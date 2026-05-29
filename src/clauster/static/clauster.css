@@ -85,3 +85,36 @@ main { padding: 1.5rem; }
 .card-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .empty { color: var(--muted); }
+
+/* status badge (feature 2) */
+.status {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.status-running { color: var(--green); border-color: var(--green); }
+.status-starting { color: var(--accent); border-color: var(--accent); }
+.status-crashed, .status-error { color: #e06a6a; border-color: #e06a6a; }
+
+.card-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+.spinner { color: var(--accent); font-size: 0.8rem; }
+.card-error { color: #e06a6a; font-size: 0.8rem; margin: 0.4rem 0 0; }
+
+/* feature 5: URL display + QR */
+.url-panel { margin-top: 0.7rem; border-top: 1px solid var(--border); padding-top: 0.6rem; }
+.url-row { display: flex; gap: 0.4rem; align-items: center; margin-bottom: 0.35rem; }
+.open-link {
+  color: var(--accent); text-decoration: none; font-size: 0.88rem;
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.open-link.primary { font-weight: 600; }
+.url-row.secondary .open-link { color: var(--muted); font-size: 0.82rem; }
+.btn-copy, .btn-qr, .btn-logs {
+  background: transparent; color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.2rem 0.5rem; cursor: pointer; font-size: 0.75rem;
+}
+.qr-box { margin-top: 0.5rem; background: #fff; padding: 8px; border-radius: 8px; width: max-content; }

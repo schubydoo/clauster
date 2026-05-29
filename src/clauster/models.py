@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class InstanceStatus(str, Enum):
@@ -53,6 +53,16 @@ class RemoteControlInstance(BaseModel):
     intentional_stop: bool = False
     started_at: datetime | None = None
     bridge_debug_log_path: Path | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_url(self) -> str | None:
+        """Primary "Open session in Claude" deep link — lands directly in the
+        ready starter session named after the project (feature 5). ``url`` is
+        the secondary "New session" composer link."""
+        if self.starter_session_id is None:
+            return None
+        return f"https://claude.ai/code/{self.starter_session_id}?from=cli"
 
 
 class Attribution(str, Enum):
