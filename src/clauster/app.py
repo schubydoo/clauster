@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import segno
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
@@ -103,6 +105,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return await runner.trust_project(name)
         except UnknownProject as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/instances/{instance_id}/qr")
+    async def api_instance_qr(instance_id: str) -> Response:
+        """SVG QR for the primary deep link (feature 5) — scan to open on mobile."""
+        instance = runner.get_instance(instance_id)
+        if instance is None:
+            raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
+        target = instance.session_url or instance.url
+        if not target:
+            raise HTTPException(status_code=409, detail="no session URL available yet")
+        buf = io.BytesIO()
+        segno.make(target, error="m").save(buf, kind="svg", scale=4, border=2)
+        return Response(content=buf.getvalue(), media_type="image/svg+xml")
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> HTMLResponse:
