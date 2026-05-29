@@ -1,0 +1,118 @@
+"""Process introspection for bridge liveness (spec §7, source #3 liveness).
+
+A bridge-pointer.json (Anthropic-controlled) records the bridge **parent** PID
+plus a ``procStart`` value (Linux starttime, in jiffies). A dead bridge leaves a
+stale pointer, and a PID can be reused, so liveness alone is never enough. A PID
+is only trusted as a live bridge when ALL hold:
+
+  1. the process exists and is not a zombie,
+  2. its start time matches the recorded one (PID-reuse defense), and
+  3. its cmdline is actually ``claude remote-control`` (HANDOFF locked decision:
+     require a cmdline match before trusting a pointer).
+
+Uses ``psutil`` for cross-platform process ops; the only Linux-specific bit is
+converting a pointer's jiffies ``procStart`` to an epoch for comparison, which
+degrades gracefully on other platforms.
+"""
+
+from __future__ import annotations
+
+import os
+
+import psutil
+
+# The token sequence that identifies a managed bridge in a process cmdline.
+_BRIDGE_CMDLINE = ("remote-control",)
+_BRIDGE_BINARY_HINT = "claude"
+
+
+def _clk_tck() -> int:
+    try:
+        return os.sysconf("SC_CLK_TCK") or 100
+    except (ValueError, AttributeError, OSError):
+        return 100
+
+
+def jiffies_to_epoch(jiffies: int) -> float | None:
+    """Convert a Linux starttime (jiffies since boot) to an epoch timestamp.
+
+    Returns None when the host can't express boot time (non-Linux), in which
+    case callers fall back to a cmdline-only trust check.
+    """
+    try:
+        return psutil.boot_time() + (jiffies / _clk_tck())
+    except (OSError, AttributeError):
+        return None
+
+
+def is_bridge_cmdline(cmdline: list[str]) -> bool:
+    """True if a process command line is a ``claude … remote-control`` bridge."""
+    if not cmdline:
+        return False
+    joined = " ".join(cmdline)
+    if _BRIDGE_BINARY_HINT not in joined:
+        return False
+    return all(tok in cmdline or tok in joined for tok in _BRIDGE_CMDLINE)
+
+
+def proc_create_time(pid: int) -> float | None:
+    """Epoch create-time of a live, non-zombie PID, else None."""
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return None
+        return proc.create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return None
+
+
+def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float = 2.0) -> bool:
+    """Whether ``pid`` is a trustworthy, currently-running managed bridge.
+
+    ``proc_start`` may be a pointer's jiffies string, our own stored psutil
+    create-time (float/epoch), or None to skip the start-time match.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        cmdline = proc.cmdline()
+        create_time = proc.create_time()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+
+    if not is_bridge_cmdline(cmdline):
+        return False
+
+    expected = _expected_epoch(proc_start)
+    if expected is None:
+        # No comparable start-time (skip or non-Linux pointer): cmdline+alive is
+        # the best available trust signal.
+        return True
+    return abs(create_time - expected) <= tolerance
+
+
+def _expected_epoch(proc_start: str | float | None) -> float | None:
+    """Normalize a stored proc_start to an epoch, or None to skip the check."""
+    if proc_start is None:
+        return None
+    if isinstance(proc_start, (int, float)) and not isinstance(proc_start, bool):
+        # Already an epoch create-time (our own spawn). Jiffies would be a huge
+        # integer; treat values that look epoch-scaled (> year 2001) as epoch.
+        return float(proc_start)
+    try:
+        jiffies = int(str(proc_start))
+    except (TypeError, ValueError):
+        return None
+    return jiffies_to_epoch(jiffies)
+
+
+def reap_if_exited(pid: int) -> None:
+    """Best-effort non-blocking reap of one of our own children (avoid zombies).
+
+    Safe to call on a non-child or already-reaped PID.
+    """
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass

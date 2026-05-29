@@ -42,8 +42,8 @@ class RemoteControlInstance(BaseModel):
 
     project: str
     label: str  # passed as --name to claude remote-control
-    bridge_pid: int | None = None  # parent PID from subprocess
-    bridge_proc_start: int | None = None  # psutil create-time; PID-reuse defense
+    bridge_pid: int | None = None  # bridge parent PID (matches bridge-pointer pid)
+    bridge_proc_start: float | None = None  # psutil create-time (epoch); PID-reuse defense
     bridge_id: str | None = None  # UUID from bridge:init log
     environment_id: str | None = None  # env_<ULID>; the URL parameter
     starter_session_id: str | None = None  # session_<ULID> from "Created initial session"

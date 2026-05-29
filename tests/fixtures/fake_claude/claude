@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Parameterizable fake `claude` binary for SessionRunner tests.
+
+Behaviour is selected via env vars so tests can drive each branch:
+  FAKE_CLAUDE_MODE = ready | no_marker | crash | trust_error | slow   (default ready)
+  FAKE_CLAUDE_SLOW = seconds to delay before writing markers (mode=slow)
+  FAKE_CLAUDE_AGENTS = JSON string returned by `agents --json`        (default [])
+
+`remote-control` writes the real bridge-log marker sequence to --debug-file,
+then (mode=ready) idles until SIGINT, on which it logs the shutdown marker and
+exits 0 — mimicking the empirically-confirmed clean SIGINT path.
+"""
+import os
+import signal
+import sys
+import time
+
+ENV_ID = "env_01TESTENVAAAAAAAAAAAAAAAA"
+STARTER = "session_01TESTSTARTERAAAAAAAAAA"
+BRIDGE_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def _arg(args, flag):
+    return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else None
+
+
+def run_bridge(args):
+    debug_file = _arg(args, "--debug-file")
+    mode = os.environ.get("FAKE_CLAUDE_MODE", "ready")
+
+    def log(line):
+        if debug_file:
+            with open(debug_file, "a") as fh:
+                fh.write(line + "\n")
+
+    if mode == "crash":
+        return 1
+    if mode == "trust_error":
+        log("2026-01-01T00:00:00.000Z [ERROR] Workspace not trusted")
+        return 1
+    if mode == "slow":
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_SLOW", "1.0")))
+
+    log(f"2026-01-01T00:00:00.000Z [DEBUG] [bridge:init] bridgeId={BRIDGE_ID} dir=/x branch=HEAD")
+    log(f"2026-01-01T00:00:00.100Z [DEBUG] [bridge:api] POST /v1/environments/bridge -> 200 environment_id={ENV_ID}")
+    log(f"2026-01-01T00:00:00.200Z [DEBUG] [bridge:init] Created initial session {STARTER}")
+
+    if mode == "no_marker":
+        return 0  # exits before the poll loop -> never becomes ready
+
+    log(f"2026-01-01T00:00:00.300Z [DEBUG] [bridge:work] Starting poll loop spawnMode=same-dir maxSessions=32 environmentId={ENV_ID}")
+
+    stopped = {"v": False}
+
+    def handler(_signum, _frame):
+        log("2026-01-01T00:00:05.000Z [DEBUG] [bridge:shutdown] SIGINT received, shutting down")
+        stopped["v"] = True
+
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+    for _ in range(2400):  # idle up to ~600s waiting for a signal
+        if stopped["v"]:
+            break
+        time.sleep(0.25)
+    return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "--version":
+        print("2.1.156 (Claude Code)")
+        return 0
+    if args and args[0] == "agents" and "--json" in args:
+        print(os.environ.get("FAKE_CLAUDE_AGENTS", "[]"))
+        return 0
+    if args and args[0] == "remote-control":
+        return run_bridge(args)
+    sys.stderr.write(f"fake-claude: unknown args {args}\n")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
