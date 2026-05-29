@@ -8,15 +8,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import segno
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
-from . import __version__, claude_cli
+from . import __version__, claude_cli, logstream
 from .config import ClausterConfig
 from .discovery import discover_projects
 from .models import Project, RemoteControlInstance
+from .redact import sanitize_line
 from .runner import SessionRunner, SpawnError, UnknownProject
 
 _PKG_DIR = Path(__file__).resolve().parent
@@ -118,6 +119,31 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         buf = io.BytesIO()
         segno.make(target, error="m").save(buf, kind="svg", scale=4, border=2)
         return Response(content=buf.getvalue(), media_type="image/svg+xml")
+
+    @app.websocket("/ws/bridge-log/{instance_id}")
+    async def ws_bridge_log(websocket: WebSocket, instance_id: str) -> None:
+        """Tail the bridge debug log — ANSI-stripped and ID-redacted (feature 6, D11)."""
+        await websocket.accept()
+        instance = runner.get_instance(instance_id)
+        if instance is None or instance.bridge_debug_log_path is None:
+            await websocket.close(code=1008)  # nothing to stream
+            return
+        path = instance.bridge_debug_log_path
+        strip = config.logs.strip_ansi_in_stream
+        offset = await asyncio.to_thread(logstream.initial_offset, path)
+        carry = ""
+        try:
+            while True:
+                offset, text = await asyncio.to_thread(logstream.read_new, path, offset)
+                if text:
+                    # Buffer whole lines so redaction never misses an id split
+                    # across two reads.
+                    *lines, carry = (carry + text).split("\n")
+                    for line in lines:
+                        await websocket.send_text(sanitize_line(line, strip_ansi_seq=strip))
+                await asyncio.sleep(0.5)
+        except (WebSocketDisconnect, RuntimeError):
+            return
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> HTMLResponse:

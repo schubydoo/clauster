@@ -118,3 +118,19 @@ main { padding: 1.5rem; }
   border-radius: 6px; padding: 0.2rem 0.5rem; cursor: pointer; font-size: 0.75rem;
 }
 .qr-box { margin-top: 0.5rem; background: #fff; padding: 8px; border-radius: 8px; width: max-content; }
+
+/* feature 6: log tail */
+.log-section { margin-top: 0.6rem; }
+.log-panel { margin-top: 0.5rem; }
+.log-controls { display: flex; gap: 0.4rem; align-items: center; margin-bottom: 0.3rem; }
+.log-controls button {
+  background: transparent; color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.2rem 0.5rem; cursor: pointer; font-size: 0.75rem;
+}
+.log-state { color: var(--amber); font-size: 0.72rem; }
+.log-view {
+  margin: 0; max-height: 220px; overflow: auto;
+  background: #0b0d11; border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.5rem; font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color: #cbd2df; white-space: pre-wrap; word-break: break-word;
+}
