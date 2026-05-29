@@ -1,0 +1,41 @@
+# Clauster configuration (v0.1).
+# Search order:  $CLAUSTER_CONFIG -> ./clauster.yml -> $CLAUSTER_HOME/clauster.yml
+# Any scalar key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value
+#   e.g. CLAUSTER_PORT=8080  CLAUSTER_CLAUDE_BINARY=/opt/claude/bin/claude
+# Schema is additive-only: old configs always work in newer versions.
+
+schema_version: 1
+projects_root: /mnt/nas/projects   # required, must exist and be readable
+host: 127.0.0.1                    # v0.1 binds loopback only
+port: 7621
+state_dir: ~/.clauster             # state, logs, pid files
+root_path: ""                      # subpath when behind a reverse proxy
+log_format: text                   # text | json (json for Docker/Loki)
+
+claude:
+  binary: claude                   # name on PATH or absolute path
+  min_version: "2.1.145"           # for `claude agents --json`
+  agents_json_poll_interval_seconds: 300
+
+instance_defaults:
+  spawn_mode: same-dir             # v0.1 only same-dir
+  capacity: 32                     # per-bridge cap (Anthropic-imposed)
+
+projects: {}                       # per-project overrides (v0.2+)
+
+# v0.2+ only; v0.1 ignores these entirely.
+auth:
+  enabled: false
+  password_required: false
+  reverse_proxy:
+    enabled: false
+    user_header: "Remote-User"
+    shared_secret_header: "X-Proxy-Auth"
+    trusted_ips: []
+  allow_unauthenticated_network: false
+
+logs:
+  bridge_log_max_size_mb: 10
+  keep_rotated: 5
+  redact_session_url: false        # false=hybrid (verbatim disk, redacted WS)
+  strip_ansi_in_stream: true

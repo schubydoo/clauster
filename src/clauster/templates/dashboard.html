@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clauster</title>
+  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/clauster.css">
+  <script defer src="{{ request.scope.root_path }}/static/alpine.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>Clauster <span class="version">v{{ version }}</span></h1>
+    <p class="subtitle">{{ projects_root }}</p>
+  </header>
+
+  <main x-data="dashboard()">
+    {% block project_list %}
+    {% if projects %}
+    <ul class="project-grid">
+      {% for p in projects %}
+      <li class="card" data-project="{{ p.name }}">
+        <div class="card-head">
+          <h2>{{ p.name }}</h2>
+          <span class="trust trust-{{ p.trust_state.value }}">{{ p.trust_state.value }}</span>
+        </div>
+        <div class="badges">
+          {% if p.is_git_repo %}<span class="badge badge-git">git</span>{% endif %}
+          {% if p.has_claude_md %}<span class="badge badge-md">CLAUDE.md</span>{% endif %}
+        </div>
+        <div class="card-actions">
+          <!-- Start/Stop (features 3-4) + URL/log (features 5-6) land in later sprints -->
+          <button disabled title="bridge spawn lands in a later sprint">Start bridge</button>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">No projects found under <code>{{ projects_root }}</code>.</p>
+    {% endif %}
+    {% endblock %}
+  </main>
+
+  <script>
+    function dashboard() {
+      return {
+        // status polling / WS wiring lands with features 2 & 6
+      };
+    }
+  </script>
+</body>
+</html>
