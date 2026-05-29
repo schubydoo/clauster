@@ -61,6 +61,25 @@
             <img :src="qrSrc('{{ p.name }}')" alt="QR code for the session deep link" width="160" height="160">
           </div>
         </div>
+
+        <!-- Feature 6: bridge log tail (WebSocket, ANSI-stripped + redacted) -->
+        <div class="log-section" x-show="isRunning('{{ p.name }}')">
+          <button class="btn-logs" @click="toggleLogs('{{ p.name }}')"
+                  x-text="logs['{{ p.name }}'] && logs['{{ p.name }}'].open ? 'Hide logs' : 'Show logs'"></button>
+          <template x-if="logs['{{ p.name }}'] && logs['{{ p.name }}'].open">
+            <div class="log-panel">
+              <div class="log-controls">
+                <button @click="logs['{{ p.name }}'].paused ? resumeLogs('{{ p.name }}') : pauseLogs('{{ p.name }}')"
+                        x-text="logs['{{ p.name }}'].paused ? 'Resume' : 'Pause'"></button>
+                <button @click="jumpToLatest('{{ p.name }}')">Jump to latest</button>
+                <span class="log-state" x-show="logs['{{ p.name }}'].paused">paused
+                  (<span x-text="logs['{{ p.name }}'].pending.length"></span> buffered)</span>
+              </div>
+              <pre class="log-view" :id="'log-' + '{{ p.name }}'"
+                   x-text="logs['{{ p.name }}'].lines.join('\n')"></pre>
+            </div>
+          </template>
+        </div>
       </li>
       {% endfor %}
     </ul>
@@ -76,12 +95,14 @@
       crashed: "Crashed", error: "Failed to start",
     };
     const ROOT = "{{ request.scope.root_path }}";
+    const MAX_LOG_LINES = 1000;
 
     function dashboard() {
       return {
         instances: {},      // project name -> instance
         errors: {},         // project name -> last error message
         qrOpen: {},         // project name -> bool
+        logs: {},           // project name -> { open, ws, lines, pending, paused }
         async init() {
           await this.refresh();
           setInterval(() => this.refresh(), 4000);
@@ -122,6 +143,7 @@
           await this.refresh();
         },
         async stop(name) {
+          this.closeLogs(name);
           try {
             const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
             if (res.ok) this.instances[name] = await res.json();
@@ -133,6 +155,48 @@
           catch (e) { this.errors[name] = String(e); }
           window.location.reload();
         },
+        // --- feature 6: log streaming ---
+        toggleLogs(name) {
+          const s = this.logs[name];
+          if (s && s.open) { this.closeLogs(name); } else { this.openLogs(name); }
+        },
+        openLogs(name) {
+          const proto = location.protocol === "https:" ? "wss" : "ws";
+          const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
+          // Assign first so handlers mutate the reactive proxy (this.logs[name]),
+          // not a detached local object — otherwise Alpine never re-renders.
+          this.logs[name] = { open: true, ws: null, lines: [], pending: [], paused: false };
+          const self = this;
+          const ws = new WebSocket(url);
+          ws.onmessage = (ev) => {
+            const s = self.logs[name];
+            if (!s || !s.open) return;
+            if (s.paused) { s.pending.push(ev.data); return; }
+            s.lines.push(ev.data);
+            if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
+            self.$nextTick(() => self.scrollLog(name));
+          };
+          this.logs[name].ws = ws;
+        },
+        closeLogs(name) {
+          const s = this.logs[name];
+          if (s && s.ws) { try { s.ws.close(); } catch (e) {} }
+          if (s) s.open = false;
+        },
+        pauseLogs(name) { if (this.logs[name]) this.logs[name].paused = true; },
+        resumeLogs(name) {
+          const s = this.logs[name];
+          if (!s) return;
+          s.lines.push(...s.pending); s.pending = [];
+          if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
+          s.paused = false;
+          this.$nextTick(() => this.scrollLog(name));
+        },
+        scrollLog(name) {
+          const el = document.getElementById("log-" + name);
+          if (el) el.scrollTop = el.scrollHeight;
+        },
+        jumpToLatest(name) { this.scrollLog(name); },
       };
     }
   </script>
