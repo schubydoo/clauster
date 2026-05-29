@@ -13,7 +13,7 @@
     <p class="subtitle">{{ projects_root }}</p>
   </header>
 
-  <main x-data="dashboard()">
+  <main x-data="dashboard()" x-init="init()">
     {% block project_list %}
     {% if projects %}
     <ul class="project-grid">
@@ -21,16 +21,29 @@
       <li class="card" data-project="{{ p.name }}">
         <div class="card-head">
           <h2>{{ p.name }}</h2>
-          <span class="trust trust-{{ p.trust_state.value }}">{{ p.trust_state.value }}</span>
+          <span class="status"
+                :class="'status-' + statusOf('{{ p.name }}')"
+                x-text="statusLabel('{{ p.name }}')">{{ p.trust_state.value }}</span>
         </div>
         <div class="badges">
           {% if p.is_git_repo %}<span class="badge badge-git">git</span>{% endif %}
           {% if p.has_claude_md %}<span class="badge badge-md">CLAUDE.md</span>{% endif %}
+          <span class="trust trust-{{ p.trust_state.value }}">{{ p.trust_state.value }}</span>
         </div>
         <div class="card-actions">
-          <!-- Start/Stop (features 3-4) + URL/log (features 5-6) land in later sprints -->
-          <button disabled title="bridge spawn lands in a later sprint">Start bridge</button>
+          {% if p.trust_state.value == 'untrusted' %}
+          <button class="btn-trust" @click="trust('{{ p.name }}')"
+                  x-show="!isRunning('{{ p.name }}')">Trust directory</button>
+          {% endif %}
+          <button class="btn-start" @click="start('{{ p.name }}')"
+                  x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}')">Start bridge</button>
+          <button class="btn-stop" @click="stop('{{ p.name }}')"
+                  x-show="isRunning('{{ p.name }}')">Stop bridge</button>
+          <span class="spinner" x-show="isBusy('{{ p.name }}')">starting…</span>
+          <a class="open-link" target="_blank" rel="noopener"
+             x-show="urlOf('{{ p.name }}')" :href="urlOf('{{ p.name }}')">Open in Claude</a>
         </div>
+        <p class="card-error" x-show="errorOf('{{ p.name }}')" x-text="errorOf('{{ p.name }}')"></p>
       </li>
       {% endfor %}
     </ul>
@@ -41,9 +54,63 @@
   </main>
 
   <script>
+    const STATUS_LABELS = {
+      starting: "Starting", running: "Running", stopped: "Stopped",
+      crashed: "Crashed", error: "Failed to start",
+    };
+    const ROOT = "{{ request.scope.root_path }}";
+
     function dashboard() {
       return {
-        // status polling / WS wiring lands with features 2 & 6
+        instances: {},      // project name -> instance
+        errors: {},         // project name -> last error message
+        async init() {
+          await this.refresh();
+          setInterval(() => this.refresh(), 4000);
+        },
+        async refresh() {
+          try {
+            const res = await fetch(ROOT + "/api/instances");
+            if (!res.ok) return;
+            const list = await res.json();
+            const next = {};
+            for (const i of list) next[i.project] = i;
+            this.instances = next;
+          } catch (e) { /* transient; next tick retries */ }
+        },
+        statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
+        statusLabel(name) { return STATUS_LABELS[this.statusOf(name)] || "Stopped"; },
+        isRunning(name) { return this.statusOf(name) === "running"; },
+        isBusy(name) { return this.statusOf(name) === "starting"; },
+        urlOf(name) { return this.isRunning(name) ? (this.instances[name] || {}).url : null; },
+        errorOf(name) { return this.errors[name] || null; },
+        async start(name) {
+          this.errors[name] = null;
+          this.instances[name] = { project: name, status: "starting" };
+          try {
+            const res = await fetch(ROOT + "/api/instances", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ project: name }),
+            });
+            const body = await res.json();
+            if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; }
+            else { this.instances[name] = body; }
+          } catch (e) { this.errors[name] = String(e); delete this.instances[name]; }
+          await this.refresh();
+        },
+        async stop(name) {
+          try {
+            const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
+            if (res.ok) this.instances[name] = await res.json();
+          } catch (e) { this.errors[name] = String(e); }
+          await this.refresh();
+        },
+        async trust(name) {
+          try { await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" }); }
+          catch (e) { this.errors[name] = String(e); }
+          window.location.reload();  // re-render trust badge/state from the server
+        },
       };
     }
   </script>

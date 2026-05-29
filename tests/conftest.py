@@ -34,3 +34,30 @@ def write_config(tmp_path: Path, projects_root: Path):
         return cfg
 
     return _write
+
+
+FAKE_CLAUDE = FIXTURES / "fake_claude" / "claude"
+
+
+@pytest.fixture
+def fake_claude() -> Path:
+    """Absolute path to the parameterizable fake `claude` binary."""
+    return FAKE_CLAUDE
+
+
+@pytest.fixture
+def runner_config(tmp_path: Path, projects_root: Path):
+    """A ClausterConfig wired to the fake binary, a tmp state_dir, and a trusted
+    projects_root (so spawn isn't blocked on trust by default)."""
+    from clauster.config import ClausterConfig
+
+    claude_json = tmp_path / "claude.json"
+    claude_json.write_text(
+        '{"projects": {"%s": {"hasTrustDialogAccepted": true}}}' % projects_root.resolve()
+    )
+    config = ClausterConfig(
+        projects_root=projects_root,
+        state_dir=tmp_path / "state",
+        claude={"binary": str(FAKE_CLAUDE)},
+    )
+    return config, claude_json

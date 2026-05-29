@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import os
+
+import psutil
+
+from clauster import procutil
+
+
+def test_is_bridge_cmdline_matches_real_bridge():
+    assert procutil.is_bridge_cmdline(["claude", "remote-control", "--name", "x"]) is True
+    assert procutil.is_bridge_cmdline(["python3", "/p/claude", "remote-control"]) is True
+
+
+def test_is_bridge_cmdline_rejects_non_bridge():
+    assert procutil.is_bridge_cmdline([]) is False
+    assert procutil.is_bridge_cmdline(["claude", "agents", "--json"]) is False
+    assert procutil.is_bridge_cmdline(["python3", "pytest"]) is False
+
+
+def test_dead_pid_is_not_live():
+    # A PID that almost certainly doesn't exist.
+    assert procutil.is_live_bridge(2_000_000_000, None) is False
+
+
+def test_current_process_is_not_a_bridge():
+    # Alive, but cmdline is pytest/python — must fail the cmdline gate.
+    assert procutil.is_live_bridge(os.getpid(), None) is False
+
+
+def test_proc_create_time_of_self_is_float():
+    ct = procutil.proc_create_time(os.getpid())
+    assert isinstance(ct, float) and ct > 0
+
+
+def test_jiffies_to_epoch_uses_boot_time():
+    epoch = procutil.jiffies_to_epoch(0)
+    assert epoch is not None
+    assert abs(epoch - psutil.boot_time()) < 1.0
+
+
+def test_zombie_status_treated_as_dead(monkeypatch):
+    class FakeProc:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_ZOMBIE
+
+        def cmdline(self):
+            return ["claude", "remote-control"]
+
+        def create_time(self):
+            return 123.0
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.is_live_bridge(1234, None) is False
+
+
+def test_create_time_mismatch_rejected(monkeypatch):
+    class FakeProc:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
+        def cmdline(self):
+            return ["claude", "remote-control"]
+
+        def create_time(self):
+            return 1000.0
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    # Stored epoch differs by far more than tolerance -> PID reuse -> not our bridge.
+    assert procutil.is_live_bridge(1234, 5000.0) is False
+    assert procutil.is_live_bridge(1234, 1000.5) is True  # within tolerance
