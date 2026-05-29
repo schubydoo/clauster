@@ -40,10 +40,27 @@
           <button class="btn-stop" @click="stop('{{ p.name }}')"
                   x-show="isRunning('{{ p.name }}')">Stop bridge</button>
           <span class="spinner" x-show="isBusy('{{ p.name }}')">starting…</span>
-          <a class="open-link" target="_blank" rel="noopener"
-             x-show="urlOf('{{ p.name }}')" :href="urlOf('{{ p.name }}')">Open in Claude</a>
         </div>
         <p class="card-error" x-show="errorOf('{{ p.name }}')" x-text="errorOf('{{ p.name }}')"></p>
+
+        <!-- Feature 5: URL display (primary session deep link + QR, secondary New Session) -->
+        <div class="url-panel" x-show="isRunning('{{ p.name }}') && sessionUrlOf('{{ p.name }}')">
+          <div class="url-row">
+            <a class="open-link primary" target="_blank" rel="noopener"
+               :href="sessionUrlOf('{{ p.name }}')">Open session in Claude</a>
+            <button class="btn-copy" @click="copy(sessionUrlOf('{{ p.name }}'))" title="Copy link">copy</button>
+            <button class="btn-qr" @click="toggleQr('{{ p.name }}')"
+                    x-text="qrOpen['{{ p.name }}'] ? 'hide QR' : 'QR'"></button>
+          </div>
+          <div class="url-row secondary" x-show="envUrlOf('{{ p.name }}')">
+            <a class="open-link" target="_blank" rel="noopener"
+               :href="envUrlOf('{{ p.name }}')">New session</a>
+            <button class="btn-copy" @click="copy(envUrlOf('{{ p.name }}'))" title="Copy link">copy</button>
+          </div>
+          <div class="qr-box" x-show="qrOpen['{{ p.name }}']">
+            <img :src="qrSrc('{{ p.name }}')" alt="QR code for the session deep link" width="160" height="160">
+          </div>
+        </div>
       </li>
       {% endfor %}
     </ul>
@@ -64,6 +81,7 @@
       return {
         instances: {},      // project name -> instance
         errors: {},         // project name -> last error message
+        qrOpen: {},         // project name -> bool
         async init() {
           await this.refresh();
           setInterval(() => this.refresh(), 4000);
@@ -82,8 +100,12 @@
         statusLabel(name) { return STATUS_LABELS[this.statusOf(name)] || "Stopped"; },
         isRunning(name) { return this.statusOf(name) === "running"; },
         isBusy(name) { return this.statusOf(name) === "starting"; },
-        urlOf(name) { return this.isRunning(name) ? (this.instances[name] || {}).url : null; },
+        sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
+        envUrlOf(name) { return (this.instances[name] || {}).url || null; },
         errorOf(name) { return this.errors[name] || null; },
+        qrSrc(name) { return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr"; },
+        toggleQr(name) { this.qrOpen[name] = !this.qrOpen[name]; },
+        async copy(text) { try { await navigator.clipboard.writeText(text); } catch (e) {} },
         async start(name) {
           this.errors[name] = null;
           this.instances[name] = { project: name, status: "starting" };
@@ -109,7 +131,7 @@
         async trust(name) {
           try { await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" }); }
           catch (e) { this.errors[name] = String(e); }
-          window.location.reload();  // re-render trust badge/state from the server
+          window.location.reload();
         },
       };
     }
