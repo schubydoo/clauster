@@ -1,0 +1,8 @@
+2026-05-27T23:58:39.928Z [DEBUG] [bridge:init] bridgeId=97051a45-aaaa-bbbb-cccc-ddddeeeeffff dir=/mnt/nas/projects/test1 branch=HEAD gitRepoUrl=null machine=claude-code
+2026-05-27T23:58:40.536Z [DEBUG] [bridge:api] POST /v1/environments/bridge -> 200 environment_id=env_01RHE7cHW3DawXjGRp5Ae3va
+2026-05-27T23:58:40.976Z [DEBUG] [bridge:init] Created initial session session_01LG15p2JVjwBamscENjuBLi
+2026-05-27T23:58:41.004Z [DEBUG] [bridge:work] Starting poll loop spawnMode=same-dir maxSessions=32 environmentId=env_01RHE7cHW3DawXjGRp5Ae3va
+2026-05-27T23:58:47.441Z [DEBUG] [bridge:session] sessionId=[REDACTED] pid=81805
+2026-05-27T23:58:47.646Z [DEBUG] [bridge:title] server title for session_01LG15p2JVjwBamscENjuBLi: test
+2026-05-27T23:59:12.328Z [DEBUG] [bridge:shutdown] SIGINT received, shutting down
+2026-05-27T23:59:12.808Z [DEBUG] [bridge:session] sessionId=[REDACTED] failed exit_code=143 pid=81805
