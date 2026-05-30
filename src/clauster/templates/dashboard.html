@@ -69,6 +69,9 @@
           {% if p.is_git_repo %}<span class="badge badge-git">git</span>{% endif %}
           {% if p.has_claude_md %}<span class="badge badge-md">CLAUDE.md</span>{% endif %}
           <span class="trust trust-{{ p.trust_state.value }}">{{ p.trust_state.value }}</span>
+          <span class="badge badge-cost" x-show="usageLabel('{{ p.name }}')"
+                :title="usageTitle('{{ p.name }}')"
+                x-text="usageLabel('{{ p.name }}')"></span>
         </div>
         <div class="card-actions">
           {% if p.trust_state.value == 'untrusted' %}
@@ -226,6 +229,7 @@
         confirmBypass: {},  // project name -> bool (typed-confirm panel open)
         bypassTyped: {},    // project name -> text typed into the confirm box
         cmd: {},            // project name -> CLAUDE.md editor state
+        usage: {},          // project name -> cost/token rollup (lazy-loaded badge)
         np: { open: false, name: "", mode: "create", url: "", shallow: false,
               gitInit: false, busy: false, error: null, warn: null },  // new-project panel
         async init() {
@@ -234,6 +238,9 @@
             this.permMode[n] = DEFAULT_PERMISSION_MODE;
           }
           await this.refresh();
+          // Cost badges: each rollup parses the project's transcripts, so load them
+          // off the critical path (fire-and-forget) rather than blocking first paint.
+          for (const n of PROJECT_NAMES) this.loadUsage(n);
           setInterval(() => this.refresh(), 4000);
         },
         async refresh() {
@@ -263,6 +270,29 @@
           return Array.isArray(s) ? s.length : 0;
         },
         hasExternal(name) { return this.externalCount(name) > 0; },
+        async loadUsage(name) {
+          // Best-effort: on any failure the badge just stays hidden.
+          try {
+            const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/usage");
+            if (res.ok) this.usage[name] = await res.json();
+          } catch (e) { /* badge stays hidden */ }
+        },
+        usageLabel(name) {
+          const u = this.usage[name];
+          if (!u || !u.transcripts) return null;  // no transcripts yet -> no badge
+          return "≈$" + (u.cost_usd || 0).toFixed(2);
+        },
+        usageTitle(name) {
+          const u = this.usage[name];
+          if (!u) return "";
+          const tokens = (u.total_tokens || 0).toLocaleString();
+          const sessions = u.transcripts + (u.transcripts === 1 ? " session" : " sessions");
+          let s = tokens + " tokens across " + sessions + " · approximate cost";
+          if (u.unpriced_models && u.unpriced_models.length) {
+            s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
+          }
+          return s;
+        },
         qrSrc(name) {
           // Cache-bust per open so a QR fetched once while stopped (409) isn't reused.
           return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);
@@ -407,6 +437,7 @@
             if (res.ok) this.instances[name] = await res.json();
           } catch (e) { this.errors[name] = String(e); }
           await this.refresh();
+          this.loadUsage(name);  // a session just ended — its cost is now final
         },
         async trust(name) {
           try { await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" }); }
