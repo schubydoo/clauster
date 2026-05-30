@@ -10,16 +10,20 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
+import time
 from pathlib import Path
 
 import uvicorn
 
-from . import __version__, claude_cli, ops
+from . import __version__, claude_cli, environments, ops
 from .app import create_app
 from .auth import hash_password, make_hasher
 from .config import load_config
 
-_COMMANDS = {"run", "hash-password", "doctor", "backup", "restore", "migrate", "install-service"}
+_COMMANDS = {
+    "run", "hash-password", "doctor", "backup", "restore", "migrate",
+    "install-service", "reap-environments",
+}
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
 
@@ -54,6 +58,13 @@ def main(argv: list[str] | None = None) -> int:
     svc_p.add_argument("-c", "--config", help="config path to embed in the unit")
     svc_p.add_argument("--user", help="run-as user (systemd)")
 
+    reap_p = sub.add_parser(
+        "reap-environments", help="archive ghost bridge environments (dry-run by default)")
+    reap_p.add_argument("-c", "--config", help="path to clauster.yml")
+    reap_p.add_argument("--archive", action="store_true", help="archive the ghosts (reversible)")
+    reap_p.add_argument("--force-delete", action="store_true",
+                        help="hard-delete ghosts, discarding queued work (instead of archiving)")
+
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
     if argv and argv[0] not in _COMMANDS and argv[0] not in _TOP_LEVEL_FLAGS:
         argv = ["run", *argv]
@@ -71,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         return _migrate(args.config)
     if args.command == "install-service":
         return _install_service(args.kind, args.config, args.user)
+    if args.command == "reap-environments":
+        return _reap_environments(args.config, args.archive, args.force_delete)
     return _run(getattr(args, "config", None))
 
 
@@ -145,6 +158,54 @@ def _migrate(config_path: str | None) -> int:
 
 def _install_service(kind: str, config_path: str | None, user: str | None) -> int:
     print(ops.render_service_unit(kind, config_path=config_path, user=user))
+    return 0
+
+
+def _reap_environments(config_path: str | None, archive: bool, force_delete: bool) -> int:
+    config = _load_or_exit(config_path)
+    try:
+        creds = environments.load_credentials(now_ms=int(time.time() * 1000))
+    except environments.CredentialsError as exc:
+        print(f"clauster: credentials error: {exc}", file=sys.stderr)
+        return 2
+    print(f"clauster: org {creds.organization_uuid}, token {creds.masked_token()}", file=sys.stderr)
+    client = environments.EnvironmentsClient(creds)
+    try:
+        envs = client.list_environments()
+    except environments.EnvironmentsAPIError as exc:
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 2
+    # SAFETY: never reap without a trustworthy live set. If we can't enumerate live
+    # bridges, abort — proceeding could archive a still-live environment.
+    try:
+        live = environments.live_bridge_directories(config.claude.binary, config.projects_root)
+    except Exception as exc:  # noqa: BLE001 - fail closed on ANY liveness-probe failure
+        print(f"clauster: refusing to reap — could not determine live bridges: {exc}", file=sys.stderr)
+        return 2
+
+    ghosts = environments.find_ghosts(envs, live)
+    print(f"clauster: {len(envs)} env(s), {len(live)} live dir(s), {len(ghosts)} ghost(s)",
+          file=sys.stderr)
+    for g in ghosts:
+        print(f"  - {g.id}  {g.config.directory or '(no dir)'}  ({g.name})", file=sys.stderr)
+    if not ghosts:
+        return 0
+    if not (archive or force_delete):
+        print("clauster: dry-run (no changes). Pass --archive to archive (reversible).",
+              file=sys.stderr)
+        return 0
+
+    action = "delete" if force_delete else "archive"
+    for g in ghosts:
+        try:
+            if force_delete:
+                client.delete_environment(g.id, force=True)
+            else:
+                client.archive_environment(g.id)
+        except environments.EnvironmentsAPIError as exc:
+            print(f"clauster: failed to {action} {g.id}: {exc}", file=sys.stderr)
+            return 1
+    print(f"clauster: {action}d {len(ghosts)} ghost environment(s)", file=sys.stderr)
     return 0
 
 
