@@ -123,6 +123,176 @@ def test_project_usage_empty_project_zero(write_config, tmp_path):
     assert body["approximate"] is True
 
 
+# ----- ghost-environment reaper (opt-in dashboard surface) --------------
+
+def _reaper_client(write_config, tmp_path) -> TestClient:
+    return TestClient(create_app(load_config(write_config(
+        f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\nreaper:\n  ui_enabled: true\n"))))
+
+
+def _env(id, type, directory=None, name=""):
+    from clauster import environments as envmod
+    return envmod.Environment(id=id, name=name,
+                              config=envmod.EnvironmentConfig(type=type, directory=directory))
+
+
+def _setup_reaper(monkeypatch, envs, live, sink):
+    """Patch the environments module so nothing hits the network; record API calls."""
+    from clauster import environments as envmod
+    monkeypatch.setattr(envmod, "load_credentials",
+                        lambda **k: envmod.Credentials(access_token="tkn", organization_uuid="org"))
+    monkeypatch.setattr(envmod, "live_bridge_directories", lambda *a, **k: set(live))
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def list_environments(self, **k): return list(envs)
+        def archive_environment(self, env_id): sink.append(("archive", env_id))
+        def delete_environment(self, env_id, *, force=False): sink.append(("delete", env_id, force))
+
+    monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
+
+
+# a live bridge (kept), two ghosts, and the cloud Default (never reaped)
+_ENVS = [
+    ("env_live", "bridge", "/live/dir", "live"),
+    ("env_ghost1", "bridge", "/ghost/one", "ghost-one"),
+    ("env_ghost2", "bridge", "/ghost/two", "ghost-two"),
+    ("env_cloud", "cloud", None, "Default"),
+]
+
+
+def _make_envs():
+    return [_env(*e) for e in _ENVS]
+
+
+def test_reaper_disabled_by_default_404(write_config, tmp_path):
+    c = _client(write_config, tmp_path)  # no reaper config -> ui_enabled false
+    assert c.get("/api/environments/ghosts").status_code == 404
+    assert c.post("/api/environments/reap",
+                  json={"action": "archive", "ids": ["x"], "confirm": "archive"}).status_code == 404
+
+
+def test_reaper_preview_lists_only_ghosts(write_config, tmp_path, monkeypatch):
+    _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, [])
+    body = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts").json()
+    assert body["enabled"] is True
+    assert body["total"] == 4 and body["live_dirs"] == 1
+    ids = {g["id"] for g in body["ghosts"]}
+    assert ids == {"env_ghost1", "env_ghost2"}  # cloud + live excluded
+
+
+def test_reaper_archive_acts_only_on_ghosts(write_config, tmp_path, monkeypatch):
+    sink = []
+    _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, sink)
+    # Client asks to archive a ghost AND the live + cloud env (stale/hostile input).
+    r = _reaper_client(write_config, tmp_path).post("/api/environments/reap", json={
+        "action": "archive", "confirm": "archive",
+        "ids": ["env_ghost1", "env_live", "env_cloud"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["reaped"] == ["env_ghost1"]
+    assert set(body["skipped"]) == {"env_live", "env_cloud"}  # never acted on
+    # The API client only ever saw the ghost — live/cloud were never archived.
+    assert sink == [("archive", "env_ghost1")]
+
+
+def test_reaper_delete_requires_typed_confirm(write_config, tmp_path, monkeypatch):
+    sink = []
+    _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, sink)
+    c = _reaper_client(write_config, tmp_path)
+    # Wrong confirm token for delete -> 400, nothing touched.
+    bad = c.post("/api/environments/reap",
+                 json={"action": "delete", "ids": ["env_ghost1"], "confirm": "archive"})
+    assert bad.status_code == 400
+    assert sink == []
+    # Correct token -> force-delete proceeds.
+    ok = c.post("/api/environments/reap",
+                json={"action": "delete", "ids": ["env_ghost1"], "confirm": "DELETE"})
+    assert ok.status_code == 200
+    assert ok.json()["reaped"] == ["env_ghost1"]
+    assert sink == [("delete", "env_ghost1", True)]  # force=True
+
+
+def test_reaper_validation_errors(write_config, tmp_path, monkeypatch):
+    _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, [])
+    c = _reaper_client(write_config, tmp_path)
+    assert c.post("/api/environments/reap", json={"action": "nope", "ids": ["x"]}).status_code == 422
+    assert c.post("/api/environments/reap", json={"action": "archive", "ids": []}).status_code == 422
+    assert c.post("/api/environments/reap",
+                  json={"action": "archive", "ids": [1, 2]}).status_code == 422
+
+
+def test_reaper_credentials_error_503(write_config, tmp_path, monkeypatch):
+    from clauster import environments as envmod
+
+    def _raise(**k):
+        raise envmod.CredentialsError("no token")
+
+    monkeypatch.setattr(envmod, "load_credentials", _raise)
+    r = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts")
+    assert r.status_code == 503
+    assert "credentials" in r.json()["detail"]
+
+
+def test_reaper_list_api_error_502(write_config, tmp_path, monkeypatch):
+    from clauster import environments as envmod
+    monkeypatch.setattr(envmod, "load_credentials",
+                        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"))
+    monkeypatch.setattr(envmod, "live_bridge_directories", lambda *a, **k: set())
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def list_environments(self, **k): raise envmod.EnvironmentsAPIError(500, "upstream boom")
+
+    monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
+    r = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts")
+    assert r.status_code == 502
+    assert "environments API error" in r.json()["detail"]
+
+
+def test_reaper_per_env_error_is_reported_not_fatal(write_config, tmp_path, monkeypatch):
+    from clauster import environments as envmod
+    monkeypatch.setattr(envmod, "load_credentials",
+                        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"))
+    monkeypatch.setattr(envmod, "live_bridge_directories", lambda *a, **k: {"/live/dir"})
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def list_environments(self, **k): return _make_envs()
+        def archive_environment(self, env_id):
+            if env_id == "env_ghost1":
+                raise envmod.EnvironmentsAPIError(409, "work queued")
+            # env_ghost2 archives fine
+
+    monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
+    body = _reaper_client(write_config, tmp_path).post("/api/environments/reap", json={
+        "action": "archive", "confirm": "archive",
+        "ids": ["env_ghost1", "env_ghost2"]}).json()
+    assert body["reaped"] == ["env_ghost2"]          # the healthy one still went through
+    assert "env_ghost1" in body["errors"]            # the failure is surfaced, not swallowed
+    assert "409" in body["errors"]["env_ghost1"]
+
+
+def test_reaper_fails_closed_on_live_set_failure(write_config, tmp_path, monkeypatch):
+    from clauster import environments as envmod
+    monkeypatch.setattr(envmod, "load_credentials",
+                        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"))
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        def list_environments(self, **k): return _make_envs()
+
+    monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
+
+    def _boom(*a, **k):
+        raise RuntimeError("agents --json failed")
+
+    monkeypatch.setattr(envmod, "live_bridge_directories", _boom)
+    r = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts")
+    assert r.status_code == 503
+    assert "could not determine live bridges" in r.json()["detail"]
+
+
 def test_project_usage_serializes_rollup(write_config, tmp_path, monkeypatch):
     # Aggregation itself is unit-tested; here we pin the route's serialization
     # (field names, $ rounding, per-model breakdown) against a known rollup.

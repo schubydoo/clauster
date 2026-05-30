@@ -133,6 +133,21 @@ def test_env_override_nested_bool(write_config, monkeypatch):
     assert config.logs.strip_ansi_in_stream is False
 
 
+def test_reaper_ui_disabled_by_default(write_config):
+    assert load_config(write_config()).reaper.ui_enabled is False
+
+
+def test_reaper_ui_enabled_via_config(write_config):
+    config = load_config(write_config("reaper:\n  ui_enabled: true\n"))
+    assert config.reaper.ui_enabled is True
+
+
+def test_reaper_ui_env_override(write_config, monkeypatch):
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_REAPER_UI_ENABLED", "true")
+    assert load_config(cfg_path).reaper.ui_enabled is True
+
+
 def test_missing_config_file_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUSTER_CONFIG", raising=False)
     monkeypatch.delenv("CLAUSTER_HOME", raising=False)
