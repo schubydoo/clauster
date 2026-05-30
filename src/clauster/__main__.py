@@ -15,14 +15,14 @@ from pathlib import Path
 
 import uvicorn
 
-from . import __version__, claude_cli, environments, ops
+from . import __version__, claude_cli, environments, ops, usage
 from .app import create_app
 from .auth import hash_password, make_hasher
 from .config import load_config
 
 _COMMANDS = {
     "run", "hash-password", "doctor", "backup", "restore", "migrate",
-    "install-service", "reap-environments",
+    "install-service", "reap-environments", "usage",
 }
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
@@ -65,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     reap_p.add_argument("--force-delete", action="store_true",
                         help="hard-delete ghosts, discarding queued work (instead of archiving)")
 
+    usage_p = sub.add_parser("usage", help="token + approx cost summary for a session transcript")
+    usage_p.add_argument("transcript", help="path to a session transcript .jsonl")
+
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
     if argv and argv[0] not in _COMMANDS and argv[0] not in _TOP_LEVEL_FLAGS:
         argv = ["run", *argv]
@@ -84,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         return _install_service(args.kind, args.config, args.user)
     if args.command == "reap-environments":
         return _reap_environments(args.config, args.archive, args.force_delete)
+    if args.command == "usage":
+        return _usage(args.transcript)
     return _run(getattr(args, "config", None))
 
 
@@ -206,6 +211,23 @@ def _reap_environments(config_path: str | None, archive: bool, force_delete: boo
             print(f"clauster: failed to {action} {g.id}: {exc}", file=sys.stderr)
             return 1
     print(f"clauster: {action}d {len(ghosts)} ghost environment(s)", file=sys.stderr)
+    return 0
+
+
+def _usage(transcript: str) -> int:
+    try:
+        u = usage.parse_transcript(Path(transcript))
+    except FileNotFoundError as exc:
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 2
+    for model, t in sorted(u.by_model.items()):
+        c = usage.cost_usd(model, t)
+        cstr = f"≈${c:.4f}" if c is not None else "(unpriced)"
+        print(f"  {model:<22} in={t.input} out={t.output} "
+              f"cache_w={t.cache_creation} cache_r={t.cache_read}  {cstr}", file=sys.stderr)
+    tot = u.totals
+    print(f"clauster: {tot.messages} assistant msg(s), {tot.total_tokens} tokens, "
+          f"≈${u.cost_usd():.4f} total (approx)", file=sys.stderr)
     return 0
 
 
