@@ -12,6 +12,22 @@ from clauster.config import ClausterConfig
 # ----- passwords -----------------------------------------------------------
 
 
+def test_verify_password_runs_verify_even_without_hash():
+    # Timing-defense pin: with no configured hash, verify_password must STILL run a
+    # real argon2 verify (against the dummy) and never authenticate. Guards against a
+    # regression that short-circuits `if stored_hash is None: return False`.
+    class SpyHasher:
+        called = False
+
+        def verify(self, target, attempt):
+            type(self).called = True
+            return True
+
+    spy = SpyHasher()
+    assert auth.verify_password(spy, None, "anything") is False  # dummy never authenticates
+    assert spy.called is True  # but the verify still ran
+
+
 def test_password_roundtrip():
     h = auth.make_hasher()
     stored = auth.hash_password(h, "hunter2")

@@ -13,6 +13,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, computed_field
 
+from .config import PermissionMode, SpawnMode
+
 
 class InstanceStatus(str, Enum):
     STARTING = "starting"
@@ -53,8 +55,8 @@ class RemoteControlInstance(BaseModel):
     environment_id: str | None = None  # env_<ULID>; the URL parameter
     starter_session_id: str | None = None  # session_<ULID> from "Created initial session"
     url: str | None = None  # https://claude.ai/code?environment=env_<ULID>
-    spawn_mode: str = "same-dir"
-    permission_mode: str = "default"
+    spawn_mode: SpawnMode = "same-dir"
+    permission_mode: PermissionMode = "default"
     status: InstanceStatus = InstanceStatus.STARTING
     intentional_stop: bool = False
     started_at: datetime | None = None
