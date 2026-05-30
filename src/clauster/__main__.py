@@ -1,6 +1,7 @@
 """Entry point: ``clauster`` / ``python -m clauster``.
 
-Subcommands: ``run`` (default) and ``hash-password``. Bare ``clauster`` and
+Subcommands: ``run`` (default), ``hash-password``, ``doctor``, ``backup``,
+``restore``, ``migrate``, ``install-service``. Bare ``clauster`` and
 ``clauster -c <cfg>`` still mean ``run`` for backward compatibility.
 """
 
@@ -9,15 +10,16 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
+from pathlib import Path
 
 import uvicorn
 
-from . import __version__, claude_cli
+from . import __version__, claude_cli, ops
 from .app import create_app
 from .auth import hash_password, make_hasher
 from .config import load_config
 
-_COMMANDS = {"run", "hash-password"}
+_COMMANDS = {"run", "hash-password", "doctor", "backup", "restore", "migrate", "install-service"}
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
 
@@ -31,6 +33,27 @@ def main(argv: list[str] | None = None) -> int:
     run_p.add_argument("-c", "--config", help="path to clauster.yml")
     sub.add_parser("hash-password", help="hash a password for auth.password_hash")
 
+    doctor_p = sub.add_parser("doctor", help="diagnose config / environment")
+    doctor_p.add_argument("-c", "--config", help="path to clauster.yml")
+
+    backup_p = sub.add_parser("backup", help="back up state_dir + config to a tar.gz")
+    backup_p.add_argument("-c", "--config", help="path to clauster.yml")
+    backup_p.add_argument("-o", "--output", default=".", help="output file or directory")
+
+    restore_p = sub.add_parser("restore", help="restore state (and optionally config) from a backup")
+    restore_p.add_argument("backup", help="path to a clauster backup tar.gz")
+    restore_p.add_argument("--state-dir", required=True, help="state_dir to restore into")
+    restore_p.add_argument("--config-out", help="also restore the config to this path")
+    restore_p.add_argument("--force", action="store_true", help="overwrite a non-empty target")
+
+    migrate_p = sub.add_parser("migrate", help="migrate state.json to the current schema")
+    migrate_p.add_argument("-c", "--config", help="path to clauster.yml")
+
+    svc_p = sub.add_parser("install-service", help="print a service unit (systemd/launchd/windows)")
+    svc_p.add_argument("kind", choices=("systemd", "launchd", "windows"))
+    svc_p.add_argument("-c", "--config", help="config path to embed in the unit")
+    svc_p.add_argument("--user", help="run-as user (systemd)")
+
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
     if argv and argv[0] not in _COMMANDS and argv[0] not in _TOP_LEVEL_FLAGS:
         argv = ["run", *argv]
@@ -38,6 +61,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "hash-password":
         return _hash_password()
+    if args.command == "doctor":
+        return _doctor(args.config)
+    if args.command == "backup":
+        return _backup(args.config, args.output)
+    if args.command == "restore":
+        return _restore(args.backup, args.state_dir, args.config_out, args.force)
+    if args.command == "migrate":
+        return _migrate(args.config)
+    if args.command == "install-service":
+        return _install_service(args.kind, args.config, args.user)
     return _run(getattr(args, "config", None))
 
 
@@ -50,6 +83,68 @@ def _hash_password() -> int:
         print("clauster: passwords do not match", file=sys.stderr)
         return 2
     print(hash_password(make_hasher(), password))
+    return 0
+
+
+_STATUS_MARK = {ops.OK: "✓", ops.WARN: "!", ops.FAIL: "✗"}
+
+
+def _doctor(config_path: str | None) -> int:
+    checks, ok = ops.run_doctor(config_path)
+    for c in checks:
+        print(f"  {_STATUS_MARK.get(c.status, '?')} {c.name:<16} {c.detail}", file=sys.stderr)
+    print(("clauster: all checks passed" if ok else "clauster: FAILURES above"), file=sys.stderr)
+    return 0 if ok else 1
+
+
+def _load_or_exit(config_path: str | None):
+    try:
+        return load_config(config_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"clauster: config error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def _backup(config_path: str | None, output: str) -> int:
+    config = _load_or_exit(config_path)
+    path = ops.make_backup(config, Path(output))
+    print(f"clauster: wrote backup {path}", file=sys.stderr)
+    print("clauster: note — the backed-up config contains the argon2 password hash; "
+          "store the archive securely.", file=sys.stderr)
+    print(path)
+    return 0
+
+
+def _restore(backup: str, state_dir: str, config_out: str | None, force: bool) -> int:
+    try:
+        result = ops.restore_backup(
+            Path(backup), state_dir=Path(state_dir),
+            config_out=Path(config_out) if config_out else None, force=force,
+        )
+    except FileNotFoundError as exc:
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 2
+    except FileExistsError as exc:
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:  # unsafe archive member
+        print(f"clauster: refused unsafe backup: {exc}", file=sys.stderr)
+        return 1
+    print(f"clauster: restored {result['state_files']} state file(s)"
+          + (f"; config -> {result['config']}" if result["config"] else ""), file=sys.stderr)
+    return 0
+
+
+def _migrate(config_path: str | None) -> int:
+    config = _load_or_exit(config_path)
+    result = ops.migrate_state(config)
+    print(f"clauster: state at schema {result['schema_version']} "
+          f"({result['instances']} instance record(s))", file=sys.stderr)
+    return 0
+
+
+def _install_service(kind: str, config_path: str | None, user: str | None) -> int:
+    print(ops.render_service_unit(kind, config_path=config_path, user=user))
     return 0
 
 
