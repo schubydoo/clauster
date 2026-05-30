@@ -40,6 +40,11 @@ eval = [
     # Evaluation tooling only — NOT a committed part of the core stack.
     "logfire>=4.34.0",
 ]
+package = [
+    # Standalone-binary builds (see clauster.spec + scripts/build-binary.sh).
+    # Built in CI / a full environment, not in the dev sandbox.
+    "pyinstaller>=6.0",
+]
 
 [project.scripts]
 clauster = "clauster.__main__:main"
