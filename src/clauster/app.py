@@ -16,7 +16,7 @@ from jinja2_fragments.fastapi import Jinja2Blocks
 from . import __version__, claude_cli, logstream
 from .config import ClausterConfig
 from .discovery import discover_projects
-from .models import Project, RemoteControlInstance
+from .models import Project, RemoteControlInstance, WorkingSession
 from .redact import sanitize_line
 from .runner import SessionRunner, SpawnError, UnknownProject
 
@@ -73,6 +73,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.get("/api/instances")
     async def api_instances() -> list[RemoteControlInstance]:
         return runner.list_instances()
+
+    @app.get("/api/sessions")
+    async def api_sessions() -> dict[str, list[WorkingSession]]:
+        """External (unmanaged) working sessions grouped by project name (bug #4)."""
+        return runner.external_sessions_by_project()
 
     @app.post("/api/instances", status_code=201)
     async def api_spawn(body: dict) -> RemoteControlInstance:

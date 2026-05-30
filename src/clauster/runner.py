@@ -25,6 +25,7 @@ from . import bridge_log, inspector, pointers, procutil
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
 from .models import (
+    Attribution,
     InstanceStatus,
     Project,
     RemoteControlInstance,
@@ -74,6 +75,25 @@ class SessionRunner:
 
     def working_sessions(self) -> list[WorkingSession]:
         return list(self._sessions)
+
+    def external_sessions_by_project(self) -> dict[str, list[WorkingSession]]:
+        """EXTERNAL working sessions (not tied to a managed bridge) grouped by
+        the discovered project at their cwd, keyed by project name (bug #4).
+
+        Lets the UI surface "external session active" for a project Clauster
+        isn't managing — e.g. a bridge started from the terminal or Claude
+        Desktop, which the pointer-walk misses but the ``agents --json``
+        cross-check (computed in :meth:`poll_once`) already sees.
+        """
+        by_path = {p.path.resolve(): name for name, p in self._discovered().items()}
+        out: dict[str, list[WorkingSession]] = {}
+        for session in self._sessions:
+            if session.attribution is not Attribution.EXTERNAL:
+                continue
+            name = by_path.get(session.cwd.resolve())
+            if name is not None:
+                out.setdefault(name, []).append(session)
+        return out
 
     # ----- discovery helpers ---------------------------------------------
 
