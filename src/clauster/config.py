@@ -101,6 +101,14 @@ class CloneConfig(BaseModel):
         return v
 
 
+class ReaperConfig(BaseModel):
+    """Ghost-environment reaper (spec §11). The CLI (`clauster reap-environments`)
+    is always available; this gates only the *dashboard* surface, which exposes a
+    destructive first-party API in the browser. Off by default — opt in explicitly."""
+
+    ui_enabled: bool = False
+
+
 class LogsConfig(BaseModel):
     bridge_log_max_size_mb: int = Field(default=10, ge=1)
     keep_rotated: int = Field(default=5, ge=0)
@@ -123,6 +131,7 @@ class ClausterConfig(BaseModel):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
     clone: CloneConfig = Field(default_factory=CloneConfig)
+    reaper: ReaperConfig = Field(default_factory=ReaperConfig)
 
     _source_path: Path | None = PrivateAttr(default=None)
 
