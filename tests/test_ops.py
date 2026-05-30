@@ -13,6 +13,8 @@ from clauster.config import load_config
 from clauster.ops import (
     FAIL,
     OK,
+    WARN,
+    _check_auth,
     _version_ge,
     make_backup,
     migrate_state,
@@ -66,6 +68,57 @@ def test_doctor_old_claude_fails(write_config, tmp_path):
     assert by["claude"].status == FAIL and ok is False
 
 
+def test_doctor_invalid_config_fails(tmp_path):
+    bad = tmp_path / "bad.yml"
+    bad.write_text(f"projects_root: {tmp_path}/does-not-exist\n")  # fails validation -> ValueError
+    checks, ok = run_doctor(str(bad))
+    assert ok is False and checks[0].name == "config" and checks[0].status == FAIL
+
+
+def test_doctor_claude_not_found(write_config, tmp_path):
+    cfg = str(write_config(f"claude:\n  binary: no-such-claude-bin\nstate_dir: {tmp_path}/.s\n"))
+    by = {c.name: c for c in run_doctor(cfg)[0]}
+    assert by["claude"].status == FAIL
+
+
+def test_doctor_probe_exception(write_config, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "clauster.ops.claude_cli.claude_version",
+        lambda b: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    by = {c.name: c for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}
+    assert by["claude"].status == FAIL and "boom" in by["claude"].detail
+
+
+def test_doctor_git_missing_warns(write_config, tmp_path, monkeypatch):
+    monkeypatch.setattr("clauster.ops.shutil.which", lambda n: None)
+    by = {c.name: c for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}
+    assert by["git"].status == WARN
+
+
+def test_doctor_state_dir_not_writable_fails(write_config, tmp_path):
+    blocker = tmp_path / "afile"
+    blocker.write_text("x")  # state_dir points at a file -> mkdir fails
+    cfg = str(write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {blocker}\n"))
+    by = {c.name: c for c in run_doctor(cfg)[0]}
+    assert by["state_dir"].status == FAIL
+
+
+def test_check_auth_branches(write_config, tmp_path):
+    config = load_config(_cfg_file(write_config, tmp_path))
+    assert _check_auth(config).status == OK
+    # password_required but no hash -> FAIL (mutate past the config validator)
+    config.auth.password_required = True
+    config.auth.password_hash = None
+    assert _check_auth(config).status == FAIL
+    # non-loopback with no auth -> FAIL; with explicit opt-out -> WARN
+    c2 = load_config(_cfg_file(write_config, tmp_path))
+    c2.host = "0.0.0.0"
+    assert _check_auth(c2).status == FAIL
+    c2.auth.allow_unauthenticated_network = True
+    assert _check_auth(c2).status == WARN
+
+
 # ----- backup / restore -------------------------------------------------
 
 def _seed_state(state_dir: Path):
@@ -109,6 +162,49 @@ def test_restore_refuses_nonempty_without_force(write_config, tmp_path):
         restore_backup(archive, state_dir=dest)
     restore_backup(archive, state_dir=dest, force=True)  # force overwrites
     assert (dest / "state.json").is_file()
+
+
+def test_restore_recreates_subdirs(write_config, tmp_path):
+    config = load_config(_cfg_file(write_config, tmp_path))
+    sd = config.state_dir
+    (sd / "sub").mkdir(parents=True, exist_ok=True)
+    (sd / "sub" / "nested.json").write_text("{}")
+    outdir = tmp_path / "o"
+    outdir.mkdir()
+    archive = make_backup(config, outdir)
+    dest = tmp_path / "restored"
+    restore_backup(archive, state_dir=dest)
+    assert (dest / "sub" / "nested.json").is_file()  # directory member rebuilt
+
+
+def test_restore_config_out_conflict_without_force(write_config, tmp_path):
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    outdir = tmp_path / "o"
+    outdir.mkdir()
+    archive = make_backup(config, outdir)
+    existing = tmp_path / "existing.yml"
+    existing.write_text("keep me")
+    with pytest.raises(FileExistsError):
+        restore_backup(archive, state_dir=tmp_path / "st", config_out=existing)
+
+
+def test_restore_skips_link_members(tmp_path):
+    import io
+    arch = tmp_path / "s.tar.gz"
+    with tarfile.open(arch, "w:gz") as tar:
+        data = b"hi"
+        f = tarfile.TarInfo("state/ok.txt")
+        f.size = len(data)
+        tar.addfile(f, io.BytesIO(data))
+        link = tarfile.TarInfo("state/evil-link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        tar.addfile(link)
+    res = restore_backup(arch, state_dir=tmp_path / "out")
+    assert (tmp_path / "out" / "ok.txt").is_file()
+    assert not (tmp_path / "out" / "evil-link").exists()  # link member dropped
+    assert res["state_files"] == 1
 
 
 @pytest.mark.parametrize("evil", ["../evil.txt", "/etc/evil.txt"])
