@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------
+  # Unit tests across the supported Python versions (Linux only — clauster
+  # targets a Linux/NAS host; psutil/proc + bridge management aren't
+  # exercised on macOS/Windows). The 96% coverage gate lives in
+  # pyproject [tool.pytest.ini_options] addopts (--cov-fail-under=96), so
+  # a bare `pytest` enforces it on every cell.
+  # --------------------------------------------------------------------
+  tests:
+    name: tests (${{ matrix.os }}, ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    # macOS + Windows are spec targets but not yet verified green: the test stub
+    # needs a Windows entrypoint and the code has cross-platform gaps the spec
+    # flagged as open (SIGINT-based stop, jiffies procStart). Run them for signal
+    # but don't block merges on them yet — Linux is the gate. Drop this per-OS as
+    # each platform is brought green in CI. See HANDOFF.md "cross-platform CI".
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      # Spec target is Ubuntu + macOS + Windows (conductor_spec_v3 §"Ubuntu,
+      # macOS, Windows" + 4-runner PyInstaller matrix; psutil was chosen for
+      # cross-platform liveness). Full Python sweep on Linux (the canonical
+      # coverage-gated cells); macOS + Windows get a portability cell each.
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: macos-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      # Matrix values flow through env vars (not inlined into `run:`) so zizmor's
+      # template-injection analysis doesn't flag the shell blocks. The matrix is
+      # hard-coded above, not derived from any PR-controlled input. `shell: bash`
+      # keeps one script across all three runners (Git Bash ships on Windows).
+      - name: Set up Python ${{ matrix.python-version }}
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv python install "$PYTHON_VERSION"
+      - name: Install
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv sync --extra dev --python "$PYTHON_VERSION"
+      # Linux enforces the 96% coverage gate (pyproject addopts). macOS + Windows
+      # run for correctness/portability only — `-o addopts=` drops the cov gate,
+      # since some branches are inherently platform-specific (Linux jiffies
+      # procStart conversion, etc.) and would skew cross-platform coverage.
+      - name: pytest
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          RUNNER_OS: ${{ runner.os }}
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            uv run --python "$PYTHON_VERSION" pytest -q
+          else
+            uv run --python "$PYTHON_VERSION" pytest -q -o addopts=""
+          fi
+
+  # --------------------------------------------------------------------
+  # Build sdist + wheel. Cheap; runs on every push and PR so we always
+  # know the package is shippable.
+  # --------------------------------------------------------------------
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+      - name: Build
+        run: uv build
+      - name: Upload dist artefacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------
+  # Required-checks aggregator. ONE check for branch protection to gate
+  # on, regardless of how many underlying jobs exist. `if: always()` so it
+  # runs even when a need failed; jq fails the aggregator iff any listed
+  # job is not success-or-skipped. Add a new ci.yml job by appending to
+  # `needs:` — branch protection lists only this one name.
+  # --------------------------------------------------------------------
+  ci-required-checks-passed:
+    name: ci required checks passed
+    if: always()
+    needs:
+      - tests
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check required jobs passed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          failing=$(echo "$NEEDS_JSON" | jq -r '
+            to_entries[]
+            | select(.value.result != "success" and .value.result != "skipped")
+            | "\(.key): \(.value.result)"
+          ')
+          if [ -n "$failing" ]; then
+            echo "Failed or cancelled jobs:"
+            echo "$failing"
+            exit 1
+          fi
+          echo "All required jobs passed (or were intentionally skipped)."
