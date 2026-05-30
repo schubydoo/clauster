@@ -12,6 +12,8 @@ name: Semgrep
 # repo's own `zizmor` workflow-audit gate in security.yml):
 #   - actions/checkout is SHA-pinned (unpinned-uses) — same pin as the rest of
 #     the repo.
+#   - the semgrep/semgrep container image is digest-pinned (unpinned-uses for
+#     container images — flagged by zizmor's stricter code-scanning persona).
 #   - persist-credentials: false (artipacked).
 #   - explicit top-level least-privilege permissions.
 
@@ -45,7 +47,8 @@ jobs:
     env:
       SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
     container:
-      image: semgrep/semgrep
+      # renovate: datasource=docker depName=semgrep/semgrep
+      image: semgrep/semgrep:latest@sha256:7cad2bc2d1e44f87f0bf4be6d1fa23aa90fb72015bebc89fb91385d813987a03
     if: (github.actor != 'dependabot[bot]')
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
