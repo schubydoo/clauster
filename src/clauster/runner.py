@@ -31,6 +31,7 @@ from .models import (
     RemoteControlInstance,
     WorkingSession,
 )
+from .state import StateStore
 from .trust import is_trusted, trust_directory
 
 
@@ -61,6 +62,10 @@ class SessionRunner:
         self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
         self._poll_task: asyncio.Task | None = None
+        # Lightweight persistence of label / intentional_stop / spawn_mode (D14).
+        self._state = StateStore(config.state_dir)
+        self._persisted: dict[str, dict] = self._state.load()
+        self._last_saved: dict[str, dict] | None = None
 
     # ----- read API -------------------------------------------------------
 
@@ -94,6 +99,26 @@ class SessionRunner:
             if name is not None:
                 out.setdefault(name, []).append(session)
         return out
+
+    # ----- persistence (state.json, D14) ----------------------------------
+
+    def _persist_subset(self) -> dict[str, dict]:
+        return {
+            name: {
+                "label": inst.label,
+                "intentional_stop": inst.intentional_stop,
+                "spawn_mode": inst.spawn_mode,
+            }
+            for name, inst in self._instances.items()
+        }
+
+    async def _persist(self) -> None:
+        """Write the persisted subset off-loop, but only when it actually changed."""
+        subset = self._persist_subset()
+        if subset == self._last_saved:
+            return
+        await asyncio.to_thread(self._state.save, subset)
+        self._last_saved = subset
 
     # ----- discovery helpers ---------------------------------------------
 
@@ -151,6 +176,7 @@ class SessionRunner:
 
         markers = await asyncio.to_thread(self._await_ready, log_path, proc)
         self._apply_markers(instance, markers, proc)
+        await self._persist()
         return instance
 
     def _unique_log_path(self, name: str) -> Path:
@@ -229,6 +255,7 @@ class SessionRunner:
         if instance is None:
             raise UnknownProject(f"no managed instance: {name!r}")
         instance.intentional_stop = True  # mark intent BEFORE signalling (spec §3 feat 4)
+        await self._persist()  # persist the intent so a restart doesn't mislabel it CRASHED
 
         pid = instance.bridge_pid
         if pid is None:
@@ -260,9 +287,14 @@ class SessionRunner:
             ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
             if ptr is None or not await asyncio.to_thread(pointers.is_live, ptr):
                 continue
+            # Overlay the few fields the pointer-walk can't recover; a bridge
+            # found alive is by definition NOT intentionally stopped.
+            saved = self._persisted.get(proj.name, {})
             self._instances[proj.name] = RemoteControlInstance(
                 project=proj.name,
-                label=proj.name,
+                label=saved.get("label") or proj.name,
+                spawn_mode=saved.get("spawn_mode", self._config.instance_defaults.spawn_mode),
+                intentional_stop=False,
                 status=InstanceStatus.RUNNING,
                 bridge_pid=ptr.pid,
                 bridge_proc_start=procutil.jiffies_to_epoch(int(ptr.proc_start)),
@@ -270,6 +302,7 @@ class SessionRunner:
                 starter_session_id=ptr.session_id,
                 url=f"https://claude.ai/code?environment={ptr.environment_id}",
             )
+        await self._persist()
 
     async def poll_once(self) -> None:
         """Liveness reconcile + `claude agents --json` cross-check (off-loop work,

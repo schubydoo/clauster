@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clauster — Sign in</title>
+  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/clauster.css">
+</head>
+<body>
+  <main class="login-wrap">
+    <!-- CSRF is enforced centrally: the auth guard middleware (app.py) requires a
+         trusted Origin/Referer on every unsafe method, including this POST. No
+         per-form token by design (see plan). -->
+    <form class="login-card" method="post" action="{{ request.scope.root_path }}/login"> <!-- nosemgrep -->
+      <h1 class="login-title">Clauster</h1>
+      <p class="login-sub">Sign in to continue</p>
+      {% if error %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
+      <label class="login-label" for="password">Password</label>
+      <input class="login-input" type="password" id="password" name="password"
+             autocomplete="current-password" autofocus required>
+      <button class="login-btn" type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>
