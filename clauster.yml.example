@@ -1,12 +1,12 @@
-# Clauster configuration (v0.1).
+# Clauster configuration — copy to clauster.yml and edit.
 # Search order:  $CLAUSTER_CONFIG -> ./clauster.yml -> $CLAUSTER_HOME/clauster.yml
 # Any scalar key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value
 #   e.g. CLAUSTER_PORT=8080  CLAUSTER_CLAUDE_BINARY=/opt/claude/bin/claude
 # Schema is additive-only: old configs always work in newer versions.
 
 schema_version: 1
-projects_root: /mnt/nas/projects   # required, must exist and be readable
-host: 127.0.0.1                    # v0.1 binds loopback only
+projects_root: /srv/projects       # required, must exist and be readable
+host: 127.0.0.1                    # non-loopback requires auth (see below)
 port: 7621
 state_dir: ~/.clauster             # state, logs, pid files
 root_path: ""                      # subpath when behind a reverse proxy
@@ -14,28 +14,52 @@ log_format: text                   # text | json (json for Docker/Loki)
 
 claude:
   binary: claude                   # name on PATH or absolute path
-  min_version: "2.1.145"           # for `claude agents --json`
+  min_version: "2.1.145"
   agents_json_poll_interval_seconds: 300
 
 instance_defaults:
-  spawn_mode: same-dir             # v0.1 only same-dir
-  capacity: 32                     # per-bridge cap (Anthropic-imposed)
+  spawn_mode: same-dir             # same-dir | worktree (git repos) | session
+  permission_mode: default         # default | plan | acceptEdits | auto | dontAsk | bypassPermissions
+  capacity: 32                     # per-bridge session cap (Anthropic-imposed)
 
-projects: {}                       # per-project overrides (v0.2+)
+# Per-project overrides. allow_bypass_permissions is the hard ceiling for the
+# bypassPermissions footgun — it can't be selected in the UI unless set here.
+projects: {}
+#   my-project:
+#     allow_bypass_permissions: false
 
-# v0.2+ only; v0.1 ignores these entirely.
 auth:
-  enabled: false
+  enabled: false                   # turn on to require login / gate non-loopback
   password_required: false
+  password_hash: null              # argon2id; generate via `clauster hash-password`
+  cookie_secure: auto              # auto | always | never
+  session_max_age_seconds: 604800  # 7 days
+  allowed_origins: []              # extra WS/CSRF origins (e.g. your proxy domain)
+  allow_unauthenticated_network: false
   reverse_proxy:
     enabled: false
     user_header: "Remote-User"
     shared_secret_header: "X-Proxy-Auth"
+    shared_secret: null            # HMAC key the proxy signs the auth header with
     trusted_ips: []
-  allow_unauthenticated_network: false
+    hmac_window_seconds: 60
 
 logs:
   bridge_log_max_size_mb: 10
   keep_rotated: 5
-  redact_session_url: false        # false=hybrid (verbatim disk, redacted WS)
+  redact_session_url: false        # false=hybrid (verbatim on disk, redacted over WS)
   strip_ansi_in_stream: true
+
+# Project create/clone guards (clone URLs are user-supplied + hit the network).
+clone:
+  enabled: true
+  allowed_schemes: [https, ssh]
+  allow_private_hosts: false       # block private/LAN IPs by default (SSRF)
+  allowed_private_cidrs: []        # targeted LAN opt-in, e.g. ["192.168.1.0/24"]
+  timeout_seconds: 300
+  max_mb: 2048                     # post-clone size cap; 0 = unlimited
+
+# Ghost-environment reaper dashboard surface. The CLI (`clauster reap-environments`)
+# is always available; this only gates the destructive browser button. Off by default.
+reaper:
+  ui_enabled: false
