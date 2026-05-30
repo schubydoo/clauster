@@ -15,9 +15,22 @@ from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
 from . import __version__, auth, claude_cli, logstream
+from .claude_md import (
+    ClaudeMdConflict,
+    ClaudeMdError,
+    ClaudeMdTooLarge,
+    read_claude_md,
+    write_claude_md,
+)
 from .config import ClausterConfig
-from .discovery import discover_projects
-from .models import Project, RemoteControlInstance, WorkingSession
+from .discovery import discover_projects, is_valid_project_name
+from .models import (
+    ClaudeMdDoc,
+    InstanceStatus,
+    Project,
+    RemoteControlInstance,
+    WorkingSession,
+)
 from .redact import sanitize_line
 from .runner import (
     InvalidSpawnOption,
@@ -263,6 +276,58 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return await runner.trust_project(name)
         except UnknownProject as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    async def _resolve_project_path(name: str) -> Path:
+        """Map a project name to its path, refusing unknown/unsafe names (traversal)."""
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=404, detail=f"no such project: {name!r}")
+        for proj in await list_projects():
+            if proj.name == name:
+                return proj.path
+        raise HTTPException(status_code=404, detail=f"no such project: {name!r}")
+
+    def _bridge_running(name: str) -> bool:
+        inst = runner.get_instance(name)
+        if inst is not None and inst.status is InstanceStatus.RUNNING:
+            return True
+        return name in runner.external_sessions_by_project()
+
+    @app.get("/api/projects/{name}/claude-md")
+    async def api_claude_md_get(name: str) -> ClaudeMdDoc:
+        path = await _resolve_project_path(name)
+        try:
+            doc = await asyncio.to_thread(read_claude_md, path)
+        except ClaudeMdError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        doc.bridge_running = _bridge_running(name)
+        return doc
+
+    @app.put("/api/projects/{name}/claude-md")
+    async def api_claude_md_put(name: str, body: dict) -> ClaudeMdDoc:
+        path = await _resolve_project_path(name)
+        content = body.get("content")
+        if not isinstance(content, str):
+            raise HTTPException(status_code=422, detail="body must include a 'content' string")
+        base_sha = body.get("base_sha256")
+        if base_sha is not None and not isinstance(base_sha, str):
+            raise HTTPException(status_code=422, detail="base_sha256 must be a string")
+        try:
+            doc = await asyncio.to_thread(
+                write_claude_md,
+                path,
+                content,
+                base_sha256=base_sha,
+                state_dir=config.state_dir,
+                user=_SESSION_USER,
+            )
+        except ClaudeMdTooLarge as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except ClaudeMdConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ClaudeMdError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        doc.bridge_running = _bridge_running(name)
+        return doc
 
     @app.get("/api/instances/{instance_id}/qr")
     async def api_instance_qr(instance_id: str) -> Response:

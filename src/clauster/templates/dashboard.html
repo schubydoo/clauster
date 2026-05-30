@@ -65,6 +65,8 @@
           <button class="btn-stop" @click="stop('{{ p.name }}')"
                   x-show="isRunning('{{ p.name }}')">Stop bridge</button>
           <span class="spinner" x-show="isBusy('{{ p.name }}')">starting…</span>
+          <button class="btn-claude-md" @click="toggleClaudeMd('{{ p.name }}')"
+                  x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</button>
         </div>
 
         <!-- Footgun layer 2: typed-confirm before spawning with bypassPermissions.
@@ -78,6 +80,32 @@
           <button class="btn-bypass-cancel" @click="cancelBypass('{{ p.name }}')">Cancel</button>
         </div>
         <p class="card-error" x-show="errorOf('{{ p.name }}')" x-text="errorOf('{{ p.name }}')"></p>
+
+        <!-- CLAUDE.md viewer/editor (spec §5): textarea, 64KB cap, stale-bridge banner. -->
+        <template x-if="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open">
+          <div class="claude-md-panel">
+            <div class="cmd-bar">
+              <span class="cmd-title">CLAUDE.md</span>
+              <span class="cmd-new" x-show="!cmd['{{ p.name }}'].loading && !cmd['{{ p.name }}'].exists">new file</span>
+              <span class="cmd-count" :class="{ over: cmdBytes('{{ p.name }}') > 65536 }"
+                    x-text="cmdBytes('{{ p.name }}') + ' / 65536 bytes'"></span>
+            </div>
+            <p class="cmd-banner" x-show="cmd['{{ p.name }}'].bridge_running">
+              ⚠ A bridge is running for this project — saved changes apply to
+              <strong>new</strong> sessions, not the one already attached.</p>
+            <p class="cmd-error" x-show="cmd['{{ p.name }}'].error" x-text="cmd['{{ p.name }}'].error"></p>
+            <textarea class="cmd-text" x-model="cmd['{{ p.name }}'].content" rows="14"
+                      spellcheck="false" autocomplete="off"
+                      :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving"></textarea>
+            <div class="cmd-actions">
+              <button class="btn-cmd-save" @click="saveClaudeMd('{{ p.name }}')"
+                      :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving || cmdBytes('{{ p.name }}') > 65536"
+                      x-text="cmd['{{ p.name }}'].saving ? 'Saving…' : 'Save'">Save</button>
+              <button class="btn-cmd-cancel" @click="closeClaudeMd('{{ p.name }}')">Cancel</button>
+              <span class="cmd-saved" x-show="cmd['{{ p.name }}'].savedAt && !cmd['{{ p.name }}'].error">✓ saved</span>
+            </div>
+          </div>
+        </template>
 
         <!-- Bug #4: a bridge/session Clauster doesn't manage (e.g. started from the
              terminal or Claude Desktop). Seen via `claude agents --json`, not the
@@ -163,6 +191,7 @@
         permMode: {},       // project name -> selected --permission-mode
         confirmBypass: {},  // project name -> bool (typed-confirm panel open)
         bypassTyped: {},    // project name -> text typed into the confirm box
+        cmd: {},            // project name -> CLAUDE.md editor state
         async init() {
           for (const n of PROJECT_NAMES) {
             this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -247,6 +276,48 @@
           this.confirmBypass[name] = false;
           this.bypassTyped[name] = "";
         },
+        cmdUrl(name) { return ROOT + "/api/projects/" + encodeURIComponent(name) + "/claude-md"; },
+        cmdBytes(name) {
+          const c = this.cmd[name];
+          return c ? new TextEncoder().encode(c.content || "").length : 0;
+        },
+        async toggleClaudeMd(name) {
+          if (this.cmd[name] && this.cmd[name].open) { this.closeClaudeMd(name); return; }
+          this.cmd[name] = { open: true, loading: true, saving: false, content: "",
+                             sha: null, exists: false, bridge_running: false, error: null, savedAt: null };
+          try {
+            const res = await fetch(this.cmdUrl(name));
+            const body = await res.json();
+            if (!res.ok) { this.cmd[name].error = body.detail || "failed to load"; }
+            else {
+              Object.assign(this.cmd[name], {
+                content: body.content, sha: body.sha256,
+                exists: body.exists, bridge_running: body.bridge_running,
+              });
+            }
+          } catch (e) { this.cmd[name].error = String(e); }
+          this.cmd[name].loading = false;
+        },
+        async saveClaudeMd(name) {
+          const c = this.cmd[name];
+          if (!c) return;
+          c.saving = true; c.error = null; c.savedAt = null;
+          const payload = { content: c.content };
+          // Lost-update guard only when overwriting an existing file; omit to create new.
+          if (c.exists && c.sha) payload.base_sha256 = c.sha;
+          try {
+            const res = await fetch(this.cmdUrl(name), {
+              method: "PUT", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const body = await res.json();
+            if (!res.ok) { c.error = body.detail || "failed to save"; }
+            else { Object.assign(c, { sha: body.sha256, exists: true,
+                     bridge_running: body.bridge_running, savedAt: Date.now() }); }
+          } catch (e) { c.error = String(e); }
+          c.saving = false;
+        },
+        closeClaudeMd(name) { if (this.cmd[name]) this.cmd[name].open = false; },
         async _spawn(name) {
           this.errors[name] = null;
           this.instances[name] = { project: name, status: "starting" };
