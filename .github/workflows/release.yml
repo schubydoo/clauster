@@ -46,7 +46,11 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          enable-cache: true
+          # Caching is intentionally OFF in the publish job (zizmor
+          # cache-poisoning): a cache restored from a lower-privilege context
+          # could taint the artifact this OIDC-signed step ships to PyPI. A
+          # once-per-release build gains little from a warm cache anyway.
+          enable-cache: false
       - name: Set up Python 3.13
         run: uv python install 3.13
       - name: Build sdist + wheel
