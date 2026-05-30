@@ -19,7 +19,13 @@ from .config import ClausterConfig
 from .discovery import discover_projects
 from .models import Project, RemoteControlInstance, WorkingSession
 from .redact import sanitize_line
-from .runner import SessionRunner, SpawnError, UnknownProject
+from .runner import (
+    InvalidSpawnOption,
+    PermissionModeNotAllowed,
+    SessionRunner,
+    SpawnError,
+    UnknownProject,
+)
 
 _SESSION_COOKIE = "clauster_session"
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -174,7 +180,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return resp
 
     async def list_projects() -> list[Project]:
-        return await asyncio.to_thread(discover_projects, config.projects_root)
+        projects = await asyncio.to_thread(discover_projects, config.projects_root)
+        # Surface the config bypass-ceiling per project so the UI can gate the option
+        # (discovery has no config knowledge; the app layer owns this).
+        for p in projects:
+            p.allow_bypass_permissions = config.allows_bypass(p.name)
+        return projects
 
     @app.get("/healthz")
     async def healthz(request: Request) -> dict:
@@ -214,10 +225,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         project = body.get("project")
         if not isinstance(project, str) or not project:
             raise HTTPException(status_code=422, detail="body must include a 'project' string")
+        spawn_mode = body.get("spawn_mode")
+        permission_mode = body.get("permission_mode")
+        for field, value in (("spawn_mode", spawn_mode), ("permission_mode", permission_mode)):
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(status_code=422, detail=f"{field} must be a string")
         try:
-            return await runner.spawn(project)
+            return await runner.spawn(
+                project, spawn_mode=spawn_mode, permission_mode=permission_mode
+            )
         except UnknownProject as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except InvalidSpawnOption as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PermissionModeNotAllowed as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except SpawnError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -301,6 +323,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "version": __version__,
                 "projects_root": str(config.projects_root),
                 "auth_enabled": config.auth.enabled,
+                "default_spawn_mode": config.instance_defaults.spawn_mode,
+                "default_permission_mode": config.instance_defaults.permission_mode,
             },
         )
 

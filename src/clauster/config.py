@@ -17,6 +17,21 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_valid
 SCHEMA_VERSION = 1
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
+# The spawn/permission modes `claude remote-control` accepts (verified against
+# `claude remote-control --help`, claude 2.1.156). worktree requires a git repo;
+# bypassPermissions is footgun-gated (see `ProjectConfig.allow_bypass_permissions`).
+SpawnMode = Literal["same-dir", "worktree", "session"]
+PermissionMode = Literal["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"]
+SPAWN_MODES: tuple[str, ...] = ("same-dir", "worktree", "session")
+PERMISSION_MODES: tuple[str, ...] = (
+    "default",
+    "plan",
+    "acceptEdits",
+    "auto",
+    "dontAsk",
+    "bypassPermissions",
+)
+
 
 class ClaudeConfig(BaseModel):
     binary: str = "claude"
@@ -25,8 +40,20 @@ class ClaudeConfig(BaseModel):
 
 
 class InstanceDefaults(BaseModel):
-    spawn_mode: Literal["same-dir"] = "same-dir"  # v0.2 adds worktree/session
+    spawn_mode: SpawnMode = "same-dir"
+    permission_mode: PermissionMode = "default"
     capacity: int = 32
+
+
+class ProjectConfig(BaseModel):
+    """Per-project config (the `projects:` map). Additive-only; unknown keys ignored.
+
+    `allow_bypass_permissions` is the *hard ceiling* for the footgun gate: a project
+    can never be spawned with `--permission-mode bypassPermissions` unless this is set
+    here in clauster.yml. The dashboard's per-session typed-confirm is the second layer.
+    """
+
+    allow_bypass_permissions: bool = False
 
 
 class ReverseProxyConfig(BaseModel):
@@ -70,7 +97,7 @@ class ClausterConfig(BaseModel):
 
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     instance_defaults: InstanceDefaults = Field(default_factory=InstanceDefaults)
-    projects: dict[str, dict] = Field(default_factory=dict)
+    projects: dict[str, ProjectConfig] = Field(default_factory=dict)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
 
@@ -79,6 +106,11 @@ class ClausterConfig(BaseModel):
     @property
     def source_path(self) -> Path | None:
         return self._source_path
+
+    def allows_bypass(self, project_name: str) -> bool:
+        """Whether the config hard-ceiling permits bypassPermissions for this project."""
+        pc = self.projects.get(project_name)
+        return bool(pc and pc.allow_bypass_permissions)
 
     @field_validator("projects_root", "state_dir", mode="before")
     @classmethod

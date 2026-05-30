@@ -191,3 +191,28 @@ main { padding: 1.5rem; }
   padding: 0.5rem; font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, monospace;
   color: #cbd2df; white-space: pre-wrap; word-break: break-word;
 }
+
+/* v0.2 spawn controls: spawn-mode + permission-mode pickers */
+.spawn-opts { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; margin-right: 0.4rem; }
+.spawn-opts label { color: var(--muted); font-size: 0.72rem; display: flex; gap: 0.3rem; align-items: center; }
+.spawn-opts select {
+  background: transparent; color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.15rem 0.35rem; font-size: 0.75rem;
+}
+.bypass-confirm {
+  margin: 0.5rem 0 0; padding: 0.6rem 0.7rem; border: 1px solid var(--amber);
+  border-radius: 8px; background: rgba(224, 161, 58, 0.08);
+}
+.bypass-warn { margin: 0 0 0.5rem; font-size: 0.78rem; color: var(--fg); }
+.bypass-confirm input {
+  background: #0b0d11; color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.25rem 0.5rem; font-size: 0.8rem; margin-right: 0.4rem;
+}
+.btn-bypass-go {
+  background: var(--amber); color: #1a1300; border: none; border-radius: 6px;
+  padding: 0.25rem 0.6rem; cursor: pointer; font-size: 0.78rem; font-weight: 600;
+}
+.btn-bypass-cancel {
+  background: transparent; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.25rem 0.6rem; cursor: pointer; font-size: 0.78rem;
+}

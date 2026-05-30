@@ -35,6 +35,10 @@ class Project(BaseModel):
     is_git_repo: bool = False
     has_claude_md: bool = False
     trust_state: TrustState = TrustState.UNTRUSTED
+    # Config hard-ceiling for the bypassPermissions footgun gate; surfaced so the
+    # dashboard can decide whether to even offer the option. Set at the app layer
+    # from config (discovery has no config knowledge).
+    allow_bypass_permissions: bool = False
 
 
 class RemoteControlInstance(BaseModel):
@@ -49,6 +53,7 @@ class RemoteControlInstance(BaseModel):
     starter_session_id: str | None = None  # session_<ULID> from "Created initial session"
     url: str | None = None  # https://claude.ai/code?environment=env_<ULID>
     spawn_mode: str = "same-dir"
+    permission_mode: str = "default"
     status: InstanceStatus = InstanceStatus.STARTING
     intentional_stop: bool = False
     started_at: datetime | None = None
