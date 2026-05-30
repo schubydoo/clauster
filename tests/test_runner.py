@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
-from clauster.models import Attribution, InstanceStatus, RemoteControlInstance, WorkingSession
+from clauster.models import (
+    Attribution,
+    InstanceStatus,
+    RemoteControlInstance,
+    WorkingSession,
+)
 from clauster.runner import NotTrusted, SessionRunner, UnknownProject
 from clauster.state import StateStore
 
@@ -53,7 +55,10 @@ async def test_spawn_is_idempotent_while_running(runner_config, monkeypatch):
 async def test_stop_instance_without_pid_marks_stopped(runner_config):
     runner = _make_runner(runner_config)
     runner._instances["alpha"] = RemoteControlInstance(
-        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_pid=None,
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_pid=None,
     )
     inst = await runner.stop("alpha")
     assert inst.status is InstanceStatus.STOPPED and inst.intentional_stop is True
@@ -113,15 +118,19 @@ def test_external_sessions_by_project(runner_config):
 
     def session(pid, rel, attribution):
         return WorkingSession(
-            pid=pid, cwd=root / rel, kind="interactive",
-            started_at=pid, local_uuid=f"uuid-{pid}", attribution=attribution,
+            pid=pid,
+            cwd=root / rel,
+            kind="interactive",
+            started_at=pid,
+            local_uuid=f"uuid-{pid}",
+            attribution=attribution,
         )
 
     runner._sessions = [
-        session(111, "alpha", Attribution.EXTERNAL),   # surfaced
-        session(222, "alpha", Attribution.EXTERNAL),   # grouped with the first
-        session(333, "beta", Attribution.TRACKED),     # managed -> excluded
-        session(444, "nope", Attribution.EXTERNAL),    # not a discovered project -> excluded
+        session(111, "alpha", Attribution.EXTERNAL),  # surfaced
+        session(222, "alpha", Attribution.EXTERNAL),  # grouped with the first
+        session(333, "beta", Attribution.TRACKED),  # managed -> excluded
+        session(444, "nope", Attribution.EXTERNAL),  # not a discovered project -> excluded
     ]
 
     grouped = runner.external_sessions_by_project()
@@ -139,8 +148,16 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     # alpha was intentionally stopped with a custom label; zeta is stale/persisted.
     StateStore(config.state_dir).save(
         {
-            "alpha": {"label": "my-alpha", "intentional_stop": True, "spawn_mode": "same-dir"},
-            "zeta": {"label": "zeta", "intentional_stop": True, "spawn_mode": "same-dir"},
+            "alpha": {
+                "label": "my-alpha",
+                "intentional_stop": True,
+                "spawn_mode": "same-dir",
+            },
+            "zeta": {
+                "label": "zeta",
+                "intentional_stop": True,
+                "spawn_mode": "same-dir",
+            },
         }
     )
     runner = SessionRunner(config, claude_json=claude_json)
@@ -166,17 +183,25 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
 
 async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkeypatch):
     config, claude_json = runner_config
-    StateStore(config.state_dir).save({
-        "alpha": {"label": "alpha", "intentional_stop": True,
-                  "spawn_mode": "BOGUS", "permission_mode": "NOPE"},
-    })
+    StateStore(config.state_dir).save(
+        {
+            "alpha": {
+                "label": "alpha",
+                "intentional_stop": True,
+                "spawn_mode": "BOGUS",
+                "permission_mode": "NOPE",
+            },
+        }
+    )
     runner = SessionRunner(config, claude_json=claude_json)
 
     class FakePtr:
         pid, proc_start, environment_id, session_id = 4242, "1000", "env_x", "session_x"
 
-    monkeypatch.setattr("clauster.pointers.pointer_for_project",
-                        lambda path: FakePtr() if path.name == "alpha" else None)
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: FakePtr() if path.name == "alpha" else None,
+    )
     monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
 
@@ -188,7 +213,9 @@ async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkey
 
 def test_reconcile_status_transitions():
     def inst(status, intentional=False):
-        return RemoteControlInstance(project="x", label="x", status=status, intentional_stop=intentional)
+        return RemoteControlInstance(
+            project="x", label="x", status=status, intentional_stop=intentional
+        )
 
     i = inst(InstanceStatus.RUNNING, intentional=True)
     SessionRunner._reconcile_status(i, alive=False)

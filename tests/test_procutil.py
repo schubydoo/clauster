@@ -121,10 +121,10 @@ def test_proc_create_time_missing_pid_is_none():
 
 def test_expected_epoch_normalizations():
     assert procutil._expected_epoch(None) is None
-    assert procutil._expected_epoch(1234.5) == 1234.5          # already an epoch
-    assert procutil._expected_epoch("abc") is None             # non-numeric -> skip
-    assert procutil._expected_epoch(True) is None              # bool -> int("True") fails -> None
-    jiffies = procutil._expected_epoch("0")                    # jiffies string -> epoch
+    assert procutil._expected_epoch(1234.5) == 1234.5  # already an epoch
+    assert procutil._expected_epoch("abc") is None  # non-numeric -> skip
+    assert procutil._expected_epoch(True) is None  # bool -> int("True") fails -> None
+    jiffies = procutil._expected_epoch("0")  # jiffies string -> epoch
     assert jiffies is not None and abs(jiffies - psutil.boot_time()) < 1.0
 
 

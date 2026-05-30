@@ -74,7 +74,9 @@ def _price_for(model: str, prices: dict[str, ModelPrice]) -> ModelPrice | None:
     return None
 
 
-def cost_usd(model: str, totals: TokenTotals, prices: dict[str, ModelPrice] = PRICES) -> float | None:
+def cost_usd(
+    model: str, totals: TokenTotals, prices: dict[str, ModelPrice] = PRICES
+) -> float | None:
     """Approx USD for one model's totals, or None if the model isn't in the table."""
     price = _price_for(model, prices)
     if price is None:

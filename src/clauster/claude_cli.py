@@ -17,9 +17,7 @@ class ClaudeNotFound(RuntimeError):
 def resolve_binary(binary: str) -> str:
     resolved = shutil.which(binary)
     if resolved is None:
-        raise ClaudeNotFound(
-            f"claude binary {binary!r} not found on PATH; Clauster cannot start."
-        )
+        raise ClaudeNotFound(f"claude binary {binary!r} not found on PATH; Clauster cannot start.")
     return resolved
 
 

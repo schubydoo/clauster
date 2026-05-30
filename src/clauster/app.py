@@ -24,6 +24,13 @@ from .claude_md import (
 )
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
+from .models import (
+    ClaudeMdDoc,
+    InstanceStatus,
+    Project,
+    RemoteControlInstance,
+    WorkingSession,
+)
 from .provisioning import (
     BlockedCloneHost,
     CloneFailed,
@@ -34,13 +41,6 @@ from .provisioning import (
     TargetExists,
     clone_project,
     create_project,
-)
-from .models import (
-    ClaudeMdDoc,
-    InstanceStatus,
-    Project,
-    RemoteControlInstance,
-    WorkingSession,
 )
 from .redact import sanitize_line
 from .runner import (
@@ -77,7 +77,9 @@ class LoginThrottle:
             self._failures.setdefault(ip, []).append(time.monotonic())
 
     def reset(self, ip: str | None) -> None:
-        self._failures.pop(ip, None)
+        if ip is not None:
+            self._failures.pop(ip, None)
+
 
 _PKG_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
@@ -127,11 +129,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             sig = scope.headers.get(rp.shared_secret_header)
             method = getattr(scope, "method", "GET")  # WS handshake => GET
             if auth.verify_proxy_hmac(
-                rp.shared_secret, sig, remote_user, method, scope.url.path, rp.hmac_window_seconds
+                rp.shared_secret,
+                sig,
+                remote_user,
+                method,
+                scope.url.path,
+                rp.hmac_window_seconds,
             ):
                 return remote_user, True
         user = auth.read_session(
-            _serializer, scope.cookies.get(_SESSION_COOKIE), config.auth.session_max_age_seconds,
+            _serializer,
+            scope.cookies.get(_SESSION_COOKIE),
+            config.auth.session_max_age_seconds,
             current_epoch=app.state.session_epoch,
         )
         return (user, False) if user else (None, False)
@@ -185,8 +194,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         ip = auth.peer_ip(request)
         if not _throttle.allowed(ip):
             return templates.TemplateResponse(
-                request, "login.html",
-                {"error": "Too many attempts — wait a few minutes."}, status_code=429,
+                request,
+                "login.html",
+                {"error": "Too many attempts — wait a few minutes."},
+                status_code=429,
             )
         form = await request.form()
         if auth.verify_password(_hasher, config.auth.password_hash, str(form.get("password", ""))):
@@ -195,8 +206,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             resp.set_cookie(
                 _SESSION_COOKIE,
                 auth.issue_session(_serializer, _SESSION_USER, app.state.session_epoch),
-                max_age=config.auth.session_max_age_seconds, httponly=True,
-                samesite="lax", secure=_cookie_secure(request), path=_root or "/",
+                max_age=config.auth.session_max_age_seconds,
+                httponly=True,
+                samesite="lax",
+                secure=_cookie_secure(request),
+                path=_root or "/",
             )
             return resp
         _throttle.record_failure(ip)
@@ -255,7 +269,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
         rollup = await asyncio.to_thread(
-            usage.aggregate_project_usage, config.projects_root / name, project_name=name
+            usage.aggregate_project_usage,
+            config.projects_root / name,
+            project_name=name,
         )
         tot = rollup.totals
         return {
@@ -443,7 +459,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=422, detail="body must include a 'project' string")
         spawn_mode = body.get("spawn_mode")
         permission_mode = body.get("permission_mode")
-        for field, value in (("spawn_mode", spawn_mode), ("permission_mode", permission_mode)):
+        for field, value in (
+            ("spawn_mode", spawn_mode),
+            ("permission_mode", permission_mode),
+        ):
             if value is not None and not isinstance(value, str):
                 raise HTTPException(status_code=422, detail=f"{field} must be a string")
         try:
@@ -556,7 +575,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def ws_bridge_log(websocket: WebSocket, instance_id: str) -> None:
         """Tail the bridge debug log — ANSI-stripped and ID-redacted (feature 6, D11)."""
         if config.auth.enabled and not _ws_authorized(websocket):
-            await websocket.close(code=1008)  # validate before accept — never open an unauthed socket
+            await websocket.close(
+                code=1008
+            )  # validate before accept — never open an unauthed socket
             return
         await websocket.accept()
         instance = runner.get_instance(instance_id)
@@ -581,7 +602,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return
 
     @app.get("/", response_class=HTMLResponse)
-    async def dashboard(request: Request) -> HTMLResponse:
+    async def dashboard(request: Request) -> Response:
         projects = await list_projects()
         return templates.TemplateResponse(
             request,

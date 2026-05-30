@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -53,7 +54,7 @@ def runner_config(tmp_path: Path, projects_root: Path):
 
     claude_json = tmp_path / "claude.json"
     claude_json.write_text(
-        '{"projects": {"%s": {"hasTrustDialogAccepted": true}}}' % projects_root.resolve()
+        json.dumps({"projects": {str(projects_root.resolve()): {"hasTrustDialogAccepted": True}}})
     )
     config = ClausterConfig(
         projects_root=projects_root,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +10,6 @@ from clauster import auth
 from clauster.app import LoginThrottle, create_app
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import SessionRunner
-
 from test_auth import _proxy_header  # reuse the HMAC header builder
 
 PASSWORD = "hunter2"
@@ -30,7 +28,10 @@ def _password_client(runner_config) -> TestClient:
 
 def _login(client: TestClient) -> None:
     resp = client.post(
-        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+        "/login",
+        data={"password": PASSWORD},
+        headers={"origin": ORIGIN},
+        follow_redirects=False,
     )
     assert resp.status_code == 303, resp.text
 
@@ -74,7 +75,10 @@ def test_login_correct_then_authed(runner_config):
 def test_login_wrong_password_rejected(runner_config):
     client = _password_client(runner_config)
     resp = client.post(
-        "/login", data={"password": "nope"}, headers={"origin": ORIGIN}, follow_redirects=False
+        "/login",
+        data={"password": "nope"},
+        headers={"origin": ORIGIN},
+        follow_redirects=False,
     )
     assert resp.status_code == 401
     assert not client.cookies.get("clauster_session")
@@ -140,8 +144,18 @@ def test_epoch_persists_across_restart(runner_config):
 def test_login_throttled_after_repeated_failures(runner_config):
     client = _password_client(runner_config)
     for _ in range(5):
-        client.post("/login", data={"password": "x"}, headers={"origin": ORIGIN}, follow_redirects=False)
-    resp = client.post("/login", data={"password": "x"}, headers={"origin": ORIGIN}, follow_redirects=False)
+        client.post(
+            "/login",
+            data={"password": "x"},
+            headers={"origin": ORIGIN},
+            follow_redirects=False,
+        )
+    resp = client.post(
+        "/login",
+        data={"password": "x"},
+        headers={"origin": ORIGIN},
+        follow_redirects=False,
+    )
     assert resp.status_code == 429
 
 
@@ -151,7 +165,10 @@ def test_login_throttled_after_repeated_failures(runner_config):
 def test_cookie_flags_auto_http_not_secure(runner_config):
     client = _password_client(runner_config)
     resp = client.post(
-        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+        "/login",
+        data={"password": PASSWORD},
+        headers={"origin": ORIGIN},
+        follow_redirects=False,
     )
     setc = resp.headers["set-cookie"].lower()
     assert "httponly" in setc and "samesite=lax" in setc and "secure" not in setc
@@ -166,7 +183,10 @@ def test_cookie_secure_always(runner_config):
     config.auth.cookie_secure = "always"
     client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
     resp = client.post(
-        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+        "/login",
+        data={"password": PASSWORD},
+        headers={"origin": ORIGIN},
+        follow_redirects=False,
     )
     assert "secure" in resp.headers["set-cookie"].lower()
 
@@ -221,7 +241,9 @@ def test_proxy_trusted_peer_valid_hmac_allows(runner_config, monkeypatch):
 def test_proxy_bad_hmac_rejected(runner_config, monkeypatch):
     client = _proxy_client(runner_config)
     monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
-    resp = client.get("/api/instances", headers={"Remote-User": "alice", "X-Proxy-Auth": "t=1,v1=bad"})
+    resp = client.get(
+        "/api/instances", headers={"Remote-User": "alice", "X-Proxy-Auth": "t=1,v1=bad"}
+    )
     assert resp.status_code == 401
 
 
@@ -307,13 +329,16 @@ def test_ws_streams_sanitized_lines(runner_config, tmp_path):
     logf = tmp_path / "bridge.log"
     logf.write_text("ready \x1b[31mRED\x1b[0m env_01TESTENVAAAAAAAAAAAAAAAA go\n")
     runner._instances["demo"] = RemoteControlInstance(
-        project="demo", label="demo", status=InstanceStatus.RUNNING, bridge_debug_log_path=logf,
+        project="demo",
+        label="demo",
+        status=InstanceStatus.RUNNING,
+        bridge_debug_log_path=logf,
     )
     with TestClient(create_app(config, runner=runner)) as client:
         with client.websocket_connect("/ws/bridge-log/demo") as ws:
             line = ws.receive_text()
-    assert "RED" in line and "\x1b[" not in line                 # ANSI stripped
-    assert "env_01TESTENVAAAAAAAAAAAAAAAA" not in line           # id redacted (D11)
+    assert "RED" in line and "\x1b[" not in line  # ANSI stripped
+    assert "env_01TESTENVAAAAAAAAAAAAAAAA" not in line  # id redacted (D11)
 
 
 # ----- misc app behaviours --------------------------------------------------

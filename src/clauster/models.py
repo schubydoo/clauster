@@ -8,7 +8,7 @@ Two ID namespaces (see spec §8):
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, Field, computed_field
@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, computed_field
 from .config import PermissionMode, SpawnMode
 
 
-class InstanceStatus(str, Enum):
+class InstanceStatus(StrEnum):
     STARTING = "starting"
     RUNNING = "running"
     STOPPED = "stopped"
@@ -24,7 +24,7 @@ class InstanceStatus(str, Enum):
     ERROR = "error"
 
 
-class TrustState(str, Enum):
+class TrustState(StrEnum):
     TRUSTED = "trusted"
     UNTRUSTED = "untrusted"
 
@@ -83,7 +83,7 @@ class ClaudeMdDoc(BaseModel):
     bridge_running: bool = False  # set at the app layer; drives the stale-bridge banner
 
 
-class Attribution(str, Enum):
+class Attribution(StrEnum):
     TRACKED = "tracked"
     UNTRACKED = "untracked"
     EXTERNAL = "external"

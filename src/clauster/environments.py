@@ -20,9 +20,9 @@ from __future__ import annotations
 import http.client
 import json
 import ssl
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
@@ -74,7 +74,7 @@ def load_credentials(
     """
     cred_file = Path(credentials_path).expanduser()
     try:
-        oauth = (json.loads(cred_file.read_text()).get("claudeAiOauth") or {})
+        oauth = json.loads(cred_file.read_text()).get("claudeAiOauth") or {}
     except (FileNotFoundError, OSError) as exc:
         raise CredentialsError(f"could not read {cred_file}: {exc}") from exc
     except json.JSONDecodeError as exc:
@@ -123,7 +123,9 @@ class Environment(BaseModel):
         return self.config.type == "bridge"
 
 
-def _https_transport(method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
+def _https_transport(
+    method: str, url: str, headers: dict, body: bytes | None
+) -> tuple[int, bytes]:
     # http.client.HTTPSConnection is HTTPS-only by construction (no file:// / other
     # schemes possible, unlike urllib.urlopen), so a malformed base/path can't be
     # coerced into reading a local file. The scheme guard is unit-tested; the actual
@@ -139,7 +141,9 @@ def _https_roundtrip(method, parts, headers, body):  # pragma: no cover - live n
     # Explicit verifying context checks cert chain + hostname (rule is a cross-version
     # audit nag; on py3.11+ with create_default_context() certs ARE verified) — never disable.
     # nosemgrep: python.lang.security.audit.httpsconnection-detected.httpsconnection-detected
-    conn = http.client.HTTPSConnection(parts.netloc, timeout=30, context=ssl.create_default_context())
+    conn = http.client.HTTPSConnection(
+        parts.netloc, timeout=30, context=ssl.create_default_context()
+    )
     try:
         path = parts.path + (f"?{parts.query}" if parts.query else "")
         conn.request(method, path, body=body, headers=headers)

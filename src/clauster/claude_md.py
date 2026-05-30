@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import ClaudeMdDoc
@@ -130,8 +130,12 @@ def write_claude_md(
                 sha256=new_sha,
             )
         except OSError as exc:
-            _log.error("%s write for %s succeeded but audit append failed: %s",
-                       FILENAME, project_path.name, exc)
+            _log.error(
+                "%s write for %s succeeded but audit append failed: %s",
+                FILENAME,
+                project_path.name,
+                exc,
+            )
     return ClaudeMdDoc(exists=True, content=content, sha256=new_sha, size=len(encoded))
 
 
@@ -142,7 +146,7 @@ def _append_audit(
     not undo a write that already succeeded, but it is never silently dropped on a
     healthy disk (the state_dir is the same local volume as the rest of the app)."""
     entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "user": user,
         "project": project,
         "action": action,

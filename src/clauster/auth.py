@@ -6,8 +6,10 @@ web wiring (middleware, routes, cookie handling) lives in ``app.py``.
 
 Three trust paths:
   - password login  -> signed-cookie session  (``issue_session`` / ``read_session``)
-  - reverse proxy    -> peer-IP allowlist + HMAC-signed header  (``peer_trusted`` / ``verify_proxy_hmac``)
-  - cross-site guard -> strict Origin allowlist  (``build_allowed_origins`` / ``normalize_origin``)
+  - reverse proxy    -> peer-IP allowlist + HMAC-signed header
+                        (``peer_trusted`` / ``verify_proxy_hmac``)
+  - cross-site guard -> strict Origin allowlist
+                        (``build_allowed_origins`` / ``normalize_origin``)
 """
 
 from __future__ import annotations

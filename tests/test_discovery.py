@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from clauster.discovery import (
     discover_projects,
@@ -38,9 +37,7 @@ def test_trust_inherits_down_tree(tmp_path):
     root = tmp_path / "projects"
     child = root / "svc"
     child.mkdir(parents=True)
-    claude_json.write_text(
-        json.dumps({"projects": {str(root): {"hasTrustDialogAccepted": True}}})
-    )
+    claude_json.write_text(json.dumps({"projects": {str(root): {"hasTrustDialogAccepted": True}}}))
     trusted = {root}
     assert trust_state_for(child, trusted) is TrustState.TRUSTED
 
