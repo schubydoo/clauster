@@ -43,6 +43,17 @@
         </div>
         <p class="card-error" x-show="errorOf('{{ p.name }}')" x-text="errorOf('{{ p.name }}')"></p>
 
+        <!-- Bug #4: a bridge/session Clauster doesn't manage (e.g. started from the
+             terminal or Claude Desktop). Seen via `claude agents --json`, not the
+             pointer-walk. Clearly distinct from a Clauster-managed bridge. -->
+        <p class="external-session" x-show="hasExternal('{{ p.name }}')">
+          <span class="ext-dot"></span>
+          <span x-text="externalCount('{{ p.name }}') > 1
+            ? externalCount('{{ p.name }}') + ' external sessions active'
+            : 'External session active'"></span>
+          <span class="ext-note">— not managed by Clauster</span>
+        </p>
+
         <!-- Feature 5: URL display (primary session deep link + QR, secondary New Session) -->
         <div class="url-panel" x-show="isRunning('{{ p.name }}') && sessionUrlOf('{{ p.name }}')">
           <div class="url-row">
@@ -57,9 +68,13 @@
                :href="envUrlOf('{{ p.name }}')">New session</a>
             <button class="btn-copy" @click="copy(envUrlOf('{{ p.name }}'))" title="Copy link">copy</button>
           </div>
-          <div class="qr-box" x-show="qrOpen['{{ p.name }}']">
-            <img :src="qrSrc('{{ p.name }}')" alt="QR code for the session deep link" width="160" height="160">
-          </div>
+          <!-- x-if (not x-show) so the <img> is created only when opened — i.e. while
+               the bridge is running — instead of fetching /qr at page load (409). -->
+          <template x-if="qrOpen['{{ p.name }}']">
+            <div class="qr-box">
+              <img :src="qrSrc('{{ p.name }}')" alt="QR code for the session deep link" width="160" height="160">
+            </div>
+          </template>
         </div>
 
         <!-- Feature 6: bridge log tail (WebSocket, ANSI-stripped + redacted) -->
@@ -100,8 +115,10 @@
     function dashboard() {
       return {
         instances: {},      // project name -> instance
+        externalSessions: {}, // project name -> [WorkingSession] (unmanaged; bug #4)
         errors: {},         // project name -> last error message
         qrOpen: {},         // project name -> bool
+        qrNonce: {},        // project name -> cache-bust token, set when QR opens
         logs: {},           // project name -> { open, ws, lines, pending, paused }
         async init() {
           await this.refresh();
@@ -109,12 +126,17 @@
         },
         async refresh() {
           try {
-            const res = await fetch(ROOT + "/api/instances");
-            if (!res.ok) return;
-            const list = await res.json();
-            const next = {};
-            for (const i of list) next[i.project] = i;
-            this.instances = next;
+            const [iRes, sRes] = await Promise.all([
+              fetch(ROOT + "/api/instances"),
+              fetch(ROOT + "/api/sessions"),
+            ]);
+            if (iRes.ok) {
+              const list = await iRes.json();
+              const next = {};
+              for (const i of list) next[i.project] = i;
+              this.instances = next;
+            }
+            if (sRes.ok) this.externalSessions = await sRes.json();
           } catch (e) { /* transient; next tick retries */ }
         },
         statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
@@ -124,9 +146,37 @@
         sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
         envUrlOf(name) { return (this.instances[name] || {}).url || null; },
         errorOf(name) { return this.errors[name] || null; },
-        qrSrc(name) { return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr"; },
-        toggleQr(name) { this.qrOpen[name] = !this.qrOpen[name]; },
-        async copy(text) { try { await navigator.clipboard.writeText(text); } catch (e) {} },
+        externalCount(name) {
+          const s = this.externalSessions[name];
+          return Array.isArray(s) ? s.length : 0;
+        },
+        hasExternal(name) { return this.externalCount(name) > 0; },
+        qrSrc(name) {
+          // Cache-bust per open so a QR fetched once while stopped (409) isn't reused.
+          return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);
+        },
+        toggleQr(name) {
+          const opening = !this.qrOpen[name];
+          if (opening) this.qrNonce[name] = Date.now();
+          this.qrOpen[name] = opening;
+        },
+        async copy(text) {
+          // navigator.clipboard only exists in a secure context (HTTPS or localhost);
+          // over plain http://LAN-IP it's undefined, so fall back to execCommand.
+          if (window.isSecureContext && navigator.clipboard) {
+            try { await navigator.clipboard.writeText(text); return; } catch (e) { /* fall through */ }
+          }
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed";
+          ta.style.top = "-1000px";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand("copy"); } catch (e) {}
+          document.body.removeChild(ta);
+        },
         async start(name) {
           this.errors[name] = null;
           this.instances[name] = { project: name, status: "starting" };

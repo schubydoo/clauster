@@ -20,6 +20,13 @@ def test_instances_empty_initially(runner_config):
         assert resp.json() == []
 
 
+def test_sessions_empty_initially(runner_config):
+    with _client(runner_config) as client:
+        resp = client.get("/api/sessions")
+        assert resp.status_code == 200
+        assert resp.json() == {}
+
+
 def test_spawn_and_stop_via_api(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     with _client(runner_config) as client:

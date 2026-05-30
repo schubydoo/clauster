@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from clauster.models import InstanceStatus, RemoteControlInstance
+from clauster.models import Attribution, InstanceStatus, RemoteControlInstance, WorkingSession
 from clauster.runner import NotTrusted, SessionRunner, UnknownProject
 
 
@@ -83,6 +83,34 @@ async def test_stop_unknown_instance_raises(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
         await runner.stop("alpha")  # never spawned
+
+
+def test_external_sessions_by_project(runner_config):
+    config, claude_json = runner_config
+    runner = _make_runner(runner_config)
+    root = config.projects_root
+
+    def session(pid, rel, attribution):
+        return WorkingSession(
+            pid=pid, cwd=root / rel, kind="interactive",
+            started_at=pid, local_uuid=f"uuid-{pid}", attribution=attribution,
+        )
+
+    runner._sessions = [
+        session(111, "alpha", Attribution.EXTERNAL),   # surfaced
+        session(222, "alpha", Attribution.EXTERNAL),   # grouped with the first
+        session(333, "beta", Attribution.TRACKED),     # managed -> excluded
+        session(444, "nope", Attribution.EXTERNAL),    # not a discovered project -> excluded
+    ]
+
+    grouped = runner.external_sessions_by_project()
+    assert set(grouped) == {"alpha"}
+    assert sorted(s.pid for s in grouped["alpha"]) == [111, 222]
+
+
+def test_external_sessions_empty_when_none(runner_config):
+    runner = _make_runner(runner_config)
+    assert runner.external_sessions_by_project() == {}
 
 
 def test_reconcile_status_transitions():
