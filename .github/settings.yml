@@ -11,8 +11,11 @@
 repository:
   name: clauster
   description: >-
-    Self-hosted web UI for spawning and managing Claude Code remote-control
-    bridges on a remote host, from a browser or phone.
+    Your homelab's Claude Code launchpad. Self-hosted web UI that spawns &
+    manages remote-control bridges on a remote host from any browser or phone —
+    start/stop, spawn & permission modes, CLAUDE.md editor, git clone, live log
+    tail, cost tracking. Loopback by default; password/reverse-proxy auth. No
+    telemetry.
   # Topics: GitHub slugs disallow spaces — a leading space after "comma+space"
   # gets silently dropped. Folded scalar + bare commas => exactly `a,b,c`.
   topics: >-
