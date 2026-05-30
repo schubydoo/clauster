@@ -41,11 +41,41 @@
           <button class="btn-trust" @click="trust('{{ p.name }}')"
                   x-show="!isRunning('{{ p.name }}')">Trust directory</button>
           {% endif %}
+          <div class="spawn-opts" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}')">
+            <label>Spawn
+              <select x-model="spawnMode['{{ p.name }}']">
+                <option value="same-dir">same-dir</option>
+                {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
+                <option value="session">session</option>
+              </select>
+            </label>
+            <label>Permissions
+              <select x-model="permMode['{{ p.name }}']">
+                <option value="default">default</option>
+                <option value="plan">plan</option>
+                <option value="acceptEdits">acceptEdits</option>
+                <option value="auto">auto</option>
+                <option value="dontAsk">dontAsk</option>
+                {% if p.allow_bypass_permissions %}<option value="bypassPermissions">bypassPermissions ⚠</option>{% endif %}
+              </select>
+            </label>
+          </div>
           <button class="btn-start" @click="start('{{ p.name }}')"
                   x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}')">Start bridge</button>
           <button class="btn-stop" @click="stop('{{ p.name }}')"
                   x-show="isRunning('{{ p.name }}')">Stop bridge</button>
           <span class="spinner" x-show="isBusy('{{ p.name }}')">starting…</span>
+        </div>
+
+        <!-- Footgun layer 2: typed-confirm before spawning with bypassPermissions.
+             (Layer 1 is the config ceiling that even lets the option render above.) -->
+        <div class="bypass-confirm" x-show="confirmBypass['{{ p.name }}']">
+          <p class="bypass-warn">⚠ <strong>bypassPermissions</strong> lets sessions in
+            <code>{{ p.name }}</code> run tools without asking. Type the project name to confirm.</p>
+          <input type="text" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
+                 @keyup.enter="confirmBypassStart('{{ p.name }}')">
+          <button class="btn-bypass-go" @click="confirmBypassStart('{{ p.name }}')">Start with bypass</button>
+          <button class="btn-bypass-cancel" @click="cancelBypass('{{ p.name }}')">Cancel</button>
         </div>
         <p class="card-error" x-show="errorOf('{{ p.name }}')" x-text="errorOf('{{ p.name }}')"></p>
 
@@ -117,6 +147,9 @@
     };
     const ROOT = "{{ request.scope.root_path }}";
     const MAX_LOG_LINES = 1000;
+    const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
+    const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
+    const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
 
     function dashboard() {
       return {
@@ -126,7 +159,15 @@
         qrOpen: {},         // project name -> bool
         qrNonce: {},        // project name -> cache-bust token, set when QR opens
         logs: {},           // project name -> { open, ws, lines, pending, paused }
+        spawnMode: {},      // project name -> selected --spawn mode
+        permMode: {},       // project name -> selected --permission-mode
+        confirmBypass: {},  // project name -> bool (typed-confirm panel open)
+        bypassTyped: {},    // project name -> text typed into the confirm box
         async init() {
+          for (const n of PROJECT_NAMES) {
+            this.spawnMode[n] = DEFAULT_SPAWN_MODE;
+            this.permMode[n] = DEFAULT_PERMISSION_MODE;
+          }
           await this.refresh();
           setInterval(() => this.refresh(), 4000);
         },
@@ -184,13 +225,40 @@
           document.body.removeChild(ta);
         },
         async start(name) {
+          // Footgun layer 2: don't spawn with bypassPermissions until the user has
+          // typed the project name into the confirm panel (confirmBypassStart).
+          if (this.permMode[name] === "bypassPermissions") {
+            this.errors[name] = null;
+            this.confirmBypass[name] = true;
+            return;
+          }
+          await this._spawn(name);
+        },
+        confirmBypassStart(name) {
+          if ((this.bypassTyped[name] || "") !== name) {
+            this.errors[name] = "Type the project name exactly to confirm bypass.";
+            return;
+          }
+          this.confirmBypass[name] = false;
+          this.bypassTyped[name] = "";
+          this._spawn(name);
+        },
+        cancelBypass(name) {
+          this.confirmBypass[name] = false;
+          this.bypassTyped[name] = "";
+        },
+        async _spawn(name) {
           this.errors[name] = null;
           this.instances[name] = { project: name, status: "starting" };
           try {
             const res = await fetch(ROOT + "/api/instances", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ project: name }),
+              body: JSON.stringify({
+                project: name,
+                spawn_mode: this.spawnMode[name],
+                permission_mode: this.permMode[name],
+              }),
             });
             const body = await res.json();
             if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; }

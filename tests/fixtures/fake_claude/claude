@@ -28,6 +28,14 @@ def run_bridge(args):
     debug_file = _arg(args, "--debug-file")
     mode = os.environ.get("FAKE_CLAUDE_MODE", "ready")
 
+    # Record the full argv next to the debug file so tests can assert the flags
+    # Clauster passed (--spawn / --permission-mode, etc.).
+    if debug_file:
+        import json
+
+        with open(debug_file + ".argv.json", "w") as fh:
+            json.dump(args, fh)
+
     def log(line):
         if debug_file:
             with open(debug_file, "a") as fh:
