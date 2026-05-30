@@ -104,6 +104,21 @@ def test_doctor_state_dir_not_writable_fails(write_config, tmp_path):
     assert by["state_dir"].status == FAIL
 
 
+def test_doctor_port_in_use_warns(write_config, tmp_path):
+    import socket
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        cfg = str(write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\nport: {port}\n"))
+        by = {c.name: c for c in run_doctor(cfg)[0]}
+        assert by["port"].status == WARN and str(port) in by["port"].detail
+    finally:
+        srv.close()
+
+
 def test_check_auth_branches(write_config, tmp_path):
     config = load_config(_cfg_file(write_config, tmp_path))
     assert _check_auth(config).status == OK

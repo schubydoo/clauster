@@ -39,6 +39,26 @@ async def test_spawn_unknown_project_rejected(runner_config):
         await runner.spawn("does-not-exist")
 
 
+async def test_spawn_is_idempotent_while_running(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha")
+    assert first.status is InstanceStatus.RUNNING
+    second = await runner.spawn("alpha")  # already running -> returns the same instance
+    assert second is first
+    assert runner.running_count() == 1
+    await runner.stop("alpha")
+
+
+async def test_stop_instance_without_pid_marks_stopped(runner_config):
+    runner = _make_runner(runner_config)
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_pid=None,
+    )
+    inst = await runner.stop("alpha")
+    assert inst.status is InstanceStatus.STOPPED and inst.intentional_stop is True
+
+
 async def test_spawn_path_traversal_rejected(runner_config):
     runner = _make_runner(runner_config)
     # Invalid names never reach Popen (spec §9 path-traversal defense).
