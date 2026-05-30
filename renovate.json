@@ -1,0 +1,66 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "Etc/UTC",
+  "schedule": ["before 7am on monday"],
+  "labels": ["dependencies"],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"]
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 7am on monday"]
+  },
+  "packageRules": [
+    {
+      "description": "Auto-merge patch updates of dev tooling.",
+      "matchPackageNames": ["ruff", "pyright", "pytest", "pytest-cov", "pytest-asyncio"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true,
+      "automergeType": "branch"
+    },
+    {
+      "description": "Group all pytest-related updates.",
+      "matchPackageNames": ["/^pytest/"],
+      "groupName": "pytest"
+    },
+    {
+      "description": "Group all ruff-related updates.",
+      "matchPackageNames": ["/^ruff/"],
+      "groupName": "ruff"
+    },
+    {
+      "description": "Roll all non-major GitHub Actions updates into one weekly PR.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "github-actions (non-major)"
+    },
+    {
+      "description": "Group security-tooling actions — same security.yml scanners, useful to review together.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": [
+        "github/codeql-action",
+        "actions/dependency-review-action",
+        "aquasecurity/trivy-action",
+        "gitleaks/gitleaks-action",
+        "ossf/scorecard-action"
+      ],
+      "groupName": "security tooling actions"
+    },
+    {
+      "description": "Group release-automation actions (release-please + amannn semantic PR title). Both feed the squash-merge -> release-please pipeline and tend to need joint review on majors.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": [
+        "googleapis/release-please-action",
+        "amannn/action-semantic-pull-request"
+      ],
+      "groupName": "release automation actions"
+    }
+  ]
+}
