@@ -19,13 +19,13 @@ _ID_RE = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
 # A conservative set of obvious secret shapes, as defense-in-depth — the bridge
 # already prints "[REDACTED]" for most secrets, but never rely on that alone.
 _SECRET_RES = (
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"),       # GitHub tokens
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),     # GitHub fine-grained PAT
-    re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}\b"),         # GitLab PAT
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                 # AWS access key id
-    re.compile(r"\bsk-[A-Za-z0-9-]{16,}\b"),             # OpenAI/Anthropic-style
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),     # Slack tokens
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{12,}\b"), # Authorization: Bearer …
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"),  # GitHub tokens
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),  # GitHub fine-grained PAT
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}\b"),  # GitLab PAT
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id
+    re.compile(r"\bsk-[A-Za-z0-9-]{16,}\b"),  # OpenAI/Anthropic-style
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),  # Slack tokens
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{12,}\b"),  # Authorization: Bearer …
 )
 
 _REDACTED = "<redacted>"

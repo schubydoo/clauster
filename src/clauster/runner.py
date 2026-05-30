@@ -20,12 +20,19 @@ import os
 import signal
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from . import bridge_log, inspector, pointers, procutil
 from .claude_cli import ClaudeNotFound
-from .config import PERMISSION_MODES, SPAWN_MODES, ClausterConfig
+from .config import (
+    PERMISSION_MODES,
+    SPAWN_MODES,
+    ClausterConfig,
+    PermissionMode,
+    SpawnMode,
+)
 from .discovery import discover_projects, is_valid_project_name
 from .models import (
     Attribution,
@@ -137,7 +144,9 @@ class SessionRunner:
     # ----- discovery helpers ---------------------------------------------
 
     def _discovered(self) -> dict[str, Project]:
-        return {p.name: p for p in discover_projects(self._config.projects_root, self._claude_json)}
+        return {
+            p.name: p for p in discover_projects(self._config.projects_root, self._claude_json)
+        }
 
     def _resolve_project(self, name: str) -> Project:
         # Path-traversal defense (spec §9): only ever spawn a discovered project.
@@ -189,9 +198,11 @@ class SessionRunner:
             label=name,
             status=InstanceStatus.STARTING,
             bridge_debug_log_path=log_path,
-            started_at=datetime.now(timezone.utc),
-            spawn_mode=spawn_mode,
-            permission_mode=permission_mode,
+            started_at=datetime.now(UTC),
+            # Validated above (_validate_spawn_options raises on a bad value), so
+            # these str inputs are known-good members of the Literal types.
+            spawn_mode=cast(SpawnMode, spawn_mode),
+            permission_mode=cast(PermissionMode, permission_mode),
         )
         self._instances[name] = instance  # on the loop
 
@@ -251,7 +262,12 @@ class SessionRunner:
         ]
 
     def _popen(
-        self, cwd: Path, log_path: Path, name: str, spawn_mode: str, permission_mode: str
+        self,
+        cwd: Path,
+        log_path: Path,
+        name: str,
+        spawn_mode: str,
+        permission_mode: str,
     ) -> subprocess.Popen:
         cmd = self._build_cmd(log_path, name, spawn_mode, permission_mode)
         # Detached (own session) so the bridge survives a clauster restart and a
@@ -387,7 +403,12 @@ class SessionRunner:
 
         try:
             sessions = await asyncio.to_thread(inspector.list_working_sessions, self._binary)
-        except (ClaudeNotFound, subprocess.SubprocessError, json.JSONDecodeError, OSError) as exc:
+        except (
+            ClaudeNotFound,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+            OSError,
+        ) as exc:
             # Cross-check is best-effort — keep the loop alive, but log so a degraded
             # `agents --json` probe is observable instead of silently freezing sessions.
             _log.warning("agents --json cross-check failed (continuing): %s", exc)
@@ -407,9 +428,7 @@ class SessionRunner:
             # disappearance is expected (STOPPED), not a crash. same-dir/worktree persist,
             # so an unintended exit there IS a crash.
             expected_exit = instance.intentional_stop or instance.spawn_mode == "session"
-            instance.status = (
-                InstanceStatus.STOPPED if expected_exit else InstanceStatus.CRASHED
-            )
+            instance.status = InstanceStatus.STOPPED if expected_exit else InstanceStatus.CRASHED
         elif status is InstanceStatus.ERROR and alive:
             # A slow-to-start detached bridge that timed out but is actually up.
             instance.status = InstanceStatus.RUNNING

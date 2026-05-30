@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,6 +28,7 @@ def _sha(text: str) -> str:
 
 # ----- read -------------------------------------------------------------
 
+
 def test_read_absent_file(tmp_path):
     doc = read_claude_md(tmp_path)
     assert doc.exists is False and doc.content == "" and doc.sha256 is None and doc.size == 0
@@ -40,7 +40,7 @@ def test_read_existing_file(tmp_path):
     assert doc.exists is True
     assert doc.content == "# hi\n"
     assert doc.sha256 == _sha("# hi\n")
-    assert doc.size == len("# hi\n".encode())
+    assert doc.size == len(b"# hi\n")
 
 
 def test_read_non_utf8_rejected(tmp_path):
@@ -60,6 +60,7 @@ def test_read_symlink_escape_rejected(tmp_path):
 
 
 # ----- write ------------------------------------------------------------
+
 
 def test_write_creates_file_and_audit(tmp_path):
     proj = tmp_path / "proj"
@@ -81,7 +82,10 @@ def test_write_update_audits_as_update(tmp_path):
     (proj / "CLAUDE.md").write_text("old\n")
     state = tmp_path / "state"
     write_claude_md(proj, "new\n", base_sha256=_sha("old\n"), state_dir=state)
-    actions = [json.loads(l)["action"] for l in (state / "claude_md_audit.log").read_text().splitlines()]
+    actions = [
+        json.loads(line)["action"]
+        for line in (state / "claude_md_audit.log").read_text().splitlines()
+    ]
     assert actions == ["update"]
 
 
@@ -153,6 +157,7 @@ def test_write_symlink_escape_rejected(tmp_path):
 
 
 # ----- routes -----------------------------------------------------------
+
 
 def _client(write_config, tmp_path) -> TestClient:
     # state_dir is dot-prefixed so discovery never scans it as a project.

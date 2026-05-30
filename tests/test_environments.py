@@ -46,6 +46,7 @@ def _env(id_, type_, directory=None):
 
 # ----- credentials ------------------------------------------------------
 
+
 def _write_creds(tmp_path, *, token="tok-abcdef", org="org-1", expires=None):
     cred = tmp_path / "credentials.json"
     oauth = {"accessToken": token}
@@ -109,13 +110,14 @@ def test_load_credentials_bad_json(tmp_path):
 
 # ----- find_ghosts (pure) ----------------------------------------------
 
+
 def test_find_ghosts_classification():
     envs = [
-        _env("env_cloud", "cloud"),            # NEVER a ghost
-        _env("env_live", "bridge", "/live"),   # has a live bridge -> keep
-        _env("env_dead", "bridge", "/dead"),   # no live bridge -> ghost
-        _env("env_nodir", "bridge", None),     # unattributable -> skip
-        _env("env_other", "other", "/dead"),   # not a bridge -> skip
+        _env("env_cloud", "cloud"),  # NEVER a ghost
+        _env("env_live", "bridge", "/live"),  # has a live bridge -> keep
+        _env("env_dead", "bridge", "/dead"),  # no live bridge -> ghost
+        _env("env_nodir", "bridge", None),  # unattributable -> skip
+        _env("env_other", "other", "/dead"),  # not a bridge -> skip
     ]
     ghosts = find_ghosts(envs, {"/live"})
     assert [g.id for g in ghosts] == ["env_dead"]
@@ -133,17 +135,31 @@ def test_find_ghosts_empty_live_set_reaps_all_bridges():
 
 # ----- client (mock transport) -----------------------------------------
 
+
 def _client(responses):
     mt = MockTransport(responses)
     return EnvironmentsClient(Credentials("tokX", "org9"), transport=mt), mt
 
 
 def test_client_list_paginates():
-    client, mt = _client([
-        (200, {"data": [{"id": "env_1", "config": {"type": "bridge", "directory": "/a"}}],
-               "next_page": "env_1"}),
-        (200, {"data": [{"id": "env_2", "config": {"type": "cloud"}}], "next_page": None}),
-    ])
+    client, mt = _client(
+        [
+            (
+                200,
+                {
+                    "data": [{"id": "env_1", "config": {"type": "bridge", "directory": "/a"}}],
+                    "next_page": "env_1",
+                },
+            ),
+            (
+                200,
+                {
+                    "data": [{"id": "env_2", "config": {"type": "cloud"}}],
+                    "next_page": None,
+                },
+            ),
+        ]
+    )
     envs = client.list_environments()
     assert [e.id for e in envs] == ["env_1", "env_2"]
     assert "after_id=env_1" in mt.calls[1][1]  # the second page request paginated
@@ -180,8 +196,10 @@ def test_https_transport_rejects_non_https():
 
 # ----- live_bridge_directories (fail-closed) ---------------------------
 
+
 def test_live_dirs_from_sessions(monkeypatch):
     from clauster.models import WorkingSession
+
     s = WorkingSession(pid=1, cwd=Path("/x"), kind="interactive", started_at=1, local_uuid="u")
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda b: [s])
     assert "/x" in environments.live_bridge_directories("claude")
@@ -189,6 +207,7 @@ def test_live_dirs_from_sessions(monkeypatch):
 
 def test_live_dirs_includes_live_pointer_projects(monkeypatch, tmp_path):
     from clauster.models import Project
+
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda b: [])
     proj = Project(name="p", path=tmp_path / "p")
     monkeypatch.setattr("clauster.discovery.discover_projects", lambda root: [proj])
@@ -211,6 +230,7 @@ def test_live_dirs_propagates_probe_failure(monkeypatch):
 
 # ----- CLI (everything mocked; no network) -----------------------------
 
+
 def _cfg(write_config, tmp_path):
     return str(write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n"))
 
@@ -223,10 +243,17 @@ def test_cli_reap_dry_run(write_config, tmp_path, monkeypatch, capsys):
     _patch_creds(monkeypatch)
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self): return [_env("env_dead", "bridge", "/dead")]
-        def archive_environment(self, i): raise AssertionError("dry-run must not archive")
-        def delete_environment(self, i, **k): raise AssertionError("dry-run must not delete")
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self):
+            return [_env("env_dead", "bridge", "/dead")]
+
+        def archive_environment(self, i):
+            raise AssertionError("dry-run must not archive")
+
+        def delete_environment(self, i, **k):
+            raise AssertionError("dry-run must not delete")
 
     monkeypatch.setattr(environments, "EnvironmentsClient", FakeClient)
     monkeypatch.setattr(environments, "live_bridge_directories", lambda b, pr: set())
@@ -241,10 +268,14 @@ def test_cli_reap_archive(write_config, tmp_path, monkeypatch):
     archived = []
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self): return [_env("env_dead", "bridge", "/dead"),
-                                             _env("env_default", "cloud")]
-        def archive_environment(self, i): archived.append(i)
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self):
+            return [_env("env_dead", "bridge", "/dead"), _env("env_default", "cloud")]
+
+        def archive_environment(self, i):
+            archived.append(i)
 
     monkeypatch.setattr(environments, "EnvironmentsClient", FakeClient)
     monkeypatch.setattr(environments, "live_bridge_directories", lambda b, pr: set())
@@ -257,13 +288,19 @@ def test_cli_reap_aborts_when_live_probe_fails(write_config, tmp_path, monkeypat
     _patch_creds(monkeypatch)
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self): return [_env("env_dead", "bridge", "/dead")]
-        def archive_environment(self, i): raise AssertionError("must not reap when live set unknown")
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self):
+            return [_env("env_dead", "bridge", "/dead")]
+
+        def archive_environment(self, i):
+            raise AssertionError("must not reap when live set unknown")
 
     monkeypatch.setattr(environments, "EnvironmentsClient", FakeClient)
     monkeypatch.setattr(
-        environments, "live_bridge_directories",
+        environments,
+        "live_bridge_directories",
         lambda b, pr: (_ for _ in ()).throw(RuntimeError("probe down")),
     )
     rc = cli.main(["reap-environments", "-c", _cfg(write_config, tmp_path), "--archive"])
@@ -272,7 +309,8 @@ def test_cli_reap_aborts_when_live_probe_fails(write_config, tmp_path, monkeypat
 
 def test_cli_reap_bad_credentials_exit_2(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr(
-        environments, "load_credentials",
+        environments,
+        "load_credentials",
         lambda **k: (_ for _ in ()).throw(CredentialsError("no token")),
     )
     rc = cli.main(["reap-environments", "-c", _cfg(write_config, tmp_path)])
@@ -284,9 +322,14 @@ def test_cli_reap_force_delete(write_config, tmp_path, monkeypatch):
     deleted = []
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self): return [_env("env_dead", "bridge", "/dead")]
-        def delete_environment(self, i, force=False): deleted.append((i, force))
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self):
+            return [_env("env_dead", "bridge", "/dead")]
+
+        def delete_environment(self, i, force=False):
+            deleted.append((i, force))
 
     monkeypatch.setattr(environments, "EnvironmentsClient", FakeClient)
     monkeypatch.setattr(environments, "live_bridge_directories", lambda b, pr: set())
@@ -298,8 +341,11 @@ def test_cli_reap_no_ghosts(write_config, tmp_path, monkeypatch, capsys):
     _patch_creds(monkeypatch)
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self): return [_env("env_live", "bridge", "/live")]
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self):
+            return [_env("env_live", "bridge", "/live")]
 
     monkeypatch.setattr(environments, "EnvironmentsClient", FakeClient)
     monkeypatch.setattr(environments, "live_bridge_directories", lambda b, pr: {"/live"})
@@ -311,8 +357,12 @@ def test_cli_reap_archive_failure_exit_1(write_config, tmp_path, monkeypatch):
     _patch_creds(monkeypatch)
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self): return [_env("env_dead", "bridge", "/dead")]
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self):
+            return [_env("env_dead", "bridge", "/dead")]
+
         def archive_environment(self, i):
             raise environments.EnvironmentsAPIError(500, "boom")
 
@@ -326,7 +376,9 @@ def test_cli_reap_list_error_exit_2(write_config, tmp_path, monkeypatch):
     _patch_creds(monkeypatch)
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
+        def __init__(self, *a, **k):
+            pass
+
         def list_environments(self):
             raise environments.EnvironmentsAPIError(401, "unauthorized")
 
