@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
-from . import __version__, auth, claude_cli, logstream
+from . import __version__, auth, claude_cli, logstream, usage
 from .claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
@@ -245,6 +245,35 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.get("/api/projects")
     async def api_projects() -> list[Project]:
         return await list_projects()
+
+    @app.get("/api/projects/{name}/usage")
+    async def api_project_usage(name: str) -> dict:
+        # Read-only cost/token rollup for the dashboard badge. We validate the name
+        # for path-component safety but deliberately skip a discovery scan: an
+        # unknown-but-safe name simply has no transcripts and rolls up to zero.
+        # Transcripts can be huge, so the parse runs off the event loop.
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        rollup = await asyncio.to_thread(
+            usage.aggregate_project_usage, config.projects_root / name, project_name=name
+        )
+        tot = rollup.totals
+        return {
+            "project": name,
+            "transcripts": rollup.transcript_count,
+            "messages": tot.messages,
+            "total_tokens": tot.total_tokens,
+            "cost_usd": round(rollup.cost_usd(), 4),
+            "approximate": True,  # hand-maintained price table; counts exact, $ ballpark
+            "unpriced_models": rollup.unpriced_models(),
+            "by_model": {
+                model: {
+                    "total_tokens": t.total_tokens,
+                    "cost_usd": round(usage.cost_usd(model, t) or 0.0, 4),
+                }
+                for model, t in sorted(rollup.by_model.items())
+            },
+        }
 
     async def _project_by_name(name: str) -> Project:
         for proj in await list_projects():

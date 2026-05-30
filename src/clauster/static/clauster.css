@@ -89,6 +89,8 @@ main { padding: 1.5rem; }
   background: #20242e;
   color: var(--muted);
 }
+/* approximate cost rollup (v0.3); cursor:help signals the tooltip detail */
+.badge-cost { background: #1d2a22; color: #7fcfa3; cursor: help; }
 
 .card-actions button {
   background: transparent;
