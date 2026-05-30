@@ -65,8 +65,11 @@ packages = ["src/clauster"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 # Coverage runs by default (pytest-cov is in the dev extra, which the test env needs
-# anyway). Gate at 95%; the suite currently sits at ~96%.
-addopts = "--cov=src/clauster --cov-report=term-missing:skip-covered --cov-fail-under=95"
+# anyway). Gate at 96%; the suite sits at ~97%. The ~52 uncovered lines are
+# intentional: best-effort backup OSError swallows (state/trust), poll-loop
+# exception guards (runner), and guards unreachable by construction (e.g. a
+# name that passes the project-name regex can't escape projects_root).
+addopts = "--cov=src/clauster --cov-report=term-missing:skip-covered --cov-fail-under=96"
 
 [tool.coverage.run]
 omit = ["tests/*"]

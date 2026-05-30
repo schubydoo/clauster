@@ -55,6 +55,16 @@ def test_create_bad_name_rejected(tmp_path, bad):
         create_project(tmp_path, bad)
 
 
+def test_create_mkdir_race_is_target_exists(tmp_path, monkeypatch):
+    # exists() passes but mkdir loses a race -> FileExistsError -> TargetExists.
+    monkeypatch.setattr(
+        "clauster.provisioning.Path.mkdir",
+        lambda self, *a, **k: (_ for _ in ()).throw(FileExistsError()),
+    )
+    with pytest.raises(TargetExists):
+        create_project(tmp_path, "racy")
+
+
 def test_create_git_init_missing_git(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "clauster.provisioning.subprocess.run",
