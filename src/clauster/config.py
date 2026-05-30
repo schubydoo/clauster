@@ -34,15 +34,22 @@ class ReverseProxyConfig(BaseModel):
     user_header: str = "Remote-User"
     shared_secret_header: str = "X-Proxy-Auth"
     trusted_ips: list[str] = Field(default_factory=list)
+    shared_secret: str | None = None  # HMAC key the proxy signs X-Proxy-Auth with
+    hmac_window_seconds: int = 60  # max clock skew / replay window for the signature
 
 
 class AuthConfig(BaseModel):
-    """v0.2+ only; v0.1 ignores these entirely but still parses them."""
+    """v0.2 auth foundation. Parsed (and ignored) since v0.1; enforced when enabled."""
 
     enabled: bool = False
     password_required: bool = False
+    password_hash: str | None = None  # argon2id hash; see `clauster hash-password`
     reverse_proxy: ReverseProxyConfig = Field(default_factory=ReverseProxyConfig)
     allow_unauthenticated_network: bool = False
+    # auto = Secure only over https (or trusted-proxy X-Forwarded-Proto=https)
+    cookie_secure: Literal["auto", "always", "never"] = "auto"
+    session_max_age_seconds: int = 604800  # 7 days
+    allowed_origins: list[str] = Field(default_factory=list)  # extra WS/CSRF origins (proxy domain)
 
 
 class LogsConfig(BaseModel):
@@ -90,11 +97,22 @@ class ClausterConfig(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _v01_loopback_only(self) -> ClausterConfig:
+    def _loopback_or_authed(self) -> ClausterConfig:
+        # Non-loopback bind is only allowed once authentication can gate it.
         if self.host not in _LOOPBACK_HOSTS:
+            a = self.auth
+            if not (a.password_required or a.reverse_proxy.enabled or a.allow_unauthenticated_network):
+                raise ValueError(
+                    f"refusing non-loopback host={self.host!r} without auth. Set one of "
+                    "auth.password_required, auth.reverse_proxy.enabled, or (to opt out on a "
+                    "trusted LAN) auth.allow_unauthenticated_network."
+                )
+        # Fail closed: password auth required but no hash configured would lock everyone out
+        # (or, worse, be skipped) — refuse to start with a clear message.
+        if self.auth.password_required and not self.auth.password_hash:
             raise ValueError(
-                f"v0.1 binds loopback only; refusing host={self.host!r}. "
-                "Non-loopback bind with auth lands in v0.2."
+                "auth.password_required is set but auth.password_hash is empty. "
+                "Generate one with `clauster hash-password` (or set CLAUSTER_AUTH_PASSWORD_HASH)."
             )
         return self
 

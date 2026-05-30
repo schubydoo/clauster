@@ -25,10 +25,47 @@ def test_missing_projects_root_rejected(tmp_path):
         load_config(cfg)
 
 
-def test_non_loopback_host_rejected(write_config):
+def test_non_loopback_host_rejected_without_auth(write_config):
     cfg_path = write_config("host: 0.0.0.0\n")
-    with pytest.raises(ValueError, match="loopback only"):
+    with pytest.raises(ValueError, match="non-loopback"):
         load_config(cfg_path)
+
+
+# A valid argon2id hash for the fixtures (password "hunter2"); see clauster hash-password.
+_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$"
+    "c29tZXNhbHRzb21lc2FsdA$RdjKDIYxJYDjN8a8B0xBkY7Q3oN2pZqkXz0m3l1H4sM"
+)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "host: 0.0.0.0\nauth:\n  reverse_proxy:\n    enabled: true\n",
+        "host: 0.0.0.0\nauth:\n  allow_unauthenticated_network: true\n",
+    ],
+)
+def test_non_loopback_allowed_with_auth(write_config, extra):
+    config = load_config(write_config(extra))
+    assert config.host == "0.0.0.0"
+
+
+def test_password_required_without_hash_fails_closed(write_config):
+    cfg_path = write_config("auth:\n  enabled: true\n  password_required: true\n")
+    with pytest.raises(ValueError, match="password_hash is empty"):
+        load_config(cfg_path)
+
+
+def test_password_required_with_hash_ok(write_config):
+    config = load_config(
+        write_config(
+            "host: 0.0.0.0\n"
+            "auth:\n  enabled: true\n  password_required: true\n"
+            f"  password_hash: '{_HASH}'\n"
+        )
+    )
+    assert config.auth.password_required is True
+    assert config.host == "0.0.0.0"
 
 
 def test_env_override_scalar(write_config, monkeypatch):

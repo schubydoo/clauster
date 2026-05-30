@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from clauster import auth
+from clauster.app import create_app
+from clauster.runner import SessionRunner
+
+from test_auth import _proxy_header  # reuse the HMAC header builder
+
+PASSWORD = "hunter2"
+_PW_HASH = auth.hash_password(auth.make_hasher(), PASSWORD)
+ORIGIN = "http://testserver"  # TestClient's default origin
+
+
+def _password_client(runner_config) -> TestClient:
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    return TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+
+def _login(client: TestClient) -> None:
+    resp = client.post(
+        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+    )
+    assert resp.status_code == 303, resp.text
+
+
+# ----- guard ---------------------------------------------------------------
+
+
+def test_unauth_api_returns_401(runner_config):
+    client = _password_client(runner_config)
+    assert client.get("/api/instances").status_code == 401
+
+
+def test_unauth_html_redirects_to_login(runner_config):
+    client = _password_client(runner_config)
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].endswith("/login")
+
+
+def test_public_paths_reachable_unauthenticated(runner_config):
+    client = _password_client(runner_config)
+    assert client.get("/login").status_code == 200
+    assert client.get("/static/clauster.css").status_code == 200
+    health = client.get("/healthz")
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}  # trimmed when unauthenticated
+
+
+# ----- login / logout ------------------------------------------------------
+
+
+def test_login_correct_then_authed(runner_config):
+    client = _password_client(runner_config)
+    _login(client)
+    assert client.cookies.get("clauster_session")
+    assert client.get("/api/instances").status_code == 200
+    # healthz now returns full detail to the authed session
+    assert "claude_version" in client.get("/healthz").json()
+
+
+def test_login_wrong_password_rejected(runner_config):
+    client = _password_client(runner_config)
+    resp = client.post(
+        "/login", data={"password": "nope"}, headers={"origin": ORIGIN}, follow_redirects=False
+    )
+    assert resp.status_code == 401
+    assert not client.cookies.get("clauster_session")
+
+
+def test_logout_clears_session(runner_config):
+    client = _password_client(runner_config)
+    _login(client)
+    client.post("/logout", headers={"origin": ORIGIN}, follow_redirects=False)
+    assert client.get("/api/instances").status_code == 401
+
+
+def test_login_throttled_after_repeated_failures(runner_config):
+    client = _password_client(runner_config)
+    for _ in range(5):
+        client.post("/login", data={"password": "x"}, headers={"origin": ORIGIN}, follow_redirects=False)
+    resp = client.post("/login", data={"password": "x"}, headers={"origin": ORIGIN}, follow_redirects=False)
+    assert resp.status_code == 429
+
+
+# ----- cookie flags --------------------------------------------------------
+
+
+def test_cookie_flags_auto_http_not_secure(runner_config):
+    client = _password_client(runner_config)
+    resp = client.post(
+        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+    )
+    setc = resp.headers["set-cookie"].lower()
+    assert "httponly" in setc and "samesite=lax" in setc and "secure" not in setc
+
+
+def test_cookie_secure_always(runner_config):
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    config.auth.cookie_secure = "always"
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    resp = client.post(
+        "/login", data={"password": PASSWORD}, headers={"origin": ORIGIN}, follow_redirects=False
+    )
+    assert "secure" in resp.headers["set-cookie"].lower()
+
+
+# ----- CSRF (Origin check on unsafe methods) -------------------------------
+
+
+def test_csrf_evil_origin_blocked(runner_config):
+    client = _password_client(runner_config)
+    _login(client)
+    resp = client.post("/api/instances", json={}, headers={"origin": "http://evil.test"})
+    assert resp.status_code == 403
+
+
+def test_csrf_good_origin_passes_to_route(runner_config):
+    client = _password_client(runner_config)
+    _login(client)
+    # Empty body -> 422 from the route; proves CSRF + auth both passed (not 403/401).
+    resp = client.post("/api/instances", json={}, headers={"origin": ORIGIN})
+    assert resp.status_code == 422
+
+
+def test_csrf_missing_origin_and_referer_blocked(runner_config):
+    client = _password_client(runner_config)
+    _login(client)
+    resp = client.request("POST", "/api/instances", json={}, headers={"referer": ""})
+    assert resp.status_code == 403
+
+
+# ----- reverse-proxy trust (peer_ip seam monkeypatched) --------------------
+
+
+def _proxy_client(runner_config):
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.reverse_proxy.enabled = True
+    config.auth.reverse_proxy.trusted_ips = ["10.0.0.1"]
+    config.auth.reverse_proxy.shared_secret = "proxy-secret"
+    config.auth.allowed_origins = [ORIGIN]
+    return TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+
+def test_proxy_trusted_peer_valid_hmac_allows(runner_config, monkeypatch):
+    client = _proxy_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    t = int(time.time())
+    hdr = _proxy_header("proxy-secret", "alice", "GET", "/api/instances", t)
+    resp = client.get("/api/instances", headers={"Remote-User": "alice", "X-Proxy-Auth": hdr})
+    assert resp.status_code == 200
+
+
+def test_proxy_bad_hmac_rejected(runner_config, monkeypatch):
+    client = _proxy_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    resp = client.get("/api/instances", headers={"Remote-User": "alice", "X-Proxy-Auth": "t=1,v1=bad"})
+    assert resp.status_code == 401
+
+
+def test_proxy_missing_remote_user_rejected(runner_config, monkeypatch):
+    client = _proxy_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    t = int(time.time())
+    hdr = _proxy_header("proxy-secret", "alice", "GET", "/api/instances", t)
+    assert client.get("/api/instances", headers={"X-Proxy-Auth": hdr}).status_code == 401
+
+
+def test_proxy_untrusted_peer_rejected(runner_config, monkeypatch):
+    client = _proxy_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "9.9.9.9")
+    t = int(time.time())
+    hdr = _proxy_header("proxy-secret", "alice", "GET", "/api/instances", t)
+    resp = client.get("/api/instances", headers={"Remote-User": "alice", "X-Proxy-Auth": hdr})
+    assert resp.status_code == 401
+
+
+def test_proxy_hmac_replay_on_other_endpoint_rejected(runner_config, monkeypatch):
+    client = _proxy_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    t = int(time.time())
+    # token signed for GET /api/instances, replayed against DELETE /api/instances/x
+    hdr = _proxy_header("proxy-secret", "alice", "GET", "/api/instances", t)
+    resp = client.delete(
+        "/api/instances/x",
+        headers={"Remote-User": "alice", "X-Proxy-Auth": hdr, "origin": ORIGIN},
+    )
+    assert resp.status_code == 401  # HMAC method+path binding defeats the replay
+
+
+# ----- WebSocket auth (D12) ------------------------------------------------
+
+
+def test_ws_rejected_without_auth(runner_config):
+    client = _password_client(runner_config)
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws/bridge-log/alpha", headers={"origin": ORIGIN}):
+            pass
+
+
+def test_ws_rejected_bad_origin(runner_config):
+    client = _password_client(runner_config)
+    _login(client)
+    tok = client.cookies.get("clauster_session")
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/ws/bridge-log/alpha",
+            headers={"origin": "http://evil.test", "cookie": f"clauster_session={tok}"},
+        ):
+            pass
+
+
+def test_ws_authorized_passes_auth_gate(runner_config):
+    client = _password_client(runner_config)
+    _login(client)
+    tok = client.cookies.get("clauster_session")
+    # Good origin + valid cookie => auth passes (accept), then closes 1008 for the
+    # nonexistent instance. Reaching accept proves the gate opened.
+    with client.websocket_connect(
+        "/ws/bridge-log/ghost",
+        headers={"origin": ORIGIN, "cookie": f"clauster_session={tok}"},
+    ) as ws:
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_text()

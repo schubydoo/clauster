@@ -7,6 +7,7 @@ import pytest
 
 from clauster.models import Attribution, InstanceStatus, RemoteControlInstance, WorkingSession
 from clauster.runner import NotTrusted, SessionRunner, UnknownProject
+from clauster.state import StateStore
 
 
 def _make_runner(runner_config) -> SessionRunner:
@@ -111,6 +112,36 @@ def test_external_sessions_by_project(runner_config):
 def test_external_sessions_empty_when_none(runner_config):
     runner = _make_runner(runner_config)
     assert runner.external_sessions_by_project() == {}
+
+
+async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    # alpha was intentionally stopped with a custom label; zeta is stale/persisted.
+    StateStore(config.state_dir).save(
+        {
+            "alpha": {"label": "my-alpha", "intentional_stop": True, "spawn_mode": "same-dir"},
+            "zeta": {"label": "zeta", "intentional_stop": True, "spawn_mode": "same-dir"},
+        }
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    class FakePtr:
+        pid, proc_start, environment_id, session_id = 4242, "1000", "env_x", "session_x"
+
+    # Only alpha has a live bridge; beta/gamma/zeta resolve to no pointer.
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
+
+    await runner.rediscover()
+    insts = {i.project: i for i in runner.list_instances()}
+
+    assert set(insts) == {"alpha"}  # no phantom from a persisted-but-dead entry
+    assert insts["alpha"].label == "my-alpha"  # persisted label overlaid
+    assert insts["alpha"].intentional_stop is False  # a live bridge is not "stopped"
 
 
 def test_reconcile_status_transitions():

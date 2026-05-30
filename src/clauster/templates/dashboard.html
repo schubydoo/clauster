@@ -11,6 +11,12 @@
   <header class="topbar">
     <h1>Clauster <span class="version">v{{ version }}</span></h1>
     <p class="subtitle">{{ projects_root }}</p>
+    {% if auth_enabled %}
+    <!-- CSRF enforced by the auth guard middleware (Origin/Referer on unsafe methods). -->
+    <form class="logout-form" method="post" action="{{ request.scope.root_path }}/logout"> <!-- nosemgrep -->
+      <button class="btn-logout" type="submit">Log out</button>
+    </form>
+    {% endif %}
   </header>
 
   <main x-data="dashboard()" x-init="init()">
