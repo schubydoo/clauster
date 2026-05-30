@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from clauster import auth
-from clauster.app import create_app
+from clauster.app import LoginThrottle, create_app
+from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import SessionRunner
 
 from test_auth import _proxy_header  # reuse the HMAC header builder
@@ -237,3 +239,43 @@ def test_ws_authorized_passes_auth_gate(runner_config):
     ) as ws:
         with pytest.raises(WebSocketDisconnect):
             ws.receive_text()
+
+
+def test_ws_streams_sanitized_lines(runner_config, tmp_path):
+    # Happy path: a managed instance with a log file -> the loop reads, strips ANSI,
+    # redacts ids, and sends whole lines (covers the streaming body + disconnect).
+    config, claude_json = runner_config  # auth off
+    runner = SessionRunner(config, claude_json=claude_json)
+    logf = tmp_path / "bridge.log"
+    logf.write_text("ready \x1b[31mRED\x1b[0m env_01TESTENVAAAAAAAAAAAAAAAA go\n")
+    runner._instances["demo"] = RemoteControlInstance(
+        project="demo", label="demo", status=InstanceStatus.RUNNING, bridge_debug_log_path=logf,
+    )
+    with TestClient(create_app(config, runner=runner)) as client:
+        with client.websocket_connect("/ws/bridge-log/demo") as ws:
+            line = ws.receive_text()
+    assert "RED" in line and "\x1b[" not in line                 # ANSI stripped
+    assert "env_01TESTENVAAAAAAAAAAAAAAAA" not in line           # id redacted (D11)
+
+
+# ----- misc app behaviours --------------------------------------------------
+
+
+def test_throttle_allows_when_ip_unknown():
+    assert LoginThrottle().allowed(None) is True
+
+
+def test_login_form_redirects_when_already_authed(runner_config):
+    client = _password_client(runner_config)
+    _login(client)
+    resp = client.get("/login", follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"].endswith("/")
+
+
+def test_healthz_claude_probe_failure(runner_config):
+    # auth off + bogus binary -> the except branch (claude_ok False, version None).
+    config, claude_json = runner_config
+    config.claude.binary = "definitely-not-claude-xyz"
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    body = client.get("/healthz").json()
+    assert body["claude_ok"] is False and body["claude_version"] is None

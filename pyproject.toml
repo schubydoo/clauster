@@ -65,8 +65,8 @@ packages = ["src/clauster"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 # Coverage runs by default (pytest-cov is in the dev extra, which the test env needs
-# anyway). Gate at 94%; the suite currently sits at ~95%.
-addopts = "--cov=src/clauster --cov-report=term-missing:skip-covered --cov-fail-under=94"
+# anyway). Gate at 95%; the suite currently sits at ~96%.
+addopts = "--cov=src/clauster --cov-report=term-missing:skip-covered --cov-fail-under=95"
 
 [tool.coverage.run]
 omit = ["tests/*"]
