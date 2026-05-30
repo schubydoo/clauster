@@ -67,6 +67,7 @@ def discover_projects(projects_root: Path, claude_json: Path = CLAUDE_JSON) -> l
                 path=entry,
                 is_git_repo=(entry / ".git").exists(),
                 has_claude_md=(entry / "CLAUDE.md").is_file(),
+                has_claude_dir=(entry / ".claude").is_dir(),
                 trust_state=trust_state_for(entry, trusted),
             )
         )
