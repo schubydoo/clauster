@@ -1,0 +1,69 @@
+name: Release
+
+# Fires when Release Please pushes a tag (e.g. `v0.2.0`). Release Please itself
+# creates the GitHub Release + CHANGELOG; this workflow's job is to publish the
+# distribution. clauster ships to PyPI today; a multi-arch GHCR image can be
+# added here once a Dockerfile lands (see the commented stub at the bottom).
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual fallback to (re)publish an existing tag — e.g. to recover a release
+  # whose tag was pushed by GITHUB_TOKEN and therefore didn't trigger the
+  # push-tags run. Dispatch from the default branch and pass the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v0.1.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Releases must NOT be cancelled mid-flight.
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pypi:
+    name: PyPI publish (Trusted Publishing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/clauster
+    permissions:
+      contents: read
+      id-token: write # OIDC for PyPI Trusted Publishing — no API token stored
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+      - name: Build sdist + wheel
+        run: uv build
+      # Trusted Publishing: configure the publisher on PyPI FIRST
+      # (pypi.org -> the clauster project -> Settings -> Publishing):
+      #   owner=schubydoo, repo=clauster, workflow=release.yml, environment=pypi
+      # Until that's set up, this step 403s — there is no token to add.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist/
+
+# --------------------------------------------------------------------------
+# TODO (when a Dockerfile exists): add a GHCR multi-arch image job mirroring
+# the family's release.yml (dump1090-exporter) — docker/setup-qemu +
+# setup-buildx + login + metadata + build-push (provenance + sbom) + cosign
+# keyless signing. Also add a `trivy-image` job to security.yml and the
+# Dockerfile uv-pin customManager to renovate.json at that point.
+# --------------------------------------------------------------------------

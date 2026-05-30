@@ -1,0 +1,36 @@
+name: Release Please
+
+# Release Please reads Conventional Commits on main and opens a "release PR"
+# that bumps the version (src/clauster/__init__.py + pyproject.toml) and rewrites
+# CHANGELOG.md. Merging that PR tags the commit (e.g. `v0.2.0`), which fires
+# release.yml (`on: push: tags`).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          # A user PAT (not GITHUB_TOKEN) so the release tag is attributed to a
+          # real identity and therefore *triggers* release.yml. Tags pushed by
+          # GITHUB_TOKEN do not start further workflow runs (GitHub's
+          # anti-recursion rule). Fine-grained PAT scoped to this repo with
+          # Contents:write + Pull requests:write, stored as RELEASE_PLEASE_TOKEN.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
