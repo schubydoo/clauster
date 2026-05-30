@@ -75,3 +75,60 @@ def test_create_time_mismatch_rejected(monkeypatch):
     # Stored epoch differs by far more than tolerance -> PID reuse -> not our bridge.
     assert procutil.is_live_bridge(1234, 5000.0) is False
     assert procutil.is_live_bridge(1234, 1000.5) is True  # within tolerance
+
+
+def _fake_proc(status=psutil.STATUS_RUNNING, cmdline=("claude", "remote-control"), ct=1000.0):
+    class FakeProc:
+        def __init__(self, pid):
+            pass
+
+        def status(self):
+            return status
+
+        def cmdline(self):
+            return list(cmdline)
+
+        def create_time(self):
+            return ct
+
+    return FakeProc
+
+
+def test_is_live_bridge_skips_start_check_when_none(monkeypatch):
+    # Bridge cmdline + alive + no comparable start time -> trusted (line 91).
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc())
+    assert procutil.is_live_bridge(1234, None) is True
+
+
+def test_clk_tck_falls_back_on_error(monkeypatch):
+    monkeypatch.setattr(procutil.os, "sysconf", lambda _name: (_ for _ in ()).throw(OSError()))
+    assert procutil._clk_tck() == 100
+
+
+def test_jiffies_to_epoch_none_when_boot_time_unavailable(monkeypatch):
+    monkeypatch.setattr(procutil.psutil, "boot_time", lambda: (_ for _ in ()).throw(OSError()))
+    assert procutil.jiffies_to_epoch(500) is None
+
+
+def test_proc_create_time_zombie_is_none(monkeypatch):
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(status=psutil.STATUS_ZOMBIE))
+    assert procutil.proc_create_time(1234) is None
+
+
+def test_proc_create_time_missing_pid_is_none():
+    assert procutil.proc_create_time(2_000_000_000) is None
+
+
+def test_expected_epoch_normalizations():
+    assert procutil._expected_epoch(None) is None
+    assert procutil._expected_epoch(1234.5) == 1234.5          # already an epoch
+    assert procutil._expected_epoch("abc") is None             # non-numeric -> skip
+    assert procutil._expected_epoch(True) is None              # bool -> int("True") fails -> None
+    jiffies = procutil._expected_epoch("0")                    # jiffies string -> epoch
+    assert jiffies is not None and abs(jiffies - psutil.boot_time()) < 1.0
+
+
+def test_reap_if_exited_swallows_non_child():
+    # Neither a bogus PID nor our own (not a child) should raise.
+    procutil.reap_if_exited(2_000_000_000)
+    procutil.reap_if_exited(os.getpid())

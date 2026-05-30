@@ -6,6 +6,8 @@ URL validation uses IP literals / monkeypatched getaddrinfo, and clones use a fa
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,8 +18,10 @@ from clauster.config import CloneConfig, load_config
 from clauster.provisioning import (
     BlockedCloneHost,
     CloneFailed,
+    GitUnavailable,
     InvalidCloneUrl,
     InvalidProjectName,
+    ProvisionError,
     TargetExists,
     clone_project,
     create_project,
@@ -49,6 +53,25 @@ def test_create_duplicate_rejected(tmp_path):
 def test_create_bad_name_rejected(tmp_path, bad):
     with pytest.raises(InvalidProjectName):
         create_project(tmp_path, bad)
+
+
+def test_create_git_init_missing_git(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "clauster.provisioning.subprocess.run",
+        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    with pytest.raises(GitUnavailable):
+        create_project(tmp_path, "g", git_init=True)
+
+
+def test_create_git_init_failure_cleans_up(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.CalledProcessError(1, "git", stderr=b"init blew up")
+
+    monkeypatch.setattr("clauster.provisioning.subprocess.run", boom)
+    with pytest.raises(CloneFailed):
+        create_project(tmp_path, "g", git_init=True)
+    assert not (tmp_path / "g").exists()  # rolled back
 
 
 # ----- url validation ---------------------------------------------------
@@ -137,6 +160,23 @@ def test_clone_rename_conflict_is_target_exists(tmp_path, monkeypatch):
     assert leftover == []  # temp dir cleaned up on the failed rename
 
 
+def test_url_no_host_rejected():
+    with pytest.raises(InvalidCloneUrl):
+        validate_clone_url("https:///just/a/path.git", _cfg())
+
+
+def test_url_unresolvable_host_rejected():
+    # .invalid is reserved (RFC 6761) -> guaranteed NXDOMAIN -> gaierror, offline-safe.
+    with pytest.raises(InvalidCloneUrl):
+        validate_clone_url("https://nonexistent.invalid./r.git", _cfg())
+
+
+def test_url_malformed_cidr_in_allowlist_ignored():
+    # A garbage CIDR must never widen access — the private IP stays blocked.
+    with pytest.raises(BlockedCloneHost):
+        validate_clone_url("https://10.0.0.1/r.git", _cfg(allowed_private_cidrs=["garbage"]))
+
+
 def test_url_hostname_resolves_to_private_blocked(monkeypatch):
     monkeypatch.setattr(
         "clauster.provisioning.socket.getaddrinfo",
@@ -217,6 +257,18 @@ def test_clone_blocked_host_before_git(tmp_path):
                       cfg=_cfg(), git_binary=_gitbin())  # default: private blocked
 
 
+def test_clone_disabled_raises(tmp_path):
+    with pytest.raises(ProvisionError):
+        clone_project(tmp_path, "x", "https://8.8.8.8/r.git",
+                      cfg=_cfg(enabled=False), git_binary=_gitbin())
+
+
+def test_clone_git_binary_unavailable(tmp_path):
+    with pytest.raises(GitUnavailable):
+        clone_project(tmp_path, "x", "https://10.0.0.1/r.git",
+                      cfg=_cfg(allow_private_hosts=True), git_binary="definitely-not-git-xyz")
+
+
 # ----- routes -----------------------------------------------------------
 
 def _client(write_config, extra: str = "") -> TestClient:
@@ -268,3 +320,21 @@ def test_route_clone_success(write_config, monkeypatch):
     body = resp.json()
     assert body["name"] == "cloned"
     assert body["has_claude_md"] is True and body["has_claude_dir"] is True
+
+
+def test_route_clone_failed_502(write_config, monkeypatch):
+    monkeypatch.setenv("PATH", str(FAKE_GIT) + ":" + os.environ["PATH"])
+    monkeypatch.setenv("FAKE_GIT_MODE", "fail")
+    client = _client(write_config, "clone:\n  allow_private_hosts: true\n")
+    resp = client.post("/api/projects/clone", json={"name": "x", "url": "https://10.0.0.1/r.git"})
+    assert resp.status_code == 502
+
+
+def test_route_create_git_init_unavailable_503(write_config, monkeypatch):
+    monkeypatch.setattr(
+        "clauster.provisioning.subprocess.run",
+        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    client = _client(write_config)
+    resp = client.post("/api/projects", json={"name": "gg", "git_init": True})
+    assert resp.status_code == 503
