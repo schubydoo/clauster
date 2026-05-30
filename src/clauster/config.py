@@ -79,6 +79,18 @@ class AuthConfig(BaseModel):
     allowed_origins: list[str] = Field(default_factory=list)  # extra WS/CSRF origins (proxy domain)
 
 
+class CloneConfig(BaseModel):
+    """Project clone/create guards (spec §11 clone+trust chain). Clone URLs are
+    user-supplied and hit the network from the host, so the defaults are strict."""
+
+    enabled: bool = True
+    allowed_schemes: list[str] = Field(default_factory=lambda: ["https", "ssh"])
+    allow_private_hosts: bool = False  # block private/LAN IPs by default (SSRF)
+    allowed_private_cidrs: list[str] = Field(default_factory=list)  # targeted LAN opt-in
+    timeout_seconds: int = 300
+    max_mb: int = 2048  # post-clone size cap; 0 = unlimited
+
+
 class LogsConfig(BaseModel):
     bridge_log_max_size_mb: int = 10
     keep_rotated: int = 5
@@ -100,6 +112,7 @@ class ClausterConfig(BaseModel):
     projects: dict[str, ProjectConfig] = Field(default_factory=dict)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
+    clone: CloneConfig = Field(default_factory=CloneConfig)
 
     _source_path: Path | None = PrivateAttr(default=None)
 

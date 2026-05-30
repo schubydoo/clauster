@@ -34,6 +34,7 @@ class Project(BaseModel):
     path: Path
     is_git_repo: bool = False
     has_claude_md: bool = False
+    has_claude_dir: bool = False  # presence of .claude/ — warns "code runs on Start" after a clone
     trust_state: TrustState = TrustState.UNTRUSTED
     # Config hard-ceiling for the bypassPermissions footgun gate; surfaced so the
     # dashboard can decide whether to even offer the option. Set at the app layer

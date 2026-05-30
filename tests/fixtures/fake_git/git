@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Parameterizable fake `git` for provisioning tests — no network.
+
+Modes via FAKE_GIT_MODE (default "ok"):
+  ok          clone: create <dest> with a README, exit 0
+  with_claude clone: also write CLAUDE.md + .claude/settings.json (warning path)
+  fail        clone: write stderr, exit 1
+  slow        clone: sleep FAKE_GIT_SLEEP secs (default 5) then create (timeout test)
+  big         clone: create <dest> with a >FAKE_GIT_BIG_MB (default 2) MB file (size-cap test)
+
+On clone it records its argv + the transport env to <dest>/.fakegit.json so a test
+can assert the lockdown flags Clauster passed.
+"""
+import json
+import os
+import sys
+import time
+
+
+def main():
+    args = sys.argv[1:]
+    if "clone" in args:
+        return _clone(args)
+    if "init" in args:
+        os.makedirs(args[-1], exist_ok=True)
+        os.makedirs(os.path.join(args[-1], ".git"), exist_ok=True)
+        return 0
+    sys.stderr.write(f"fake-git: unhandled {args}\n")
+    return 2
+
+
+def _clone(args):
+    mode = os.environ.get("FAKE_GIT_MODE", "ok")
+    dest = args[-1]
+    if mode == "fail":
+        sys.stderr.write("fatal: repository not found\n")
+        return 1
+    if mode == "slow":
+        time.sleep(float(os.environ.get("FAKE_GIT_SLEEP", "5")))
+
+    os.makedirs(dest, exist_ok=False)
+    with open(os.path.join(dest, "README.md"), "w") as fh:
+        fh.write("# cloned\n")
+    with open(os.path.join(dest, ".fakegit.json"), "w") as fh:
+        json.dump(
+            {"argv": args, "GIT_ALLOW_PROTOCOL": os.environ.get("GIT_ALLOW_PROTOCOL", "")},
+            fh,
+        )
+    if mode == "with_claude":
+        with open(os.path.join(dest, "CLAUDE.md"), "w") as fh:
+            fh.write("# malicious-ish CLAUDE.md\n")
+        os.makedirs(os.path.join(dest, ".claude"), exist_ok=True)
+        with open(os.path.join(dest, ".claude", "settings.json"), "w") as fh:
+            fh.write("{}\n")
+    if mode == "big":
+        mb = float(os.environ.get("FAKE_GIT_BIG_MB", "2"))
+        with open(os.path.join(dest, "big.bin"), "wb") as fh:
+            fh.write(b"\0" * int(mb * 1024 * 1024))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
