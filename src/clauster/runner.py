@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import bridge_log, inspector, pointers, procutil
-from .config import ClausterConfig
+from .config import PERMISSION_MODES, SPAWN_MODES, ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
 from .models import (
     Attribution,
@@ -45,6 +45,14 @@ class UnknownProject(SpawnError):
 
 class NotTrusted(SpawnError):
     pass
+
+
+class InvalidSpawnOption(SpawnError):
+    """Bad spawn_mode/permission_mode value, or worktree requested for a non-git project."""
+
+
+class PermissionModeNotAllowed(SpawnError):
+    """bypassPermissions requested for a project whose config ceiling forbids it."""
 
 
 # How long to wait for a freshly-spawned bridge to reach its poll loop.
@@ -108,6 +116,7 @@ class SessionRunner:
                 "label": inst.label,
                 "intentional_stop": inst.intentional_stop,
                 "spawn_mode": inst.spawn_mode,
+                "permission_mode": inst.permission_mode,
             }
             for name, inst in self._instances.items()
         }
@@ -144,7 +153,13 @@ class SessionRunner:
 
     # ----- spawn ----------------------------------------------------------
 
-    async def spawn(self, name: str) -> RemoteControlInstance:
+    async def spawn(
+        self,
+        name: str,
+        *,
+        spawn_mode: str | None = None,
+        permission_mode: str | None = None,
+    ) -> RemoteControlInstance:
         existing = self._instances.get(name)
         if existing is not None and existing.status in (
             InstanceStatus.STARTING,
@@ -153,6 +168,11 @@ class SessionRunner:
             return existing
 
         proj = self._resolve_project(name)
+        defaults = self._config.instance_defaults
+        spawn_mode = spawn_mode or defaults.spawn_mode
+        permission_mode = permission_mode or defaults.permission_mode
+        self._validate_spawn_options(proj, spawn_mode, permission_mode)
+
         if not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
             raise NotTrusted(
                 f"directory not trusted: {proj.path}. Use the Trust action before starting."
@@ -165,11 +185,14 @@ class SessionRunner:
             status=InstanceStatus.STARTING,
             bridge_debug_log_path=log_path,
             started_at=datetime.now(timezone.utc),
-            spawn_mode=self._config.instance_defaults.spawn_mode,
+            spawn_mode=spawn_mode,
+            permission_mode=permission_mode,
         )
         self._instances[name] = instance  # on the loop
 
-        proc = await asyncio.to_thread(self._popen, proj.path, log_path, name)
+        proc = await asyncio.to_thread(
+            self._popen, proj.path, log_path, name, spawn_mode, permission_mode
+        )
         self._procs[name] = proc
         instance.bridge_pid = proc.pid
         instance.bridge_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
@@ -179,20 +202,53 @@ class SessionRunner:
         await self._persist()
         return instance
 
+    def _validate_spawn_options(
+        self, proj: Project, spawn_mode: str, permission_mode: str
+    ) -> None:
+        if spawn_mode not in SPAWN_MODES:
+            raise InvalidSpawnOption(
+                f"invalid spawn_mode {spawn_mode!r}; expected one of {SPAWN_MODES}"
+            )
+        if permission_mode not in PERMISSION_MODES:
+            raise InvalidSpawnOption(
+                f"invalid permission_mode {permission_mode!r}; expected one of {PERMISSION_MODES}"
+            )
+        if spawn_mode == "worktree" and not proj.is_git_repo:
+            raise InvalidSpawnOption(
+                f"worktree mode requires a git repository: {proj.name!r} is not one"
+            )
+        if permission_mode == "bypassPermissions" and not self._config.allows_bypass(proj.name):
+            raise PermissionModeNotAllowed(
+                f"bypassPermissions is not enabled for project {proj.name!r}. Set "
+                "projects.<name>.allow_bypass_permissions: true in clauster.yml first."
+            )
+
     def _unique_log_path(self, name: str) -> Path:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         # Unique per spawn so the parser never reads a previous run's markers.
         return self._log_dir / f"{name}-{int(time.time() * 1000)}.log"
 
-    def _popen(self, cwd: Path, log_path: Path, name: str) -> subprocess.Popen:
-        cmd = [
+    def _build_cmd(
+        self, log_path: Path, name: str, spawn_mode: str, permission_mode: str
+    ) -> list[str]:
+        """The `claude remote-control` argv. Pure (no side effects) so it's unit-testable."""
+        return [
             self._binary,
             "remote-control",
             "--name",
             name,
             "--debug-file",
             str(log_path),
+            "--spawn",
+            spawn_mode,
+            "--permission-mode",
+            permission_mode,
         ]
+
+    def _popen(
+        self, cwd: Path, log_path: Path, name: str, spawn_mode: str, permission_mode: str
+    ) -> subprocess.Popen:
+        cmd = self._build_cmd(log_path, name, spawn_mode, permission_mode)
         # Detached (own session) so the bridge survives a clauster restart and a
         # SIGINT to clauster never propagates to it.
         return subprocess.Popen(
@@ -294,6 +350,9 @@ class SessionRunner:
                 project=proj.name,
                 label=saved.get("label") or proj.name,
                 spawn_mode=saved.get("spawn_mode", self._config.instance_defaults.spawn_mode),
+                permission_mode=saved.get(
+                    "permission_mode", self._config.instance_defaults.permission_mode
+                ),
                 intentional_stop=False,
                 status=InstanceStatus.RUNNING,
                 bridge_pid=ptr.pid,
@@ -332,8 +391,12 @@ class SessionRunner:
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:
         status = instance.status
         if status is InstanceStatus.RUNNING and not alive:
+            # session mode is single-shot: the bridge exits when its session ends, so a
+            # disappearance is expected (STOPPED), not a crash. same-dir/worktree persist,
+            # so an unintended exit there IS a crash.
+            expected_exit = instance.intentional_stop or instance.spawn_mode == "session"
             instance.status = (
-                InstanceStatus.STOPPED if instance.intentional_stop else InstanceStatus.CRASHED
+                InstanceStatus.STOPPED if expected_exit else InstanceStatus.CRASHED
             )
         elif status is InstanceStatus.ERROR and alive:
             # A slow-to-start detached bridge that timed out but is actually up.
