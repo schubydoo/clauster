@@ -77,7 +77,9 @@ class AuthConfig(BaseModel):
     # auto = Secure only over https (or trusted-proxy X-Forwarded-Proto=https)
     cookie_secure: Literal["auto", "always", "never"] = "auto"
     session_max_age_seconds: int = Field(default=604800, ge=1)  # 7 days
-    allowed_origins: list[str] = Field(default_factory=list)  # extra WS/CSRF origins (proxy domain)
+    allowed_origins: list[str] = Field(
+        default_factory=list
+    )  # extra WS/CSRF origins (proxy domain)
 
 
 class CloneConfig(BaseModel):
@@ -165,7 +167,9 @@ class ClausterConfig(BaseModel):
         # Non-loopback bind is only allowed once authentication can gate it.
         if self.host not in _LOOPBACK_HOSTS:
             a = self.auth
-            if not (a.password_required or a.reverse_proxy.enabled or a.allow_unauthenticated_network):
+            if not (
+                a.password_required or a.reverse_proxy.enabled or a.allow_unauthenticated_network
+            ):
                 raise ValueError(
                     f"refusing non-loopback host={self.host!r} without auth. Set one of "
                     "auth.password_required, auth.reverse_proxy.enabled, or (to opt out on a "
@@ -198,7 +202,9 @@ def _candidate_paths(explicit: Path | None) -> list[Path]:
     return paths
 
 
-def _scalar_env_map(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> dict[str, tuple[str, ...]]:
+def _scalar_env_map(
+    model: type[BaseModel], prefix: tuple[str, ...] = ()
+) -> dict[str, tuple[str, ...]]:
     """Map CLAUSTER_<UPPER_SNAKE_PATH> -> dotted path for every scalar leaf.
 
     Nested models recurse; dict/list leaves (e.g. projects, trusted_ips) are

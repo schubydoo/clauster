@@ -28,8 +28,11 @@ def test_session_url_computed_field():
 
 
 def test_session_url_serialized_in_api(runner_config):
-    inst = _running("alpha", starter_session_id="session_01ABCDEF",
-                    url="https://claude.ai/code?environment=env_01ZZZ")
+    inst = _running(
+        "alpha",
+        starter_session_id="session_01ABCDEF",
+        url="https://claude.ai/code?environment=env_01ZZZ",
+    )
     with _client_with(runner_config, inst) as client:
         body = client.get("/api/instances/alpha").json()
         assert body["session_url"] == "https://claude.ai/code/session_01ABCDEF?from=cli"

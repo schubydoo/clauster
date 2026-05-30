@@ -8,7 +8,9 @@ from clauster import trust
 
 def test_trust_directory_sets_flag_and_preserves_other_keys(tmp_path: Path):
     cj = tmp_path / "claude.json"
-    cj.write_text(json.dumps({"projects": {"/other": {"hasTrustDialogAccepted": True}}, "misc": 1}))
+    cj.write_text(
+        json.dumps({"projects": {"/other": {"hasTrustDialogAccepted": True}}, "misc": 1})
+    )
     target = tmp_path / "proj"
     target.mkdir()
 

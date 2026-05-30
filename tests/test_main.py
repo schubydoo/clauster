@@ -24,6 +24,7 @@ def _cfg(write_config, tmp_path, claude_extra: str = "") -> str:
 
 # ----- top-level --------------------------------------------------------
 
+
 def test_version_exits_zero(capsys):
     with pytest.raises(SystemExit) as ei:
         cli.main(["--version"])
@@ -32,6 +33,7 @@ def test_version_exits_zero(capsys):
 
 
 # ----- run (default) ----------------------------------------------------
+
 
 def test_run_invokes_uvicorn(write_config, tmp_path, monkeypatch):
     calls = {}
@@ -56,13 +58,15 @@ def test_run_missing_config_exits_2(monkeypatch):
 
 def test_run_claude_not_found_exits_2(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **k: None)
-    cfg = _cfg(write_config, tmp_path, "")
     # point the binary at something that won't resolve
-    bad = str(write_config(f"claude:\n  binary: definitely-not-claude\nstate_dir: {tmp_path}/.s\n"))
+    bad = str(
+        write_config(f"claude:\n  binary: definitely-not-claude\nstate_dir: {tmp_path}/.s\n")
+    )
     assert cli.main(["run", "-c", bad]) == 2
 
 
 # ----- hash-password ----------------------------------------------------
+
 
 def test_hash_password_ok(monkeypatch, capsys):
     monkeypatch.setattr(cli.getpass, "getpass", lambda *_: "hunter2")
@@ -83,15 +87,19 @@ def test_hash_password_empty_exits_2(monkeypatch):
 
 # ----- doctor -----------------------------------------------------------
 
+
 def test_doctor_ok_exit_0(write_config, tmp_path):
     assert cli.main(["doctor", "-c", _cfg(write_config, tmp_path)]) == 0
 
 
 def test_doctor_failure_exit_1(write_config, tmp_path):
-    assert cli.main(["doctor", "-c", _cfg(write_config, tmp_path, '  min_version: "9.9.9"\n')]) == 1
+    assert (
+        cli.main(["doctor", "-c", _cfg(write_config, tmp_path, '  min_version: "9.9.9"\n')]) == 1
+    )
 
 
 # ----- backup / restore / migrate --------------------------------------
+
 
 def test_backup_then_restore(write_config, tmp_path, capsys):
     cfg = _cfg(write_config, tmp_path)
@@ -107,7 +115,17 @@ def test_backup_then_restore(write_config, tmp_path, capsys):
 
 
 def test_restore_missing_backup_exit_2(tmp_path):
-    assert cli.main(["restore", str(tmp_path / "nope.tar.gz"), "--state-dir", str(tmp_path / "r")]) == 2
+    assert (
+        cli.main(
+            [
+                "restore",
+                str(tmp_path / "nope.tar.gz"),
+                "--state-dir",
+                str(tmp_path / "r"),
+            ]
+        )
+        == 2
+    )
 
 
 def test_migrate_exit_0(write_config, tmp_path):
@@ -129,6 +147,7 @@ def test_backup_failure_exit_1(write_config, tmp_path, monkeypatch):
 
 def test_run_warns_on_insecure_cookie(write_config, tmp_path, monkeypatch, capsys):
     from clauster import auth
+
     pw = auth.hash_password(auth.make_hasher(), "pw")
     extra = f'auth:\n  enabled: true\n  password_required: true\n  password_hash: "{pw}"\n'
     cfg = _cfg(write_config, tmp_path, extra)
@@ -140,11 +159,15 @@ def test_run_warns_on_insecure_cookie(write_config, tmp_path, monkeypatch, capsy
 
 # ----- install-service --------------------------------------------------
 
-@pytest.mark.parametrize("kind,marker", [
-    ("systemd", "[Service]"),
-    ("launchd", "<plist"),
-    ("windows", "nssm install Clauster"),
-])
+
+@pytest.mark.parametrize(
+    "kind,marker",
+    [
+        ("systemd", "[Service]"),
+        ("launchd", "<plist"),
+        ("windows", "nssm install Clauster"),
+    ],
+)
 def test_install_service(kind, marker, capsys):
     assert cli.main(["install-service", kind, "-c", "/etc/clauster/clauster.yml"]) == 0
     assert marker in capsys.readouterr().out

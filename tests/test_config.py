@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from clauster.config import load_config
@@ -43,13 +41,16 @@ def test_non_mapping_config_root_rejected(tmp_path):
         load_config(cfg)
 
 
-@pytest.mark.parametrize("extra", [
-    "port: 0\n",
-    "port: 70000\n",
-    "instance_defaults:\n  capacity: 0\n",
-    "clone:\n  timeout_seconds: 0\n",
-    "logs:\n  bridge_log_max_size_mb: 0\n",
-])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "port: 0\n",
+        "port: 70000\n",
+        "instance_defaults:\n  capacity: 0\n",
+        "clone:\n  timeout_seconds: 0\n",
+        "logs:\n  bridge_log_max_size_mb: 0\n",
+    ],
+)
 def test_out_of_range_numeric_config_rejected(write_config, extra):
     with pytest.raises(ValueError):
         load_config(write_config(extra))
@@ -61,7 +62,9 @@ def test_malformed_clone_cidr_rejected(write_config):
 
 
 def test_valid_clone_cidr_accepted(write_config):
-    config = load_config(write_config('clone:\n  allowed_private_cidrs: ["192.168.0.0/16", "10.0.0.0/8"]\n'))
+    config = load_config(
+        write_config('clone:\n  allowed_private_cidrs: ["192.168.0.0/16", "10.0.0.0/8"]\n')
+    )
     assert config.clone.allowed_private_cidrs == ["192.168.0.0/16", "10.0.0.0/8"]
 
 

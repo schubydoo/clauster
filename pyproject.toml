@@ -14,6 +14,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "fastapi>=0.115",
@@ -36,10 +37,8 @@ dev = [
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
     "pytest-cov>=5.0",
-]
-eval = [
-    # Evaluation tooling only — NOT a committed part of the core stack.
-    "logfire>=4.34.0",
+    "ruff>=0.8",
+    "pyright>=1.1.390",
 ]
 package = [
     # Standalone-binary builds (see clauster.spec + scripts/build-binary.sh).
@@ -79,3 +78,24 @@ exclude_also = [
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
 ]
+
+[tool.ruff]
+# PEP 8 sanctions up to 99 for a team that agrees on it ("it is okay to increase
+# the line length limit up to 99 characters"); we use that ceiling.
+line-length = 99
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# A pragmatic starter set: pyflakes (F), pycodestyle (E/W), import-sort (I),
+# pyupgrade (UP), and flake8-bugbear (B). Expand over time.
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.pyright]
+include = ["src/clauster"]
+pythonVersion = "3.11"
+# `basic` to start — `standard`/`strict` would surface a large initial backlog
+# in a codebase not written under a type checker. Tighten incrementally.
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"

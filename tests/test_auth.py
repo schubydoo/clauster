@@ -8,7 +8,6 @@ import pytest
 from clauster import auth
 from clauster.config import ClausterConfig
 
-
 # ----- passwords -----------------------------------------------------------
 
 
@@ -129,7 +128,9 @@ def test_session_malformed_epoch_reads_as_zero():
 
 
 def _proxy_header(secret: str, user: str, method: str, path: str, t: int) -> str:
-    sig = hmac.new(secret.encode(), f"{user}:{t}:{method}:{path}".encode(), hashlib.sha256).hexdigest()
+    sig = hmac.new(
+        secret.encode(), f"{user}:{t}:{method}:{path}".encode(), hashlib.sha256
+    ).hexdigest()
     return f"t={t},v1={sig}"
 
 
@@ -137,8 +138,13 @@ def test_proxy_hmac_valid_and_bindings():
     secret, t = "proxy-secret", 1000
     hdr = _proxy_header(secret, "alice", "GET", "/api/instances", t)
     ok = lambda **kw: auth.verify_proxy_hmac(  # noqa: E731
-        secret, hdr, kw.get("u", "alice"), kw.get("m", "GET"),
-        kw.get("p", "/api/instances"), 60, now=kw.get("now", t)
+        secret,
+        hdr,
+        kw.get("u", "alice"),
+        kw.get("m", "GET"),
+        kw.get("p", "/api/instances"),
+        60,
+        now=kw.get("now", t),
     )
     assert ok() is True
     assert ok(now=t + 61) is False  # expired
@@ -169,8 +175,13 @@ def test_build_allowed_origins(tmp_path):
 
     # A non-loopback bind auto-allows nothing; operator must list origins explicitly.
     public = ClausterConfig(
-        projects_root=tmp_path, host="0.0.0.0", port=7621,
-        auth={"allow_unauthenticated_network": True, "allowed_origins": ["https://clauster.example.com"]},
+        projects_root=tmp_path,
+        host="0.0.0.0",
+        port=7621,
+        auth={
+            "allow_unauthenticated_network": True,
+            "allowed_origins": ["https://clauster.example.com"],
+        },
     )
     assert auth.build_allowed_origins(public) == {"https://clauster.example.com"}
 

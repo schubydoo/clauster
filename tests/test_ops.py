@@ -28,19 +28,24 @@ FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "cl
 
 # ----- _version_ge ------------------------------------------------------
 
-@pytest.mark.parametrize("have,want,expected", [
-    ("2.1.156", "2.1.145", True),
-    ("2.1.145", "2.1.145", True),
-    ("2.1.144", "2.1.145", False),
-    ("2.2.0", "2.1.999", True),
-    ("2.1", "2.1.0", True),       # missing patch treated as 0
-    ("10.0.0", "9.9.9", True),    # numeric, not lexical
-])
+
+@pytest.mark.parametrize(
+    "have,want,expected",
+    [
+        ("2.1.156", "2.1.145", True),
+        ("2.1.145", "2.1.145", True),
+        ("2.1.144", "2.1.145", False),
+        ("2.2.0", "2.1.999", True),
+        ("2.1", "2.1.0", True),  # missing patch treated as 0
+        ("10.0.0", "9.9.9", True),  # numeric, not lexical
+    ],
+)
 def test_version_ge(have, want, expected):
     assert _version_ge(have, want) is expected
 
 
 # ----- doctor -----------------------------------------------------------
+
 
 def _cfg_file(write_config, tmp_path, claude_extra: str = "") -> str:
     # Isolate state_dir under tmp (dot-prefixed so discovery never sees it as a project).
@@ -114,13 +119,18 @@ def test_doctor_absent_state_dir_ok_without_creating(write_config, tmp_path):
 
 def test_doctor_port_in_use_warns(write_config, tmp_path):
     import socket
+
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", 0))
     srv.listen(1)
     port = srv.getsockname()[1]
     try:
-        cfg = str(write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\nport: {port}\n"))
+        cfg = str(
+            write_config(
+                f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\nport: {port}\n"
+            )
+        )
         by = {c.name: c for c in run_doctor(cfg)[0]}
         assert by["port"].status == WARN and str(port) in by["port"].detail
     finally:
@@ -143,6 +153,7 @@ def test_check_auth_branches(write_config, tmp_path):
 
 
 # ----- backup / restore -------------------------------------------------
+
 
 def _seed_state(state_dir: Path):
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -218,6 +229,7 @@ def test_restore_config_out_conflict_without_force(write_config, tmp_path):
 
 def test_restore_skips_link_members(tmp_path):
     import io
+
     arch = tmp_path / "s.tar.gz"
     with tarfile.open(arch, "w:gz") as tar:
         data = b"hi"
@@ -250,14 +262,25 @@ def test_restore_rejects_malicious_tar(tmp_path, evil):
 
 # ----- migrate ----------------------------------------------------------
 
+
 def test_migrate_upgrades_old_schema(write_config, tmp_path):
     config = load_config(_cfg_file(write_config, tmp_path))
     config.state_dir.mkdir(parents=True, exist_ok=True)
     sj = config.state_dir / "state.json"
-    sj.write_text(json.dumps({
-        "schema_version": 0,
-        "instances": {"alpha": {"label": "alpha", "intentional_stop": True, "spawn_mode": "same-dir"}},
-    }))
+    sj.write_text(
+        json.dumps(
+            {
+                "schema_version": 0,
+                "instances": {
+                    "alpha": {
+                        "label": "alpha",
+                        "intentional_stop": True,
+                        "spawn_mode": "same-dir",
+                    }
+                },
+            }
+        )
+    )
     result = migrate_state(config)
     assert result["schema_version"] == 1
     assert json.loads(sj.read_text())["schema_version"] == 1
@@ -266,19 +289,29 @@ def test_migrate_upgrades_old_schema(write_config, tmp_path):
 
 # ----- install-service --------------------------------------------------
 
+
 def test_service_systemd():
-    unit = render_service_unit("systemd", python="/usr/bin/python3", config_path="/etc/clauster/clauster.yml", user="clauster")
+    unit = render_service_unit(
+        "systemd",
+        python="/usr/bin/python3",
+        config_path="/etc/clauster/clauster.yml",
+        user="clauster",
+    )
     assert "[Service]" in unit and "ExecStart=/usr/bin/python3 -m clauster run" in unit
     assert "User=clauster" in unit and "Restart=on-failure" in unit
 
 
 def test_service_launchd():
-    unit = render_service_unit("launchd", python="/usr/bin/python3", config_path="/etc/clauster/clauster.yml")
+    unit = render_service_unit(
+        "launchd", python="/usr/bin/python3", config_path="/etc/clauster/clauster.yml"
+    )
     assert "<plist" in unit and "org.clauster.daemon" in unit and "RunAtLoad" in unit
 
 
 def test_service_windows():
-    unit = render_service_unit("windows", python="C:\\py\\python.exe", config_path="C:\\clauster.yml")
+    unit = render_service_unit(
+        "windows", python="C:\\py\\python.exe", config_path="C:\\clauster.yml"
+    )
     assert "nssm install Clauster" in unit
 
 

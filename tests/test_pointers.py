@@ -7,7 +7,9 @@ from clauster import pointers
 
 def test_sanitize_cwd_replaces_all_non_alphanumerics():
     # Verified scheme: /mnt/nas/projects/unnamed_project -> -mnt-nas-projects-unnamed-project
-    assert pointers.sanitize_cwd(Path("/mnt/nas/projects/clauster")) == "-mnt-nas-projects-clauster"
+    assert (
+        pointers.sanitize_cwd(Path("/mnt/nas/projects/clauster")) == "-mnt-nas-projects-clauster"
+    )
     assert (
         pointers.sanitize_cwd(Path("/mnt/nas/projects/unnamed_project"))
         == "-mnt-nas-projects-unnamed-project"

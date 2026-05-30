@@ -14,7 +14,7 @@ import sys
 import tarfile
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from . import claude_cli
@@ -36,6 +36,7 @@ class Check:
 
 def _version_ge(have: str, want: str) -> bool:
     """Compare dotted versions numerically (2.1.156 >= 2.1.145). Missing/odd parts -> 0."""
+
     def parse(v: str) -> tuple[int, ...]:
         parts = []
         for seg in v.split("."):
@@ -81,9 +82,7 @@ def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
 
     # projects_root (config validation already requires it exists+readable, but surface it)
     pr = config.projects_root
-    checks.append(
-        Check("projects_root", OK if pr.is_dir() else FAIL, str(pr))
-    )
+    checks.append(Check("projects_root", OK if pr.is_dir() else FAIL, str(pr)))
 
     # state_dir writable
     checks.append(_check_state_dir_writable(config.state_dir))
@@ -92,7 +91,9 @@ def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
     if shutil.which("git"):
         checks.append(Check("git", OK, shutil.which("git") or "git"))
     else:
-        checks.append(Check("git", WARN, "git not on PATH — create --git-init / clone unavailable"))
+        checks.append(
+            Check("git", WARN, "git not on PATH — create --git-init / clone unavailable")
+        )
 
     # auth sanity
     checks.append(_check_auth(config))
@@ -100,8 +101,11 @@ def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
     # workspace trust (informational)
     trusted = trust_state_for(pr, _load_trusted_paths(claude_cli_json()))
     checks.append(
-        Check("workspace-trust", OK if trusted.value == "trusted" else WARN,
-              f"projects_root is {trusted.value}")
+        Check(
+            "workspace-trust",
+            OK if trusted.value == "trusted" else WARN,
+            f"projects_root is {trusted.value}",
+        )
     )
 
     # port (warn-only: in-use may be this very server)
@@ -139,7 +143,9 @@ def _check_auth(config: ClausterConfig) -> Check:
     if a.password_required and not a.password_hash:
         return Check("auth", FAIL, "password_required but no password_hash set")
     loopback = config.host in {"127.0.0.1", "::1", "localhost"}
-    if not loopback and not (a.password_required or a.reverse_proxy.enabled or a.allow_unauthenticated_network):
+    if not loopback and not (
+        a.password_required or a.reverse_proxy.enabled or a.allow_unauthenticated_network
+    ):
         return Check("auth", FAIL, f"non-loopback host {config.host} without any auth")
     if not loopback and a.allow_unauthenticated_network:
         return Check("auth", WARN, "bound non-loopback with auth explicitly disabled")
@@ -169,7 +175,7 @@ def make_backup(config: ClausterConfig, out: Path, *, now: datetime | None = Non
     NB: the config file carries the argon2 password *hash* (not plaintext) — the
     backup is sensitive, store it accordingly.
     """
-    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+    stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
     out = out.expanduser()
     if out.is_dir():
         out = out / f"clauster-backup-{stamp}.tar.gz"
@@ -277,6 +283,7 @@ def restore_backup(
 
 
 # ----- migrate ----------------------------------------------------------
+
 
 def migrate_state(config: ClausterConfig) -> dict:
     """Force state.json to the current schema (StateStore.load migrates + .bak's on read),

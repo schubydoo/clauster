@@ -8,7 +8,13 @@ from clauster.models import Attribution
 
 
 def _agent(pid, cwd, sid, kind="interactive", started=1716998400000):
-    return {"pid": pid, "cwd": cwd, "kind": kind, "startedAt": started, "sessionId": sid}
+    return {
+        "pid": pid,
+        "cwd": cwd,
+        "kind": kind,
+        "startedAt": started,
+        "sessionId": sid,
+    }
 
 
 def test_parse_agents_json_empty():

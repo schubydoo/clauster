@@ -104,14 +104,21 @@ def create_project(projects_root: Path, name: str, *, git_init: bool = False) ->
 
 # ----- clone ------------------------------------------------------------
 
-def _ip_blocked(ip: ipaddress._BaseAddress, cfg: CloneConfig) -> bool:
+
+def _ip_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, cfg: CloneConfig) -> bool:
     # Normalize IPv4-mapped IPv6 (::ffff:a.b.c.d) to its IPv4 so the loopback/
     # private/CGNAT classification below can't be bypassed via the mapped form.
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     # Always blocked, even with allow_private_hosts — never a legit remote clone
     # target and the SSRF crown jewels.
-    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
         return True
     private = ip.is_private or any(ip in net for net in _EXTRA_PRIVATE_NETS)
     if not private:
@@ -151,7 +158,7 @@ def validate_clone_url(url: str, cfg: CloneConfig) -> None:
         infos = socket.getaddrinfo(host, parts.port or None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise InvalidCloneUrl(f"could not resolve host {host!r}: {exc}") from exc
-    addresses = {info[4][0] for info in infos}
+    addresses = {str(info[4][0]) for info in infos}
     if not addresses:
         raise InvalidCloneUrl(f"host {host!r} resolved to no addresses")
     for addr in addresses:
@@ -221,8 +228,10 @@ def clone_project(
 
     cmd = [
         git_binary,
-        "-c", "protocol.file.allow=never",
-        "-c", "credential.helper=",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "credential.helper=",
         "clone",
         "--no-tags",
         "--no-recurse-submodules",

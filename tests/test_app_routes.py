@@ -19,19 +19,29 @@ FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "cl
 
 
 def _client(write_config, tmp_path) -> TestClient:
-    return TestClient(create_app(load_config(
-        write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n"))))
+    return TestClient(
+        create_app(
+            load_config(
+                write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n")
+            )
+        )
+    )
 
 
 # ----- create / clone body validation ----------------------------------
 
+
 def test_create_missing_name_422(write_config, tmp_path):
     assert _client(write_config, tmp_path).post("/api/projects", json={}).status_code == 422
-    assert _client(write_config, tmp_path).post("/api/projects", json={"name": ""}).status_code == 422
+    assert (
+        _client(write_config, tmp_path).post("/api/projects", json={"name": ""}).status_code == 422
+    )
 
 
 def test_clone_missing_name_422(write_config, tmp_path):
-    r = _client(write_config, tmp_path).post("/api/projects/clone", json={"url": "https://x/r.git"})
+    r = _client(write_config, tmp_path).post(
+        "/api/projects/clone", json={"url": "https://x/r.git"}
+    )
     assert r.status_code == 422
 
 
@@ -41,6 +51,7 @@ def test_clone_missing_url_422(write_config, tmp_path):
 
 
 # ----- instance stop / trust not-found ----------------------------------
+
 
 def test_stop_unknown_instance_404(write_config, tmp_path):
     assert _client(write_config, tmp_path).delete("/api/instances/ghost").status_code == 404
@@ -53,13 +64,17 @@ def test_trust_unknown_project_404(write_config, tmp_path):
 
 # ----- claude-md resolver + read-error branches -------------------------
 
+
 def test_claude_md_unknown_project_404(write_config, tmp_path):
-    assert _client(write_config, tmp_path).get("/api/projects/ghostproj/claude-md").status_code == 404
+    assert (
+        _client(write_config, tmp_path).get("/api/projects/ghostproj/claude-md").status_code == 404
+    )
 
 
 def test_claude_md_put_base_sha_not_string_422(write_config, tmp_path):
     r = _client(write_config, tmp_path).put(
-        "/api/projects/alpha/claude-md", json={"content": "x", "base_sha256": 123})
+        "/api/projects/alpha/claude-md", json={"content": "x", "base_sha256": 123}
+    )
     assert r.status_code == 422
 
 
@@ -72,7 +87,10 @@ def test_claude_md_get_non_utf8_is_422(write_config, projects_root, tmp_path):
 
 def test_claude_md_invalid_name_404(write_config, tmp_path):
     # A dotted name fails the project-name regex -> resolver's first 404.
-    assert _client(write_config, tmp_path).get("/api/projects/ghost.proj/claude-md").status_code == 404
+    assert (
+        _client(write_config, tmp_path).get("/api/projects/ghost.proj/claude-md").status_code
+        == 404
+    )
 
 
 def test_claude_md_put_path_escape_422(write_config, projects_root, tmp_path):
@@ -84,6 +102,7 @@ def test_claude_md_put_path_escape_422(write_config, projects_root, tmp_path):
 
 # ----- spawn + clone route error branches -------------------------------
 
+
 def test_spawn_untrusted_dir_409(write_config, tmp_path):
     # projects_root (a tmp dir) isn't trusted in ~/.claude.json -> NotTrusted -> 409.
     r = _client(write_config, tmp_path).post("/api/instances", json={"project": "alpha"})
@@ -92,18 +111,21 @@ def test_spawn_untrusted_dir_409(write_config, tmp_path):
 
 def test_clone_route_invalid_name_422(write_config, tmp_path):
     r = _client(write_config, tmp_path).post(
-        "/api/projects/clone", json={"name": "../evil", "url": "https://10.0.0.1/r.git"})
+        "/api/projects/clone", json={"name": "../evil", "url": "https://10.0.0.1/r.git"}
+    )
     assert r.status_code == 422
 
 
 def test_clone_route_existing_target_409(write_config, tmp_path):
     # 'alpha' already exists under projects_root -> TargetExists (before URL checks).
     r = _client(write_config, tmp_path).post(
-        "/api/projects/clone", json={"name": "alpha", "url": "https://10.0.0.1/r.git"})
+        "/api/projects/clone", json={"name": "alpha", "url": "https://10.0.0.1/r.git"}
+    )
     assert r.status_code == 409
 
 
 # ----- per-project usage (cost badge) -----------------------------------
+
 
 def test_project_usage_invalid_name_422(write_config, tmp_path):
     # Dotted name fails the project-name regex -> 422 (don't even scan transcripts).
@@ -125,29 +147,53 @@ def test_project_usage_empty_project_zero(write_config, tmp_path):
 
 # ----- ghost-environment reaper (opt-in dashboard surface) --------------
 
+
 def _reaper_client(write_config, tmp_path) -> TestClient:
-    return TestClient(create_app(load_config(write_config(
-        f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\nreaper:\n  ui_enabled: true\n"))))
+    return TestClient(
+        create_app(
+            load_config(
+                write_config(
+                    f"claude:\n  binary: {FAKE_CLAUDE}\n"
+                    f"state_dir: {tmp_path}/.s\nreaper:\n  ui_enabled: true\n"
+                )
+            )
+        )
+    )
 
 
 def _env(id, type, directory=None, name=""):
     from clauster import environments as envmod
-    return envmod.Environment(id=id, name=name,
-                              config=envmod.EnvironmentConfig(type=type, directory=directory))
+
+    return envmod.Environment(
+        id=id,
+        name=name,
+        config=envmod.EnvironmentConfig(type=type, directory=directory),
+    )
 
 
 def _setup_reaper(monkeypatch, envs, live, sink):
     """Patch the environments module so nothing hits the network; record API calls."""
     from clauster import environments as envmod
-    monkeypatch.setattr(envmod, "load_credentials",
-                        lambda **k: envmod.Credentials(access_token="tkn", organization_uuid="org"))
+
+    monkeypatch.setattr(
+        envmod,
+        "load_credentials",
+        lambda **k: envmod.Credentials(access_token="tkn", organization_uuid="org"),
+    )
     monkeypatch.setattr(envmod, "live_bridge_directories", lambda *a, **k: set(live))
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self, **k): return list(envs)
-        def archive_environment(self, env_id): sink.append(("archive", env_id))
-        def delete_environment(self, env_id, *, force=False): sink.append(("delete", env_id, force))
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self, **k):
+            return list(envs)
+
+        def archive_environment(self, env_id):
+            sink.append(("archive", env_id))
+
+        def delete_environment(self, env_id, *, force=False):
+            sink.append(("delete", env_id, force))
 
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
 
@@ -168,8 +214,13 @@ def _make_envs():
 def test_reaper_disabled_by_default_404(write_config, tmp_path):
     c = _client(write_config, tmp_path)  # no reaper config -> ui_enabled false
     assert c.get("/api/environments/ghosts").status_code == 404
-    assert c.post("/api/environments/reap",
-                  json={"action": "archive", "ids": ["x"], "confirm": "archive"}).status_code == 404
+    assert (
+        c.post(
+            "/api/environments/reap",
+            json={"action": "archive", "ids": ["x"], "confirm": "archive"},
+        ).status_code
+        == 404
+    )
 
 
 def test_reaper_preview_lists_only_ghosts(write_config, tmp_path, monkeypatch):
@@ -185,9 +236,14 @@ def test_reaper_archive_acts_only_on_ghosts(write_config, tmp_path, monkeypatch)
     sink = []
     _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, sink)
     # Client asks to archive a ghost AND the live + cloud env (stale/hostile input).
-    r = _reaper_client(write_config, tmp_path).post("/api/environments/reap", json={
-        "action": "archive", "confirm": "archive",
-        "ids": ["env_ghost1", "env_live", "env_cloud"]})
+    r = _reaper_client(write_config, tmp_path).post(
+        "/api/environments/reap",
+        json={
+            "action": "archive",
+            "confirm": "archive",
+            "ids": ["env_ghost1", "env_live", "env_cloud"],
+        },
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["reaped"] == ["env_ghost1"]
@@ -201,13 +257,17 @@ def test_reaper_delete_requires_typed_confirm(write_config, tmp_path, monkeypatc
     _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, sink)
     c = _reaper_client(write_config, tmp_path)
     # Wrong confirm token for delete -> 400, nothing touched.
-    bad = c.post("/api/environments/reap",
-                 json={"action": "delete", "ids": ["env_ghost1"], "confirm": "archive"})
+    bad = c.post(
+        "/api/environments/reap",
+        json={"action": "delete", "ids": ["env_ghost1"], "confirm": "archive"},
+    )
     assert bad.status_code == 400
     assert sink == []
     # Correct token -> force-delete proceeds.
-    ok = c.post("/api/environments/reap",
-                json={"action": "delete", "ids": ["env_ghost1"], "confirm": "DELETE"})
+    ok = c.post(
+        "/api/environments/reap",
+        json={"action": "delete", "ids": ["env_ghost1"], "confirm": "DELETE"},
+    )
     assert ok.status_code == 200
     assert ok.json()["reaped"] == ["env_ghost1"]
     assert sink == [("delete", "env_ghost1", True)]  # force=True
@@ -216,10 +276,16 @@ def test_reaper_delete_requires_typed_confirm(write_config, tmp_path, monkeypatc
 def test_reaper_validation_errors(write_config, tmp_path, monkeypatch):
     _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, [])
     c = _reaper_client(write_config, tmp_path)
-    assert c.post("/api/environments/reap", json={"action": "nope", "ids": ["x"]}).status_code == 422
-    assert c.post("/api/environments/reap", json={"action": "archive", "ids": []}).status_code == 422
-    assert c.post("/api/environments/reap",
-                  json={"action": "archive", "ids": [1, 2]}).status_code == 422
+    assert (
+        c.post("/api/environments/reap", json={"action": "nope", "ids": ["x"]}).status_code == 422
+    )
+    assert (
+        c.post("/api/environments/reap", json={"action": "archive", "ids": []}).status_code == 422
+    )
+    assert (
+        c.post("/api/environments/reap", json={"action": "archive", "ids": [1, 2]}).status_code
+        == 422
+    )
 
 
 def test_reaper_credentials_error_503(write_config, tmp_path, monkeypatch):
@@ -236,13 +302,20 @@ def test_reaper_credentials_error_503(write_config, tmp_path, monkeypatch):
 
 def test_reaper_list_api_error_502(write_config, tmp_path, monkeypatch):
     from clauster import environments as envmod
-    monkeypatch.setattr(envmod, "load_credentials",
-                        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"))
+
+    monkeypatch.setattr(
+        envmod,
+        "load_credentials",
+        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"),
+    )
     monkeypatch.setattr(envmod, "live_bridge_directories", lambda *a, **k: set())
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self, **k): raise envmod.EnvironmentsAPIError(500, "upstream boom")
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self, **k):
+            raise envmod.EnvironmentsAPIError(500, "upstream boom")
 
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
     r = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts")
@@ -252,35 +325,59 @@ def test_reaper_list_api_error_502(write_config, tmp_path, monkeypatch):
 
 def test_reaper_per_env_error_is_reported_not_fatal(write_config, tmp_path, monkeypatch):
     from clauster import environments as envmod
-    monkeypatch.setattr(envmod, "load_credentials",
-                        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"))
+
+    monkeypatch.setattr(
+        envmod,
+        "load_credentials",
+        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"),
+    )
     monkeypatch.setattr(envmod, "live_bridge_directories", lambda *a, **k: {"/live/dir"})
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self, **k): return _make_envs()
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self, **k):
+            return _make_envs()
+
         def archive_environment(self, env_id):
             if env_id == "env_ghost1":
                 raise envmod.EnvironmentsAPIError(409, "work queued")
             # env_ghost2 archives fine
 
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
-    body = _reaper_client(write_config, tmp_path).post("/api/environments/reap", json={
-        "action": "archive", "confirm": "archive",
-        "ids": ["env_ghost1", "env_ghost2"]}).json()
-    assert body["reaped"] == ["env_ghost2"]          # the healthy one still went through
-    assert "env_ghost1" in body["errors"]            # the failure is surfaced, not swallowed
+    body = (
+        _reaper_client(write_config, tmp_path)
+        .post(
+            "/api/environments/reap",
+            json={
+                "action": "archive",
+                "confirm": "archive",
+                "ids": ["env_ghost1", "env_ghost2"],
+            },
+        )
+        .json()
+    )
+    assert body["reaped"] == ["env_ghost2"]  # the healthy one still went through
+    assert "env_ghost1" in body["errors"]  # the failure is surfaced, not swallowed
     assert "409" in body["errors"]["env_ghost1"]
 
 
 def test_reaper_fails_closed_on_live_set_failure(write_config, tmp_path, monkeypatch):
     from clauster import environments as envmod
-    monkeypatch.setattr(envmod, "load_credentials",
-                        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"))
+
+    monkeypatch.setattr(
+        envmod,
+        "load_credentials",
+        lambda **k: envmod.Credentials(access_token="t", organization_uuid="o"),
+    )
 
     class FakeClient:
-        def __init__(self, *a, **k): pass
-        def list_environments(self, **k): return _make_envs()
+        def __init__(self, *a, **k):
+            pass
+
+        def list_environments(self, **k):
+            return _make_envs()
 
     monkeypatch.setattr(envmod, "EnvironmentsClient", FakeClient)
 
