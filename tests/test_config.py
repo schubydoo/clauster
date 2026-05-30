@@ -25,6 +25,33 @@ def test_missing_projects_root_rejected(tmp_path):
         load_config(cfg)
 
 
+def test_unreadable_projects_root_rejected(tmp_path, monkeypatch):
+    pr = tmp_path / "noread"
+    pr.mkdir()
+    cfg = tmp_path / "clauster.yml"
+    cfg.write_text(f"projects_root: {pr}\n")
+    # Force the not-readable branch without real chmod (the dir exists but R_OK fails).
+    monkeypatch.setattr("clauster.config.os.access", lambda *a, **k: False)
+    with pytest.raises(ValueError, match="not readable"):
+        load_config(cfg)
+
+
+def test_non_mapping_config_root_rejected(tmp_path):
+    cfg = tmp_path / "clauster.yml"
+    cfg.write_text("- a\n- b\n")  # a YAML list, not a mapping
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_config(cfg)
+
+
+def test_env_config_and_home_candidates(write_config, monkeypatch):
+    # Setting CLAUSTER_CONFIG / CLAUSTER_HOME exercises both candidate-path branches.
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_CONFIG", str(cfg_path))
+    monkeypatch.setenv("CLAUSTER_HOME", str(cfg_path.parent))
+    config = load_config()  # no explicit path -> resolves via env
+    assert config.source_path == cfg_path
+
+
 def test_non_loopback_host_rejected_without_auth(write_config):
     cfg_path = write_config("host: 0.0.0.0\n")
     with pytest.raises(ValueError, match="non-loopback"):
