@@ -119,6 +119,25 @@ def test_migrate_exit_0(write_config, tmp_path):
     assert json.loads((sd / "state.json").read_text())["schema_version"] == 1
 
 
+def test_backup_failure_exit_1(write_config, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "clauster.ops.make_backup",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    assert cli.main(["backup", "-c", _cfg(write_config, tmp_path)]) == 1
+
+
+def test_run_warns_on_insecure_cookie(write_config, tmp_path, monkeypatch, capsys):
+    from clauster import auth
+    pw = auth.hash_password(auth.make_hasher(), "pw")
+    extra = f'auth:\n  enabled: true\n  password_required: true\n  password_hash: "{pw}"\n'
+    cfg = _cfg(write_config, tmp_path, extra)
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **k: None)
+    assert cli.main(["run", "-c", cfg]) == 0
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "Secure" in err
+
+
 # ----- install-service --------------------------------------------------
 
 @pytest.mark.parametrize("kind,marker", [
