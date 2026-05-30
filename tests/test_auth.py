@@ -67,6 +67,64 @@ def test_session_expired():
     assert auth.read_session(s, tok, max_age=0) is None  # older than max_age
 
 
+# ----- session epoch (logout revocation) ----------------------------------
+
+
+def test_epoch_missing_is_zero(tmp_path):
+    assert auth.read_epoch(tmp_path) == 0
+
+
+def test_epoch_corrupt_is_zero(tmp_path):
+    (tmp_path / "session.epoch").write_text("not-a-number")
+    assert auth.read_epoch(tmp_path) == 0
+
+
+def test_bump_epoch_increments_and_persists(tmp_path):
+    assert auth.bump_epoch(tmp_path) == 1
+    assert auth.read_epoch(tmp_path) == 1
+    assert auth.bump_epoch(tmp_path) == 2
+    assert auth.read_epoch(tmp_path) == 2
+
+
+def test_session_rejected_when_epoch_stale():
+    s = auth.make_serializer(b"secret-key-0001")
+    tok = auth.issue_session(s, "admin", epoch=0)
+    assert auth.read_session(s, tok, 3600, current_epoch=0) == "admin"  # same epoch
+    assert auth.read_session(s, tok, 3600, current_epoch=1) is None  # bumped -> revoked
+
+
+def test_session_newer_epoch_accepted():
+    # A cookie issued at the current (or, defensively, a higher) epoch is valid.
+    s = auth.make_serializer(b"secret-key-0001")
+    tok = auth.issue_session(s, "admin", epoch=5)
+    assert auth.read_session(s, tok, 3600, current_epoch=5) == "admin"
+    assert auth.read_session(s, tok, 3600, current_epoch=4) == "admin"
+
+
+def test_pre_epoch_cookie_valid_until_first_bump():
+    # A cookie from before the feature (no "e" field) reads as epoch 0: still
+    # valid at epoch 0, revoked once the epoch is bumped.
+    s = auth.make_serializer(b"secret-key-0001")
+    legacy = s.dumps({"u": "admin"})  # no "e"
+    assert auth.read_session(s, legacy, 3600, current_epoch=0) == "admin"
+    assert auth.read_session(s, legacy, 3600, current_epoch=1) is None
+
+
+def test_session_non_dict_payload_rejected():
+    # A validly-signed but non-dict payload is rejected (defensive guard).
+    s = auth.make_serializer(b"secret-key-0001")
+    assert auth.read_session(s, s.dumps("just-a-string"), 3600) is None
+
+
+def test_session_malformed_epoch_reads_as_zero():
+    # A signed cookie carrying a non-numeric "e" degrades to epoch 0 rather than
+    # raising — resilient against a future/garbled payload shape.
+    s = auth.make_serializer(b"secret-key-0001")
+    tok = s.dumps({"u": "admin", "e": "bogus"})
+    assert auth.read_session(s, tok, 3600, current_epoch=0) == "admin"
+    assert auth.read_session(s, tok, 3600, current_epoch=1) is None
+
+
 # ----- reverse-proxy HMAC --------------------------------------------------
 
 

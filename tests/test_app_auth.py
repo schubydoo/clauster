@@ -87,6 +87,56 @@ def test_logout_clears_session(runner_config):
     assert client.get("/api/instances").status_code == 401
 
 
+def test_logout_revokes_captured_cookie(runner_config):
+    # The real revocation property: a cookie copied off the wire BEFORE logout is
+    # dead AFTER logout — not merely cleared from this client's jar. Replay the
+    # captured value explicitly and expect 401.
+    client = _password_client(runner_config)
+    _login(client)
+    captured = client.cookies.get("clauster_session")
+    assert client.get("/api/instances").status_code == 200  # valid before logout
+    client.post("/logout", headers={"origin": ORIGIN}, follow_redirects=False)
+    replay = client.get("/api/instances", headers={"cookie": f"clauster_session={captured}"})
+    assert replay.status_code == 401  # epoch bumped -> captured cookie revoked
+
+
+def test_logout_revokes_all_sessions(runner_config):
+    # Single-user logout is "log out everywhere": a second session's cookie dies
+    # when the first logs out (shared server-side epoch).
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    app = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
+    phone, laptop = TestClient(app), TestClient(app)
+    _login(phone)
+    _login(laptop)
+    assert laptop.get("/api/instances").status_code == 200
+    phone.post("/logout", headers={"origin": ORIGIN}, follow_redirects=False)
+    assert laptop.get("/api/instances").status_code == 401  # revoked everywhere
+
+
+def test_epoch_persists_across_restart(runner_config):
+    # A bump survives an app restart (re-create_app reads session.epoch): a
+    # cookie revoked before restart stays revoked after.
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    app1 = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
+    c1 = TestClient(app1)
+    _login(c1)
+    captured = c1.cookies.get("clauster_session")
+    c1.post("/logout", headers={"origin": ORIGIN}, follow_redirects=False)
+    # "restart": a fresh app over the same state_dir
+    app2 = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
+    c2 = TestClient(app2)
+    replay = c2.get("/api/instances", headers={"cookie": f"clauster_session={captured}"})
+    assert replay.status_code == 401
+
+
 def test_login_throttled_after_repeated_failures(runner_config):
     client = _password_client(runner_config)
     for _ in range(5):

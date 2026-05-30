@@ -112,6 +112,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     _hasher = auth.make_hasher()
     _allowed_origins = auth.build_allowed_origins(config)
     _throttle = LoginThrottle()
+    # Session epoch: cookies embed it at issue; logout bumps it so every
+    # outstanding cookie (incl. a captured one) is revoked. Persisted, so a
+    # restart doesn't silently un-revoke. Cached on app.state — single uvicorn
+    # worker, so the in-memory value is authoritative.
+    app.state.session_epoch = auth.read_epoch(config.state_dir)
 
     def _authenticate(scope) -> tuple[str | None, bool]:
         """Return (user, via_proxy). Works for both Request and WebSocket
@@ -126,7 +131,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             ):
                 return remote_user, True
         user = auth.read_session(
-            _serializer, scope.cookies.get(_SESSION_COOKIE), config.auth.session_max_age_seconds
+            _serializer, scope.cookies.get(_SESSION_COOKIE), config.auth.session_max_age_seconds,
+            current_epoch=app.state.session_epoch,
         )
         return (user, False) if user else (None, False)
 
@@ -187,7 +193,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             _throttle.reset(ip)
             resp = RedirectResponse(f"{_root}/", status_code=303)
             resp.set_cookie(
-                _SESSION_COOKIE, auth.issue_session(_serializer, _SESSION_USER),
+                _SESSION_COOKIE,
+                auth.issue_session(_serializer, _SESSION_USER, app.state.session_epoch),
                 max_age=config.auth.session_max_age_seconds, httponly=True,
                 samesite="lax", secure=_cookie_secure(request), path=_root or "/",
             )
@@ -199,6 +206,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/logout")
     async def logout(request: Request) -> Response:
+        # Bump the server-side epoch so the cookie we just dropped — and any
+        # copy of it elsewhere — is actually revoked, not merely cleared client
+        # side. Single-user today, so this is "log out everywhere".
+        app.state.session_epoch = await asyncio.to_thread(auth.bump_epoch, config.state_dir)
         resp = RedirectResponse(f"{_root}/login", status_code=303)
         resp.delete_cookie(_SESSION_COOKIE, path=_root or "/")
         return resp

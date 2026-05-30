@@ -94,21 +94,76 @@ def make_serializer(secret: bytes) -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(secret, salt=_SESSION_SALT)
 
 
-def issue_session(serializer: URLSafeTimedSerializer, user: str) -> str:
-    return serializer.dumps({"u": user})
+def issue_session(serializer: URLSafeTimedSerializer, user: str, epoch: int = 0) -> str:
+    """Sign a session cookie carrying the user and the issuing ``epoch``.
+
+    The epoch lets ``read_session`` reject cookies issued before the last
+    server-side revocation (see ``bump_epoch``) — turning logout into actual
+    revocation rather than a client-side cookie delete.
+    """
+    return serializer.dumps({"u": user, "e": epoch})
 
 
 def read_session(
-    serializer: URLSafeTimedSerializer, token: str | None, max_age: int
+    serializer: URLSafeTimedSerializer,
+    token: str | None,
+    max_age: int,
+    *,
+    current_epoch: int = 0,
 ) -> str | None:
-    """Return the session user, or None if absent/expired/tampered/wrong-key."""
+    """Return the session user, or None if absent/expired/tampered/wrong-key/revoked.
+
+    A cookie whose embedded epoch is below ``current_epoch`` was issued before a
+    revocation bump and is rejected. Cookies predating the epoch feature (no
+    ``e`` field) read as epoch 0, so they stay valid until the first bump.
+    """
     if not token:
         return None
     try:
         data = serializer.loads(token, max_age=max_age)
     except BadSignature:  # covers SignatureExpired (subclass) too
         return None
-    return data.get("u") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    try:
+        token_epoch = int(data.get("e", 0))
+    except (TypeError, ValueError):
+        token_epoch = 0
+    if token_epoch < current_epoch:
+        return None  # issued before the last revocation
+    return data.get("u")
+
+
+# ----- session epoch (logout revocation) -----------------------------------
+
+
+def read_epoch(state_dir: Path) -> int:
+    """Current session epoch. Missing/corrupt file => 0 (no revocation yet).
+
+    Never raises — a fresh deploy simply starts at epoch 0.
+    """
+    path = state_dir.expanduser() / "session.epoch"
+    try:
+        return int(path.read_text().strip())
+    except (FileNotFoundError, OSError, ValueError):
+        return 0
+
+
+def bump_epoch(state_dir: Path) -> int:
+    """Atomically increment + persist the session epoch; return the new value.
+
+    Bumping invalidates every previously-issued cookie (their embedded epoch is
+    now stale), so logout becomes a genuine "log out everywhere" revocation that
+    a captured cookie can't survive. Atomic write mirrors ``state.StateStore``.
+    """
+    state_dir = state_dir.expanduser()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "session.epoch"
+    new_value = read_epoch(state_dir) + 1
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(str(new_value))
+    os.replace(tmp, path)
+    return new_value
 
 
 # ----- reverse-proxy HMAC (D13) -------------------------------------------
