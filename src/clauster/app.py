@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
-from . import __version__, auth, claude_cli, logstream, usage
+from . import __version__, auth, claude_cli, environments, logstream, usage
 from .claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
@@ -275,6 +275,98 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             },
         }
 
+    # --- ghost-environment reaper (spec §11), dashboard surface ----------------
+    # Destructive first-party API, so: opt-in config gate, fail-closed live set,
+    # and every action re-derives the ghost set server-side (see _gather_ghosts).
+    def _gather_ghosts() -> tuple[environments.EnvironmentsClient, list, set, list]:
+        """Sync: creds → list envs → live set (fail-closed) → ghosts.
+
+        Mirrors the CLI's safety rails. Raises HTTPException on any failure so the
+        route never proceeds on partial information.
+        """
+        try:
+            creds = environments.load_credentials(now_ms=int(time.time() * 1000))
+        except environments.CredentialsError as exc:
+            raise HTTPException(status_code=503, detail=f"credentials unavailable: {exc}") from exc
+        client = environments.EnvironmentsClient(creds)
+        try:
+            envs = client.list_environments()
+        except environments.EnvironmentsAPIError as exc:
+            raise HTTPException(status_code=502, detail=f"environments API error: {exc}") from exc
+        # SAFETY: never reap without a trustworthy live set — an incomplete one could
+        # see a live bridge as a ghost. Fail closed on ANY liveness-probe failure.
+        try:
+            live = environments.live_bridge_directories(config.claude.binary, config.projects_root)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=503,
+                detail=f"refusing to reap — could not determine live bridges: {exc}",
+            ) from exc
+        return client, envs, live, environments.find_ghosts(envs, live)
+
+    @app.get("/api/environments/ghosts")
+    async def api_environment_ghosts() -> dict:
+        if not config.reaper.ui_enabled:
+            raise HTTPException(status_code=404, detail="reaper UI is disabled")
+
+        def _work() -> dict:
+            _client, envs, live, ghosts = _gather_ghosts()
+            return {
+                "enabled": True,
+                "total": len(envs),
+                "live_dirs": len(live),
+                "ghosts": [
+                    {"id": g.id, "directory": g.config.directory, "name": g.name} for g in ghosts
+                ],
+            }
+
+        return await asyncio.to_thread(_work)
+
+    @app.post("/api/environments/reap")
+    async def api_environment_reap(body: dict) -> dict:
+        if not config.reaper.ui_enabled:
+            raise HTTPException(status_code=404, detail="reaper UI is disabled")
+        action = body.get("action")
+        if action not in ("archive", "delete"):
+            raise HTTPException(status_code=422, detail="action must be 'archive' or 'delete'")
+        ids = body.get("ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+            raise HTTPException(status_code=422, detail="ids must be a non-empty list of strings")
+        # Typed-confirm gate; the irreversible force-delete demands the stricter token.
+        expected = "DELETE" if action == "delete" else "archive"
+        if body.get("confirm") != expected:
+            raise HTTPException(status_code=400, detail=f"confirmation text must be {expected!r}")
+
+        def _work() -> dict:
+            client, _envs, _live, ghosts = _gather_ghosts()
+            # Re-derive server-side: only ever act on ids that are CURRENTLY ghosts.
+            # Anything else (a now-live bridge, the cloud Default, an unknown or stale
+            # id) is left untouched and reported back as skipped — the client cannot
+            # widen the blast radius beyond the freshly-computed ghost set.
+            requested = set(ids)
+            ghost_ids = {g.id for g in ghosts}
+            reaped: list[str] = []
+            errors: dict[str, str] = {}
+            for g in ghosts:
+                if g.id not in requested:
+                    continue
+                try:
+                    if action == "delete":
+                        client.delete_environment(g.id, force=True)
+                    else:
+                        client.archive_environment(g.id)
+                    reaped.append(g.id)
+                except environments.EnvironmentsAPIError as exc:
+                    errors[g.id] = str(exc)
+            return {
+                "action": action,
+                "reaped": reaped,
+                "skipped": sorted(requested - ghost_ids),
+                "errors": errors,
+            }
+
+        return await asyncio.to_thread(_work)
+
     async def _project_by_name(name: str) -> Project:
         for proj in await list_projects():
             if proj.name == name:
@@ -499,6 +591,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "version": __version__,
                 "projects_root": str(config.projects_root),
                 "auth_enabled": config.auth.enabled,
+                "reaper_ui_enabled": config.reaper.ui_enabled,
                 "default_spawn_mode": config.instance_defaults.spawn_mode,
                 "default_permission_mode": config.instance_defaults.permission_mode,
             },

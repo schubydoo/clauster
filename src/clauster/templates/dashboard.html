@@ -54,6 +54,45 @@
         </div>
       </div>
     </section>
+    {% if reaper_ui_enabled %}
+    <section class="reaper" x-data="reaper()">
+      <button class="btn-reaper-toggle" @click="toggle()"
+              x-text="open ? '× Close ghost reaper' : '👻 Reap ghost environments'">👻 Reap ghost environments</button>
+      <div class="reaper-panel" x-show="open">
+        <p class="reaper-blurb">Server-side bridge environments with no live bridge clutter the
+          claude.ai/code “New session” selector. The cloud <code>Default</code> and any environment
+          backing a live bridge are never reaped.</p>
+        <p class="reaper-state" x-show="loading">Scanning…</p>
+        <p class="reaper-error" x-show="error" x-text="error"></p>
+        <template x-if="!loading && loaded && !error">
+          <div>
+            <p class="reaper-summary" x-text="summary()"></p>
+            <ul class="ghost-list" x-show="ghosts.length">
+              <template x-for="g in ghosts" :key="g.id">
+                <li class="ghost">
+                  <code x-text="g.id"></code>
+                  <span class="ghost-dir" x-text="g.directory || '(no directory)'"></span>
+                  <span class="ghost-name" x-show="g.name" x-text="g.name"></span>
+                </li>
+              </template>
+            </ul>
+            <div class="reaper-actions" x-show="ghosts.length">
+              <button class="btn-archive" @click="archive()" :disabled="busy"
+                      x-text="busy ? 'Working…' : ('Archive ' + ghosts.length + ' (reversible)')">Archive</button>
+              <!-- Irreversible: gated behind typing DELETE exactly (stricter than archive). -->
+              <div class="reaper-danger">
+                <label>force-delete (irreversible) — type <code>DELETE</code>:
+                  <input type="text" x-model="deleteTyped" placeholder="DELETE" autocomplete="off"></label>
+                <button class="btn-delete" @click="del()" :disabled="busy || deleteTyped !== 'DELETE'">Permanently delete</button>
+              </div>
+            </div>
+            <p class="reaper-result" x-show="result" x-text="result"></p>
+            <button class="btn-reaper-refresh" @click="load()" :disabled="busy">Refresh</button>
+          </div>
+        </template>
+      </div>
+    </section>
+    {% endif %}
     {% block project_list %}
     {% if projects %}
     <ul class="project-grid">
@@ -486,6 +525,51 @@
           if (el) el.scrollTop = el.scrollHeight;
         },
         jumpToLatest(name) { this.scrollLog(name); },
+      };
+    }
+
+    // Ghost-environment reaper panel (opt-in; spec §11). Independent Alpine scope.
+    function reaper() {
+      return {
+        open: false, loading: false, loaded: false, error: null,
+        ghosts: [], total: 0, liveDirs: 0, busy: false, result: null, deleteTyped: "",
+        toggle() { this.open = !this.open; if (this.open && !this.loaded) this.load(); },
+        summary() {
+          if (!this.ghosts.length) return "No ghost environments — nothing to reap.";
+          return this.ghosts.length + " ghost(s) · " + this.liveDirs +
+            " live dir(s) kept · cloud Default never touched";
+        },
+        async load() {
+          this.loading = true; this.error = null; this.result = null;
+          try {
+            const res = await fetch(ROOT + "/api/environments/ghosts");
+            const body = await res.json();
+            if (!res.ok) { this.error = body.detail || "failed to scan"; }
+            else { this.ghosts = body.ghosts || []; this.total = body.total; this.liveDirs = body.live_dirs; }
+          } catch (e) { this.error = String(e); }
+          finally { this.loaded = true; this.loading = false; }
+        },
+        async _reap(action, confirm) {
+          this.busy = true; this.error = null; this.result = null;
+          try {
+            const res = await fetch(ROOT + "/api/environments/reap", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action, confirm, ids: this.ghosts.map((g) => g.id) }),
+            });
+            const body = await res.json();
+            if (!res.ok) { this.error = body.detail || "reap failed"; return; }
+            const errs = Object.keys(body.errors || {}).length;
+            const msg = "✓ " + action + "d " + body.reaped.length + " environment(s)" +
+              (body.skipped.length ? " · skipped " + body.skipped.length : "") +
+              (errs ? " · " + errs + " error(s)" : "");
+            this.deleteTyped = "";
+            await this.load();  // refresh preview — should now be fewer/zero
+            this.result = msg;  // set AFTER load() (which clears result) so it persists
+          } catch (e) { this.error = String(e); }
+          finally { this.busy = false; }
+        },
+        archive() { this._reap("archive", "archive"); },
+        del() { if (this.deleteTyped === "DELETE") this._reap("delete", "DELETE"); },
       };
     }
   </script>
