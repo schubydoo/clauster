@@ -98,10 +98,18 @@ def test_doctor_git_missing_warns(write_config, tmp_path, monkeypatch):
 
 def test_doctor_state_dir_not_writable_fails(write_config, tmp_path):
     blocker = tmp_path / "afile"
-    blocker.write_text("x")  # state_dir points at a file -> mkdir fails
+    blocker.write_text("x")  # state_dir points at a file -> probe fails
     cfg = str(write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {blocker}\n"))
     by = {c.name: c for c in run_doctor(cfg)[0]}
     assert by["state_dir"].status == FAIL
+
+
+def test_doctor_absent_state_dir_ok_without_creating(write_config, tmp_path):
+    sd = tmp_path / "willcreate"  # absent
+    cfg = str(write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {sd}\n"))
+    by = {c.name: c for c in run_doctor(cfg)[0]}
+    assert by["state_dir"].status == OK
+    assert not sd.exists()  # read-only diagnostic must NOT create the tree
 
 
 def test_doctor_port_in_use_warns(write_config, tmp_path):
@@ -200,8 +208,12 @@ def test_restore_config_out_conflict_without_force(write_config, tmp_path):
     archive = make_backup(config, outdir)
     existing = tmp_path / "existing.yml"
     existing.write_text("keep me")
+    dest = tmp_path / "freshstate"  # does not exist yet
     with pytest.raises(FileExistsError):
-        restore_backup(archive, state_dir=tmp_path / "st", config_out=existing)
+        restore_backup(archive, state_dir=dest, config_out=existing)
+    # config conflict is detected up front, so state must NOT be half-applied.
+    assert not dest.exists()
+    assert existing.read_text() == "keep me"  # untouched
 
 
 def test_restore_skips_link_members(tmp_path):

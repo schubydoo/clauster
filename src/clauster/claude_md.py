@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from .models import ClaudeMdDoc
 FILENAME = "CLAUDE.md"
 MAX_BYTES = 64 * 1024  # 64 KB cap (spec §5)
 _AUDIT_FILE = "claude_md_audit.log"
+_log = logging.getLogger("clauster.claude_md")
 
 
 class ClaudeMdError(RuntimeError):
@@ -101,19 +103,35 @@ def write_claude_md(
         raise ClaudeMdConflict(f"{FILENAME} changed on disk since it was loaded")
 
     tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, target)
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError as exc:
+        # Atomic write failed (disk full, read-only, cross-device) — clean up the
+        # partial temp file and surface a 4xx instead of leaking an orphan + raw 500.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise ClaudeMdError(f"could not write {FILENAME}: {exc}") from exc
 
     new_sha = _sha256(content)
     if state_dir is not None:
-        _append_audit(
-            state_dir,
-            project=project_path.name,
-            user=user,
-            action="create" if not current.exists else "update",
-            size=len(encoded),
-            sha256=new_sha,
-        )
+        # Audit is best-effort: the content write already committed via os.replace,
+        # so a failed audit append must NOT be reported as a failed save — but it is
+        # logged loudly so the gap is never silent.
+        try:
+            _append_audit(
+                state_dir,
+                project=project_path.name,
+                user=user,
+                action="create" if not current.exists else "update",
+                size=len(encoded),
+                sha256=new_sha,
+            )
+        except OSError as exc:
+            _log.error("%s write for %s succeeded but audit append failed: %s",
+                       FILENAME, project_path.name, exc)
     return ClaudeMdDoc(exists=True, content=content, sha256=new_sha, size=len(encoded))
 
 

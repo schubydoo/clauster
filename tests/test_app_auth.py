@@ -183,6 +183,14 @@ def test_proxy_missing_remote_user_rejected(runner_config, monkeypatch):
     assert client.get("/api/instances", headers={"X-Proxy-Auth": hdr}).status_code == 401
 
 
+def test_proxy_trusted_peer_no_header_rejected(runner_config, monkeypatch):
+    client = _proxy_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    # Trusted peer IP but NO X-Proxy-Auth/Remote-User: must NOT trust on peer-IP
+    # alone — falls through to (absent) session auth -> 401.
+    assert client.get("/api/instances").status_code == 401
+
+
 def test_proxy_untrusted_peer_rejected(runner_config, monkeypatch):
     client = _proxy_client(runner_config)
     monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "9.9.9.9")
