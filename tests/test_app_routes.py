@@ -101,3 +101,41 @@ def test_clone_route_existing_target_409(write_config, tmp_path):
     r = _client(write_config, tmp_path).post(
         "/api/projects/clone", json={"name": "alpha", "url": "https://10.0.0.1/r.git"})
     assert r.status_code == 409
+
+
+# ----- per-project usage (cost badge) -----------------------------------
+
+def test_project_usage_invalid_name_422(write_config, tmp_path):
+    # Dotted name fails the project-name regex -> 422 (don't even scan transcripts).
+    assert _client(write_config, tmp_path).get("/api/projects/bad.name/usage").status_code == 422
+
+
+def test_project_usage_empty_project_zero(write_config, tmp_path):
+    # A real project with no transcripts under ~/.claude -> well-formed zero rollup.
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/usage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["project"] == "gamma"
+    assert body["transcripts"] == 0
+    assert body["total_tokens"] == 0
+    assert body["cost_usd"] == 0.0
+    assert body["by_model"] == {}
+    assert body["approximate"] is True
+
+
+def test_project_usage_serializes_rollup(write_config, tmp_path, monkeypatch):
+    # Aggregation itself is unit-tested; here we pin the route's serialization
+    # (field names, $ rounding, per-model breakdown) against a known rollup.
+    from clauster import usage as usage_mod
+
+    pu = usage_mod.ProjectUsage(project="alpha", transcript_count=2)
+    pu.by_model["claude-opus-4-8"] = usage_mod.TokenTotals(input=1_000_000, messages=3)
+    monkeypatch.setattr(usage_mod, "aggregate_project_usage", lambda *a, **k: pu)
+
+    body = _client(write_config, tmp_path).get("/api/projects/alpha/usage").json()
+    assert body["transcripts"] == 2
+    assert body["messages"] == 3
+    assert body["total_tokens"] == 1_000_000
+    assert body["cost_usd"] == 15.0  # 1 Mtok opus input @ $15/Mtok
+    assert body["by_model"]["claude-opus-4-8"]["cost_usd"] == 15.0
+    assert body["unpriced_models"] == []

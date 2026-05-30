@@ -8,13 +8,17 @@ from pathlib import Path
 import pytest
 
 from clauster import __main__ as cli
+from clauster.pointers import sanitize_cwd
 from clauster.usage import (
     PRICES,
     ModelPrice,
+    ProjectUsage,
     TokenTotals,
     TranscriptUsage,
+    aggregate_project_usage,
     cost_usd,
     parse_transcript,
+    transcript_paths_for,
 )
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "transcripts" / "test1-session.jsonl"
@@ -123,3 +127,102 @@ def test_cli_usage_fixture(capsys):
 
 def test_cli_usage_missing_file(tmp_path):
     assert cli.main(["usage", str(tmp_path / "nope.jsonl")]) == 2
+
+
+# ----- TokenTotals.merge -----------------------------------------------
+
+def test_token_totals_merge():
+    a = TokenTotals(input=1, output=2, cache_creation=3, cache_read=4, messages=1)
+    b = TokenTotals(input=10, output=20, cache_creation=30, cache_read=40, messages=2)
+    a.merge(b)
+    assert (a.input, a.output, a.cache_creation, a.cache_read, a.messages) == (11, 22, 33, 44, 3)
+
+
+# ----- per-project discovery + aggregation -----------------------------
+
+def _project_transcript_dir(claude_projects_dir: Path, project_path: Path) -> Path:
+    """Build the dir Claude would use for a project's transcripts, and create it."""
+    d = claude_projects_dir / sanitize_cwd(project_path)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_transcript_paths_for_finds_jsonl(tmp_path):
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    d = _project_transcript_dir(claude_dir, project)
+    (d / "a.jsonl").write_text("")
+    (d / "b.jsonl").write_text("")
+    (d / "notes.txt").write_text("ignore me")  # non-jsonl ignored
+    paths = transcript_paths_for(project, claude_dir)
+    assert [p.name for p in paths] == ["a.jsonl", "b.jsonl"]  # sorted
+
+
+def test_transcript_paths_for_missing_dir_is_empty(tmp_path):
+    # No transcript dir for this project -> [] rather than raising.
+    assert transcript_paths_for(Path("/srv/projects/never_run"), tmp_path / "claude_projects") == []
+
+
+def test_aggregate_project_usage_sums_across_transcripts(tmp_path):
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    d = _project_transcript_dir(claude_dir, project)
+    (d / "s1.jsonl").write_text(
+        json.dumps(_assistant("claude-opus-4-8", input_tokens=10, output_tokens=20)) + "\n"
+    )
+    (d / "s2.jsonl").write_text(
+        json.dumps(_assistant("claude-opus-4-8", input_tokens=5, output_tokens=1)) + "\n"
+        + json.dumps(_assistant("claude-sonnet-4-6", input_tokens=100, output_tokens=200)) + "\n"
+    )
+    pu = aggregate_project_usage(project, project_name="my_proj", claude_projects_dir=claude_dir)
+    assert isinstance(pu, ProjectUsage)
+    assert pu.project == "my_proj"
+    assert pu.transcript_count == 2
+    assert set(pu.by_model) == {"claude-opus-4-8", "claude-sonnet-4-6"}
+    # opus input merged across both transcripts; sonnet only in s2
+    assert pu.by_model["claude-opus-4-8"].input == 15
+    assert pu.by_model["claude-sonnet-4-6"].input == 100
+    assert pu.totals.input == 115 and pu.totals.messages == 3
+    assert pu.cost_usd() > 0
+
+
+def test_aggregate_project_usage_no_transcripts_is_zero(tmp_path):
+    pu = aggregate_project_usage(Path("/srv/projects/never_run"),
+                                 claude_projects_dir=tmp_path / "claude_projects")
+    assert pu.transcript_count == 0
+    assert pu.by_model == {}
+    assert pu.cost_usd() == 0.0
+    assert pu.totals.total_tokens == 0
+
+
+def test_aggregate_project_usage_defaults_name_to_basename(tmp_path):
+    pu = aggregate_project_usage(Path("/srv/projects/widget"),
+                                 claude_projects_dir=tmp_path / "claude_projects")
+    assert pu.project == "widget"
+
+
+def test_transcript_paths_for_oserror_is_empty(tmp_path, monkeypatch):
+    # If the filesystem raises while globbing (e.g. a permission error), swallow it
+    # and return [] rather than crashing the dashboard badge.
+    def _boom(self, pattern):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "glob", _boom)
+    assert transcript_paths_for(Path("/srv/projects/my_proj"), tmp_path / "claude_projects") == []
+
+
+def test_aggregate_skips_transcript_deleted_mid_walk(tmp_path, monkeypatch):
+    # A transcript listed by the walk vanishes before parse -> skipped, not fatal.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    d = _project_transcript_dir(claude_dir, project)
+    (d / "gone.jsonl").write_text(json.dumps(_assistant("claude-opus-4-8", input_tokens=1)) + "\n")
+
+    import clauster.usage as usage_mod
+
+    def _raise(_path):
+        raise FileNotFoundError("raced deletion")
+
+    monkeypatch.setattr(usage_mod, "parse_transcript", _raise)
+    pu = aggregate_project_usage(project, claude_projects_dir=claude_dir)
+    assert pu.transcript_count == 0 and pu.by_model == {}

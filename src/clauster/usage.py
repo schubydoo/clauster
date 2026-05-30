@@ -16,6 +16,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .pointers import CLAUDE_PROJECTS_DIR, sanitize_cwd
+
 
 @dataclass(frozen=True)
 class ModelPrice:
@@ -51,6 +53,14 @@ class TokenTotals:
         self.cache_read += int(usage.get("cache_read_input_tokens", 0) or 0)
         self.messages += 1
 
+    def merge(self, other: TokenTotals) -> None:
+        """Accumulate another bucket's counts into this one."""
+        self.input += other.input
+        self.output += other.output
+        self.cache_creation += other.cache_creation
+        self.cache_read += other.cache_read
+        self.messages += other.messages
+
     @property
     def total_tokens(self) -> int:
         return self.input + self.output + self.cache_creation + self.cache_read
@@ -77,30 +87,46 @@ def cost_usd(model: str, totals: TokenTotals, prices: dict[str, ModelPrice] = PR
     ) / 1_000_000
 
 
-@dataclass
-class TranscriptUsage:
-    path: Path
-    by_model: dict[str, TokenTotals] = field(default_factory=dict)
+class _ByModelAggregate:
+    """Shared token/cost rollup over a ``by_model`` mapping.
+
+    A plain mixin (not a dataclass) so the two concrete aggregates below can each
+    declare their own dataclass fields without inherited-default ordering trouble;
+    they only have to provide a ``by_model`` attribute.
+    """
+
+    by_model: dict[str, TokenTotals]
 
     @property
     def totals(self) -> TokenTotals:
         agg = TokenTotals()
         for t in self.by_model.values():
-            agg.input += t.input
-            agg.output += t.output
-            agg.cache_creation += t.cache_creation
-            agg.cache_read += t.cache_read
-            agg.messages += t.messages
+            agg.merge(t)
         return agg
 
     def cost_usd(self, prices: dict[str, ModelPrice] = PRICES) -> float:
         """Total approx USD across known models (unpriced models contribute 0)."""
-        return sum(
-            (cost_usd(m, t, prices) or 0.0) for m, t in self.by_model.items()
-        )
+        return sum((cost_usd(m, t, prices) or 0.0) for m, t in self.by_model.items())
 
     def unpriced_models(self, prices: dict[str, ModelPrice] = PRICES) -> list[str]:
         return [m for m in self.by_model if _price_for(m, prices) is None]
+
+
+@dataclass
+class TranscriptUsage(_ByModelAggregate):
+    """Token usage from a single transcript JSONL."""
+
+    path: Path
+    by_model: dict[str, TokenTotals] = field(default_factory=dict)
+
+
+@dataclass
+class ProjectUsage(_ByModelAggregate):
+    """Token usage aggregated across all of a project's transcripts."""
+
+    project: str
+    transcript_count: int = 0
+    by_model: dict[str, TokenTotals] = field(default_factory=dict)
 
 
 def parse_transcript(path: Path) -> TranscriptUsage:
@@ -132,4 +158,44 @@ def parse_transcript(path: Path) -> TranscriptUsage:
                 continue
             model = message.get("model") or "unknown"
             result.by_model.setdefault(model, TokenTotals()).add_usage(usage)
+    return result
+
+
+def transcript_paths_for(
+    project_path: Path, claude_projects_dir: Path = CLAUDE_PROJECTS_DIR
+) -> list[Path]:
+    """Every transcript JSONL Claude has written for ``project_path``.
+
+    Claude stores per-session transcripts under ``<claude_projects_dir>/<sanitized-cwd>/``,
+    where the directory name is the cwd with every non-alphanumeric character replaced
+    by ``-`` (the same mapping the bridge-pointer walk uses). Returns ``[]`` if that
+    directory is absent or unreadable.
+    """
+    transcript_dir = Path(claude_projects_dir) / sanitize_cwd(Path(project_path))
+    try:
+        return sorted(p for p in transcript_dir.glob("*.jsonl") if p.is_file())
+    except OSError:
+        return []
+
+
+def aggregate_project_usage(
+    project_path: Path,
+    *,
+    project_name: str | None = None,
+    claude_projects_dir: Path = CLAUDE_PROJECTS_DIR,
+) -> ProjectUsage:
+    """Sum token usage across every transcript belonging to a project.
+
+    Each transcript is streamed (never loaded whole); one that vanishes mid-walk
+    (a racing session cleanup) is skipped rather than aborting the whole tally.
+    """
+    result = ProjectUsage(project=project_name or Path(project_path).name)
+    for path in transcript_paths_for(project_path, claude_projects_dir):
+        try:
+            transcript = parse_transcript(path)
+        except FileNotFoundError:
+            continue
+        for model, totals in transcript.by_model.items():
+            result.by_model.setdefault(model, TokenTotals()).merge(totals)
+        result.transcript_count += 1
     return result
