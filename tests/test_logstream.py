@@ -45,3 +45,22 @@ def test_initial_offset_tails_large_file(tmp_path: Path):
     p = tmp_path / "l.log"
     p.write_bytes(b"x" * 100_000)
     assert logstream.initial_offset(p, tail_bytes=1000) == 99_000
+
+
+def test_initial_offset_missing_file_is_zero(tmp_path: Path):
+    assert logstream.initial_offset(tmp_path / "nope.log") == 0
+
+
+def test_read_new_open_error_returns_empty(tmp_path: Path, monkeypatch):
+    # stat() succeeds but open() fails (file vanishes / perm) -> graceful ("", offset).
+    p = tmp_path / "l.log"
+    p.write_text("hello world\n")
+    real_open = open
+
+    def boom(path, *a, **k):
+        if str(path) == str(p):
+            raise OSError("vanished")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", boom)
+    assert logstream.read_new(p, 0) == (0, "")
