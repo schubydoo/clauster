@@ -87,6 +87,13 @@ branches:
         # that's each job's `name:` field, NOT "workflow / job". A check must
         # also have run on the repo at least once before it can be required.
         #
+        # GOTCHA (observed on clauster's first push): when this file ships in a
+        # repo's FIRST push, none of these contexts have reported yet, and the
+        # Settings App's branch-protection PUT is rejected wholesale — labels /
+        # description / merge settings still apply (different API calls), but
+        # protection silently does NOT. Fix: once every listed check has run
+        # once, re-push this file (a no-op edit is enough) to re-apply.
+        #
         # Aggregator pattern (mirrors the family):
         #  - `ci required checks passed`        — ci.yml aggregator (needs: tests, build)
         #  - `security required checks passed`  — security.yml aggregator
