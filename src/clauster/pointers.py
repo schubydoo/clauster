@@ -10,8 +10,8 @@ and — via its directory name — the cwd. It does NOT carry ``intentional_stop
 or ``label`` (no ``state.json`` in v0.1); liveness is authoritative instead.
 
 The pointer directory name is Claude's sanitized cwd: every non-alphanumeric
-character becomes ``-`` (verified: ``/mnt/nas/projects/unnamed_project`` →
-``-mnt-nas-projects-unnamed-project``). That mapping is lossy, so we resolve
+character becomes ``-`` (verified: ``/srv/projects/my_project`` →
+``-srv-projects-my-project``). That mapping is lossy, so we resolve
 **forward** (project path → expected dir), never by reversing the dir name.
 """
 
