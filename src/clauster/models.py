@@ -70,6 +70,16 @@ class RemoteControlInstance(BaseModel):
         return f"https://claude.ai/code/{self.starter_session_id}?from=cli"
 
 
+class ClaudeMdDoc(BaseModel):
+    """A project's root CLAUDE.md as seen by the viewer/editor (spec §5)."""
+
+    exists: bool
+    content: str
+    sha256: str | None = None  # of the on-disk content; None when the file is absent
+    size: int = 0  # bytes (UTF-8)
+    bridge_running: bool = False  # set at the app layer; drives the stale-bridge banner
+
+
 class Attribution(str, Enum):
     TRACKED = "tracked"
     UNTRACKED = "untracked"
