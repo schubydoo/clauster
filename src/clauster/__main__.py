@@ -125,7 +125,11 @@ def _load_or_exit(config_path: str | None):
 
 def _backup(config_path: str | None, output: str) -> int:
     config = _load_or_exit(config_path)
-    path = ops.make_backup(config, Path(output))
+    try:
+        path = ops.make_backup(config, Path(output))
+    except OSError as exc:  # disk full / unwritable dest — clean exit, not a traceback
+        print(f"clauster: backup failed: {exc}", file=sys.stderr)
+        return 1
     print(f"clauster: wrote backup {path}", file=sys.stderr)
     print("clauster: note — the backed-up config contains the argon2 password hash; "
           "store the archive securely.", file=sys.stderr)
@@ -231,6 +235,24 @@ def _usage(transcript: str) -> int:
     return 0
 
 
+def _warn_if_cookie_insecure(config) -> None:
+    """Warn when auth is on but the session cookie will likely ship without Secure
+    (plain-http LAN, no TLS-terminating proxy) — it's then sniffable on the wire."""
+    a = config.auth
+    if not (a.enabled and a.password_required):
+        return
+    if a.cookie_secure == "always":
+        return  # Secure forced regardless of scheme
+    if a.reverse_proxy.enabled:
+        return  # a TLS proxy is expected to terminate https and set X-Forwarded-Proto
+    print(
+        "clauster: WARNING — auth is enabled but the session cookie may ship without "
+        "the Secure flag over plain http; put Clauster behind https/a TLS proxy, or set "
+        "auth.cookie_secure: always.",
+        file=sys.stderr,
+    )
+
+
 def _run(config_path: str | None) -> int:
     try:
         config = load_config(config_path)
@@ -252,6 +274,7 @@ def _run(config_path: str | None) -> int:
         f"projects_root={config.projects_root} | http://{config.host}:{config.port}",
         file=sys.stderr,
     )
+    _warn_if_cookie_insecure(config)
     app = create_app(config)
     # proxy_headers=False: keep request.client.host as the real socket peer so the
     # reverse-proxy IP allowlist can't be defeated via a spoofed X-Forwarded-For.
