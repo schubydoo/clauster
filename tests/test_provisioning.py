@@ -181,10 +181,11 @@ def test_url_unresolvable_host_rejected():
         validate_clone_url("https://nonexistent.invalid./r.git", _cfg())
 
 
-def test_url_malformed_cidr_in_allowlist_ignored():
-    # A garbage CIDR must never widen access — the private IP stays blocked.
-    with pytest.raises(BlockedCloneHost):
-        validate_clone_url("https://10.0.0.1/r.git", _cfg(allowed_private_cidrs=["garbage"]))
+def test_malformed_cidr_rejected_at_config_load():
+    # A garbage CIDR is now rejected when CloneConfig is built (fail-fast), rather
+    # than silently never matching — so it can never widen the SSRF allowlist.
+    with pytest.raises(ValueError):
+        _cfg(allowed_private_cidrs=["garbage"])
 
 
 def test_url_hostname_resolves_to_private_blocked(monkeypatch):
@@ -194,6 +195,18 @@ def test_url_hostname_resolves_to_private_blocked(monkeypatch):
     )
     with pytest.raises(BlockedCloneHost):
         validate_clone_url("https://internal.example/r.git", _cfg())
+
+
+def test_url_mixed_public_and_private_records_blocked(monkeypatch):
+    # DNS-rebinding / multi-A defense: a host that returns one public AND one
+    # private address must be blocked (we block if ANY record is private), not
+    # passed because the first happens to be public.
+    monkeypatch.setattr(
+        "clauster.provisioning.socket.getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", ("8.8.8.8", 443)), (2, 1, 6, "", ("10.0.0.1", 443))],
+    )
+    with pytest.raises(BlockedCloneHost):
+        validate_clone_url("https://rebind.example/r.git", _cfg())
 
 
 # ----- clone (fake git) -------------------------------------------------

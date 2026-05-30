@@ -7,6 +7,7 @@ of these touch the network or spawn bridges; they inspect config + manage state_
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import sys
@@ -114,15 +115,23 @@ def claude_cli_json() -> Path:
 
 
 def _check_state_dir_writable(state_dir: Path) -> Check:
+    # Read-only diagnostic: NEVER create the tree (that would mask a misconfigured
+    # path). Probe an existing dir; otherwise check the nearest existing ancestor.
     sd = state_dir.expanduser()
-    try:
-        sd.mkdir(parents=True, exist_ok=True)
-        probe = sd / ".doctor-write-probe"
-        probe.write_text("ok")
-        probe.unlink()
-        return Check("state_dir", OK, f"{sd} (writable)")
-    except OSError as exc:
-        return Check("state_dir", FAIL, f"{sd} not writable: {exc}")
+    if sd.exists():
+        try:
+            probe = sd / ".doctor-write-probe"
+            probe.write_text("ok")
+            probe.unlink()
+            return Check("state_dir", OK, f"{sd} (writable)")
+        except OSError as exc:
+            return Check("state_dir", FAIL, f"{sd} not writable: {exc}")
+    ancestor = sd
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    if os.access(ancestor, os.W_OK):
+        return Check("state_dir", OK, f"{sd} (absent; creatable under {ancestor})")
+    return Check("state_dir", FAIL, f"{sd} can't be created: {ancestor} not writable")
 
 
 def _check_auth(config: ClausterConfig) -> Check:
@@ -225,13 +234,19 @@ def restore_backup(
     force: bool = False,
 ) -> dict:
     """Restore state (and optionally config) from a backup. Extraction is hardened
-    against path traversal / absolute paths / symlink escape via filter='data'."""
+    against path traversal / absolute paths / symlink escape (see _safe_extract_tar)."""
     backup = backup.expanduser()
     state_dir = state_dir.expanduser()
+    if config_out is not None:
+        config_out = config_out.expanduser()
     if not backup.is_file():
         raise FileNotFoundError(f"backup not found: {backup}")
+    # Validate BOTH destinations up front so a config_out conflict can't leave a
+    # half-applied restore (state already copied, then we abort on the config).
     if state_dir.exists() and any(state_dir.iterdir()) and not force:
         raise FileExistsError(f"{state_dir} is not empty; pass force=True to overwrite")
+    if config_out is not None and config_out.exists() and not force:
+        raise FileExistsError(f"{config_out} exists; pass force=True to overwrite")
 
     restored = {"state_files": 0, "config": None}
     with tempfile.TemporaryDirectory() as td:
@@ -255,9 +270,6 @@ def restore_backup(
         if config_out is not None and src_cfg_dir.is_dir():
             cfgs = [p for p in src_cfg_dir.iterdir() if p.is_file()]
             if cfgs:
-                config_out = config_out.expanduser()
-                if config_out.exists() and not force:
-                    raise FileExistsError(f"{config_out} exists; pass force=True to overwrite")
                 config_out.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(cfgs[0], config_out)
                 restored["config"] = str(config_out)

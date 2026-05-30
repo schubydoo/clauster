@@ -164,6 +164,28 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     assert insts["alpha"].intentional_stop is False  # a live bridge is not "stopped"
 
 
+async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save({
+        "alpha": {"label": "alpha", "intentional_stop": True,
+                  "spawn_mode": "BOGUS", "permission_mode": "NOPE"},
+    })
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    class FakePtr:
+        pid, proc_start, environment_id, session_id = 4242, "1000", "env_x", "session_x"
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project",
+                        lambda path: FakePtr() if path.name == "alpha" else None)
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
+
+    await runner.rediscover()
+    inst = runner.get_instance("alpha")
+    assert inst is not None  # didn't crash on the bad persisted modes
+    assert inst.spawn_mode == "same-dir" and inst.permission_mode == "default"  # fell back
+
+
 def test_reconcile_status_transitions():
     def inst(status, intentional=False):
         return RemoteControlInstance(project="x", label="x", status=status, intentional_stop=intentional)

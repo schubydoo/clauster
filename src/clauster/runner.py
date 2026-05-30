@@ -14,6 +14,8 @@ iterate over a ``list(...)`` snapshot, never the live dict.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import signal
 import subprocess
@@ -22,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import bridge_log, inspector, pointers, procutil
+from .claude_cli import ClaudeNotFound
 from .config import PERMISSION_MODES, SPAWN_MODES, ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
 from .models import (
@@ -33,6 +36,8 @@ from .models import (
 )
 from .state import StateStore
 from .trust import is_trusted, trust_directory
+
+_log = logging.getLogger("clauster.runner")
 
 
 class SpawnError(RuntimeError):
@@ -346,13 +351,17 @@ class SessionRunner:
             # Overlay the few fields the pointer-walk can't recover; a bridge
             # found alive is by definition NOT intentionally stopped.
             saved = self._persisted.get(proj.name, {})
+            defaults = self._config.instance_defaults
+            # Coerce persisted modes against the allowed sets so a hand-edited /
+            # corrupt state.json can't fail the (now Literal-typed) model and abort
+            # startup — fall back to the configured default instead.
+            sm = saved.get("spawn_mode")
+            pm = saved.get("permission_mode")
             self._instances[proj.name] = RemoteControlInstance(
                 project=proj.name,
                 label=saved.get("label") or proj.name,
-                spawn_mode=saved.get("spawn_mode", self._config.instance_defaults.spawn_mode),
-                permission_mode=saved.get(
-                    "permission_mode", self._config.instance_defaults.permission_mode
-                ),
+                spawn_mode=sm if sm in SPAWN_MODES else defaults.spawn_mode,
+                permission_mode=pm if pm in PERMISSION_MODES else defaults.permission_mode,
                 intentional_stop=False,
                 status=InstanceStatus.RUNNING,
                 bridge_pid=ptr.pid,
@@ -378,8 +387,11 @@ class SessionRunner:
 
         try:
             sessions = await asyncio.to_thread(inspector.list_working_sessions, self._binary)
-        except Exception:
-            return  # cross-check is best-effort; never let it crash the loop
+        except (ClaudeNotFound, subprocess.SubprocessError, json.JSONDecodeError, OSError) as exc:
+            # Cross-check is best-effort — keep the loop alive, but log so a degraded
+            # `agents --json` probe is observable instead of silently freezing sessions.
+            _log.warning("agents --json cross-check failed (continuing): %s", exc)
+            return
         managed = {
             Path(self._discovered()[i.project].path): i.project
             for i in self._instances.values()
@@ -416,7 +428,9 @@ class SessionRunner:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                pass
+                # Never let an unexpected error kill the daemon's poll loop, but make
+                # it observable — a silent `pass` here hid status-reconcile failures.
+                _log.exception("poll_once failed; continuing")
             await asyncio.sleep(interval)
 
     async def shutdown(self) -> None:

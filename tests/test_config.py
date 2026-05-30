@@ -43,6 +43,28 @@ def test_non_mapping_config_root_rejected(tmp_path):
         load_config(cfg)
 
 
+@pytest.mark.parametrize("extra", [
+    "port: 0\n",
+    "port: 70000\n",
+    "instance_defaults:\n  capacity: 0\n",
+    "clone:\n  timeout_seconds: 0\n",
+    "logs:\n  bridge_log_max_size_mb: 0\n",
+])
+def test_out_of_range_numeric_config_rejected(write_config, extra):
+    with pytest.raises(ValueError):
+        load_config(write_config(extra))
+
+
+def test_malformed_clone_cidr_rejected(write_config):
+    with pytest.raises(ValueError):
+        load_config(write_config('clone:\n  allowed_private_cidrs: ["not-a-cidr"]\n'))
+
+
+def test_valid_clone_cidr_accepted(write_config):
+    config = load_config(write_config('clone:\n  allowed_private_cidrs: ["192.168.0.0/16", "10.0.0.0/8"]\n'))
+    assert config.clone.allowed_private_cidrs == ["192.168.0.0/16", "10.0.0.0/8"]
+
+
 def test_env_config_and_home_candidates(write_config, monkeypatch):
     # Setting CLAUSTER_CONFIG / CLAUSTER_HOME exercises both candidate-path branches.
     cfg_path = write_config()

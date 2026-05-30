@@ -117,6 +117,30 @@ def test_write_matching_base_sha_succeeds(tmp_path):
     assert doc.content == "mine\n"
 
 
+def test_write_replace_failure_cleans_tmp_and_raises(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setattr(
+        "clauster.claude_md.os.replace",
+        lambda s, d: (_ for _ in ()).throw(OSError("cross-device")),
+    )
+    with pytest.raises(ClaudeMdError):
+        write_claude_md(proj, "hello\n")
+    assert list(proj.glob("CLAUDE.md*")) == []  # no orphan .tmp left behind
+
+
+def test_write_audit_failure_does_not_fail_write(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    # Audit append raises, but the content write already committed -> save succeeds.
+    monkeypatch.setattr(
+        "clauster.claude_md._append_audit",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    doc = write_claude_md(proj, "kept\n", state_dir=tmp_path / "state")
+    assert doc.exists and (proj / "CLAUDE.md").read_text() == "kept\n"
+
+
 def test_write_symlink_escape_rejected(tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("password\n")

@@ -195,11 +195,13 @@ def test_api_spawn_non_string_mode_is_422(write_config):
 # ----- dashboard renders the pickers (footgun gating) ------------------
 
 def test_dashboard_renders_pickers(write_config):
+    # Assert on the binding/option markup, not on user-facing label text (which a
+    # copy change could break without a behaviour regression).
     client = _client(write_config)
     html = client.get("/").text
-    assert "spawn-opts" in html
-    assert "Permissions" in html
-    assert "worktree" in html  # alpha is a git repo -> worktree offered
+    assert "x-model=\"spawnMode['alpha']\"" in html
+    assert "x-model=\"permMode['alpha']\"" in html
+    assert '<option value="worktree">worktree</option>' in html  # alpha is a git repo
 
 
 _BYPASS_OPTION = '<option value="bypassPermissions">'

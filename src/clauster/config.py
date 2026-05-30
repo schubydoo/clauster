@@ -7,6 +7,7 @@ Schema is additive-only: old configs must always validate against newer versions
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
 from typing import Annotated, Literal
@@ -36,13 +37,13 @@ PERMISSION_MODES: tuple[str, ...] = (
 class ClaudeConfig(BaseModel):
     binary: str = "claude"
     min_version: str = "2.1.145"
-    agents_json_poll_interval_seconds: int = 300
+    agents_json_poll_interval_seconds: int = Field(default=300, ge=1)
 
 
 class InstanceDefaults(BaseModel):
     spawn_mode: SpawnMode = "same-dir"
     permission_mode: PermissionMode = "default"
-    capacity: int = 32
+    capacity: int = Field(default=32, ge=1)
 
 
 class ProjectConfig(BaseModel):
@@ -62,7 +63,7 @@ class ReverseProxyConfig(BaseModel):
     shared_secret_header: str = "X-Proxy-Auth"
     trusted_ips: list[str] = Field(default_factory=list)
     shared_secret: str | None = None  # HMAC key the proxy signs X-Proxy-Auth with
-    hmac_window_seconds: int = 60  # max clock skew / replay window for the signature
+    hmac_window_seconds: int = Field(default=60, ge=0)  # clock skew / replay window
 
 
 class AuthConfig(BaseModel):
@@ -75,7 +76,7 @@ class AuthConfig(BaseModel):
     allow_unauthenticated_network: bool = False
     # auto = Secure only over https (or trusted-proxy X-Forwarded-Proto=https)
     cookie_secure: Literal["auto", "always", "never"] = "auto"
-    session_max_age_seconds: int = 604800  # 7 days
+    session_max_age_seconds: int = Field(default=604800, ge=1)  # 7 days
     allowed_origins: list[str] = Field(default_factory=list)  # extra WS/CSRF origins (proxy domain)
 
 
@@ -87,13 +88,22 @@ class CloneConfig(BaseModel):
     allowed_schemes: list[str] = Field(default_factory=lambda: ["https", "ssh"])
     allow_private_hosts: bool = False  # block private/LAN IPs by default (SSRF)
     allowed_private_cidrs: list[str] = Field(default_factory=list)  # targeted LAN opt-in
-    timeout_seconds: int = 300
-    max_mb: int = 2048  # post-clone size cap; 0 = unlimited
+    timeout_seconds: int = Field(default=300, ge=1)
+    max_mb: int = Field(default=2048, ge=0)  # post-clone size cap; 0 = unlimited
+
+    @field_validator("allowed_private_cidrs")
+    @classmethod
+    def _validate_cidrs(cls, v: list[str]) -> list[str]:
+        # Fail fast on a malformed CIDR rather than letting it silently never match
+        # (this is an SSRF allowlist — a quiet no-op entry is a footgun).
+        for cidr in v:
+            ipaddress.ip_network(cidr, strict=False)
+        return v
 
 
 class LogsConfig(BaseModel):
-    bridge_log_max_size_mb: int = 10
-    keep_rotated: int = 5
+    bridge_log_max_size_mb: int = Field(default=10, ge=1)
+    keep_rotated: int = Field(default=5, ge=0)
     redact_session_url: bool = False  # false=hybrid (verbatim disk, redacted WS)
     strip_ansi_in_stream: bool = True
 
@@ -102,7 +112,7 @@ class ClausterConfig(BaseModel):
     schema_version: int = SCHEMA_VERSION
     projects_root: Path
     host: str = "127.0.0.1"
-    port: int = 7621
+    port: int = Field(default=7621, ge=1, le=65535)
     state_dir: Path = Path("~/.clauster")
     root_path: str = ""
     log_format: Literal["text", "json"] = "text"
