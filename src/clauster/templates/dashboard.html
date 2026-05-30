@@ -20,6 +20,40 @@
   </header>
 
   <main x-data="dashboard()" x-init="init()">
+    <section class="new-project">
+      <button class="btn-new-toggle" @click="np.open = !np.open"
+              x-text="np.open ? '× Cancel' : '+ New project'">+ New project</button>
+      <div class="np-panel" x-show="np.open">
+        <label class="np-field">Name
+          <input type="text" x-model="np.name" placeholder="my-project"
+                 pattern="[a-zA-Z0-9_-]+" @keyup.enter="submitNew()"></label>
+        <div class="np-modes">
+          <label><input type="radio" value="create" x-model="np.mode"> Create empty</label>
+          <label><input type="radio" value="clone" x-model="np.mode"> Clone from git URL</label>
+        </div>
+        <label class="np-field" x-show="np.mode === 'create'">
+          <input type="checkbox" x-model="np.gitInit"> run <code>git init</code></label>
+        <div x-show="np.mode === 'clone'">
+          <label class="np-field">Git URL
+            <input type="text" x-model="np.url" autocomplete="off" spellcheck="false"
+                   placeholder="https://github.com/owner/repo.git" @keyup.enter="submitNew()"></label>
+          <label class="np-field"><input type="checkbox" x-model="np.shallow"> shallow clone (<code>--depth 1</code>)</label>
+          <p class="np-hint">https / ssh only · private/LAN hosts blocked unless enabled in config ·
+            cloned code runs only when you Start a bridge.</p>
+        </div>
+        <div class="np-actions">
+          <button class="btn-np-go" @click="submitNew()" :disabled="np.busy || !np.name"
+                  x-text="np.busy ? (np.mode === 'clone' ? 'Cloning…' : 'Creating…')
+                                  : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</button>
+        </div>
+        <p class="np-error" x-show="np.error" x-text="np.error"></p>
+        <div class="np-warn" x-show="np.warn">
+          <p>⚠ <strong x-text="np.name"></strong> was created and ships <strong x-text="np.warn"></strong>
+            — its code runs when you Start a bridge here. Review it before starting.</p>
+          <button class="btn-np-reveal" @click="reloadToProject()">Show it</button>
+        </div>
+      </div>
+    </section>
     {% block project_list %}
     {% if projects %}
     <ul class="project-grid">
@@ -192,6 +226,8 @@
         confirmBypass: {},  // project name -> bool (typed-confirm panel open)
         bypassTyped: {},    // project name -> text typed into the confirm box
         cmd: {},            // project name -> CLAUDE.md editor state
+        np: { open: false, name: "", mode: "create", url: "", shallow: false,
+              gitInit: false, busy: false, error: null, warn: null },  // new-project panel
         async init() {
           for (const n of PROJECT_NAMES) {
             this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -318,6 +354,33 @@
           c.saving = false;
         },
         closeClaudeMd(name) { if (this.cmd[name]) this.cmd[name].open = false; },
+        async submitNew() {
+          const np = this.np;
+          if (!np.name || np.busy) return;
+          np.busy = true; np.error = null; np.warn = null;
+          try {
+            const res = np.mode === "clone"
+              ? await fetch(ROOT + "/api/projects/clone", {
+                  method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ name: np.name, url: np.url, shallow: np.shallow }) })
+              : await fetch(ROOT + "/api/projects", {
+                  method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ name: np.name, git_init: np.gitInit }) });
+            const body = await res.json();
+            if (!res.ok) { np.error = body.detail || "failed"; }
+            else {
+              // Spec §11 mitigation: warn (don't auto-start) when the new project
+              // ships code that will run once a bridge is started here.
+              const ships = [];
+              if (body.has_claude_md) ships.push("CLAUDE.md");
+              if (body.has_claude_dir) ships.push(".claude/");
+              if (ships.length) np.warn = ships.join(" + ");
+              else this.reloadToProject();
+            }
+          } catch (e) { np.error = String(e); }
+          np.busy = false;
+        },
+        reloadToProject() { window.location.reload(); },
         async _spawn(name) {
           this.errors[name] = null;
           this.instances[name] = { project: name, status: "starting" };

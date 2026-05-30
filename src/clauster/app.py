@@ -24,6 +24,17 @@ from .claude_md import (
 )
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
+from .provisioning import (
+    BlockedCloneHost,
+    CloneFailed,
+    GitUnavailable,
+    InvalidCloneUrl,
+    InvalidProjectName,
+    ProvisionError,
+    TargetExists,
+    clone_project,
+    create_project,
+)
 from .models import (
     ClaudeMdDoc,
     InstanceStatus,
@@ -223,6 +234,66 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.get("/api/projects")
     async def api_projects() -> list[Project]:
         return await list_projects()
+
+    async def _project_by_name(name: str) -> Project:
+        for proj in await list_projects():
+            if proj.name == name:
+                return proj
+        raise HTTPException(status_code=500, detail=f"project {name!r} missing after provisioning")
+
+    @app.post("/api/projects", status_code=201)
+    async def api_create_project(body: dict) -> Project:
+        name = body.get("name")
+        if not isinstance(name, str) or not name:
+            raise HTTPException(status_code=422, detail="body must include a 'name' string")
+        git_init = bool(body.get("git_init", False))
+        try:
+            await asyncio.to_thread(create_project, config.projects_root, name, git_init=git_init)
+        except InvalidProjectName as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except TargetExists as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except GitUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ProvisionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await _project_by_name(name)
+
+    @app.post("/api/projects/clone", status_code=201)
+    async def api_clone_project(body: dict) -> Project:
+        if not config.clone.enabled:
+            raise HTTPException(status_code=403, detail="clone is disabled in config")
+        name = body.get("name")
+        url = body.get("url")
+        if not isinstance(name, str) or not name:
+            raise HTTPException(status_code=422, detail="body must include a 'name' string")
+        if not isinstance(url, str) or not url:
+            raise HTTPException(status_code=422, detail="body must include a 'url' string")
+        shallow = bool(body.get("shallow", False))
+        try:
+            await asyncio.to_thread(
+                clone_project,
+                config.projects_root,
+                name,
+                url,
+                cfg=config.clone,
+                shallow=shallow,
+            )
+        except InvalidProjectName as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except TargetExists as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except InvalidCloneUrl as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except BlockedCloneHost as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except GitUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except CloneFailed as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except ProvisionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return await _project_by_name(name)
 
     @app.get("/api/instances")
     async def api_instances() -> list[RemoteControlInstance]:
