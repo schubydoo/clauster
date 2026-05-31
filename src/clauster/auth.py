@@ -161,19 +161,32 @@ def read_epoch(state_dir: Path) -> int:
         return 0
 
 
-def bump_epoch(state_dir: Path) -> int:
+def bump_epoch(state_dir: Path, floor: int = 0) -> int:
     """Atomically increment + persist the session epoch; return the new value.
 
     Bumping invalidates every previously-issued cookie (their embedded epoch is
     now stale), so logout becomes a genuine "log out everywhere" revocation that
     a captured cookie can't survive. Atomic write mirrors ``state.StateStore``.
+
+    The new value is ``max(on-disk epoch, floor) + 1``. ``floor`` is the caller's
+    last-known epoch — the in-memory ``app.state.session_epoch``, authoritative
+    for the running process. Flooring against it means a transient read error or
+    a corrupt on-disk value can never *lower* the epoch (which would un-revoke
+    previously-revoked cookies), so the read can stay lenient and logout never
+    has to fail to preserve the revocation guarantee. A missing/empty file reads
+    as 0; the floor carries the real value.
     """
     state_dir = state_dir.expanduser()
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = state_dir / "session.epoch"
-    new_value = read_epoch(state_dir) + 1
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+        disk = int(text) if text else 0
+    except (FileNotFoundError, OSError, ValueError):
+        disk = 0  # unreadable/corrupt: rely on the floor, never regress
+    new_value = max(disk, floor) + 1
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(str(new_value))
+    tmp.write_text(str(new_value), encoding="utf-8")
     os.replace(tmp, path)
     return new_value
 
