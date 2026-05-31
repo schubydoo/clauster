@@ -24,12 +24,10 @@ jobs:
     name: tests (${{ matrix.os }}, ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
-    # macOS + Windows are spec targets but not yet verified green: the test stub
-    # needs a Windows entrypoint and the code has cross-platform gaps the spec
-    # flagged as open (SIGINT-based stop, jiffies procStart). Run them for signal
-    # but don't block merges on them yet — Linux is the gate. Drop this per-OS as
-    # each platform is brought green in CI. See HANDOFF.md "cross-platform CI".
-    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    # Ubuntu, macOS, and Windows are all required (spec target: tri-platform).
+    # macOS + Windows were brought green via a .cmd entrypoint for the test stubs
+    # plus cross-platform guards; they now block merges like Linux, so a future
+    # regression on any platform can't silently rot the way these 29 once did.
     strategy:
       fail-fast: false
       # Spec target is Ubuntu + macOS + Windows (conductor_spec_v3 §"Ubuntu,
