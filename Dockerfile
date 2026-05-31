@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1
 #
 # Multi-arch (linux/amd64, linux/arm64) image for clauster, per spec §"Docker
-# image": python:3.13-slim base, non-root, PUID/PGID, healthcheck, JSON logs.
+# image": python:3.14-slim-trixie base, non-root, PUID/PGID, healthcheck, JSON logs.
 #
 # clauster spawns `claude remote-control` bridges, so the claude CLI is NOT
 # baked in — provide it at runtime (mount it onto PATH, or build a derived image
 # that installs it) along with ~/.claude credentials and your projects dir.
 
 # ----- builder: resolve the locked deps into a self-contained venv -----------
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.14-slim-trixie AS builder
 
 # renovate: datasource=docker depName=ghcr.io/astral-sh/uv
 COPY --from=ghcr.io/astral-sh/uv:0.11.17 /uv /uvx /bin/
@@ -28,19 +28,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable
 
 # ----- runtime ---------------------------------------------------------------
-FROM python:3.13-slim-bookworm AS runtime
+FROM python:3.14-slim-trixie AS runtime
 
-# apt upgrade pulls Debian security fixes the base image lags on (e.g. libgnutls30,
-# libgcrypt20). git: provisioning (create --git-init / clone). gosu + passwd:
-# PUID/PGID remap then privilege-drop in the entrypoint.
+# apt upgrade pulls any Debian security fixes published since the base image was
+# built (defense-in-depth on rebuilds). git: provisioning (create --git-init /
+# clone). gosu + passwd: PUID/PGID remap then privilege-drop in the entrypoint.
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends git gosu passwd \
     && rm -rf /var/lib/apt/lists/*
-
-# The base image's system pip is never used at runtime (clauster runs from the
-# copied venv) but trivy still flags its CVEs — upgrade it to a patched release.
-RUN pip install --no-cache-dir --upgrade pip
 
 # Default identity; remappable to the host's PUID/PGID at runtime.
 RUN groupadd -g 1000 clauster \
