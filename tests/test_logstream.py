@@ -7,10 +7,12 @@ from clauster import logstream
 
 def test_read_new_appends(tmp_path: Path):
     p = tmp_path / "l.log"
-    p.write_text("a\nb\n")
+    # write_bytes (not write_text): logstream reads raw bytes, so the fixture must
+    # not let text-mode newline translation turn "\n" into "\r\n" on Windows.
+    p.write_bytes(b"a\nb\n")
     off, text = logstream.read_new(p, 0)
     assert text == "a\nb\n" and off == 4
-    p.write_text("a\nb\nc\n")
+    p.write_bytes(b"a\nb\nc\n")
     off2, text2 = logstream.read_new(p, off)
     assert text2 == "c\n" and off2 == 6
 
@@ -24,9 +26,9 @@ def test_read_new_nothing_new(tmp_path: Path):
 
 def test_read_new_resets_on_truncation(tmp_path: Path):
     p = tmp_path / "l.log"
-    p.write_text("longcontent\n")
+    p.write_bytes(b"longcontent\n")  # bytes: avoid Windows "\n"->"\r\n" translation
     off, _ = logstream.read_new(p, 0)
-    p.write_text("x\n")  # rotated -> smaller than last offset
+    p.write_bytes(b"x\n")  # rotated -> smaller than last offset
     off2, text = logstream.read_new(p, off)
     assert text == "x\n" and off2 == 2
 

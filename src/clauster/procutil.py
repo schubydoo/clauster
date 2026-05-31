@@ -110,8 +110,11 @@ def _expected_epoch(proc_start: str | float | None) -> float | None:
 def reap_if_exited(pid: int) -> None:
     """Best-effort non-blocking reap of one of our own children (avoid zombies).
 
-    Safe to call on a non-child or already-reaped PID.
+    Safe to call on a non-child or already-reaped PID. A no-op on Windows, which
+    has no ``waitpid``/``WNOHANG`` and does not leave zombies to reap.
     """
+    if not hasattr(os, "WNOHANG"):  # Windows: no child reaping needed
+        return
     try:
         os.waitpid(pid, os.WNOHANG)
     except (ChildProcessError, OSError):

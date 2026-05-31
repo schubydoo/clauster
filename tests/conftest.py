@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# Windows CreateProcess can't launch the extensionless Python stubs, so on Windows
+# the fixtures expose a same-named `.cmd` wrapper that shells out to `python`.
+WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
 
 
 @pytest.fixture
@@ -37,7 +42,7 @@ def write_config(tmp_path: Path, projects_root: Path):
     return _write
 
 
-FAKE_CLAUDE = FIXTURES / "fake_claude" / "claude"
+FAKE_CLAUDE = FIXTURES / "fake_claude" / f"claude{WIN_STUB_SUFFIX}"
 
 
 @pytest.fixture

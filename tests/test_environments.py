@@ -202,7 +202,9 @@ def test_live_dirs_from_sessions(monkeypatch):
 
     s = WorkingSession(pid=1, cwd=Path("/x"), kind="interactive", started_at=1, local_uuid="u")
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda b: [s])
-    assert "/x" in environments.live_bridge_directories("claude")
+    # live_bridge_directories stores str(cwd); compare against the platform's own
+    # rendering ("/x" on POSIX, "\\x" on Windows) rather than a hardcoded literal.
+    assert str(Path("/x")) in environments.live_bridge_directories("claude")
 
 
 def test_live_dirs_includes_live_pointer_projects(monkeypatch, tmp_path):
