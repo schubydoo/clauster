@@ -30,11 +30,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ----- runtime ---------------------------------------------------------------
 FROM python:3.13-slim-bookworm AS runtime
 
-# git: provisioning (create --git-init / clone). gosu + passwd: PUID/PGID remap
-# then privilege-drop in the entrypoint.
+# apt upgrade pulls Debian security fixes the base image lags on (e.g. libgnutls30,
+# libgcrypt20). git: provisioning (create --git-init / clone). gosu + passwd:
+# PUID/PGID remap then privilege-drop in the entrypoint.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends git gosu passwd \
     && rm -rf /var/lib/apt/lists/*
+
+# The base image's system pip is never used at runtime (clauster runs from the
+# copied venv) but trivy still flags its CVEs — upgrade it to a patched release.
+RUN pip install --no-cache-dir --upgrade pip
 
 # Default identity; remappable to the host's PUID/PGID at runtime.
 RUN groupadd -g 1000 clauster \
