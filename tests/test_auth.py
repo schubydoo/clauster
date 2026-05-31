@@ -86,10 +86,10 @@ def test_bump_epoch_increments_and_persists(tmp_path):
     assert auth.read_epoch(tmp_path) == 2
 
 
-def test_bump_epoch_does_not_regress_on_read_error(tmp_path, monkeypatch):
-    # Regression: a transient I/O error reading the epoch must NOT silently reset
-    # it to 0 and write 1 — that would un-revoke every cookie issued before the
-    # prior bumps. bump_epoch must fail closed (propagate) and leave the file.
+def test_bump_epoch_floored_against_memory_on_read_error(tmp_path, monkeypatch):
+    # Regression: a transient read error must NOT lower the epoch to 1 (which
+    # would un-revoke cookies issued before prior bumps). The in-memory floor
+    # carries the real value, so the bump still advances past it.
     import pathlib
 
     (tmp_path / "session.epoch").write_text("7", encoding="utf-8")  # prior logouts
@@ -101,23 +101,26 @@ def test_bump_epoch_does_not_regress_on_read_error(tmp_path, monkeypatch):
         return real_read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(pathlib.Path, "read_text", boom)
-    with pytest.raises(OSError):
-        auth.bump_epoch(tmp_path)
-    # On-disk epoch unchanged (read_bytes isn't monkeypatched).
-    assert (tmp_path / "session.epoch").read_bytes().decode().strip() == "7"
+    # Caller passes its last-known epoch (7) as the floor -> 8, never 1.
+    assert auth.bump_epoch(tmp_path, floor=7) == 8
+    assert (tmp_path / "session.epoch").read_bytes().decode().strip() == "8"
 
 
-def test_bump_epoch_corrupt_value_fails_closed(tmp_path):
-    # A non-empty unparseable epoch also must not regress to 1; fail closed.
+def test_bump_epoch_floor_beats_corrupt_disk(tmp_path):
+    # A corrupt on-disk value reads as 0, but the floor prevents regression.
     (tmp_path / "session.epoch").write_text("garbage", encoding="utf-8")
-    with pytest.raises(ValueError):
-        auth.bump_epoch(tmp_path)
-    assert (tmp_path / "session.epoch").read_text(encoding="utf-8") == "garbage"
+    assert auth.bump_epoch(tmp_path, floor=7) == 8
+
+
+def test_bump_epoch_disk_beats_lower_floor(tmp_path):
+    # When the on-disk epoch is ahead of the floor (e.g. another process bumped
+    # it), the disk value wins so the epoch is monotonic.
+    (tmp_path / "session.epoch").write_text("5", encoding="utf-8")
+    assert auth.bump_epoch(tmp_path, floor=2) == 6
 
 
 def test_bump_epoch_empty_file_is_fresh_start(tmp_path):
-    # An empty file (anomalous, but not corrupt content) is treated as a fresh
-    # start, not a fail-closed error.
+    # An empty/missing file reads as 0; with no floor that's a fresh start.
     (tmp_path / "session.epoch").write_text("", encoding="utf-8")
     assert auth.bump_epoch(tmp_path) == 1
 

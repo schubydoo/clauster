@@ -245,7 +245,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # Bump the server-side epoch so the cookie we just dropped — and any
         # copy of it elsewhere — is actually revoked, not merely cleared client
         # side. Single-user today, so this is "log out everywhere".
-        app.state.session_epoch = await asyncio.to_thread(auth.bump_epoch, config.state_dir)
+        # Floor the bump against the in-memory epoch so a transient read error
+        # or corrupt session.epoch can never lower it (which would un-revoke).
+        app.state.session_epoch = await asyncio.to_thread(
+            auth.bump_epoch, config.state_dir, app.state.session_epoch
+        )
         resp = RedirectResponse(f"{_root}/login", status_code=303)
         resp.delete_cookie(_SESSION_COOKIE, path=_root or "/")
         return resp
