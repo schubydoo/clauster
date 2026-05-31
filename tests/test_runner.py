@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import subprocess
+from typing import cast
+
 import pytest
 
+from clauster import bridge_log
 from clauster.models import (
     Attribution,
     InstanceStatus,
@@ -158,6 +162,45 @@ async def test_spawn_trust_error_is_error(runner_config, monkeypatch):
     assert inst.status is InstanceStatus.ERROR
 
 
+def test_apply_markers_status_branches(runner_config):
+    """A slow-but-alive bridge stays STARTING (not a false 'Failed to start');
+    only a dead proc or a trust rejection is a terminal ERROR."""
+    runner = _make_runner(runner_config)
+
+    def proc(alive: bool) -> subprocess.Popen:
+        class _Proc:
+            def poll(self):
+                return None if alive else 0
+
+        return cast(subprocess.Popen, _Proc())
+
+    def fresh():
+        return RemoteControlInstance(project="x", label="x", status=InstanceStatus.STARTING)
+
+    ready = bridge_log.BridgeMarkers(poll_loop_started=True, environment_id="env_x")
+    assert ready.is_ready
+
+    # ready + alive -> RUNNING
+    i = fresh()
+    runner._apply_markers(i, ready, proc(alive=True))
+    assert i.status is InstanceStatus.RUNNING
+
+    # alive but no ready marker yet -> stays STARTING (slow start, not a failure)
+    i = fresh()
+    runner._apply_markers(i, bridge_log.BridgeMarkers(), proc(alive=True))
+    assert i.status is InstanceStatus.STARTING
+
+    # exited before readiness -> ERROR (genuine, terminal)
+    i = fresh()
+    runner._apply_markers(i, bridge_log.BridgeMarkers(), proc(alive=False))
+    assert i.status is InstanceStatus.ERROR
+
+    # trust rejected even while alive -> ERROR
+    i = fresh()
+    runner._apply_markers(i, bridge_log.BridgeMarkers(trust_error=True), proc(alive=True))
+    assert i.status is InstanceStatus.ERROR
+
+
 async def test_stop_unknown_instance_raises(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
@@ -300,9 +343,13 @@ def test_reconcile_status_transitions():
     SessionRunner._reconcile_status(i, alive=False)
     assert i.status is InstanceStatus.CRASHED
 
-    i = inst(InstanceStatus.ERROR)
+    i = inst(InstanceStatus.STARTING)
     SessionRunner._reconcile_status(i, alive=True)
-    assert i.status is InstanceStatus.RUNNING  # slow-start recovery
+    assert i.status is InstanceStatus.RUNNING  # slow-start promotion
+
+    i = inst(InstanceStatus.STARTING, intentional=False)
+    SessionRunner._reconcile_status(i, alive=False)
+    assert i.status is InstanceStatus.CRASHED  # died during startup
 
     i = inst(InstanceStatus.RUNNING)
     SessionRunner._reconcile_status(i, alive=True)
