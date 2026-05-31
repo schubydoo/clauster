@@ -168,6 +168,14 @@ def test_normalize_origin():
     assert auth.normalize_origin("https://h.test/login?x=1") == "https://h.test"
 
 
+def test_normalize_origin_malformed_passthrough():
+    # An origin with no scheme/hostname (e.g. the literal "null" Origin, or a bare
+    # token) can't be structured; it degrades to a lowercased, slash-trimmed
+    # passthrough that simply won't match the allowlist (fails closed).
+    assert auth.normalize_origin("null") == "null"
+    assert auth.normalize_origin("GARBAGE/") == "garbage"
+
+
 def test_build_allowed_origins(tmp_path):
     loopback = ClausterConfig(projects_root=tmp_path, host="127.0.0.1", port=7621)
     origins = auth.build_allowed_origins(loopback)
