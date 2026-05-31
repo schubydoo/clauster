@@ -217,7 +217,12 @@ def clone_project(
         raise ProvisionError("clone is disabled in config (clone.enabled = false)")
     target = _safe_target(projects_root, name)
     validate_clone_url(url, cfg)
-    if shutil.which(git_binary) is None:
+    # Resolve once and exec the resolved path: CreateProcess on Windows only
+    # auto-appends .exe (never .cmd/.bat), so a bare name would skip a .cmd shim
+    # that shutil.which (PATHEXT-aware) does find. Resolving also avoids a TOCTOU
+    # between this check and the spawn.
+    resolved_git = shutil.which(git_binary)
+    if resolved_git is None:
         raise GitUnavailable("git is not installed on the host")
 
     # Clone into a unique dot-prefixed temp dir (skipped by discovery; the random
@@ -227,7 +232,7 @@ def clone_project(
     tmp = projects_root / f".{name}.{uuid.uuid4().hex[:8]}.clone-tmp"
 
     cmd = [
-        git_binary,
+        resolved_git,
         "-c",
         "protocol.file.allow=never",
         "-c",
