@@ -428,7 +428,11 @@ class SessionRunner:
                 intentional_stop=False,
                 status=InstanceStatus.RUNNING,
                 bridge_pid=ptr.pid,
-                bridge_proc_start=procutil.jiffies_to_epoch(int(ptr.proc_start)),
+                # _expected_epoch (not bare int()) so an unparseable procStart
+                # degrades to None (cmdline-only liveness) instead of raising
+                # ValueError out of startup. Mirrors is_live_bridge, so the
+                # liveness check at line 412 and this construction can't disagree.
+                bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
                 environment_id=ptr.environment_id,
                 starter_session_id=ptr.session_id,
                 url=f"https://claude.ai/code?environment={ptr.environment_id}",
