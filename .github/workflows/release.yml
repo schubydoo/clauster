@@ -64,10 +64,62 @@ jobs:
         with:
           packages-dir: dist/
 
-# --------------------------------------------------------------------------
-# TODO (when a Dockerfile exists): add a GHCR multi-arch image job mirroring
-# the family's release.yml (dump1090-exporter) — docker/setup-qemu +
-# setup-buildx + login + metadata + build-push (provenance + sbom) + cosign
-# keyless signing. Also add a `trivy-image` job to security.yml and the
-# Dockerfile uv-pin customManager to renovate.json at that point.
-# --------------------------------------------------------------------------
+  docker:
+    name: GHCR image (multi-arch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+      id-token: write # cosign keyless signing (OIDC)
+      attestations: write # build provenance / SBOM attestations
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # Tag is refs/tags/vX.Y.Z on a push; semver patterns strip the leading v.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+      - name: Build and push (amd64 + arm64)
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Supply-chain provenance + SBOM attestations pushed with the image.
+          provenance: true
+          sbom: true
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the image (keyless, by digest)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            cosign sign --yes "${tag%%:*}@${DIGEST}"
+          done <<< "$TAGS"

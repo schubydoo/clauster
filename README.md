@@ -55,6 +55,25 @@ uv run clauster
 
 Then open <http://127.0.0.1:7621>.
 
+## Docker
+
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on each release:
+
+```sh
+docker run -d --name clauster \
+  -p 7621:7621 \
+  -e PUID=1000 -e PGID=1000 \
+  -e CLAUSTER_AUTH_PASSWORD_HASH="$(clauster hash-password)" \
+  -v /path/to/config:/config \
+  -v /path/to/projects:/projects \
+  ghcr.io/schubydoo/clauster:latest
+```
+
+- The image binds `0.0.0.0`, which **requires auth** — set `CLAUSTER_AUTH_PASSWORD_HASH` (or put it in `/config/clauster.yml`) or the container exits on start.
+- `/config` holds `clauster.yml` + state; `/projects` is your `projects_root`. `PUID`/`PGID` remap the runtime user to own bind-mounts.
+- `claude` is **not** baked in (clauster spawns `claude remote-control`): mount it onto the container `PATH` along with `~/.claude` credentials, or build a derived image that installs it.
+- Logs are JSON by default (`CLAUSTER_LOG_FORMAT`); health is at `/healthz`. Images are cosign-signed with build provenance + SBOM attestations.
+
 ## CLI
 
 ```

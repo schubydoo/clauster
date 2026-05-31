@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 2
     outputs:
       deps: ${{ steps.diff.outputs.deps }}
+      docker: ${{ steps.diff.outputs.docker }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         if: github.event_name == 'pull_request'
@@ -44,14 +45,19 @@ jobs:
           echo "Changed files:"
           printf '%s\n' "$files"
           deps=false
+          docker=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
               pyproject.toml|uv.lock) deps=true ;;
             esac
+            case "$f" in
+              Dockerfile|.dockerignore|docker/*) docker=true ;;
+            esac
           done <<< "$files"
           echo "deps=$deps" >> "$GITHUB_OUTPUT"
-          echo "Resolved flags: deps=$deps"
+          echo "docker=$docker" >> "$GITHUB_OUTPUT"
+          echo "Resolved flags: deps=$deps docker=$docker"
 
   codeql:
     name: codeql analyze
@@ -150,6 +156,46 @@ jobs:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
 
+  trivy-image:
+    name: trivy image scan
+    needs: changes
+    if: needs.changes.outputs.docker == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      # Build the amd64 image once and load it locally for the scan (no push).
+      - name: Build image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          load: true
+          tags: clauster:scan
+          platforms: linux/amd64
+      - name: Trivy image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: clauster:scan
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
   zizmor:
     name: workflow audit
     runs-on: ubuntu-latest
@@ -203,6 +249,7 @@ jobs:
       - gitleaks
       - semgrep
       - trivy-fs
+      - trivy-image
       - zizmor
       - dependency-review
     runs-on: ubuntu-latest
