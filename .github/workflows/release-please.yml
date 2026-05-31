@@ -46,6 +46,12 @@ jobs:
         with:
           app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          # Scope the minted token to exactly what release-please needs, rather
+          # than inheriting the installation's full permission set (zizmor
+          # least-privilege). Add permission-issues: write only if you enable
+          # release-please's label-on-issue features.
+          permission-contents: write
+          permission-pull-requests: write
 
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
