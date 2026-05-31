@@ -86,15 +86,21 @@ def create_project(projects_root: Path, name: str, *, git_init: bool = False) ->
     except FileExistsError as exc:  # lost the exists()->mkdir race
         raise TargetExists(f"a directory named {name!r} already exists") from exc
     if git_init:
+        # Resolve then exec (mirrors clone_project): Windows CreateProcess only
+        # auto-appends .exe, so a bare "git" would skip a git.cmd shim that
+        # shutil.which resolves — running a different/again-resolved binary.
+        resolved_git = shutil.which("git")
+        if resolved_git is None:
+            raise GitUnavailable("git is not installed on the host")
         try:
             subprocess.run(
-                ["git", "init", "--quiet", str(target)],
+                [resolved_git, "init", "--quiet", str(target)],
                 check=True,
                 capture_output=True,
                 timeout=30,
                 env=_git_env(),
             )
-        except FileNotFoundError as exc:
+        except FileNotFoundError as exc:  # race: git vanished after which()
             raise GitUnavailable("git is not installed on the host") from exc
         except subprocess.CalledProcessError as exc:
             shutil.rmtree(target, ignore_errors=True)

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import cast
 
 from . import bridge_log, inspector, pointers, procutil
-from .claude_cli import ClaudeNotFound
+from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
     SPAWN_MODES,
@@ -207,9 +207,17 @@ class SessionRunner:
         )
         self._instances[name] = instance  # on the loop
 
-        proc = await asyncio.to_thread(
-            self._popen, proj.path, log_path, name, spawn_mode, permission_mode
-        )
+        try:
+            proc = await asyncio.to_thread(
+                self._popen, proj.path, log_path, name, spawn_mode, permission_mode
+            )
+        except (OSError, ClaudeNotFound) as exc:
+            # Binary unresolvable / not executable: fail the instance cleanly
+            # instead of leaving it stuck in STARTING.
+            _log.warning("spawn of %s failed to launch: %s", name, exc)
+            instance.status = InstanceStatus.ERROR
+            await self._persist()
+            return instance
         self._procs[name] = proc
         instance.bridge_pid = proc.pid
         instance.bridge_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
@@ -271,6 +279,11 @@ class SessionRunner:
         permission_mode: str,
     ) -> subprocess.Popen:
         cmd = self._build_cmd(log_path, name, spawn_mode, permission_mode)
+        # Exec the RESOLVED absolute path, not the bare configured name: Windows
+        # CreateProcess only auto-appends .exe (never the .cmd/.ps1 shim npm installs
+        # for `claude`), so a bare name that the version probe resolves via
+        # shutil.which would fail to spawn here. Also pins the binary we validated.
+        cmd[0] = resolve_binary(cmd[0])
         # Detach the bridge into its own session/group so it survives a clauster
         # restart and a SIGINT to clauster never propagates to it. On Windows,
         # CREATE_NEW_PROCESS_GROUP additionally makes the bridge addressable by a
@@ -364,7 +377,12 @@ class SessionRunner:
         """Ask a bridge to shut down gracefully: SIGINT on POSIX, CTRL_BREAK on
         Windows (deliverable because the bridge is its own process group)."""
         sig = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
-        os.kill(pid, sig)
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError) as exc:
+            # Already exited / reused / not signalable — _await_exit's liveness
+            # poll and force-kill fallback handle the outcome; don't raise out of stop().
+            _log.debug("stop signal to pid %s was a no-op: %s", pid, exc)
 
     async def _await_exit(self, name: str, pid: int, proc_start: float | None) -> None:
         for _ in range(20):  # ~5s grace for a clean shutdown
