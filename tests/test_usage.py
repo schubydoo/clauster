@@ -127,6 +127,17 @@ def test_parse_tolerates_blank_and_corrupt_lines(tmp_path):
     assert u.totals.input == 5 and u.totals.messages == 1
 
 
+def test_parse_tolerates_invalid_utf8(tmp_path):
+    # Transcripts are written by the external claude bridge and can contain
+    # invalid UTF-8. A bad byte must not crash the tally (regression: it used to
+    # raise an uncaught UnicodeDecodeError mid-iteration, aborting the whole walk).
+    p = tmp_path / "t.jsonl"
+    good = json.dumps(_assistant("claude-opus-4-8", input_tokens=7)).encode("utf-8")
+    p.write_bytes(b"\xff\xfe garbage line\n" + good + b"\n")
+    u = parse_transcript(p)
+    assert u.totals.input == 7 and u.totals.messages == 1
+
+
 def test_parse_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         parse_transcript(tmp_path / "nope.jsonl")

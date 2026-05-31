@@ -140,7 +140,12 @@ def parse_transcript(path: Path) -> TranscriptUsage:
     """
     result = TranscriptUsage(path=Path(path))
     try:
-        fh = open(path, encoding="utf-8")
+        # errors="replace": transcripts are written by the external claude bridge
+        # and can carry invalid UTF-8. Without this, a bad byte raises
+        # UnicodeDecodeError mid-iteration (not a JSONDecodeError, so the per-line
+        # guard below misses it), aborting the whole project tally. A replaced
+        # char either parses fine or trips the JSONDecodeError skip — never crashes.
+        fh = open(path, encoding="utf-8", errors="replace")
     except (FileNotFoundError, OSError) as exc:
         raise FileNotFoundError(f"transcript not found: {path}") from exc
     with fh:
