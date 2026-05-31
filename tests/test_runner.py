@@ -201,6 +201,78 @@ def test_apply_markers_status_branches(runner_config):
     assert i.status is InstanceStatus.ERROR
 
 
+async def test_watch_startup_alive_unregistered_becomes_error(runner_config, monkeypatch):
+    """Regression: a bridge that launches but never registers an environment
+    (e.g. it can't authenticate to the controller) stays alive yet uncontrollable.
+    It must never be reported RUNNING — it stays STARTING, then fails to ERROR."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")  # alive, never registers
+    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 0.3  # tiny grace so the test is fast
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING  # NOT a false RUNNING
+    assert inst.url is None and inst.environment_id is None
+    watch = runner._startup_watches["alpha"]
+
+    await watch
+    assert inst.status is InstanceStatus.ERROR  # honest: alive but never usable
+    assert inst.url is None and inst.environment_id is None
+    assert runner.running_count() == 0
+
+    await runner.stop("alpha")  # clean up the still-idling fake bridge
+
+
+async def test_watch_startup_promotes_on_late_registration(runner_config, monkeypatch):
+    """A genuinely slow bridge that registers *after* the synchronous readiness
+    wait is promoted to RUNNING by the watch — but only once it actually has an
+    environment, never on liveness alone."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "slow")
+    monkeypatch.setenv("FAKE_CLAUDE_SLOW", "0.5")  # registers ~0.5s in, after the wait
+    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 30
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING  # not ready within the 0.2s wait
+    assert inst.url is None
+    watch = runner._startup_watches["alpha"]
+
+    await watch
+    assert inst.status is InstanceStatus.RUNNING
+    assert inst.environment_id == "env_01TESTENVAAAAAAAAAAAAAAAA"
+    assert inst.url and inst.url.endswith("env_01TESTENVAAAAAAAAAAAAAAAA")
+
+    await runner.stop("alpha")
+
+
+async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeypatch):
+    """If a STARTING bridge dies before registering, the watch defers to the same
+    rule as the poll loop: an unintended same-dir exit is CRASHED."""
+    import os
+    import signal as _signal
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
+    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 30  # long; we kill it well before grace
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING
+    watch = runner._startup_watches["alpha"]
+
+    assert inst.bridge_pid is not None
+    os.kill(inst.bridge_pid, _signal.SIGKILL)  # die during startup
+    await watch
+    assert inst.status is InstanceStatus.CRASHED
+
+
 async def test_stop_unknown_instance_raises(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
@@ -345,7 +417,10 @@ def test_reconcile_status_transitions():
 
     i = inst(InstanceStatus.STARTING)
     SessionRunner._reconcile_status(i, alive=True)
-    assert i.status is InstanceStatus.RUNNING  # slow-start promotion
+    # Liveness alone must NOT promote: a bridge can be alive yet never have
+    # registered an environment (then it is unusable). Promotion is the
+    # startup-watch's job, gated on a real environment registration.
+    assert i.status is InstanceStatus.STARTING
 
     i = inst(InstanceStatus.STARTING, intentional=False)
     SessionRunner._reconcile_status(i, alive=False)
