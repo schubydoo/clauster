@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import sys
 
 import pytest
 
@@ -213,6 +214,9 @@ def test_secret_persists_and_is_0600(tmp_path):
     s1 = auth.load_or_create_secret(tmp_path)
     s2 = auth.load_or_create_secret(tmp_path)
     assert s1 == s2 and len(s1) == 32
+    if sys.platform == "win32":
+        # Windows has no POSIX permission bits; chmod(0o600) is a no-op there.
+        pytest.skip("POSIX file modes not enforced on Windows")
     assert (tmp_path / "session.secret").stat().st_mode & 0o777 == 0o600
 
 

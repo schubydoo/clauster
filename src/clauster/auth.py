@@ -51,8 +51,12 @@ def load_or_create_secret(state_dir: Path) -> bytes:
     state_dir = state_dir.expanduser()
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / "session.secret"
+    # O_BINARY (Windows-only; 0 on POSIX) keeps os.write from translating any
+    # 0x0A byte in the random secret into 0x0D 0x0A — which would corrupt ~12% of
+    # secrets and break session persistence across restarts on Windows.
     try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags, 0o600)
     except FileExistsError:
         return path.read_bytes()
     try:

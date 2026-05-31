@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import tarfile
 from pathlib import Path
 
@@ -23,7 +24,12 @@ from clauster.ops import (
     run_doctor,
 )
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+# .cmd on Windows so the version probe resolves on Python 3.11 too (3.12+ would
+# find the sibling claude.cmd via PATHEXT, but 3.11 won't — be explicit).
+_WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
+FAKE_CLAUDE = (
+    Path(__file__).resolve().parent / "fixtures" / "fake_claude" / f"claude{_WIN_STUB_SUFFIX}"
+)
 
 
 # ----- _version_ge ------------------------------------------------------

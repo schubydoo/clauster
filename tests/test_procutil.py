@@ -101,7 +101,10 @@ def test_is_live_bridge_skips_start_check_when_none(monkeypatch):
 
 
 def test_clk_tck_falls_back_on_error(monkeypatch):
-    monkeypatch.setattr(procutil.os, "sysconf", lambda _name: (_ for _ in ()).throw(OSError()))
+    # raising=False: os.sysconf doesn't exist on Windows, so patch it in regardless.
+    monkeypatch.setattr(
+        procutil.os, "sysconf", lambda _name: (_ for _ in ()).throw(OSError()), raising=False
+    )
     assert procutil._clk_tck() == 100
 
 

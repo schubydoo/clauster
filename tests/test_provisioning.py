@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,10 @@ from clauster.provisioning import (
 )
 
 FAKE_GIT = Path(__file__).resolve().parent / "fixtures" / "fake_git"
+
+# Windows can't exec/resolve the extensionless `git` stub; a `.cmd` wrapper sits
+# beside it and is what shutil.which/subprocess must target on Windows.
+_WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
 
 
 # ----- create -----------------------------------------------------------
@@ -226,7 +231,7 @@ def test_url_mixed_public_and_private_records_blocked(monkeypatch):
 
 
 def _gitbin() -> str:
-    return str(FAKE_GIT / "git")
+    return str(FAKE_GIT / f"git{_WIN_STUB_SUFFIX}")
 
 
 def test_clone_success_and_transport_env(tmp_path, monkeypatch):
@@ -386,7 +391,7 @@ def test_route_clone_bad_url_422(write_config):
 
 
 def test_route_clone_success(write_config, monkeypatch):
-    monkeypatch.setenv("PATH", str(FAKE_GIT) + ":" + __import__("os").environ["PATH"])
+    monkeypatch.setenv("PATH", str(FAKE_GIT) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("FAKE_GIT_MODE", "with_claude")
     client = _client(write_config, "clone:\n  allow_private_hosts: true\n")
     resp = client.post(
@@ -399,7 +404,7 @@ def test_route_clone_success(write_config, monkeypatch):
 
 
 def test_route_clone_failed_502(write_config, monkeypatch):
-    monkeypatch.setenv("PATH", str(FAKE_GIT) + ":" + os.environ["PATH"])
+    monkeypatch.setenv("PATH", str(FAKE_GIT) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("FAKE_GIT_MODE", "fail")
     client = _client(write_config, "clone:\n  allow_private_hosts: true\n")
     resp = client.post("/api/projects/clone", json={"name": "x", "url": "https://10.0.0.1/r.git"})
