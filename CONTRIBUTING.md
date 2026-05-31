@@ -28,8 +28,9 @@ uv run clauster
   title becomes the commit subject that release-please parses for versioning and
   the changelog. CI enforces this.
 
-CI runs tests (Linux on Python 3.11–3.14; macOS/Windows are informational for
-now), lint, security scanners, and dependency review.
+CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.14
+(all merge-blocking; Linux additionally enforces the 96% coverage gate), plus
+lint, security scanners, and dependency review.
 
 ## License
 
