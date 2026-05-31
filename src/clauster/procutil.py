@@ -107,6 +107,26 @@ def _expected_epoch(proc_start: str | float | None) -> float | None:
     return jiffies_to_epoch(jiffies)
 
 
+def force_kill_tree(pid: int) -> None:
+    """Best-effort hard kill of ``pid`` and all its descendants.
+
+    The graceful-stop fallback: used when a bridge ignores SIGINT/CTRL_BREAK, or
+    to reap a wrapper process (e.g. a Windows ``.cmd`` shim) that outlives the
+    bridge it launched. Safe on a dead/reused/absent PID.
+    """
+    try:
+        proc = psutil.Process(pid)
+        targets = proc.children(recursive=True)
+        targets.append(proc)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return
+    for p in targets:
+        try:
+            p.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+
 def reap_if_exited(pid: int) -> None:
     """Best-effort non-blocking reap of one of our own children (avoid zombies).
 

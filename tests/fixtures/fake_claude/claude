@@ -66,6 +66,8 @@ def run_bridge(args):
 
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
+    if hasattr(signal, "SIGBREAK"):  # Windows CTRL_BREAK_EVENT (graceful stop)
+        signal.signal(signal.SIGBREAK, handler)
     for _ in range(2400):  # idle up to ~600s waiting for a signal
         if stopped["v"]:
             break
