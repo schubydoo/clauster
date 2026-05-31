@@ -167,13 +167,25 @@ def bump_epoch(state_dir: Path) -> int:
     Bumping invalidates every previously-issued cookie (their embedded epoch is
     now stale), so logout becomes a genuine "log out everywhere" revocation that
     a captured cookie can't survive. Atomic write mirrors ``state.StateStore``.
+
+    Reads the current epoch STRICTLY here — unlike the lenient ``read_epoch``
+    used on every request, which returns 0 on any error. A missing or empty file
+    is a legitimate fresh start (=> 0), but a transient I/O error or a corrupt
+    value must NOT silently reset the epoch to 0: that would *lower* it and
+    un-revoke every previously-revoked cookie, defeating logout. Those propagate
+    (logout fails loudly, fail-closed) rather than regressing the epoch.
     """
     state_dir = state_dir.expanduser()
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = state_dir / "session.epoch"
-    new_value = read_epoch(state_dir) + 1
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        text = ""
+    current = int(text) if text else 0  # non-empty garbage -> ValueError (fail closed)
+    new_value = current + 1
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(str(new_value))
+    tmp.write_text(str(new_value), encoding="utf-8")
     os.replace(tmp, path)
     return new_value
 

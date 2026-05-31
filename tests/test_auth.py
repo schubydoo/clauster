@@ -86,6 +86,42 @@ def test_bump_epoch_increments_and_persists(tmp_path):
     assert auth.read_epoch(tmp_path) == 2
 
 
+def test_bump_epoch_does_not_regress_on_read_error(tmp_path, monkeypatch):
+    # Regression: a transient I/O error reading the epoch must NOT silently reset
+    # it to 0 and write 1 — that would un-revoke every cookie issued before the
+    # prior bumps. bump_epoch must fail closed (propagate) and leave the file.
+    import pathlib
+
+    (tmp_path / "session.epoch").write_text("7", encoding="utf-8")  # prior logouts
+    real_read_text = pathlib.Path.read_text
+
+    def boom(self, *args, **kwargs):
+        if self.name == "session.epoch":
+            raise PermissionError("simulated transient read error")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", boom)
+    with pytest.raises(OSError):
+        auth.bump_epoch(tmp_path)
+    # On-disk epoch unchanged (read_bytes isn't monkeypatched).
+    assert (tmp_path / "session.epoch").read_bytes().decode().strip() == "7"
+
+
+def test_bump_epoch_corrupt_value_fails_closed(tmp_path):
+    # A non-empty unparseable epoch also must not regress to 1; fail closed.
+    (tmp_path / "session.epoch").write_text("garbage", encoding="utf-8")
+    with pytest.raises(ValueError):
+        auth.bump_epoch(tmp_path)
+    assert (tmp_path / "session.epoch").read_text(encoding="utf-8") == "garbage"
+
+
+def test_bump_epoch_empty_file_is_fresh_start(tmp_path):
+    # An empty file (anomalous, but not corrupt content) is treated as a fresh
+    # start, not a fail-closed error.
+    (tmp_path / "session.epoch").write_text("", encoding="utf-8")
+    assert auth.bump_epoch(tmp_path) == 1
+
+
 def test_session_rejected_when_epoch_stale():
     s = auth.make_serializer(b"secret-key-0001")
     tok = auth.issue_session(s, "admin", epoch=0)
