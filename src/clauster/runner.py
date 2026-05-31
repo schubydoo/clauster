@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -270,8 +271,20 @@ class SessionRunner:
         permission_mode: str,
     ) -> subprocess.Popen:
         cmd = self._build_cmd(log_path, name, spawn_mode, permission_mode)
-        # Detached (own session) so the bridge survives a clauster restart and a
-        # SIGINT to clauster never propagates to it.
+        # Detach the bridge into its own session/group so it survives a clauster
+        # restart and a SIGINT to clauster never propagates to it. On Windows,
+        # CREATE_NEW_PROCESS_GROUP additionally makes the bridge addressable by a
+        # CTRL_BREAK_EVENT for graceful stop (POSIX uses start_new_session); stdin
+        # is detached so a wrapping cmd.exe never blocks on an interactive prompt.
+        if sys.platform == "win32":
+            return subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
         return subprocess.Popen(
             cmd,
             cwd=str(cwd),
@@ -341,17 +354,28 @@ class SessionRunner:
 
         # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
         if await asyncio.to_thread(procutil.is_live_bridge, pid, instance.bridge_proc_start):
-            await asyncio.to_thread(os.kill, pid, signal.SIGINT)
+            await asyncio.to_thread(self._signal_stop, pid)
             await self._await_exit(name, pid, instance.bridge_proc_start)
         instance.status = InstanceStatus.STOPPED
         return instance
 
+    @staticmethod
+    def _signal_stop(pid: int) -> None:
+        """Ask a bridge to shut down gracefully: SIGINT on POSIX, CTRL_BREAK on
+        Windows (deliverable because the bridge is its own process group)."""
+        sig = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
+        os.kill(pid, sig)
+
     async def _await_exit(self, name: str, pid: int, proc_start: float | None) -> None:
-        for _ in range(20):  # ~5s
+        for _ in range(20):  # ~5s grace for a clean shutdown
             alive = await asyncio.to_thread(procutil.is_live_bridge, pid, proc_start)
             if not alive:
                 break
             await asyncio.sleep(0.25)
+        else:
+            # Ignored the graceful signal (or a wrapper process is lingering, e.g.
+            # a Windows .cmd shim parked at cmd.exe's prompt) -> force the tree down.
+            await asyncio.to_thread(procutil.force_kill_tree, pid)
         await asyncio.to_thread(procutil.reap_if_exited, pid)
 
     # ----- background poll (source #2 + liveness reconcile) ---------------

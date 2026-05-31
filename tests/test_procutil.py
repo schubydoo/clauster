@@ -135,3 +135,22 @@ def test_reap_if_exited_swallows_non_child():
     # Neither a bogus PID nor our own (not a child) should raise.
     procutil.reap_if_exited(2_000_000_000)
     procutil.reap_if_exited(os.getpid())
+
+
+def test_force_kill_tree_kills_process():
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert psutil.pid_exists(proc.pid)
+        procutil.force_kill_tree(proc.pid)
+        proc.wait(timeout=5)
+        assert proc.poll() is not None  # actually dead
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_force_kill_tree_safe_on_dead_pid():
+    procutil.force_kill_tree(2_000_000_000)  # absent PID -> no raise

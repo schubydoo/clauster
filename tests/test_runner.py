@@ -35,6 +35,49 @@ async def test_spawn_ready_then_stop(runner_config, monkeypatch):
     assert runner.running_count() == 0
 
 
+async def test_stop_signals_graceful_shutdown(runner_config, monkeypatch):
+    # The bridge must receive the graceful stop signal (SIGINT on POSIX,
+    # CTRL_BREAK on Windows) and log its shutdown marker before exiting — proves
+    # stop() is graceful cross-platform, not a hard kill.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    log_path = inst.bridge_debug_log_path
+    assert log_path is not None
+
+    await runner.stop("alpha")
+    assert "[bridge:shutdown]" in log_path.read_text()
+
+
+async def test_stop_force_kills_when_signal_ignored(runner_config, monkeypatch):
+    # If the bridge never clears the liveness check (ignored the signal, or a
+    # wrapper process lingers), _await_exit exhausts its grace loop and force-kills.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    pid = inst.bridge_pid
+
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    killed: list[int] = []
+    from clauster import procutil
+
+    real_force = procutil.force_kill_tree
+    monkeypatch.setattr(
+        "clauster.runner.procutil.force_kill_tree",
+        lambda p: (killed.append(p), real_force(p))[0],
+    )
+
+    async def _nosleep(_seconds):
+        return None
+
+    monkeypatch.setattr("clauster.runner.asyncio.sleep", _nosleep)
+
+    stopped = await runner.stop("alpha")
+    assert stopped.status is InstanceStatus.STOPPED
+    assert killed == [pid]  # force-kill fallback fired
+
+
 async def test_spawn_unknown_project_rejected(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
