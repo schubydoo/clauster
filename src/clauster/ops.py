@@ -189,6 +189,10 @@ def make_backup(config: ClausterConfig, out: Path, *, now: datetime | None = Non
         "has_config": cfg_path is not None and Path(cfg_path).is_file(),
     }
     out.parent.mkdir(parents=True, exist_ok=True)
+    # The archive embeds the argon2 password hash and the session secret, so
+    # create it 0600 up front — never momentarily world-readable on a shared host.
+    # (0600 has no group/other bits for the umask to clear; a no-op on Windows.)
+    os.close(os.open(out, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600))
     with tarfile.open(out, "w:gz") as tar:
         if state_dir.is_dir():
             tar.add(state_dir, arcname="state")

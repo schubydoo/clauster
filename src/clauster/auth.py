@@ -47,7 +47,13 @@ def load_or_create_secret(state_dir: Path) -> bytes:
     """
     env = os.environ.get("CLAUSTER_SESSION_SECRET")
     if env:
-        return env.encode("utf-8")
+        raw = env.encode("utf-8")
+        if len(raw) < 32:
+            raise ValueError(
+                "CLAUSTER_SESSION_SECRET must be at least 32 bytes; "
+                'generate one with `python -c "import secrets; print(secrets.token_hex(32))"`.'
+            )
+        return raw
     state_dir = state_dir.expanduser()
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / "session.secret"

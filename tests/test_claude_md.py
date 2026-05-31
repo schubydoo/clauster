@@ -14,12 +14,14 @@ from clauster.claude_md import (
     MAX_BYTES,
     ClaudeMdConflict,
     ClaudeMdError,
+    ClaudeMdNotTrusted,
     ClaudeMdPathError,
     ClaudeMdTooLarge,
     read_claude_md,
     write_claude_md,
 )
 from clauster.config import load_config
+from clauster.runner import SessionRunner
 
 
 def _sha(text: str) -> str:
@@ -156,13 +158,33 @@ def test_write_symlink_escape_rejected(tmp_path):
     assert secret.read_text() == "password\n"  # untouched
 
 
+def test_write_untrusted_project_refused(tmp_path):
+    # When claude_json is supplied, an untrusted project dir (e.g. a symlink that
+    # resolves outside projects_root) must be refused — the confinement gate.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    claude_json = tmp_path / "claude.json"
+    claude_json.write_text(json.dumps({"projects": {}}))  # trusts nothing
+    with pytest.raises(ClaudeMdNotTrusted):
+        write_claude_md(proj, "x\n", claude_json=claude_json)
+    assert not (proj / "CLAUDE.md").exists()
+
+
 # ----- routes -----------------------------------------------------------
 
 
 def _client(write_config, tmp_path) -> TestClient:
     # state_dir is dot-prefixed so discovery never scans it as a project.
     cfg = load_config(write_config(f"state_dir: {tmp_path}/.state\n"))
-    return TestClient(create_app(cfg))
+    # CLAUDE.md writes are trust-gated; trust projects_root so edits are allowed.
+    claude_json = tmp_path / "claude.json"
+    claude_json.write_text(
+        json.dumps(
+            {"projects": {str(cfg.projects_root.resolve()): {"hasTrustDialogAccepted": True}}}
+        )
+    )
+    runner = SessionRunner(cfg, claude_json=claude_json)
+    return TestClient(create_app(cfg, runner=runner))
 
 
 def test_get_claude_md_absent(write_config, tmp_path):

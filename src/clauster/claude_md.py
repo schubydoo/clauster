@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import ClaudeMdDoc
+from .trust import is_trusted
 
 FILENAME = "CLAUDE.md"
 MAX_BYTES = 64 * 1024  # 64 KB cap (spec §5)
@@ -40,6 +41,10 @@ class ClaudeMdConflict(ClaudeMdError):
 
 class ClaudeMdPathError(ClaudeMdError):
     """The resolved CLAUDE.md path escapes the project directory."""
+
+
+class ClaudeMdNotTrusted(ClaudeMdError):
+    """The project directory is not trusted — writing CLAUDE.md is refused."""
 
 
 def _target(project_path: Path) -> Path:
@@ -84,14 +89,23 @@ def write_claude_md(
     base_sha256: str | None = None,
     state_dir: Path | None = None,
     user: str = "?",
+    claude_json: Path | None = None,
 ) -> ClaudeMdDoc:
     """Atomically write CLAUDE.md, enforcing the size cap and (optional) lost-update guard.
 
     ``base_sha256`` is the hash the editor loaded. When provided, the current
     on-disk hash must match (None == absent) or the write is refused as a conflict;
     omit it to create a brand-new file or to force last-write-wins.
+
+    When ``claude_json`` is given, the write is refused unless the project dir is
+    trusted there — this confines writes to trusted dirs (a symlinked project that
+    resolves outside projects_root won't be trusted), matching the spawn trust gate.
     """
     target = _target(project_path)
+    # Validate the path shape first, then authorize: a symlinked project dir that
+    # resolves outside projects_root won't be trusted (mirrors the spawn gate).
+    if claude_json is not None and not is_trusted(project_path, claude_json):
+        raise ClaudeMdNotTrusted(f"{project_path} is not a trusted directory")
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_BYTES:
         raise ClaudeMdTooLarge(
