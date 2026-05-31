@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from typing import cast
 
@@ -267,6 +268,37 @@ async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeyp
     runner._procs["alpha"].kill()  # die during startup (cross-platform hard kill)
     await watch
     assert inst.status is InstanceStatus.CRASHED
+
+
+async def test_spawn_auto_enables_remote_control(runner_config, monkeypatch):
+    """Before launching a bridge, the runner marks remote control acknowledged in
+    ~/.claude.json (hasUsedRemoteControl/remoteDialogSeen) so the bridge skips the
+    interactive enable prompt a detached-stdin bridge could never answer."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    assert "hasUsedRemoteControl" not in json.loads(claude_json.read_text())
+
+    await runner.spawn("alpha")
+    after = json.loads(claude_json.read_text())
+    assert after["hasUsedRemoteControl"] is True
+    assert after["remoteDialogSeen"] is True
+    assert after["projects"]  # existing trust entries preserved
+
+    await runner.stop("alpha")
+
+
+async def test_spawn_auto_enable_can_be_disabled(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.claude.auto_enable_remote_control = False
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    await runner.spawn("alpha")
+    assert "hasUsedRemoteControl" not in json.loads(claude_json.read_text())
+
+    await runner.stop("alpha")
 
 
 async def test_stop_unknown_instance_raises(runner_config):
