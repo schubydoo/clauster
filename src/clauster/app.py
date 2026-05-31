@@ -177,7 +177,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if rp.enabled and auth.peer_trusted(ip, rp.trusted_ips):
             user = request.headers.get(rp.user_header)
             if user:
-                return f"proxy-user:{user}"
+                # Namespaced so a proxy user can't collide with a raw IP key. This
+                # value only ever keys the rate limiter, never an HTTP response, so
+                # semgrep's flask format-string-response rule is a false positive
+                # on this non-route helper (bare nosemgrep: the line trips nothing
+                # else, and the precise rule id overflows the line-length limit).
+                return f"proxy-user:{user}"  # nosemgrep
         return ip
 
     def _is_public(path: str) -> bool:
