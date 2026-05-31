@@ -1,0 +1,29 @@
+# Keep the build context (and final image) lean: only pyproject/uv.lock/README/src
+# feed the build. Everything else is noise or must never ship.
+.git
+.github
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+htmlcov
+.coverage*
+tests
+dist
+build
+*.spec
+scripts
+
+# Local config + internal notes (mirror .gitignore; never bake into an image)
+clauster.yml
+NOTES.md
+HANDOFF.md
+DEBUG_NOTES.md
+PLAN_*.md
+*_spec*.md
+v4-panel-findings.md
+.claude
+.gitnexus
+.logfire
