@@ -78,6 +78,16 @@ async def test_stop_force_kills_when_signal_ignored(runner_config, monkeypatch):
     assert killed == [pid]  # force-kill fallback fired
 
 
+async def test_spawn_unresolvable_binary_is_error(runner_config):
+    # A claude binary that doesn't resolve must fail the instance to ERROR, not
+    # leave it stuck in STARTING or raise out of spawn().
+    config, claude_json = runner_config
+    config.claude.binary = "definitely-not-a-real-claude-xyz"
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.ERROR
+
+
 async def test_spawn_unknown_project_rejected(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
