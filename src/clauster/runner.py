@@ -352,9 +352,16 @@ class SessionRunner:
 
         if markers.is_ready and proc.poll() is None:
             instance.status = InstanceStatus.RUNNING
-        else:
-            # Never reached the poll loop: trust failure, early exit, or timeout.
+        elif markers.trust_error or proc.poll() is not None:
+            # Genuine, terminal failure: the bridge rejected workspace trust, or it
+            # exited before ever reaching the poll loop. Surface it as ERROR.
             instance.status = InstanceStatus.ERROR
+        else:
+            # Alive but hasn't logged readiness within _READY_TIMEOUT. A slow start
+            # is not a failure: stay STARTING and let the poll loop promote it to
+            # RUNNING (or CRASHED if it later dies). Prevents a false "Failed to
+            # start" on a bridge that is simply still coming up.
+            instance.status = InstanceStatus.STARTING
 
     # ----- stop -----------------------------------------------------------
 
@@ -474,14 +481,16 @@ class SessionRunner:
     @staticmethod
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:
         status = instance.status
-        if status is InstanceStatus.RUNNING and not alive:
+        if status in (InstanceStatus.RUNNING, InstanceStatus.STARTING) and not alive:
             # session mode is single-shot: the bridge exits when its session ends, so a
             # disappearance is expected (STOPPED), not a crash. same-dir/worktree persist,
-            # so an unintended exit there IS a crash.
+            # so an unintended exit there IS a crash. A STARTING bridge that vanishes
+            # died during startup — the same expected/unexpected distinction applies.
             expected_exit = instance.intentional_stop or instance.spawn_mode == "session"
             instance.status = InstanceStatus.STOPPED if expected_exit else InstanceStatus.CRASHED
-        elif status is InstanceStatus.ERROR and alive:
-            # A slow-to-start detached bridge that timed out but is actually up.
+        elif status is InstanceStatus.STARTING and alive:
+            # A slow-to-start detached bridge that exceeded _READY_TIMEOUT but is
+            # actually up — liveness confirms it, so promote STARTING -> RUNNING.
             instance.status = InstanceStatus.RUNNING
 
     # ----- lifecycle ------------------------------------------------------
