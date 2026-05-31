@@ -90,6 +90,11 @@ class SessionRunner:
 
     # ----- read API -------------------------------------------------------
 
+    @property
+    def claude_json(self) -> Path:
+        """The claude.json whose trusted-dirs this runner honors (for trust checks)."""
+        return self._claude_json
+
     def list_instances(self) -> list[RemoteControlInstance]:
         return list(self._instances.values())
 

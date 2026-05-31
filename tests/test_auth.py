@@ -221,5 +221,12 @@ def test_secret_persists_and_is_0600(tmp_path):
 
 
 def test_secret_env_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "fixed-secret")
-    assert auth.load_or_create_secret(tmp_path) == b"fixed-secret"
+    value = "x" * 40  # >= 32 bytes
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", value)
+    assert auth.load_or_create_secret(tmp_path) == value.encode()
+
+
+def test_secret_env_too_short_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "too-short")
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        auth.load_or_create_secret(tmp_path)

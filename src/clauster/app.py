@@ -18,6 +18,7 @@ from . import __version__, auth, claude_cli, environments, logstream, usage
 from .claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
+    ClaudeMdNotTrusted,
     ClaudeMdTooLarge,
     read_claude_md,
     write_claude_md,
@@ -146,11 +147,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return (user, False) if user else (None, False)
 
     def _origin_allowed(request: Request) -> bool:
-        for header in ("origin", "referer"):
-            value = request.headers.get(header)
-            if value:
-                return auth.normalize_origin(value) in _allowed_origins
-        return False  # no Origin/Referer on a state-changing request => reject
+        # Origin only: Referer is spoofable/suppressible (Referrer-Policy, downgrades)
+        # so it's not trusted for CSRF. Modern browsers always send Origin on a
+        # state-changing fetch/XHR/form POST; its absence => reject.
+        origin = request.headers.get("origin")
+        if origin is None:
+            return False
+        return auth.normalize_origin(origin) in _allowed_origins
 
     def _cookie_secure(request: Request) -> bool:
         mode = config.auth.cookie_secure
@@ -162,6 +165,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if rp.enabled and auth.peer_trusted(auth.peer_ip(request), rp.trusted_ips):
             return request.headers.get("x-forwarded-proto", "").lower() == "https"
         return False
+
+    def _throttle_key(request: Request) -> str | None:
+        # Behind a trusted reverse proxy every login shares the proxy's socket IP,
+        # so a per-IP limiter becomes global (one attacker locks everyone out).
+        # Key on the proxy-asserted user instead — the trusted proxy overwrites
+        # this header, so a client can't forge it. NB: with proxy auth configured,
+        # password login is best kept loopback-only; this just hardens the overlap.
+        rp = config.auth.reverse_proxy
+        ip = auth.peer_ip(request)
+        if rp.enabled and auth.peer_trusted(ip, rp.trusted_ips):
+            user = request.headers.get(rp.user_header)
+            if user:
+                # Namespaced so a proxy user can't collide with a raw IP key. This
+                # value only ever keys the rate limiter, never an HTTP response, so
+                # semgrep's flask format-string-response rule is a false positive
+                # on this non-route helper (bare nosemgrep: the line trips nothing
+                # else, and the precise rule id overflows the line-length limit).
+                return f"proxy-user:{user}"  # nosemgrep
+        return ip
 
     def _is_public(path: str) -> bool:
         return path == "/healthz" or path == "/login" or path.startswith("/static/")
@@ -191,8 +213,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/login")
     async def login_submit(request: Request) -> Response:
-        ip = auth.peer_ip(request)
-        if not _throttle.allowed(ip):
+        throttle_key = _throttle_key(request)
+        if not _throttle.allowed(throttle_key):
             return templates.TemplateResponse(
                 request,
                 "login.html",
@@ -201,7 +223,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         form = await request.form()
         if auth.verify_password(_hasher, config.auth.password_hash, str(form.get("password", ""))):
-            _throttle.reset(ip)
+            _throttle.reset(throttle_key)
             resp = RedirectResponse(f"{_root}/", status_code=303)
             resp.set_cookie(
                 _SESSION_COOKIE,
@@ -213,7 +235,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 path=_root or "/",
             )
             return resp
-        _throttle.record_failure(ip)
+        _throttle.record_failure(throttle_key)
         return templates.TemplateResponse(
             request, "login.html", {"error": "Incorrect password."}, status_code=401
         )
@@ -541,9 +563,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 base_sha256=base_sha,
                 state_dir=config.state_dir,
                 user=_SESSION_USER,
+                claude_json=runner.claude_json,
             )
         except ClaudeMdTooLarge as exc:
             raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except ClaudeMdNotTrusted as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ClaudeMdConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ClaudeMdError as exc:
