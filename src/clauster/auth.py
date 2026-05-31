@@ -55,7 +55,7 @@ def load_or_create_secret(state_dir: Path) -> bytes:
             )
         return raw
     state_dir = state_dir.expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)  # holds the secret
     path = state_dir / "session.secret"
     # O_BINARY (Windows-only; 0 on POSIX) keeps os.write from translating any
     # 0x0A byte in the random secret into 0x0D 0x0A — which would corrupt ~12% of
@@ -169,7 +169,7 @@ def bump_epoch(state_dir: Path) -> int:
     a captured cookie can't survive. Atomic write mirrors ``state.StateStore``.
     """
     state_dir = state_dir.expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = state_dir / "session.epoch"
     new_value = read_epoch(state_dir) + 1
     tmp = path.with_suffix(path.suffix + ".tmp")

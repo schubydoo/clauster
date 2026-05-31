@@ -54,10 +54,12 @@ class StateStore:
 
     def save(self, instances: dict[str, dict]) -> None:
         """Atomically persist ``{project: {persisted fields}}``."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # mode=0o700: the state dir also holds session.secret/epoch (0700 has no
+        # group/other bits for umask to clear; only applies on creation).
+        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = {"schema_version": CURRENT_SCHEMA, "instances": instances}
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         os.replace(tmp, self._path)
 
     def _migrate(self, data: dict, raw: str) -> dict:

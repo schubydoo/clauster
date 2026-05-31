@@ -13,11 +13,14 @@ taken before the first modification.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
 from .discovery import CLAUDE_JSON, trust_state_for
 from .models import TrustState
+
+_log = logging.getLogger("clauster.trust")
 
 
 def is_trusted(path: Path, claude_json: Path = CLAUDE_JSON) -> bool:
@@ -48,9 +51,11 @@ def trust_directory(path: Path, claude_json: Path = CLAUDE_JSON) -> None:
         backup = claude_json.with_suffix(claude_json.suffix + ".bak")
         if not backup.exists():
             try:
-                backup.write_text(raw)
-            except OSError:
-                pass  # backup is best-effort; never block the trust write
+                backup.write_text(raw, encoding="utf-8")
+            except OSError as exc:
+                # Best-effort; never block the trust write, but surface it so a
+                # missing pre-image isn't a silent loss of the rollback copy.
+                _log.warning("could not write %s backup: %s", backup, exc)
 
     projects = data.get("projects")
     if not isinstance(projects, dict):
@@ -63,5 +68,5 @@ def trust_directory(path: Path, claude_json: Path = CLAUDE_JSON) -> None:
     entry["hasTrustDialogAccepted"] = True
 
     tmp = claude_json.with_suffix(claude_json.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, claude_json)

@@ -18,6 +18,7 @@ its CLAUDE.md/hooks/MCP run the moment a bridge starts. This module therefore:
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 import shutil
 import socket
@@ -28,6 +29,8 @@ from urllib.parse import urlsplit
 
 from .config import CloneConfig
 from .discovery import is_valid_project_name
+
+_log = logging.getLogger("clauster.provisioning")
 
 # Ranges `ipaddress.is_private` does NOT reliably flag but that must not be a
 # clone target by default: CGNAT (100.64/10 — Tailscale/ISP, this very host),
@@ -205,8 +208,10 @@ def _dir_size_mb(path: Path) -> float:
             fp = Path(root) / f
             try:
                 total += fp.stat(follow_symlinks=False).st_size
-            except OSError:
-                pass
+            except OSError as exc:
+                # Unstattable file undercounts the size cap; log so it's not a
+                # silent gap (the cap is a post-clone best-effort check anyway).
+                _log.warning("size walk could not stat %s: %s", fp, exc)
     return total / (1024 * 1024)
 
 
