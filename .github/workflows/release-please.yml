@@ -20,17 +20,41 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # GITHUB_TOKEN stays read-only: the App token (minted below) does all the
+    # writing, so the default token needs no write scope here.
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
     steps:
+      # Mint a short-lived installation token for the Clauster release GitHub
+      # App so the release PR + version-bump commits are authored by the app's
+      # bot identity, NOT a human account. Crucially this is *not* the default
+      # GITHUB_TOKEN, so the tag pushed when the release PR merges still
+      # *triggers* release.yml (GITHUB_TOKEN-pushed tags don't — anti-recursion).
+      #
+      # Requires (set up once, manually):
+      #   - a GitHub App owned by the repo owner, installed on this repo, with
+      #     repo permissions Contents: R/W + Pull requests: R/W;
+      #   - secrets RELEASE_PLEASE_APP_ID (numeric App ID) and
+      #     RELEASE_PLEASE_APP_PRIVATE_KEY (the App's .pem private key).
+      # Until those exist this step 401s — merge this only after they're added.
+      # Supersedes the old RELEASE_PLEASE_TOKEN PAT (which attributed PRs to a
+      # real user); that secret can be deleted once this is live.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          # Scope the minted token to exactly what release-please needs, rather
+          # than inheriting the installation's full permission set (zizmor
+          # least-privilege). Add permission-issues: write only if you enable
+          # release-please's label-on-issue features.
+          permission-contents: write
+          permission-pull-requests: write
+
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          # A user PAT (not GITHUB_TOKEN) so the release tag is attributed to a
-          # real identity and therefore *triggers* release.yml. Tags pushed by
-          # GITHUB_TOKEN do not start further workflow runs (GitHub's
-          # anti-recursion rule). Fine-grained PAT scoped to this repo with
-          # Contents:write + Pull requests:write, stored as RELEASE_PLEASE_TOKEN.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
