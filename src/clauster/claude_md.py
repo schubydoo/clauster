@@ -170,5 +170,5 @@ def _append_audit(
     }
     state_dir = state_dir.expanduser()
     state_dir.mkdir(parents=True, exist_ok=True)
-    with open(state_dir / _AUDIT_FILE, "a", encoding="utf-8") as fh:
+    with open(state_dir / _AUDIT_FILE, "a", encoding="utf-8", newline="") as fh:
         fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
