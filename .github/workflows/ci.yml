@@ -62,9 +62,10 @@ jobs:
           PYTHON_VERSION: ${{ matrix.python-version }}
         run: uv sync --extra dev --python "$PYTHON_VERSION"
       # Linux enforces the 96% coverage gate (pyproject addopts). macOS + Windows
-      # run for correctness/portability only — `-o addopts=` drops the cov gate,
-      # since some branches are inherently platform-specific (Linux jiffies
-      # procStart conversion, etc.) and would skew cross-platform coverage.
+      # still REPORT coverage (term-missing, for visibility into platform-specific
+      # gaps) but don't gate on it — `--cov-fail-under=0` overrides the addopts
+      # threshold — since branches are inherently platform-specific (Linux jiffies
+      # procStart, Windows O_BINARY/WNOHANG guards) and no single OS reaches 96%.
       - name: pytest
         shell: bash
         env:
@@ -74,7 +75,7 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then
             uv run --python "$PYTHON_VERSION" pytest -q
           else
-            uv run --python "$PYTHON_VERSION" pytest -q -o addopts=""
+            uv run --python "$PYTHON_VERSION" pytest -q --cov-fail-under=0
           fi
 
   # --------------------------------------------------------------------
