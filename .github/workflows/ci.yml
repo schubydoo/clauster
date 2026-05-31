@@ -32,16 +32,13 @@ jobs:
       fail-fast: false
       # Spec target is Ubuntu + macOS + Windows (conductor_spec_v3 §"Ubuntu,
       # macOS, Windows" + 4-runner PyInstaller matrix; psutil was chosen for
-      # cross-platform liveness). Full Python sweep on Linux (the canonical
-      # coverage-gated cells); macOS + Windows get a portability cell each.
+      # cross-platform liveness). Full Python sweep on every OS (3 × 4 = 12
+      # cells) so a version-specific portability bug can't hide on an untested
+      # OS×version combo. Public repo → Actions minutes are free; cells run in
+      # parallel. Only Linux enforces the coverage gate (see the pytest step).
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
-        include:
-          - os: macos-latest
-            python-version: "3.13"
-          - os: windows-latest
-            python-version: "3.13"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
