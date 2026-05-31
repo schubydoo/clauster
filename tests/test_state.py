@@ -37,6 +37,31 @@ def test_old_schema_migrates_with_backup(tmp_path):
     assert (tmp_path / "state.json.bak").exists()
 
 
+def test_migrate_backup_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch):
+    # A failed pre-migration .bak write must be surfaced (audit: no silent drops),
+    # while the load still succeeds (the backup is best-effort). Monkeypatch the
+    # write rather than chmod — Windows ignores a dir's write bit, and that cell
+    # is merge-blocking.
+    import pathlib
+
+    (tmp_path / "state.json").write_text(
+        json.dumps({"schema_version": 0, "instances": {"a": {"label": "a"}}}), encoding="utf-8"
+    )
+    real_write_text = pathlib.Path.write_text
+
+    def boom(self, *args, **kwargs):
+        if self.suffix == ".bak":
+            raise OSError("simulated: backup write failed")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", boom)
+    with caplog.at_level("WARNING", logger="clauster.state"):
+        loaded = StateStore(tmp_path).load()
+    assert loaded == {"a": {"label": "a"}}  # migration still succeeded
+    assert not (tmp_path / "state.json.bak").exists()  # backup genuinely failed
+    assert any("backup" in r.message for r in caplog.records)  # surfaced, not silent
+
+
 def test_non_dict_root_returns_empty(tmp_path):
     (tmp_path / "state.json").write_text(json.dumps(["not", "a", "dict"]))
     assert StateStore(tmp_path).load() == {}

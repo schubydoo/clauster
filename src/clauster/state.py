@@ -13,11 +13,14 @@ Atomic-write pattern mirrors ``trust.trust_directory``: write ``.tmp`` then
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
 CURRENT_SCHEMA = 1
 _PERSISTED_FIELDS = ("label", "intentional_stop", "spawn_mode", "permission_mode")
+
+_log = logging.getLogger("clauster.state")
 
 
 class StateStore:
@@ -31,7 +34,7 @@ class StateStore:
         older schema_version (taking a ``.bak`` first). Unknown fields are dropped.
         """
         try:
-            raw = self._path.read_text()
+            raw = self._path.read_text(encoding="utf-8")
         except (FileNotFoundError, OSError):
             return {}
         try:
@@ -71,9 +74,12 @@ class StateStore:
         backup = self._path.with_suffix(self._path.suffix + ".bak")
         if not backup.exists():
             try:
-                backup.write_text(raw)
-            except OSError:
-                pass  # backup is best-effort; never block the load
+                backup.write_text(raw, encoding="utf-8")
+            except OSError as exc:
+                # Best-effort; never block the load, but surface it so a missing
+                # pre-migration backup isn't a silent loss before we coerce away
+                # the legacy data.
+                _log.warning("could not write %s backup: %s", backup, exc)
         instances = data.get("instances")
         return {
             "schema_version": CURRENT_SCHEMA,

@@ -38,7 +38,7 @@ def trust_directory(path: Path, claude_json: Path = CLAUDE_JSON) -> None:
     resolved = str(path.resolve())
 
     try:
-        raw = claude_json.read_text()
+        raw = claude_json.read_text(encoding="utf-8")
         data = json.loads(raw)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         raw = None
