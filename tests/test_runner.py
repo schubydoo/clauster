@@ -264,6 +264,28 @@ async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkey
     assert inst.spawn_mode == "same-dir" and inst.permission_mode == "default"  # fell back
 
 
+async def test_rediscover_tolerates_unparseable_proc_start(runner_config, monkeypatch):
+    # A garbled/future-format pointer procStart must not crash startup with a bare
+    # int() ValueError; it degrades to bridge_proc_start=None (cmdline-only
+    # liveness), mirroring procutil.is_live_bridge so the two paths can't disagree.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    class FakePtr:
+        pid, proc_start, environment_id, session_id = 4242, "not-a-number", "env_x", "session_x"
+
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+
+    await runner.rediscover()  # must not raise
+    inst = runner.get_instance("alpha")
+    assert inst is not None  # rediscovered despite the unparseable procStart
+    assert inst.bridge_proc_start is None  # degraded, not crashed
+
+
 def test_reconcile_status_transitions():
     def inst(status, intentional=False):
         return RemoteControlInstance(
