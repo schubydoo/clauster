@@ -8,13 +8,20 @@ tests don't touch.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from clauster import __main__ as cli
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+# .cmd on Windows: the extensionless stub isn't launchable by subprocess, and
+# only Python 3.12+ falls back to PATHEXT to find a sibling claude.cmd — be
+# explicit so the version probe also resolves on 3.11.
+_WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
+FAKE_CLAUDE = (
+    Path(__file__).resolve().parent / "fixtures" / "fake_claude" / f"claude{_WIN_STUB_SUFFIX}"
+)
 
 
 def _cfg(write_config, tmp_path, claude_extra: str = "") -> str:
