@@ -50,6 +50,15 @@ class ClaudeConfig(BaseModel):
     # stdin is detached) — so the bridge would sit alive-but-unregistered forever.
     # Set false to manage those flags yourself.
     auto_enable_remote_control: bool = True
+    # `claude remote-control` restart spawns a fresh session with an empty
+    # context window — it has no resume flag, so a restarted bridge "forgets"
+    # the prior conversation. When true, Clauster installs a SessionStart hook
+    # (in the runtime user's ~/.claude/settings.json) that recaps the most
+    # recent prior transcript for the cwd back into the new session. Opt-in: it
+    # edits the user's Claude settings and injects prior turns into context.
+    resume_recap: bool = False
+    # Character budget for the recap injection (most recent turns kept).
+    resume_recap_max_chars: int = Field(default=8000, ge=500)
 
 
 class InstanceDefaults(BaseModel):
