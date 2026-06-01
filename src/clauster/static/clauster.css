@@ -127,8 +127,9 @@ main { padding: 1.5rem; }
   border-radius: 6px; font-size: 0.72rem; margin: 0.3rem 0 0; padding: 0.4rem 0.6rem;
   white-space: pre-wrap; overflow-wrap: break-word; max-height: 8rem; overflow: auto;
 }
-/* Resume reconnects to a live prior session — green, distinct from a plain Start. */
-.btn-resume { color: var(--green); border-color: var(--green) !important; }
+/* Restart re-spawns a stopped bridge (reconnects its environment, reuses its
+   modes) — green, distinct from a plain Start. Not conversation-resume. */
+.btn-restart { color: var(--green); border-color: var(--green) !important; }
 
 /* bug #4: unmanaged external session indicator — muted, distinct from a managed bridge */
 .external-session {

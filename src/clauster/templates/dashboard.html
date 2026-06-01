@@ -138,9 +138,9 @@
           </div>
           <button class="btn-start" @click="start('{{ p.name }}')"
                   x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isResumable('{{ p.name }}')">Start bridge</button>
-          <button class="btn-resume" @click="resume('{{ p.name }}')"
+          <button class="btn-restart" @click="resume('{{ p.name }}')"
                   x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && isResumable('{{ p.name }}')"
-                  :title="'Reconnect to the previous session (keeps ' + resumeModeOf('{{ p.name }}') + ' mode)'">Resume</button>
+                  :title="'Restart the bridge — reconnects the environment and keeps ' + resumeModeOf('{{ p.name }}') + ' mode. Starts a fresh chat (Desktop keeps your history visible).'">Restart</button>
           <button class="btn-stop" @click="stop('{{ p.name }}')"
                   x-show="isRunning('{{ p.name }}')">Stop bridge</button>
           <span class="spinner" x-show="isBusy('{{ p.name }}')">starting…</span>
@@ -308,8 +308,12 @@
         isRunning(name) { return this.statusOf(name) === "running"; },
         isBusy(name) { return this.statusOf(name) === "starting"; },
         // A stopped/crashed bridge that still has an environment can reconnect to
-        // its prior session — show "Resume" instead of "Start" so the distinction
-        // is explicit, and reuse its stored modes (preserves the permission mode).
+        // it — show "Restart" instead of "Start" and reuse its stored modes
+        // (preserves the permission mode). NB: this reconnects the *environment*
+        // (Desktop keeps the history visible); the bridge opens a fresh chat — it
+        // does NOT restore the agent's conversation context. Hence "Restart", not
+        // "Resume": claude remote-control pre-creates a new session each start and
+        // exposes no --resume/--continue. See task: true-resume spike.
         isResumable(name) {
           const i = this.instances[name] || {};
           return (i.status === "stopped" || i.status === "crashed") && !!i.environment_id;
