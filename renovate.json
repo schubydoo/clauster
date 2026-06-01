@@ -17,7 +17,24 @@
     "enabled": true,
     "schedule": ["before 7am on monday"]
   },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track self-hosted (vendored) front-end assets via static/vendor/versions.txt; a PR here is a heads-up to re-vendor the dist files.",
+      "fileMatch": ["^src/clauster/static/vendor/versions\\.txt$"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\S+=(?<currentValue>\\S+)"
+      ],
+      "versioningTemplate": "npm"
+    }
+  ],
   "packageRules": [
+    {
+      "description": "Vendored front-end assets require a manual dist re-vendor — never auto-merge; label for review.",
+      "matchFileNames": ["src/clauster/static/vendor/versions.txt"],
+      "automerge": false,
+      "labels": ["vendored-assets"]
+    },
     {
       "description": "Auto-merge patch updates of dev tooling.",
       "matchPackageNames": ["ruff", "pyright", "pytest", "pytest-cov", "pytest-asyncio"],

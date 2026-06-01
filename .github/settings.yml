@@ -98,7 +98,7 @@ branches:
         #  - `ci required checks passed`        — ci.yml aggregator (needs: tests, build)
         #  - `security required checks passed`  — security.yml aggregator
         #                                         (needs: codeql, gitleaks, trivy-fs,
-        #                                         zizmor, semgrep, dependency-review)
+        #                                         zizmor, dependency-review)
         #  - `conventional PR title`            — pr-title.yml (gates the squash subject
         #                                         that Release Please parses)
         #  - `ruff + pyright`                   — lint.yml (we gate lint/type; the

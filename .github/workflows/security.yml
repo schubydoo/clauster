@@ -101,32 +101,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  semgrep:
-    name: semgrep
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      security-events: write
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: Install semgrep
-        run: uv tool install semgrep
-      # `--config auto` uses the community/registry rulesets (no login needed for
-      # the open rules). `--error` fails the job on findings, making it a gate.
-      - name: Run semgrep
-        run: semgrep scan --config auto --error --sarif --output semgrep.sarif src/clauster
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
-        with:
-          sarif_file: semgrep.sarif
-          category: semgrep
-
   trivy-fs:
     name: trivy filesystem scan
     needs: changes
@@ -247,7 +221,6 @@ jobs:
       - changes
       - codeql
       - gitleaks
-      - semgrep
       - trivy-fs
       - trivy-image
       - zizmor

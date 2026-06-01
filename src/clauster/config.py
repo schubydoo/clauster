@@ -81,7 +81,7 @@ class ProjectConfig(BaseModel):
 class ReverseProxyConfig(BaseModel):
     enabled: bool = False
     user_header: str = "Remote-User"
-    shared_secret_header: str = "X-Proxy-Auth"
+    shared_secret_header: str = "X-Proxy-Auth"  # noqa: S105 — HTTP header name, not a secret
     trusted_ips: list[str] = Field(default_factory=list)
     shared_secret: str | None = None  # HMAC key the proxy signs X-Proxy-Auth with
     hmac_window_seconds: int = Field(default=60, ge=0)  # clock skew / replay window

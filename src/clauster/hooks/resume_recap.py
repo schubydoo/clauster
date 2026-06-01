@@ -203,5 +203,5 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception:  # noqa: BLE001 — a hook must never break the session it serves
+    except Exception:  # noqa: BLE001, S110 — a hook must never break the session it serves
         pass

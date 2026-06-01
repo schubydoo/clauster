@@ -1,0 +1,9 @@
+# Vendored front-end asset versions — the Renovate-tracked pin for our self-hosted
+# (no-CDN) static assets. Renovate (see renovate.json `customManagers`) opens a PR
+# when a newer upstream is released; on merge, re-vendor the matching dist files and
+# refresh the vendor README/provenance. Keep these in sync with the actual files.
+#
+# renovate: datasource=npm depName=@tabler/core
+tabler=1.4.0
+# renovate: datasource=npm depName=alpinejs
+alpine=3.14.8
