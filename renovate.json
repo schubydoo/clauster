@@ -21,7 +21,9 @@
     {
       "customType": "regex",
       "description": "Track self-hosted (vendored) front-end assets via static/vendor/versions.txt; a PR here is a heads-up to re-vendor the dist files.",
-      "fileMatch": ["^src/clauster/static/vendor/versions\\.txt$"],
+      "managerFilePatterns": [
+        "/^src/clauster/static/vendor/versions\\.txt$/"
+      ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\S+=(?<currentValue>\\S+)"
       ],
