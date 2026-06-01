@@ -35,6 +35,7 @@ _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse ``argv``, dispatch to the requested subcommand, and return its exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="clauster", description=__doc__)
     parser.add_argument("--version", action="version", version=f"clauster {__version__}")
@@ -288,8 +289,11 @@ def _usage(transcript: str) -> int:
 
 
 def _warn_if_cookie_insecure(config) -> None:
-    """Warn when auth is on but the session cookie will likely ship without Secure
-    (plain-http LAN, no TLS-terminating proxy) — it's then sniffable on the wire."""
+    """Warn when auth is on but the session cookie will likely ship without Secure.
+
+    Happens on a plain-http LAN with no TLS-terminating proxy — the cookie is then
+    sniffable on the wire.
+    """
     a = config.auth
     if not (a.enabled and a.password_required):
         return

@@ -40,6 +40,8 @@ PRICES: dict[str, ModelPrice] = {
 
 @dataclass
 class TokenTotals:
+    """Running token + message counts for one usage bucket (e.g. a model or day)."""
+
     input: int = 0
     output: int = 0
     cache_creation: int = 0
@@ -47,6 +49,7 @@ class TokenTotals:
     messages: int = 0
 
     def add_usage(self, usage: dict) -> None:
+        """Fold one message's ``usage`` dict into these totals (counts one message)."""
         self.input += int(usage.get("input_tokens", 0) or 0)
         self.output += int(usage.get("output_tokens", 0) or 0)
         self.cache_creation += int(usage.get("cache_creation_input_tokens", 0) or 0)
@@ -63,6 +66,7 @@ class TokenTotals:
 
     @property
     def total_tokens(self) -> int:
+        """Sum of input, output, and cache (creation + read) tokens."""
         return self.input + self.output + self.cache_creation + self.cache_read
 
 

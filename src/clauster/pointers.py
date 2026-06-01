@@ -35,6 +35,7 @@ def sanitize_cwd(path: Path) -> str:
 
 
 def pointer_path_for(project_path: Path, claude_projects_dir: Path = CLAUDE_PROJECTS_DIR) -> Path:
+    """Resolve the expected bridge-pointer.json path for a project (forward map)."""
     return claude_projects_dir / sanitize_cwd(project_path) / "bridge-pointer.json"
 
 
@@ -53,6 +54,7 @@ def load_pointer(path: Path) -> BridgePointer | None:
 def pointer_for_project(
     project_path: Path, claude_projects_dir: Path = CLAUDE_PROJECTS_DIR
 ) -> BridgePointer | None:
+    """Load the bridge pointer for a project, or None if missing/malformed."""
     return load_pointer(pointer_path_for(project_path, claude_projects_dir))
 
 

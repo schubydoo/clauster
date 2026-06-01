@@ -24,7 +24,7 @@ HOOK_SCRIPT = Path(__file__).parent / "hooks" / "resume_recap.py"
 
 
 def hook_command(python: str | None = None, script: Path | None = None) -> str:
-    """The ``settings.json`` command that runs the recap hook.
+    """Build the ``settings.json`` command that runs the recap hook.
 
     Defaults to the *current* interpreter and the installed script path so the
     hook runs under the same Python (and venv) Clauster runs in.
@@ -33,7 +33,7 @@ def hook_command(python: str | None = None, script: Path | None = None) -> str:
 
 
 def _matching_hook(entry: object, marker: str) -> dict | None:
-    """The command-hook dict in this entry that references our script, or None.
+    """Return the command-hook dict in this entry that references our script, or None.
 
     Matches on the script *filename* (a stable identity) rather than the full
     path so a moved venv / changed interpreter is recognized as the same hook

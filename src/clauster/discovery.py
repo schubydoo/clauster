@@ -20,6 +20,7 @@ CLAUDE_JSON = Path("~/.claude.json").expanduser()
 
 
 def is_valid_project_name(name: str) -> bool:
+    """Whether ``name`` is a safe single path component (path-traversal defense)."""
     return PROJECT_NAME_RE.fullmatch(name) is not None
 
 

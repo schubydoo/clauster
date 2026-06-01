@@ -77,10 +77,12 @@ def load_or_create_secret(state_dir: Path) -> bytes:
 
 
 def make_hasher() -> PasswordHasher:
+    """Build an argon2id password hasher with the library's default cost params."""
     return PasswordHasher()  # library defaults: argon2id, sane time/memory cost
 
 
 def hash_password(hasher: PasswordHasher, plaintext: str) -> str:
+    """Hash ``plaintext`` into an argon2id encoded string for ``auth.password_hash``."""
     return hasher.hash(plaintext)
 
 
@@ -103,6 +105,7 @@ def verify_password(hasher: PasswordHasher, stored_hash: str | None, attempt: st
 
 
 def make_serializer(secret: bytes) -> URLSafeTimedSerializer:
+    """Build the timed serializer used to sign/verify session cookies."""
     return URLSafeTimedSerializer(secret, salt=_SESSION_SALT)
 
 
@@ -150,7 +153,7 @@ def read_session(
 
 
 def read_epoch(state_dir: Path) -> int:
-    """Current session epoch. Missing/corrupt file => 0 (no revocation yet).
+    """Return the current session epoch; a missing/corrupt file means 0 (no revocation yet).
 
     Never raises — a fresh deploy simply starts at epoch 0.
     """
@@ -278,7 +281,7 @@ def build_allowed_origins(config: ClausterConfig) -> set[str]:
 
 
 def peer_ip(request) -> str | None:
-    """The socket peer IP (duck-typed Starlette Request; no import needed).
+    """Return the socket peer IP (duck-typed Starlette Request; no import needed).
 
     A seam so tests can monkeypatch the trusted-peer decision. Never derived
     from X-Forwarded-For — uvicorn is pinned with proxy_headers=False so
@@ -289,7 +292,7 @@ def peer_ip(request) -> str | None:
 
 
 def peer_trusted(ip: str | None, trusted_ips: list[str]) -> bool:
-    """True if ``ip`` falls within any ``trusted_ips`` entry (IP or CIDR)."""
+    """Whether ``ip`` falls within any ``trusted_ips`` entry (IP or CIDR)."""
     if not ip or not trusted_ips:
         return False
     try:

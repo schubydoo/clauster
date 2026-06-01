@@ -24,6 +24,12 @@ _log = logging.getLogger("clauster.state")
 
 
 class StateStore:
+    """Persists per-project bridge intent (label, stop flag, spawn/permission mode).
+
+    Backed by a single ``state.json`` under the state dir; reads tolerate a
+    missing/corrupt file and migrate older schemas in place.
+    """
+
     def __init__(self, state_dir: Path) -> None:
         self._path = state_dir.expanduser() / "state.json"
 

@@ -88,21 +88,33 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 # A pragmatic starter set: pyflakes (F), pycodestyle (E/W), import-sort (I),
-# pyupgrade (UP), flake8-bugbear (B), and flake8-bandit (S) — the bandit-derived
-# security checks that replace the dropped Semgrep job (CodeQL covers SAST).
-select = ["E", "F", "I", "W", "UP", "B", "S"]
+# pyupgrade (UP), flake8-bugbear (B), flake8-bandit (S) — the bandit-derived
+# security checks that replace the dropped Semgrep job (CodeQL covers SAST) — and
+# pydocstyle (D), our docstring-coverage gate (require docstrings on public
+# classes/methods/functions; D105/D107 ignored below as boilerplate-prone).
+select = ["E", "F", "I", "W", "UP", "B", "S", "D"]
 # S603 (subprocess-without-shell-equals-true) fires on *every* subprocess call and
 # is advisory; we never use shell=True, always pass a list argv, and resolve/validate
 # the binary (resolve_binary) and project names before spawning. S607 (partial
 # executable path) trips only on the offline doctor's `git` call (guarded by a .git
 # check) — the bridge runner always resolves its binary to an absolute path, so it
 # never trips this. Both are ignored globally rather than scattering noqa.
-ignore = ["S603", "S607"]
+# D105 (magic methods) and D107 (__init__) are skipped: a docstring there is
+# almost always redundant with the class docstring or low-value boilerplate.
+ignore = ["S603", "S607", "D105", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+# pep257 base convention (disables the positional D2xx rules that conflict with
+# our "summary on the opening-quote line" style). With D105/D107 ignored above,
+# this enforces: docstrings on public modules/classes/methods/functions, a blank
+# line between summary and body (D205), and imperative-mood summaries (D401).
+convention = "pep257"
 
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately use assert (S101) and fixture-only "secrets", bind-all hosts,
-# and temp paths — none are real security issues in test code.
-"tests/**" = ["S101", "S104", "S105", "S106", "S107", "S108"]
+# and temp paths — none are real security issues in test code. Tests are also
+# self-describing (the function name is the spec), so docstrings aren't required (D).
+"tests/**" = ["S101", "S104", "S105", "S106", "S107", "S108", "D"]
 
 [tool.pyright]
 include = ["src/clauster"]

@@ -100,8 +100,11 @@ def extract_turns(transcript_path: str) -> list[tuple[str, str]]:
 
 
 def find_prior_transcript(project_dir: str, current_session_id: str | None) -> str | None:
-    """Most recently modified ``*.jsonl`` in ``project_dir`` that is not the
-    current session's transcript. Returns None if there is no prior transcript."""
+    """Find the prior transcript to recap.
+
+    Returns the most recently modified ``*.jsonl`` in ``project_dir`` that is not
+    the current session's transcript, or None if there is no prior transcript.
+    """
     try:
         candidates = glob.glob(os.path.join(project_dir, "*.jsonl"))
     except OSError:
@@ -172,6 +175,7 @@ def _max_chars() -> int:
 
 
 def main() -> None:
+    """Read the SessionStart payload from stdin and emit a recap (or nothing)."""
     if os.environ.get(ENV_FLAG) != "1":
         return
     raw = sys.stdin.read()

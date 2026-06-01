@@ -30,6 +30,8 @@ OK, WARN, FAIL = "ok", "warn", "fail"
 
 @dataclass
 class Check:
+    """One doctor diagnostic result: a named check, its status, and a detail line."""
+
     name: str
     status: str  # OK | WARN | FAIL
     detail: str
@@ -121,12 +123,13 @@ def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
 
 
 def _check_repo_freshness(repo: Path | None = None) -> Check | None:
-    """If Clauster runs from a git checkout (editable / from-source install), report
-    whether it is behind its upstream so the operator knows to ``git pull`` + restart.
+    """Report whether a from-source checkout is behind its upstream.
 
-    Returns None for non-git installs (PyPI/Docker) — there's nothing to upgrade in
-    place. Read-only and offline: it compares against the last-fetched upstream ref,
-    never the network, so doctor stays fast and works without connectivity.
+    If Clauster runs from a git checkout (editable / from-source install), this tells
+    the operator whether to ``git pull`` + restart. Returns None for non-git installs
+    (PyPI/Docker) — there's nothing to upgrade in place. Read-only and offline: it
+    compares against the last-fetched upstream ref, never the network, so doctor stays
+    fast and works without connectivity.
     """
     repo = repo or Path(__file__).resolve().parents[2]  # src/clauster/ops.py -> repo root
     if not (repo / ".git").exists():
@@ -160,6 +163,7 @@ def _check_repo_freshness(repo: Path | None = None) -> Check | None:
 
 
 def claude_cli_json() -> Path:
+    """Return the path to the user's ``~/.claude.json``."""
     return Path("~/.claude.json").expanduser()
 
 
@@ -336,8 +340,11 @@ def restore_backup(
     config_out: Path | None = None,
     force: bool = False,
 ) -> dict:
-    """Restore state (and optionally config) from a backup. Extraction is hardened
-    against path traversal / absolute paths / symlink escape (see _safe_extract_tar)."""
+    """Restore state (and optionally config) from a backup.
+
+    Extraction is hardened against path traversal / absolute paths / symlink escape
+    (see _safe_extract_tar).
+    """
     backup = backup.expanduser()
     state_dir = state_dir.expanduser()
     if config_out is not None:
@@ -377,8 +384,11 @@ def restore_backup(
 
 
 def migrate_state(config: ClausterConfig) -> dict:
-    """Force state.json to the current schema (StateStore.load migrates + .bak's on read),
-    then re-save canonical. clauster.yml is additive-only, so just confirm it validates."""
+    """Force state.json to the current schema, then re-save canonical.
+
+    ``StateStore.load`` migrates (and ``.bak``s) older schemas on read; clauster.yml
+    is additive-only, so this just confirms it still validates.
+    """
     store = StateStore(config.state_dir)
     data = store.load()  # migrates older schema in place (taking a .bak)
     store.save(data)  # rewrite canonical at CURRENT_SCHEMA
@@ -398,6 +408,7 @@ def render_service_unit(
     workdir: str | None = None,
     user: str | None = None,
 ) -> str:
+    """Render a service definition (systemd/launchd/windows) for the given kind."""
     if kind not in _SERVICE_KINDS:
         raise ValueError(f"unknown service kind {kind!r}; expected one of {_SERVICE_KINDS}")
     python = python or sys.executable

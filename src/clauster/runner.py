@@ -54,11 +54,11 @@ class SpawnError(RuntimeError):
 
 
 class UnknownProject(SpawnError):
-    pass
+    """The named project does not exist under projects_root."""
 
 
 class NotTrusted(SpawnError):
-    pass
+    """The project directory has not accepted Claude's workspace-trust dialog."""
 
 
 class InvalidSpawnOption(SpawnError):
@@ -78,6 +78,8 @@ _STARTUP_WATCH_INTERVAL = 2.0
 
 
 class SessionRunner:
+    """Owns the lifecycle of managed bridges: spawn, resume, stop, and status polling."""
+
     def __init__(self, config: ClausterConfig, claude_json: Path | None = None) -> None:
         self._config = config
         self._binary = config.claude.binary
@@ -109,20 +111,25 @@ class SessionRunner:
         return self._claude_json
 
     def list_instances(self) -> list[RemoteControlInstance]:
+        """Return a snapshot list of all managed bridge instances."""
         return list(self._instances.values())
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
+        """Return the instance with this id, or None if unknown."""
         return self._instances.get(instance_id)
 
     def running_count(self) -> int:
+        """Count instances currently in the RUNNING state."""
         return sum(1 for i in self._instances.values() if i.status is InstanceStatus.RUNNING)
 
     def working_sessions(self) -> list[WorkingSession]:
+        """Return a snapshot list of the last-observed working sessions."""
         return list(self._sessions)
 
     def external_sessions_by_project(self) -> dict[str, list[WorkingSession]]:
-        """EXTERNAL working sessions (not tied to a managed bridge) grouped by
-        the discovered project at their cwd, keyed by project name (bug #4).
+        """Group EXTERNAL working sessions by the project at their cwd (bug #4).
+
+        Covers sessions not tied to a managed bridge, keyed by project name.
 
         Lets the UI surface "external session active" for a project Clauster
         isn't managing — e.g. a bridge started from the terminal or Claude
@@ -179,6 +186,7 @@ class SessionRunner:
     # ----- trust ----------------------------------------------------------
 
     async def trust_project(self, name: str) -> Project:
+        """Accept the workspace-trust dialog for ``name`` and return its refreshed state."""
         proj = self._resolve_project(name)
         await asyncio.to_thread(trust_directory, proj.path, self._claude_json)
         # Re-read so the returned Project reflects the new trust state.
@@ -193,6 +201,11 @@ class SessionRunner:
         spawn_mode: str | None = None,
         permission_mode: str | None = None,
     ) -> RemoteControlInstance:
+        """Spawn a new bridge for ``name`` (returning the existing one if already up).
+
+        Validates spawn/permission modes, ensures remote control + the recap hook are
+        set up, launches the process, and watches it until it reaches RUNNING or ERROR.
+        """
         existing = self._instances.get(name)
         if existing is not None and existing.status in (
             InstanceStatus.STARTING,
@@ -336,7 +349,7 @@ class SessionRunner:
     def _build_cmd(
         self, log_path: Path, name: str, spawn_mode: str, permission_mode: str
     ) -> list[str]:
-        """The `claude remote-control` argv. Pure (no side effects) so it's unit-testable."""
+        """Build the `claude remote-control` argv. Pure (no side effects) so it's unit-testable."""
         return [
             self._binary,
             "remote-control",
@@ -357,7 +370,8 @@ class SessionRunner:
         The bridge writes startup *failures* (e.g. ``Error: Workspace not
         trusted``, controller-auth errors) to its stderr, NOT the --debug-file.
         Routing both streams here — instead of DEVNULL — lets a failed spawn
-        surface a real reason instead of a bare timeout."""
+        surface a real reason instead of a bare timeout.
+        """
         return log_path.with_name(log_path.stem + ".stderr.log")
 
     def _popen(
@@ -493,7 +507,8 @@ class SessionRunner:
         session", so ``starter_session_id`` (and thus ``session_url``, the primary
         deep link) would be empty after a resume without this. No-op for a fresh
         start, which logs the session directly. (The environment id never needs
-        backfilling: this only runs once RUNNING, which already requires it.)"""
+        backfilling: this only runs once RUNNING, which already requires it.)
+        """
         if instance.starter_session_id is not None:
             return
         ptr = pointers.pointer_for_project(project_path)
@@ -583,6 +598,7 @@ class SessionRunner:
     # ----- stop -----------------------------------------------------------
 
     async def stop(self, name: str) -> RemoteControlInstance:
+        """Signal a managed bridge to shut down and mark the stop as intentional."""
         instance = self._instances.get(name)
         if instance is None:
             raise UnknownProject(f"no managed instance: {name!r}")
@@ -604,8 +620,11 @@ class SessionRunner:
 
     @staticmethod
     def _signal_stop(pid: int) -> None:
-        """Ask a bridge to shut down gracefully: SIGINT on POSIX, CTRL_BREAK on
-        Windows (deliverable because the bridge is its own process group)."""
+        """Ask a bridge to shut down gracefully.
+
+        SIGINT on POSIX, CTRL_BREAK on Windows (deliverable because the bridge is
+        its own process group).
+        """
         sig = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
         try:
             os.kill(pid, sig)
@@ -665,8 +684,10 @@ class SessionRunner:
         await self._persist()
 
     async def poll_once(self) -> None:
-        """Liveness reconcile + `claude agents --json` cross-check (off-loop work,
-        applied on-loop)."""
+        """Reconcile bridge liveness and cross-check `claude agents --json`.
+
+        Off-loop work, applied on-loop.
+        """
         for instance in list(self._instances.values()):
             pid = instance.bridge_pid
             if pid is None:
@@ -715,6 +736,7 @@ class SessionRunner:
     # ----- lifecycle ------------------------------------------------------
 
     async def start_poll_loop(self) -> None:
+        """Rediscover already-running bridges, then start the background poll loop."""
         await self.rediscover()
         self._poll_task = asyncio.create_task(self._poll_forever())
 
@@ -737,6 +759,7 @@ class SessionRunner:
             task.cancel()
 
     async def shutdown(self) -> None:
+        """Cancel the poll loop and startup watches, leaving managed bridges running."""
         # Cancel the poll task and any in-flight startup watches; leave bridges
         # running (they are detached and survive a Clauster restart).
         for task in list(self._startup_watches.values()):
