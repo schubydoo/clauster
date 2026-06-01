@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -111,7 +112,51 @@ def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
     # port (warn-only: in-use may be this very server)
     checks.append(_check_port(config.host, config.port))
 
+    # source-checkout freshness (only for editable/from-source installs)
+    fresh = _check_repo_freshness()
+    if fresh is not None:
+        checks.append(fresh)
+
     return checks, all(c.status != FAIL for c in checks)
+
+
+def _check_repo_freshness(repo: Path | None = None) -> Check | None:
+    """If Clauster runs from a git checkout (editable / from-source install), report
+    whether it is behind its upstream so the operator knows to ``git pull`` + restart.
+
+    Returns None for non-git installs (PyPI/Docker) — there's nothing to upgrade in
+    place. Read-only and offline: it compares against the last-fetched upstream ref,
+    never the network, so doctor stays fast and works without connectivity.
+    """
+    repo = repo or Path(__file__).resolve().parents[2]  # src/clauster/ops.py -> repo root
+    if not (repo / ".git").exists():
+        return None  # installed package, not a source checkout
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Check("version", WARN, f"source checkout; git freshness check failed: {exc}")
+    if out.returncode != 0:
+        # No upstream tracking (detached HEAD, local-only branch) — not an error.
+        return Check("version", OK, "source checkout (no upstream tracking configured)")
+    try:
+        behind, ahead = (int(n) for n in out.stdout.split())
+    except ValueError:
+        return Check("version", OK, "source checkout")
+    if behind:
+        plural = "s" if behind != 1 else ""
+        return Check(
+            "version",
+            WARN,
+            f"{behind} commit{plural} behind upstream (as of last fetch) — "
+            "git pull && restart to upgrade",
+        )
+    suffix = f" (+{ahead} local)" if ahead else ""
+    return Check("version", OK, f"up to date with upstream{suffix}")
 
 
 def claude_cli_json() -> Path:
