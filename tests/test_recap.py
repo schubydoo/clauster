@@ -301,16 +301,23 @@ def test_installer_recovers_from_malformed_settings(tmp_path: Path) -> None:
 
 
 def test_installer_updates_interpreter_in_place(tmp_path: Path) -> None:
-    """A changed interpreter (moved venv) updates the same entry, not duplicates."""
+    """A changed interpreter (moved venv) rewrites the same entry, not duplicates."""
     settings = tmp_path / "settings.json"
     script = Path("/opt/clauster/hooks/resume_recap.py")
     ensure_recap_hook_installed(settings, command=f'"/old/python" "{script}"', script=script)
-    # re-run with a different interpreter but the same script path -> idempotent
+    # re-run with a different interpreter but the same script name -> self-heal in place
     changed = ensure_recap_hook_installed(
         settings, command=f'"/new/python" "{script}"', script=script
     )
-    assert changed is False
-    assert len(json.loads(settings.read_text())["hooks"]["SessionStart"]) == 1
+    assert changed is True
+    entries = json.loads(settings.read_text())["hooks"]["SessionStart"]
+    assert len(entries) == 1  # updated, not duplicated
+    assert entries[0]["hooks"][0]["command"] == f'"/new/python" "{script}"'
+    # a third run with the now-current command is a no-op
+    again = ensure_recap_hook_installed(
+        settings, command=f'"/new/python" "{script}"', script=script
+    )
+    assert again is False
 
 
 def test_installer_ignores_non_dict_session_start_entries(tmp_path: Path) -> None:

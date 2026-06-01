@@ -32,13 +32,19 @@ def hook_command(python: str | None = None, script: Path | None = None) -> str:
     return f'"{python or sys.executable}" "{script or HOOK_SCRIPT}"'
 
 
-def _entry_has_script(entry: object, script_str: str) -> bool:
+def _matching_hook(entry: object, marker: str) -> dict | None:
+    """The command-hook dict in this entry that references our script, or None.
+
+    Matches on the script *filename* (a stable identity) rather than the full
+    path so a moved venv / changed interpreter is recognized as the same hook
+    and updated in place instead of duplicated.
+    """
     if not isinstance(entry, dict):
-        return False
+        return None
     for hook in entry.get("hooks", []):
-        if isinstance(hook, dict) and script_str in str(hook.get("command", "")):
-            return True
-    return False
+        if isinstance(hook, dict) and marker in str(hook.get("command", "")):
+            return hook
+    return None
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -63,11 +69,12 @@ def ensure_recap_hook_installed(
 ) -> bool:
     """Idempotently register the SessionStart recap hook. Returns True if changed.
 
-    Identifies our entry by the hook *script path* so a changed interpreter
-    (e.g. a moved venv) updates in place rather than duplicating. Unrelated
-    SessionStart hooks (context-mode, the user's own) are preserved.
+    Identifies our entry by the hook *script filename* so a changed interpreter
+    (e.g. a moved venv) rewrites the command in place rather than duplicating.
+    Unrelated SessionStart hooks (context-mode, the user's own) are preserved.
     """
-    script_str = str(script or HOOK_SCRIPT)
+    script = script or HOOK_SCRIPT
+    marker = Path(script).name
     command = command or hook_command(script=script)
     settings_path = Path(settings_path).expanduser()
 
@@ -89,8 +96,15 @@ def ensure_recap_hook_installed(
         session_start = []
         hooks["SessionStart"] = session_start
 
-    if any(_entry_has_script(entry, script_str) for entry in session_start):
-        return False
+    for entry in session_start:
+        hook = _matching_hook(entry, marker)
+        if hook is not None:
+            if hook.get("command") == command:
+                return False  # already registered with the right command
+            hook["command"] = command  # self-heal: interpreter/path changed
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_json(settings_path, data)
+            return True
 
     session_start.append({"matcher": "", "hooks": [{"type": "command", "command": command}]})
     settings_path.parent.mkdir(parents=True, exist_ok=True)
