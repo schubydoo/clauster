@@ -17,6 +17,15 @@
     "enabled": true,
     "schedule": ["before 7am on monday"]
   },
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/examples/**",
+    "**/__tests__/**",
+    "**/test/**",
+    "**/tests/**",
+    "**/__fixtures__/**"
+  ],
   "customManagers": [
     {
       "customType": "regex",
