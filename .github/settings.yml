@@ -59,6 +59,9 @@ labels:
   - name: security
     color: d93f0b
     description: Security-related — Renovate vulnerability alerts use this
+  - name: vendored-assets
+    color: ededed
+    description: Renovate heads-up to re-vendor self-hosted front-end assets (manual dist update)
 
   # ---- Release Please ----
   # release-please-action applies these to its release PRs / tagged release
