@@ -457,3 +457,72 @@ def test_reconcile_status_transitions():
     i = inst(InstanceStatus.RUNNING)
     SessionRunner._reconcile_status(i, alive=True)
     assert i.status is InstanceStatus.RUNNING  # unchanged
+
+
+def _argv_of(instance) -> list[str]:
+    """The argv the fake bridge recorded for its most recent spawn."""
+    from pathlib import Path
+
+    return json.loads(Path(str(instance.bridge_debug_log_path) + ".argv.json").read_text())
+
+
+async def test_resume_reuses_modes_and_backfills_session(runner_config, monkeypatch):
+    # A reconnecting bridge re-logs the environment + poll loop but NOT
+    # "Created initial session", so the session id must be recovered from the
+    # bridge-pointer — otherwise session_url (the primary deep link) breaks.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha", permission_mode="acceptEdits")
+    assert first.status is InstanceStatus.RUNNING
+    assert first.error_detail is None  # a clean start records no failure reason
+    await runner.stop("alpha")
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = "session_01RESUMEDBBBBBBBBBBB"
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: FakePtr())
+
+    resumed = await runner.resume("alpha")
+    assert resumed.status is InstanceStatus.RUNNING
+    # session id backfilled from the pointer (the resume log omitted it)…
+    assert resumed.starter_session_id == "session_01RESUMEDBBBBBBBBBBB"
+    assert resumed.session_url and "session_01RESUMEDBBBBBBBBBBB" in resumed.session_url
+    # …and resume reused the stored permission mode rather than the config default.
+    argv = _argv_of(resumed)
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    await runner.stop("alpha")
+
+
+async def test_resume_unknown_instance_rejected(runner_config):
+    runner = _make_runner(runner_config)
+    with pytest.raises(UnknownProject):
+        await runner.resume("alpha")  # never spawned -> nothing to resume
+
+
+async def test_spawn_captures_stderr_detail_on_failure(runner_config, monkeypatch):
+    # A startup failure whose reason goes only to stderr (not --debug-file) must
+    # still surface: clauster routes stdout+stderr to a file and captures the tail.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stderr_error")
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.ERROR
+    assert inst.error_detail and "HTTP 401" in inst.error_detail
+
+
+def test_capture_error_detail_no_log_is_noop():
+    inst = RemoteControlInstance(project="x", label="x", bridge_debug_log_path=None)
+    SessionRunner._capture_error_detail(inst)  # must not raise
+    assert inst.error_detail is None
+
+
+def test_capture_error_detail_unreadable_is_noop(tmp_path):
+    # stderr sibling is a directory -> read_text raises OSError -> swallowed.
+    log = tmp_path / "b.log"
+    (tmp_path / "b.stderr.log").mkdir()
+    inst = RemoteControlInstance(project="x", label="x", bridge_debug_log_path=log)
+    SessionRunner._capture_error_detail(inst)
+    assert inst.error_detail is None

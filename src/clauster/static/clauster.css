@@ -121,6 +121,14 @@ main { padding: 1.5rem; }
 .card-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
 .spinner { color: var(--accent); font-size: 0.8rem; }
 .card-error { color: #e06a6a; font-size: 0.8rem; margin: 0.4rem 0 0; }
+/* captured bridge stderr tail — monospace, scrollable, visually subordinate to .card-error */
+.card-detail {
+  color: var(--muted); background: #1a1a1a; border: 1px solid var(--border);
+  border-radius: 6px; font-size: 0.72rem; margin: 0.3rem 0 0; padding: 0.4rem 0.6rem;
+  white-space: pre-wrap; overflow-wrap: break-word; max-height: 8rem; overflow: auto;
+}
+/* Resume reconnects to a live prior session — green, distinct from a plain Start. */
+.btn-resume { color: var(--green); border-color: var(--green) !important; }
 
 /* bug #4: unmanaged external session indicator — muted, distinct from a managed bridge */
 .external-session {
