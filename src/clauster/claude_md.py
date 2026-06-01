@@ -32,7 +32,7 @@ class ClaudeMdError(RuntimeError):
 
 
 class ClaudeMdTooLarge(ClaudeMdError):
-    pass
+    """The submitted CLAUDE.md exceeds the configured size limit."""
 
 
 class ClaudeMdConflict(ClaudeMdError):
@@ -48,7 +48,7 @@ class ClaudeMdNotTrusted(ClaudeMdError):
 
 
 def _target(project_path: Path) -> Path:
-    """The locked target path, guaranteed to sit directly inside the project dir.
+    """Resolve the locked target path, guaranteed to sit directly inside the project dir.
 
     Resolving catches a symlinked CLAUDE.md that points out of the tree: the real
     path's parent must be the (resolved) project dir and its name must be CLAUDE.md.
@@ -67,6 +67,7 @@ def _sha256(text: str) -> str:
 
 
 def read_claude_md(project_path: Path) -> ClaudeMdDoc:
+    """Read the project's CLAUDE.md, returning an empty doc if it does not exist."""
     target = _target(project_path)
     try:
         content = target.read_text(encoding="utf-8")
@@ -156,9 +157,12 @@ def write_claude_md(
 def _append_audit(
     state_dir: Path, *, project: str, user: str, action: str, size: int, sha256: str
 ) -> None:
-    """Append one JSON line recording the edit. Best-effort: a failure here must
-    not undo a write that already succeeded, but it is never silently dropped on a
-    healthy disk (the state_dir is the same local volume as the rest of the app)."""
+    """Append one JSON line recording the edit.
+
+    Best-effort: a failure here must not undo a write that already succeeded, but
+    it is never silently dropped on a healthy disk (the state_dir is the same local
+    volume as the rest of the app).
+    """
     entry = {
         "ts": datetime.now(UTC).isoformat(),
         "user": user,

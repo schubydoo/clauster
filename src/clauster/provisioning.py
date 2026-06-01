@@ -46,15 +46,15 @@ class ProvisionError(RuntimeError):
 
 
 class InvalidProjectName(ProvisionError):
-    pass
+    """The project name fails validation or would escape projects_root."""
 
 
 class TargetExists(ProvisionError):
-    pass
+    """A directory with the requested name already exists under projects_root."""
 
 
 class InvalidCloneUrl(ProvisionError):
-    pass
+    """The clone URL is malformed or uses a disallowed scheme."""
 
 
 class BlockedCloneHost(ProvisionError):
@@ -62,11 +62,11 @@ class BlockedCloneHost(ProvisionError):
 
 
 class CloneFailed(ProvisionError):
-    pass
+    """The ``git clone`` itself failed (network, auth, or size-cap exceeded)."""
 
 
 class GitUnavailable(ProvisionError):
-    pass
+    """The ``git`` binary could not be found on PATH."""
 
 
 def _safe_target(projects_root: Path, name: str) -> Path:
@@ -83,6 +83,7 @@ def _safe_target(projects_root: Path, name: str) -> Path:
 
 
 def create_project(projects_root: Path, name: str, *, git_init: bool = False) -> Path:
+    """Create an empty project directory under projects_root (optionally ``git init``)."""
     target = _safe_target(projects_root, name)
     try:
         target.mkdir(parents=False, exist_ok=False)
@@ -180,13 +181,16 @@ def validate_clone_url(url: str, cfg: CloneConfig) -> None:
 
 
 def _git_env() -> dict[str, str]:
-    """Environment that locks git down: only https/ssh transports, no credential
-    prompts (fail fast instead of hanging), no system config, no interactive auth.
+    """Build an environment that locks git down for untrusted clone URLs.
+
+    Only https/ssh transports, no credential prompts (fail fast instead of hanging),
+    no system config, no interactive auth.
 
     Residual (accepted, single-user): an ssh:// clone offers the host's own ssh
     identity/agent to the target server, so pasting an attacker ssh URL is a
     credential-probing vector. Operators who don't need it can set
-    clone.allowed_schemes: [https] to drop ssh entirely."""
+    clone.allowed_schemes: [https] to drop ssh entirely.
+    """
     env = dict(os.environ)
     env.update(
         {
@@ -224,6 +228,11 @@ def clone_project(
     shallow: bool = False,
     git_binary: str = "git",
 ) -> Path:
+    """Clone ``url`` into a new project under projects_root, enforcing the clone guards.
+
+    Validates the scheme, blocks private/loopback hosts (unless opted in), and
+    enforces the post-clone size cap.
+    """
     if not cfg.enabled:
         raise ProvisionError("clone is disabled in config (clone.enabled = false)")
     target = _safe_target(projects_root, name)

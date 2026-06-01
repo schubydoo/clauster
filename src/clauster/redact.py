@@ -32,6 +32,7 @@ _REDACTED = "<redacted>"
 
 
 def strip_ansi(text: str) -> str:
+    """Remove ANSI/CSI escape sequences (colors, cursor moves, OSC) from ``text``."""
     return _ANSI_RE.sub("", text)
 
 
@@ -41,6 +42,7 @@ def redact_ids(text: str) -> str:
 
 
 def redact_secrets(text: str) -> str:
+    """Mask obvious secret shapes (API tokens, bearer headers) as defense-in-depth."""
     out = text
     for rx in _SECRET_RES:
         out = rx.sub(_REDACTED, out)

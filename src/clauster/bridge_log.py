@@ -49,8 +49,10 @@ class BridgeMarkers:
 
 
 def parse_bridge_markers(text: str) -> BridgeMarkers:
-    """Extract markers from (possibly partial) bridge-log text. First-wins for
-    single-valued fields; tolerant of truncated / mid-write content."""
+    """Extract markers from (possibly partial) bridge-log text.
+
+    First-wins for single-valued fields; tolerant of truncated / mid-write content.
+    """
     m = BridgeMarkers()
 
     if (hit := _RE_BRIDGE_ID.search(text)) is not None:

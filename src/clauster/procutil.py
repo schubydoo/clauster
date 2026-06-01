@@ -46,7 +46,7 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
 
 
 def is_bridge_cmdline(cmdline: list[str]) -> bool:
-    """True if a process command line is a ``claude … remote-control`` bridge."""
+    """Whether a process command line is a ``claude … remote-control`` bridge."""
     if not cmdline:
         return False
     joined = " ".join(cmdline)

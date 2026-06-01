@@ -35,6 +35,8 @@ PERMISSION_MODES: tuple[str, ...] = (
 
 
 class ClaudeConfig(BaseModel):
+    """Settings for the `claude` binary and bridge-spawn behavior."""
+
     binary: str = "claude"
     min_version: str = "2.1.145"
     agents_json_poll_interval_seconds: int = Field(default=300, ge=1)
@@ -62,6 +64,8 @@ class ClaudeConfig(BaseModel):
 
 
 class InstanceDefaults(BaseModel):
+    """Default spawn/permission mode and capacity applied to new bridges."""
+
     spawn_mode: SpawnMode = "same-dir"
     permission_mode: PermissionMode = "default"
     capacity: int = Field(default=32, ge=1)
@@ -79,6 +83,8 @@ class ProjectConfig(BaseModel):
 
 
 class ReverseProxyConfig(BaseModel):
+    """Trusted-reverse-proxy auth: user header, HMAC-signed secret, and IP allowlist."""
+
     enabled: bool = False
     user_header: str = "Remote-User"
     shared_secret_header: str = "X-Proxy-Auth"  # noqa: S105 — HTTP header name, not a secret
@@ -104,8 +110,11 @@ class AuthConfig(BaseModel):
 
 
 class CloneConfig(BaseModel):
-    """Project clone/create guards (spec §11 clone+trust chain). Clone URLs are
-    user-supplied and hit the network from the host, so the defaults are strict."""
+    """Project clone/create guards (spec §11 clone+trust chain).
+
+    Clone URLs are user-supplied and hit the network from the host, so the
+    defaults are strict.
+    """
 
     enabled: bool = True
     allowed_schemes: list[str] = Field(default_factory=lambda: ["https", "ssh"])
@@ -125,14 +134,19 @@ class CloneConfig(BaseModel):
 
 
 class ReaperConfig(BaseModel):
-    """Ghost-environment reaper (spec §11). The CLI (`clauster reap-environments`)
-    is always available; this gates only the *dashboard* surface, which exposes a
-    destructive first-party API in the browser. Off by default — opt in explicitly."""
+    """Ghost-environment reaper (spec §11) dashboard gate.
+
+    The CLI (`clauster reap-environments`) is always available; this gates only
+    the *dashboard* surface, which exposes a destructive first-party API in the
+    browser. Off by default — opt in explicitly.
+    """
 
     ui_enabled: bool = False
 
 
 class LogsConfig(BaseModel):
+    """Bridge-log rotation sizing and WebSocket redaction/ANSI-stripping toggles."""
+
     bridge_log_max_size_mb: int = Field(default=10, ge=1)
     keep_rotated: int = Field(default=5, ge=0)
     redact_session_url: bool = False  # false=hybrid (verbatim disk, redacted WS)
@@ -140,6 +154,8 @@ class LogsConfig(BaseModel):
 
 
 class ClausterConfig(BaseModel):
+    """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
+
     schema_version: int = SCHEMA_VERSION
     projects_root: Path
     host: str = "127.0.0.1"
@@ -160,6 +176,7 @@ class ClausterConfig(BaseModel):
 
     @property
     def source_path(self) -> Path | None:
+        """Filesystem path the config was loaded from, or None if not yet loaded."""
         return self._source_path
 
     def allows_bypass(self, project_name: str) -> bool:

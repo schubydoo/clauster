@@ -52,6 +52,8 @@ class CredentialsError(RuntimeError):
 
 
 class EnvironmentsAPIError(RuntimeError):
+    """The environments API returned a non-2xx status or an unusable body."""
+
     def __init__(self, status: int, detail: str) -> None:
         super().__init__(f"environments API returned {status}: {detail}")
         self.status = status
@@ -60,11 +62,14 @@ class EnvironmentsAPIError(RuntimeError):
 
 @dataclass
 class Credentials:
+    """OAuth access token + org UUID used to call the environments API."""
+
     access_token: str
     organization_uuid: str
     expires_at: int | None = None  # ms epoch, if present
 
     def masked_token(self) -> str:
+        """Return the token's first 6 chars plus an ellipsis (safe for logs)."""
         return (self.access_token[:6] + "…") if self.access_token else "(none)"
 
 
@@ -108,6 +113,8 @@ def load_credentials(
 
 
 class EnvironmentConfig(BaseModel):
+    """The ``config`` block of an environment (type + directory; extras allowed)."""
+
     type: str = ""
     directory: str | None = None
     model_config = {"extra": "allow"}
@@ -123,10 +130,12 @@ class Environment(BaseModel):
 
     @property
     def is_cloud(self) -> bool:
+        """Whether this is a cloud environment (never reaped)."""
         return self.config.type == "cloud"
 
     @property
     def is_bridge(self) -> bool:
+        """Whether this is a bridge environment (the reaper's candidate type)."""
         return self.config.type == "bridge"
 
 
@@ -161,6 +170,8 @@ def _https_roundtrip(method, parts, headers, body):  # pragma: no cover - live n
 
 
 class EnvironmentsClient:
+    """Minimal client for the Anthropic environments API (list/archive/delete)."""
+
     def __init__(
         self,
         credentials: Credentials,

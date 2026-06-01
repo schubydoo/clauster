@@ -17,6 +17,8 @@ from .config import PermissionMode, SpawnMode
 
 
 class InstanceStatus(StrEnum):
+    """Lifecycle state of a managed bridge, as surfaced to the dashboard."""
+
     STARTING = "starting"
     RUNNING = "running"
     STOPPED = "stopped"
@@ -25,6 +27,8 @@ class InstanceStatus(StrEnum):
 
 
 class TrustState(StrEnum):
+    """Whether a project directory has accepted Claude's workspace-trust dialog."""
+
     TRUSTED = "trusted"
     UNTRUSTED = "untrusted"
 
@@ -68,9 +72,11 @@ class RemoteControlInstance(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def session_url(self) -> str | None:
-        """Primary "Open session in Claude" deep link — lands directly in the
-        ready starter session named after the project (feature 5). ``url`` is
-        the secondary "New session" composer link."""
+        """Primary "Open session in Claude" deep link.
+
+        Lands directly in the ready starter session named after the project
+        (feature 5). ``url`` is the secondary "New session" composer link.
+        """
         if self.starter_session_id is None:
             return None
         return f"https://claude.ai/code/{self.starter_session_id}?from=cli"
@@ -87,14 +93,18 @@ class ClaudeMdDoc(BaseModel):
 
 
 class Attribution(StrEnum):
+    """How a working session relates to a managed bridge (tracked/untracked/external)."""
+
     TRACKED = "tracked"
     UNTRACKED = "untracked"
     EXTERNAL = "external"
 
 
 class WorkingSession(BaseModel):
-    """Observed, not managed. Exact shape of a `claude agents --json` list item
-    is {pid, cwd, kind, startedAt, sessionId}; the rest is Clauster-derived.
+    """A `claude agents --json` working session — observed, not managed.
+
+    The raw list-item shape is {pid, cwd, kind, startedAt, sessionId}; the rest of
+    the fields here are Clauster-derived.
     """
 
     pid: int
@@ -107,6 +117,7 @@ class WorkingSession(BaseModel):
 
     @classmethod
     def from_agents_json(cls, item: dict) -> WorkingSession:
+        """Build a ``WorkingSession`` from one raw ``claude agents --json`` item."""
         return cls(
             pid=item["pid"],
             cwd=Path(item["cwd"]),

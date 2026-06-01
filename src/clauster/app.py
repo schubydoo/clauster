@@ -67,6 +67,7 @@ class LoginThrottle:
         self._failures: dict[str, list[float]] = {}
 
     def allowed(self, ip: str | None) -> bool:
+        """Whether ``ip`` is under the failure limit within the rolling window."""
         if not ip:
             return True
         now = time.monotonic()
@@ -75,10 +76,12 @@ class LoginThrottle:
         return len(recent) < self._max
 
     def record_failure(self, ip: str | None) -> None:
+        """Record one failed login attempt from ``ip``."""
         if ip:
             self._failures.setdefault(ip, []).append(time.monotonic())
 
     def reset(self, ip: str | None) -> None:
+        """Clear ``ip``'s recorded failures (called on a successful login)."""
         if ip is not None:
             self._failures.pop(ip, None)
 
@@ -89,6 +92,7 @@ _STATIC_DIR = _PKG_DIR / "static"
 
 
 def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> FastAPI:
+    """Build and wire the FastAPI app (routes, middleware, static, bridge poll loop)."""
     runner = runner or SessionRunner(config)
 
     @asynccontextmanager
@@ -123,8 +127,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.state.session_epoch = auth.read_epoch(config.state_dir)
 
     def _authenticate(scope) -> tuple[str | None, bool]:
-        """Return (user, via_proxy). Works for both Request and WebSocket
-        (both expose .headers/.cookies/.client/.url)."""
+        """Return (user, via_proxy) for the request/connection.
+
+        Works for both Request and WebSocket (both expose
+        .headers/.cookies/.client/.url).
+        """
         rp = config.auth.reverse_proxy
         if rp.enabled and auth.peer_trusted(auth.peer_ip(scope), rp.trusted_ips):
             remote_user = scope.headers.get(rp.user_header)
@@ -481,7 +488,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     async def _spawn_or_http(coro: Awaitable[RemoteControlInstance]) -> RemoteControlInstance:
         """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.
-        Shared by the create and resume routes so the mapping lives in one place."""
+
+        Shared by the create and resume routes so the mapping lives in one place.
+        """
         try:
             return await coro
         except UnknownProject as exc:
@@ -526,9 +535,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/instances/{instance_id}/resume")
     async def api_resume(instance_id: str) -> RemoteControlInstance:
-        """Re-spawn a stopped/crashed bridge, reconnecting to its prior session
-        and reusing its stored spawn/permission modes (so resume keeps the same
-        permission mode rather than dropping to the default)."""
+        """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
+
+        Reuses the bridge's stored spawn/permission modes (so resume keeps the same
+        permission mode rather than dropping to the default).
+        """
         return await _spawn_or_http(runner.resume(instance_id))
 
     @app.post("/api/projects/{name}/trust")

@@ -11,10 +11,11 @@ import subprocess
 
 
 class ClaudeNotFound(RuntimeError):
-    pass
+    """Raised when the configured ``claude`` binary cannot be found on PATH."""
 
 
 def resolve_binary(binary: str) -> str:
+    """Resolve ``binary`` to an absolute path via PATH, or raise ``ClaudeNotFound``."""
     resolved = shutil.which(binary)
     if resolved is None:
         raise ClaudeNotFound(f"claude binary {binary!r} not found on PATH; Clauster cannot start.")
