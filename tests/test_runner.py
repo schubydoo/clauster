@@ -253,9 +253,6 @@ async def test_watch_startup_promotes_on_late_registration(runner_config, monkey
 async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeypatch):
     """If a STARTING bridge dies before registering, the watch defers to the same
     rule as the poll loop: an unintended same-dir exit is CRASHED."""
-    import os
-    import signal as _signal
-
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
     monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
     monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
@@ -267,8 +264,7 @@ async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeyp
     assert inst.status is InstanceStatus.STARTING
     watch = runner._startup_watches["alpha"]
 
-    assert inst.bridge_pid is not None
-    os.kill(inst.bridge_pid, _signal.SIGKILL)  # die during startup
+    runner._procs["alpha"].kill()  # die during startup (cross-platform hard kill)
     await watch
     assert inst.status is InstanceStatus.CRASHED
 
