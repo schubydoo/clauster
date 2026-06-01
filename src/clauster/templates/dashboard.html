@@ -21,6 +21,10 @@
     .toast-stack { position: fixed; bottom: 1rem; right: 1rem; z-index: 1090;
                    display: flex; flex-direction: column; gap: .5rem; max-width: 360px; }
     .cmd-text { font-family: var(--tblr-font-monospace); font-size: .82rem; }
+    .card-detail { font-family: var(--tblr-font-monospace); font-size: .72rem; margin: .4rem 0 0;
+                   padding: .4rem .6rem; border-radius: 6px; max-height: 8rem; overflow: auto;
+                   white-space: pre-wrap; overflow-wrap: break-word;
+                   background: var(--tblr-bg-surface-secondary); color: var(--tblr-secondary); }
   </style>
 </head>
 <body>
@@ -211,7 +215,10 @@
 
               <div class="btn-list">
                 <button class="btn btn-sm btn-success" @click="start('{{ p.name }}')"
-                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}')" x-cloak>Start bridge</button>
+                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>Start bridge</button>
+                <button class="btn btn-sm btn-success" @click="resume('{{ p.name }}')"
+                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
+                        :title="'Restart the bridge — reconnects its environment and keeps ' + resumeModeOf('{{ p.name }}') + ' mode.'">Restart</button>
                 <button class="btn btn-sm btn-danger" @click="stop('{{ p.name }}')"
                         x-show="isRunning('{{ p.name }}')" x-cloak
                         :disabled="isStopping('{{ p.name }}')">
@@ -236,6 +243,9 @@
                 </div>
               </div>
               <div class="alert alert-danger mt-2 mb-0" x-show="errorOf('{{ p.name }}')" x-cloak x-text="errorOf('{{ p.name }}')"></div>
+              <!-- server-side startup failure detail (bridge stderr tail) -->
+              <pre class="card-detail" x-show="statusOf('{{ p.name }}') === 'error' && detailOf('{{ p.name }}')"
+                   x-cloak x-text="detailOf('{{ p.name }}')"></pre>
 
               <!-- CLAUDE.md editor -->
               <template x-if="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open">
@@ -440,6 +450,14 @@
       sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
       envUrlOf(name) { return (this.instances[name] || {}).url || null; },
       errorOf(name) { return this.errors[name] || null; },
+      // A stopped/crashed bridge that still has an environment can reconnect to it —
+      // show "Restart" instead of "Start" and reuse its stored permission mode.
+      isResumable(name) {
+        const i = this.instances[name] || {};
+        return (i.status === "stopped" || i.status === "crashed") && !!i.environment_id;
+      },
+      resumeModeOf(name) { return (this.instances[name] || {}).permission_mode || ""; },
+      detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
       externalCount(name) {
         const s = this.externalSessions[name];
         return Array.isArray(s) ? s.length : 0;
@@ -590,6 +608,28 @@
           if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; this.toast(name + ": start failed", "error"); }
           else { this.instances[name] = body; if (body.status === "running") this.toast(name + ": running", "success"); }
         } catch (e) { this.errors[name] = String(e); delete this.instances[name]; }
+        await this.refresh();
+      },
+      async resume(name) {
+        this.errors[name] = null;
+        const prev = this.instances[name];
+        this.instances[name] = { project: name, status: "starting" };  // optimistic
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name) + "/resume",
+                                  { method: "POST" });
+          const body = await res.json();
+          if (!res.ok) {
+            this.errors[name] = body.detail || "failed to resume";
+            if (prev) this.instances[name] = prev; else delete this.instances[name];
+            this.toast(name + ": restart failed", "error");
+          } else {
+            this.instances[name] = body;
+            if (body.status === "running") this.toast(name + ": running", "success");
+          }
+        } catch (e) {
+          this.errors[name] = String(e);
+          if (prev) this.instances[name] = prev; else delete this.instances[name];
+        }
         await this.refresh();
       },
       async stop(name) {
