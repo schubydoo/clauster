@@ -189,6 +189,25 @@ def test_client_maps_http_error():
     assert ei.value.status == 409
 
 
+def test_client_list_pagination_cycle_guard():
+    # A repeated next_page cursor must terminate, not loop forever (which would
+    # also exhaust the mock into an IndexError on a 3rd request).
+    def page(nxt):
+        return {"data": [{"id": "env_1", "config": {"type": "bridge"}}], "next_page": nxt}
+
+    client, mt = _client([(200, page("c1")), (200, page("c1"))])
+    envs = client.list_environments()
+    assert len(mt.calls) == 2  # stopped on the repeated cursor, no 3rd request
+    assert len(envs) == 2
+
+
+def test_client_request_non_json_body_raises():
+    # A 2xx with a non-JSON body surfaces as an API error, not a bare JSONDecodeError.
+    client, _ = _client([(200, b"<html>502 Bad Gateway</html>")])
+    with pytest.raises(EnvironmentsAPIError, match="non-JSON"):
+        client.list_environments()
+
+
 def test_https_transport_rejects_non_https():
     with pytest.raises(EnvironmentsAPIError, match="non-https"):
         environments._https_transport("GET", "file:///etc/passwd", {}, None)
