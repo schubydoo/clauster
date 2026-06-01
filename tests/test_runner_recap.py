@@ -29,9 +29,7 @@ async def test_spawn_installs_recap_hook_when_enabled(runner_config, monkeypatch
         settings = runner._settings_json
         assert settings.is_file()
         data = json.loads(settings.read_text())
-        commands = [
-            h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]
-        ]
+        commands = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
         assert any("resume_recap.py" in c for c in commands)
     finally:
         await runner.stop("alpha")

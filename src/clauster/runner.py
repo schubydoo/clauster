@@ -231,9 +231,7 @@ class SessionRunner:
 
         if self._config.claude.resume_recap and not self._recap_hook_ensured:
             try:
-                changed = await asyncio.to_thread(
-                    ensure_recap_hook_installed, self._settings_json
-                )
+                changed = await asyncio.to_thread(ensure_recap_hook_installed, self._settings_json)
                 if changed:
                     _log.info(
                         "installed the resume-recap SessionStart hook in %s so a restarted "
@@ -385,9 +383,7 @@ class SessionRunner:
             popen_env = {
                 **os.environ,
                 "CLAUSTER_RESUME_RECAP": "1",
-                "CLAUSTER_RESUME_RECAP_MAX_CHARS": str(
-                    self._config.claude.resume_recap_max_chars
-                ),
+                "CLAUSTER_RESUME_RECAP_MAX_CHARS": str(self._config.claude.resume_recap_max_chars),
             }
         # Capture stdout+stderr to a file so a failed start leaves a diagnosable
         # reason behind (the bridge logs the *why* there, not to --debug-file).
