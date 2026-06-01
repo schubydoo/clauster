@@ -43,7 +43,7 @@ from .models import (
     WorkingSession,
 )
 from .state import StateStore
-from .trust import is_trusted, trust_directory
+from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
 
 _log = logging.getLogger("clauster.runner")
 
@@ -89,6 +89,8 @@ class SessionRunner:
         # Per-spawn background tasks that watch a STARTING bridge until it either
         # registers an environment (-> RUNNING) or proves stuck (-> ERROR).
         self._startup_watches: dict[str, asyncio.Task] = {}
+        # Mark remote control as acknowledged once, before the first spawn.
+        self._rc_setting_ensured = False
         # Lightweight persistence of label / intentional_stop / spawn_mode (D14).
         self._state = StateStore(config.state_dir)
         self._persisted: dict[str, dict] = self._state.load()
@@ -203,6 +205,24 @@ class SessionRunner:
             raise NotTrusted(
                 f"directory not trusted: {proj.path}. Use the Trust action before starting."
             )
+
+        if self._config.claude.auto_enable_remote_control and not self._rc_setting_ensured:
+            try:
+                changed = await asyncio.to_thread(ensure_remote_control_enabled, self._claude_json)
+                if changed:
+                    _log.info(
+                        "marked remote control acknowledged in %s so the bridge skips the "
+                        "interactive enable prompt",
+                        self._claude_json,
+                    )
+            except OSError as exc:
+                # Best-effort: if we can't write the flag the bridge may hang on the
+                # prompt, but the startup-watch surfaces that honestly as ERROR rather
+                # than a false RUNNING — so don't fail the spawn over it.
+                _log.warning(
+                    "could not pre-enable remote control in %s: %s", self._claude_json, exc
+                )
+            self._rc_setting_ensured = True
 
         log_path = self._unique_log_path(name)
         instance = RemoteControlInstance(
