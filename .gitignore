@@ -33,3 +33,8 @@ DEBUG_NOTES.md
 
 # --- Single rolling scratchpad for in-flight agent/session notes (not committed) ---
 NOTES.md
+
+# --- Agent/PoC scratch (UI screenshots, a11y snapshots, Playwright MCP logs) ---
+.playwright-mcp/
+/dash-*.png
+/dash-a11y.yml
