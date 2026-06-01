@@ -460,7 +460,15 @@ def test_reconcile_status_transitions():
 
 
 def _argv_of(instance) -> list[str]:
-    """The argv the fake bridge recorded for its most recent spawn."""
+    """
+    Read the fake bridge's recorded spawn argv for the given instance.
+    
+    Parameters:
+        instance: Object with a `bridge_debug_log_path` attribute pointing to the bridge debug log file.
+    
+    Returns:
+        list[str]: The argv recorded in the sidecar file `<bridge_debug_log_path>.argv.json`.
+    """
     from pathlib import Path
 
     return json.loads(Path(str(instance.bridge_debug_log_path) + ".argv.json").read_text())

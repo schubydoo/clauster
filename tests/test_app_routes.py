@@ -58,6 +58,11 @@ def test_stop_unknown_instance_404(write_config, tmp_path):
 
 
 def test_resume_unknown_instance_404(write_config, tmp_path):
+    """
+    Verify that attempting to resume a non-existent instance returns HTTP 404.
+    
+    Posts to /api/instances/ghost/resume and asserts the response status code is 404.
+    """
     assert _client(write_config, tmp_path).post("/api/instances/ghost/resume").status_code == 404
 
 

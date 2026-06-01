@@ -188,6 +188,25 @@ class SessionRunner:
         spawn_mode: str | None = None,
         permission_mode: str | None = None,
     ) -> RemoteControlInstance:
+        """
+        Start and register a managed remote-control bridge for the named project.
+        
+        Attempts to start a bridge for `name` and returns its managed RemoteControlInstance. If an instance already exists and is STARTING or RUNNING, the existing instance is returned. The method validates spawn and permission options, verifies the project is trusted, optionally ensures remote-control is pre-enabled, launches the bridge process, performs an initial readiness check using the bridge debug log, enriches instance metadata (starter session or error tail), persists state, and—if still STARTING—schedules a background startup watch to resolve late registration or failure.
+        
+        Parameters:
+            name (str): Managed project name to spawn the bridge for.
+            spawn_mode (str | None): Optional spawn mode; defaults to configured instance default. Must be a supported spawn mode.
+            permission_mode (str | None): Optional permission mode; defaults to configured instance default. Must be a supported permission mode.
+        
+        Returns:
+            RemoteControlInstance: The managed instance representing the bridge after spawn and initial readiness processing.
+        
+        Raises:
+            UnknownProject: if `name` is not a discovered/valid project.
+            InvalidSpawnOption: if `spawn_mode` or `permission_mode` is invalid for the project or configuration.
+            PermissionModeNotAllowed: if `permission_mode` requests bypass when not permitted by config.
+            NotTrusted: if the project directory is not trusted.
+        """
         existing = self._instances.get(name)
         if existing is not None and existing.status in (
             InstanceStatus.STARTING,
@@ -266,15 +285,15 @@ class SessionRunner:
         return instance
 
     async def resume(self, name: str) -> RemoteControlInstance:
-        """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
-
-        Re-running ``claude remote-control`` in the same cwd reconnects to the
-        existing environment + session (the bridge-pointer.json the prior run
-        left behind drives it — empirically confirmed). We reuse the stopped
-        instance's stored ``spawn_mode``/``permission_mode`` so the resume keeps
-        the same permission mode (a *fresh* bare start would drop back to the
-        default 'ask'). The session id, which a reconnecting bridge does NOT
-        re-log, is recovered from the pointer by :meth:`spawn`'s enrich step.
+        """
+        Resume a managed project's bridge using its previously stored spawn and permission modes.
+        
+        Looks up the managed instance by name and starts a new bridge process with the
+        instance's stored `spawn_mode` and `permission_mode`. Raises `UnknownProject` if
+        no managed instance exists for the given name.
+        
+        Returns:
+            RemoteControlInstance: the managed instance after attempting to spawn (status may be STARTING, RUNNING, or ERROR)
         """
         existing = self._instances.get(name)
         if existing is None:
@@ -288,6 +307,18 @@ class SessionRunner:
     def _validate_spawn_options(
         self, proj: Project, spawn_mode: str, permission_mode: str
     ) -> None:
+        """
+        Validate spawn and permission mode choices for a project and raise on invalid combinations.
+        
+        Parameters:
+            proj (Project): Project metadata used to enforce repo-specific rules (e.g., git requirement).
+            spawn_mode (str): Desired spawn mode; must be one of the allowed `SPAWN_MODES`.
+            permission_mode (str): Desired permission mode; must be one of the allowed `PERMISSION_MODES`.
+        
+        Raises:
+            InvalidSpawnOption: If `spawn_mode` or `permission_mode` is not recognised, or if `spawn_mode == "worktree"` is requested for a project that is not a git repository.
+            PermissionModeNotAllowed: If `permission_mode == "bypassPermissions"` is requested but the configuration disallows bypass for the project.
+        """
         if spawn_mode not in SPAWN_MODES:
             raise InvalidSpawnOption(
                 f"invalid spawn_mode {spawn_mode!r}; expected one of {SPAWN_MODES}"
@@ -314,7 +345,12 @@ class SessionRunner:
     def _build_cmd(
         self, log_path: Path, name: str, spawn_mode: str, permission_mode: str
     ) -> list[str]:
-        """The `claude remote-control` argv. Pure (no side effects) so it's unit-testable."""
+        """
+        Builds the argument vector for invoking `claude remote-control`.
+        
+        Returns:
+            list[str]: Command-line arguments suitable for passing to subprocess (argv form).
+        """
         return [
             self._binary,
             "remote-control",
@@ -346,6 +382,19 @@ class SessionRunner:
         spawn_mode: str,
         permission_mode: str,
     ) -> subprocess.Popen:
+        """
+        Spawn a detached `claude remote-control` bridge process for a project and capture its combined stdout/stderr to a sibling stderr log file.
+        
+        Parameters:
+            cwd (Path): Working directory for the spawned process (project path).
+            log_path (Path): Path to the bridge debug log; a sibling `<stem>.stderr.log` file will receive stdout/stderr.
+            name (str): Instance name passed to the bridge.
+            spawn_mode (str): Spawn mode argument for the bridge (`--spawn`).
+            permission_mode (str): Permission mode argument for the bridge (`--permission-mode`).
+        
+        Returns:
+            subprocess.Popen: A Popen handle for the detached child process; the child's stdout/stderr have been redirected to the stderr log file.
+        """
         cmd = self._build_cmd(log_path, name, spawn_mode, permission_mode)
         # Exec the RESOLVED absolute path, not the bare configured name: Windows
         # CreateProcess only auto-appends .exe (never the .cmd/.ps1 shim npm installs
@@ -383,10 +432,15 @@ class SessionRunner:
             err_fh.close()
 
     def _await_ready(self, log_path: Path, proc: subprocess.Popen) -> bridge_log.BridgeMarkers:
-        """Block until the bridge is ready, errors, or times out.
-
-        The log file is created by the bridge after exec, so poll-until-exists.
-        Because the path is unique to this spawn, any markers found are ours.
+        """
+        Block until the bridge registers as ready, reports a trust error, or a readiness timeout elapses.
+        
+        Parameters:
+            log_path (Path): Path to the bridge debug log used to detect readiness markers.
+            proc (subprocess.Popen): Spawned bridge process used to detect premature exit.
+        
+        Returns:
+            bridge_log.BridgeMarkers: Parsed markers from the bridge log; may be empty if no markers were written.
         """
         deadline = time.monotonic() + _READY_TIMEOUT
         markers = bridge_log.BridgeMarkers()
@@ -415,6 +469,15 @@ class SessionRunner:
         markers: bridge_log.BridgeMarkers,
         proc: subprocess.Popen,
     ) -> None:
+        """
+        Update the given instance with identifiers from bridge log markers and determine its lifecycle status.
+        
+        Sets instance.bridge_id, instance.environment_id, and instance.starter_session_id when present in markers, and constructs instance.url when an environment_id is available. Then sets instance.status to RUNNING if the markers indicate readiness and the process is still alive; sets status to ERROR if the markers report a trust error or the process has exited; otherwise leaves the instance in STARTING.
+        Parameters:
+            instance (RemoteControlInstance): The instance to update.
+            markers (bridge_log.BridgeMarkers): Parsed markers extracted from the bridge debug log.
+            proc (subprocess.Popen): The spawned bridge process used to check liveness.
+        """
         instance.bridge_id = markers.bridge_id or instance.bridge_id
         instance.environment_id = markers.environment_id or instance.environment_id
         instance.starter_session_id = markers.starter_session_id or instance.starter_session_id
@@ -437,13 +500,14 @@ class SessionRunner:
     async def _post_spawn_enrich(
         self, instance: RemoteControlInstance, project_path: Path
     ) -> None:
-        """After readiness is decided, fill in what the log alone can't tell us.
-
-        - RUNNING: a *reconnecting* bridge never re-logs ``Created initial
-          session``, so ``starter_session_id`` (and thus ``session_url``) would
-          be empty after a resume — backfill it from the pointer.
-        - ERROR/CRASHED: capture the bridge's stderr tail so the failure has a
-          visible reason instead of a bare "Failed to start".
+        """
+        Enrich the instance record after initial readiness detection.
+        
+        When the instance status is RUNNING, populate a missing starter_session_id from the project's pointer so reconnecting bridges expose a session URL. When the status is ERROR or CRASHED, read the bridge's captured stderr tail and set instance.error_detail to a bounded snippet describing the failure.
+        
+        Parameters:
+            instance (RemoteControlInstance): The managed instance to update in-place.
+            project_path (Path): Filesystem path of the project used to locate the pointer for backfilling.
         """
         if instance.status is InstanceStatus.RUNNING:
             await asyncio.to_thread(self._backfill_starter_session, instance, project_path)
@@ -452,13 +516,17 @@ class SessionRunner:
 
     @staticmethod
     def _backfill_starter_session(instance: RemoteControlInstance, project_path: Path) -> None:
-        """Recover the session id from the bridge-pointer when the log omitted it.
-
-        A *reconnecting* bridge re-logs its environment but NOT "Created initial
-        session", so ``starter_session_id`` (and thus ``session_url``, the primary
-        deep link) would be empty after a resume without this. No-op for a fresh
-        start, which logs the session directly. (The environment id never needs
-        backfilling: this only runs once RUNNING, which already requires it.)"""
+        """
+        Restore a missing starter session id from the on-disk bridge pointer.
+        
+        If `instance.starter_session_id` is unset and the project's bridge pointer contains a `session_id`,
+        assigns that value to `instance.starter_session_id`. No effect if the instance already has a starter
+        session id or if the pointer is absent or contains no `session_id`.
+        
+        Parameters:
+            instance (RemoteControlInstance): The managed instance to update.
+            project_path (Path): Filesystem path of the project whose bridge pointer to read.
+        """
         if instance.starter_session_id is not None:
             return
         ptr = pointers.pointer_for_project(project_path)
@@ -467,7 +535,14 @@ class SessionRunner:
 
     @classmethod
     def _capture_error_detail(cls, instance: RemoteControlInstance) -> None:
-        """Read the tail of the bridge's captured stderr into ``error_detail``."""
+        """
+        Populate a RemoteControlInstance's `error_detail` with the trailing contents of the bridge's captured stderr log.
+        
+        Reads the stderr sibling file corresponding to `instance.bridge_debug_log_path` and, if readable and non-empty, sets `instance.error_detail` to the last 2000 characters of that text. If the debug log path is missing, the stderr file is unreadable, or the file is empty, `instance.error_detail` is left unchanged.
+        
+        Parameters:
+            instance (RemoteControlInstance): The instance whose stderr capture will be read and whose `error_detail` may be updated.
+        """
         log_path = instance.bridge_debug_log_path
         if log_path is None:
             return
@@ -480,6 +555,15 @@ class SessionRunner:
             instance.error_detail = text[-2000:]
 
     def _project_path(self, name: str) -> Path | None:
+        """
+        Resolve a discovered project's filesystem path by project name.
+        
+        Parameters:
+            name (str): The discovered project's canonical name.
+        
+        Returns:
+            Path | None: The project's filesystem Path if found, otherwise None.
+        """
         proj = self._discovered().get(name)
         return proj.path if proj is not None else None
 

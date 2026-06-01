@@ -89,6 +89,24 @@ _STATIC_DIR = _PKG_DIR / "static"
 
 
 def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> FastAPI:
+    """
+    Create and configure the Clauster FastAPI application.
+    
+    Builds and returns a fully wired FastAPI instance for the given configuration:
+    it mounts static files and templates, installs application lifespan startup
+    and shutdown behavior, registers authentication and CSRF/origin guards,
+    and exposes the HTTP and WebSocket routes used by the Clauster UI and APIs
+    (including project, instance, environment reaper, health, login/logout,
+    and bridge log streaming endpoints).
+    
+    Parameters:
+        config (ClausterConfig): Application configuration and paths.
+        runner (SessionRunner | None): Optional session runner to use; when
+            omitted a new SessionRunner is created from `config`.
+    
+    Returns:
+        FastAPI: A configured FastAPI application instance ready to be served.
+    """
     runner = runner or SessionRunner(config)
 
     @asynccontextmanager
@@ -476,12 +494,31 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/sessions")
     async def api_sessions() -> dict[str, list[WorkingSession]]:
-        """External (unmanaged) working sessions grouped by project name (bug #4)."""
+        """
+        External working sessions grouped by project name.
+        
+        Returns:
+            dict[str, list[WorkingSession]]: Mapping from project name to lists of external (unmanaged) WorkingSession objects.
+        """
         return runner.external_sessions_by_project()
 
     async def _spawn_or_http(coro: Awaitable[RemoteControlInstance]) -> RemoteControlInstance:
-        """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.
-        Shared by the create and resume routes so the mapping lives in one place."""
+        """
+        Await a spawn or resume coroutine and translate known spawn errors into HTTPExceptions.
+        
+        Parameters:
+            coro (Awaitable[RemoteControlInstance]): An awaitable that performs a spawn or resume operation and yields the resulting RemoteControlInstance.
+        
+        Returns:
+            RemoteControlInstance: The created or resumed instance.
+        
+        Raises:
+            HTTPException: Raised with the following status codes when the corresponding errors occur:
+                - 404 for UnknownProject
+                - 422 for InvalidSpawnOption
+                - 403 for PermissionModeNotAllowed
+                - 409 for SpawnError
+        """
         try:
             return await coro
         except UnknownProject as exc:
@@ -495,6 +532,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/instances", status_code=201)
     async def api_spawn(body: dict) -> RemoteControlInstance:
+        """
+        Spawn a new instance for the specified project using optional spawn and permission modes.
+        
+        Parameters:
+            body (dict): Request body expected to contain:
+                - "project" (str): Required project name.
+                - "spawn_mode" (str, optional): Spawn mode to request.
+                - "permission_mode" (str, optional): Permission mode to request.
+        
+        Returns:
+            RemoteControlInstance: The created or spawned instance.
+        
+        Raises:
+            HTTPException: 422 if required fields are missing or if any of the provided modes are not strings.
+        """
         project = body.get("project")
         if not isinstance(project, str) or not project:
             raise HTTPException(status_code=422, detail="body must include a 'project' string")
@@ -512,6 +564,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/instances/{instance_id}")
     async def api_instance(instance_id: str) -> RemoteControlInstance:
+        """
+        Locate and return a runner instance by its identifier.
+        
+        Parameters:
+            instance_id (str): Identifier of the instance to retrieve.
+        
+        Returns:
+            RemoteControlInstance: The instance matching the given identifier.
+        
+        Raises:
+            HTTPException: with status 404 if no instance with the given id exists.
+        """
         instance = runner.get_instance(instance_id)
         if instance is None:
             raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
@@ -519,6 +583,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.delete("/api/instances/{instance_id}")
     async def api_stop(instance_id: str) -> RemoteControlInstance:
+        """
+        Stop a runner instance identified by its instance ID.
+        
+        Returns:
+            RemoteControlInstance: The RemoteControlInstance representing the stopped instance.
+        
+        Raises:
+            HTTPException: with status code 404 if the instance's project is unknown.
+        """
         try:
             return await runner.stop(instance_id)
         except UnknownProject as exc:
@@ -526,13 +599,28 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/instances/{instance_id}/resume")
     async def api_resume(instance_id: str) -> RemoteControlInstance:
-        """Re-spawn a stopped/crashed bridge, reconnecting to its prior session
-        and reusing its stored spawn/permission modes (so resume keeps the same
-        permission mode rather than dropping to the default)."""
+        """
+        Re-spawn a stopped or crashed bridge, reconnecting to its prior session and reusing its stored spawn and permission modes.
+        
+        Returns:
+            RemoteControlInstance: The resumed instance.
+        """
         return await _spawn_or_http(runner.resume(instance_id))
 
     @app.post("/api/projects/{name}/trust")
     async def api_trust(name: str) -> Project:
+        """
+        Mark the named project as trusted by the runner.
+        
+        Parameters:
+            name (str): The project name to mark as trusted.
+        
+        Returns:
+            Project: The trusted project.
+        
+        Raises:
+            HTTPException: Raised with status 404 if the named project does not exist.
+        """
         try:
             return await runner.trust_project(name)
         except UnknownProject as exc:
