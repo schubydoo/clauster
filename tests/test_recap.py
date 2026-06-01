@@ -327,5 +327,7 @@ def test_installer_ignores_non_dict_session_start_entries(tmp_path: Path) -> Non
 
 
 def test_hook_command_quotes_interpreter_and_script() -> None:
-    cmd = hook_command(python="/usr/bin/python3", script=Path("/x/resume_recap.py"))
-    assert cmd == '"/usr/bin/python3" "/x/resume_recap.py"'
+    # Compare against the platform's own Path rendering (Windows uses backslashes).
+    script = Path("/x/resume_recap.py")
+    cmd = hook_command(python="/usr/bin/python3", script=script)
+    assert cmd == f'"/usr/bin/python3" "{script}"'

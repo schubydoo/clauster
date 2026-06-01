@@ -35,7 +35,6 @@ from .config import (
     SpawnMode,
 )
 from .discovery import discover_projects, is_valid_project_name
-from .recap import ensure_recap_hook_installed
 from .models import (
     Attribution,
     InstanceStatus,
@@ -43,6 +42,7 @@ from .models import (
     RemoteControlInstance,
     WorkingSession,
 )
+from .recap import ensure_recap_hook_installed
 from .state import StateStore
 from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
 
