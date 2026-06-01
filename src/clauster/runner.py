@@ -35,6 +35,7 @@ from .config import (
     SpawnMode,
 )
 from .discovery import discover_projects, is_valid_project_name
+from .recap import ensure_recap_hook_installed
 from .models import (
     Attribution,
     InstanceStatus,
@@ -91,6 +92,10 @@ class SessionRunner:
         self._startup_watches: dict[str, asyncio.Task] = {}
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
+        # Install the resume-recap SessionStart hook once, before the first spawn.
+        self._recap_hook_ensured = False
+        # ~/.claude/settings.json sits beside the ~/.claude.json we honor for trust.
+        self._settings_json = self._claude_json.parent / ".claude" / "settings.json"
         # Lightweight persistence of label / intentional_stop / spawn_mode (D14).
         self._state = StateStore(config.state_dir)
         self._persisted: dict[str, dict] = self._state.load()
@@ -224,6 +229,25 @@ class SessionRunner:
                 )
             self._rc_setting_ensured = True
 
+        if self._config.claude.resume_recap and not self._recap_hook_ensured:
+            try:
+                changed = await asyncio.to_thread(
+                    ensure_recap_hook_installed, self._settings_json
+                )
+                if changed:
+                    _log.info(
+                        "installed the resume-recap SessionStart hook in %s so a restarted "
+                        "bridge gets its prior conversation recapped into context",
+                        self._settings_json,
+                    )
+            except OSError as exc:
+                # Best-effort, same as the remote-control flag: a failure here only
+                # means a restart won't be recapped, not that the bridge can't run.
+                _log.warning(
+                    "could not install resume-recap hook in %s: %s", self._settings_json, exc
+                )
+            self._recap_hook_ensured = True
+
         log_path = self._unique_log_path(name)
         instance = RemoteControlInstance(
             project=name,
@@ -352,6 +376,19 @@ class SessionRunner:
         # for `claude`), so a bare name that the version probe resolves via
         # shutil.which would fail to spawn here. Also pins the binary we validated.
         cmd[0] = resolve_binary(cmd[0])
+        # When resume-recap is enabled, flag it in the bridge's env. The detached
+        # bridge's child sessions inherit this, and the SessionStart hook (wired
+        # into ~/.claude/settings.json) acts only when it is set — so the recap
+        # never fires for the user's non-Clauster sessions sharing that config.
+        popen_env: dict[str, str] | None = None
+        if self._config.claude.resume_recap:
+            popen_env = {
+                **os.environ,
+                "CLAUSTER_RESUME_RECAP": "1",
+                "CLAUSTER_RESUME_RECAP_MAX_CHARS": str(
+                    self._config.claude.resume_recap_max_chars
+                ),
+            }
         # Capture stdout+stderr to a file so a failed start leaves a diagnosable
         # reason behind (the bridge logs the *why* there, not to --debug-file).
         # The detached child inherits its own dup of the fd, so the parent closes
@@ -370,6 +407,7 @@ class SessionRunner:
                     stdin=subprocess.DEVNULL,
                     stdout=err_fh,
                     stderr=subprocess.STDOUT,
+                    env=popen_env,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 )
             return subprocess.Popen(
@@ -377,6 +415,7 @@ class SessionRunner:
                 cwd=str(cwd),
                 stdout=err_fh,
                 stderr=subprocess.STDOUT,
+                env=popen_env,
                 start_new_session=True,
             )
         finally:
