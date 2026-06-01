@@ -4,22 +4,74 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Clauster — Sign in</title>
-  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/clauster.css">
+  <!-- Set the theme before first paint to avoid a flash. Defaults to dark. -->
+  <script>
+    (function () {
+      var t = localStorage.getItem("clauster-theme") || "dark";
+      document.documentElement.setAttribute("data-bs-theme", t);
+    })();
+  </script>
+  <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css">
 </head>
-<body>
-  <main class="login-wrap">
-    <!-- CSRF is enforced centrally: the auth guard middleware (app.py) requires a
-         trusted Origin/Referer on every unsafe method, including this POST. No
-         per-form token by design (see plan). -->
-    <form class="login-card" method="post" action="{{ request.scope.root_path }}/login"> <!-- nosemgrep -->
-      <h1 class="login-title">Clauster</h1>
-      <p class="login-sub">Sign in to continue</p>
-      {% if error %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
-      <label class="login-label" for="password">Password</label>
-      <input class="login-input" type="password" id="password" name="password"
-             autocomplete="current-password" autofocus required>
-      <button class="login-btn" type="submit">Sign in</button>
-    </form>
-  </main>
+<body class="d-flex flex-column">
+  <!-- Theme toggle (persists to localStorage; mirrors the dashboard control). -->
+  <button id="theme-toggle" type="button" style="z-index: 1080"
+          class="btn btn-icon position-fixed top-0 end-0 m-3" aria-label="Toggle theme">
+    <svg class="icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="4"></circle>
+      <path d="M3 12h1M20 12h1M12 3v1M12 20v1M5.6 5.6l.7.7M17.7 17.7l.7.7M18.4 5.6l-.7.7M6.3 17.7l-.7.7"></path>
+    </svg>
+    <svg class="icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"></path>
+    </svg>
+  </button>
+
+  <div class="page page-center">
+    <div class="container container-tight py-4">
+      <div class="text-center mb-4">
+        <span class="navbar-brand navbar-brand-autodark fs-1 fw-bold">Clauster</span>
+      </div>
+      <!-- CSRF is enforced centrally: the auth guard middleware (app.py) requires a
+           trusted Origin/Referer on every unsafe method, including this POST. No
+           per-form token by design (see plan). -->
+      <form class="card card-md" method="post" action="{{ request.scope.root_path }}/login"> <!-- nosemgrep -->
+        <div class="card-body">
+          <h2 class="h2 text-center mb-4">Sign in to continue</h2>
+          {% if error %}
+          <div class="alert alert-danger" role="alert">{{ error }}</div>
+          {% endif %}
+          <div class="mb-3">
+            <label class="form-label" for="password">Password</label>
+            <input class="form-control" type="password" id="password" name="password"
+                   autocomplete="current-password" autofocus required>
+          </div>
+          <div class="form-footer">
+            <button class="btn btn-primary w-100" type="submit">Sign in</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var btn = document.getElementById("theme-toggle");
+      function sync() {
+        var dark = document.documentElement.getAttribute("data-bs-theme") === "dark";
+        btn.querySelector(".icon-sun").style.display = dark ? "none" : "inline-block";
+        btn.querySelector(".icon-moon").style.display = dark ? "inline-block" : "none";
+      }
+      btn.addEventListener("click", function () {
+        var next = document.documentElement.getAttribute("data-bs-theme") === "dark" ? "light" : "dark";
+        document.documentElement.setAttribute("data-bs-theme", next);
+        localStorage.setItem("clauster-theme", next);
+        sync();
+      });
+      sync();
+    })();
+  </script>
 </body>
 </html>

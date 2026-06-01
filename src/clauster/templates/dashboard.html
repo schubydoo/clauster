@@ -4,611 +4,747 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Clauster</title>
-  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/clauster.css">
+  <!-- Set theme before first paint to avoid a flash. Defaults to dark. -->
+  <script>
+    (function () {
+      var t = localStorage.getItem("clauster-theme") || "dark";
+      document.documentElement.setAttribute("data-bs-theme", t);
+    })();
+  </script>
+  <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css">
   <script defer src="{{ request.scope.root_path }}/static/alpine.min.js"></script>
+  <style>
+    .log-view { max-height: 320px; overflow: auto; font-size: .78rem; line-height: 1.35;
+                white-space: pre-wrap; word-break: break-word; margin: 0; }
+    .qr-box { background: #fff; padding: 8px; border-radius: 8px; width: max-content; }
+    .toast-stack { position: fixed; bottom: 1rem; right: 1rem; z-index: 1090;
+                   display: flex; flex-direction: column; gap: .5rem; max-width: 360px; }
+    .cmd-text { font-family: var(--tblr-font-monospace); font-size: .82rem; }
+    .card-detail { font-family: var(--tblr-font-monospace); font-size: .72rem; margin: .4rem 0 0;
+                   padding: .4rem .6rem; border-radius: 6px; max-height: 8rem; overflow: auto;
+                   white-space: pre-wrap; overflow-wrap: break-word;
+                   background: var(--tblr-bg-surface-secondary); color: var(--tblr-secondary); }
+    [x-cloak] { display: none !important; }
+  </style>
 </head>
 <body>
-  <header class="topbar">
-    <h1>Clauster <span class="version">v{{ version }}</span></h1>
-    <p class="subtitle">{{ projects_root }}</p>
-    {% if auth_enabled %}
-    <!-- CSRF enforced by the auth guard middleware (Origin/Referer on unsafe methods). -->
-    <form class="logout-form" method="post" action="{{ request.scope.root_path }}/logout"> <!-- nosemgrep -->
-      <button class="btn-logout" type="submit">Log out</button>
-    </form>
-    {% endif %}
+<div class="page">
+  <header class="navbar navbar-expand-md sticky-top d-print-none">
+    <div class="container-xl">
+      <span class="navbar-brand fs-2 fw-bold mb-0">Clauster
+        <span class="text-secondary fs-5 fw-normal">v{{ version }}</span></span>
+      <span class="text-secondary small d-none d-lg-inline ms-2 text-truncate">{{ projects_root }}</span>
+      <div class="navbar-nav flex-row ms-auto align-items-center" style="gap:.5rem">
+        <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme">
+          <svg class="icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4"></circle>
+            <path d="M3 12h1M20 12h1M12 3v1M12 20v1M5.6 5.6l.7.7M17.7 17.7l.7.7M18.4 5.6l-.7.7M6.3 17.7l-.7.7"></path>
+          </svg>
+          <svg class="icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"></path>
+          </svg>
+        </button>
+        {% if auth_enabled %}
+        <!-- CSRF enforced by the auth guard middleware (Origin/Referer on unsafe methods). -->
+        <form method="post" action="{{ request.scope.root_path }}/logout"> <!-- nosemgrep -->
+          <button class="btn btn-sm" type="submit">Log out</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
   </header>
 
-  <main x-data="dashboard()" x-init="init()">
-    <section class="new-project">
-      <button class="btn-new-toggle" @click="np.open = !np.open"
-              x-text="np.open ? '× Cancel' : '+ New project'">+ New project</button>
-      <div class="np-panel" x-show="np.open">
-        <label class="np-field">Name
-          <input type="text" x-model="np.name" placeholder="my-project"
-                 pattern="[a-zA-Z0-9_-]+" @keyup.enter="submitNew()"></label>
-        <div class="np-modes">
-          <label><input type="radio" value="create" x-model="np.mode"> Create empty</label>
-          <label><input type="radio" value="clone" x-model="np.mode"> Clone from git URL</label>
-        </div>
-        <label class="np-field" x-show="np.mode === 'create'">
-          <input type="checkbox" x-model="np.gitInit"> run <code>git init</code></label>
-        <div x-show="np.mode === 'clone'">
-          <label class="np-field">Git URL
-            <input type="text" x-model="np.url" autocomplete="off" spellcheck="false"
-                   placeholder="https://github.com/owner/repo.git" @keyup.enter="submitNew()"></label>
-          <label class="np-field"><input type="checkbox" x-model="np.shallow"> shallow clone (<code>--depth 1</code>)</label>
-          <p class="np-hint">https / ssh only · private/LAN hosts blocked unless enabled in config ·
-            cloned code runs only when you Start a bridge.</p>
-        </div>
-        <div class="np-actions">
-          <button class="btn-np-go" @click="submitNew()" :disabled="np.busy || !np.name"
-                  x-text="np.busy ? (np.mode === 'clone' ? 'Cloning…' : 'Creating…')
-                                  : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</button>
-        </div>
-        <p class="np-error" x-show="np.error" x-text="np.error"></p>
-        <div class="np-warn" x-show="np.warn">
-          <p>⚠ <strong x-text="np.name"></strong> was created and ships <strong x-text="np.warn"></strong>
-            — its code runs when you Start a bridge here. Review it before starting.</p>
-          <button class="btn-np-reveal" @click="reloadToProject()">Show it</button>
+  <div class="page-body">
+    <div class="container-xl" x-data="dashboard()" x-init="init()">
+
+      <!-- ===== New project ===== -->
+      <div class="mb-3">
+        <button class="btn btn-primary" @click="np.open = !np.open">
+          <span x-text="np.open ? '× Cancel' : '+ New project'">+ New project</span>
+        </button>
+        <div class="card mt-2" x-show="np.open" x-cloak>
+          <div class="card-body">
+            <div class="row g-2">
+              <div class="col-md-5">
+                <label class="form-label">Name</label>
+                <input type="text" class="form-control" x-model="np.name" placeholder="my-project"
+                       pattern="[a-zA-Z0-9_-]+" @keyup.enter="submitNew()">
+              </div>
+              <div class="col-md-7">
+                <label class="form-label">Type</label>
+                <div class="btn-group w-100" role="group">
+                  <input type="radio" class="btn-check" id="np-create" value="create" x-model="np.mode">
+                  <label class="btn" for="np-create">Create empty</label>
+                  <input type="radio" class="btn-check" id="np-clone" value="clone" x-model="np.mode">
+                  <label class="btn" for="np-clone">Clone from git URL</label>
+                </div>
+              </div>
+            </div>
+            <div class="mt-2" x-show="np.mode === 'create'">
+              <label class="form-check"><input type="checkbox" class="form-check-input" x-model="np.gitInit">
+                <span class="form-check-label">run <code>git init</code></span></label>
+            </div>
+            <div class="mt-2" x-show="np.mode === 'clone'">
+              <label class="form-label">Git URL</label>
+              <input type="text" class="form-control" x-model="np.url" autocomplete="off" spellcheck="false"
+                     placeholder="https://github.com/owner/repo.git" @keyup.enter="submitNew()">
+              <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
+                <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>
+              <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts blocked unless enabled in
+                config · cloned code runs only when you Start a bridge.</p>
+            </div>
+            <div class="mt-3">
+              <button class="btn btn-primary" @click="submitNew()" :disabled="np.busy || !np.name">
+                <span class="spinner-border spinner-border-sm me-1" x-show="np.busy" x-cloak></span>
+                <span x-text="np.busy ? (np.mode === 'clone' ? 'Cloning…' : 'Creating…')
+                                      : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</span>
+              </button>
+            </div>
+            <div class="alert alert-danger mt-2 mb-0" x-show="np.error" x-cloak x-text="np.error"></div>
+            <div class="alert alert-warning mt-2 mb-0" x-show="np.warn" x-cloak>
+              ⚠ <strong x-text="np.name"></strong> was created and ships <strong x-text="np.warn"></strong>
+              — its code runs when you Start a bridge here. Review it before starting.
+              <button class="btn btn-sm btn-warning ms-2" @click="reloadToProject()">Show it</button>
+            </div>
+          </div>
         </div>
       </div>
-    </section>
-    {% if reaper_ui_enabled %}
-    <section class="reaper" x-data="reaper()">
-      <button class="btn-reaper-toggle" @click="toggle()"
-              x-text="open ? '× Close ghost reaper' : '👻 Reap ghost environments'">👻 Reap ghost environments</button>
-      <div class="reaper-panel" x-show="open">
-        <p class="reaper-blurb">Server-side bridge environments with no live bridge clutter the
-          claude.ai/code “New session” selector. The cloud <code>Default</code> and any environment
-          backing a live bridge are never reaped.</p>
-        <p class="reaper-state" x-show="loading">Scanning…</p>
-        <p class="reaper-error" x-show="error" x-text="error"></p>
-        <template x-if="!loading && loaded && !error">
-          <div>
-            <p class="reaper-summary" x-text="summary()"></p>
-            <ul class="ghost-list" x-show="ghosts.length">
-              <template x-for="g in ghosts" :key="g.id">
-                <li class="ghost">
-                  <code x-text="g.id"></code>
-                  <span class="ghost-dir" x-text="g.directory || '(no directory)'"></span>
-                  <span class="ghost-name" x-show="g.name" x-text="g.name"></span>
-                </li>
+
+      {% if reaper_ui_enabled %}
+      <!-- ===== Ghost-environment reaper ===== -->
+      <div class="mb-3" x-data="reaper()">
+        <button class="btn btn-ghost-secondary" @click="toggle()">
+          <span x-text="open ? '× Close ghost reaper' : '👻 Reap ghost environments'">👻 Reap ghost environments</span>
+        </button>
+        <div class="card mt-2" x-show="open" x-cloak>
+          <div class="card-body">
+            <p class="text-secondary small">Server-side bridge environments with no live bridge clutter the
+              claude.ai/code "New session" selector. The cloud <code>Default</code> and any environment backing a
+              live bridge are never reaped.</p>
+            <p class="text-secondary" x-show="loading" x-cloak>Scanning…</p>
+            <div class="alert alert-danger" x-show="error" x-cloak x-text="error"></div>
+            <template x-if="!loading && loaded && !error">
+              <div>
+                <p x-text="summary()"></p>
+                <div class="list-group mb-2" x-show="ghosts.length" x-cloak>
+                  <template x-for="g in ghosts" :key="g.id">
+                    <div class="list-group-item">
+                      <code x-text="g.id"></code>
+                      <span class="text-secondary ms-2" x-text="g.directory || '(no directory)'"></span>
+                      <span class="badge bg-secondary-lt ms-2" x-show="g.name" x-text="g.name"></span>
+                    </div>
+                  </template>
+                </div>
+                <div x-show="ghosts.length" x-cloak>
+                  <button class="btn btn-warning" @click="archive()" :disabled="busy"
+                          x-text="busy ? 'Working…' : ('Archive ' + ghosts.length + ' (reversible)')">Archive</button>
+                  <div class="mt-2">
+                    <label class="form-label">force-delete (irreversible) — type <code>DELETE</code>:</label>
+                    <div class="input-group" style="max-width:320px">
+                      <input type="text" class="form-control" x-model="deleteTyped" placeholder="DELETE" autocomplete="off">
+                      <button class="btn btn-danger" @click="del()" :disabled="busy || deleteTyped !== 'DELETE'">Permanently delete</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="alert alert-info mt-2" x-show="result" x-cloak x-text="result"></div>
+                <button class="btn btn-sm mt-2" @click="load()" :disabled="busy">Refresh</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- ===== Project grid ===== -->
+      {% if projects %}
+      <div class="row row-cards">
+        {% for p in projects %}
+        <div class="col-md-6 col-xl-4" data-project="{{ p.name }}">
+          <div class="card h-100">
+            <div class="card-header">
+              <h3 class="card-title text-truncate">{{ p.name }}</h3>
+              <div class="card-actions">
+                <span class="badge" :class="statusBadgeClass('{{ p.name }}')">
+                  <span class="status-dot" :class="statusDotClass('{{ p.name }}')"></span>
+                  <span x-text="statusLabel('{{ p.name }}')">Stopped</span>
+                </span>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="mb-2">
+                {% if p.is_git_repo %}<span class="badge bg-secondary-lt me-1">git</span>{% endif %}
+                {% if p.has_claude_md %}<span class="badge bg-azure-lt me-1">CLAUDE.md</span>{% endif %}
+                <span class="badge me-1" :class="trustState['{{ p.name }}'] === 'trusted' ? 'bg-green-lt' : 'bg-yellow-lt'"
+                      x-text="trustState['{{ p.name }}']">{{ p.trust_state.value }}</span>
+                <span class="badge bg-teal-lt me-1" x-show="usageLabel('{{ p.name }}')" x-cloak
+                      :title="usageTitle('{{ p.name }}')" x-text="usageLabel('{{ p.name }}')"></span>
+              </div>
+
+              <!-- Trust (untrusted only; updates in place) -->
+              <button class="btn btn-sm btn-outline-warning mb-2" @click="trust('{{ p.name }}')"
+                      x-show="trustState['{{ p.name }}'] === 'untrusted' && !isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}')"
+                      x-cloak :disabled="trusting['{{ p.name }}']">
+                <span class="spinner-border spinner-border-sm me-1" x-show="trusting['{{ p.name }}']" x-cloak></span>
+                Trust directory
+              </button>
+
+              <!-- Spawn controls -->
+              <div class="row g-2 mb-2" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>
+                <div class="col-6">
+                  <label class="form-label small mb-1">Spawn</label>
+                  <select class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']">
+                    <option value="same-dir">same-dir</option>
+                    {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
+                    <option value="session">session</option>
+                  </select>
+                </div>
+                <div class="col-6">
+                  <label class="form-label small mb-1">Permissions</label>
+                  <select class="form-select form-select-sm" x-model="permMode['{{ p.name }}']">
+                    <option value="default">default</option>
+                    <option value="plan">plan</option>
+                    <option value="acceptEdits">acceptEdits</option>
+                    <option value="auto">auto</option>
+                    <option value="dontAsk">dontAsk</option>
+                    {% if p.allow_bypass_permissions %}<option value="bypassPermissions">bypassPermissions ⚠</option>{% endif %}
+                  </select>
+                </div>
+              </div>
+
+              <div class="btn-list">
+                <button class="btn btn-sm btn-success" @click="start('{{ p.name }}')"
+                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>Start bridge</button>
+                <button class="btn btn-sm btn-success" @click="resume('{{ p.name }}')"
+                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
+                        :title="'Restart the bridge — reconnects its environment and keeps ' + resumeModeOf('{{ p.name }}') + ' mode.'">Restart</button>
+                <button class="btn btn-sm btn-danger" @click="stop('{{ p.name }}')"
+                        x-show="isRunning('{{ p.name }}') || isStopping('{{ p.name }}')" x-cloak
+                        :disabled="isStopping('{{ p.name }}')">
+                  <span class="spinner-border spinner-border-sm me-1" x-show="isStopping('{{ p.name }}')" x-cloak></span>
+                  <span x-text="isStopping('{{ p.name }}') ? 'Stopping…' : 'Stop bridge'">Stop bridge</span>
+                </button>
+                <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="isBusy('{{ p.name }}')" x-cloak>
+                  <span class="spinner-border spinner-border-sm me-1"></span>starting…</span>
+                <button class="btn btn-sm" @click="toggleClaudeMd('{{ p.name }}')"
+                        x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</button>
+              </div>
+
+              <!-- bypassPermissions typed-confirm -->
+              <div class="alert alert-danger mt-2" x-show="confirmBypass['{{ p.name }}']" x-cloak>
+                <p class="mb-2">⚠ <strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
+                  run tools without asking. Type the project name to confirm.</p>
+                <div class="input-group">
+                  <input type="text" class="form-control" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
+                         @keyup.enter="confirmBypassStart('{{ p.name }}')">
+                  <button class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')">Start with bypass</button>
+                  <button class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
+                </div>
+              </div>
+              <div class="alert alert-danger mt-2 mb-0" x-show="errorOf('{{ p.name }}')" x-cloak x-text="errorOf('{{ p.name }}')"></div>
+              <!-- server-side startup failure detail (bridge stderr tail) -->
+              <pre class="card-detail" x-show="statusOf('{{ p.name }}') === 'error' && detailOf('{{ p.name }}')"
+                   x-cloak x-text="detailOf('{{ p.name }}')"></pre>
+
+              <!-- CLAUDE.md editor -->
+              <template x-if="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open">
+                <div class="mt-2 border rounded p-2">
+                  <div class="d-flex align-items-center mb-1">
+                    <strong class="me-2">CLAUDE.md</strong>
+                    <span class="badge bg-blue-lt me-2" x-show="!cmd['{{ p.name }}'].loading && !cmd['{{ p.name }}'].exists" x-cloak>new file</span>
+                    <span class="small ms-auto" :class="{ 'text-danger': cmdBytes('{{ p.name }}') > 65536 }"
+                          x-text="cmdBytes('{{ p.name }}') + ' / 65536 bytes'"></span>
+                  </div>
+                  <div class="alert alert-warning py-1" x-show="cmd['{{ p.name }}'].bridge_running" x-cloak>
+                    ⚠ A bridge is running — saved changes apply to <strong>new</strong> sessions, not the attached one.</div>
+                  <div class="alert alert-danger py-1" x-show="cmd['{{ p.name }}'].error" x-cloak x-text="cmd['{{ p.name }}'].error"></div>
+                  <textarea class="form-control cmd-text" x-model="cmd['{{ p.name }}'].content" rows="12"
+                            spellcheck="false" autocomplete="off"
+                            :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving"></textarea>
+                  <div class="btn-list mt-2">
+                    <button class="btn btn-sm btn-primary" @click="saveClaudeMd('{{ p.name }}')"
+                            :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving || cmdBytes('{{ p.name }}') > 65536"
+                            x-text="cmd['{{ p.name }}'].saving ? 'Saving…' : 'Save'">Save</button>
+                    <button class="btn btn-sm" @click="closeClaudeMd('{{ p.name }}')">Cancel</button>
+                    <span class="text-green" x-show="cmd['{{ p.name }}'].savedAt && !cmd['{{ p.name }}'].error" x-cloak>✓ saved</span>
+                  </div>
+                </div>
               </template>
-            </ul>
-            <div class="reaper-actions" x-show="ghosts.length">
-              <button class="btn-archive" @click="archive()" :disabled="busy"
-                      x-text="busy ? 'Working…' : ('Archive ' + ghosts.length + ' (reversible)')">Archive</button>
-              <!-- Irreversible: gated behind typing DELETE exactly (stricter than archive). -->
-              <div class="reaper-danger">
-                <label>force-delete (irreversible) — type <code>DELETE</code>:
-                  <input type="text" x-model="deleteTyped" placeholder="DELETE" autocomplete="off"></label>
-                <button class="btn-delete" @click="del()" :disabled="busy || deleteTyped !== 'DELETE'">Permanently delete</button>
+
+              <!-- external (unmanaged) session -->
+              <div class="mt-2 text-secondary small" x-show="hasExternal('{{ p.name }}')" x-cloak>
+                <span class="status-dot status-dot-animated bg-yellow me-1"></span>
+                <span x-text="externalCount('{{ p.name }}') > 1
+                  ? externalCount('{{ p.name }}') + ' external sessions active'
+                  : 'External session active'"></span>
+                <span class="text-muted">— not managed by Clauster</span>
+              </div>
+
+              <!-- session URLs + QR -->
+              <div class="mt-2" x-show="isRunning('{{ p.name }}') && sessionUrlOf('{{ p.name }}')" x-cloak>
+                <div class="btn-list">
+                  <a class="btn btn-sm btn-primary" target="_blank" rel="noopener" :href="sessionUrlOf('{{ p.name }}')">Open session in Claude</a>
+                  <button class="btn btn-sm" @click="copy(sessionUrlOf('{{ p.name }}'))">copy</button>
+                  <button class="btn btn-sm" @click="toggleQr('{{ p.name }}')" x-text="qrOpen['{{ p.name }}'] ? 'hide QR' : 'QR'"></button>
+                </div>
+                <div class="btn-list mt-1" x-show="envUrlOf('{{ p.name }}')" x-cloak>
+                  <a class="btn btn-sm btn-ghost-secondary" target="_blank" rel="noopener" :href="envUrlOf('{{ p.name }}')">New session</a>
+                  <button class="btn btn-sm btn-ghost-secondary" @click="copy(envUrlOf('{{ p.name }}'))">copy</button>
+                </div>
+                <template x-if="qrOpen['{{ p.name }}']">
+                  <div class="qr-box mt-2">
+                    <img :src="qrSrc('{{ p.name }}')" alt="QR code for the session deep link" width="160" height="160">
+                  </div>
+                </template>
+              </div>
+
+              <!-- bridge log tail -->
+              <div class="mt-2" x-show="isRunning('{{ p.name }}')" x-cloak>
+                <button class="btn btn-sm btn-ghost-secondary" @click="toggleLogs('{{ p.name }}')"
+                        x-text="logs['{{ p.name }}'] && logs['{{ p.name }}'].open ? 'Hide logs' : 'Show logs'"></button>
+                <template x-if="logs['{{ p.name }}'] && logs['{{ p.name }}'].open">
+                  <div class="mt-2">
+                    <div class="btn-list mb-1">
+                      <button class="btn btn-sm" @click="logs['{{ p.name }}'].paused ? resumeLogs('{{ p.name }}') : pauseLogs('{{ p.name }}')"
+                              x-text="logs['{{ p.name }}'].paused ? 'Resume' : 'Pause'"></button>
+                      <button class="btn btn-sm" @click="jumpToLatest('{{ p.name }}')">Jump to latest</button>
+                      <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="logs['{{ p.name }}'].paused" x-cloak>paused
+                        (<span x-text="logs['{{ p.name }}'].pending.length"></span> buffered)</span>
+                    </div>
+                    <pre class="log-view bg-dark text-white rounded p-2" :id="'log-' + '{{ p.name }}'"
+                         x-text="logs['{{ p.name }}'].lines.join('\n')"></pre>
+                  </div>
+                </template>
               </div>
             </div>
-            <p class="reaper-result" x-show="result" x-text="result"></p>
-            <button class="btn-reaper-refresh" @click="load()" :disabled="busy">Refresh</button>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty">
+        <p class="empty-title">No projects found</p>
+        <p class="empty-subtitle text-secondary">Nothing under <code>{{ projects_root }}</code>.</p>
+      </div>
+      {% endif %}
+
+      <!-- ===== Toasts ===== -->
+      <div class="toast-stack">
+        <template x-for="t in toasts" :key="t.id">
+          <div class="alert" :class="{'alert-success': t.type==='success', 'alert-danger': t.type==='error', 'alert-info': t.type==='info'}"
+               role="alert">
+            <div class="d-flex">
+              <div x-text="t.msg"></div>
+              <a href="#" class="btn-close ms-auto" @click.prevent="dismissToast(t.id)"></a>
+            </div>
           </div>
         </template>
       </div>
-    </section>
-    {% endif %}
-    {% block project_list %}
-    {% if projects %}
-    <ul class="project-grid">
-      {% for p in projects %}
-      <li class="card" data-project="{{ p.name }}">
-        <div class="card-head">
-          <h2>{{ p.name }}</h2>
-          <span class="status"
-                :class="'status-' + statusOf('{{ p.name }}')"
-                x-text="statusLabel('{{ p.name }}')">{{ p.trust_state.value }}</span>
-        </div>
-        <div class="badges">
-          {% if p.is_git_repo %}<span class="badge badge-git">git</span>{% endif %}
-          {% if p.has_claude_md %}<span class="badge badge-md">CLAUDE.md</span>{% endif %}
-          <span class="trust trust-{{ p.trust_state.value }}">{{ p.trust_state.value }}</span>
-          <span class="badge badge-cost" x-show="usageLabel('{{ p.name }}')"
-                :title="usageTitle('{{ p.name }}')"
-                x-text="usageLabel('{{ p.name }}')"></span>
-        </div>
-        <div class="card-actions">
-          {% if p.trust_state.value == 'untrusted' %}
-          <button class="btn-trust" @click="trust('{{ p.name }}')"
-                  x-show="!isRunning('{{ p.name }}')">Trust directory</button>
-          {% endif %}
-          <div class="spawn-opts" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isResumable('{{ p.name }}')">
-            <label>Spawn
-              <select x-model="spawnMode['{{ p.name }}']">
-                <option value="same-dir">same-dir</option>
-                {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
-                <option value="session">session</option>
-              </select>
-            </label>
-            <label>Permissions
-              <select x-model="permMode['{{ p.name }}']">
-                <option value="default">default</option>
-                <option value="plan">plan</option>
-                <option value="acceptEdits">acceptEdits</option>
-                <option value="auto">auto</option>
-                <option value="dontAsk">dontAsk</option>
-                {% if p.allow_bypass_permissions %}<option value="bypassPermissions">bypassPermissions ⚠</option>{% endif %}
-              </select>
-            </label>
-          </div>
-          <button class="btn-start" @click="start('{{ p.name }}')"
-                  x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isResumable('{{ p.name }}')">Start bridge</button>
-          <button class="btn-restart" @click="resume('{{ p.name }}')"
-                  x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && isResumable('{{ p.name }}')"
-                  :title="'Restart the bridge — reconnects the environment and keeps ' + resumeModeOf('{{ p.name }}') + ' mode. Starts a fresh chat (Desktop keeps your history visible).'">Restart</button>
-          <button class="btn-stop" @click="stop('{{ p.name }}')"
-                  x-show="isRunning('{{ p.name }}')">Stop bridge</button>
-          <span class="spinner" x-show="isBusy('{{ p.name }}')">starting…</span>
-          <button class="btn-claude-md" @click="toggleClaudeMd('{{ p.name }}')"
-                  x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</button>
-        </div>
 
-        <!-- Footgun layer 2: typed-confirm before spawning with bypassPermissions.
-             (Layer 1 is the config ceiling that even lets the option render above.) -->
-        <div class="bypass-confirm" x-show="confirmBypass['{{ p.name }}']">
-          <p class="bypass-warn">⚠ <strong>bypassPermissions</strong> lets sessions in
-            <code>{{ p.name }}</code> run tools without asking. Type the project name to confirm.</p>
-          <input type="text" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
-                 @keyup.enter="confirmBypassStart('{{ p.name }}')">
-          <button class="btn-bypass-go" @click="confirmBypassStart('{{ p.name }}')">Start with bypass</button>
-          <button class="btn-bypass-cancel" @click="cancelBypass('{{ p.name }}')">Cancel</button>
-        </div>
-        <p class="card-error" x-show="errorOf('{{ p.name }}')" x-text="errorOf('{{ p.name }}')"></p>
-        <!-- Server-captured bridge stderr tail: the real reason a start failed. -->
-        <pre class="card-detail" x-show="statusOf('{{ p.name }}') === 'error' && detailOf('{{ p.name }}')"
-             x-text="detailOf('{{ p.name }}')"></pre>
+    </div>
+  </div>
+</div>
 
-        <!-- CLAUDE.md viewer/editor (spec §5): textarea, 64KB cap, stale-bridge banner. -->
-        <template x-if="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open">
-          <div class="claude-md-panel">
-            <div class="cmd-bar">
-              <span class="cmd-title">CLAUDE.md</span>
-              <span class="cmd-new" x-show="!cmd['{{ p.name }}'].loading && !cmd['{{ p.name }}'].exists">new file</span>
-              <span class="cmd-count" :class="{ over: cmdBytes('{{ p.name }}') > 65536 }"
-                    x-text="cmdBytes('{{ p.name }}') + ' / 65536 bytes'"></span>
-            </div>
-            <p class="cmd-banner" x-show="cmd['{{ p.name }}'].bridge_running">
-              ⚠ A bridge is running for this project — saved changes apply to
-              <strong>new</strong> sessions, not the one already attached.</p>
-            <p class="cmd-error" x-show="cmd['{{ p.name }}'].error" x-text="cmd['{{ p.name }}'].error"></p>
-            <textarea class="cmd-text" x-model="cmd['{{ p.name }}'].content" rows="14"
-                      spellcheck="false" autocomplete="off"
-                      :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving"></textarea>
-            <div class="cmd-actions">
-              <button class="btn-cmd-save" @click="saveClaudeMd('{{ p.name }}')"
-                      :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving || cmdBytes('{{ p.name }}') > 65536"
-                      x-text="cmd['{{ p.name }}'].saving ? 'Saving…' : 'Save'">Save</button>
-              <button class="btn-cmd-cancel" @click="closeClaudeMd('{{ p.name }}')">Cancel</button>
-              <span class="cmd-saved" x-show="cmd['{{ p.name }}'].savedAt && !cmd['{{ p.name }}'].error">✓ saved</span>
-            </div>
-          </div>
-        </template>
+<script>
+  const STATUS_LABELS = {
+    starting: "Starting", running: "Running", stopping: "Stopping", stopped: "Stopped",
+    crashed: "Crashed", error: "Failed to start",
+  };
+  const STATUS_BADGE = {
+    running: "bg-green-lt", starting: "bg-azure-lt", stopping: "bg-orange-lt",
+    crashed: "bg-red-lt", error: "bg-red-lt", stopped: "bg-secondary-lt",
+  };
+  const STATUS_DOT = {
+    running: "bg-green", starting: "bg-azure status-dot-animated", stopping: "bg-orange status-dot-animated",
+    crashed: "bg-red", error: "bg-red", stopped: "bg-secondary",
+  };
+  const ROOT = "{{ request.scope.root_path }}";
+  const MAX_LOG_LINES = 1000;
+  const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
+  const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
+  const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
+  const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
+  const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
 
-        <!-- Bug #4: a bridge/session Clauster doesn't manage (e.g. started from the
-             terminal or Claude Desktop). Seen via `claude agents --json`, not the
-             pointer-walk. Clearly distinct from a Clauster-managed bridge. -->
-        <p class="external-session" x-show="hasExternal('{{ p.name }}')">
-          <span class="ext-dot"></span>
-          <span x-text="externalCount('{{ p.name }}') > 1
-            ? externalCount('{{ p.name }}') + ' external sessions active'
-            : 'External session active'"></span>
-          <span class="ext-note">— not managed by Clauster</span>
-        </p>
+  // Theme toggle (navbar) — persisted, mirrors the no-flash init above.
+  document.addEventListener("DOMContentLoaded", function () {
+    var btn = document.getElementById("theme-toggle");
+    if (!btn) return;
+    function sync() {
+      var dark = document.documentElement.getAttribute("data-bs-theme") === "dark";
+      btn.querySelector(".icon-sun").style.display = dark ? "none" : "inline-block";
+      btn.querySelector(".icon-moon").style.display = dark ? "inline-block" : "none";
+    }
+    btn.addEventListener("click", function () {
+      var next = document.documentElement.getAttribute("data-bs-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-bs-theme", next);
+      localStorage.setItem("clauster-theme", next);
+      sync();
+    });
+    sync();
+  });
 
-        <!-- Feature 5: URL display (primary session deep link + QR, secondary New Session) -->
-        <div class="url-panel" x-show="isRunning('{{ p.name }}') && sessionUrlOf('{{ p.name }}')">
-          <div class="url-row">
-            <a class="open-link primary" target="_blank" rel="noopener"
-               :href="sessionUrlOf('{{ p.name }}')">Open session in Claude</a>
-            <button class="btn-copy" @click="copy(sessionUrlOf('{{ p.name }}'))" title="Copy link">copy</button>
-            <button class="btn-qr" @click="toggleQr('{{ p.name }}')"
-                    x-text="qrOpen['{{ p.name }}'] ? 'hide QR' : 'QR'"></button>
-          </div>
-          <div class="url-row secondary" x-show="envUrlOf('{{ p.name }}')">
-            <a class="open-link" target="_blank" rel="noopener"
-               :href="envUrlOf('{{ p.name }}')">New session</a>
-            <button class="btn-copy" @click="copy(envUrlOf('{{ p.name }}'))" title="Copy link">copy</button>
-          </div>
-          <!-- x-if (not x-show) so the <img> is created only when opened — i.e. while
-               the bridge is running — instead of fetching /qr at page load (409). -->
-          <template x-if="qrOpen['{{ p.name }}']">
-            <div class="qr-box">
-              <img :src="qrSrc('{{ p.name }}')" alt="QR code for the session deep link" width="160" height="160">
-            </div>
-          </template>
-        </div>
-
-        <!-- Feature 6: bridge log tail (WebSocket, ANSI-stripped + redacted) -->
-        <div class="log-section" x-show="isRunning('{{ p.name }}')">
-          <button class="btn-logs" @click="toggleLogs('{{ p.name }}')"
-                  x-text="logs['{{ p.name }}'] && logs['{{ p.name }}'].open ? 'Hide logs' : 'Show logs'"></button>
-          <template x-if="logs['{{ p.name }}'] && logs['{{ p.name }}'].open">
-            <div class="log-panel">
-              <div class="log-controls">
-                <button @click="logs['{{ p.name }}'].paused ? resumeLogs('{{ p.name }}') : pauseLogs('{{ p.name }}')"
-                        x-text="logs['{{ p.name }}'].paused ? 'Resume' : 'Pause'"></button>
-                <button @click="jumpToLatest('{{ p.name }}')">Jump to latest</button>
-                <span class="log-state" x-show="logs['{{ p.name }}'].paused">paused
-                  (<span x-text="logs['{{ p.name }}'].pending.length"></span> buffered)</span>
-              </div>
-              <pre class="log-view" :id="'log-' + '{{ p.name }}'"
-                   x-text="logs['{{ p.name }}'].lines.join('\n')"></pre>
-            </div>
-          </template>
-        </div>
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p class="empty">No projects found under <code>{{ projects_root }}</code>.</p>
-    {% endif %}
-    {% endblock %}
-  </main>
-
-  <script>
-    const STATUS_LABELS = {
-      starting: "Starting", running: "Running", stopped: "Stopped",
-      crashed: "Crashed", error: "Failed to start",
-    };
-    const ROOT = "{{ request.scope.root_path }}";
-    const MAX_LOG_LINES = 1000;
-    const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
-    const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
-    const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
-
-    function dashboard() {
-      return {
-        instances: {},      // project name -> instance
-        externalSessions: {}, // project name -> [WorkingSession] (unmanaged; bug #4)
-        errors: {},         // project name -> last error message
-        qrOpen: {},         // project name -> bool
-        qrNonce: {},        // project name -> cache-bust token, set when QR opens
-        logs: {},           // project name -> { open, ws, lines, pending, paused }
-        spawnMode: {},      // project name -> selected --spawn mode
-        permMode: {},       // project name -> selected --permission-mode
-        confirmBypass: {},  // project name -> bool (typed-confirm panel open)
-        bypassTyped: {},    // project name -> text typed into the confirm box
-        cmd: {},            // project name -> CLAUDE.md editor state
-        usage: {},          // project name -> cost/token rollup (lazy-loaded badge)
-        np: { open: false, name: "", mode: "create", url: "", shallow: false,
-              gitInit: false, busy: false, error: null, warn: null },  // new-project panel
-        async init() {
-          for (const n of PROJECT_NAMES) {
-            this.spawnMode[n] = DEFAULT_SPAWN_MODE;
-            this.permMode[n] = DEFAULT_PERMISSION_MODE;
-          }
-          await this.refresh();
-          // Cost badges: each rollup parses the project's transcripts, so load them
-          // off the critical path (fire-and-forget) rather than blocking first paint.
-          for (const n of PROJECT_NAMES) this.loadUsage(n);
-          setInterval(() => this.refresh(), 4000);
-        },
-        async refresh() {
-          try {
-            const [iRes, sRes] = await Promise.all([
-              fetch(ROOT + "/api/instances"),
-              fetch(ROOT + "/api/sessions"),
-            ]);
-            if (iRes.ok) {
-              const list = await iRes.json();
-              const next = {};
-              for (const i of list) next[i.project] = i;
-              this.instances = next;
+  function dashboard() {
+    return {
+      instances: {},
+      externalSessions: {},
+      errors: {},
+      qrOpen: {},
+      qrNonce: {},
+      logs: {},
+      spawnMode: {},
+      permMode: {},
+      confirmBypass: {},
+      bypassTyped: {},
+      cmd: {},
+      usage: {},
+      trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
+      trusting: {},       // project name -> bool (trust request in flight)
+      toasts: [],
+      _toastSeq: 0,
+      np: { open: false, name: "", mode: "create", url: "", shallow: false,
+            gitInit: false, busy: false, error: null, warn: null },
+      async init() {
+        for (const n of PROJECT_NAMES) {
+          this.spawnMode[n] = DEFAULT_SPAWN_MODE;
+          this.permMode[n] = DEFAULT_PERMISSION_MODE;
+        }
+        this.trustState = { ...INITIAL_TRUST };
+        await this.refresh();
+        for (const n of PROJECT_NAMES) this.loadUsage(n);
+        setInterval(() => this.refresh(), 4000);
+      },
+      // --- toasts ---
+      toast(msg, type = "info") {
+        const id = ++this._toastSeq;
+        this.toasts.push({ id, msg, type });
+        setTimeout(() => this.dismissToast(id), 4500);
+      },
+      dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
+      async refresh() {
+        try {
+          const [iRes, sRes] = await Promise.all([
+            fetch(ROOT + "/api/instances"),
+            fetch(ROOT + "/api/sessions"),
+          ]);
+          if (iRes.ok) {
+            const list = await iRes.json();
+            const next = {};
+            for (const i of list) next[i.project] = i;
+            // Preserve a local optimistic "stopping" until the server confirms it's gone.
+            for (const n of Object.keys(this.instances)) {
+              if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
             }
-            if (sRes.ok) this.externalSessions = await sRes.json();
-          } catch (e) { /* transient; next tick retries */ }
-        },
-        statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
-        statusLabel(name) { return STATUS_LABELS[this.statusOf(name)] || "Stopped"; },
-        isRunning(name) { return this.statusOf(name) === "running"; },
-        isBusy(name) { return this.statusOf(name) === "starting"; },
-        // A stopped/crashed bridge that still has an environment can reconnect to
-        // it — show "Restart" instead of "Start" and reuse its stored modes
-        // (preserves the permission mode). NB: this reconnects the *environment*
-        // (Desktop keeps the history visible); the bridge opens a fresh chat — it
-        // does NOT restore the agent's conversation context. Hence "Restart", not
-        // "Resume": claude remote-control pre-creates a new session each start and
-        // exposes no --resume/--continue. See task: true-resume spike.
-        isResumable(name) {
-          const i = this.instances[name] || {};
-          return (i.status === "stopped" || i.status === "crashed") && !!i.environment_id;
-        },
-        resumeModeOf(name) { return (this.instances[name] || {}).permission_mode || ""; },
-        sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
-        envUrlOf(name) { return (this.instances[name] || {}).url || null; },
-        errorOf(name) { return this.errors[name] || null; },
-        detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
-        externalCount(name) {
-          const s = this.externalSessions[name];
-          return Array.isArray(s) ? s.length : 0;
-        },
-        hasExternal(name) { return this.externalCount(name) > 0; },
-        async loadUsage(name) {
-          // Best-effort: on any failure the badge just stays hidden.
-          try {
-            const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/usage");
-            if (res.ok) this.usage[name] = await res.json();
-          } catch (e) { /* badge stays hidden */ }
-        },
-        usageLabel(name) {
-          const u = this.usage[name];
-          if (!u || !u.transcripts) return null;  // no transcripts yet -> no badge
-          return "≈$" + (u.cost_usd || 0).toFixed(2);
-        },
-        usageTitle(name) {
-          const u = this.usage[name];
-          if (!u) return "";
-          const tokens = (u.total_tokens || 0).toLocaleString();
-          const sessions = u.transcripts + (u.transcripts === 1 ? " session" : " sessions");
-          let s = tokens + " tokens across " + sessions + " · approximate cost";
-          if (u.unpriced_models && u.unpriced_models.length) {
-            s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
+            this.instances = next;
           }
-          return s;
-        },
-        qrSrc(name) {
-          // Cache-bust per open so a QR fetched once while stopped (409) isn't reused.
-          return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);
-        },
-        toggleQr(name) {
-          const opening = !this.qrOpen[name];
-          if (opening) this.qrNonce[name] = Date.now();
-          this.qrOpen[name] = opening;
-        },
-        async copy(text) {
-          // navigator.clipboard only exists in a secure context (HTTPS or localhost);
-          // over plain http://LAN-IP it's undefined, so fall back to execCommand.
-          if (window.isSecureContext && navigator.clipboard) {
-            try { await navigator.clipboard.writeText(text); return; } catch (e) { /* fall through */ }
-          }
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          ta.setAttribute("readonly", "");
-          ta.style.position = "fixed";
-          ta.style.top = "-1000px";
-          ta.style.opacity = "0";
-          document.body.appendChild(ta);
-          ta.select();
-          try { document.execCommand("copy"); } catch (e) {}
-          document.body.removeChild(ta);
-        },
-        async start(name) {
-          // Footgun layer 2: don't spawn with bypassPermissions until the user has
-          // typed the project name into the confirm panel (confirmBypassStart).
-          if (this.permMode[name] === "bypassPermissions") {
-            this.errors[name] = null;
-            this.confirmBypass[name] = true;
-            return;
-          }
-          await this._spawn(name);
-        },
-        confirmBypassStart(name) {
-          if ((this.bypassTyped[name] || "") !== name) {
-            this.errors[name] = "Type the project name exactly to confirm bypass.";
-            return;
-          }
-          this.confirmBypass[name] = false;
-          this.bypassTyped[name] = "";
-          this._spawn(name);
-        },
-        cancelBypass(name) {
-          this.confirmBypass[name] = false;
-          this.bypassTyped[name] = "";
-        },
-        cmdUrl(name) { return ROOT + "/api/projects/" + encodeURIComponent(name) + "/claude-md"; },
-        cmdBytes(name) {
-          const c = this.cmd[name];
-          return c ? new TextEncoder().encode(c.content || "").length : 0;
-        },
-        async toggleClaudeMd(name) {
-          if (this.cmd[name] && this.cmd[name].open) { this.closeClaudeMd(name); return; }
-          this.cmd[name] = { open: true, loading: true, saving: false, content: "",
-                             sha: null, exists: false, bridge_running: false, error: null, savedAt: null };
-          try {
-            const res = await fetch(this.cmdUrl(name));
-            const body = await res.json();
-            if (!res.ok) { this.cmd[name].error = body.detail || "failed to load"; }
-            else {
-              Object.assign(this.cmd[name], {
-                content: body.content, sha: body.sha256,
-                exists: body.exists, bridge_running: body.bridge_running,
-              });
-            }
-          } catch (e) { this.cmd[name].error = String(e); }
-          this.cmd[name].loading = false;
-        },
-        async saveClaudeMd(name) {
-          const c = this.cmd[name];
-          if (!c) return;
-          c.saving = true; c.error = null; c.savedAt = null;
-          const payload = { content: c.content };
-          // Lost-update guard only when overwriting an existing file; omit to create new.
-          if (c.exists && c.sha) payload.base_sha256 = c.sha;
-          try {
-            const res = await fetch(this.cmdUrl(name), {
-              method: "PUT", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            });
-            const body = await res.json();
-            if (!res.ok) { c.error = body.detail || "failed to save"; }
-            else { Object.assign(c, { sha: body.sha256, exists: true,
-                     bridge_running: body.bridge_running, savedAt: Date.now() }); }
-          } catch (e) { c.error = String(e); }
-          c.saving = false;
-        },
-        closeClaudeMd(name) { if (this.cmd[name]) this.cmd[name].open = false; },
-        async submitNew() {
-          const np = this.np;
-          if (!np.name || np.busy) return;
-          np.busy = true; np.error = null; np.warn = null;
-          try {
-            const res = np.mode === "clone"
-              ? await fetch(ROOT + "/api/projects/clone", {
-                  method: "POST", headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ name: np.name, url: np.url, shallow: np.shallow }) })
-              : await fetch(ROOT + "/api/projects", {
-                  method: "POST", headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ name: np.name, git_init: np.gitInit }) });
-            const body = await res.json();
-            if (!res.ok) { np.error = body.detail || "failed"; }
-            else {
-              // Spec §11 mitigation: warn (don't auto-start) when the new project
-              // ships code that will run once a bridge is started here.
-              const ships = [];
-              if (body.has_claude_md) ships.push("CLAUDE.md");
-              if (body.has_claude_dir) ships.push(".claude/");
-              if (ships.length) np.warn = ships.join(" + ");
-              else this.reloadToProject();
-            }
-          } catch (e) { np.error = String(e); }
-          np.busy = false;
-        },
-        reloadToProject() { window.location.reload(); },
-        async _spawn(name) {
+          if (sRes.ok) this.externalSessions = await sRes.json();
+        } catch (e) { /* transient; next tick retries */ }
+      },
+      statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
+      statusLabel(name) { return STATUS_LABELS[this.statusOf(name)] || "Stopped"; },
+      statusBadgeClass(name) { return STATUS_BADGE[this.statusOf(name)] || "bg-secondary-lt"; },
+      statusDotClass(name) { return STATUS_DOT[this.statusOf(name)] || "bg-secondary"; },
+      isRunning(name) { return this.statusOf(name) === "running"; },
+      isBusy(name) { return this.statusOf(name) === "starting"; },
+      isStopping(name) { return this.statusOf(name) === "stopping"; },
+      sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
+      envUrlOf(name) { return (this.instances[name] || {}).url || null; },
+      errorOf(name) { return this.errors[name] || null; },
+      // A stopped/crashed bridge that still has an environment can reconnect to it —
+      // show "Restart" instead of "Start" and reuse its stored permission mode.
+      isResumable(name) {
+        const i = this.instances[name] || {};
+        return (i.status === "stopped" || i.status === "crashed") && !!i.environment_id;
+      },
+      resumeModeOf(name) { return (this.instances[name] || {}).permission_mode || ""; },
+      detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
+      externalCount(name) {
+        const s = this.externalSessions[name];
+        return Array.isArray(s) ? s.length : 0;
+      },
+      hasExternal(name) { return this.externalCount(name) > 0; },
+      async loadUsage(name) {
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/usage");
+          if (res.ok) this.usage[name] = await res.json();
+        } catch (e) { /* badge stays hidden */ }
+      },
+      usageLabel(name) {
+        const u = this.usage[name];
+        if (!u || !u.transcripts) return null;
+        return "≈$" + (u.cost_usd || 0).toFixed(2);
+      },
+      usageTitle(name) {
+        const u = this.usage[name];
+        if (!u) return "";
+        const tokens = (u.total_tokens || 0).toLocaleString();
+        const sessions = u.transcripts + (u.transcripts === 1 ? " session" : " sessions");
+        let s = tokens + " tokens across " + sessions + " · approximate cost";
+        if (u.unpriced_models && u.unpriced_models.length) {
+          s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
+        }
+        return s;
+      },
+      qrSrc(name) {
+        return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);
+      },
+      toggleQr(name) {
+        const opening = !this.qrOpen[name];
+        if (opening) this.qrNonce[name] = Date.now();
+        this.qrOpen[name] = opening;
+      },
+      async copy(text) {
+        if (window.isSecureContext && navigator.clipboard) {
+          try { await navigator.clipboard.writeText(text); this.toast("Link copied", "success"); return; } catch (e) { /* fall through */ }
+        }
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.setAttribute("readonly", "");
+        ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand("copy"); this.toast("Link copied", "success"); } catch (e) {}
+        document.body.removeChild(ta);
+      },
+      async start(name) {
+        if (this.permMode[name] === "bypassPermissions") {
           this.errors[name] = null;
-          this.instances[name] = { project: name, status: "starting" };
-          try {
-            const res = await fetch(ROOT + "/api/instances", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                project: name,
-                spawn_mode: this.spawnMode[name],
-                permission_mode: this.permMode[name],
-              }),
+          this.confirmBypass[name] = true;
+          return;
+        }
+        await this._spawn(name);
+      },
+      confirmBypassStart(name) {
+        if ((this.bypassTyped[name] || "") !== name) {
+          this.errors[name] = "Type the project name exactly to confirm bypass.";
+          return;
+        }
+        this.confirmBypass[name] = false;
+        this.bypassTyped[name] = "";
+        this._spawn(name);
+      },
+      cancelBypass(name) {
+        this.confirmBypass[name] = false;
+        this.bypassTyped[name] = "";
+      },
+      cmdUrl(name) { return ROOT + "/api/projects/" + encodeURIComponent(name) + "/claude-md"; },
+      cmdBytes(name) {
+        const c = this.cmd[name];
+        return c ? new TextEncoder().encode(c.content || "").length : 0;
+      },
+      async toggleClaudeMd(name) {
+        if (this.cmd[name] && this.cmd[name].open) { this.closeClaudeMd(name); return; }
+        this.cmd[name] = { open: true, loading: true, saving: false, content: "",
+                           sha: null, exists: false, bridge_running: false, error: null, savedAt: null };
+        try {
+          const res = await fetch(this.cmdUrl(name));
+          const body = await res.json();
+          if (!res.ok) { this.cmd[name].error = body.detail || "failed to load"; }
+          else {
+            Object.assign(this.cmd[name], {
+              content: body.content, sha: body.sha256,
+              exists: body.exists, bridge_running: body.bridge_running,
             });
-            const body = await res.json();
-            if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; }
-            else { this.instances[name] = body; }
-          } catch (e) { this.errors[name] = String(e); delete this.instances[name]; }
-          await this.refresh();
-        },
-        async resume(name) {
-          this.errors[name] = null;
-          const prev = this.instances[name];
-          this.instances[name] = { project: name, status: "starting" };
-          try {
-            const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name) + "/resume",
-                                    { method: "POST" });
-            const body = await res.json();
-            if (!res.ok) {
-              this.errors[name] = body.detail || "failed to resume";
-              if (prev) this.instances[name] = prev; else delete this.instances[name];
-            } else { this.instances[name] = body; }
-          } catch (e) {
-            this.errors[name] = String(e);
+          }
+        } catch (e) { this.cmd[name].error = String(e); }
+        this.cmd[name].loading = false;
+      },
+      async saveClaudeMd(name) {
+        const c = this.cmd[name];
+        if (!c) return;
+        c.saving = true; c.error = null; c.savedAt = null;
+        const payload = { content: c.content };
+        if (c.exists && c.sha) payload.base_sha256 = c.sha;
+        try {
+          const res = await fetch(this.cmdUrl(name), {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const body = await res.json();
+          if (!res.ok) { c.error = body.detail || "failed to save"; this.toast("CLAUDE.md save failed", "error"); }
+          else { Object.assign(c, { sha: body.sha256, exists: true,
+                   bridge_running: body.bridge_running, savedAt: Date.now() }); this.toast("CLAUDE.md saved", "success"); }
+        } catch (e) { c.error = String(e); }
+        c.saving = false;
+      },
+      closeClaudeMd(name) { if (this.cmd[name]) this.cmd[name].open = false; },
+      async submitNew() {
+        const np = this.np;
+        if (!np.name || np.busy) return;
+        np.busy = true; np.error = null; np.warn = null;
+        try {
+          const res = np.mode === "clone"
+            ? await fetch(ROOT + "/api/projects/clone", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: np.name, url: np.url, shallow: np.shallow }) })
+            : await fetch(ROOT + "/api/projects", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: np.name, git_init: np.gitInit }) });
+          const body = await res.json();
+          if (!res.ok) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
+          else {
+            const ships = [];
+            if (body.has_claude_md) ships.push("CLAUDE.md");
+            if (body.has_claude_dir) ships.push(".claude/");
+            if (ships.length) np.warn = ships.join(" + ");
+            else { this.toast("Project created", "success"); this.reloadToProject(); }
+          }
+        } catch (e) { np.error = String(e); }
+        np.busy = false;
+      },
+      reloadToProject() { window.location.reload(); },
+      async _spawn(name) {
+        this.errors[name] = null;
+        this.instances[name] = { project: name, status: "starting" };
+        try {
+          const res = await fetch(ROOT + "/api/instances", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              project: name,
+              spawn_mode: this.spawnMode[name],
+              permission_mode: this.permMode[name],
+            }),
+          });
+          const body = await res.json();
+          if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; this.toast(name + ": start failed", "error"); }
+          else { this.instances[name] = body; if (body.status === "running") this.toast(name + ": running", "success"); }
+        } catch (e) { this.errors[name] = String(e); delete this.instances[name]; }
+        await this.refresh();
+      },
+      async resume(name) {
+        this.errors[name] = null;
+        const prev = this.instances[name];
+        this.instances[name] = { project: name, status: "starting" };  // optimistic
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name) + "/resume",
+                                  { method: "POST" });
+          const body = await res.json();
+          if (!res.ok) {
+            this.errors[name] = body.detail || "failed to resume";
             if (prev) this.instances[name] = prev; else delete this.instances[name];
+            this.toast(name + ": restart failed", "error");
+          } else {
+            this.instances[name] = body;
+            if (body.status === "running") this.toast(name + ": running", "success");
           }
-          await this.refresh();
-        },
-        async stop(name) {
-          this.closeLogs(name);
-          try {
-            const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
-            if (res.ok) this.instances[name] = await res.json();
-          } catch (e) { this.errors[name] = String(e); }
-          await this.refresh();
-          this.loadUsage(name);  // a session just ended — its cost is now final
-        },
-        async trust(name) {
-          try { await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" }); }
-          catch (e) { this.errors[name] = String(e); }
-          window.location.reload();
-        },
-        // --- feature 6: log streaming ---
-        toggleLogs(name) {
-          const s = this.logs[name];
-          if (s && s.open) { this.closeLogs(name); } else { this.openLogs(name); }
-        },
-        openLogs(name) {
-          const proto = location.protocol === "https:" ? "wss" : "ws";
-          const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
-          // Assign first so handlers mutate the reactive proxy (this.logs[name]),
-          // not a detached local object — otherwise Alpine never re-renders.
-          this.logs[name] = { open: true, ws: null, lines: [], pending: [], paused: false };
-          const self = this;
-          const ws = new WebSocket(url);
-          ws.onmessage = (ev) => {
-            const s = self.logs[name];
-            if (!s || !s.open) return;
-            if (s.paused) { s.pending.push(ev.data); return; }
-            s.lines.push(ev.data);
-            if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
-            self.$nextTick(() => self.scrollLog(name));
-          };
-          this.logs[name].ws = ws;
-        },
-        closeLogs(name) {
-          const s = this.logs[name];
-          if (s && s.ws) { try { s.ws.close(); } catch (e) {} }
-          if (s) s.open = false;
-        },
-        pauseLogs(name) { if (this.logs[name]) this.logs[name].paused = true; },
-        resumeLogs(name) {
-          const s = this.logs[name];
-          if (!s) return;
-          s.lines.push(...s.pending); s.pending = [];
+        } catch (e) {
+          this.errors[name] = String(e);
+          if (prev) this.instances[name] = prev; else delete this.instances[name];
+        }
+        await this.refresh();
+      },
+      async stop(name) {
+        this.closeLogs(name);
+        const prev = this.instances[name];
+        this.instances[name] = { ...(prev || { project: name }), status: "stopping" };  // optimistic
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
+          if (res.ok) { this.instances[name] = await res.json(); this.toast(name + ": stopped", "success"); }
+          else { this.toast(name + ": stop failed", "error"); }
+        } catch (e) { this.errors[name] = String(e); this.toast(name + ": stop failed", "error"); }
+        await this.refresh();
+        this.loadUsage(name);
+      },
+      async trust(name) {
+        this.trusting[name] = true;
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" });
+          if (res.ok) { this.trustState[name] = "trusted"; this.toast(name + ": trusted", "success"); }
+          else { this.toast(name + ": trust failed", "error"); }
+        } catch (e) { this.errors[name] = String(e); this.toast(name + ": trust failed", "error"); }
+        this.trusting[name] = false;
+      },
+      // --- log streaming ---
+      toggleLogs(name) {
+        const s = this.logs[name];
+        if (s && s.open) { this.closeLogs(name); } else { this.openLogs(name); }
+      },
+      openLogs(name) {
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
+        this.logs[name] = { open: true, ws: null, lines: [], pending: [], paused: false };
+        const self = this;
+        const ws = new WebSocket(url);
+        ws.onmessage = (ev) => {
+          const s = self.logs[name];
+          if (!s || !s.open) return;
+          if (s.paused) {
+            s.pending.push(ev.data);
+            if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
+            return;
+          }
+          s.lines.push(ev.data);
           if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
-          s.paused = false;
-          this.$nextTick(() => this.scrollLog(name));
-        },
-        scrollLog(name) {
-          const el = document.getElementById("log-" + name);
-          if (el) el.scrollTop = el.scrollHeight;
-        },
-        jumpToLatest(name) { this.scrollLog(name); },
-      };
-    }
+          self.$nextTick(() => self.scrollLog(name));
+        };
+        this.logs[name].ws = ws;
+      },
+      closeLogs(name) {
+        const s = this.logs[name];
+        if (s && s.ws) { try { s.ws.close(); } catch (e) {} }
+        if (s) s.open = false;
+      },
+      pauseLogs(name) { if (this.logs[name]) this.logs[name].paused = true; },
+      resumeLogs(name) {
+        const s = this.logs[name];
+        if (!s) return;
+        s.lines.push(...s.pending); s.pending = [];
+        if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
+        s.paused = false;
+        this.$nextTick(() => this.scrollLog(name));
+      },
+      scrollLog(name) {
+        const el = document.getElementById("log-" + name);
+        if (el) el.scrollTop = el.scrollHeight;
+      },
+      jumpToLatest(name) { this.scrollLog(name); },
+    };
+  }
 
-    // Ghost-environment reaper panel (opt-in; spec §11). Independent Alpine scope.
-    function reaper() {
-      return {
-        open: false, loading: false, loaded: false, error: null,
-        ghosts: [], total: 0, liveDirs: 0, busy: false, result: null, deleteTyped: "",
-        toggle() { this.open = !this.open; if (this.open && !this.loaded) this.load(); },
-        summary() {
-          if (!this.ghosts.length) return "No ghost environments — nothing to reap.";
-          return this.ghosts.length + " ghost(s) · " + this.liveDirs +
-            " live dir(s) kept · cloud Default never touched";
-        },
-        async load() {
-          this.loading = true; this.error = null; this.result = null;
-          try {
-            const res = await fetch(ROOT + "/api/environments/ghosts");
-            const body = await res.json();
-            if (!res.ok) { this.error = body.detail || "failed to scan"; }
-            else { this.ghosts = body.ghosts || []; this.total = body.total; this.liveDirs = body.live_dirs; }
-          } catch (e) { this.error = String(e); }
-          finally { this.loaded = true; this.loading = false; }
-        },
-        async _reap(action, confirm) {
-          this.busy = true; this.error = null; this.result = null;
-          try {
-            const res = await fetch(ROOT + "/api/environments/reap", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ action, confirm, ids: this.ghosts.map((g) => g.id) }),
-            });
-            const body = await res.json();
-            if (!res.ok) { this.error = body.detail || "reap failed"; return; }
-            const errs = Object.keys(body.errors || {}).length;
-            const msg = "✓ " + action + "d " + body.reaped.length + " environment(s)" +
-              (body.skipped.length ? " · skipped " + body.skipped.length : "") +
-              (errs ? " · " + errs + " error(s)" : "");
-            this.deleteTyped = "";
-            await this.load();  // refresh preview — should now be fewer/zero
-            this.result = msg;  // set AFTER load() (which clears result) so it persists
-          } catch (e) { this.error = String(e); }
-          finally { this.busy = false; }
-        },
-        archive() { this._reap("archive", "archive"); },
-        del() { if (this.deleteTyped === "DELETE") this._reap("delete", "DELETE"); },
-      };
-    }
-  </script>
+  function reaper() {
+    return {
+      open: false, loading: false, loaded: false, error: null,
+      ghosts: [], total: 0, liveDirs: 0, busy: false, result: null, deleteTyped: "",
+      toggle() { this.open = !this.open; if (this.open && !this.loaded) this.load(); },
+      summary() {
+        if (!this.ghosts.length) return "No ghost environments — nothing to reap.";
+        return this.ghosts.length + " ghost(s) · " + this.liveDirs +
+          " live dir(s) kept · cloud Default never touched";
+      },
+      async load() {
+        this.loading = true; this.error = null; this.result = null;
+        try {
+          const res = await fetch(ROOT + "/api/environments/ghosts");
+          const body = await res.json();
+          if (!res.ok) { this.error = body.detail || "failed to scan"; }
+          else { this.ghosts = body.ghosts || []; this.total = body.total; this.liveDirs = body.live_dirs; }
+        } catch (e) { this.error = String(e); }
+        finally { this.loaded = true; this.loading = false; }
+      },
+      async _reap(action, confirm) {
+        this.busy = true; this.error = null; this.result = null;
+        try {
+          const res = await fetch(ROOT + "/api/environments/reap", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, confirm, ids: this.ghosts.map((g) => g.id) }),
+          });
+          const body = await res.json();
+          if (!res.ok) { this.error = body.detail || "reap failed"; return; }
+          const errs = Object.keys(body.errors || {}).length;
+          const msg = "✓ " + action + "d " + body.reaped.length + " environment(s)" +
+            (body.skipped.length ? " · skipped " + body.skipped.length : "") +
+            (errs ? " · " + errs + " error(s)" : "");
+          this.deleteTyped = "";
+          await this.load();
+          this.result = msg;
+        } catch (e) { this.error = String(e); }
+        finally { this.busy = false; }
+      },
+      archive() { this._reap("archive", "archive"); },
+      del() { if (this.deleteTyped === "DELETE") this._reap("delete", "DELETE"); },
+    };
+  }
+</script>
 </body>
 </html>
