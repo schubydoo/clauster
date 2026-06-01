@@ -255,6 +255,7 @@ class SessionRunner:
 
         markers = await asyncio.to_thread(self._await_ready, log_path, proc)
         self._apply_markers(instance, markers, proc)
+        await self._post_spawn_enrich(instance, proj.path)
         await self._persist()
         # A bridge still STARTING after the synchronous readiness wait may yet
         # register (slow start) or may be alive-but-stuck (e.g. it couldn't
@@ -263,6 +264,26 @@ class SessionRunner:
         if instance.status is InstanceStatus.STARTING:
             self._start_startup_watch(name)
         return instance
+
+    async def resume(self, name: str) -> RemoteControlInstance:
+        """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
+
+        Re-running ``claude remote-control`` in the same cwd reconnects to the
+        existing environment + session (the bridge-pointer.json the prior run
+        left behind drives it — empirically confirmed). We reuse the stopped
+        instance's stored ``spawn_mode``/``permission_mode`` so the resume keeps
+        the same permission mode (a *fresh* bare start would drop back to the
+        default 'ask'). The session id, which a reconnecting bridge does NOT
+        re-log, is recovered from the pointer by :meth:`spawn`'s enrich step.
+        """
+        existing = self._instances.get(name)
+        if existing is None:
+            raise UnknownProject(f"no managed instance to resume: {name!r}")
+        return await self.spawn(
+            name,
+            spawn_mode=existing.spawn_mode,
+            permission_mode=existing.permission_mode,
+        )
 
     def _validate_spawn_options(
         self, proj: Project, spawn_mode: str, permission_mode: str
@@ -307,6 +328,16 @@ class SessionRunner:
             permission_mode,
         ]
 
+    @staticmethod
+    def _stderr_path_for(log_path: Path) -> Path:
+        """Sibling of the --debug-file that captures the bridge's stdout+stderr.
+
+        The bridge writes startup *failures* (e.g. ``Error: Workspace not
+        trusted``, controller-auth errors) to its stderr, NOT the --debug-file.
+        Routing both streams here — instead of DEVNULL — lets a failed spawn
+        surface a real reason instead of a bare timeout."""
+        return log_path.with_name(log_path.stem + ".stderr.log")
+
     def _popen(
         self,
         cwd: Path,
@@ -321,27 +352,35 @@ class SessionRunner:
         # for `claude`), so a bare name that the version probe resolves via
         # shutil.which would fail to spawn here. Also pins the binary we validated.
         cmd[0] = resolve_binary(cmd[0])
-        # Detach the bridge into its own session/group so it survives a clauster
-        # restart and a SIGINT to clauster never propagates to it. On Windows,
-        # CREATE_NEW_PROCESS_GROUP additionally makes the bridge addressable by a
-        # CTRL_BREAK_EVENT for graceful stop (POSIX uses start_new_session); stdin
-        # is detached so a wrapping cmd.exe never blocks on an interactive prompt.
-        if sys.platform == "win32":
+        # Capture stdout+stderr to a file so a failed start leaves a diagnosable
+        # reason behind (the bridge logs the *why* there, not to --debug-file).
+        # The detached child inherits its own dup of the fd, so the parent closes
+        # its copy right after spawn; the child keeps writing.
+        err_fh = self._stderr_path_for(log_path).open("wb")
+        try:
+            # Detach the bridge into its own session/group so it survives a clauster
+            # restart and a SIGINT to clauster never propagates to it. On Windows,
+            # CREATE_NEW_PROCESS_GROUP additionally makes the bridge addressable by a
+            # CTRL_BREAK_EVENT for graceful stop (POSIX uses start_new_session); stdin
+            # is detached so a wrapping cmd.exe never blocks on an interactive prompt.
+            if sys.platform == "win32":
+                return subprocess.Popen(
+                    cmd,
+                    cwd=str(cwd),
+                    stdin=subprocess.DEVNULL,
+                    stdout=err_fh,
+                    stderr=subprocess.STDOUT,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
             return subprocess.Popen(
                 cmd,
                 cwd=str(cwd),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=err_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
-        return subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        finally:
+            err_fh.close()
 
     def _await_ready(self, log_path: Path, proc: subprocess.Popen) -> bridge_log.BridgeMarkers:
         """Block until the bridge is ready, errors, or times out.
@@ -395,6 +434,55 @@ class SessionRunner:
             # start" on a bridge that is simply still coming up.
             instance.status = InstanceStatus.STARTING
 
+    async def _post_spawn_enrich(
+        self, instance: RemoteControlInstance, project_path: Path
+    ) -> None:
+        """After readiness is decided, fill in what the log alone can't tell us.
+
+        - RUNNING: a *reconnecting* bridge never re-logs ``Created initial
+          session``, so ``starter_session_id`` (and thus ``session_url``) would
+          be empty after a resume — backfill it from the pointer.
+        - ERROR/CRASHED: capture the bridge's stderr tail so the failure has a
+          visible reason instead of a bare "Failed to start".
+        """
+        if instance.status is InstanceStatus.RUNNING:
+            await asyncio.to_thread(self._backfill_starter_session, instance, project_path)
+        elif instance.status in (InstanceStatus.ERROR, InstanceStatus.CRASHED):
+            await asyncio.to_thread(self._capture_error_detail, instance)
+
+    @staticmethod
+    def _backfill_starter_session(instance: RemoteControlInstance, project_path: Path) -> None:
+        """Recover the session id from the bridge-pointer when the log omitted it.
+
+        A *reconnecting* bridge re-logs its environment but NOT "Created initial
+        session", so ``starter_session_id`` (and thus ``session_url``, the primary
+        deep link) would be empty after a resume without this. No-op for a fresh
+        start, which logs the session directly. (The environment id never needs
+        backfilling: this only runs once RUNNING, which already requires it.)"""
+        if instance.starter_session_id is not None:
+            return
+        ptr = pointers.pointer_for_project(project_path)
+        if ptr is not None and ptr.session_id:
+            instance.starter_session_id = ptr.session_id
+
+    @classmethod
+    def _capture_error_detail(cls, instance: RemoteControlInstance) -> None:
+        """Read the tail of the bridge's captured stderr into ``error_detail``."""
+        log_path = instance.bridge_debug_log_path
+        if log_path is None:
+            return
+        try:
+            text = cls._stderr_path_for(log_path).read_text(errors="replace").strip()
+        except OSError:
+            return
+        if text:
+            # Bound it: the UI shows a reason, not a full transcript.
+            instance.error_detail = text[-2000:]
+
+    def _project_path(self, name: str) -> Path | None:
+        proj = self._discovered().get(name)
+        return proj.path if proj is not None else None
+
     # ----- startup watch --------------------------------------------------
 
     def _start_startup_watch(self, name: str) -> None:
@@ -441,6 +529,7 @@ class SessionRunner:
             markers = await asyncio.to_thread(self._read_markers, log_path)
             self._apply_markers(instance, markers, proc)
             if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
+                await self._post_spawn_enrich(instance, self._project_path(name) or log_path)
                 await self._persist()
                 return
             if time.monotonic() >= deadline:
@@ -452,6 +541,7 @@ class SessionRunner:
                     name,
                     grace,
                 )
+                await asyncio.to_thread(self._capture_error_detail, instance)
                 await self._persist()
                 return
 

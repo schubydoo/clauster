@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import time
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -478,6 +479,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """External (unmanaged) working sessions grouped by project name (bug #4)."""
         return runner.external_sessions_by_project()
 
+    async def _spawn_or_http(coro: Awaitable[RemoteControlInstance]) -> RemoteControlInstance:
+        """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.
+        Shared by the create and resume routes so the mapping lives in one place."""
+        try:
+            return await coro
+        except UnknownProject as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except InvalidSpawnOption as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PermissionModeNotAllowed as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except SpawnError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/api/instances", status_code=201)
     async def api_spawn(body: dict) -> RemoteControlInstance:
         project = body.get("project")
@@ -491,18 +506,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         ):
             if value is not None and not isinstance(value, str):
                 raise HTTPException(status_code=422, detail=f"{field} must be a string")
-        try:
-            return await runner.spawn(
-                project, spawn_mode=spawn_mode, permission_mode=permission_mode
-            )
-        except UnknownProject as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except InvalidSpawnOption as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except PermissionModeNotAllowed as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except SpawnError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return await _spawn_or_http(
+            runner.spawn(project, spawn_mode=spawn_mode, permission_mode=permission_mode)
+        )
 
     @app.get("/api/instances/{instance_id}")
     async def api_instance(instance_id: str) -> RemoteControlInstance:
@@ -517,6 +523,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return await runner.stop(instance_id)
         except UnknownProject as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/instances/{instance_id}/resume")
+    async def api_resume(instance_id: str) -> RemoteControlInstance:
+        """Re-spawn a stopped/crashed bridge, reconnecting to its prior session
+        and reusing its stored spawn/permission modes (so resume keeps the same
+        permission mode rather than dropping to the default)."""
+        return await _spawn_or_http(runner.resume(instance_id))
 
     @app.post("/api/projects/{name}/trust")
     async def api_trust(name: str) -> Project:

@@ -61,6 +61,9 @@ class RemoteControlInstance(BaseModel):
     intentional_stop: bool = False
     started_at: datetime | None = None
     bridge_debug_log_path: Path | None = None
+    # Tail of the bridge's stdout/stderr, captured when a spawn fails (ERROR/CRASHED)
+    # so the UI can show *why* instead of a bare "Failed to start". None on success.
+    error_detail: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
