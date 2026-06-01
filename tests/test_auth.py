@@ -207,6 +207,14 @@ def test_normalize_origin():
     assert auth.normalize_origin("https://h.test/login?x=1") == "https://h.test"
 
 
+def test_normalize_origin_ipv6_rebracketed():
+    # urlsplit strips the brackets from an IPv6 host; normalize_origin must put
+    # them back so the origin round-trips and matches the allowlist.
+    assert auth.normalize_origin("http://[::1]:7621") == "http://[::1]:7621"
+    assert auth.normalize_origin("HTTP://[::1]:80/") == "http://[::1]"
+    assert auth.normalize_origin("https://[2001:DB8::1]:443") == "https://[2001:db8::1]"
+
+
 def test_normalize_origin_malformed_passthrough():
     # An origin with no scheme/hostname (e.g. the literal "null" Origin, or a bare
     # token) can't be structured; it degrades to a lowercased, slash-trimmed
@@ -220,6 +228,7 @@ def test_build_allowed_origins(tmp_path):
     origins = auth.build_allowed_origins(loopback)
     assert "http://127.0.0.1:7621" in origins
     assert "http://localhost:7621" in origins
+    assert "http://[::1]:7621" in origins  # IPv6 loopback origin is allowed too
 
     # A non-loopback bind auto-allows nothing; operator must list origins explicitly.
     public = ClausterConfig(

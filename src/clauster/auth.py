@@ -232,12 +232,20 @@ def verify_proxy_hmac(
 
 
 def normalize_origin(origin: str) -> str:
-    """scheme://host[:port] lowercased, default port elided, no trailing slash."""
+    """scheme://host[:port] lowercased, default port elided, no trailing slash.
+
+    IPv6 hosts are re-bracketed: ``urlsplit`` strips the brackets from
+    ``http://[::1]`` (``.hostname`` -> ``::1``), so without this an IPv6 loopback
+    origin would normalize to the malformed ``http://::1`` and never match the
+    allowlist.
+    """
     cleaned = origin.strip().rstrip("/")
     parts = urlsplit(cleaned)
     if not parts.scheme or not parts.hostname:
         return cleaned.lower()
     scheme, host = parts.scheme.lower(), parts.hostname.lower()
+    if ":" in host:  # IPv6 literal — urlsplit dropped the surrounding brackets
+        host = f"[{host}]"
     default = {"http": 80, "https": 443}.get(scheme)
     port = parts.port
     if port is None or port == default:
@@ -255,7 +263,10 @@ def build_allowed_origins(config: ClausterConfig) -> set[str]:
     """
     origins: set[str] = set()
     if config.host in _LOOPBACK_HOSTS:
-        for h in ("127.0.0.1", "localhost"):
+        # Include the IPv6 loopback literal — a browser hitting http://[::1]:port
+        # sends that as its Origin, and without it the CSRF/WS check would reject a
+        # legitimate loopback request.
+        for h in ("127.0.0.1", "localhost", "[::1]"):
             origins.add(normalize_origin(f"http://{h}:{config.port}"))
             origins.add(normalize_origin(f"https://{h}:{config.port}"))
     for extra in config.auth.allowed_origins:

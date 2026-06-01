@@ -252,6 +252,46 @@ def test_restore_skips_link_members(tmp_path):
     assert res["state_files"] == 1
 
 
+def test_restore_force_is_replace_not_merge(write_config, tmp_path):
+    # A forced restore must REPLACE the state dir, not merge into it: a stale file
+    # that isn't in the backup must be gone afterwards (it would otherwise survive
+    # and silently outlive the restore).
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    dest = tmp_path / "occupied"
+    dest.mkdir()
+    (dest / "stale.json").write_text("from a previous life")
+
+    restore_backup(archive, state_dir=dest, force=True)
+
+    assert (dest / "state.json").is_file()  # backup contents present
+    assert not (dest / "stale.json").exists()  # stale file replaced away
+
+
+def test_restore_rolls_back_on_copy_failure(write_config, tmp_path, monkeypatch):
+    # If the copy fails partway, the original state_dir must be left intact — never
+    # a half-applied mix of old and new.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    dest = tmp_path / "live"
+    dest.mkdir()
+    (dest / "keepme.json").write_text("precious")
+
+    import clauster.ops as ops
+
+    def boom(src, dst, *a, **k):
+        raise OSError("simulated: disk full mid-restore")
+
+    monkeypatch.setattr(ops.shutil, "copy2", boom)
+    with pytest.raises(OSError):
+        restore_backup(archive, state_dir=dest, force=True)
+
+    assert (dest / "keepme.json").read_text() == "precious"  # untouched
+    assert not (dest / "state.json").exists()  # nothing half-applied
+
+
 @pytest.mark.parametrize("evil", ["../evil.txt", "/etc/evil.txt"])
 def test_restore_rejects_malicious_tar(tmp_path, evil):
     bad = tmp_path / "bad.tar.gz"
