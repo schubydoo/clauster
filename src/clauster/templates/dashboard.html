@@ -25,6 +25,7 @@
                    padding: .4rem .6rem; border-radius: 6px; max-height: 8rem; overflow: auto;
                    white-space: pre-wrap; overflow-wrap: break-word;
                    background: var(--tblr-bg-surface-secondary); color: var(--tblr-secondary); }
+    [x-cloak] { display: none !important; }
   </style>
 </head>
 <body>
@@ -184,14 +185,14 @@
 
               <!-- Trust (untrusted only; updates in place) -->
               <button class="btn btn-sm btn-outline-warning mb-2" @click="trust('{{ p.name }}')"
-                      x-show="trustState['{{ p.name }}'] === 'untrusted' && !isRunning('{{ p.name }}') && !isBusy('{{ p.name }}')"
+                      x-show="trustState['{{ p.name }}'] === 'untrusted' && !isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}')"
                       x-cloak :disabled="trusting['{{ p.name }}']">
                 <span class="spinner-border spinner-border-sm me-1" x-show="trusting['{{ p.name }}']" x-cloak></span>
                 Trust directory
               </button>
 
               <!-- Spawn controls -->
-              <div class="row g-2 mb-2" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}')" x-cloak>
+              <div class="row g-2 mb-2" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>
                 <div class="col-6">
                   <label class="form-label small mb-1">Spawn</label>
                   <select class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']">
@@ -215,12 +216,12 @@
 
               <div class="btn-list">
                 <button class="btn btn-sm btn-success" @click="start('{{ p.name }}')"
-                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>Start bridge</button>
+                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>Start bridge</button>
                 <button class="btn btn-sm btn-success" @click="resume('{{ p.name }}')"
-                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
+                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
                         :title="'Restart the bridge — reconnects its environment and keeps ' + resumeModeOf('{{ p.name }}') + ' mode.'">Restart</button>
                 <button class="btn btn-sm btn-danger" @click="stop('{{ p.name }}')"
-                        x-show="isRunning('{{ p.name }}')" x-cloak
+                        x-show="isRunning('{{ p.name }}') || isStopping('{{ p.name }}')" x-cloak
                         :disabled="isStopping('{{ p.name }}')">
                   <span class="spinner-border spinner-border-sm me-1" x-show="isStopping('{{ p.name }}')" x-cloak></span>
                   <span x-text="isStopping('{{ p.name }}') ? 'Stopping…' : 'Stop bridge'">Stop bridge</span>
@@ -361,6 +362,7 @@
   };
   const ROOT = "{{ request.scope.root_path }}";
   const MAX_LOG_LINES = 1000;
+  const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
@@ -667,7 +669,11 @@
         ws.onmessage = (ev) => {
           const s = self.logs[name];
           if (!s || !s.open) return;
-          if (s.paused) { s.pending.push(ev.data); return; }
+          if (s.paused) {
+            s.pending.push(ev.data);
+            if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
+            return;
+          }
           s.lines.push(ev.data);
           if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
           self.$nextTick(() => self.scrollLog(name));
@@ -740,6 +746,5 @@
     };
   }
 </script>
-<style>[x-cloak]{display:none !important;}</style>
 </body>
 </html>
