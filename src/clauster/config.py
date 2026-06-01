@@ -38,6 +38,27 @@ class ClaudeConfig(BaseModel):
     binary: str = "claude"
     min_version: str = "2.1.145"
     agents_json_poll_interval_seconds: int = Field(default=300, ge=1)
+    # How long a freshly-spawned bridge may stay alive without registering an
+    # environment before Clauster gives up and marks it ERROR. A bridge that
+    # launches but can't authenticate to the remote-control controller stays
+    # alive yet never becomes connectable; liveness alone is not "running".
+    startup_grace_seconds: float = Field(default=60.0, gt=0)
+    # Before spawning the first bridge, mark remote control as acknowledged in the
+    # runtime user's ~/.claude.json (hasUsedRemoteControl/remoteDialogSeen).
+    # `claude remote-control` otherwise blocks on a one-time interactive "Enable
+    # Remote Control? (y/n)" prompt that Clauster can never answer (the bridge's
+    # stdin is detached) — so the bridge would sit alive-but-unregistered forever.
+    # Set false to manage those flags yourself.
+    auto_enable_remote_control: bool = True
+    # `claude remote-control` restart spawns a fresh session with an empty
+    # context window — it has no resume flag, so a restarted bridge "forgets"
+    # the prior conversation. When true, Clauster installs a SessionStart hook
+    # (in the runtime user's ~/.claude/settings.json) that recaps the most
+    # recent prior transcript for the cwd back into the new session. Opt-in: it
+    # edits the user's Claude settings and injects prior turns into context.
+    resume_recap: bool = False
+    # Character budget for the recap injection (most recent turns kept).
+    resume_recap_max_chars: int = Field(default=8000, ge=500)
 
 
 class InstanceDefaults(BaseModel):

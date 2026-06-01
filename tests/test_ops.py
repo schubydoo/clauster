@@ -16,6 +16,7 @@ from clauster.ops import (
     OK,
     WARN,
     _check_auth,
+    _check_repo_freshness,
     _version_ge,
     make_backup,
     migrate_state,
@@ -105,6 +106,41 @@ def test_doctor_git_missing_warns(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr("clauster.ops.shutil.which", lambda n: None)
     by = {c.name: c for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}
     assert by["git"].status == WARN
+
+
+def test_repo_freshness_none_for_non_git_install(tmp_path):
+    # A PyPI/Docker install (no .git) reports nothing — there's no in-place upgrade.
+    assert _check_repo_freshness(tmp_path) is None
+
+
+def _fake_git(monkeypatch, *, returncode=0, stdout=""):
+    import subprocess as sp
+
+    def fake_run(*a, **k):
+        return sp.CompletedProcess(a[0] if a else [], returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("clauster.ops.subprocess.run", fake_run)
+
+
+def test_repo_freshness_behind_warns(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    _fake_git(monkeypatch, returncode=0, stdout="3\t0\n")  # 3 behind, 0 ahead
+    c = _check_repo_freshness(tmp_path)
+    assert c is not None and c.status == WARN and "3 commits behind" in c.detail
+
+
+def test_repo_freshness_up_to_date_ok(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    _fake_git(monkeypatch, returncode=0, stdout="0\t2\n")  # 0 behind, 2 local ahead
+    c = _check_repo_freshness(tmp_path)
+    assert c is not None and c.status == OK and "+2 local" in c.detail
+
+
+def test_repo_freshness_no_upstream_ok(tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    _fake_git(monkeypatch, returncode=128, stdout="")  # @{upstream} unresolvable
+    c = _check_repo_freshness(tmp_path)
+    assert c is not None and c.status == OK and "no upstream" in c.detail
 
 
 def test_doctor_state_dir_not_writable_fails(write_config, tmp_path):
@@ -250,6 +286,46 @@ def test_restore_skips_link_members(tmp_path):
     assert (tmp_path / "out" / "ok.txt").is_file()
     assert not (tmp_path / "out" / "evil-link").exists()  # link member dropped
     assert res["state_files"] == 1
+
+
+def test_restore_force_is_replace_not_merge(write_config, tmp_path):
+    # A forced restore must REPLACE the state dir, not merge into it: a stale file
+    # that isn't in the backup must be gone afterwards (it would otherwise survive
+    # and silently outlive the restore).
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    dest = tmp_path / "occupied"
+    dest.mkdir()
+    (dest / "stale.json").write_text("from a previous life")
+
+    restore_backup(archive, state_dir=dest, force=True)
+
+    assert (dest / "state.json").is_file()  # backup contents present
+    assert not (dest / "stale.json").exists()  # stale file replaced away
+
+
+def test_restore_rolls_back_on_copy_failure(write_config, tmp_path, monkeypatch):
+    # If the copy fails partway, the original state_dir must be left intact — never
+    # a half-applied mix of old and new.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    dest = tmp_path / "live"
+    dest.mkdir()
+    (dest / "keepme.json").write_text("precious")
+
+    import clauster.ops as ops
+
+    def boom(src, dst, *a, **k):
+        raise OSError("simulated: disk full mid-restore")
+
+    monkeypatch.setattr(ops.shutil, "copy2", boom)
+    with pytest.raises(OSError):
+        restore_backup(archive, state_dir=dest, force=True)
+
+    assert (dest / "keepme.json").read_text() == "precious"  # untouched
+    assert not (dest / "state.json").exists()  # nothing half-applied
 
 
 @pytest.mark.parametrize("evil", ["../evil.txt", "/etc/evil.txt"])

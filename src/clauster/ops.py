@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -111,7 +112,51 @@ def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
     # port (warn-only: in-use may be this very server)
     checks.append(_check_port(config.host, config.port))
 
+    # source-checkout freshness (only for editable/from-source installs)
+    fresh = _check_repo_freshness()
+    if fresh is not None:
+        checks.append(fresh)
+
     return checks, all(c.status != FAIL for c in checks)
+
+
+def _check_repo_freshness(repo: Path | None = None) -> Check | None:
+    """If Clauster runs from a git checkout (editable / from-source install), report
+    whether it is behind its upstream so the operator knows to ``git pull`` + restart.
+
+    Returns None for non-git installs (PyPI/Docker) — there's nothing to upgrade in
+    place. Read-only and offline: it compares against the last-fetched upstream ref,
+    never the network, so doctor stays fast and works without connectivity.
+    """
+    repo = repo or Path(__file__).resolve().parents[2]  # src/clauster/ops.py -> repo root
+    if not (repo / ".git").exists():
+        return None  # installed package, not a source checkout
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Check("version", WARN, f"source checkout; git freshness check failed: {exc}")
+    if out.returncode != 0:
+        # No upstream tracking (detached HEAD, local-only branch) — not an error.
+        return Check("version", OK, "source checkout (no upstream tracking configured)")
+    try:
+        behind, ahead = (int(n) for n in out.stdout.split())
+    except ValueError:
+        return Check("version", OK, "source checkout")
+    if behind:
+        plural = "s" if behind != 1 else ""
+        return Check(
+            "version",
+            WARN,
+            f"{behind} commit{plural} behind upstream (as of last fetch) — "
+            "git pull && restart to upgrade",
+        )
+    suffix = f" (+{ahead} local)" if ahead else ""
+    return Check("version", OK, f"up to date with upstream{suffix}")
 
 
 def claude_cli_json() -> Path:
@@ -236,6 +281,54 @@ def _safe_extract_tar(backup: Path, dest: Path) -> None:
                 shutil.copyfileobj(src, fh)
 
 
+def _atomic_replace_state(src_state: Path, state_dir: Path) -> int:
+    """Replace ``state_dir`` with the contents of ``src_state`` atomically.
+
+    Stages a full copy in a sibling temp dir on ``state_dir``'s own filesystem,
+    then swaps it in with directory renames (move the old aside, move the staged
+    copy into place, drop the old). So a mid-copy failure never leaves a
+    half-applied ``state_dir``, and a forced restore is replace-not-merge — stale
+    files absent from the backup don't linger. Returns the file count restored.
+    """
+    state_dir = state_dir.expanduser()
+    parent = state_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+
+    # Stage on the destination's filesystem so the swap below is a rename, not a
+    # cross-device copy (TemporaryDirectory may live on a different mount).
+    staged = Path(tempfile.mkdtemp(prefix=f".{state_dir.name}.restore-", dir=parent))
+    try:
+        count = 0
+        for item in src_state.rglob("*"):
+            target = staged / item.relative_to(src_state)
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+                count += 1
+    except BaseException:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+
+    # Swap. The aside name is unique (derived from the staged temp name), so the
+    # renames work on POSIX and Windows alike and never replace an existing dir.
+    old_aside = parent / f"{staged.name}.old"
+    moved_old = state_dir.exists()
+    if moved_old:
+        os.replace(state_dir, old_aside)
+    try:
+        os.replace(staged, state_dir)
+    except BaseException:
+        if moved_old:
+            os.replace(old_aside, state_dir)  # roll back to the pre-restore state
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    if moved_old:
+        shutil.rmtree(old_aside, ignore_errors=True)
+    return count
+
+
 def restore_backup(
     backup: Path,
     *,
@@ -265,16 +358,10 @@ def restore_backup(
 
         src_state = tmp / "state"
         if src_state.is_dir():
-            state_dir.mkdir(parents=True, exist_ok=True)
-            for item in src_state.rglob("*"):
-                rel = item.relative_to(src_state)
-                dest = state_dir / rel
-                if item.is_dir():
-                    dest.mkdir(parents=True, exist_ok=True)
-                else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, dest)
-                    restored["state_files"] += 1
+            # Atomic replace-not-merge: build the new state on the destination's
+            # filesystem and swap it in, so a forced restore can't leave a mix of
+            # old + new files (or stale files the backup no longer contains).
+            restored["state_files"] = _atomic_replace_state(src_state, state_dir)
 
         src_cfg_dir = tmp / "config"
         if config_out is not None and src_cfg_dir.is_dir():

@@ -14,22 +14,12 @@ htmlcov/
 .logfire/
 CLAUDE.md
 AGENTS.md
-dotnet-install.sh
 
 # --- Local config with real host paths (commit clauster.yml.example instead) ---
 clauster.yml
 
-# --- Internal planning / spec docs (kept on disk, not version-controlled) ---
-clauster_spec.md
-conductor_spec_v2.md
-conductor_spec_v3.md
-v4-panel-findings.md
-HANDOFF.md
-PLAN_sessionrunner.md
-PLAN_spawn_controls.md
-PLAN_create_clone.md
-PLAN_packaging_ops.md
-DEBUG_NOTES.md
-
-# --- Single rolling scratchpad for in-flight agent/session notes (not committed) ---
-NOTES.md
+# --- All other local-only files live under one dir, so the repo root stays clean
+#     and no private filenames need to be enumerated here (planning/spec docs,
+#     session notes, UI screenshots, a11y snapshots, Playwright/MCP logs, etc.). ---
+scratch/
+.playwright-mcp/

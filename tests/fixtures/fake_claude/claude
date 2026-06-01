@@ -2,7 +2,12 @@
 """Parameterizable fake `claude` binary for SessionRunner tests.
 
 Behaviour is selected via env vars so tests can drive each branch:
-  FAKE_CLAUDE_MODE = ready | no_marker | crash | trust_error | slow   (default ready)
+  FAKE_CLAUDE_MODE = ready | no_marker | crash | trust_error | slow | stall
+                     | resume | stderr_error                              (default ready)
+  - resume:       like ready but omits "Created initial session" (a reconnecting
+                  bridge doesn't re-log it) -> exercises pointer session backfill
+  - stderr_error: writes a failure reason to STDERR (not --debug-file) and exits 1
+                  -> exercises clauster's stderr capture into error_detail
   FAKE_CLAUDE_SLOW = seconds to delay before writing markers (mode=slow)
   FAKE_CLAUDE_AGENTS = JSON string returned by `agents --json`        (default [])
 
@@ -46,12 +51,42 @@ def run_bridge(args):
     if mode == "trust_error":
         log("2026-01-01T00:00:00.000Z [ERROR] Workspace not trusted")
         return 1
+    if mode == "stderr_error":
+        # Failure reason on stderr only (NOT --debug-file), e.g. a controller-auth
+        # rejection. clauster routes stdout+stderr to a file and surfaces this.
+        sys.stderr.write("Error: failed to authenticate bridge to controller (HTTP 401)\n")
+        sys.stderr.flush()
+        return 1
+    if mode == "stall":
+        # Alive but never registers an environment: mimic a bridge that launched
+        # yet could not authenticate to the controller (the real "running but
+        # unusable" case). Emit only a non-marker debug line, then idle until
+        # signalled — no bridge:init/api/work markers are ever written.
+        log("2026-01-01T00:00:00.000Z [DEBUG] Failed to read OAuth token: permission denied")
+        stalled = {"v": False}
+
+        def _stop(_signum, _frame):
+            stalled["v"] = True
+
+        signal.signal(signal.SIGINT, _stop)
+        signal.signal(signal.SIGTERM, _stop)
+        if hasattr(signal, "SIGBREAK"):  # Windows CTRL_BREAK_EVENT
+            signal.signal(signal.SIGBREAK, _stop)
+        for _ in range(2400):  # idle up to ~600s waiting for a signal
+            if stalled["v"]:
+                break
+            time.sleep(0.25)
+        return 0
     if mode == "slow":
         time.sleep(float(os.environ.get("FAKE_CLAUDE_SLOW", "1.0")))
 
     log(f"2026-01-01T00:00:00.000Z [DEBUG] [bridge:init] bridgeId={BRIDGE_ID} dir=/x branch=HEAD")
     log(f"2026-01-01T00:00:00.100Z [DEBUG] [bridge:api] POST /v1/environments/bridge -> 200 environment_id={ENV_ID}")
-    log(f"2026-01-01T00:00:00.200Z [DEBUG] [bridge:init] Created initial session {STARTER}")
+    if mode != "resume":
+        # A reconnecting bridge re-attaches to an existing session and does NOT
+        # re-log this line — so 'resume' mode omits it and clauster must recover
+        # the session id from the bridge-pointer instead.
+        log(f"2026-01-01T00:00:00.200Z [DEBUG] [bridge:init] Created initial session {STARTER}")
 
     if mode == "no_marker":
         return 0  # exits before the poll loop -> never becomes ready

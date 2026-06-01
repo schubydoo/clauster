@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import json
+import subprocess
+from typing import cast
+
 import pytest
 
+from clauster import bridge_log
 from clauster.models import (
     Attribution,
     InstanceStatus,
@@ -158,6 +163,144 @@ async def test_spawn_trust_error_is_error(runner_config, monkeypatch):
     assert inst.status is InstanceStatus.ERROR
 
 
+def test_apply_markers_status_branches(runner_config):
+    """A slow-but-alive bridge stays STARTING (not a false 'Failed to start');
+    only a dead proc or a trust rejection is a terminal ERROR."""
+    runner = _make_runner(runner_config)
+
+    def proc(alive: bool) -> subprocess.Popen:
+        class _Proc:
+            def poll(self):
+                return None if alive else 0
+
+        return cast(subprocess.Popen, _Proc())
+
+    def fresh():
+        return RemoteControlInstance(project="x", label="x", status=InstanceStatus.STARTING)
+
+    ready = bridge_log.BridgeMarkers(poll_loop_started=True, environment_id="env_x")
+    assert ready.is_ready
+
+    # ready + alive -> RUNNING
+    i = fresh()
+    runner._apply_markers(i, ready, proc(alive=True))
+    assert i.status is InstanceStatus.RUNNING
+
+    # alive but no ready marker yet -> stays STARTING (slow start, not a failure)
+    i = fresh()
+    runner._apply_markers(i, bridge_log.BridgeMarkers(), proc(alive=True))
+    assert i.status is InstanceStatus.STARTING
+
+    # exited before readiness -> ERROR (genuine, terminal)
+    i = fresh()
+    runner._apply_markers(i, bridge_log.BridgeMarkers(), proc(alive=False))
+    assert i.status is InstanceStatus.ERROR
+
+    # trust rejected even while alive -> ERROR
+    i = fresh()
+    runner._apply_markers(i, bridge_log.BridgeMarkers(trust_error=True), proc(alive=True))
+    assert i.status is InstanceStatus.ERROR
+
+
+async def test_watch_startup_alive_unregistered_becomes_error(runner_config, monkeypatch):
+    """Regression: a bridge that launches but never registers an environment
+    (e.g. it can't authenticate to the controller) stays alive yet uncontrollable.
+    It must never be reported RUNNING — it stays STARTING, then fails to ERROR."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")  # alive, never registers
+    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 0.3  # tiny grace so the test is fast
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING  # NOT a false RUNNING
+    assert inst.url is None and inst.environment_id is None
+    watch = runner._startup_watches["alpha"]
+
+    await watch
+    assert inst.status is InstanceStatus.ERROR  # honest: alive but never usable
+    assert inst.url is None and inst.environment_id is None
+    assert runner.running_count() == 0
+
+    await runner.stop("alpha")  # clean up the still-idling fake bridge
+
+
+async def test_watch_startup_promotes_on_late_registration(runner_config, monkeypatch):
+    """A genuinely slow bridge that registers *after* the synchronous readiness
+    wait is promoted to RUNNING by the watch — but only once it actually has an
+    environment, never on liveness alone."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "slow")
+    monkeypatch.setenv("FAKE_CLAUDE_SLOW", "0.5")  # registers ~0.5s in, after the wait
+    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 30
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING  # not ready within the 0.2s wait
+    assert inst.url is None
+    watch = runner._startup_watches["alpha"]
+
+    await watch
+    assert inst.status is InstanceStatus.RUNNING
+    assert inst.environment_id == "env_01TESTENVAAAAAAAAAAAAAAAA"
+    assert inst.url and inst.url.endswith("env_01TESTENVAAAAAAAAAAAAAAAA")
+
+    await runner.stop("alpha")
+
+
+async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeypatch):
+    """If a STARTING bridge dies before registering, the watch defers to the same
+    rule as the poll loop: an unintended same-dir exit is CRASHED."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stall")
+    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.2)
+    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.05)
+    config, claude_json = runner_config
+    config.claude.startup_grace_seconds = 30  # long; we kill it well before grace
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.STARTING
+    watch = runner._startup_watches["alpha"]
+
+    runner._procs["alpha"].kill()  # die during startup (cross-platform hard kill)
+    await watch
+    assert inst.status is InstanceStatus.CRASHED
+
+
+async def test_spawn_auto_enables_remote_control(runner_config, monkeypatch):
+    """Before launching a bridge, the runner marks remote control acknowledged in
+    ~/.claude.json (hasUsedRemoteControl/remoteDialogSeen) so the bridge skips the
+    interactive enable prompt a detached-stdin bridge could never answer."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    assert "hasUsedRemoteControl" not in json.loads(claude_json.read_text())
+
+    await runner.spawn("alpha")
+    after = json.loads(claude_json.read_text())
+    assert after["hasUsedRemoteControl"] is True
+    assert after["remoteDialogSeen"] is True
+    assert after["projects"]  # existing trust entries preserved
+
+    await runner.stop("alpha")
+
+
+async def test_spawn_auto_enable_can_be_disabled(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.claude.auto_enable_remote_control = False
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    await runner.spawn("alpha")
+    assert "hasUsedRemoteControl" not in json.loads(claude_json.read_text())
+
+    await runner.stop("alpha")
+
+
 async def test_stop_unknown_instance_raises(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
@@ -300,10 +443,86 @@ def test_reconcile_status_transitions():
     SessionRunner._reconcile_status(i, alive=False)
     assert i.status is InstanceStatus.CRASHED
 
-    i = inst(InstanceStatus.ERROR)
+    i = inst(InstanceStatus.STARTING)
     SessionRunner._reconcile_status(i, alive=True)
-    assert i.status is InstanceStatus.RUNNING  # slow-start recovery
+    # Liveness alone must NOT promote: a bridge can be alive yet never have
+    # registered an environment (then it is unusable). Promotion is the
+    # startup-watch's job, gated on a real environment registration.
+    assert i.status is InstanceStatus.STARTING
+
+    i = inst(InstanceStatus.STARTING, intentional=False)
+    SessionRunner._reconcile_status(i, alive=False)
+    assert i.status is InstanceStatus.CRASHED  # died during startup
 
     i = inst(InstanceStatus.RUNNING)
     SessionRunner._reconcile_status(i, alive=True)
     assert i.status is InstanceStatus.RUNNING  # unchanged
+
+
+def _argv_of(instance) -> list[str]:
+    """The argv the fake bridge recorded for its most recent spawn."""
+    from pathlib import Path
+
+    return json.loads(Path(str(instance.bridge_debug_log_path) + ".argv.json").read_text())
+
+
+async def test_resume_reuses_modes_and_backfills_session(runner_config, monkeypatch):
+    # A reconnecting bridge re-logs the environment + poll loop but NOT
+    # "Created initial session", so the session id must be recovered from the
+    # bridge-pointer — otherwise session_url (the primary deep link) breaks.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha", permission_mode="acceptEdits")
+    assert first.status is InstanceStatus.RUNNING
+    assert first.error_detail is None  # a clean start records no failure reason
+    await runner.stop("alpha")
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = "session_01RESUMEDBBBBBBBBBBB"
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: FakePtr())
+
+    resumed = await runner.resume("alpha")
+    assert resumed.status is InstanceStatus.RUNNING
+    # session id backfilled from the pointer (the resume log omitted it)…
+    assert resumed.starter_session_id == "session_01RESUMEDBBBBBBBBBBB"
+    assert resumed.session_url and "session_01RESUMEDBBBBBBBBBBB" in resumed.session_url
+    # …and resume reused the stored permission mode rather than the config default.
+    argv = _argv_of(resumed)
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    await runner.stop("alpha")
+
+
+async def test_resume_unknown_instance_rejected(runner_config):
+    runner = _make_runner(runner_config)
+    with pytest.raises(UnknownProject):
+        await runner.resume("alpha")  # never spawned -> nothing to resume
+
+
+async def test_spawn_captures_stderr_detail_on_failure(runner_config, monkeypatch):
+    # A startup failure whose reason goes only to stderr (not --debug-file) must
+    # still surface: clauster routes stdout+stderr to a file and captures the tail.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "stderr_error")
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.ERROR
+    assert inst.error_detail and "HTTP 401" in inst.error_detail
+
+
+def test_capture_error_detail_no_log_is_noop():
+    inst = RemoteControlInstance(project="x", label="x", bridge_debug_log_path=None)
+    SessionRunner._capture_error_detail(inst)  # must not raise
+    assert inst.error_detail is None
+
+
+def test_capture_error_detail_unreadable_is_noop(tmp_path):
+    # stderr sibling is a directory -> read_text raises OSError -> swallowed.
+    log = tmp_path / "b.log"
+    (tmp_path / "b.stderr.log").mkdir()
+    inst = RemoteControlInstance(project="x", label="x", bridge_debug_log_path=log)
+    SessionRunner._capture_error_detail(inst)
+    assert inst.error_detail is None

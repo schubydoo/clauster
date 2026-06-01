@@ -42,8 +42,9 @@ from .models import (
     RemoteControlInstance,
     WorkingSession,
 )
+from .recap import ensure_recap_hook_installed
 from .state import StateStore
-from .trust import is_trusted, trust_directory
+from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
 
 _log = logging.getLogger("clauster.runner")
 
@@ -71,6 +72,9 @@ class PermissionModeNotAllowed(SpawnError):
 # How long to wait for a freshly-spawned bridge to reach its poll loop.
 _READY_TIMEOUT = 15.0
 _READY_POLL_INTERVAL = 0.25
+# Cadence at which the post-spawn startup-watch re-reads the bridge log to detect
+# a (late) environment registration or a stuck-but-alive bridge.
+_STARTUP_WATCH_INTERVAL = 2.0
 
 
 class SessionRunner:
@@ -83,6 +87,15 @@ class SessionRunner:
         self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
         self._poll_task: asyncio.Task | None = None
+        # Per-spawn background tasks that watch a STARTING bridge until it either
+        # registers an environment (-> RUNNING) or proves stuck (-> ERROR).
+        self._startup_watches: dict[str, asyncio.Task] = {}
+        # Mark remote control as acknowledged once, before the first spawn.
+        self._rc_setting_ensured = False
+        # Install the resume-recap SessionStart hook once, before the first spawn.
+        self._recap_hook_ensured = False
+        # ~/.claude/settings.json sits beside the ~/.claude.json we honor for trust.
+        self._settings_json = self._claude_json.parent / ".claude" / "settings.json"
         # Lightweight persistence of label / intentional_stop / spawn_mode (D14).
         self._state = StateStore(config.state_dir)
         self._persisted: dict[str, dict] = self._state.load()
@@ -198,6 +211,41 @@ class SessionRunner:
                 f"directory not trusted: {proj.path}. Use the Trust action before starting."
             )
 
+        if self._config.claude.auto_enable_remote_control and not self._rc_setting_ensured:
+            try:
+                changed = await asyncio.to_thread(ensure_remote_control_enabled, self._claude_json)
+                if changed:
+                    _log.info(
+                        "marked remote control acknowledged in %s so the bridge skips the "
+                        "interactive enable prompt",
+                        self._claude_json,
+                    )
+            except OSError as exc:
+                # Best-effort: if we can't write the flag the bridge may hang on the
+                # prompt, but the startup-watch surfaces that honestly as ERROR rather
+                # than a false RUNNING — so don't fail the spawn over it.
+                _log.warning(
+                    "could not pre-enable remote control in %s: %s", self._claude_json, exc
+                )
+            self._rc_setting_ensured = True
+
+        if self._config.claude.resume_recap and not self._recap_hook_ensured:
+            try:
+                changed = await asyncio.to_thread(ensure_recap_hook_installed, self._settings_json)
+                if changed:
+                    _log.info(
+                        "installed the resume-recap SessionStart hook in %s so a restarted "
+                        "bridge gets its prior conversation recapped into context",
+                        self._settings_json,
+                    )
+            except OSError as exc:
+                # Best-effort, same as the remote-control flag: a failure here only
+                # means a restart won't be recapped, not that the bridge can't run.
+                _log.warning(
+                    "could not install resume-recap hook in %s: %s", self._settings_json, exc
+                )
+            self._recap_hook_ensured = True
+
         log_path = self._unique_log_path(name)
         instance = RemoteControlInstance(
             project=name,
@@ -229,8 +277,35 @@ class SessionRunner:
 
         markers = await asyncio.to_thread(self._await_ready, log_path, proc)
         self._apply_markers(instance, markers, proc)
+        await self._post_spawn_enrich(instance, proj.path)
         await self._persist()
+        # A bridge still STARTING after the synchronous readiness wait may yet
+        # register (slow start) or may be alive-but-stuck (e.g. it couldn't
+        # authenticate to the controller). Watch it off the request path so it is
+        # only ever promoted to RUNNING once it actually registers an environment.
+        if instance.status is InstanceStatus.STARTING:
+            self._start_startup_watch(name)
         return instance
+
+    async def resume(self, name: str) -> RemoteControlInstance:
+        """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
+
+        Re-running ``claude remote-control`` in the same cwd reconnects to the
+        existing environment + session (the bridge-pointer.json the prior run
+        left behind drives it — empirically confirmed). We reuse the stopped
+        instance's stored ``spawn_mode``/``permission_mode`` so the resume keeps
+        the same permission mode (a *fresh* bare start would drop back to the
+        default 'ask'). The session id, which a reconnecting bridge does NOT
+        re-log, is recovered from the pointer by :meth:`spawn`'s enrich step.
+        """
+        existing = self._instances.get(name)
+        if existing is None:
+            raise UnknownProject(f"no managed instance to resume: {name!r}")
+        return await self.spawn(
+            name,
+            spawn_mode=existing.spawn_mode,
+            permission_mode=existing.permission_mode,
+        )
 
     def _validate_spawn_options(
         self, proj: Project, spawn_mode: str, permission_mode: str
@@ -275,6 +350,16 @@ class SessionRunner:
             permission_mode,
         ]
 
+    @staticmethod
+    def _stderr_path_for(log_path: Path) -> Path:
+        """Sibling of the --debug-file that captures the bridge's stdout+stderr.
+
+        The bridge writes startup *failures* (e.g. ``Error: Workspace not
+        trusted``, controller-auth errors) to its stderr, NOT the --debug-file.
+        Routing both streams here — instead of DEVNULL — lets a failed spawn
+        surface a real reason instead of a bare timeout."""
+        return log_path.with_name(log_path.stem + ".stderr.log")
+
     def _popen(
         self,
         cwd: Path,
@@ -289,27 +374,48 @@ class SessionRunner:
         # for `claude`), so a bare name that the version probe resolves via
         # shutil.which would fail to spawn here. Also pins the binary we validated.
         cmd[0] = resolve_binary(cmd[0])
-        # Detach the bridge into its own session/group so it survives a clauster
-        # restart and a SIGINT to clauster never propagates to it. On Windows,
-        # CREATE_NEW_PROCESS_GROUP additionally makes the bridge addressable by a
-        # CTRL_BREAK_EVENT for graceful stop (POSIX uses start_new_session); stdin
-        # is detached so a wrapping cmd.exe never blocks on an interactive prompt.
-        if sys.platform == "win32":
+        # When resume-recap is enabled, flag it in the bridge's env. The detached
+        # bridge's child sessions inherit this, and the SessionStart hook (wired
+        # into ~/.claude/settings.json) acts only when it is set — so the recap
+        # never fires for the user's non-Clauster sessions sharing that config.
+        popen_env: dict[str, str] | None = None
+        if self._config.claude.resume_recap:
+            popen_env = {
+                **os.environ,
+                "CLAUSTER_RESUME_RECAP": "1",
+                "CLAUSTER_RESUME_RECAP_MAX_CHARS": str(self._config.claude.resume_recap_max_chars),
+            }
+        # Capture stdout+stderr to a file so a failed start leaves a diagnosable
+        # reason behind (the bridge logs the *why* there, not to --debug-file).
+        # The detached child inherits its own dup of the fd, so the parent closes
+        # its copy right after spawn; the child keeps writing.
+        err_fh = self._stderr_path_for(log_path).open("wb")
+        try:
+            # Detach the bridge into its own session/group so it survives a clauster
+            # restart and a SIGINT to clauster never propagates to it. On Windows,
+            # CREATE_NEW_PROCESS_GROUP additionally makes the bridge addressable by a
+            # CTRL_BREAK_EVENT for graceful stop (POSIX uses start_new_session); stdin
+            # is detached so a wrapping cmd.exe never blocks on an interactive prompt.
+            if sys.platform == "win32":
+                return subprocess.Popen(
+                    cmd,
+                    cwd=str(cwd),
+                    stdin=subprocess.DEVNULL,
+                    stdout=err_fh,
+                    stderr=subprocess.STDOUT,
+                    env=popen_env,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
             return subprocess.Popen(
                 cmd,
                 cwd=str(cwd),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=err_fh,
+                stderr=subprocess.STDOUT,
+                env=popen_env,
+                start_new_session=True,
             )
-        return subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        finally:
+            err_fh.close()
 
     def _await_ready(self, log_path: Path, proc: subprocess.Popen) -> bridge_log.BridgeMarkers:
         """Block until the bridge is ready, errors, or times out.
@@ -352,9 +458,127 @@ class SessionRunner:
 
         if markers.is_ready and proc.poll() is None:
             instance.status = InstanceStatus.RUNNING
-        else:
-            # Never reached the poll loop: trust failure, early exit, or timeout.
+        elif markers.trust_error or proc.poll() is not None:
+            # Genuine, terminal failure: the bridge rejected workspace trust, or it
+            # exited before ever reaching the poll loop. Surface it as ERROR.
             instance.status = InstanceStatus.ERROR
+        else:
+            # Alive but hasn't logged readiness within _READY_TIMEOUT. A slow start
+            # is not a failure: stay STARTING and let the poll loop promote it to
+            # RUNNING (or CRASHED if it later dies). Prevents a false "Failed to
+            # start" on a bridge that is simply still coming up.
+            instance.status = InstanceStatus.STARTING
+
+    async def _post_spawn_enrich(
+        self, instance: RemoteControlInstance, project_path: Path
+    ) -> None:
+        """After readiness is decided, fill in what the log alone can't tell us.
+
+        - RUNNING: a *reconnecting* bridge never re-logs ``Created initial
+          session``, so ``starter_session_id`` (and thus ``session_url``) would
+          be empty after a resume — backfill it from the pointer.
+        - ERROR/CRASHED: capture the bridge's stderr tail so the failure has a
+          visible reason instead of a bare "Failed to start".
+        """
+        if instance.status is InstanceStatus.RUNNING:
+            await asyncio.to_thread(self._backfill_starter_session, instance, project_path)
+        elif instance.status in (InstanceStatus.ERROR, InstanceStatus.CRASHED):
+            await asyncio.to_thread(self._capture_error_detail, instance)
+
+    @staticmethod
+    def _backfill_starter_session(instance: RemoteControlInstance, project_path: Path) -> None:
+        """Recover the session id from the bridge-pointer when the log omitted it.
+
+        A *reconnecting* bridge re-logs its environment but NOT "Created initial
+        session", so ``starter_session_id`` (and thus ``session_url``, the primary
+        deep link) would be empty after a resume without this. No-op for a fresh
+        start, which logs the session directly. (The environment id never needs
+        backfilling: this only runs once RUNNING, which already requires it.)"""
+        if instance.starter_session_id is not None:
+            return
+        ptr = pointers.pointer_for_project(project_path)
+        if ptr is not None and ptr.session_id:
+            instance.starter_session_id = ptr.session_id
+
+    @classmethod
+    def _capture_error_detail(cls, instance: RemoteControlInstance) -> None:
+        """Read the tail of the bridge's captured stderr into ``error_detail``."""
+        log_path = instance.bridge_debug_log_path
+        if log_path is None:
+            return
+        try:
+            text = cls._stderr_path_for(log_path).read_text(errors="replace").strip()
+        except OSError:
+            return
+        if text:
+            # Bound it: the UI shows a reason, not a full transcript.
+            instance.error_detail = text[-2000:]
+
+    def _project_path(self, name: str) -> Path | None:
+        proj = self._discovered().get(name)
+        return proj.path if proj is not None else None
+
+    # ----- startup watch --------------------------------------------------
+
+    def _start_startup_watch(self, name: str) -> None:
+        """Launch (or replace) the background watch for a STARTING bridge."""
+        old = self._startup_watches.pop(name, None)
+        if old is not None and not old.done():
+            old.cancel()
+        task = asyncio.create_task(self._watch_startup(name), name=f"startup-watch:{name}")
+        self._startup_watches[name] = task
+
+        def _done(t: asyncio.Task, _name: str = name) -> None:
+            if self._startup_watches.get(_name) is t:
+                self._startup_watches.pop(_name, None)
+            if not t.cancelled() and (exc := t.exception()) is not None:
+                _log.warning("startup-watch for %s failed: %s", _name, exc)
+
+        task.add_done_callback(_done)
+
+    async def _watch_startup(self, name: str) -> None:
+        """Resolve a STARTING bridge off the request path.
+
+        Re-reads the bridge log until the bridge registers an environment (-> the
+        existing :meth:`_apply_markers` promotes it to RUNNING) or until the
+        ``startup_grace_seconds`` budget expires while it is still alive but
+        unregistered — which is a failed start (ERROR), not a running bridge.
+        Process death during startup is delegated to :meth:`_reconcile_status` so
+        the CRASHED/STOPPED outcome matches the poll loop exactly.
+        """
+        grace = self._config.claude.startup_grace_seconds
+        deadline = time.monotonic() + grace
+        while True:
+            await asyncio.sleep(_STARTUP_WATCH_INTERVAL)
+            instance = self._instances.get(name)
+            proc = self._procs.get(name)
+            if instance is None or proc is None or instance.status is not InstanceStatus.STARTING:
+                return  # already resolved, stopped, or gone
+            if proc.poll() is not None:  # exited during startup
+                self._reconcile_status(instance, alive=False)
+                await self._persist()
+                return
+            log_path = instance.bridge_debug_log_path
+            if log_path is None:
+                return  # nothing to read from; leave it for the poll loop
+            markers = await asyncio.to_thread(self._read_markers, log_path)
+            self._apply_markers(instance, markers, proc)
+            if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
+                await self._post_spawn_enrich(instance, self._project_path(name) or log_path)
+                await self._persist()
+                return
+            if time.monotonic() >= deadline:
+                instance.status = InstanceStatus.ERROR
+                _log.warning(
+                    "bridge %s is alive but never registered an environment within %.0fs; "
+                    "marking ERROR (it is not connectable). Check the bridge debug log — a "
+                    "common cause is the claude user lacking readable remote-control credentials.",
+                    name,
+                    grace,
+                )
+                await asyncio.to_thread(self._capture_error_detail, instance)
+                await self._persist()
+                return
 
     # ----- stop -----------------------------------------------------------
 
@@ -362,6 +586,7 @@ class SessionRunner:
         instance = self._instances.get(name)
         if instance is None:
             raise UnknownProject(f"no managed instance: {name!r}")
+        self._cancel_startup_watch(name)  # stop racing the watch over this instance's status
         instance.intentional_stop = True  # mark intent BEFORE signalling (spec §3 feat 4)
         await self._persist()  # persist the intent so a restart doesn't mislabel it CRASHED
 
@@ -474,15 +699,18 @@ class SessionRunner:
     @staticmethod
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:
         status = instance.status
-        if status is InstanceStatus.RUNNING and not alive:
+        if status in (InstanceStatus.RUNNING, InstanceStatus.STARTING) and not alive:
             # session mode is single-shot: the bridge exits when its session ends, so a
             # disappearance is expected (STOPPED), not a crash. same-dir/worktree persist,
-            # so an unintended exit there IS a crash.
+            # so an unintended exit there IS a crash. A STARTING bridge that vanishes
+            # died during startup — the same expected/unexpected distinction applies.
             expected_exit = instance.intentional_stop or instance.spawn_mode == "session"
             instance.status = InstanceStatus.STOPPED if expected_exit else InstanceStatus.CRASHED
-        elif status is InstanceStatus.ERROR and alive:
-            # A slow-to-start detached bridge that timed out but is actually up.
-            instance.status = InstanceStatus.RUNNING
+        # NB: a STARTING bridge that is merely *alive* is NOT promoted to RUNNING
+        # here. Promotion requires a confirmed environment registration (handled by
+        # the startup-watch via _apply_markers). A bridge can stay alive without
+        # ever authenticating to the controller — liveness is not usability, and
+        # promoting on it reported uncontrollable bridges as RUNNING.
 
     # ----- lifecycle ------------------------------------------------------
 
@@ -503,8 +731,18 @@ class SessionRunner:
                 _log.exception("poll_once failed; continuing")
             await asyncio.sleep(interval)
 
+    def _cancel_startup_watch(self, name: str) -> None:
+        task = self._startup_watches.pop(name, None)
+        if task is not None and not task.done():
+            task.cancel()
+
     async def shutdown(self) -> None:
-        # Cancel the poll task only; leave bridges running (they are detached).
+        # Cancel the poll task and any in-flight startup watches; leave bridges
+        # running (they are detached and survive a Clauster restart).
+        for task in list(self._startup_watches.values()):
+            if not task.done():
+                task.cancel()
+        self._startup_watches.clear()
         if self._poll_task is not None:
             self._poll_task.cancel()
             try:
