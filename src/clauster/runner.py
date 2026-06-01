@@ -71,6 +71,9 @@ class PermissionModeNotAllowed(SpawnError):
 # How long to wait for a freshly-spawned bridge to reach its poll loop.
 _READY_TIMEOUT = 15.0
 _READY_POLL_INTERVAL = 0.25
+# Cadence at which the post-spawn startup-watch re-reads the bridge log to detect
+# a (late) environment registration or a stuck-but-alive bridge.
+_STARTUP_WATCH_INTERVAL = 2.0
 
 
 class SessionRunner:
@@ -83,6 +86,9 @@ class SessionRunner:
         self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
         self._poll_task: asyncio.Task | None = None
+        # Per-spawn background tasks that watch a STARTING bridge until it either
+        # registers an environment (-> RUNNING) or proves stuck (-> ERROR).
+        self._startup_watches: dict[str, asyncio.Task] = {}
         # Lightweight persistence of label / intentional_stop / spawn_mode (D14).
         self._state = StateStore(config.state_dir)
         self._persisted: dict[str, dict] = self._state.load()
@@ -230,6 +236,12 @@ class SessionRunner:
         markers = await asyncio.to_thread(self._await_ready, log_path, proc)
         self._apply_markers(instance, markers, proc)
         await self._persist()
+        # A bridge still STARTING after the synchronous readiness wait may yet
+        # register (slow start) or may be alive-but-stuck (e.g. it couldn't
+        # authenticate to the controller). Watch it off the request path so it is
+        # only ever promoted to RUNNING once it actually registers an environment.
+        if instance.status is InstanceStatus.STARTING:
+            self._start_startup_watch(name)
         return instance
 
     def _validate_spawn_options(
@@ -363,12 +375,73 @@ class SessionRunner:
             # start" on a bridge that is simply still coming up.
             instance.status = InstanceStatus.STARTING
 
+    # ----- startup watch --------------------------------------------------
+
+    def _start_startup_watch(self, name: str) -> None:
+        """Launch (or replace) the background watch for a STARTING bridge."""
+        old = self._startup_watches.pop(name, None)
+        if old is not None and not old.done():
+            old.cancel()
+        task = asyncio.create_task(self._watch_startup(name), name=f"startup-watch:{name}")
+        self._startup_watches[name] = task
+
+        def _done(t: asyncio.Task, _name: str = name) -> None:
+            if self._startup_watches.get(_name) is t:
+                self._startup_watches.pop(_name, None)
+            if not t.cancelled() and (exc := t.exception()) is not None:
+                _log.warning("startup-watch for %s failed: %s", _name, exc)
+
+        task.add_done_callback(_done)
+
+    async def _watch_startup(self, name: str) -> None:
+        """Resolve a STARTING bridge off the request path.
+
+        Re-reads the bridge log until the bridge registers an environment (-> the
+        existing :meth:`_apply_markers` promotes it to RUNNING) or until the
+        ``startup_grace_seconds`` budget expires while it is still alive but
+        unregistered — which is a failed start (ERROR), not a running bridge.
+        Process death during startup is delegated to :meth:`_reconcile_status` so
+        the CRASHED/STOPPED outcome matches the poll loop exactly.
+        """
+        grace = self._config.claude.startup_grace_seconds
+        deadline = time.monotonic() + grace
+        while True:
+            await asyncio.sleep(_STARTUP_WATCH_INTERVAL)
+            instance = self._instances.get(name)
+            proc = self._procs.get(name)
+            if instance is None or proc is None or instance.status is not InstanceStatus.STARTING:
+                return  # already resolved, stopped, or gone
+            if proc.poll() is not None:  # exited during startup
+                self._reconcile_status(instance, alive=False)
+                await self._persist()
+                return
+            log_path = instance.bridge_debug_log_path
+            if log_path is None:
+                return  # nothing to read from; leave it for the poll loop
+            markers = await asyncio.to_thread(self._read_markers, log_path)
+            self._apply_markers(instance, markers, proc)
+            if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
+                await self._persist()
+                return
+            if time.monotonic() >= deadline:
+                instance.status = InstanceStatus.ERROR
+                _log.warning(
+                    "bridge %s is alive but never registered an environment within %.0fs; "
+                    "marking ERROR (it is not connectable). Check the bridge debug log — a "
+                    "common cause is the claude user lacking readable remote-control credentials.",
+                    name,
+                    grace,
+                )
+                await self._persist()
+                return
+
     # ----- stop -----------------------------------------------------------
 
     async def stop(self, name: str) -> RemoteControlInstance:
         instance = self._instances.get(name)
         if instance is None:
             raise UnknownProject(f"no managed instance: {name!r}")
+        self._cancel_startup_watch(name)  # stop racing the watch over this instance's status
         instance.intentional_stop = True  # mark intent BEFORE signalling (spec §3 feat 4)
         await self._persist()  # persist the intent so a restart doesn't mislabel it CRASHED
 
@@ -488,10 +561,11 @@ class SessionRunner:
             # died during startup — the same expected/unexpected distinction applies.
             expected_exit = instance.intentional_stop or instance.spawn_mode == "session"
             instance.status = InstanceStatus.STOPPED if expected_exit else InstanceStatus.CRASHED
-        elif status is InstanceStatus.STARTING and alive:
-            # A slow-to-start detached bridge that exceeded _READY_TIMEOUT but is
-            # actually up — liveness confirms it, so promote STARTING -> RUNNING.
-            instance.status = InstanceStatus.RUNNING
+        # NB: a STARTING bridge that is merely *alive* is NOT promoted to RUNNING
+        # here. Promotion requires a confirmed environment registration (handled by
+        # the startup-watch via _apply_markers). A bridge can stay alive without
+        # ever authenticating to the controller — liveness is not usability, and
+        # promoting on it reported uncontrollable bridges as RUNNING.
 
     # ----- lifecycle ------------------------------------------------------
 
@@ -512,8 +586,18 @@ class SessionRunner:
                 _log.exception("poll_once failed; continuing")
             await asyncio.sleep(interval)
 
+    def _cancel_startup_watch(self, name: str) -> None:
+        task = self._startup_watches.pop(name, None)
+        if task is not None and not task.done():
+            task.cancel()
+
     async def shutdown(self) -> None:
-        # Cancel the poll task only; leave bridges running (they are detached).
+        # Cancel the poll task and any in-flight startup watches; leave bridges
+        # running (they are detached and survive a Clauster restart).
+        for task in list(self._startup_watches.values()):
+            if not task.done():
+                task.cancel()
+        self._startup_watches.clear()
         if self._poll_task is not None:
             self._poll_task.cancel()
             try:

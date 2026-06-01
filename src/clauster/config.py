@@ -38,6 +38,11 @@ class ClaudeConfig(BaseModel):
     binary: str = "claude"
     min_version: str = "2.1.145"
     agents_json_poll_interval_seconds: int = Field(default=300, ge=1)
+    # How long a freshly-spawned bridge may stay alive without registering an
+    # environment before Clauster gives up and marks it ERROR. A bridge that
+    # launches but can't authenticate to the remote-control controller stays
+    # alive yet never becomes connectable; liveness alone is not "running".
+    startup_grace_seconds: float = Field(default=60.0, gt=0)
 
 
 class InstanceDefaults(BaseModel):
