@@ -43,6 +43,13 @@ class ClaudeConfig(BaseModel):
     # launches but can't authenticate to the remote-control controller stays
     # alive yet never becomes connectable; liveness alone is not "running".
     startup_grace_seconds: float = Field(default=60.0, gt=0)
+    # Before spawning the first bridge, mark remote control as acknowledged in the
+    # runtime user's ~/.claude.json (hasUsedRemoteControl/remoteDialogSeen).
+    # `claude remote-control` otherwise blocks on a one-time interactive "Enable
+    # Remote Control? (y/n)" prompt that Clauster can never answer (the bridge's
+    # stdin is detached) — so the bridge would sit alive-but-unregistered forever.
+    # Set false to manage those flags yourself.
+    auto_enable_remote_control: bool = True
 
 
 class InstanceDefaults(BaseModel):

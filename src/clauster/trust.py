@@ -70,3 +70,47 @@ def trust_directory(path: Path, claude_json: Path = CLAUDE_JSON) -> None:
     tmp = claude_json.with_suffix(claude_json.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, claude_json)
+
+
+# Top-level ~/.claude.json flags that record the operator already acknowledged
+# remote control, so `claude remote-control` skips its one-time interactive
+# "Enable Remote Control? (y/n)" prompt (which a detached-stdin bridge can never
+# answer — empirically verified 2026-05-31).
+_REMOTE_CONTROL_FLAGS = ("hasUsedRemoteControl", "remoteDialogSeen")
+
+
+def ensure_remote_control_enabled(claude_json: Path = CLAUDE_JSON) -> bool:
+    """Atomically set the remote-control acknowledgment flags in ``claude_json``.
+
+    Returns True if the file was changed, False if the flags were already set (or
+    the file couldn't be read). Same atomic temp+replace + one-time ``.bak`` as
+    :func:`trust_directory`, since the ``claude`` CLI writes this file too.
+    Idempotent.
+    """
+    try:
+        raw = claude_json.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        raw = None
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    if all(data.get(flag) is True for flag in _REMOTE_CONTROL_FLAGS):
+        return False  # already acknowledged — nothing to do
+
+    if raw is not None:
+        backup = claude_json.with_suffix(claude_json.suffix + ".bak")
+        if not backup.exists():
+            try:
+                backup.write_text(raw, encoding="utf-8")
+            except OSError as exc:
+                _log.warning("could not write %s backup: %s", backup, exc)
+
+    for flag in _REMOTE_CONTROL_FLAGS:
+        data[flag] = True
+
+    tmp = claude_json.with_suffix(claude_json.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, claude_json)
+    return True
