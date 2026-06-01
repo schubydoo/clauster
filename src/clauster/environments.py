@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import ssl
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +27,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
+
+_log = logging.getLogger("clauster.environments")
+
+# Hard ceiling on pagination so a misbehaving endpoint can't spin forever; at the
+# default page size this is ~1M environments, far beyond any real account.
+_MAX_LIST_PAGES = 10_000
 
 API_BASE = "https://api.anthropic.com"
 # Date-stamped and the CLI moves fast — re-verify against the installed `claude`
@@ -177,21 +184,39 @@ class EnvironmentsClient:
         status, raw = self._transport(method, self._base + path, self._headers(), None)
         if status >= 400:
             raise EnvironmentsAPIError(status, raw.decode("utf-8", "replace")[:500])
-        return json.loads(raw) if raw else {}
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # A 2xx with a non-JSON body (proxy error page, truncated response) must
+            # not crash the reaper with a bare decode error — surface it as an API error.
+            raise EnvironmentsAPIError(status, f"non-JSON response body: {exc}") from exc
 
     def list_environments(self, *, limit: int = 100) -> list[Environment]:
-        """All environments, following ``next_page`` (after_id) pagination."""
+        """All environments, following ``next_page`` (after_id) pagination.
+
+        Bounded against a misbehaving endpoint: stops if a cursor repeats (a cycle)
+        or the page count exceeds ``_MAX_LIST_PAGES``, returning what was collected.
+        """
         out: list[Environment] = []
         after: str | None = None
-        while True:
+        seen: set[str] = set()
+        for _ in range(_MAX_LIST_PAGES):
             path = f"/v1/environments?limit={limit}"
             if after:
                 path += f"&after_id={after}"
             data = self._request("GET", path)
             out.extend(Environment.model_validate(e) for e in data.get("data", []))
             after = data.get("next_page")
-            if not after:
+            if not after or after in seen:
                 return out
+            seen.add(after)
+        _log.warning(
+            "environments pagination hit the %d-page ceiling; returning a partial list",
+            _MAX_LIST_PAGES,
+        )
+        return out
 
     def archive_environment(self, env_id: str) -> None:
         """Reversible: makes the env read-only and drains its queue (preferred over delete)."""

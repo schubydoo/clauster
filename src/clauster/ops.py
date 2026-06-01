@@ -236,6 +236,54 @@ def _safe_extract_tar(backup: Path, dest: Path) -> None:
                 shutil.copyfileobj(src, fh)
 
 
+def _atomic_replace_state(src_state: Path, state_dir: Path) -> int:
+    """Replace ``state_dir`` with the contents of ``src_state`` atomically.
+
+    Stages a full copy in a sibling temp dir on ``state_dir``'s own filesystem,
+    then swaps it in with directory renames (move the old aside, move the staged
+    copy into place, drop the old). So a mid-copy failure never leaves a
+    half-applied ``state_dir``, and a forced restore is replace-not-merge — stale
+    files absent from the backup don't linger. Returns the file count restored.
+    """
+    state_dir = state_dir.expanduser()
+    parent = state_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+
+    # Stage on the destination's filesystem so the swap below is a rename, not a
+    # cross-device copy (TemporaryDirectory may live on a different mount).
+    staged = Path(tempfile.mkdtemp(prefix=f".{state_dir.name}.restore-", dir=parent))
+    try:
+        count = 0
+        for item in src_state.rglob("*"):
+            target = staged / item.relative_to(src_state)
+            if item.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+                count += 1
+    except BaseException:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+
+    # Swap. The aside name is unique (derived from the staged temp name), so the
+    # renames work on POSIX and Windows alike and never replace an existing dir.
+    old_aside = parent / f"{staged.name}.old"
+    moved_old = state_dir.exists()
+    if moved_old:
+        os.replace(state_dir, old_aside)
+    try:
+        os.replace(staged, state_dir)
+    except BaseException:
+        if moved_old:
+            os.replace(old_aside, state_dir)  # roll back to the pre-restore state
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    if moved_old:
+        shutil.rmtree(old_aside, ignore_errors=True)
+    return count
+
+
 def restore_backup(
     backup: Path,
     *,
@@ -265,16 +313,10 @@ def restore_backup(
 
         src_state = tmp / "state"
         if src_state.is_dir():
-            state_dir.mkdir(parents=True, exist_ok=True)
-            for item in src_state.rglob("*"):
-                rel = item.relative_to(src_state)
-                dest = state_dir / rel
-                if item.is_dir():
-                    dest.mkdir(parents=True, exist_ok=True)
-                else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, dest)
-                    restored["state_files"] += 1
+            # Atomic replace-not-merge: build the new state on the destination's
+            # filesystem and swap it in, so a forced restore can't leave a mix of
+            # old + new files (or stale files the backup no longer contains).
+            restored["state_files"] = _atomic_replace_state(src_state, state_dir)
 
         src_cfg_dir = tmp / "config"
         if config_out is not None and src_cfg_dir.is_dir():
