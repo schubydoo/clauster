@@ -117,7 +117,7 @@
           <button class="btn-trust" @click="trust('{{ p.name }}')"
                   x-show="!isRunning('{{ p.name }}')">Trust directory</button>
           {% endif %}
-          <div class="spawn-opts" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}')">
+          <div class="spawn-opts" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isResumable('{{ p.name }}')">
             <label>Spawn
               <select x-model="spawnMode['{{ p.name }}']">
                 <option value="same-dir">same-dir</option>
@@ -137,7 +137,10 @@
             </label>
           </div>
           <button class="btn-start" @click="start('{{ p.name }}')"
-                  x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}')">Start bridge</button>
+                  x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isResumable('{{ p.name }}')">Start bridge</button>
+          <button class="btn-resume" @click="resume('{{ p.name }}')"
+                  x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && isResumable('{{ p.name }}')"
+                  :title="'Reconnect to the previous session (keeps ' + resumeModeOf('{{ p.name }}') + ' mode)'">Resume</button>
           <button class="btn-stop" @click="stop('{{ p.name }}')"
                   x-show="isRunning('{{ p.name }}')">Stop bridge</button>
           <span class="spinner" x-show="isBusy('{{ p.name }}')">starting…</span>
@@ -156,6 +159,9 @@
           <button class="btn-bypass-cancel" @click="cancelBypass('{{ p.name }}')">Cancel</button>
         </div>
         <p class="card-error" x-show="errorOf('{{ p.name }}')" x-text="errorOf('{{ p.name }}')"></p>
+        <!-- Server-captured bridge stderr tail: the real reason a start failed. -->
+        <pre class="card-detail" x-show="statusOf('{{ p.name }}') === 'error' && detailOf('{{ p.name }}')"
+             x-text="detailOf('{{ p.name }}')"></pre>
 
         <!-- CLAUDE.md viewer/editor (spec §5): textarea, 64KB cap, stale-bridge banner. -->
         <template x-if="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open">
@@ -301,9 +307,18 @@
         statusLabel(name) { return STATUS_LABELS[this.statusOf(name)] || "Stopped"; },
         isRunning(name) { return this.statusOf(name) === "running"; },
         isBusy(name) { return this.statusOf(name) === "starting"; },
+        // A stopped/crashed bridge that still has an environment can reconnect to
+        // its prior session — show "Resume" instead of "Start" so the distinction
+        // is explicit, and reuse its stored modes (preserves the permission mode).
+        isResumable(name) {
+          const i = this.instances[name] || {};
+          return (i.status === "stopped" || i.status === "crashed") && !!i.environment_id;
+        },
+        resumeModeOf(name) { return (this.instances[name] || {}).permission_mode || ""; },
         sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
         envUrlOf(name) { return (this.instances[name] || {}).url || null; },
         errorOf(name) { return this.errors[name] || null; },
+        detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
         externalCount(name) {
           const s = this.externalSessions[name];
           return Array.isArray(s) ? s.length : 0;
@@ -467,6 +482,24 @@
             if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; }
             else { this.instances[name] = body; }
           } catch (e) { this.errors[name] = String(e); delete this.instances[name]; }
+          await this.refresh();
+        },
+        async resume(name) {
+          this.errors[name] = null;
+          const prev = this.instances[name];
+          this.instances[name] = { project: name, status: "starting" };
+          try {
+            const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name) + "/resume",
+                                    { method: "POST" });
+            const body = await res.json();
+            if (!res.ok) {
+              this.errors[name] = body.detail || "failed to resume";
+              if (prev) this.instances[name] = prev; else delete this.instances[name];
+            } else { this.instances[name] = body; }
+          } catch (e) {
+            this.errors[name] = String(e);
+            if (prev) this.instances[name] = prev; else delete this.instances[name];
+          }
           await this.refresh();
         },
         async stop(name) {

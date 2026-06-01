@@ -57,6 +57,10 @@ def test_stop_unknown_instance_404(write_config, tmp_path):
     assert _client(write_config, tmp_path).delete("/api/instances/ghost").status_code == 404
 
 
+def test_resume_unknown_instance_404(write_config, tmp_path):
+    assert _client(write_config, tmp_path).post("/api/instances/ghost/resume").status_code == 404
+
+
 def test_trust_unknown_project_404(write_config, tmp_path):
     # valid name, but not a discovered project -> UnknownProject -> 404
     assert _client(write_config, tmp_path).post("/api/projects/ghostproj/trust").status_code == 404
