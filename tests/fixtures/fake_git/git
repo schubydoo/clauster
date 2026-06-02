@@ -5,6 +5,7 @@ Modes via FAKE_GIT_MODE (default "ok"):
   ok          clone: create <dest> with a README, exit 0
   with_claude clone: also write CLAUDE.md + .claude/settings.json (warning path)
   fail        clone: write stderr, exit 1
+  progress    clone: emit git-style "Receiving objects: N%" to stderr, then create
   slow        clone: sleep FAKE_GIT_SLEEP secs (default 5) then create (timeout test)
   big         clone: create <dest> with a >FAKE_GIT_BIG_MB (default 2) MB file (size-cap test)
 
@@ -37,6 +38,13 @@ def _clone(args):
         return 1
     if mode == "slow":
         time.sleep(float(os.environ.get("FAKE_GIT_SLEEP", "5")))
+    if mode == "progress":
+        # CR-updated progress lines, exactly like `git clone --progress`.
+        for pct in (0, 30, 60, 100):
+            sys.stderr.write(f"Receiving objects: {pct}% ({pct}/100)\r")
+            sys.stderr.flush()
+        sys.stderr.write("\n")
+        sys.stderr.flush()
 
     os.makedirs(dest, exist_ok=False)
     with open(os.path.join(dest, "README.md"), "w") as fh:

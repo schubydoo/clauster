@@ -20,15 +20,22 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
+import threading
 import uuid
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .config import CloneConfig
 from .discovery import is_valid_project_name
+
+# git progress lines are separated by CR (in-place updates) or LF.
+_PROGRESS_SPLIT = re.compile(rb"[\r\n]")
 
 _log = logging.getLogger("clauster.provisioning")
 
@@ -227,11 +234,13 @@ def clone_project(
     cfg: CloneConfig,
     shallow: bool = False,
     git_binary: str = "git",
+    progress_cb: Callable[[str], None] | None = None,
 ) -> Path:
     """Clone ``url`` into a new project under projects_root, enforcing the clone guards.
 
     Validates the scheme, blocks private/loopback hosts (unless opted in), and
-    enforces the post-clone size cap.
+    enforces the post-clone size cap. When ``progress_cb`` is given, each git
+    progress line (``Receiving objects: 42% …``) is forwarded to it live.
     """
     if not cfg.enabled:
         raise ProvisionError("clone is disabled in config (clone.enabled = false)")
@@ -258,6 +267,7 @@ def clone_project(
         "-c",
         "credential.helper=",
         "clone",
+        "--progress",  # force progress to stderr even though it isn't a TTY
         "--no-tags",
         "--no-recurse-submodules",
     ]
@@ -266,19 +276,10 @@ def clone_project(
     cmd += ["--", url, str(tmp)]
 
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=cfg.timeout_seconds,
-            env=_git_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
+        _run_clone_streaming(cmd, cfg.timeout_seconds, progress_cb)
+    except CloneFailed:
         shutil.rmtree(tmp, ignore_errors=True)
-        raise CloneFailed(f"clone timed out after {cfg.timeout_seconds}s") from exc
-
-    if proc.returncode != 0:
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise CloneFailed(f"git clone failed: {_stderr_tail(proc.stderr)}")
+        raise
 
     # NB: max_mb is a *post-clone* cap (we can't bound the transfer mid-flight
     # without partial-clone filters); the transfer itself is bounded by timeout_seconds.
@@ -292,6 +293,66 @@ def clone_project(
         shutil.rmtree(tmp, ignore_errors=True)
         raise TargetExists(f"a directory named {name!r} already exists") from exc
     return target
+
+
+def _run_clone_streaming(
+    cmd: list[str],
+    timeout_seconds: int,
+    progress_cb: Callable[[str], None] | None,
+) -> None:
+    """Run ``git clone`` (``cmd``), forwarding stderr progress lines to ``progress_cb``.
+
+    Raise ``CloneFailed`` on a non-zero exit or if the clone exceeds
+    ``timeout_seconds`` — a watchdog terminates the process so a stalled transfer
+    can never hang the worker thread.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=_git_env(),
+    )
+    timed_out = threading.Event()
+
+    def _terminate() -> None:
+        timed_out.set()
+        proc.terminate()
+
+    watchdog = threading.Timer(timeout_seconds, _terminate)
+    watchdog.start()
+    tail: deque[str] = deque(maxlen=20)
+    buf = b""
+    try:
+        stderr = proc.stderr
+        if stderr is None:  # pragma: no cover - unreachable with stderr=PIPE, narrows type
+            raise CloneFailed("git clone produced no stderr stream")
+        fd = stderr.fileno()
+
+        def _emit(raw: bytes) -> None:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                return
+            tail.append(line)
+            if progress_cb is not None:
+                progress_cb(line)
+
+        while True:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break  # EOF — git closed stderr
+            buf += chunk
+            *complete, buf = _PROGRESS_SPLIT.split(buf)
+            for raw in complete:
+                _emit(raw)
+        _emit(buf)  # flush a final fragment with no trailing CR/LF
+        proc.wait()
+    finally:
+        watchdog.cancel()
+
+    if timed_out.is_set():
+        raise CloneFailed(f"clone timed out after {timeout_seconds}s")
+    if proc.returncode != 0:
+        raise CloneFailed(f"git clone failed: {_stderr_tail(' / '.join(tail))}")
 
 
 def _stderr_tail(stderr: bytes | str | None, limit: int = 400) -> str:
