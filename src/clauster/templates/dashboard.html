@@ -182,7 +182,7 @@
       <!-- ===== Toasts ===== -->
       <div class="toast-stack">
         <template x-for="t in toasts" :key="t.id">
-          <div class="alert" :class="{'alert-success': t.type==='success', 'alert-danger': t.type==='error', 'alert-info': t.type==='info'}"
+          <div class="alert" :class="{'alert-success': t.type==='success', 'alert-danger': t.type==='error', 'alert-warning': t.type==='warning', 'alert-info': t.type==='info'}"
                role="alert">
             <div class="d-flex">
               <div x-text="t.msg"></div>
@@ -561,11 +561,15 @@
         if (empty) empty.style.display = "none";
         this.loadUsage(name);
       },
-      // The card is now inserted reactively; "Show it" just focuses it.
+      // The card is now inserted reactively; "Show it" scrolls to it and moves
+      // DOM focus there too (keyboard/screen-reader users land on the new card).
       revealProject(name) {
         this.np.warn = null;
         const el = document.querySelector('[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]');
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+        if (!el) return;
+        el.setAttribute("tabindex", "-1");
+        el.focus({ preventScroll: true });
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
       },
       reloadToProject() { window.location.reload(); },
       async _spawn(name) {
