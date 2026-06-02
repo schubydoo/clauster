@@ -1,0 +1,52 @@
+# markdownlint-cli2 config — https://github.com/DavidAnson/markdownlint-cli2
+#
+# Lints our hand-written Markdown (README, CONTRIBUTING, SECURITY, UPGRADING,
+# THIRD_PARTY_NOTICES, tests/E2E_CHECKLIST). Vendored READMEs and the gitignored
+# scratch/ + CLAUDE.md are excluded (gitignore:true skips the latter two).
+# Run locally and in CI via scripts/lint-docs.sh (pinned version, single source).
+
+# Honour .gitignore so gitignored docs (scratch/, CLAUDE.md, AGENTS.md) are skipped.
+gitignore: true
+
+globs:
+  - "**/*.md"
+
+ignores:
+  - "**/vendor/**" # third-party assets we ship verbatim
+  - "**/node_modules/**"
+
+config:
+  default: true
+  # MD013 line-length: prose is reflow-friendly; we don't hard-wrap docs.
+  MD013: false
+  # MD033 inline HTML: the README's hero + screenshot layout is intentional HTML
+  # (centred headings, badge links, a screenshot table). Allow that curated set
+  # so arbitrary tags (<script>, <iframe>, …) and stray HTML in the prose docs
+  # are still flagged.
+  MD033:
+    allowed_elements:
+      - a
+      - b
+      - br
+      - code
+      - details
+      - div
+      - em
+      - h1
+      - h2
+      - h3
+      - img
+      - kbd
+      - p
+      - sub
+      - summary
+      - sup
+      - table
+      - tbody
+      - td
+      - th
+      - thead
+      - tr
+
+# Quiet the per-file progress noise; keep the error list.
+noProgress: true

@@ -176,7 +176,7 @@ scalar key is overridable by an environment variable of the form
 validate against newer versions.
 
 | Common flag | Default | What it does |
-|---|---|---|
+| --- | --- | --- |
 | `host` / `port` | `127.0.0.1` / `7621` | bind address (non-loopback needs auth) |
 | `projects_root` | — | directory whose children become project cards |
 | `auth.password_required` | `false` | require login (`clauster hash-password` for the hash) |
@@ -187,7 +187,7 @@ validate against newer versions.
 
 ## CLI
 
-```
+```text
 clauster run                  # start the server (default)
 clauster hash-password        # generate an argon2id hash for auth
 clauster doctor               # diagnose config / environment

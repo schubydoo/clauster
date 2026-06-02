@@ -9,8 +9,8 @@ permission notices are reproduced below. Pinned versions are tracked in
 
 ## Tabler
 
-- Project: https://tabler.io
-- Source: https://github.com/tabler/tabler
+- Project: <https://tabler.io>
+- Source: <https://github.com/tabler/tabler>
 - Version: 1.4.0
 - Files: `src/clauster/static/vendor/tabler/`
 - License: MIT (also retained verbatim at `src/clauster/static/vendor/tabler/LICENSE`
@@ -44,8 +44,8 @@ THE SOFTWARE.
 
 ## Alpine.js
 
-- Project: https://alpinejs.dev
-- Source: https://github.com/alpinejs/alpine
+- Project: <https://alpinejs.dev>
+- Source: <https://github.com/alpinejs/alpine>
 - Version: 3.15.12
 - Files: `src/clauster/static/alpine.min.js` (notice also retained at
   `src/clauster/static/alpine.LICENSE`)
@@ -79,8 +79,8 @@ SOFTWARE.
 
 ## Iconoir
 
-- Project: https://iconoir.com
-- Source: https://github.com/iconoir-icons/iconoir
+- Project: <https://iconoir.com>
+- Source: <https://github.com/iconoir-icons/iconoir>
 - Version: 7.11.0
 - Files: a subset of `icons/regular/*.svg` assembled into an inline SVG sprite at
   `src/clauster/templates/_iconoir_sprite.html` (provenance + notice retained at
