@@ -120,9 +120,13 @@ branches:
           - "security required checks passed"
           - "conventional PR title"
           - "lint"
-      # `null` (not `false`) — the Probot Settings App rejects `false` here
-      # silently. See repository-settings/app#923.
-      enforce_admins: null
+      # `true` enforces branch protection for admins too — OpenSSF Scorecard's
+      # Branch-Protection check rewards this. NB the Settings App rejects `false`
+      # here silently (repository-settings/app#923): use `null` to disable,
+      # `true` to enforce. Trade-off: this removes the admin-merge bypass we used
+      # for the job-rename in #66, so a future required-context change can't be
+      # force-merged the same way — revert to `null` if you need that escape hatch.
+      enforce_admins: true
       required_linear_history: true
       allow_force_pushes: false
       allow_deletions: false
