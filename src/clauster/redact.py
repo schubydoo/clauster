@@ -16,6 +16,13 @@ _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07)")
 # API identifiers that act as bearer credentials in a URL.
 _ID_RE = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
 
+# Bare UUIDs (e.g. organization_uuid, bridgeId) — account/instance identifiers
+# the bridge prints in full. Not bearer credentials, but we still don't surface
+# them over the WS stream (the on-disk log keeps them verbatim per D11).
+_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+
 # A conservative set of obvious secret shapes, as defense-in-depth — the bridge
 # already prints "[REDACTED]" for most secrets, but never rely on that alone.
 _SECRET_RES = (
@@ -37,8 +44,9 @@ def strip_ansi(text: str) -> str:
 
 
 def redact_ids(text: str) -> str:
-    """Mask ``env_/session_/cse_`` identifiers while keeping the prefix readable."""
-    return _ID_RE.sub(lambda m: f"{m.group(1)}_{_REDACTED}", text)
+    """Mask ``env_/session_/cse_`` identifiers (prefix kept readable) and bare UUIDs."""
+    text = _ID_RE.sub(lambda m: f"{m.group(1)}_{_REDACTED}", text)
+    return _UUID_RE.sub(_REDACTED, text)
 
 
 def redact_secrets(text: str) -> str:
