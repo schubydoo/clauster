@@ -15,18 +15,12 @@
   <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css">
 </head>
 <body class="d-flex flex-column">
+  {% include "_iconoir_sprite.html" %}
   <!-- Theme toggle (persists to localStorage; mirrors the dashboard control). -->
   <button id="theme-toggle" type="button" style="z-index: 1080"
           class="btn btn-icon position-fixed top-0 end-0 m-3" aria-label="Toggle theme">
-    <svg class="icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
-         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="4"></circle>
-      <path d="M3 12h1M20 12h1M12 3v1M12 20v1M5.6 5.6l.7.7M17.7 17.7l.7.7M18.4 5.6l-.7.7M6.3 17.7l-.7.7"></path>
-    </svg>
-    <svg class="icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
-         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"></path>
-    </svg>
+    <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
+    <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
   </button>
 
   <div class="page page-center">

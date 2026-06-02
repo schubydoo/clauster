@@ -53,7 +53,10 @@ restarts — the dashboard JS/CSS are cached static assets.
       project shows no badge.
 - [ ] **Login / logout** (when `auth.password_required`): login, then logout
       revokes everywhere (old cookie rejected).
-- [ ] **Theme toggle** (dark/light) persists across reload.
+- [ ] **Theme toggle** (dark/light) persists across reload — sun/moon Iconoir
+      icons render (no broken `<use>` refs).
+- [ ] **Action-button icons** (Iconoir) render on Start/Stop/Restart/Trust/Edit/
+      logs/QR/copy/Open and follow the button text color in both themes.
 - [ ] **Connection-lost banner** — stop the server (or block `/api/instances`);
       after ~2 failed polls a "Lost connection … retrying" banner appears; it
       **clears** when the server returns. A 401 mid-session bounces to `/login`.
