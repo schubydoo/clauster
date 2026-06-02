@@ -119,7 +119,7 @@
             <div class="alert alert-warning mt-2 mb-0" x-show="np.warn" x-cloak>
               ⚠ <strong x-text="np.submittedName || np.name"></strong> ships <strong x-text="np.warn"></strong>
               — its code runs when you Start a bridge here. Review it before starting.
-              <button class="btn btn-sm btn-warning ms-2" @click="reloadToProject()">Show it</button>
+              <button class="btn btn-sm btn-warning ms-2" @click="revealProject(np.submittedName || np.name)">Show it</button>
             </div>
           </div>
         </div>
@@ -171,176 +171,13 @@
       {% endif %}
 
       <!-- ===== Project grid ===== -->
-      {% if projects %}
-      <div class="row row-cards">
-        {% for p in projects %}
-        <div class="col-md-6 col-xl-4" data-project="{{ p.name }}">
-          <div class="card h-100">
-            <div class="card-header">
-              <h3 class="card-title text-truncate">{{ p.name }}</h3>
-              <div class="card-actions">
-                <span class="badge" :class="statusBadgeClass('{{ p.name }}')">
-                  <span class="status-dot" :class="statusDotClass('{{ p.name }}')"></span>
-                  <span x-text="statusLabel('{{ p.name }}')">Stopped</span>
-                </span>
-              </div>
-            </div>
-            <div class="card-body">
-              <div class="mb-2">
-                {% if p.is_git_repo %}<span class="badge bg-secondary-lt me-1">git</span>{% endif %}
-                {% if p.has_claude_md %}<span class="badge bg-azure-lt me-1">CLAUDE.md</span>{% endif %}
-                <span class="badge me-1" :class="trustState['{{ p.name }}'] === 'trusted' ? 'bg-green-lt' : 'bg-yellow-lt'"
-                      x-text="trustState['{{ p.name }}']">{{ p.trust_state.value }}</span>
-                <span class="badge bg-teal-lt me-1" x-show="usageLabel('{{ p.name }}')" x-cloak
-                      :title="usageTitle('{{ p.name }}')" x-text="usageLabel('{{ p.name }}')"></span>
-              </div>
-
-              <!-- Trust (untrusted only; updates in place) -->
-              <button class="btn btn-sm btn-outline-warning mb-2" @click="trust('{{ p.name }}')"
-                      x-show="trustState['{{ p.name }}'] === 'untrusted' && !isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}')"
-                      x-cloak :disabled="trusting['{{ p.name }}']">
-                <span class="spinner-border spinner-border-sm me-1" x-show="trusting['{{ p.name }}']" x-cloak></span>
-                Trust directory
-              </button>
-
-              <!-- Spawn controls -->
-              <div class="row g-2 mb-2" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>
-                <div class="col-6">
-                  <label class="form-label small mb-1">Spawn</label>
-                  <select class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']">
-                    <option value="same-dir">same-dir</option>
-                    {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
-                    <option value="session">session</option>
-                  </select>
-                </div>
-                <div class="col-6">
-                  <label class="form-label small mb-1">Permissions</label>
-                  <select class="form-select form-select-sm" x-model="permMode['{{ p.name }}']">
-                    <option value="default">default</option>
-                    <option value="plan">plan</option>
-                    <option value="acceptEdits">acceptEdits</option>
-                    <option value="auto">auto</option>
-                    <option value="dontAsk">dontAsk</option>
-                    {% if p.allow_bypass_permissions %}<option value="bypassPermissions">bypassPermissions ⚠</option>{% endif %}
-                  </select>
-                </div>
-              </div>
-
-              <div class="btn-list">
-                <button class="btn btn-sm btn-success" @click="start('{{ p.name }}')"
-                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>Start bridge</button>
-                <button class="btn btn-sm btn-success" @click="resume('{{ p.name }}')"
-                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
-                        :title="'Restart the bridge — reconnects its environment and keeps ' + resumeModeOf('{{ p.name }}') + ' mode.'">Restart</button>
-                <button class="btn btn-sm btn-danger" @click="stop('{{ p.name }}')"
-                        x-show="isRunning('{{ p.name }}') || isStopping('{{ p.name }}')" x-cloak
-                        :disabled="isStopping('{{ p.name }}')">
-                  <span class="spinner-border spinner-border-sm me-1" x-show="isStopping('{{ p.name }}')" x-cloak></span>
-                  <span x-text="isStopping('{{ p.name }}') ? 'Stopping…' : 'Stop bridge'">Stop bridge</span>
-                </button>
-                <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="isBusy('{{ p.name }}')" x-cloak>
-                  <span class="spinner-border spinner-border-sm me-1"></span>starting…</span>
-                <button class="btn btn-sm" @click="toggleClaudeMd('{{ p.name }}')"
-                        x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</button>
-              </div>
-
-              <!-- bypassPermissions typed-confirm -->
-              <div class="alert alert-danger mt-2" x-show="confirmBypass['{{ p.name }}']" x-cloak>
-                <p class="mb-2">⚠ <strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
-                  run tools without asking. Type the project name to confirm.</p>
-                <div class="input-group">
-                  <input type="text" class="form-control" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
-                         @keyup.enter="confirmBypassStart('{{ p.name }}')">
-                  <button class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')">Start with bypass</button>
-                  <button class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
-                </div>
-              </div>
-              <div class="alert alert-danger mt-2 mb-0" x-show="errorOf('{{ p.name }}')" x-cloak x-text="errorOf('{{ p.name }}')"></div>
-              <!-- server-side startup failure detail (bridge stderr tail) -->
-              <pre class="card-detail" x-show="statusOf('{{ p.name }}') === 'error' && detailOf('{{ p.name }}')"
-                   x-cloak x-text="detailOf('{{ p.name }}')"></pre>
-
-              <!-- CLAUDE.md editor -->
-              <template x-if="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open">
-                <div class="mt-2 border rounded p-2">
-                  <div class="d-flex align-items-center mb-1">
-                    <strong class="me-2">CLAUDE.md</strong>
-                    <span class="badge bg-blue-lt me-2" x-show="!cmd['{{ p.name }}'].loading && !cmd['{{ p.name }}'].exists" x-cloak>new file</span>
-                    <span class="small ms-auto" :class="{ 'text-danger': cmdBytes('{{ p.name }}') > 65536 }"
-                          x-text="cmdBytes('{{ p.name }}') + ' / 65536 bytes'"></span>
-                  </div>
-                  <div class="alert alert-warning py-1" x-show="cmd['{{ p.name }}'].bridge_running" x-cloak>
-                    ⚠ A bridge is running — saved changes apply to <strong>new</strong> sessions, not the attached one.</div>
-                  <div class="alert alert-danger py-1" x-show="cmd['{{ p.name }}'].error" x-cloak x-text="cmd['{{ p.name }}'].error"></div>
-                  <textarea class="form-control cmd-text" x-model="cmd['{{ p.name }}'].content" rows="12"
-                            spellcheck="false" autocomplete="off"
-                            :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving"></textarea>
-                  <div class="btn-list mt-2">
-                    <button class="btn btn-sm btn-primary" @click="saveClaudeMd('{{ p.name }}')"
-                            :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving || cmdBytes('{{ p.name }}') > 65536"
-                            x-text="cmd['{{ p.name }}'].saving ? 'Saving…' : 'Save'">Save</button>
-                    <button class="btn btn-sm" @click="closeClaudeMd('{{ p.name }}')">Cancel</button>
-                    <span class="text-green" x-show="cmd['{{ p.name }}'].savedAt && !cmd['{{ p.name }}'].error" x-cloak>✓ saved</span>
-                  </div>
-                </div>
-              </template>
-
-              <!-- external (unmanaged) session -->
-              <div class="mt-2 text-secondary small" x-show="hasExternal('{{ p.name }}')" x-cloak>
-                <span class="status-dot status-dot-animated bg-yellow me-1"></span>
-                <span x-text="externalCount('{{ p.name }}') > 1
-                  ? externalCount('{{ p.name }}') + ' external sessions active'
-                  : 'External session active'"></span>
-                <span class="text-muted">— not managed by Clauster</span>
-              </div>
-
-              <!-- session URLs + QR -->
-              <div class="mt-2" x-show="isRunning('{{ p.name }}') && sessionUrlOf('{{ p.name }}')" x-cloak>
-                <div class="btn-list">
-                  <a class="btn btn-sm btn-primary" target="_blank" rel="noopener" :href="sessionUrlOf('{{ p.name }}')">Open session in Claude</a>
-                  <button class="btn btn-sm" @click="copy(sessionUrlOf('{{ p.name }}'))">copy</button>
-                  <button class="btn btn-sm" @click="toggleQr('{{ p.name }}')" x-text="qrOpen['{{ p.name }}'] ? 'hide QR' : 'QR'"></button>
-                </div>
-                <div class="btn-list mt-1" x-show="envUrlOf('{{ p.name }}')" x-cloak>
-                  <a class="btn btn-sm btn-ghost-secondary" target="_blank" rel="noopener" :href="envUrlOf('{{ p.name }}')">New session</a>
-                  <button class="btn btn-sm btn-ghost-secondary" @click="copy(envUrlOf('{{ p.name }}'))">copy</button>
-                </div>
-                <template x-if="qrOpen['{{ p.name }}']">
-                  <div class="qr-box mt-2">
-                    <img :src="qrSrc('{{ p.name }}')" alt="QR code for the session deep link" width="160" height="160">
-                  </div>
-                </template>
-              </div>
-
-              <!-- bridge log tail -->
-              <div class="mt-2" x-show="isRunning('{{ p.name }}')" x-cloak>
-                <button class="btn btn-sm btn-ghost-secondary" @click="toggleLogs('{{ p.name }}')"
-                        x-text="logs['{{ p.name }}'] && logs['{{ p.name }}'].open ? 'Hide logs' : 'Show logs'"></button>
-                <template x-if="logs['{{ p.name }}'] && logs['{{ p.name }}'].open">
-                  <div class="mt-2">
-                    <div class="btn-list mb-1">
-                      <button class="btn btn-sm" @click="logs['{{ p.name }}'].paused ? resumeLogs('{{ p.name }}') : pauseLogs('{{ p.name }}')"
-                              x-text="logs['{{ p.name }}'].paused ? 'Resume' : 'Pause'"></button>
-                      <button class="btn btn-sm" @click="jumpToLatest('{{ p.name }}')">Jump to latest</button>
-                      <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="logs['{{ p.name }}'].paused" x-cloak>paused
-                        (<span x-text="logs['{{ p.name }}'].pending.length"></span> buffered)</span>
-                    </div>
-                    <pre class="log-view bg-dark text-white rounded p-2" :id="'log-' + '{{ p.name }}'"
-                         x-text="logs['{{ p.name }}'].lines.join('\n')"></pre>
-                  </div>
-                </template>
-              </div>
-            </div>
-          </div>
-        </div>
-        {% endfor %}
+      <div class="row row-cards" id="project-grid">
+        {% for p in projects %}{% include "_project_card.html" %}{% endfor %}
       </div>
-      {% else %}
-      <div class="empty">
+      <div class="empty" id="empty-state"{% if projects %} style="display: none"{% endif %}>
         <p class="empty-title">No projects found</p>
         <p class="empty-subtitle text-secondary">Nothing under <code>{{ projects_root }}</code>.</p>
       </div>
-      {% endif %}
 
       <!-- ===== Toasts ===== -->
       <div class="toast-stack">
@@ -608,7 +445,7 @@
             body: JSON.stringify({ name: np.submittedName, git_init: np.gitInit }) });
           const body = await res.json();
           if (!res.ok) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
-          else { this.afterProvision(np, body); }
+          else { await this.afterProvision(np, body); }
         } catch (e) { np.error = String(e); }
         np.busy = false;
       },
@@ -663,7 +500,7 @@
       async afterClone(np, name) {
         try {
           const list = await (await fetch(ROOT + "/api/projects")).json();
-          this.afterProvision(np, list.find((p) => p.name === name) || {});
+          await this.afterProvision(np, list.find((p) => p.name === name) || {});
         } catch (e) {
           // The clone itself succeeded; reveal the card (its untrusted + CLAUDE.md
           // badges still surface the inspection, and code only runs once trusted)
@@ -672,12 +509,63 @@
           this.reloadToProject();
         }
       },
-      afterProvision(np, proj) {
+      async afterProvision(np, proj) {
         const ships = [];
         if (proj.has_claude_md) ships.push("CLAUDE.md");
         if (proj.has_claude_dir) ships.push(".claude/");
-        if (ships.length) { np.warn = ships.join(" + "); np.busy = false; }
-        else { this.toast(np.submittedName + ": ready", "success"); this.reloadToProject(); }
+        await this.insertCard(np.submittedName, proj);  // reveal the new card in place — no reload
+        np.busy = false;
+        if (ships.length) {
+          // Keep the RCE-review warning up; the inserted card is untrusted, so its
+          // code can't run until the user explicitly Trusts + Starts a bridge.
+          np.warn = ships.join(" + ");
+          this.toast(np.submittedName + ": added — review before starting", "warning");
+        } else {
+          np.warn = null;
+          this.toast(np.submittedName + ": ready", "success");
+          np.open = false; np.name = ""; np.url = "";  // close the form on a clean add
+        }
+      },
+      // Insert a freshly created/cloned project's card without a full reload:
+      // seed its reactive state, fetch the server-rendered fragment, inject it,
+      // and hydrate it under the existing dashboard() scope. Falls back to a full
+      // reload if anything goes wrong, so a successful provision is never lost.
+      async insertCard(name, proj) {
+        // Seed per-card state BEFORE injecting so bindings resolve on first paint
+        // (init() does the same for the server-rendered cards).
+        if (!(name in this.spawnMode)) this.spawnMode[name] = DEFAULT_SPAWN_MODE;
+        if (!(name in this.permMode)) this.permMode[name] = DEFAULT_PERMISSION_MODE;
+        if (proj && proj.trust_state) this.trustState[name] = proj.trust_state;
+        const grid = document.getElementById("project-grid");
+        if (!grid) { this.reloadToProject(); return; }
+        const sel = '[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]';
+        if (!grid.querySelector(sel)) {  // skip if a refresh race already rendered it
+          let html;
+          try {
+            const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/card");
+            if (!res.ok) throw new Error("card " + res.status);
+            html = await res.text();
+          } catch (e) {
+            console.warn("insertCard: fragment fetch failed, reloading", e);
+            this.reloadToProject();
+            return;
+          }
+          const tpl = document.createElement("template");
+          tpl.innerHTML = html.trim();
+          const node = tpl.content.firstElementChild;
+          if (!node) { this.reloadToProject(); return; }
+          grid.appendChild(node);
+          window.Alpine.initTree(node);  // hydrate the injected card under dashboard()
+        }
+        const empty = document.getElementById("empty-state");
+        if (empty) empty.style.display = "none";
+        this.loadUsage(name);
+      },
+      // The card is now inserted reactively; "Show it" just focuses it.
+      revealProject(name) {
+        this.np.warn = null;
+        const el = document.querySelector('[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]');
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
       },
       reloadToProject() { window.location.reload(); },
       async _spawn(name) {

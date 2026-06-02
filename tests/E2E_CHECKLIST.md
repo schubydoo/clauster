@@ -43,9 +43,12 @@ restarts — the dashboard JS/CSS are cached static assets.
 - [ ] **Live log tail** streams over WS; ANSI stripped; IDs/tokens redacted.
 - [ ] **CLAUDE.md editor** — load, edit, save; stale-bridge banner; 409 conflict
       surfaces.
-- [ ] **Create project** (empty) and **clone** a git URL — clone shows the
-      **live progress bar** and the "code runs on start" warning for repos
-      shipping `CLAUDE.md`/`.claude`; errors render inline (not silent).
+- [ ] **Create project** (empty) and **clone** a git URL — the new card appears
+      **in place with no full-page reload** (empty grid → first card, or appended
+      to existing). Clone shows the **live progress bar**; repos shipping
+      `CLAUDE.md`/`.claude` show the "code runs on start" warning and the inserted
+      card stays untrusted; errors render inline (not silent). The inserted card
+      is fully interactive (Start/Trust/spawn selects) without a refresh.
 - [ ] **Per-project cost badge** lazy-loads `≈$X.XX` after first paint; blank
       project shows no badge.
 - [ ] **Login / logout** (when `auth.password_required`): login, then logout
