@@ -16,6 +16,9 @@ uv run clauster
   above the **96%** coverage gate (enforced in CI).
 - **Lint, format, types** —
   `uv run ruff check . && uv run ruff format --check . && uv run pyright src/clauster`
+- **Docs lint (Markdown + YAML)** — `bash scripts/lint-docs.sh` (markdownlint-cli2
+  via `npx`, pinned in the script; `yamllint` from `uv sync --extra dev`). Same
+  command CI runs in the `ruff + pyright` job.
 - **Security checks** — nothing extra to run locally: Bandit-style SAST is ruff's
   `S` rules, already covered by the `ruff check .` above. CI additionally runs
   CodeQL, Trivy (filesystem + image), dependency review, and a workflow audit

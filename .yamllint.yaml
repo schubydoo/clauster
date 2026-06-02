@@ -1,0 +1,33 @@
+# yamllint config — https://yamllint.readthedocs.io/
+#
+# Our YAML is all CI/config (.github/workflows, settings, coderabbit, renovate).
+# We start from the `default` ruleset and relax the handful of rules that fight
+# GitHub Actions conventions, so the gate flags real mistakes (bad indentation,
+# duplicate keys, syntax errors) without churning style.
+extends: default
+
+# Skip gitignored local-only YAML (clauster.yml, .playwright-mcp/, scratch/, …);
+# yamllint, unlike markdownlint-cli2, does not honour .gitignore on its own.
+ignore-from-file: .gitignore
+
+rules:
+  # GitHub Actions pins actions as `uses: owner/action@<sha> # vX.Y.Z` with a
+  # single space before the version comment — a deliberate, widespread
+  # convention. Accept one space rather than churn every workflow to two.
+  comments:
+    min-spaces-from-content: 1
+  # GitHub Actions' `on:` key is parsed by yamllint as the boolean `True`
+  # (YAML 1.1 truthy). check-keys:false stops it flagging `on:`/`off:` keys;
+  # we still validate truthy *values* against the canonical true/false set.
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  # 80 is too tight for workflow `run:` lines and pinned action SHAs. 120 as a
+  # warning surfaces genuinely long lines without failing the build on them.
+  line-length:
+    max: 120
+    level: warning
+  # Workflow/config files routinely omit the `---` start marker.
+  document-start: disable
+  # Probot Settings uses comments aligned under keys; don't fight that.
+  comments-indentation: disable

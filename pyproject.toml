@@ -39,6 +39,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.8",
     "pyright>=1.1.390",
+    "yamllint>=1.38",
 ]
 package = [
     # Standalone-binary builds (see clauster.spec + scripts/build-binary.sh).

@@ -16,7 +16,9 @@ jobs:
   lint:
     # This job name is a REQUIRED status check (see .github/settings.yml). The
     # family leaves lint non-required; clauster gates on it. Renaming this job
-    # means updating the branch-protection contexts list too.
+    # means updating the branch-protection contexts list too — so the name stays
+    # "ruff + pyright" even though the job now also gates Markdown + YAML lint
+    # (scripts/lint-docs.sh), to avoid orphaning the required context.
     name: ruff + pyright
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -38,3 +40,8 @@ jobs:
         run: uv run ruff format --check .
       - name: pyright
         run: uv run pyright src/clauster
+      # Markdown (markdownlint-cli2 via npx, version-pinned in the script) + YAML
+      # (yamllint, installed by `uv sync --extra dev` above). The runner ships
+      # Node/npx, so no extra setup is needed. Same script developers run locally.
+      - name: markdown + yaml lint
+        run: bash scripts/lint-docs.sh
