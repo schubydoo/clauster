@@ -9,7 +9,7 @@
 # pre-commit, local runs, and the "ruff + pyright" CI job in agreement on both
 # versions and config — no second source of truth to drift. pre-commit only runs
 # the hooks whose file types changed; CI still does the full-repo sweep.
-minimum_pre_commit_version: "3.5.0"
+minimum_pre_commit_version: "4.0.0"
 
 repos:
   - repo: local
