@@ -40,6 +40,7 @@ dev = [
     "ruff>=0.8",
     "pyright>=1.1.390",
     "yamllint>=1.38",
+    "pre-commit>=4.0",
 ]
 package = [
     # Standalone-binary builds (see clauster.spec + scripts/build-binary.sh).
@@ -86,6 +87,13 @@ exclude_also = [
 line-length = 99
 target-version = "py311"
 src = ["src", "tests"]
+# Fake-CLI test fixtures: extensionless shebang-Python stand-ins for the real
+# `claude`/`git` binaries, with intentionally realistic (long) emulated output.
+# Ruff's normal discovery skips them (no .py extension) so CI never lints them;
+# exclude them explicitly so pre-commit — which detects them as Python by shebang
+# and passes them directly — agrees (the hooks use --force-exclude). Keeps lint
+# scope identical across CI, pre-commit, and local runs.
+extend-exclude = ["tests/fixtures/fake_*/"]
 
 [tool.ruff.lint]
 # A pragmatic starter set: pyflakes (F), pycodestyle (E/W), import-sort (I),
