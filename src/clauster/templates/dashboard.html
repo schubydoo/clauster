@@ -25,10 +25,14 @@
                    padding: .4rem .6rem; border-radius: 6px; max-height: 8rem; overflow: auto;
                    white-space: pre-wrap; overflow-wrap: break-word;
                    background: var(--tblr-bg-surface-secondary); color: var(--tblr-secondary); }
+    /* Inline Iconoir icons (sprite at templates/_iconoir_sprite.html): em-sized to
+       scale with the button text, currentColor for theming. */
+    .ico { width: 1.05em; height: 1.05em; vertical-align: -.15em; flex: none; stroke-width: 1.5; }
     [x-cloak] { display: none !important; }
   </style>
 </head>
 <body>
+{% include "_iconoir_sprite.html" %}
 <div class="page">
   <header class="navbar navbar-expand-md sticky-top d-print-none">
     <div class="container-xl">
@@ -37,15 +41,8 @@
       <span class="text-secondary small d-none d-lg-inline ms-2 text-truncate">{{ projects_root }}</span>
       <div class="navbar-nav flex-row ms-auto align-items-center" style="gap:.5rem">
         <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme">
-          <svg class="icon icon-sun" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
-               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="4"></circle>
-            <path d="M3 12h1M20 12h1M12 3v1M12 20v1M5.6 5.6l.7.7M17.7 17.7l.7.7M18.4 5.6l-.7.7M6.3 17.7l-.7.7"></path>
-          </svg>
-          <svg class="icon icon-moon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
-               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"></path>
-          </svg>
+          <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
+          <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
         </button>
         {% if auth_enabled %}
         <!-- CSRF enforced by the auth guard middleware (Origin/Referer on unsafe methods). -->
