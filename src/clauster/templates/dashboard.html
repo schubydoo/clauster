@@ -103,9 +103,21 @@
                                       : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</span>
               </button>
             </div>
+            <!-- live clone progress (streamed over /ws/clone-progress) -->
+            <div class="mt-3" x-show="np.cloning" x-cloak>
+              <div class="d-flex justify-content-between small text-secondary mb-1">
+                <span x-text="np.progress.phase || 'Cloning…'"></span>
+                <span x-show="np.progress.percent !== null" x-text="np.progress.percent + '%'"></span>
+              </div>
+              <div class="progress">
+                <div class="progress-bar" role="progressbar"
+                     :class="np.progress.percent === null ? 'progress-bar-indeterminate' : ''"
+                     :style="np.progress.percent !== null ? ('width: ' + np.progress.percent + '%') : ''"></div>
+              </div>
+            </div>
             <div class="alert alert-danger mt-2 mb-0" x-show="np.error" x-cloak x-text="np.error"></div>
             <div class="alert alert-warning mt-2 mb-0" x-show="np.warn" x-cloak>
-              ⚠ <strong x-text="np.name"></strong> was created and ships <strong x-text="np.warn"></strong>
+              ⚠ <strong x-text="np.submittedName || np.name"></strong> ships <strong x-text="np.warn"></strong>
               — its code runs when you Start a bridge here. Review it before starting.
               <button class="btn btn-sm btn-warning ms-2" @click="reloadToProject()">Show it</button>
             </div>
@@ -417,8 +429,9 @@
       trusting: {},       // project name -> bool (trust request in flight)
       toasts: [],
       _toastSeq: 0,
-      np: { open: false, name: "", mode: "create", url: "", shallow: false,
-            gitInit: false, busy: false, error: null, warn: null },
+      np: { open: false, name: "", submittedName: "", mode: "create", url: "", shallow: false,
+            gitInit: false, busy: false, error: null, warn: null,
+            cloning: false, progress: { percent: null, phase: "" } },
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -585,25 +598,86 @@
         const np = this.np;
         if (!np.name || np.busy) return;
         np.busy = true; np.error = null; np.warn = null;
+        // Freeze the submitted name: the field stays editable while busy, and the
+        // async clone's completion path must match the project we actually created.
+        np.submittedName = np.name;
+        if (np.mode === "clone") { await this.startClone(np); return; }  // async, watched over WS
         try {
-          const res = np.mode === "clone"
-            ? await fetch(ROOT + "/api/projects/clone", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name: np.name, url: np.url, shallow: np.shallow }) })
-            : await fetch(ROOT + "/api/projects", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name: np.name, git_init: np.gitInit }) });
+          const res = await fetch(ROOT + "/api/projects", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: np.submittedName, git_init: np.gitInit }) });
           const body = await res.json();
           if (!res.ok) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
-          else {
-            const ships = [];
-            if (body.has_claude_md) ships.push("CLAUDE.md");
-            if (body.has_claude_dir) ships.push(".claude/");
-            if (ships.length) np.warn = ships.join(" + ");
-            else { this.toast("Project created", "success"); this.reloadToProject(); }
-          }
+          else { this.afterProvision(np, body); }
         } catch (e) { np.error = String(e); }
         np.busy = false;
+      },
+      // Kick off the clone job, then watch its progress WS until it ends.
+      async startClone(np) {
+        const name = np.submittedName, url = np.url, shallow = np.shallow;  // snapshot
+        np.cloning = true; np.progress = { percent: null, phase: "Starting…" };
+        try {
+          const res = await fetch(ROOT + "/api/projects/clone", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, url, shallow }) });
+          const body = await res.json();
+          if (!res.ok) {
+            np.error = body.detail || "clone failed"; this.toast("Clone failed", "error");
+            np.busy = false; np.cloning = false; return;
+          }
+          this.watchClone(np, body.job_id, name);
+        } catch (e) { np.error = String(e); np.busy = false; np.cloning = false; }
+      },
+      watchClone(np, jobId, name) {
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(proto + "://" + location.host + ROOT +
+                                 "/ws/clone-progress/" + encodeURIComponent(jobId));
+        let settled = false;  // exactly one terminal handling across done/error/close
+        const lost = () => {
+          if (settled) return;
+          settled = true;
+          np.cloning = false; np.busy = false;
+          np.error = "lost the progress connection — the clone may still be running; refresh to check.";
+        };
+        ws.onmessage = async (ev) => {
+          let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+          if (m.type === "progress") {
+            np.progress = { percent: m.percent, phase: m.phase || np.progress.phase };
+          } else if (m.type === "done") {
+            settled = true;  // before close(), so onclose below no-ops
+            try { ws.close(); } catch (e) { /* already closing */ }
+            np.cloning = false;
+            if (m.status === "error") {
+              np.error = m.error || "clone failed"; np.busy = false;
+              this.toast(name + ": clone failed", "error");
+            } else {
+              await this.afterClone(np, name);
+            }
+          }
+        };
+        ws.onerror = lost;
+        ws.onclose = lost;  // a silent drop that never raised onerror still settles the UI
+      },
+      // Cloned code is RCE-sensitive: fetch the landed project so afterProvision
+      // can surface the CLAUDE.md/.claude warning before any bridge runs it.
+      async afterClone(np, name) {
+        try {
+          const list = await (await fetch(ROOT + "/api/projects")).json();
+          this.afterProvision(np, list.find((p) => p.name === name) || {});
+        } catch (e) {
+          // The clone itself succeeded; reveal the card (its untrusted + CLAUDE.md
+          // badges still surface the inspection, and code only runs once trusted)
+          // rather than stranding a successful clone behind a transient list error.
+          console.warn("clone: project-list refresh failed", e);
+          this.reloadToProject();
+        }
+      },
+      afterProvision(np, proj) {
+        const ships = [];
+        if (proj.has_claude_md) ships.push("CLAUDE.md");
+        if (proj.has_claude_dir) ships.push(".claude/");
+        if (ships.length) { np.warn = ships.join(" + "); np.busy = false; }
+        else { this.toast(np.submittedName + ": ready", "success"); this.reloadToProject(); }
       },
       reloadToProject() { window.location.reload(); },
       async _spawn(name) {

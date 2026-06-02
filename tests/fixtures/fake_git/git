@@ -40,9 +40,13 @@ def _clone(args):
         time.sleep(float(os.environ.get("FAKE_GIT_SLEEP", "5")))
     if mode == "progress":
         # CR-updated progress lines, exactly like `git clone --progress`.
+        # FAKE_GIT_PROGRESS_DELAY (default 0) paces them for manual UI checks.
+        delay = float(os.environ.get("FAKE_GIT_PROGRESS_DELAY", "0"))
         for pct in (0, 30, 60, 100):
             sys.stderr.write(f"Receiving objects: {pct}% ({pct}/100)\r")
             sys.stderr.flush()
+            if delay:
+                time.sleep(delay)
         sys.stderr.write("\n")
         sys.stderr.flush()
 
