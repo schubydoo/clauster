@@ -12,6 +12,7 @@ htmlcov/
 .claude/
 .gitnexus/
 .logfire/
+.vscode/settings.json
 CLAUDE.md
 AGENTS.md
 
