@@ -30,7 +30,7 @@ docker compose up -d                              # recreate the container
 ```
 
 Your `state_dir` and config must be on a mounted volume so they survive the
-container swap (see the deployment docs / `clauster.yml.example`).
+container swap (see the README's Docker section and `clauster.yml.example`).
 
 ## From source (editable git + venv)
 
