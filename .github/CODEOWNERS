@@ -1,0 +1,9 @@
+# Code owners for Clauster — https://docs.github.com/articles/about-code-owners
+#
+# GitHub uses this to auto-request review from the owner on matching PRs.
+# Branch protection does not (yet) *require* code-owner review — as a solo
+# project there's no second reviewer to approve — but declaring ownership here
+# is good hygiene and makes required code-owner review a one-line switch if the
+# maintainer set grows.
+
+* @schubydoo
