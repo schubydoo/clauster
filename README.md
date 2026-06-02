@@ -15,25 +15,59 @@ spawned, you attach to it via `claude.ai/code` or the mobile app.
 
 ## Features
 
+Everything below is implemented and shipping. Items marked **(opt-in)** are
+gated behind a config flag and off by default — the flag is named inline so you
+can find it in `clauster.yml.example`.
+
 - **Project discovery** — one card per directory under `projects_root`, with
   git / `CLAUDE.md` / trust badges.
-- **Bridge lifecycle** — start / stop bridges; live status (Starting / Running /
-  Stopped / Crashed); a "Trust directory" action that writes the workspace-trust
-  flag before spawning.
+- **Bridge lifecycle** — start / stop / **restart** bridges; live status
+  (Starting / Running / Stopped / Crashed). Restart re-spawns the bridge and
+  reconnects its environment (it does *not* by itself restore the prior
+  conversation — see the recap hook below). A bridge that launches but never
+  registers an environment is reported honestly as `ERROR` after a grace
+  window rather than a phantom `Running`.
+- **Workspace trust** — a "Trust directory" action writes the Claude
+  workspace-trust flag before spawning; untrusted directories are refused.
 - **Spawn controls** — pick the spawn mode (same-dir / worktree / session) and
-  permission mode per launch. `bypassPermissions` is double-gated (a config
-  ceiling + a typed-confirm).
-- **Open in Claude** — primary session deep link + a scannable QR code.
+  permission mode per launch. `bypassPermissions` is double-gated: a per-project
+  config ceiling (`projects.<name>.allow_bypass_permissions`) *and* a
+  type-the-project-name confirm in the UI.
+- **Open in Claude** — primary session deep link + a scannable QR code for
+  attaching from your phone.
+- **External session surfacing** — sessions you started from a terminal or
+  Desktop (not via Clauster) are discovered and shown with a distinct indicator.
 - **Live log tail** — the bridge debug log streamed over a WebSocket,
-  ANSI-stripped and ID-redacted.
+  ANSI-stripped and ID-redacted (`env_`/`session_`/`cse_` IDs, bare UUIDs, and
+  secret-shaped tokens — API keys, bearer headers). Redaction is hybrid by
+  default (verbatim on disk, redacted over the
+  wire); `logs.redact_session_url` redacts on disk too.
 - **CLAUDE.md editor** — view/edit a project's `CLAUDE.md` from the dashboard
-  (size-capped, lost-update-guarded, audit-logged).
-- **Create / clone projects** — make a new project or clone a git URL, with
-  SSRF guards and a "code runs on start" warning for cloned repos.
+  (size-capped, lost-update-guarded, trust-gated, audit-logged).
+- **Create / clone projects** — make a new project or clone a git URL, with SSRF
+  guards, transport lockdown, a size cap, and a "code runs on start" warning for
+  cloned repos. Clones stream **live progress** over a WebSocket and never
+  auto-spawn (they land discovered-but-stopped).
 - **Per-project cost badge** — approximate USD + token totals rolled up from a
   project's session transcripts.
 - **Ghost-environment reaper** — find and archive/delete the server-side bridge
-  environments that outlive their bridge (CLI always-on; opt-in dashboard UI).
+  environments that outlive their bridge and clutter the claude.ai/code "New
+  session" selector. The CLI (`clauster reap-environments`) is always available;
+  the **dashboard UI is opt-in** (`reaper.ui_enabled`) because it exposes a
+  destructive first-party API in the browser. Archive is reversible; force-delete
+  requires typing `DELETE`.
+- **Conversation recap on restart (opt-in)** — `claude remote-control` restarts
+  into a fresh, empty context (it has no resume flag), so a restarted bridge
+  "forgets" the prior conversation. With `claude.resume_recap` enabled, Clauster
+  installs a `SessionStart` hook in the runtime user's Claude settings that
+  recaps the most recent prior transcript for that directory back into the new
+  session. Off by default — it edits the user's Claude settings and injects prior
+  turns into context.
+- **Auto-enable remote control** — before the first spawn, Clauster marks remote
+  control as acknowledged in the runtime user's `~/.claude.json` so a
+  detached-stdin bridge isn't stuck on the one-time interactive "Enable Remote
+  Control?" prompt. On by default (`claude.auto_enable_remote_control`); set
+  false to manage those flags yourself.
 
 ## Auth & networking
 
@@ -44,6 +78,32 @@ HMAC header), or an explicit `auth.allow_unauthenticated_network` opt-out for a
 trusted LAN. Sessions are signed cookies with server-side revocation
 ("log out everywhere"); WebSocket connections are authenticated before accept
 and origin-checked.
+
+## Roadmap
+
+Planned work, roughly in priority order. Nothing here is implemented yet; this
+section is the public-facing companion to the in-repo `scratch/TODO.md`.
+
+- **Fully reactive UI** — no full-page reloads anywhere (reactive project-card
+  insertion), consistent pending/loading feedback on every action, and visible
+  error surfacing throughout. Self-hosted icon set.
+- **Native true-resume ("PTY mode")** — an optional bridge mode that spawns
+  `claude --remote-control --continue` under a PTY for genuine conversation
+  resume (vs. the recap hook's best-effort replay). Single-session, with
+  different stop semantics; would sit alongside the current multi-session mode.
+- **Public API** — promote the existing `/api/*` routes to a documented,
+  versioned, auth-gated contract (OpenAPI surface, API tokens distinct from the
+  session cookie) so third parties can build their own dashboards.
+- **Session naming** — predictable/branded session display names instead of the
+  random adjective-noun defaults; list active/resumable sessions in the UI.
+- **v0.3 — multi-user** — per-user accounts (OIDC via Authentik / Pocket-ID /
+  Keycloak / Zitadel), a real persistence layer (SQLAlchemy + Alembic), and GDPR
+  controller tooling (`clauster user export` / `delete`).
+- **v0.3 — operability** — crash notifications (Apprise / webhooks), a
+  `/metrics` Prometheus endpoint, a homepage-dashboard widget endpoint, and i18n
+  string extraction.
+- **Wiki** — a proper docs/Wiki site (setup, deployment recipes, config
+  reference, security model) beyond this README.
 
 ## Quick start (dev)
 
@@ -74,6 +134,14 @@ docker run -d --name clauster \
 - `claude` is **not** baked in (clauster spawns `claude remote-control`): mount it onto the container `PATH` along with `~/.claude` credentials, or build a derived image that installs it.
 - Logs are JSON by default (`CLAUSTER_LOG_FORMAT`); health is at `/healthz`. Images are cosign-signed with build provenance + SBOM attestations.
 
+## Configuration
+
+All settings live in `clauster.yml` (see `clauster.yml.example` for the full,
+commented schema). Any scalar key is overridable by an environment variable of
+the form `CLAUSTER_<UPPER_SNAKE_PATH>` (e.g. `CLAUSTER_AUTH_PASSWORD_HASH`,
+`CLAUSTER_REAPER_UI_ENABLED`). The schema is additive-only — old configs always
+validate against newer versions.
+
 ## CLI
 
 ```
@@ -89,8 +157,7 @@ clauster usage <transcript>   # token + approximate cost for a session transcrip
 ## Stack
 
 Python 3.11+ · FastAPI · Alpine.js + Jinja2 · `uv` · `pydantic`. Developed and
-CI-gated on Linux; macOS / Windows support is a target and in progress.
-Apache-2.0 licensed.
+CI-gated on Linux; macOS / Windows are in the test matrix. Apache-2.0 licensed.
 
 ## License
 
