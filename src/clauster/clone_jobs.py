@@ -42,7 +42,7 @@ def parse_progress(line: str) -> tuple[str | None, int | None]:
 
 @dataclass
 class CloneJob:
-    """One in-flight (or finished) clone, with a queue of progress events."""
+    """One in-flight (or finished) clone, broadcasting progress to live watchers."""
 
     id: str
     name: str
@@ -50,7 +50,26 @@ class CloneJob:
     phase: str = ""
     percent: int | None = None
     error_detail: str | None = None
-    queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
+    # One queue per live watcher; events fan out to all so two tabs watching the
+    # same clone each get the full stream (a single shared queue would let them
+    # steal each other's frames).
+    _subscribers: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
+
+    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+        """Register a watcher and return its private event queue."""
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._subscribers.append(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        """Drop a watcher's queue (called when its WebSocket closes)."""
+        if queue in self._subscribers:
+            self._subscribers.remove(queue)
+
+    def broadcast(self, event: dict[str, Any]) -> None:
+        """Fan ``event`` out to every current watcher; never blocks the caller."""
+        for queue in self._subscribers:
+            queue.put_nowait(event)  # unbounded queue: short-lived, small frames
 
     def progress_event(self) -> dict[str, Any]:
         """Return the current progress as a WS ``progress`` frame."""
@@ -89,13 +108,13 @@ class CloneJobManager:
             job.phase = phase
         if percent is not None:
             job.percent = percent
-        job.queue.put_nowait(job.progress_event())
+        job.broadcast(job.progress_event())
 
     def finish(self, job: CloneJob, *, error: str | None = None) -> None:
-        """Mark ``job`` done (or errored) and enqueue its terminal frame."""
+        """Mark ``job`` done (or errored) and broadcast its terminal frame."""
         job.status = "error" if error else "done"
         job.error_detail = error
-        job.queue.put_nowait(job.terminal_event())
+        job.broadcast(job.terminal_event())
 
     def discard(self, job_id: str) -> None:
         """Drop a job from the registry (no-op if already gone)."""

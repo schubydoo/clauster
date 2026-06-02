@@ -327,6 +327,15 @@ def _run_clone_streaming(
         if stderr is None:  # pragma: no cover - unreachable with stderr=PIPE, narrows type
             raise CloneFailed("git clone produced no stderr stream")
         fd = stderr.fileno()
+
+        def _emit(raw: bytes) -> None:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                return
+            tail.append(line)
+            if progress_cb is not None:
+                progress_cb(line)
+
         while True:
             chunk = os.read(fd, 4096)
             if not chunk:
@@ -334,12 +343,8 @@ def _run_clone_streaming(
             buf += chunk
             *complete, buf = _PROGRESS_SPLIT.split(buf)
             for raw in complete:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line:
-                    continue
-                tail.append(line)
-                if progress_cb is not None:
-                    progress_cb(line)
+                _emit(raw)
+        _emit(buf)  # flush a final fragment with no trailing CR/LF
         proc.wait()
     finally:
         watchdog.cancel()

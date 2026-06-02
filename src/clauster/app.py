@@ -694,20 +694,24 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if job is None:
             await websocket.close(code=1008)  # unknown / already pruned
             return
-        # Already finished (e.g. a reconnect after completion): send the outcome.
-        if job.status != "running":
-            await websocket.send_json(job.terminal_event())
-            await websocket.close()
-            return
-        await websocket.send_json(job.progress_event())  # current snapshot
+        # Subscribe before the status check so a terminal that fires between the
+        # check and the snapshot send below lands in our queue, not the void.
+        queue = job.subscribe()
         try:
+            if job.status != "running":
+                # Already finished (e.g. a reconnect after completion).
+                await websocket.send_json(job.terminal_event())
+                return
+            await websocket.send_json(job.progress_event())  # current snapshot
             while True:
-                event = await job.queue.get()
+                event = await queue.get()
                 await websocket.send_json(event)
                 if event.get("type") == "done":
                     break
         except (WebSocketDisconnect, RuntimeError):
             return
+        finally:
+            job.unsubscribe(queue)
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> Response:
