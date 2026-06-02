@@ -4,11 +4,13 @@
 # Run on demand against everything:      uv run pre-commit run --all-files
 #
 # Every hook is `repo: local` and shells out to the SAME pinned tools CI runs
-# (ruff + yamllint resolved from uv.lock via `uv run`; markdownlint-cli2 via the
-# npx version pin that also lives in scripts/lint-docs.sh). That keeps
-# pre-commit, local runs, and the "ruff + pyright" CI job in agreement on both
+# (ruff + yamllint resolved from uv.lock via `uv run`; markdownlint-cli2 pinned in
+# package.json + package-lock.json and run from the local node_modules). That
+# keeps pre-commit, local runs, and the "lint" CI job in agreement on both
 # versions and config — no second source of truth to drift. pre-commit only runs
 # the hooks whose file types changed; CI still does the full-repo sweep.
+#
+# Prereq for the markdownlint hook: `npm ci` (installs node_modules). See CONTRIBUTING.
 minimum_pre_commit_version: "4.0.0"
 
 repos:
@@ -36,8 +38,8 @@ repos:
 
       - id: markdownlint-cli2
         name: markdownlint-cli2
-        # Keep this version in sync with scripts/lint-docs.sh.
-        entry: npx --yes markdownlint-cli2@0.22.1
+        # Version pinned in package.json; run from local node_modules (npm ci).
+        entry: npx --no-install markdownlint-cli2
         language: system
         types: [markdown]
         exclude: '(^|/)(vendor|node_modules)/'
