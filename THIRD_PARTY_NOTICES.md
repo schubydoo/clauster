@@ -16,7 +16,7 @@ permission notices are reproduced below. Pinned versions are tracked in
 - License: MIT (also retained verbatim at `src/clauster/static/vendor/tabler/LICENSE`
   and in the `tabler.min.css` banner)
 
-```
+```text
 The MIT License (MIT)
 
 Copyright (c) 2018-2025 The Tabler Authors
@@ -51,7 +51,7 @@ THE SOFTWARE.
   `src/clauster/static/alpine.LICENSE`)
 - License: MIT
 
-```
+```text
 MIT License
 
 Copyright © 2019-2025 Caleb Porzio and contributors
@@ -87,7 +87,7 @@ SOFTWARE.
   `src/clauster/static/vendor/iconoir/`)
 - License: MIT
 
-```
+```text
 MIT License
 
 Copyright (c) 2021 Luca Burgio
