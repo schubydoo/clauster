@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/schubydoo/clauster/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/schubydoo/clauster/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/schubydoo/clauster/actions/workflows/lint.yml"><img alt="Lint" src="https://github.com/schubydoo/clauster/actions/workflows/lint.yml/badge.svg"></a>
-  <a href="https://coderabbit.ai"><img alt="CodeRabbit Reviews" src="https://img.shields.io/coderabbit/prs/github/schubydoo/clauster?utm_source=oss&utm_medium=github&utm_campaign=schubydoo%2Fclauster&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews"></a>
+  <a href="https://coderabbit.ai"><img alt="Reviewed by CodeRabbit" src="https://img.shields.io/badge/CodeRabbit-reviewed-FF570A?logo=coderabbit&logoColor=white"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/schubydoo/clauster"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/schubydoo/clauster/badge"></a>
 </p>
 
