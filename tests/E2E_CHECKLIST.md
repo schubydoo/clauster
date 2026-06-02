@@ -18,8 +18,8 @@ dashboard JS/CSS — until the automated browser suite exists (see
 Run a loopback instance on a non-default port (never touch a live deploy):
 
 ```sh
-# minimal clauster.yml: host 127.0.0.1, a spare port, a temp projects_root,
-# auth.enabled false, plus whichever gates you're testing (see each item).
+# minimal clauster.yml: host 127.0.0.1 (loopback needs no auth), a spare port,
+# a temp projects_root, plus whichever gates you're testing (see each item).
 uv run clauster run -c /tmp/preview/clauster.yml
 ```
 
