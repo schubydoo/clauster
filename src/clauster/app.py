@@ -302,6 +302,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_projects() -> list[Project]:
         return await list_projects()
 
+    @app.get("/api/projects/{name}/card", response_class=HTMLResponse)
+    async def api_project_card(request: Request, name: str) -> Response:
+        """Render one project's card for reactive insertion (no full-page reload).
+
+        Same Jinja partial the dashboard grid loops over — one source of truth.
+        """
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        proj = next((p for p in await list_projects() if p.name == name), None)
+        if proj is None:
+            raise HTTPException(status_code=404, detail=f"project {name!r} not found")
+        return templates.TemplateResponse(request, "_project_card.html", {"p": proj})
+
     @app.get("/api/projects/{name}/usage")
     async def api_project_usage(name: str) -> dict:
         # Read-only cost/token rollup for the dashboard badge. We validate the name

@@ -50,6 +50,33 @@ def test_clone_missing_url_422(write_config, tmp_path):
     assert r.status_code == 422
 
 
+# ----- single-card fragment (reactive insertion, no full reload) --------
+
+
+def test_card_renders_known_project(write_config, tmp_path):
+    # The fragment route returns the same card markup the grid loop renders.
+    r = _client(write_config, tmp_path).get("/api/projects/alpha/card")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert 'data-project="alpha"' in r.text
+    assert "Start bridge" in r.text  # it's a real card, not an empty stub
+
+
+def test_card_reflects_project_shape(write_config, tmp_path):
+    # Per-project Jinja conditionals render: the CLAUDE.md badge only where present.
+    client = _client(write_config, tmp_path)
+    assert "bg-azure-lt" in client.get("/api/projects/beta/card").text  # beta ships CLAUDE.md
+    assert "bg-azure-lt" not in client.get("/api/projects/gamma/card").text  # gamma doesn't
+
+
+def test_card_unknown_project_404(write_config, tmp_path):
+    assert _client(write_config, tmp_path).get("/api/projects/ghostproj/card").status_code == 404
+
+
+def test_card_invalid_name_422(write_config, tmp_path):
+    assert _client(write_config, tmp_path).get("/api/projects/ghost.proj/card").status_code == 422
+
+
 # ----- instance stop / trust not-found ----------------------------------
 
 
