@@ -105,11 +105,11 @@ branches:
         #                                         dependency-review)
         #  - `conventional PR title`            — pr-title.yml (gates the squash subject
         #                                         that Release Please parses)
-        #  - `ruff + pyright`                   — lint.yml (we gate lint/type; the
-        #                                         family leaves this non-required —
-        #                                         we don't). This is a direct job name,
-        #                                         so renaming that job means updating
-        #                                         this list too.
+        #  - `lint`                             — lint.yml (ruff + pyright + the
+        #                                         Markdown/YAML doc-lint; we gate it,
+        #                                         the family leaves lint non-required).
+        #                                         Direct job name, so renaming that job
+        #                                         means updating this list too.
         #
         # `OSSF Scorecard` is intentionally NOT required: scorecard.yml only
         # triggers on push + schedule + branch_protection_rule, so requiring it
@@ -119,7 +119,7 @@ branches:
           - "ci required checks passed"
           - "security required checks passed"
           - "conventional PR title"
-          - "ruff + pyright"
+          - "lint"
       # `null` (not `false`) — the Probot Settings App rejects `false` here
       # silently. See repository-settings/app#923.
       enforce_admins: null

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Lint Markdown and YAML. Single source of truth for both local pre-push checks
-# and the CI "ruff + pyright" job, so versions and globs never drift between them.
+# Lint Markdown and YAML. Single entrypoint for local pre-push checks and the CI
+# "lint" job, so versions and globs never drift between them.
 #
-#   markdownlint-cli2 — Node tool, pinned via npx (this repo has no package.json).
+#   markdownlint-cli2 — Node tool, version pinned in package.json + integrity-
+#                       checked via package-lock.json (`npm ci`). Run from the
+#                       local node_modules with `npx --no-install` (no network
+#                       fetch, no unverified download).
 #   yamllint          — Python tool, installed as a dev dependency (uv run).
 #
-# Usage: bash scripts/lint-docs.sh
+# Prereqs: `npm ci` and `uv sync --extra dev` (see CONTRIBUTING). CI installs both.
+# Usage:   bash scripts/lint-docs.sh
 set -euo pipefail
-
-# Pin the markdownlint-cli2 version here (the only place it lives). Bump
-# deliberately; npx fetches this exact version.
-MARKDOWNLINT_CLI2_VERSION="0.22.1"
 
 cd "$(dirname "$0")/.."
 
-echo "==> markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"
-npx --yes "markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}"
+echo "==> markdownlint-cli2 (node_modules; version pinned in package.json)"
+npx --no-install markdownlint-cli2
 
 echo "==> yamllint"
 # No --strict: error-level problems (bad indent, duplicate keys, syntax) fail the

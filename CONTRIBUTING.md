@@ -6,6 +6,7 @@ Thanks for your interest in Clauster!
 
 ```sh
 uv sync --extra dev
+npm ci                                 # markdownlint-cli2 (pinned, integrity-checked)
 uv run pre-commit install              # auto-lint on commit (ruff + yaml/markdown)
 cp clauster.yml.example clauster.yml   # edit projects_root
 uv run clauster
@@ -18,8 +19,8 @@ uv run clauster
 - **Lint, format, types** —
   `uv run ruff check . && uv run ruff format --check . && uv run pyright src/clauster`
 - **Docs lint (Markdown + YAML)** — `bash scripts/lint-docs.sh` (markdownlint-cli2
-  via `npx`, pinned in the script; `yamllint` from `uv sync --extra dev`). Same
-  command CI runs in the `ruff + pyright` job.
+  from `npm ci`, pinned in `package.json`; `yamllint` from `uv sync --extra dev`).
+  Same command CI runs in the `lint` job.
 - **pre-commit (recommended)** — `uv run pre-commit install` once; ruff
   (check + format), yamllint, and markdownlint then run automatically on each
   commit using the same pinned tools as CI. Check everything on demand with

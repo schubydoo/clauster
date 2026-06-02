@@ -1,0 +1,13 @@
+{
+  "name": "clauster-docs-tooling",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dev-only Node tooling for Clauster (Markdown linting). Not published — Clauster itself is a Python package; this exists solely to pin markdownlint-cli2 with an integrity-checked lockfile (npm ci) instead of an unverified npx download.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "lint:md": "markdownlint-cli2"
+  },
+  "devDependencies": {
+    "markdownlint-cli2": "0.22.1"
+  }
+}

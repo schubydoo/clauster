@@ -20,32 +20,23 @@ config:
   # MD013 line-length: prose is reflow-friendly; we don't hard-wrap docs.
   MD013: false
   # MD033 inline HTML: the README's hero + screenshot layout is intentional HTML
-  # (centred headings, badge links, a screenshot table). Allow that curated set
-  # so arbitrary tags (<script>, <iframe>, …) and stray HTML in the prose docs
-  # are still flagged.
+  # (centred headings, badge links, a screenshot table). Allow exactly the tags
+  # the docs actually use today so arbitrary tags (<script>, <iframe>, …) and
+  # stray HTML in the prose docs are still flagged. Keep this list tight — add a
+  # tag only when a doc starts using it.
   MD033:
     allowed_elements:
       - a
       - b
       - br
       - code
-      - details
-      - div
       - em
       - h1
-      - h2
-      - h3
       - img
-      - kbd
       - p
       - sub
-      - summary
-      - sup
       - table
-      - tbody
       - td
-      - th
-      - thead
       - tr
 
 # Quiet the per-file progress noise; keep the error list.

@@ -8,6 +8,9 @@ __pycache__/
 .coverage.*
 htmlcov/
 
+# --- Node (dev-only markdownlint tooling; package-lock.json IS committed) ---
+node_modules/
+
 # --- Local tooling (not part of the project) ---
 .claude/
 .gitnexus/
