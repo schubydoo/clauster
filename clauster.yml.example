@@ -16,6 +16,16 @@ claude:
   binary: claude                   # name on PATH or absolute path
   min_version: "2.1.145"
   agents_json_poll_interval_seconds: 300
+  startup_grace_seconds: 60        # a bridge alive-but-unregistered past this -> ERROR
+  auto_enable_remote_control: true # pre-ack remote control in ~/.claude.json so a
+                                   # detached bridge isn't stuck on the one-time prompt
+  resume_recap: false              # opt-in: install a SessionStart hook that recaps the
+                                   # prior transcript into a restarted bridge's context
+  resume_recap_max_chars: 8000     # recap budget (most recent turns kept)
+  resume_mode: standard            # standard = headless `claude remote-control` server.
+                                   # pty = run the `claude --remote-control` flag form under
+                                   # a PTY keeper for true conversation resume on Restart
+                                   # (single-session; POSIX only). Opt-in.
 
 instance_defaults:
   spawn_mode: same-dir             # same-dir | worktree (git repos) | session
