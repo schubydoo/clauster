@@ -386,9 +386,14 @@
         ta.value = text; ta.setAttribute("readonly", "");
         ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
         document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); this.toast("Link copied", "success"); }
-        catch (e) { this.toast("Couldn't copy — copy it manually", "error"); }  // never fail silently
+        // execCommand returns false on failure (doesn't throw); the try/catch is a
+        // defensive guard for the browsers that do throw. Either way: never silently
+        // report success.
+        let copied = false;
+        try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
         document.body.removeChild(ta);
+        this.toast(copied ? "Link copied" : "Couldn't copy — copy it manually",
+                   copied ? "success" : "error");
       },
       async start(name) {
         if (this.permMode[name] === "bypassPermissions") {
