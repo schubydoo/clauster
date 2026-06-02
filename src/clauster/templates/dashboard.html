@@ -60,6 +60,16 @@
   <div class="page-body">
     <div class="container-xl" x-data="dashboard()" x-init="init()">
 
+      <!-- ===== Connection-lost banner (polling failed repeatedly) ===== -->
+      <!-- x-show drives the wrapper, NOT the .d-flex alert: Tabler's d-flex is
+           display:flex !important and would override x-show's display:none. -->
+      <div class="mb-3" x-show="connLost" x-cloak>
+        <div class="alert alert-warning d-flex align-items-center mb-0" role="status">
+          <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>
+          Lost connection to the server — data may be stale. Retrying…
+        </div>
+      </div>
+
       <!-- ===== New project ===== -->
       <div class="mb-3">
         <button class="btn btn-primary" @click="np.open = !np.open">
@@ -266,6 +276,8 @@
       trusting: {},       // project name -> bool (trust request in flight)
       toasts: [],
       _toastSeq: 0,
+      connLost: false,    // polling has failed repeatedly -> data is stale
+      _refreshFails: 0,
       np: { open: false, name: "", submittedName: "", mode: "create", url: "", shallow: false,
             gitInit: false, busy: false, error: null, warn: null,
             cloning: false, progress: { percent: null, phase: "" } },
@@ -287,11 +299,14 @@
       },
       dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
       async refresh() {
+        let ok = true;
         try {
           const [iRes, sRes] = await Promise.all([
             fetch(ROOT + "/api/instances"),
             fetch(ROOT + "/api/sessions"),
           ]);
+          // Session expired mid-use -> bounce to login instead of silently showing stale data.
+          if (iRes.status === 401 || sRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
           if (iRes.ok) {
             const list = await iRes.json();
             const next = {};
@@ -301,9 +316,14 @@
               if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
             }
             this.instances = next;
-          }
+          } else { ok = false; }
           if (sRes.ok) this.externalSessions = await sRes.json();
-        } catch (e) { /* transient; next tick retries */ }
+          else { ok = false; }
+        } catch (e) { ok = false; }
+        // A single blip is normal; only surface a *persistent* outage so the user
+        // knows the data is stale and we're retrying — never fail silently.
+        if (ok) { this._refreshFails = 0; this.connLost = false; }
+        else if (++this._refreshFails >= 2) this.connLost = true;
       },
       statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
       statusLabel(name) { return STATUS_LABELS[this.statusOf(name)] || "Stopped"; },
@@ -366,7 +386,8 @@
         ta.value = text; ta.setAttribute("readonly", "");
         ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
         document.body.appendChild(ta); ta.select();
-        try { document.execCommand("copy"); this.toast("Link copied", "success"); } catch (e) {}
+        try { document.execCommand("copy"); this.toast("Link copied", "success"); }
+        catch (e) { this.toast("Couldn't copy — copy it manually", "error"); }  // never fail silently
         document.body.removeChild(ta);
       },
       async start(name) {
@@ -588,7 +609,7 @@
           const body = await res.json();
           if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; this.toast(name + ": start failed", "error"); }
           else { this.instances[name] = body; if (body.status === "running") this.toast(name + ": running", "success"); }
-        } catch (e) { this.errors[name] = String(e); delete this.instances[name]; }
+        } catch (e) { this.errors[name] = String(e); delete this.instances[name]; this.toast(name + ": start failed", "error"); }
         await this.refresh();
       },
       async resume(name) {
@@ -620,7 +641,11 @@
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
           if (res.ok) { this.instances[name] = await res.json(); this.toast(name + ": stopped", "success"); }
-          else { this.toast(name + ": stop failed", "error"); }
+          else {
+            const b = await res.json().catch(() => ({}));
+            this.errors[name] = b.detail || "stop failed";  // inline, not just a 4.5s toast
+            this.toast(name + ": stop failed", "error");
+          }
         } catch (e) { this.errors[name] = String(e); this.toast(name + ": stop failed", "error"); }
         await this.refresh();
         this.loadUsage(name);
@@ -630,7 +655,11 @@
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" });
           if (res.ok) { this.trustState[name] = "trusted"; this.toast(name + ": trusted", "success"); }
-          else { this.toast(name + ": trust failed", "error"); }
+          else {
+            const b = await res.json().catch(() => ({}));
+            this.errors[name] = b.detail || "trust failed";  // inline, not just a 4.5s toast
+            this.toast(name + ": trust failed", "error");
+          }
         } catch (e) { this.errors[name] = String(e); this.toast(name + ": trust failed", "error"); }
         this.trusting[name] = false;
       },

@@ -54,6 +54,12 @@ restarts — the dashboard JS/CSS are cached static assets.
 - [ ] **Login / logout** (when `auth.password_required`): login, then logout
       revokes everywhere (old cookie rejected).
 - [ ] **Theme toggle** (dark/light) persists across reload.
+- [ ] **Connection-lost banner** — stop the server (or block `/api/instances`);
+      after ~2 failed polls a "Lost connection … retrying" banner appears; it
+      **clears** when the server returns. A 401 mid-session bounces to `/login`.
+- [ ] **Action errors surface** — a failed start/stop/restart/trust shows an
+      inline error on the card (not just a toast that vanishes); a failed copy
+      toasts rather than failing silently.
 
 ## Gated / opt-in flows — MUST set the flag first
 
