@@ -23,6 +23,54 @@ import time
 ENV_ID = "env_01TESTENVAAAAAAAAAAAAAAAA"
 STARTER = "session_01TESTSTARTERAAAAAAAAAA"
 BRIDGE_ID = "11111111-2222-3333-4444-555555555555"
+# Flag-form (`claude --remote-control`) connect URL session id (pty mode).
+PTY_SESSION = "session_01TESTPTYSESSIONAAAAA"
+
+
+def _idle_until_signal():
+    stopped = {"v": False}
+
+    def handler(_signum, _frame):
+        stopped["v"] = True
+
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, handler)
+    for _ in range(2400):  # idle up to ~600s waiting for a signal
+        if stopped["v"]:
+            break
+        time.sleep(0.25)
+    return 0
+
+
+def run_flag_bridge(args):
+    """The `claude --remote-control <name> [--continue]` flag form (pty mode).
+
+    Single interactive session: prints its connect URL to STDOUT (the PTY keeper
+    scrapes it off the master) then idles until SIGINT — unlike the subcommand,
+    it writes no env-register markers to --debug-file.
+    """
+    debug_file = _arg(args, "--debug-file")
+    mode = os.environ.get("FAKE_CLAUDE_MODE", "ready")
+    if debug_file:
+        import json
+
+        with open(debug_file + ".argv.json", "w") as fh:
+            json.dump(args, fh)
+    if mode == "crash":
+        return 1
+    if mode == "pty_no_url":
+        # Alive but never prints a connect URL -> exercises the STARTING/ERROR path.
+        return _idle_until_signal()
+    if mode == "pty_slow":
+        # Print the URL only after a delay so the bridge is STARTING past the
+        # synchronous readiness wait -> the background startup-watch promotes it.
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_SLOW", "0.8")))
+    # Mimic the real TUI line: "Continue here, on your phone, or at <url>".
+    sys.stdout.write(f"\r\n/remote-control is active · Continue at https://claude.ai/code/{PTY_SESSION}\r\n")
+    sys.stdout.flush()
+    return _idle_until_signal()
 
 
 def _arg(args, flag):
@@ -120,6 +168,8 @@ def main():
         return 0
     if args and args[0] == "remote-control":
         return run_bridge(args)
+    if args and args[0] == "--remote-control":
+        return run_flag_bridge(args)
     sys.stderr.write(f"fake-claude: unknown args {args}\n")
     return 2
 

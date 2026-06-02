@@ -94,6 +94,18 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
         POST 403s on the origin check.
 - [ ] **On-disk URL redaction** — set `logs.redact_session_url: true`; confirm the
       session URL is redacted in the on-disk bridge log too (not just over WS).
+- [ ] **PTY true-resume mode** — set `claude.resume_mode: pty` (POSIX only). Start a
+      bridge: it spawns the `claude --remote-control` flag form under a PTY keeper and
+      reaches RUNNING with a `claude.ai/code/session_…` link.
+      - Drive a conversation (give the agent a codeword), then **Restart**: the new
+        session **restores the prior conversation** (the agent recalls the codeword with
+        no tools) — true resume, not just the recap.
+      - It is **single-session** (no multi-chat capacity) — the card reflects that.
+      - **Stop** cleanly ends both the bridge and its keeper (no stray processes).
+      - The keeper is reparented to init, so the bridge **process** survives a clauster
+        restart (UI rediscovery of pty bridges lands in the follow-up PR).
+      - With the flag unset (default `standard`), bridges use the subcommand server and
+        Restart produces a fresh, empty-context session.
 
 ## When adding a new gated/config feature
 

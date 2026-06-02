@@ -155,6 +155,7 @@ class SessionRunner:
                 "intentional_stop": inst.intentional_stop,
                 "spawn_mode": inst.spawn_mode,
                 "permission_mode": inst.permission_mode,
+                "resume_mode": inst.resume_mode,
             }
             for name, inst in self._instances.items()
         }
@@ -200,11 +201,17 @@ class SessionRunner:
         *,
         spawn_mode: str | None = None,
         permission_mode: str | None = None,
+        resume: bool = False,
     ) -> RemoteControlInstance:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
 
         Validates spawn/permission modes, ensures remote control + the recap hook are
         set up, launches the process, and watches it until it reaches RUNNING or ERROR.
+
+        When ``claude.resume_mode`` is ``"pty"`` (POSIX only), the bridge is the
+        ``claude --remote-control`` flag form run under a :mod:`clauster.pty_keeper`
+        for true conversation resume; ``resume=True`` (set by :meth:`resume`) adds
+        ``--continue`` so the restarted session restores its prior context.
         """
         existing = self._instances.get(name)
         if existing is not None and existing.status in (
@@ -273,6 +280,10 @@ class SessionRunner:
         )
         self._instances[name] = instance  # on the loop
 
+        if self._is_pty_mode():
+            instance.resume_mode = "pty"
+            return await self._spawn_pty(instance, proj, name, log_path, permission_mode, resume)
+
         try:
             proc = await asyncio.to_thread(
                 self._popen, proj.path, log_path, name, spawn_mode, permission_mode
@@ -318,6 +329,9 @@ class SessionRunner:
             name,
             spawn_mode=existing.spawn_mode,
             permission_mode=existing.permission_mode,
+            # In pty mode this adds --continue so the flag-form bridge restores the
+            # prior conversation; the standard subcommand path ignores it.
+            resume=True,
         )
 
     def _validate_spawn_options(
@@ -430,6 +444,167 @@ class SessionRunner:
             )
         finally:
             err_fh.close()
+
+    # ----- pty / true-resume mode -----------------------------------------
+
+    def _is_pty_mode(self) -> bool:
+        """Whether new bridges use the PTY keeper (true resume). POSIX only."""
+        return sys.platform != "win32" and self._config.claude.resume_mode == "pty"
+
+    @staticmethod
+    def _sidecar_path_for(log_path: Path) -> Path:
+        """Discovery JSON the keeper writes beside the bridge's --debug-file."""
+        return log_path.with_name(log_path.stem + ".keeper.json")
+
+    def _build_pty_bridge_argv(
+        self, log_path: Path, name: str, permission_mode: str, *, resume: bool
+    ) -> list[str]:
+        """Build the flag-form bridge argv (`claude --remote-control …`). Pure/testable.
+
+        Unlike the subcommand (`_build_cmd`), the flag form is a single interactive
+        session — no `--spawn`/`--capacity`. ``--continue`` (on resume) is what makes
+        the restarted session restore its prior conversation context.
+        """
+        argv = [
+            self._binary,
+            "--remote-control",
+            name,
+            "--debug-file",
+            str(log_path),
+            "--permission-mode",
+            permission_mode,
+        ]
+        if resume:
+            argv.append("--continue")
+        return argv
+
+    @staticmethod
+    def _keeper_launch_cmd(sidecar: Path, cwd: Path, bridge_argv: list[str]) -> list[str]:
+        """Wrap the bridge argv in a `python -m clauster.pty_keeper` launcher."""
+        return [
+            sys.executable,
+            "-m",
+            "clauster.pty_keeper",
+            "--sidecar",
+            str(sidecar),
+            "--cwd",
+            str(cwd),
+            "--",
+            *bridge_argv,
+        ]
+
+    def _popen_keeper(self, cwd: Path, sidecar: Path, bridge_argv: list[str]) -> subprocess.Popen:
+        """Launch the PTY keeper detached so it outlives a Clauster restart.
+
+        Same detached pattern as the subcommand `_popen` (own session, stdin
+        detached, stdout/stderr to a file) — the keeper, not Clauster, holds the
+        bridge's terminal, so it survives independently and keeps the bridge alive.
+        """
+        cmd = self._keeper_launch_cmd(sidecar, cwd, bridge_argv)
+        keeper_log = sidecar.with_suffix(".log")  # the keeper's own stdout/stderr
+        err_fh = keeper_log.open("wb")
+        try:
+            return subprocess.Popen(
+                cmd,
+                cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
+                stdout=err_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            err_fh.close()
+
+    @staticmethod
+    def _read_sidecar(sidecar: Path) -> dict | None:
+        """Read the keeper's discovery JSON, or None if absent / mid-write / invalid."""
+        try:
+            return json.loads(sidecar.read_text())
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return None
+
+    def _await_ready_pty(self, sidecar: Path, proc: subprocess.Popen) -> dict:
+        """Block until the keeper publishes a connect URL, the keeper exits, or timeout."""
+        deadline = time.monotonic() + _READY_TIMEOUT
+        info: dict = {}
+        while time.monotonic() < deadline:
+            info = self._read_sidecar(sidecar) or info
+            if proc.poll() is not None:  # keeper (and thus bridge) gone before ready
+                return self._read_sidecar(sidecar) or info
+            if info.get("connect_url") or info.get("state") == "error":
+                return info
+            time.sleep(_READY_POLL_INTERVAL)
+        return info
+
+    def _apply_pty_info(
+        self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen
+    ) -> None:
+        """Fold the keeper sidecar into the instance (the pty analogue of `_apply_markers`)."""
+        bp = info.get("bridge_pid")
+        if isinstance(bp, int):
+            instance.bridge_pid = bp
+            ps = info.get("bridge_proc_start")
+            if isinstance(ps, (int, float)) and not isinstance(ps, bool):
+                instance.bridge_proc_start = float(ps)
+        if sid := info.get("session_id"):
+            instance.starter_session_id = sid
+        if url := info.get("connect_url"):
+            instance.url = url
+
+        keeper_dead = proc.poll() is not None
+        if info.get("connect_url") and not keeper_dead:
+            instance.status = InstanceStatus.RUNNING
+        elif info.get("state") == "error" or keeper_dead:
+            instance.status = InstanceStatus.ERROR
+        else:
+            instance.status = InstanceStatus.STARTING  # let the startup-watch promote it
+
+    async def _spawn_pty(
+        self,
+        instance: RemoteControlInstance,
+        proj: Project,
+        name: str,
+        log_path: Path,
+        permission_mode: str,
+        resume: bool,
+    ) -> RemoteControlInstance:
+        """Spawn path for `resume_mode == "pty"`: launch the keeper, discover via sidecar."""
+        sidecar = self._sidecar_path_for(log_path)
+        bridge_argv = self._build_pty_bridge_argv(log_path, name, permission_mode, resume=resume)
+        try:
+            bridge_argv[0] = resolve_binary(bridge_argv[0])
+            proc = await asyncio.to_thread(self._popen_keeper, proj.path, sidecar, bridge_argv)
+        except (OSError, ClaudeNotFound) as exc:
+            _log.warning("pty spawn of %s failed to launch: %s", name, exc)
+            instance.status = InstanceStatus.ERROR
+            await self._persist()
+            return instance
+        self._procs[name] = proc
+        instance.keeper_pid = proc.pid
+        info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
+        self._apply_pty_info(instance, info, proc)
+        if instance.status is InstanceStatus.ERROR:
+            # Surface whatever the keeper recorded (openpty/spawn failure); the
+            # bridge's own failure reason, if any, is in its --debug-file on disk.
+            instance.error_detail = info.get("error")
+        await self._persist()
+        if instance.status is InstanceStatus.STARTING:
+            self._start_startup_watch(name)
+        return instance
+
+    def _cleanup_keeper(self, pid: int) -> None:
+        """Reap the keeper (Clauster's direct child); force it down if it lingers.
+
+        The keeper self-exits once its bridge is gone, so this is usually just a
+        reap; the force path covers a keeper that somehow outlives its bridge.
+        """
+        for _ in range(8):  # ~2s grace for the keeper to follow its bridge out
+            procutil.reap_if_exited(pid)
+            if procutil.proc_create_time(pid) is None:
+                return
+            time.sleep(0.25)
+        procutil.force_kill_tree(pid)
+        procutil.reap_if_exited(pid)
 
     def _await_ready(self, log_path: Path, proc: subprocess.Popen) -> bridge_log.BridgeMarkers:
         """Block until the bridge is ready, errors, or times out.
@@ -576,12 +751,22 @@ class SessionRunner:
             log_path = instance.bridge_debug_log_path
             if log_path is None:
                 return  # nothing to read from; leave it for the poll loop
-            markers = await asyncio.to_thread(self._read_markers, log_path)
-            self._apply_markers(instance, markers, proc)
-            if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
-                await self._post_spawn_enrich(instance, self._project_path(name) or log_path)
-                await self._persist()
-                return
+            if instance.resume_mode == "pty":
+                # PTY bridges register via the keeper sidecar, not the subcommand's
+                # bridge-log markers; readiness is the connect URL appearing there.
+                sidecar = self._sidecar_path_for(log_path)
+                info = await asyncio.to_thread(self._read_sidecar, sidecar)
+                self._apply_pty_info(instance, info or {}, proc)
+                if instance.status is not InstanceStatus.STARTING:
+                    await self._persist()
+                    return
+            else:
+                markers = await asyncio.to_thread(self._read_markers, log_path)
+                self._apply_markers(instance, markers, proc)
+                if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
+                    await self._post_spawn_enrich(instance, self._project_path(name) or log_path)
+                    await self._persist()
+                    return
             if time.monotonic() >= deadline:
                 instance.status = InstanceStatus.ERROR
                 _log.warning(
@@ -607,27 +792,41 @@ class SessionRunner:
         await self._persist()  # persist the intent so a restart doesn't mislabel it CRASHED
 
         pid = instance.bridge_pid
+        # A pty bridge needs its keeper reaped even if the bridge pid is already
+        # gone (the keeper is Clauster's direct child); capture it up front.
+        keeper_pid = instance.keeper_pid
         if pid is None:
+            if keeper_pid is not None:
+                await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
             return instance
 
         # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
         if await asyncio.to_thread(procutil.is_live_bridge, pid, instance.bridge_proc_start):
-            await asyncio.to_thread(self._signal_stop, pid)
+            # The flag-form (pty) bridge's TUI treats the first SIGINT as "press
+            # again to exit"; a second confirms. The subcommand bridge stops on one.
+            twice = instance.resume_mode == "pty"
+            await asyncio.to_thread(self._signal_stop, pid, twice=twice)
             await self._await_exit(name, pid, instance.bridge_proc_start)
+        if keeper_pid is not None:
+            await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
         instance.status = InstanceStatus.STOPPED
         return instance
 
     @staticmethod
-    def _signal_stop(pid: int) -> None:
+    def _signal_stop(pid: int, *, twice: bool = False) -> None:
         """Ask a bridge to shut down gracefully.
 
         SIGINT on POSIX, CTRL_BREAK on Windows (deliverable because the bridge is
-        its own process group).
+        its own process group). When ``twice`` (pty mode), send a second SIGINT
+        after a short beat — the flag-form TUI requires a confirming second press.
         """
         sig = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
         try:
             os.kill(pid, sig)
+            if twice:
+                time.sleep(0.4)  # let the TUI surface "press Ctrl-C again to exit"
+                os.kill(pid, sig)
         except (ProcessLookupError, PermissionError, OSError) as exc:
             # Already exited / reused / not signalable — _await_exit's liveness
             # poll and force-kill fallback handle the outcome; don't raise out of stop().
@@ -690,6 +889,10 @@ class SessionRunner:
         """
         for instance in list(self._instances.values()):
             pid = instance.bridge_pid
+            # A pty keeper is Clauster's direct child and self-exits with its bridge;
+            # reap it here so it never lingers as a zombie after an organic exit.
+            if instance.keeper_pid is not None:
+                await asyncio.to_thread(procutil.reap_if_exited, instance.keeper_pid)
             if pid is None:
                 continue
             await asyncio.to_thread(procutil.reap_if_exited, pid)

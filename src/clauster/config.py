@@ -23,7 +23,13 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 # bypassPermissions is footgun-gated (see `ProjectConfig.allow_bypass_permissions`).
 SpawnMode = Literal["same-dir", "worktree", "session"]
 PermissionMode = Literal["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"]
+# How a bridge is launched. "standard" = the headless `claude remote-control`
+# subcommand server (multi-session, survives a restart, no conversation resume).
+# "pty" = the `claude --remote-control` flag form under a PTY keeper, which is
+# single-session but genuinely restores prior context on restart (true resume).
+ResumeMode = Literal["standard", "pty"]
 SPAWN_MODES: tuple[str, ...] = ("same-dir", "worktree", "session")
+RESUME_MODES: tuple[str, ...] = ("standard", "pty")
 PERMISSION_MODES: tuple[str, ...] = (
     "default",
     "plan",
@@ -61,6 +67,13 @@ class ClaudeConfig(BaseModel):
     resume_recap: bool = False
     # Character budget for the recap injection (most recent turns kept).
     resume_recap_max_chars: int = Field(default=8000, ge=500)
+    # How bridges are launched. "standard" (default) is the headless
+    # `claude remote-control` subcommand server. "pty" runs the
+    # `claude --remote-control` flag form under a PTY keeper, which is
+    # single-session but genuinely restores prior conversation context on a
+    # Restart (true resume) — unlike the recap hook, which only *recaps* it.
+    # POSIX only; on Windows "pty" falls back to standard. Opt-in.
+    resume_mode: ResumeMode = "standard"
 
 
 class InstanceDefaults(BaseModel):
