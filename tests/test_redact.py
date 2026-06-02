@@ -14,6 +14,18 @@ def test_redact_ids_keeps_prefix():
     assert "cse_<redacted>" in redact.redact_ids("worker cse_01XYZABCDEFGHIJ")
 
 
+def test_redact_ids_masks_bare_uuid():
+    # organization_uuid / bridgeId style UUIDs must not survive the WS stream.
+    out = redact.redact_ids('"organization_uuid":"fc0a4ee9-762e-42df-a376-484f5ff00f39"')
+    assert "fc0a4ee9-762e-42df-a376-484f5ff00f39" not in out
+    assert "<redacted>" in out
+    # full sanitizer path, mixed with a bridge id.
+    line = "[bridge:init] bridgeId=2d783407-cd32-4951-bba5-47fd9b82b8dc machine=claude-code"
+    out = redact.sanitize_line(line)
+    assert "2d783407-cd32-4951-bba5-47fd9b82b8dc" not in out
+    assert "machine=claude-code" in out  # non-UUID context is untouched
+
+
 def test_redact_secrets():
     assert "<redacted>" in redact.redact_secrets("tok ghp_abcdefghijklmnopqrstuvwxyz0123")
     assert "<redacted>" in redact.redact_secrets("key AKIAIOSFODNN7EXAMPLE end")
