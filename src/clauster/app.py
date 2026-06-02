@@ -24,6 +24,7 @@ from .claude_md import (
     read_claude_md,
     write_claude_md,
 )
+from .clone_jobs import CloneJob, CloneJobManager
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
 from .models import (
@@ -35,7 +36,6 @@ from .models import (
 )
 from .provisioning import (
     BlockedCloneHost,
-    CloneFailed,
     GitUnavailable,
     InvalidCloneUrl,
     InvalidProjectName,
@@ -43,6 +43,7 @@ from .provisioning import (
     TargetExists,
     clone_project,
     create_project,
+    validate_clone_url,
 )
 from .redact import sanitize_line
 from .runner import (
@@ -111,6 +112,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     )
     app.state.config = config
     app.state.runner = runner
+    clone_jobs = CloneJobManager()
+    app.state.clone_jobs = clone_jobs
+    # Drop a finished clone job after this grace so a client that disconnected
+    # mid-clone can reconnect and still read the terminal frame.
+    _CLONE_JOB_TTL = 60.0
+    # Hold strong refs to in-flight clone tasks so they aren't GC'd mid-run.
+    _clone_tasks: set[asyncio.Task] = set()
     templates = Jinja2Blocks(directory=str(_TEMPLATES_DIR))
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
@@ -441,17 +449,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await _project_by_name(name)
 
-    @app.post("/api/projects/clone", status_code=201)
-    async def api_clone_project(body: dict) -> Project:
-        if not config.clone.enabled:
-            raise HTTPException(status_code=403, detail="clone is disabled in config")
-        name = body.get("name")
-        url = body.get("url")
-        if not isinstance(name, str) or not name:
-            raise HTTPException(status_code=422, detail="body must include a 'name' string")
-        if not isinstance(url, str) or not url:
-            raise HTTPException(status_code=422, detail="body must include a 'url' string")
-        shallow = bool(body.get("shallow", False))
+    async def _run_clone(job: CloneJob, name: str, url: str, shallow: bool) -> None:
+        """Clone in a worker thread, streaming progress into the job's queue."""
+        loop = asyncio.get_running_loop()
+
+        def _forward(line: str) -> None:
+            loop.call_soon_threadsafe(clone_jobs.push_progress, job, line)
+
         try:
             await asyncio.to_thread(
                 clone_project,
@@ -460,22 +464,47 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 url,
                 cfg=config.clone,
                 shallow=shallow,
+                progress_cb=_forward,
             )
-        except InvalidProjectName as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except TargetExists as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ProvisionError as exc:
+            clone_jobs.finish(job, error=str(exc))
+        except Exception as exc:  # defensive: never leave a job stuck "running"
+            clone_jobs.finish(job, error=f"unexpected error: {exc}")
+        else:
+            clone_jobs.finish(job)
+        loop.call_later(_CLONE_JOB_TTL, clone_jobs.discard, job.id)
+
+    @app.post("/api/projects/clone", status_code=202)
+    async def api_clone_project(body: dict) -> dict:
+        """Start an async clone; returns a job id to watch via ``/ws/clone-progress``."""
+        if not config.clone.enabled:
+            raise HTTPException(status_code=403, detail="clone is disabled in config")
+        name = body.get("name")
+        url = body.get("url")
+        if not isinstance(name, str) or not name:
+            raise HTTPException(status_code=422, detail="body must include a 'name' string")
+        if not isinstance(url, str) or not url:
+            raise HTTPException(status_code=422, detail="body must include a 'url' string")
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail=f"invalid project name: {name!r}")
+        if (config.projects_root / name).exists():
+            raise HTTPException(
+                status_code=409, detail=f"a directory named {name!r} already exists"
+            )
+        shallow = bool(body.get("shallow", False))
+        # Validate the URL up front (scheme + SSRF host resolve) so an obviously
+        # bad clone fails the request itself; the DNS resolve runs off the loop.
+        try:
+            await asyncio.to_thread(validate_clone_url, url, config.clone)
         except InvalidCloneUrl as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except BlockedCloneHost as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-        except GitUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except CloneFailed as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        except ProvisionError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return await _project_by_name(name)
+        job = clone_jobs.create(name)
+        task = asyncio.create_task(_run_clone(job, name, url, shallow))
+        _clone_tasks.add(task)
+        task.add_done_callback(_clone_tasks.discard)
+        return {"job_id": job.id, "name": name}
 
     @app.get("/api/instances")
     async def api_instances() -> list[RemoteControlInstance]:
@@ -651,6 +680,32 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     for line in lines:
                         await websocket.send_text(sanitize_line(line, strip_ansi_seq=strip))
                 await asyncio.sleep(0.5)
+        except (WebSocketDisconnect, RuntimeError):
+            return
+
+    @app.websocket("/ws/clone-progress/{job_id}")
+    async def ws_clone_progress(websocket: WebSocket, job_id: str) -> None:
+        """Stream a clone job's ``{phase, percent}`` progress, then a terminal frame."""
+        if config.auth.enabled and not _ws_authorized(websocket):
+            await websocket.close(code=1008)  # validate before accept
+            return
+        await websocket.accept()
+        job = clone_jobs.get(job_id)
+        if job is None:
+            await websocket.close(code=1008)  # unknown / already pruned
+            return
+        # Already finished (e.g. a reconnect after completion): send the outcome.
+        if job.status != "running":
+            await websocket.send_json(job.terminal_event())
+            await websocket.close()
+            return
+        await websocket.send_json(job.progress_event())  # current snapshot
+        try:
+            while True:
+                event = await job.queue.get()
+                await websocket.send_json(event)
+                if event.get("type") == "done":
+                    break
         except (WebSocketDisconnect, RuntimeError):
             return
 

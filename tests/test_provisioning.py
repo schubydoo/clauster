@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from clauster.app import create_app
 from clauster.config import CloneConfig, load_config
@@ -347,6 +348,22 @@ def test_clone_git_binary_unavailable(tmp_path):
         )
 
 
+def test_clone_streams_progress(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_GIT_MODE", "progress")
+    seen: list[str] = []
+    dest = clone_project(
+        tmp_path,
+        "proj",
+        "https://10.0.0.1/r.git",
+        cfg=_cfg(allow_private_hosts=True),
+        git_binary=_gitbin(),
+        progress_cb=seen.append,
+    )
+    assert (dest / "README.md").exists()  # clone still completes
+    assert any("Receiving objects" in line for line in seen)
+    assert any("100%" in line for line in seen)
+
+
 # ----- routes -----------------------------------------------------------
 
 
@@ -390,25 +407,71 @@ def test_route_clone_bad_url_422(write_config):
     assert resp.status_code == 422
 
 
-def test_route_clone_success(write_config, monkeypatch):
+def _drain_clone_ws(client, job_id: str) -> list[dict]:
+    """Watch a clone job's WS to completion, returning every frame received."""
+    events: list[dict] = []
+    with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+        while True:
+            evt = ws.receive_json()
+            events.append(evt)
+            if evt["type"] == "done":
+                break
+    return events
+
+
+def test_route_clone_async_success(write_config, monkeypatch):
     monkeypatch.setenv("PATH", str(FAKE_GIT) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("FAKE_GIT_MODE", "with_claude")
-    client = _client(write_config, "clone:\n  allow_private_hosts: true\n")
-    resp = client.post(
-        "/api/projects/clone", json={"name": "cloned", "url": "https://10.0.0.1/r.git"}
-    )
-    assert resp.status_code == 201
-    body = resp.json()
-    assert body["name"] == "cloned"
-    assert body["has_claude_md"] is True and body["has_claude_dir"] is True
+    # `with`: keep the lifespan portal alive so the background clone task runs
+    # (and so the progress WS can observe it) across both requests.
+    with _client(write_config, "clone:\n  allow_private_hosts: true\n") as client:
+        resp = client.post(
+            "/api/projects/clone", json={"name": "cloned", "url": "https://10.0.0.1/r.git"}
+        )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        events = _drain_clone_ws(client, job_id)
+        assert events[-1] == {"type": "done", "status": "done", "error": None}
+        # the project landed (cloned dir discovered) once the job finished
+        names = [p["name"] for p in client.get("/api/projects").json()]
+        assert "cloned" in names
 
 
-def test_route_clone_failed_502(write_config, monkeypatch):
+def test_route_clone_async_failure_via_ws(write_config, monkeypatch):
     monkeypatch.setenv("PATH", str(FAKE_GIT) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("FAKE_GIT_MODE", "fail")
+    with _client(write_config, "clone:\n  allow_private_hosts: true\n") as client:
+        resp = client.post(
+            "/api/projects/clone", json={"name": "x", "url": "https://10.0.0.1/r.git"}
+        )
+        assert resp.status_code == 202
+        events = _drain_clone_ws(client, resp.json()["job_id"])
+        terminal = events[-1]
+        assert terminal["type"] == "done" and terminal["status"] == "error"
+        assert "git clone failed" in terminal["error"]
+        # nothing landed
+        assert "x" not in [p["name"] for p in client.get("/api/projects").json()]
+
+
+def test_route_clone_ws_reconnect_after_done(write_config, monkeypatch):
+    monkeypatch.setenv("PATH", str(FAKE_GIT) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("FAKE_GIT_MODE", "ok")
+    with _client(write_config, "clone:\n  allow_private_hosts: true\n") as client:
+        resp = client.post(
+            "/api/projects/clone", json={"name": "redo", "url": "https://10.0.0.1/r.git"}
+        )
+        job_id = resp.json()["job_id"]
+        _drain_clone_ws(client, job_id)  # watch it finish
+        # reconnect while still in the registry: the finished job replays its outcome
+        events = _drain_clone_ws(client, job_id)
+        assert events == [{"type": "done", "status": "done", "error": None}]
+
+
+def test_route_clone_progress_ws_unknown_job_closes(write_config):
     client = _client(write_config, "clone:\n  allow_private_hosts: true\n")
-    resp = client.post("/api/projects/clone", json={"name": "x", "url": "https://10.0.0.1/r.git"})
-    assert resp.status_code == 502
+    with pytest.raises(WebSocketDisconnect):  # server closes (1008) on an unknown job
+        with client.websocket_connect("/ws/clone-progress/deadbeef") as ws:
+            ws.receive_json()
 
 
 def test_route_create_git_init_unavailable_503(write_config, monkeypatch):
