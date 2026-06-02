@@ -1,0 +1,43 @@
+# pre-commit hooks — https://pre-commit.com
+#
+# Opt-in, one-time setup per checkout:  uv run pre-commit install
+# Run on demand against everything:      uv run pre-commit run --all-files
+#
+# Every hook is `repo: local` and shells out to the SAME pinned tools CI runs
+# (ruff + yamllint resolved from uv.lock via `uv run`; markdownlint-cli2 via the
+# npx version pin that also lives in scripts/lint-docs.sh). That keeps
+# pre-commit, local runs, and the "ruff + pyright" CI job in agreement on both
+# versions and config — no second source of truth to drift. pre-commit only runs
+# the hooks whose file types changed; CI still does the full-repo sweep.
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format (check)
+        entry: uv run ruff format --check --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: yamllint
+        name: yamllint
+        entry: uv run yamllint
+        language: system
+        types: [yaml]
+
+      - id: markdownlint-cli2
+        name: markdownlint-cli2
+        # Keep this version in sync with scripts/lint-docs.sh.
+        entry: npx --yes markdownlint-cli2@0.22.1
+        language: system
+        types: [markdown]
+        exclude: '(^|/)(vendor|node_modules)/'

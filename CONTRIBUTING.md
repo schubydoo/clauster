@@ -6,6 +6,7 @@ Thanks for your interest in Clauster!
 
 ```sh
 uv sync --extra dev
+uv run pre-commit install              # auto-lint on commit (ruff + yaml/markdown)
 cp clauster.yml.example clauster.yml   # edit projects_root
 uv run clauster
 ```
@@ -19,6 +20,11 @@ uv run clauster
 - **Docs lint (Markdown + YAML)** — `bash scripts/lint-docs.sh` (markdownlint-cli2
   via `npx`, pinned in the script; `yamllint` from `uv sync --extra dev`). Same
   command CI runs in the `ruff + pyright` job.
+- **pre-commit (recommended)** — `uv run pre-commit install` once; ruff
+  (check + format), yamllint, and markdownlint then run automatically on each
+  commit using the same pinned tools as CI. Check everything on demand with
+  `uv run pre-commit run --all-files`. It runs only the hooks for changed file
+  types; CI remains the full-repo backstop.
 - **Security checks** — nothing extra to run locally: Bandit-style SAST is ruff's
   `S` rules, already covered by the `ruff check .` above. CI additionally runs
   CodeQL, Trivy (filesystem + image), dependency review, and a workflow audit
