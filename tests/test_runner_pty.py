@@ -184,6 +184,30 @@ async def test_stop_cleans_keeper_when_bridge_pid_absent(runner_config, monkeypa
     assert stopped.status is InstanceStatus.STOPPED
 
 
+async def test_rediscover_restores_persisted_resume_mode(runner_config, monkeypatch) -> None:
+    """A pty bridge rediscovered after a restart keeps its persisted resume_mode."""
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "intentional_stop": True, "resume_mode": "pty"}}
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    class FakePtr:
+        pid, proc_start, environment_id, session_id = 4242, "1000", "env_x", "session_x"
+
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
+
+    await runner.rediscover()
+    assert runner.get_instance("alpha").resume_mode == "pty"
+
+
 def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) -> None:
     """If the keeper outlives its bridge, _cleanup_keeper force-kills then reaps it."""
     runner, _ = _pty_runner(runner_config)

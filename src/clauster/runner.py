@@ -29,6 +29,7 @@ from . import bridge_log, inspector, pointers, procutil
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
+    RESUME_MODES,
     SPAWN_MODES,
     ClausterConfig,
     PermissionMode,
@@ -863,11 +864,14 @@ class SessionRunner:
             # startup — fall back to the configured default instead.
             sm = saved.get("spawn_mode")
             pm = saved.get("permission_mode")
+            # resume_mode lives on ClaudeConfig, not InstanceDefaults — fall back there.
+            rm = saved.get("resume_mode")
             self._instances[proj.name] = RemoteControlInstance(
                 project=proj.name,
                 label=saved.get("label") or proj.name,
                 spawn_mode=sm if sm in SPAWN_MODES else defaults.spawn_mode,
                 permission_mode=pm if pm in PERMISSION_MODES else defaults.permission_mode,
+                resume_mode=rm if rm in RESUME_MODES else self._config.claude.resume_mode,
                 intentional_stop=False,
                 status=InstanceStatus.RUNNING,
                 bridge_pid=ptr.pid,

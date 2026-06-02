@@ -1,8 +1,8 @@
 """Lightweight ``state.json`` persistence (spec §8, schema versioning D14).
 
 Persists only the few instance fields the startup pointer-walk *can't* recover —
-``label``, ``intentional_stop``, ``spawn_mode``, ``permission_mode`` — keyed by
-project name. Everything
+``label``, ``intentional_stop``, ``spawn_mode``, ``permission_mode``,
+``resume_mode`` — keyed by project name. Everything
 else (pid, env_id, urls, status) is re-derived live, so this file is small and
 non-authoritative: corruption degrades to "forget the labels", never a crash.
 
@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 
 CURRENT_SCHEMA = 1
-_PERSISTED_FIELDS = ("label", "intentional_stop", "spawn_mode", "permission_mode")
+_PERSISTED_FIELDS = ("label", "intentional_stop", "spawn_mode", "permission_mode", "resume_mode")
 
 _log = logging.getLogger("clauster.state")
 
