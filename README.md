@@ -1,8 +1,9 @@
 <h1 align="center">Clauster</h1>
 
 <p align="center">
-  <em>A self-hosted web UI for spawning and managing Claude Code <code>remote-control</code><br>
-  bridges into any project directory on a remote host — from any browser or the Claude mobile app.</em>
+  <em>A self-hosted web dashboard for spawning and managing Claude Code <code>remote-control</code><br>
+  bridges into any project directory on a remote host — then attach to them from<br>
+  <code>claude.ai/code</code> or the Claude mobile app. No SSH session required.</em>
 </p>
 
 <p align="center">
@@ -17,8 +18,8 @@
   <img src="docs/screenshots/dashboard-dark.png" alt="Clauster dashboard" width="860">
 </p>
 
-Anthropic's first-party tools assume terminal access on the host to spawn a bridge
-in a new directory. Clauster fills that gap: a browser-based dispatcher of
+Anthropic's first-party tooling assumes terminal access on the host to spawn a
+bridge in a given project directory. Clauster fills that gap: a browser-based dispatcher of
 `claude remote-control` instances on a remote machine (NAS, homelab box). You pick
 a project, start a bridge, and attach to it from `claude.ai/code` or the mobile app
 — no SSH session required.
@@ -61,15 +62,16 @@ it in [`clauster.yml.example`](clauster.yml.example).
 - **Project discovery** — one card per directory under `projects_root`, with git /
   `CLAUDE.md` / trust badges.
 - **Bridge lifecycle** — start / stop / **restart** bridges; live status
-  (Starting / Running / Stopped / Crashed). A bridge that launches but never
-  registers an environment is reported honestly as `ERROR` after a grace window,
-  not a phantom `Running`.
+  (Starting / Running / Stopped / Crashed / Error). A bridge that launches but
+  never registers an environment is reported honestly as `Error` after a grace
+  window, not a phantom `Running`.
 - **Spawn controls** — pick the spawn mode (same-dir / worktree / session) and
   permission mode per launch. `bypassPermissions` is double-gated: a per-project
   config ceiling (`projects.<name>.allow_bypass_permissions`) **and** a
   type-the-project-name confirm in the UI.
-- **Open in Claude** — primary session deep link + a scannable QR code for
-  attaching from your phone.
+- **Open in Claude** — a deep link to the primary session plus a scannable QR code
+  that opens it in the Claude app (claude.ai/code or mobile), attached to the
+  running bridge.
 - **External session surfacing** — sessions you started from a terminal or Desktop
   (not via Clauster) are discovered and shown with a distinct indicator.
 - **Create / clone projects** — make a new project or clone a git URL, with SSRF
