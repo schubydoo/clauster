@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# Docstrings: our gate is ruff's pydocstyle (D) rules, enforced on EVERY PR by the
+# "ruff + pyright" CI job (.github/workflows/lint.yml, `on: pull_request`). It
+# requires docstrings on all public modules/classes/functions (pep257 convention;
+# D105/D107 and tests/** are intentionally exempt — see pyproject.toml).
+#
+# CodeRabbit's separate docstring-coverage pre-merge check computes a raw
+# percentage that counts inner/nested helpers (preexec closures, signal handlers,
+# test fixtures) which our gate deliberately exempts, so it reports a misleadingly
+# low number against its 80% default. Defer to ruff D as the single source of
+# truth and turn the redundant check off rather than run two disagreeing gates.
+language: "en-US"
+reviews:
+  pre_merge_checks:
+    docstrings:
+      mode: "off"

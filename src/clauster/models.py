@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, computed_field
 
-from .config import PermissionMode, SpawnMode
+from .config import PermissionMode, ResumeMode, SpawnMode
 
 
 class InstanceStatus(StrEnum):
@@ -61,6 +61,11 @@ class RemoteControlInstance(BaseModel):
     url: str | None = None  # https://claude.ai/code?environment=env_<ULID>
     spawn_mode: SpawnMode = "same-dir"
     permission_mode: PermissionMode = "default"
+    # How this bridge was launched. "pty" bridges run the flag form under a PTY
+    # keeper for true conversation resume; their `bridge_pid` is the bridge the
+    # keeper spawned and `keeper_pid` is the keeper holding its terminal.
+    resume_mode: ResumeMode = "standard"
+    keeper_pid: int | None = None  # PTY keeper holding the bridge's terminal ("pty" mode only)
     status: InstanceStatus = InstanceStatus.STARTING
     intentional_stop: bool = False
     started_at: datetime | None = None
