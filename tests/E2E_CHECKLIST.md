@@ -102,7 +102,7 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
         no tools) — true resume, not just the recap.
       - It is **single-session** (no multi-chat capacity) — the card reflects that.
       - **Stop** cleanly ends both the bridge and its keeper (no stray processes).
-      - The keeper is reparented to init, so the bridge **process** survives a clauster
+      - The keeper is reparented to init, so the bridge **process** survives a Clauster
         restart (UI rediscovery of pty bridges lands in the follow-up PR).
       - With the flag unset (default `standard`), bridges use the subcommand server and
         Restart produces a fresh, empty-context session.

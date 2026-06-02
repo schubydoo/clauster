@@ -102,8 +102,11 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
         return 70
 
     def _acquire_ctty() -> None:  # pragma: no cover — runs in the forked child, pre-exec
-        # We were started detached (own session via start_new_session), so we are a
-        # session leader with no controlling terminal; opening the slave claims it.
+        # Make the bridge its own session leader FIRST: TIOCSCTTY only works for a
+        # session leader with no controlling terminal. Without this setsid the
+        # bridge stays in the launcher's session and never acquires the PTY as its
+        # controlling terminal (the interactive flag form needs a real one).
+        os.setsid()
         fd = os.open(slave_name, os.O_RDWR)
         try:
             fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
