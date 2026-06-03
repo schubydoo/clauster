@@ -15,7 +15,8 @@ concurrency:
 jobs:
   lint:
     # This job name is a REQUIRED status check — it must match the context list
-    # in .github/settings.yml exactly (renaming means updating that list too).
+    # in the `main` ruleset (.github/rulesets/main.json) exactly (renaming means
+    # updating that ruleset too).
     # Runs ruff (check + format), pyright, and the Markdown + YAML doc-lint
     # (scripts/lint-docs.sh).
     name: lint
