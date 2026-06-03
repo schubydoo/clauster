@@ -73,7 +73,8 @@ def test_broadcast_reaches_every_subscriber():
             assert done["type"] == "done"
         job.unsubscribe(q1)
         mgr.push_progress(job, "Receiving objects: 99%")  # only q2 still subscribed
-        assert q1.empty()
+        with pytest.raises(asyncio.TimeoutError):  # q1 receives nothing within the window
+            await asyncio.wait_for(q1.get(), timeout=0.1)
         assert (await asyncio.wait_for(q2.get(), timeout=1))["percent"] == 99
 
     asyncio.run(_run())
