@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from clauster import redact
 
 
@@ -26,10 +28,43 @@ def test_redact_ids_masks_bare_uuid():
     assert "machine=claude-code" in out  # non-UUID context is untouched
 
 
-def test_redact_secrets():
-    assert "<redacted>" in redact.redact_secrets("tok ghp_abcdefghijklmnopqrstuvwxyz0123")
-    assert "<redacted>" in redact.redact_secrets("key AKIAIOSFODNN7EXAMPLE end")
-    assert "<redacted>" in redact.redact_secrets("Authorization: Bearer abcdef0123456789xyz")
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "ghp_abcdefghijklmnopqrstuvwxyz0123",  # GitHub classic token
+        "github_pat_11ABCDEFGHIJKLMNOPQRST_uvwxyz0123456789",  # GitHub fine-grained PAT
+        "glpat-abcdef1234567890XY",  # GitLab PAT
+        "AKIAIOSFODNN7EXAMPLE",  # AWS access key id
+        "sk-abcdefghijklmnop0123456789",  # OpenAI/Anthropic-style
+        "xoxb-0123456789-abcdefABCDEF",  # Slack bot token
+    ],
+)
+def test_redact_secrets_masks_each_shape(secret):
+    # Every shape in _SECRET_RES is exercised, embedded in surrounding context.
+    out = redact.redact_secrets(f"prefix {secret} suffix")
+    assert secret not in out
+    assert "<redacted>" in out
+    assert out.startswith("prefix ") and out.endswith(" suffix")  # context untouched
+
+
+def test_redact_secrets_bearer_header():
+    out = redact.redact_secrets("Authorization: Bearer abcdef0123456789xyz")
+    assert "abcdef0123456789xyz" not in out
+    assert "<redacted>" in out
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "tok ghp_tooshort here",  # below the {16,} quantifier — not a real token shape
+        "the bearer of bad news",  # the word "bearer" with no 12+ char token after it
+        "a skinny sk-cat ran",  # sk- but too short / wrong charset
+        "plain prose with no secrets at all",
+    ],
+)
+def test_redact_secrets_does_not_over_redact(benign):
+    # Boundary/negative: near-misses must pass through verbatim (no over-masking).
+    assert redact.redact_secrets(benign) == benign
 
 
 def test_sanitize_line_combines_ansi_and_ids():
