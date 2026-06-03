@@ -1,0 +1,15 @@
+[
+  { "name": "bug", "color": "d73a4a", "description": "Something isn't working" },
+  { "name": "enhancement", "color": "a2eeef", "description": "New feature or request" },
+  { "name": "documentation", "color": "0075ca", "description": "Improvements or additions to documentation" },
+  { "name": "question", "color": "d876e3", "description": "Further information is requested" },
+  { "name": "good first issue", "color": "7057ff", "description": "Good for newcomers" },
+  { "name": "help wanted", "color": "008672", "description": "Extra attention is needed" },
+  { "name": "breaking", "color": "b60205", "description": "Backwards-incompatible change" },
+  { "name": "security", "color": "d93f0b", "description": "Security-related — Renovate vulnerability alerts use this" },
+  { "name": "dependencies", "color": "ededed", "description": "Renovate-opened dependency update PRs (and the dashboard issue)" },
+  { "name": "vendored-assets", "color": "ededed", "description": "Renovate heads-up to re-vendor self-hosted front-end assets (manual dist update)" },
+  { "name": "autorelease: pending", "color": "ededed", "description": "Release Please — release PR is open, awaiting merge" },
+  { "name": "autorelease: tagged", "color": "0e8a16", "description": "Release Please — release PR is merged and the tag has been pushed" },
+  { "name": "autorelease: snapshot", "color": "5319e7", "description": "Release Please — snapshot/prerelease (rare)" }
+]
