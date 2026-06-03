@@ -126,6 +126,14 @@ branches:
       # `true` to enforce. Trade-off: this removes the admin-merge bypass we used
       # for the job-rename in #66, so a future required-context change can't be
       # force-merged the same way — revert to `null` if you need that escape hatch.
+      #
+      # ⚠️ CONFIRMED (A/B test, 2026-06-02): the Settings App does NOT apply this
+      # field on an already-protected branch. It reconciles other sections on push
+      # (security log: settings[bot] `repo.change_merge_setting`, probot/14.3.2) but
+      # leaves enforce_admins untouched — #70's null→true never took. Set it directly:
+      #   gh api --method POST repos/schubydoo/clauster/branches/main/protection/enforce_admins
+      # (DELETE to disable) and re-GET to verify. Keep this `true` so the desired
+      # state is still declared, but don't trust the App to apply it.
       enforce_admins: true
       required_linear_history: true
       allow_force_pushes: false
@@ -133,4 +141,3 @@ branches:
       required_conversation_resolution: true
       # Same `null`-vs-empty-array gotcha; explicit `null` for safety.
       restrictions: null
-# ab-test-trigger: temporary no-op to fire the Settings-app push handler (reverted next commit)
