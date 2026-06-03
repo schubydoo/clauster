@@ -78,7 +78,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   permission mode per launch. `bypassPermissions` is double-gated: a per-project
   config ceiling (`projects.<name>.allow_bypass_permissions`) **and** a
   type-the-project-name confirm in the UI.
-- **Open in Claude** — a deep link to the primary session plus a scannable QR code
+- **Open session in Claude** — a deep link to the primary session plus a scannable QR code
   that opens it in the Claude app (claude.ai/code or mobile), attached to the
   running bridge.
 - **External session surfacing** — sessions you started from a terminal or Desktop
@@ -156,7 +156,7 @@ bridge is a handful of clicks — no terminal needed once it's started:
    `claude remote-control` in that directory and the card flips to *Running* with a
    live status badge. (Pick a spawn / permission mode first if you like — the
    defaults are safe.)
-5. **Attach from anywhere.** Use the card's **Open in Claude** link — or scan its
+5. **Attach from anywhere.** Use the card's **Open session in Claude** link — or scan its
    **QR code** — to pick the bridge up in `claude.ai/code` or the Claude mobile app.
    No SSH session.
 6. **Stop or restart.** **Stop** signals the bridge; **Restart** relaunches it (with
