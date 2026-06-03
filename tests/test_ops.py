@@ -234,6 +234,14 @@ def test_login_malformed_json_warns(tmp_path, monkeypatch):
     assert c.status == WARN and "not valid JSON" in c.detail
 
 
+@pytest.mark.parametrize("payload", ["null", "123", "[]", '"x"'])
+def test_login_non_object_json_does_not_crash(tmp_path, monkeypatch, payload):
+    # Valid JSON that isn't an object must WARN, never raise AttributeError (CodeRabbit).
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    c = _check_claude_login(_creds(tmp_path, payload))
+    assert c.status == WARN
+
+
 # ----- backup / restore -------------------------------------------------
 
 
