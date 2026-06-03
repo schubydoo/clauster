@@ -127,10 +127,6 @@ class SessionRunner:
         """Count instances currently in the RUNNING state."""
         return sum(1 for i in self._instances.values() if i.status is InstanceStatus.RUNNING)
 
-    def working_sessions(self) -> list[WorkingSession]:
-        """Return a snapshot list of the last-observed working sessions."""
-        return list(self._sessions)
-
     def external_sessions_by_project(self) -> dict[str, list[WorkingSession]]:
         """Group EXTERNAL working sessions by the project at their cwd (bug #4).
 
