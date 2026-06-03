@@ -39,7 +39,8 @@ projects: {}
 #     allow_bypass_permissions: false
 
 auth:
-  enabled: false                   # turn on to require login / gate non-loopback
+  enabled: false                   # MASTER switch — must be true for password_required /
+                                   # reverse_proxy auth to actually be enforced
   password_required: false
   password_hash: null              # argon2id; generate via `clauster hash-password`
   cookie_secure: auto              # auto | always | never

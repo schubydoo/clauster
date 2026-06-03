@@ -93,13 +93,31 @@ _HASH = (
 @pytest.mark.parametrize(
     "extra",
     [
-        "host: 0.0.0.0\nauth:\n  reverse_proxy:\n    enabled: true\n",
+        # reverse-proxy auth only counts when auth.enabled is set (it's the runtime gate).
+        "host: 0.0.0.0\nauth:\n  enabled: true\n  reverse_proxy:\n    enabled: true\n",
+        "host: 0.0.0.0\nauth:\n  enabled: true\n  password_required: true\n"
+        f"  password_hash: '{_HASH}'\n",
         "host: 0.0.0.0\nauth:\n  allow_unauthenticated_network: true\n",
     ],
 )
 def test_non_loopback_allowed_with_auth(write_config, extra):
     config = load_config(write_config(extra))
     assert config.host == "0.0.0.0"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # The footgun: a password (or proxy) is configured but auth.enabled is left at its
+        # false default, so the runtime guard would serve the dashboard unauthenticated.
+        # The validator must refuse rather than start a silently-open non-loopback bind.
+        f"host: 0.0.0.0\nauth:\n  password_required: true\n  password_hash: '{_HASH}'\n",
+        "host: 0.0.0.0\nauth:\n  reverse_proxy:\n    enabled: true\n",
+    ],
+)
+def test_non_loopback_rejected_when_auth_not_enabled(write_config, extra):
+    with pytest.raises(ValueError, match="without enforced auth"):
+        load_config(write_config(extra))
 
 
 def test_password_required_without_hash_fails_closed(write_config):
