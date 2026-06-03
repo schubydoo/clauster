@@ -16,6 +16,20 @@ It encodes the same contract the project has always enforced:
 - `enforcement: active` with an empty `bypass_actors` list — i.e. admins are
   enforced too (the old `enforce_admins: true`).
 
+## Tag protection + immutable releases
+
+`tags.json` is a second ruleset (`target: tag`) over `refs/tags/v*` that blocks
+**deletion** and **non-fast-forward** (moving) of release tags, with no bypass —
+so a published version tag can't be repointed or removed. Tag *creation* is not
+blocked, so release-please can still cut new `vX.Y.Z` tags.
+
+This pairs with **immutable releases** (enabled on the repo via
+`PUT /repos/{owner}/{repo}/immutable-releases`): once a release is published its
+tag is locked to its commit and its assets can't be changed, and a release
+attestation is generated. Immutability applies to *future* releases only; the
+release **body/notes remain editable**, so the post-publish
+`gh release edit --notes-file` step (when needed) still works.
+
 ## Applying
 
 The ruleset is currently applied/maintained manually via the API:
