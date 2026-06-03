@@ -39,10 +39,20 @@ def test_dashboard_renders(write_config):
 def test_dashboard_pty_bridge_is_resumable(write_config):
     # Regression (true-resume reachability): a stopped pty bridge has no
     # environment_id (the flag form leaves no env ghost), so isResumable() must
-    # also accept resume_mode === "pty". Otherwise the Restart button — the only
+    # also accept resume_mode === "pty". Otherwise the Resume button — the only
     # path to POST /resume -> spawn(resume=True) -> `claude --continue` — never
     # renders, and pty true-resume is unreachable from the UI (only "Start bridge"
     # shows, which is a fresh session with no --continue).
     resp = _client(write_config).get("/")
     assert resp.status_code == 200
     assert 'i.resume_mode === "pty"' in resp.text
+
+
+def test_dashboard_resume_and_start_new_controls_render(write_config):
+    # PR2: a resumable bridge offers a primary "Resume" plus a distinct
+    # "Start new session" that goes through a warning before a fresh spawn.
+    resp = _client(write_config).get("/")
+    assert resp.status_code == 200
+    assert ">Resume</button>" in resp.text
+    assert "startNew(" in resp.text and ">Start new session</button>" in resp.text
+    assert "confirmNewStart(" in resp.text  # the warned confirm path

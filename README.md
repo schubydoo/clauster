@@ -71,7 +71,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
 
 - **Project discovery** — one card per directory under `projects_root`, with git /
   `CLAUDE.md` / trust badges.
-- **Bridge lifecycle** — start / stop / **restart** bridges; live status
+- **Bridge lifecycle** — start / stop / **resume** bridges; live status
   (Starting / Running / Stopped / Crashed / Error). A bridge that launches but
   never registers an environment is reported honestly as `Error` after a grace
   window, not a phantom `Running`.
@@ -118,7 +118,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   that directory back into the new session.
 - **Native true-resume / "PTY mode" (opt-in, POSIX)** — `claude.resume_mode: pty`
   runs the `claude --remote-control` flag form under a PTY *keeper* sidecar, which
-  **genuinely restores prior conversation context** on Restart (`--continue`) rather
+  **genuinely restores prior conversation context** on Resume (`--continue`) rather
   than recapping it. The keeper outlives a Clauster restart and is stopped by signal.
   Single-session (vs. the default multi-session server). *Backend shipped; the
   dashboard mode indicator + cross-restart UI rediscovery are in progress —
@@ -160,9 +160,10 @@ bridge is a handful of clicks — no terminal needed once it's started:
 5. **Attach from anywhere.** Use the card's **Open session in Claude** link — or scan its
    **QR code** — to pick the bridge up in `claude.ai/code` or the Claude mobile app.
    No SSH session.
-6. **Stop or restart.** **Stop** signals the bridge; **Restart** relaunches it (with
+6. **Stop or resume.** **Stop** signals the bridge; **Resume** relaunches it (with
    `claude.resume_recap` or `resume_mode: pty` it can carry the prior conversation
-   forward — see [Opt-in extras](#opt-in-extras)).
+   forward — see [Opt-in extras](#opt-in-extras)). A resumable bridge also offers
+   **Start new session** for a deliberate fresh start.
 
 > Exposing this beyond loopback (e.g. on your LAN)? Read
 > [Auth & networking](#auth--networking) first — a non-loopback bind requires
@@ -246,7 +247,7 @@ validate against newer versions.
 | `auth.enabled` | `false` | master auth switch — must be on for password / proxy auth to apply |
 | `auth.password_required` | `false` | require login (`clauster hash-password` for the hash) |
 | `claude.resume_recap` | `false` | recap the prior transcript into a restarted bridge |
-| `claude.resume_mode` | `standard` | `pty` = native true-resume on Restart (POSIX); default for new bridges only — a bridge keeps the mode it launched with |
+| `claude.resume_mode` | `standard` | `pty` = native true-resume on Resume (POSIX); default for new bridges only — a bridge keeps the mode it launched with |
 | `reaper.ui_enabled` | `false` | expose the ghost-environment reaper in the dashboard |
 | `logs.redact_session_url` | `false` | redact the session URL on disk too, not just over WS |
 

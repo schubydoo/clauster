@@ -267,6 +267,7 @@
       permMode: {},
       confirmBypass: {},
       bypassTyped: {},
+      confirmNew: {},
       cmd: {},
       usage: {},
       trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
@@ -333,12 +334,12 @@
       envUrlOf(name) { return (this.instances[name] || {}).url || null; },
       errorOf(name) { return this.errors[name] || null; },
       // A stopped/crashed bridge that still has an environment can reconnect to it —
-      // show "Restart" instead of "Start" and reuse its stored permission mode.
+      // show "Resume" instead of "Start" and reuse its stored permission mode.
       isResumable(name) {
         const i = this.instances[name] || {};
         // A pty (flag-form) bridge has no environment_id — true-resume works via
         // `claude --continue`, not an environment reconnect — so treat a stopped pty
-        // instance as resumable too, else the Restart button (the only path to
+        // instance as resumable too, else the Resume button (the only path to
         // /resume → --continue) never renders and true-resume is unreachable.
         return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
       },
@@ -403,6 +404,22 @@
           return;
         }
         await this._spawn(name);
+      },
+      // "Start new session" on a resumable bridge: a fresh start (resume=false)
+      // is deliberately distinct from Resume, so warn first — a new session won't
+      // restore the prior one and Resume may no longer reach it (pty Resume
+      // continues the most-recent transcript, which a fresh session displaces).
+      startNew(name) {
+        this.errors[name] = null;
+        this.confirmNew[name] = true;
+      },
+      confirmNewStart(name) {
+        this.confirmNew[name] = false;
+        // Route back through start() so the bypassPermissions gate still applies.
+        this.start(name);
+      },
+      cancelNew(name) {
+        this.confirmNew[name] = false;
       },
       confirmBypassStart(name) {
         if ((this.bypassTyped[name] || "") !== name) {
