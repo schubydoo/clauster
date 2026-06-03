@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-from . import claude_cli
+from . import claude_cli, environments
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import _load_trusted_paths, trust_state_for
 from .state import CURRENT_SCHEMA, StateStore
@@ -82,6 +82,10 @@ def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
         checks.append(Check("claude", FAIL, str(exc)))
     except Exception as exc:  # noqa: BLE001 - surface any probe failure
         checks.append(Check("claude", FAIL, f"version probe failed: {exc}"))
+
+    # claude logged in — a spawned bridge inherits the operator's `claude` login, so a
+    # present-but-logged-out CLI starts a bridge that can't authenticate.
+    checks.append(_check_claude_login())
 
     # projects_root (config validation already requires it exists+readable, but surface it)
     pr = config.projects_root
@@ -185,6 +189,50 @@ def _check_state_dir_writable(state_dir: Path) -> Check:
     if os.access(ancestor, os.W_OK):
         return Check("state_dir", OK, f"{sd} (absent; creatable under {ancestor})")
     return Check("state_dir", FAIL, f"{sd} can't be created: {ancestor} not writable")
+
+
+def _check_claude_login(creds_path: Path | None = None) -> Check:
+    """Check that the ``claude`` CLI actually has usable credentials.
+
+    A spawned bridge inherits the operator's ``claude`` login; without it the bridge
+    starts but can't authenticate (the dogfood "bridge runs but is dead" failure mode).
+    The other checks confirm the binary is present and new enough — this confirms it's
+    logged in. WARN, never FAIL: an ``ANTHROPIC_API_KEY`` in the environment is a valid
+    alternative, and a missing/expired token is recoverable with ``claude`` (not a broken
+    install). Reads only the credentials file's presence + token field — never the token.
+    """
+    creds = (creds_path or environments.CREDENTIALS_PATH).expanduser()
+    has_token = False
+    state = "missing"  # missing | present | bad_json
+    bad_json = ""
+    try:
+        data = json.loads(creds.read_text())
+        # Valid JSON that isn't an object (null, a number, a list) must not crash doctor.
+        oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+        oauth = oauth if isinstance(oauth, dict) else {}
+        has_token = bool(oauth.get("accessToken"))
+        state = "present"
+    except (FileNotFoundError, OSError):
+        state = "missing"  # no credentials file yet
+    except json.JSONDecodeError as exc:
+        state, bad_json = "bad_json", str(exc)
+
+    if has_token:
+        return Check("claude-login", OK, "logged in (claude credentials present)")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return Check("claude-login", OK, "ANTHROPIC_API_KEY set in environment")
+    if state == "bad_json":
+        return Check("claude-login", WARN, f"{creds} is not valid JSON: {bad_json}")
+    if state == "present":
+        return Check(
+            "claude-login", WARN, f"logged out (no access token in {creds}) — re-run `claude`"
+        )
+    return Check(
+        "claude-login",
+        WARN,
+        f"not logged in ({creds} missing) — run `claude` to authenticate; "
+        "bridges inherit the operator's login",
+    )
 
 
 def _check_auth(config: ClausterConfig) -> Check:
