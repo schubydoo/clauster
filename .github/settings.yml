@@ -133,3 +133,4 @@ branches:
       required_conversation_resolution: true
       # Same `null`-vs-empty-array gotcha; explicit `null` for safety.
       restrictions: null
+# ab-test-trigger: temporary no-op to fire the Settings-app push handler (reverted next commit)
