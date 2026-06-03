@@ -114,7 +114,7 @@
   "vulnerabilities_fixed_60_days_status": "Met",
   "vulnerabilities_fixed_60_days_justification": "Renovate and GitHub security alerts surface dependency vulnerabilities, which are patched promptly (well within 60 days).",
   "vulnerabilities_critical_fixed_status": "Met",
-  "vulnerabilities_critical_fixed_justification": "No known unpatched vulnerabilities exist (OpenSSF Scorecard Vulnerabilities check scores 10/10).",
+  "vulnerabilities_critical_fixed_justification": "No known unpatched vulnerabilities exist; the OpenSSF Scorecard Vulnerabilities check runs on pushes to main and on a weekly schedule, and dependency alerts (Renovate + GitHub) surface any new ones for prompt patching.",
   "no_leaked_credentials_status": "Met",
   "no_leaked_credentials_justification": "No credentials are stored in the repository; gitleaks and GitHub secret scanning run in CI, sensitive config is gitignored, and session URLs/tokens are redacted in logs.",
   "static_analysis_status": "Met",
