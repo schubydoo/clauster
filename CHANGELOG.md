@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/schubydoo/clauster/compare/v0.2.2...v0.3.0) (2026-06-03)
+
+
+### Features
+
+* **docker:** add a Docker Compose quickstart ([#97](https://github.com/schubydoo/clauster/issues/97)) ([e6c914d](https://github.com/schubydoo/clauster/commit/e6c914d22e648ede2dd3c0285a717fdae5f1bef2))
+* **doctor:** check that the claude CLI is logged in ([#84](https://github.com/schubydoo/clauster/issues/84)) ([f902f23](https://github.com/schubydoo/clauster/commit/f902f23af6876f1cc95e450c0d4f1447c5e71cfe))
+
+
+### Bug Fixes
+
+* **runner:** serialize concurrent spawns of the same project ([#91](https://github.com/schubydoo/clauster/issues/91)) ([2dc8eb0](https://github.com/schubydoo/clauster/commit/2dc8eb044aaed3e735627f2feedbce8281a6b298))
+* **runner:** stop wiping persisted metadata for untracked projects ([#92](https://github.com/schubydoo/clauster/issues/92)) ([cca1c69](https://github.com/schubydoo/clauster/commit/cca1c69ec29a48c2d034d64cdf5a23e4dca1383a))
+* show Restart for stopped pty bridges so true-resume is reachable ([#99](https://github.com/schubydoo/clauster/issues/99)) ([5ea38aa](https://github.com/schubydoo/clauster/commit/5ea38aaa0b2ed92039681be4babe32c7ba9ad465))
+
 ## [0.2.2](https://github.com/schubydoo/clauster/compare/v0.2.1...v0.2.2) (2026-06-03)
 
 
