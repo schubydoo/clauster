@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/schubydoo/clauster/compare/v0.2.1...v0.2.2) (2026-06-03)
+
+
+### Bug Fixes
+
+* **auth:** refuse non-loopback bind unless auth is actually enforced ([#88](https://github.com/schubydoo/clauster/issues/88)) ([d89d753](https://github.com/schubydoo/clauster/commit/d89d753120c2246eea1838cea9528aa7658eb36f))
+
 ## [0.2.1](https://github.com/schubydoo/clauster/compare/v0.2.0...v0.2.1) (2026-06-03)
 
 
