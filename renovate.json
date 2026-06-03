@@ -9,12 +9,16 @@
   "timezone": "Etc/UTC",
   "schedule": ["before 7am on monday"],
   "labels": ["dependencies"],
+  "description": "Auto-merge uses GitHub native auto-merge + squash (a real PR satisfying the main ruleset), NOT branch automerge — the ruleset requires a PR, so branch automerge would be blocked.",
+  "platformAutomerge": true,
+  "automergeStrategy": "squash",
   "vulnerabilityAlerts": {
     "enabled": true,
     "labels": ["security"]
   },
   "lockFileMaintenance": {
     "enabled": true,
+    "automerge": true,
     "schedule": ["before 7am on monday"]
   },
   "ignorePaths": [
@@ -47,11 +51,10 @@
       "labels": ["vendored-assets"]
     },
     {
-      "description": "Auto-merge patch updates of dev tooling.",
+      "description": "Auto-merge patch + minor updates of dev/test tooling once CI passes (a failing check blocks the merge).",
       "matchPackageNames": ["ruff", "pyright", "pytest", "pytest-cov", "pytest-asyncio"],
-      "matchUpdateTypes": ["patch"],
-      "automerge": true,
-      "automergeType": "branch"
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": true
     },
     {
       "description": "Group all pytest-related updates.",
@@ -64,10 +67,17 @@
       "groupName": "ruff"
     },
     {
-      "description": "Roll all non-major GitHub Actions updates into one weekly PR.",
+      "description": "Roll non-major GitHub Actions version updates into one weekly PR (reviewed).",
       "matchManagers": ["github-actions"],
-      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "matchUpdateTypes": ["minor", "patch"],
       "groupName": "github-actions (non-major)"
+    },
+    {
+      "description": "Auto-merge GitHub Actions digest re-pins (same version, new SHA) once CI passes.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "github-actions digests",
+      "automerge": true
     },
     {
       "description": "Group security-tooling actions — same security.yml scanners, useful to review together.",

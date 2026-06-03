@@ -16,7 +16,8 @@
 </p>
 
 <p align="center">
-  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue.svg">
+  <a href="https://pypi.org/project/clauster/"><img alt="PyPI" src="https://img.shields.io/pypi/v/clauster?logo=pypi&logoColor=white"></a>
+  <a href="https://pypi.org/project/clauster/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/clauster"></a>
   <a href="https://github.com/schubydoo/clauster/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="https://github.com/schubydoo/clauster/pkgs/container/clauster"><img alt="GHCR" src="https://img.shields.io/badge/ghcr.io-clauster-2496ED?logo=docker&logoColor=white"></a>
   <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
