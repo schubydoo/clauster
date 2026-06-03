@@ -32,7 +32,7 @@ restarts — the dashboard JS/CSS are cached static assets.
 
 - [ ] **Project grid** renders one card per dir under `projects_root`; git /
       `CLAUDE.md` / trust badges correct.
-- [ ] **Start / Stop / Restart** a bridge; status transitions
+- [ ] **Start / Stop / Resume** a bridge; status transitions
       Starting → Running → Stopped; optimistic pending states + disabled buttons.
 - [ ] **Trust directory** flips the badge in place (no full reload).
 - [ ] **Spawn controls** — spawn-mode + permission-mode pickers render and pass
@@ -57,7 +57,7 @@ restarts — the dashboard JS/CSS are cached static assets.
       revokes everywhere (old cookie rejected).
 - [ ] **Theme toggle** (dark/light) persists across reload — sun/moon Iconoir
       icons render (no broken `<use>` refs).
-- [ ] **Action-button icons** (Iconoir) render on Start/Stop/Restart/Trust/Edit/
+- [ ] **Action-button icons** (Iconoir) render on Start/Stop/Resume/Trust/Edit/
       logs/QR/copy/Open and follow the button text color in both themes.
 - [ ] **Connection-lost banner** — stop the server (or block `/api/instances`);
       after ~2 failed polls a "Lost connection … retrying" banner appears; it
@@ -100,22 +100,30 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
       bridge: it spawns the `claude --remote-control` flag form under a PTY keeper and
       reaches RUNNING with a `claude.ai/code/session_…` link.
       - A **`↻ true-resume`** badge shows on the card (purple); hovering it explains
-        "Restart restores prior conversation context (single session)." It is absent for
+        "Resume restores prior conversation context (single session)." It is absent for
         `standard` bridges.
       - Drive a conversation (give the agent a codeword), then **Stop**. The card must
-        then show a **Restart** button — a stopped pty bridge is *resumable* even though it
+        then show a **Resume** button — a stopped pty bridge is *resumable* even though it
         has **no `environment_id`** (regression guard: `isResumable` accepts
-        `resume_mode === "pty"`). Click **Restart**: the new session **restores the prior
+        `resume_mode === "pty"`). Click **Resume**: the new session **restores the prior
         conversation** (the agent recalls the codeword with no tools) — true resume, not
         just the recap. The respawn argv carries `--continue` and the prior transcript is
         continued (not a fresh `.jsonl`).
+      - Beside **Resume** the card also shows **Start new session**. Clicking it raises a
+        warning (a new session won't restore the prior one and Resume may no longer reach
+        it); confirming launches a **fresh** bridge (no `--continue`, the codeword is NOT
+        recalled). Cancel leaves the stopped bridge resumable.
       - It is **single-session** (no multi-chat capacity) — the card reflects that.
       - **Stop** cleanly ends both the bridge and its keeper (no stray processes).
       - The keeper is reparented to init, so the bridge survives a Clauster restart, and
         on restart the card **rediscovers the pty bridge** (still RUNNING, badge present)
         and **Stop still reaps the keeper** (keeper_pid recovered from the sidecar).
+      - **Mode is fixed per bridge:** after starting a bridge, edit `claude.resume_mode`
+        in `clauster.yml` to the *other* value and restart Clauster. The rediscovered
+        bridge keeps the mode it launched with — Stop and Resume agree (a `standard`
+        bridge is not silently resumed as pty, nor vice-versa).
       - With the flag unset (default `standard`), bridges use the subcommand server and
-        Restart produces a fresh, empty-context session.
+        Resume produces a fresh, empty-context session (no conversation resume).
 
 ## When adding a new gated/config feature
 

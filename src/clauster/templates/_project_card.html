@@ -20,7 +20,7 @@
                 <span class="badge bg-teal-lt me-1" x-show="usageLabel('{{ p.name }}')" x-cloak
                       :title="usageTitle('{{ p.name }}')" x-text="usageLabel('{{ p.name }}')"></span>
                 <span class="badge bg-purple-lt me-1" x-show="resumeModeOf('{{ p.name }}') === 'pty'" x-cloak
-                      title="Restart restores prior conversation context (single session).">↻ true-resume</span>
+                      title="Resume restores prior conversation context (single session).">↻ true-resume</span>
               </div>
 
               <!-- Trust (untrusted only; updates in place) -->
@@ -59,7 +59,10 @@
                         x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Start bridge</button>
                 <button class="btn btn-sm btn-success" @click="resume('{{ p.name }}')"
                         x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
-                        :title="'Restart the bridge — reconnects its environment and keeps ' + resumeModeOf('{{ p.name }}') + ' mode.'"><svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Restart</button>
+                        :title="'Resume the bridge — reconnects its prior session and keeps ' + resumeModeOf('{{ p.name }}') + ' mode.'"><svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Resume</button>
+                <button class="btn btn-sm btn-outline-secondary" @click="startNew('{{ p.name }}')"
+                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
+                        title="Start a new session instead of resuming the prior one."><svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Start new session</button>
                 <button class="btn btn-sm btn-danger" @click="stop('{{ p.name }}')"
                         x-show="isRunning('{{ p.name }}') || isStopping('{{ p.name }}')" x-cloak
                         :disabled="isStopping('{{ p.name }}')">
@@ -83,6 +86,17 @@
                          @keyup.enter="confirmBypassStart('{{ p.name }}')">
                   <button class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')">Start with bypass</button>
                   <button class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
+                </div>
+              </div>
+
+              <!-- start-new-session warning (distinct from Resume) -->
+              <div class="alert alert-warning mt-2" x-show="confirmNew['{{ p.name }}']" x-cloak>
+                <p class="mb-2">⚠ Start a <strong>new session</strong> in <code>{{ p.name }}</code>? This launches a
+                  fresh bridge — it won't restore the prior session, and <strong>Resume</strong> may no longer reach it
+                  (a pty Resume continues the most-recent transcript, which a new session displaces).</p>
+                <div class="btn-list">
+                  <button class="btn btn-sm btn-warning" @click="confirmNewStart('{{ p.name }}')">Start new session</button>
+                  <button class="btn btn-sm" @click="cancelNew('{{ p.name }}')">Cancel</button>
                 </div>
               </div>
               <div class="alert alert-danger mt-2 mb-0" x-show="errorOf('{{ p.name }}')" x-cloak x-text="errorOf('{{ p.name }}')"></div>
