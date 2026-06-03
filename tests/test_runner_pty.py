@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -206,6 +207,47 @@ async def test_rediscover_restores_persisted_resume_mode(runner_config, monkeypa
 
     await runner.rediscover()
     assert runner.get_instance("alpha").resume_mode == "pty"
+
+
+async def test_rediscover_recovers_keeper_pid_from_sidecar(runner_config, monkeypatch) -> None:
+    """A rediscovered pty bridge recovers its keeper pid from the matching sidecar.
+
+    The log path is timestamped (not derivable after a restart), so the sidecar is
+    located by globbing the log dir and matching ``bridge_pid``. Without this, the
+    keeper would be unmanaged and leak on stop.
+    """
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "intentional_stop": True, "resume_mode": "pty"}}
+    )
+    # A sidecar the keeper would have written, naming the live bridge pid (4242).
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000.keeper.json").write_text(
+        json.dumps({"keeper_pid": 9999, "bridge_pid": 4242})
+    )
+    # A stale sidecar for a different bridge pid must be ignored.
+    (log_dir / "alpha-1699999999999.keeper.json").write_text(
+        json.dumps({"keeper_pid": 1111, "bridge_pid": 1})
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    class FakePtr:
+        pid, proc_start, environment_id, session_id = 4242, "1000", "env_x", "session_x"
+
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
+
+    await runner.rediscover()
+    inst = runner.get_instance("alpha")
+    assert inst.resume_mode == "pty"
+    assert inst.keeper_pid == 9999
 
 
 def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) -> None:

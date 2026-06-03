@@ -338,7 +338,7 @@
         const i = this.instances[name] || {};
         return (i.status === "stopped" || i.status === "crashed") && !!i.environment_id;
       },
-      resumeModeOf(name) { return (this.instances[name] || {}).permission_mode || ""; },
+      resumeModeOf(name) { return (this.instances[name] || {}).resume_mode || ""; },
       detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
       externalCount(name) {
         const s = this.externalSessions[name];

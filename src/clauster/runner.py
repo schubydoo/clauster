@@ -524,6 +524,24 @@ class SessionRunner:
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return None
 
+    def _recover_keeper_pid(self, name: str, bridge_pid: int | None) -> int | None:
+        """Find a rediscovered pty bridge's keeper pid from its sidecar.
+
+        After a Clauster restart we know the bridge pid (from the pointer-walk) but
+        not the timestamped ``--debug-file`` path, so the sidecar can't be addressed
+        directly. Glob the log dir for ``{name}-*.keeper.json`` and match on
+        ``bridge_pid``; the keeper is alive iff the bridge is (it holds its terminal),
+        and the bridge's liveness was already confirmed before this is called.
+        """
+        if bridge_pid is None:
+            return None
+        for sidecar in sorted(self._log_dir.glob(f"{name}-*.keeper.json")):
+            info = self._read_sidecar(sidecar)
+            if info is not None and info.get("bridge_pid") == bridge_pid:
+                keeper_pid = info.get("keeper_pid")
+                return keeper_pid if isinstance(keeper_pid, int) else None
+        return None
+
     def _await_ready_pty(self, sidecar: Path, proc: subprocess.Popen) -> dict:
         """Block until the keeper publishes a connect URL, the keeper exits, or timeout."""
         deadline = time.monotonic() + _READY_TIMEOUT
@@ -866,12 +884,23 @@ class SessionRunner:
             pm = saved.get("permission_mode")
             # resume_mode lives on ClaudeConfig, not InstanceDefaults — fall back there.
             rm = saved.get("resume_mode")
+            resume_mode = rm if rm in RESUME_MODES else self._config.claude.resume_mode
+            # A "pty" bridge is held by a detached keeper that outlives a Clauster
+            # restart; recover its pid from the sidecar so stop()/poll_once can reap
+            # it — otherwise a rediscovered pty bridge would leak its keeper. The log
+            # path is timestamped (not derivable), so match the sidecar by bridge pid.
+            keeper_pid = (
+                await asyncio.to_thread(self._recover_keeper_pid, proj.name, ptr.pid)
+                if resume_mode == "pty"
+                else None
+            )
             self._instances[proj.name] = RemoteControlInstance(
                 project=proj.name,
                 label=saved.get("label") or proj.name,
                 spawn_mode=sm if sm in SPAWN_MODES else defaults.spawn_mode,
                 permission_mode=pm if pm in PERMISSION_MODES else defaults.permission_mode,
-                resume_mode=rm if rm in RESUME_MODES else self._config.claude.resume_mode,
+                resume_mode=resume_mode,
+                keeper_pid=keeper_pid,
                 intentional_stop=False,
                 status=InstanceStatus.RUNNING,
                 bridge_pid=ptr.pid,

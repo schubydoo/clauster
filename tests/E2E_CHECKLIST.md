@@ -97,13 +97,17 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
 - [ ] **PTY true-resume mode** — set `claude.resume_mode: pty` (POSIX only). Start a
       bridge: it spawns the `claude --remote-control` flag form under a PTY keeper and
       reaches RUNNING with a `claude.ai/code/session_…` link.
+      - A **`↻ true-resume`** badge shows on the card (purple); hovering it explains
+        "Restart restores prior conversation context (single session)." It is absent for
+        `standard` bridges.
       - Drive a conversation (give the agent a codeword), then **Restart**: the new
         session **restores the prior conversation** (the agent recalls the codeword with
         no tools) — true resume, not just the recap.
       - It is **single-session** (no multi-chat capacity) — the card reflects that.
       - **Stop** cleanly ends both the bridge and its keeper (no stray processes).
-      - The keeper is reparented to init, so the bridge **process** survives a Clauster
-        restart (UI rediscovery of pty bridges lands in the follow-up PR).
+      - The keeper is reparented to init, so the bridge survives a Clauster restart, and
+        on restart the card **rediscovers the pty bridge** (still RUNNING, badge present)
+        and **Stop still reaps the keeper** (keeper_pid recovered from the sidecar).
       - With the flag unset (default `standard`), bridges use the subcommand server and
         Restart produces a fresh, empty-context session.
 
