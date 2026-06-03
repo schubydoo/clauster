@@ -122,6 +122,21 @@ class AuthConfig(BaseModel):
     )  # extra WS/CSRF origins (proxy domain)
 
 
+def _missing_enforced_auth(host: str, auth: AuthConfig) -> bool:
+    """Return True when binding ``host`` would NOT actually enforce authentication.
+
+    The runtime guard gates on ``auth.enabled``, so a non-loopback bind only enforces
+    auth when ``auth.enabled`` is set together with a method (``password_required`` or
+    ``reverse_proxy.enabled``). Loopback never needs auth. The explicit
+    ``allow_unauthenticated_network`` opt-out is intentionally left to callers (the
+    config validator permits it; ``ops._check_auth`` downgrades it to a warning) so
+    both use one shared definition of "enforced auth" without conflating the opt-out.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return False
+    return not (auth.enabled and (auth.password_required or auth.reverse_proxy.enabled))
+
+
 class CloneConfig(BaseModel):
     """Project clone/create guards (spec §11 clone+trust chain).
 
@@ -220,17 +235,16 @@ class ClausterConfig(BaseModel):
         # every request passes through unauthenticated, so `password_required` /
         # `reverse_proxy.enabled` *without* `auth.enabled` is a silent open door — the
         # operator sets a password, the validator accepted it, yet the dashboard is served
-        # to anyone. Require enforcement to be real here (fail closed) instead.
-        if self.host not in _LOOPBACK_HOSTS:
-            a = self.auth
-            enforced = a.enabled and (a.password_required or a.reverse_proxy.enabled)
-            if not (enforced or a.allow_unauthenticated_network):
-                raise ValueError(
-                    f"refusing non-loopback host={self.host!r} without enforced auth. Set "
-                    "auth.enabled: true together with auth.password_required (+ a hash from "
-                    "`clauster hash-password`) or auth.reverse_proxy.enabled — or, to opt out "
-                    "on a trusted LAN, auth.allow_unauthenticated_network."
-                )
+        # to anyone. Require enforcement to be real here (fail closed) instead. Shared with
+        # ops._check_auth via _missing_enforced_auth so validation and diagnostics agree.
+        a = self.auth
+        if _missing_enforced_auth(self.host, a) and not a.allow_unauthenticated_network:
+            raise ValueError(
+                f"refusing non-loopback host={self.host!r} without enforced auth. Set "
+                "auth.enabled: true together with auth.password_required (+ a hash from "
+                "`clauster hash-password`) or auth.reverse_proxy.enabled — or, to opt out "
+                "on a trusted LAN, auth.allow_unauthenticated_network."
+            )
         # Fail closed: password auth required but no hash configured would lock everyone out
         # (or, worse, be skipped) — refuse to start with a clear message.
         if self.auth.password_required and not self.auth.password_hash:
