@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/schubydoo/clauster/compare/v0.2.0...v0.2.1) (2026-06-03)
+
+
+### Documentation
+
+* absolute GitHub URLs in README so images render on PyPI ([#79](https://github.com/schubydoo/clauster/issues/79)) ([1feef42](https://github.com/schubydoo/clauster/commit/1feef42b91a82b2d31063aa448c90e5a0688fb6a))
+
 ## [0.2.0](https://github.com/schubydoo/clauster/compare/v0.1.0...v0.2.0) (2026-06-03)
 
 
