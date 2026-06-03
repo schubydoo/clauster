@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in Clauster isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thanks for taking the time to file a bug. **For security vulnerabilities,
+        do not open an issue** — report it privately via a
+        [GitHub Security Advisory](https://github.com/schubydoo/clauster/security/advisories/new)
+        (see [SECURITY.md](https://github.com/schubydoo/clauster/blob/main/SECURITY.md)).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Clauster version
+      description: Output of `clauster --version`, or the Docker image tag.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - pip / uv (PyPI)
+        - Docker (GHCR)
+        - from source
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python version, browser (for a UI bug), reverse proxy (if any).
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste `clauster` output or bridge logs. Redact any tokens or secrets.
+      render: shell

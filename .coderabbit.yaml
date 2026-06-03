@@ -1,9 +1,10 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit configuration. Schema: https://www.coderabbit.ai/integrations/schema.v2.json
 #
 # Docstrings: our gate is ruff's pydocstyle (D) rules, enforced on EVERY PR by the
-# "ruff + pyright" CI job (.github/workflows/lint.yml, `on: pull_request`). It
-# requires docstrings on all public modules/classes/functions (pep257 convention;
-# D105/D107 and tests/** are intentionally exempt — see pyproject.toml).
+# "lint" CI job (.github/workflows/lint.yml, `on: pull_request`). It requires
+# docstrings on all public modules/classes/functions (pep257 convention; D105/D107
+# and tests/** are intentionally exempt — see pyproject.toml).
 #
 # CodeRabbit's separate docstring-coverage pre-merge check computes a raw
 # percentage that counts inner/nested helpers (preexec closures, signal handlers,
@@ -12,6 +13,42 @@
 # truth and turn the redundant check off rather than run two disagreeing gates.
 language: "en-US"
 reviews:
+  profile: "chill"
+  # Don't gate merges on a CodeRabbit "request changes" state — it isn't a
+  # required check and we don't want it blocking the solo merge flow.
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
   pre_merge_checks:
     docstrings:
       mode: "off"
+  auto_review:
+    enabled: true
+    drafts: false
+    # Skip bot-authored PRs (Renovate, release-please). They only touch deps /
+    # CHANGELOG / version files, and skipping them lets auto-merge proceed without
+    # waiting on review-thread resolution (the `main` ruleset requires it).
+    ignore_usernames:
+      - "renovate[bot]"
+      - "clauster-release-bot[bot]"
+  # Don't spend review effort on vendored / generated / lockfile content.
+  path_filters:
+    - "!src/clauster/static/vendor/**"
+    - "!**/*.min.js"
+    - "!**/*.min.css"
+    - "!uv.lock"
+    - "!package-lock.json"
+  path_instructions:
+    - path: "src/clauster/templates/**"
+      instructions: >-
+        These are Jinja2 templates (autoescape on) driving Alpine.js. Values
+        rendered with {{ }} are HTML-escaped by default — don't flag ordinary
+        interpolation as XSS. Only raw / `| safe` output, or interpolation into
+        event-handler attributes / inline script, is a genuine concern.
+    - path: "tests/**"
+      instructions: >-
+        Tests use FastAPI's TestClient. WebSocket and background-task tests must
+        wrap the client in `with _client(...)` so the app lifespan/startup runs.
+chat:
+  auto_reply: true

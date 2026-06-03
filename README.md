@@ -16,7 +16,8 @@
 </p>
 
 <p align="center">
-  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue.svg">
+  <a href="https://pypi.org/project/clauster/"><img alt="PyPI" src="https://img.shields.io/pypi/v/clauster?logo=pypi&logoColor=white"></a>
+  <a href="https://pypi.org/project/clauster/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/clauster"></a>
   <a href="https://github.com/schubydoo/clauster/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="https://github.com/schubydoo/clauster/pkgs/container/clauster"><img alt="GHCR" src="https://img.shields.io/badge/ghcr.io-clauster-2496ED?logo=docker&logoColor=white"></a>
   <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
@@ -206,6 +207,19 @@ docker run -d --name clauster \
   `claude`.
 - Logs are JSON by default (`CLAUSTER_LOG_FORMAT`); health is at `/healthz`. Images
   are cosign-signed with build provenance + SBOM attestations.
+
+### Docker Compose
+
+A ready-to-edit [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) is included:
+
+```sh
+# 1. generate a password hash (runs inside the image)
+docker compose run --rm clauster clauster hash-password
+# 2. export it single-quoted, then edit the projects/claude volumes in compose.yaml
+export CLAUSTER_AUTH_PASSWORD_HASH='$argon2id$v=19$...'
+# 3. start (the image's HEALTHCHECK is inherited)
+docker compose up -d
+```
 
 ## Auth & networking
 
