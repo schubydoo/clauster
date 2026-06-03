@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from . import claude_cli
-from .config import ClausterConfig, load_config
+from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import _load_trusted_paths, trust_state_for
 from .state import CURRENT_SCHEMA, StateStore
 
@@ -191,13 +191,12 @@ def _check_auth(config: ClausterConfig) -> Check:
     a = config.auth
     if a.password_required and not a.password_hash:
         return Check("auth", FAIL, "password_required but no password_hash set")
-    loopback = config.host in {"127.0.0.1", "::1", "localhost"}
-    if not loopback and not (
-        a.password_required or a.reverse_proxy.enabled or a.allow_unauthenticated_network
-    ):
-        return Check("auth", FAIL, f"non-loopback host {config.host} without any auth")
-    if not loopback and a.allow_unauthenticated_network:
-        return Check("auth", WARN, "bound non-loopback with auth explicitly disabled")
+    # Same "is auth actually enforced?" rule the config validator uses, so doctor never
+    # calls a config consistent that the validator would refuse to start.
+    if _missing_enforced_auth(config.host, a):
+        if a.allow_unauthenticated_network:
+            return Check("auth", WARN, "bound non-loopback with auth explicitly disabled")
+        return Check("auth", FAIL, f"non-loopback host {config.host} without enforced auth")
     return Check("auth", OK, "configuration consistent")
 
 
