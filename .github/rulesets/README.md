@@ -2,8 +2,10 @@
 
 `main.json` is the source-of-truth for the **`main` branch ruleset** — the
 replacement for the legacy branch-protection rules previously declared in
-`.github/settings.yml` (the [`repository-settings`][app] Probot app, now
-deprecated and removed).
+`.github/settings.yml` and reconciled by the [`repository-settings`][app] Probot
+app. That config file is removed in this PR, and the app itself has been
+uninstalled from the repository — the ruleset is now the sole source of branch
+protection.
 
 It encodes the same contract the project has always enforced:
 
