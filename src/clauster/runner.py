@@ -97,6 +97,10 @@ class SessionRunner:
         # Per-spawn background tasks that watch a STARTING bridge until it either
         # registers an environment (-> RUNNING) or proves stuck (-> ERROR).
         self._startup_watches: dict[str, asyncio.Task] = {}
+        # Per-project locks serializing concurrent spawns of the SAME project (see
+        # ``spawn``). One bridge per project is an invariant; without this, two
+        # near-simultaneous spawns race across the awaits in ``_spawn_locked``.
+        self._spawn_locks: dict[str, asyncio.Lock] = {}
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
@@ -213,7 +217,40 @@ class SessionRunner:
         ``claude --remote-control`` flag form run under a :mod:`clauster.pty_keeper`
         for true conversation resume; ``resume=True`` (set by :meth:`resume`) adds
         ``--continue`` so the restarted session restores its prior context.
+
+        Concurrent spawns of the *same* project are serialized by a per-project lock:
+        a double-click, retry, or second browser tab must not both pass the
+        idempotency check and launch two bridges, because the second would clobber
+        the first in ``self._instances``/``self._procs`` and orphan an untracked,
+        unreapable process. Different projects still spawn concurrently.
         """
+        async with self._spawn_lock_for(name):
+            return await self._spawn_locked(
+                name,
+                spawn_mode=spawn_mode,
+                permission_mode=permission_mode,
+                resume=resume,
+            )
+
+    def _spawn_lock_for(self, name: str) -> asyncio.Lock:
+        """Return the per-project spawn lock, creating it on first use.
+
+        Synchronous (no ``await``) so the get-or-create itself can't race on the loop.
+        """
+        lock = self._spawn_locks.get(name)
+        if lock is None:
+            lock = self._spawn_locks[name] = asyncio.Lock()
+        return lock
+
+    async def _spawn_locked(
+        self,
+        name: str,
+        *,
+        spawn_mode: str | None = None,
+        permission_mode: str | None = None,
+        resume: bool = False,
+    ) -> RemoteControlInstance:
+        # Body of spawn(), always run under the per-project lock (see spawn()).
         existing = self._instances.get(name)
         if existing is not None and existing.status in (
             InstanceStatus.STARTING,
