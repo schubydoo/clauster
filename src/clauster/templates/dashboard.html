@@ -638,6 +638,7 @@
       },
       async stop(name) {
         this.closeLogs(name);
+        this.errors[name] = null;  // clear any stale inline error from a prior failed action
         const prev = this.instances[name];
         this.instances[name] = { ...(prev || { project: name }), status: "stopping" };  // optimistic
         try {
@@ -653,6 +654,7 @@
         this.loadUsage(name);
       },
       async trust(name) {
+        this.errors[name] = null;  // clear any stale inline error from a prior failed action
         this.trusting[name] = true;
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" });

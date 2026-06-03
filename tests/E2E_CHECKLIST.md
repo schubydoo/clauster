@@ -49,6 +49,8 @@ restarts — the dashboard JS/CSS are cached static assets.
       `CLAUDE.md`/`.claude` show the "code runs on start" warning and the inserted
       card stays untrusted; errors render inline (not silent). The inserted card
       is fully interactive (Start/Trust/spawn selects) without a refresh.
+      Clicking the warning's **"Show it"** CTA reveals and focuses the new card
+      (scrolls into view + lands focus) instead of forcing a full-page reload.
 - [ ] **Per-project cost badge** lazy-loads `≈$X.XX` after first paint; blank
       project shows no badge.
 - [ ] **Login / logout** (when `auth.password_required`): login, then logout
