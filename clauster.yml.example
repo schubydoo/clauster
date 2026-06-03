@@ -28,7 +28,8 @@ claude:
                                    # (single-session; POSIX only). Opt-in.
                                    # This is the DEFAULT for *new* bridges only — a bridge's
                                    # mode is fixed at launch, so editing this never changes
-                                   # how an already-running or stopped bridge resumes.
+                                   # how an already-running or stopped bridge resumes. The
+                                   # dashboard's per-launch Mode picker can override it per bridge.
 
 instance_defaults:
   spawn_mode: same-dir             # same-dir | worktree (git repos) | session

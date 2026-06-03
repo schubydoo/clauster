@@ -218,6 +218,7 @@ class SessionRunner:
         *,
         spawn_mode: str | None = None,
         permission_mode: str | None = None,
+        resume_mode: str | None = None,
         resume: bool = False,
     ) -> RemoteControlInstance:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
@@ -225,10 +226,14 @@ class SessionRunner:
         Validates spawn/permission modes, ensures remote control + the recap hook are
         set up, launches the process, and watches it until it reaches RUNNING or ERROR.
 
-        When ``claude.resume_mode`` is ``"pty"`` (POSIX only), the bridge is the
+        ``resume_mode`` ("standard"/"pty") picks the launch mode for *this* bridge,
+        overriding the ``claude.resume_mode`` config default (the per-launch picker).
+        When the effective mode is ``"pty"`` (POSIX only), the bridge is the
         ``claude --remote-control`` flag form run under a :mod:`clauster.pty_keeper`
         for true conversation resume; ``resume=True`` (set by :meth:`resume`) adds
-        ``--continue`` so the restarted session restores its prior context.
+        ``--continue`` so the restarted session restores its prior context. The mode
+        is fixed at first launch and recorded on the instance, so a resume always
+        keeps it (see :meth:`_is_pty_mode`).
 
         Concurrent spawns of the *same* project are serialized by a per-project lock:
         a double-click, retry, or second browser tab must not both pass the
@@ -241,6 +246,7 @@ class SessionRunner:
                 name,
                 spawn_mode=spawn_mode,
                 permission_mode=permission_mode,
+                resume_mode=resume_mode,
                 resume=resume,
             )
 
@@ -260,6 +266,7 @@ class SessionRunner:
         *,
         spawn_mode: str | None = None,
         permission_mode: str | None = None,
+        resume_mode: str | None = None,
         resume: bool = False,
     ) -> RemoteControlInstance:
         # Body of spawn(), always run under the per-project lock (see spawn()).
@@ -274,7 +281,7 @@ class SessionRunner:
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode
-        self._validate_spawn_options(proj, spawn_mode, permission_mode)
+        self._validate_spawn_options(proj, spawn_mode, permission_mode, resume_mode)
 
         if not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
             raise NotTrusted(
@@ -331,10 +338,14 @@ class SessionRunner:
         self._instances[name] = instance  # on the loop
 
         # A bridge's resume_mode is fixed at first launch and recorded on the
-        # instance. On resume we honor the prior instance's mode (config only
-        # seeds brand-new bridges) so stop() and resume() agree; see _is_pty_mode.
+        # instance. An explicit resume_mode (the per-launch picker) wins for a
+        # fresh start; otherwise a resume honors the prior instance's mode and a
+        # brand-new bridge falls back to the config default — so stop() and
+        # resume() can't disagree (see _is_pty_mode).
         prior = existing if resume else None
-        instance.resume_mode = "pty" if self._is_pty_mode(prior) else "standard"
+        instance.resume_mode = (
+            "pty" if self._is_pty_mode(prior, requested=resume_mode) else "standard"
+        )
         if instance.resume_mode == "pty":
             return await self._spawn_pty(instance, proj, name, log_path, permission_mode, resume)
 
@@ -389,7 +400,11 @@ class SessionRunner:
         )
 
     def _validate_spawn_options(
-        self, proj: Project, spawn_mode: str, permission_mode: str
+        self,
+        proj: Project,
+        spawn_mode: str,
+        permission_mode: str,
+        resume_mode: str | None = None,
     ) -> None:
         if spawn_mode not in SPAWN_MODES:
             raise InvalidSpawnOption(
@@ -398,6 +413,10 @@ class SessionRunner:
         if permission_mode not in PERMISSION_MODES:
             raise InvalidSpawnOption(
                 f"invalid permission_mode {permission_mode!r}; expected one of {PERMISSION_MODES}"
+            )
+        if resume_mode is not None and resume_mode not in RESUME_MODES:
+            raise InvalidSpawnOption(
+                f"invalid resume_mode {resume_mode!r}; expected one of {RESUME_MODES}"
             )
         if spawn_mode == "worktree" and not proj.is_git_repo:
             raise InvalidSpawnOption(
@@ -501,18 +520,28 @@ class SessionRunner:
 
     # ----- pty / true-resume mode -----------------------------------------
 
-    def _is_pty_mode(self, prior: RemoteControlInstance | None = None) -> bool:
+    def _is_pty_mode(
+        self,
+        prior: RemoteControlInstance | None = None,
+        *,
+        requested: str | None = None,
+    ) -> bool:
         """Whether the bridge launches under the PTY keeper (true resume). POSIX only.
 
-        A bridge's mode is fixed at first launch. When *prior* is given (a resume
-        of an existing instance) its recorded ``resume_mode`` wins, so ``stop()``
-        and ``resume()`` can never disagree about the same bridge; the global
-        ``claude.resume_mode`` only seeds brand-new bridges. Without this, editing
-        the config under a running/stopped bridge would silently flip its mode on
-        the next resume while stop still treated it as the old mode.
+        A bridge's mode is fixed at first launch. Precedence: an explicit
+        *requested* mode (the per-launch picker) wins for a fresh start; else when
+        *prior* is given (a resume of an existing instance) its recorded
+        ``resume_mode`` wins, so ``stop()`` and ``resume()`` can never disagree
+        about the same bridge; else the global ``claude.resume_mode`` seeds a
+        brand-new bridge. Without honoring *prior*, editing the config under a
+        running/stopped bridge would silently flip its mode on the next resume
+        while stop still treated it as the old mode. Windows always falls back to
+        standard (pty is POSIX-only).
         """
         if sys.platform == "win32":
             return False
+        if requested is not None:
+            return requested == "pty"
         if prior is not None:
             return prior.resume_mode == "pty"
         return self._config.claude.resume_mode == "pty"

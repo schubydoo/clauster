@@ -76,6 +76,45 @@ def test_is_pty_mode_honors_prior_instance_over_config(runner_config) -> None:
     assert pty_runner._is_pty_mode() is (sys.platform != "win32")
 
 
+def test_is_pty_mode_explicit_request_wins(runner_config) -> None:
+    """The per-launch picker (an explicit requested mode) overrides config and prior."""
+    from clauster.models import RemoteControlInstance
+
+    std_runner = SessionRunner(runner_config[0], claude_json=runner_config[1])
+    pty_runner, _ = _pty_runner(runner_config)
+    prior_std = RemoteControlInstance(project="a", label="a", resume_mode="standard")
+
+    # explicit pty wins over a standard config (POSIX)
+    assert std_runner._is_pty_mode(requested="pty") is (sys.platform != "win32")
+    # explicit standard wins over a pty config
+    assert pty_runner._is_pty_mode(requested="standard") is False
+    # an explicit request also wins over a prior instance's recorded mode
+    assert std_runner._is_pty_mode(prior_std, requested="pty") is (sys.platform != "win32")
+
+
+async def test_spawn_rejects_invalid_resume_mode(runner_config) -> None:
+    """A bad per-launch resume_mode is rejected before launch (no fake claude needed)."""
+    from clauster.runner import InvalidSpawnOption
+
+    runner = SessionRunner(runner_config[0], claude_json=runner_config[1])
+    with pytest.raises(InvalidSpawnOption):
+        await runner.spawn("alpha", resume_mode="bogus")
+
+
+@_POSIX_ONLY
+async def test_spawn_explicit_pty_overrides_standard_config(runner_config) -> None:
+    """The picker can choose pty even when the config default is standard."""
+    runner = SessionRunner(runner_config[0], claude_json=runner_config[1])  # config=standard
+    inst = await runner.spawn("alpha", resume_mode="pty")
+    try:
+        assert inst.resume_mode == "pty"
+        assert inst.status is InstanceStatus.RUNNING
+        assert inst.url is not None and "/code/session_" in inst.url
+        assert isinstance(inst.keeper_pid, int)
+    finally:
+        await runner.stop("alpha")
+
+
 class _FakeProc:
     def __init__(self, alive: bool) -> None:
         self._alive = alive

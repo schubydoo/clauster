@@ -63,6 +63,30 @@ def test_spawn_missing_body_422(runner_config):
         assert resp.status_code == 422
 
 
+def test_spawn_non_string_resume_mode_422(runner_config):
+    with _client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "resume_mode": 1})
+        assert resp.status_code == 422
+
+
+def test_spawn_invalid_resume_mode_422(runner_config):
+    # An unknown resume_mode is rejected by _validate_spawn_options -> 422,
+    # not silently ignored or 500.
+    with _client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "resume_mode": "bogus"})
+        assert resp.status_code == 422
+
+
+def test_spawn_accepts_resume_mode(runner_config, monkeypatch):
+    # The per-launch picker: an explicit resume_mode is recorded on the instance.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "resume_mode": "standard"})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["resume_mode"] == "standard"
+        client.delete("/api/instances/alpha")
+
+
 def test_get_unknown_instance_404(runner_config):
     with _client(runner_config) as client:
         assert client.get("/api/instances/nope").status_code == 404

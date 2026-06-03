@@ -52,6 +52,16 @@
                     {% if p.allow_bypass_permissions %}<option value="bypassPermissions">bypassPermissions ⚠</option>{% endif %}
                   </select>
                 </div>
+                {% if pty_supported %}
+                <div class="col-6">
+                  <label class="form-label small mb-1">Mode</label>
+                  <select class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
+                          title="standard = multi-session server. pty = single-session true-resume (restores prior conversation on Resume).">
+                    <option value="standard">standard</option>
+                    <option value="pty">pty (true-resume)</option>
+                  </select>
+                </div>
+                {% endif %}
               </div>
 
               <div class="btn-list">

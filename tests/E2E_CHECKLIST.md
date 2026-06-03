@@ -35,8 +35,12 @@ restarts — the dashboard JS/CSS are cached static assets.
 - [ ] **Start / Stop / Resume** a bridge; status transitions
       Starting → Running → Stopped; optimistic pending states + disabled buttons.
 - [ ] **Trust directory** flips the badge in place (no full reload).
-- [ ] **Spawn controls** — spawn-mode + permission-mode pickers render and pass
-      through.
+- [ ] **Spawn controls** — spawn-mode + permission-mode + **resume-mode (Mode)**
+      pickers render and pass through. The Mode picker (standard / pty) defaults to
+      `claude.resume_mode`; choosing **pty** with a `standard` config default starts a
+      pty bridge (the `↻ true-resume` badge appears), and choosing **standard** with a
+      `pty` default starts a subcommand bridge. The Mode picker is hidden on Windows
+      (pty is POSIX-only).
 - [ ] **Open in Claude** deep link + **QR code** render and scan.
 - [ ] **External sessions** (started outside Clauster) appear with their distinct
       indicator.
