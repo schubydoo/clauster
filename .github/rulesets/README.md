@@ -32,22 +32,32 @@ release **body/notes remain editable**, so the post-publish
 
 ## Applying
 
-The ruleset is currently applied/maintained manually via the API:
+The rulesets are currently applied/maintained manually via the API. Each file
+maps to one ruleset: `main.json` → ruleset **`main`** (branch), `tags.json` →
+ruleset **`protect-version-tags`** (tag).
 
 ```sh
 # create (first time)
 gh api -X POST repos/<owner>/<repo>/rulesets --input .github/rulesets/main.json
+gh api -X POST repos/<owner>/<repo>/rulesets --input .github/rulesets/tags.json
 
-# update an existing ruleset (look up its id first)
+# update an existing ruleset (look up its id by name first)
 id=$(gh api repos/<owner>/<repo>/rulesets --jq '.[]|select(.name=="main")|.id')
 gh api -X PUT repos/<owner>/<repo>/rulesets/"$id" --input .github/rulesets/main.json
+id=$(gh api repos/<owner>/<repo>/rulesets --jq '.[]|select(.name=="protect-version-tags")|.id')
+gh api -X PUT repos/<owner>/<repo>/rulesets/"$id" --input .github/rulesets/tags.json
 
-# verify the effective rules on the branch
+# verify: effective branch rules, every ruleset, and immutable releases
 gh api repos/<owner>/<repo>/rules/branches/main
+gh api repos/<owner>/<repo>/rulesets --jq '.[]|{id,name,target,enforcement}'
+gh api repos/<owner>/<repo>/immutable-releases   # expect {"enabled": true, ...}
 ```
 
-A small GitHub Action to reconcile this file (plus repo settings and labels)
+Immutable releases is a repo setting, not a ruleset file: enable with
+`gh api -X PUT repos/<owner>/<repo>/immutable-releases` (disable with `-X DELETE`).
+
+A small GitHub Action to reconcile these files (plus repo settings and labels)
 automatically — applying on merge and re-applying on a schedule to revert
-out-of-band drift — is planned. Until then, edit `main.json` and re-apply by hand.
+out-of-band drift — is planned. Until then, edit the JSON and re-apply by hand.
 
 [app]: https://github.com/repository-settings/app
