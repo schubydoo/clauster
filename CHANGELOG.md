@@ -3,6 +3,11 @@
 ## [0.2.2](https://github.com/schubydoo/clauster/compare/v0.2.1...v0.2.2) (2026-06-03)
 
 
+### Security
+
+* **This is a security release.** A non-loopback bind (e.g. `0.0.0.0` or a LAN IP) could serve the dashboard **unauthenticated** when `auth.enabled` was left at its default `false` — even with a password configured — because the runtime guard only enforces auth when `auth.enabled` is set, while config validation did not require it. The config validator now refuses to start a non-loopback bind unless authentication is actually enforced (`auth.enabled: true` together with `auth.password_required` + a hash, or `auth.reverse_proxy.enabled`; or the explicit `auth.allow_unauthenticated_network` opt-out). All prior releases (≤ 0.2.1) are affected, including the Docker image. **Upgrade, and on any networked deployment set `auth.enabled: true`.** See [GHSA-h4g2-xfmw-q2c9](https://github.com/schubydoo/clauster/security/advisories/GHSA-h4g2-xfmw-q2c9).
+
+
 ### Bug Fixes
 
 * **auth:** refuse non-loopback bind unless auth is actually enforced ([#88](https://github.com/schubydoo/clauster/issues/88)) ([d89d753](https://github.com/schubydoo/clauster/commit/d89d753120c2246eea1838cea9528aa7658eb36f))
