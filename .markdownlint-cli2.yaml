@@ -14,6 +14,11 @@ globs:
 ignores:
   - "**/vendor/**" # third-party assets we ship verbatim
   - "**/node_modules/**"
+  # release-please owns CHANGELOG.md — it regenerates the file on every release
+  # commit (hand-edits get overwritten), and its blank-line spacing between
+  # release sections trips MD012/no-multiple-blanks. Linting a bot-generated file
+  # we don't control just blocks the release PR, so skip it.
+  - "CHANGELOG.md"
 
 config:
   default: true
