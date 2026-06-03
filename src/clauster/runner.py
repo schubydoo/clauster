@@ -330,8 +330,12 @@ class SessionRunner:
         )
         self._instances[name] = instance  # on the loop
 
-        if self._is_pty_mode():
-            instance.resume_mode = "pty"
+        # A bridge's resume_mode is fixed at first launch and recorded on the
+        # instance. On resume we honor the prior instance's mode (config only
+        # seeds brand-new bridges) so stop() and resume() agree; see _is_pty_mode.
+        prior = existing if resume else None
+        instance.resume_mode = "pty" if self._is_pty_mode(prior) else "standard"
+        if instance.resume_mode == "pty":
             return await self._spawn_pty(instance, proj, name, log_path, permission_mode, resume)
 
         try:
@@ -497,9 +501,21 @@ class SessionRunner:
 
     # ----- pty / true-resume mode -----------------------------------------
 
-    def _is_pty_mode(self) -> bool:
-        """Whether new bridges use the PTY keeper (true resume). POSIX only."""
-        return sys.platform != "win32" and self._config.claude.resume_mode == "pty"
+    def _is_pty_mode(self, prior: RemoteControlInstance | None = None) -> bool:
+        """Whether the bridge launches under the PTY keeper (true resume). POSIX only.
+
+        A bridge's mode is fixed at first launch. When *prior* is given (a resume
+        of an existing instance) its recorded ``resume_mode`` wins, so ``stop()``
+        and ``resume()`` can never disagree about the same bridge; the global
+        ``claude.resume_mode`` only seeds brand-new bridges. Without this, editing
+        the config under a running/stopped bridge would silently flip its mode on
+        the next resume while stop still treated it as the old mode.
+        """
+        if sys.platform == "win32":
+            return False
+        if prior is not None:
+            return prior.resume_mode == "pty"
+        return self._config.claude.resume_mode == "pty"
 
     @staticmethod
     def _sidecar_path_for(log_path: Path) -> Path:

@@ -53,6 +53,29 @@ def test_is_pty_mode_gated_on_config_and_platform(runner_config) -> None:
     assert pty_runner._is_pty_mode() is (sys.platform != "win32")
 
 
+def test_is_pty_mode_honors_prior_instance_over_config(runner_config) -> None:
+    """A resume follows the bridge's *recorded* mode, not the live config.
+
+    The config only seeds brand-new bridges; once a bridge has launched its mode
+    is fixed on the instance, so stop() and resume() can never disagree about the
+    same bridge after the config is edited underneath it.
+    """
+    from clauster.models import RemoteControlInstance
+
+    std_runner = SessionRunner(runner_config[0], claude_json=runner_config[1])
+    pty_runner, _ = _pty_runner(runner_config)
+    pty_inst = RemoteControlInstance(project="a", label="a", resume_mode="pty")
+    std_inst = RemoteControlInstance(project="b", label="b", resume_mode="standard")
+
+    # config=standard but the bridge was launched pty -> resume stays pty (POSIX)
+    assert std_runner._is_pty_mode(pty_inst) is (sys.platform != "win32")
+    # config=pty but the bridge was launched standard -> resume stays standard
+    assert pty_runner._is_pty_mode(std_inst) is False
+    # no prior (a brand-new spawn) still follows the config default
+    assert std_runner._is_pty_mode() is False
+    assert pty_runner._is_pty_mode() is (sys.platform != "win32")
+
+
 class _FakeProc:
     def __init__(self, alive: bool) -> None:
         self._alive = alive
