@@ -76,6 +76,10 @@ _READY_POLL_INTERVAL = 0.25
 # Cadence at which the post-spawn startup-watch re-reads the bridge log to detect
 # a (late) environment registration or a stuck-but-alive bridge.
 _STARTUP_WATCH_INTERVAL = 2.0
+# Slack when matching a keeper sidecar's recorded proc-start against the pointer's
+# (the two epochs are derived independently). Mirrors procutil.is_live_bridge's
+# default tolerance so the two PID-reuse checks can't disagree.
+_PROC_START_TOLERANCE = 2.0
 
 
 class SessionRunner:
@@ -524,22 +528,42 @@ class SessionRunner:
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return None
 
-    def _recover_keeper_pid(self, name: str, bridge_pid: int | None) -> int | None:
+    def _recover_keeper_pid(
+        self, name: str, bridge_pid: int | None, bridge_proc_start: float | None
+    ) -> int | None:
         """Find a rediscovered pty bridge's keeper pid from its sidecar.
 
-        After a Clauster restart we know the bridge pid (from the pointer-walk) but
-        not the timestamped ``--debug-file`` path, so the sidecar can't be addressed
-        directly. Glob the log dir for ``{name}-*.keeper.json`` and match on
-        ``bridge_pid``; the keeper is alive iff the bridge is (it holds its terminal),
-        and the bridge's liveness was already confirmed before this is called.
+        After a Clauster restart we know the bridge pid + proc-start (from the
+        pointer-walk) but not the timestamped ``--debug-file`` path, so the sidecar
+        can't be addressed directly. Glob the log dir for ``{name}-*.keeper.json``
+        and match on ``bridge_pid`` **and** ``bridge_proc_start`` — the latter is the
+        PID-reuse defense: a stale sidecar that merely recycled the pid is rejected,
+        so stop()/poll_once can never reap an unrelated process tree. The keeper is
+        alive iff the bridge is (it holds its terminal), already confirmed before this.
+
+        proc-start is compared with the same slack as :func:`procutil.is_live_bridge`
+        (the pointer's stored value and the sidecar's psutil create-time are derived
+        independently, so exact float equality would be brittle); when either side
+        is unknown, fall back to the pid-only match.
         """
         if bridge_pid is None:
             return None
         for sidecar in sorted(self._log_dir.glob(f"{name}-*.keeper.json")):
             info = self._read_sidecar(sidecar)
-            if info is not None and info.get("bridge_pid") == bridge_pid:
-                keeper_pid = info.get("keeper_pid")
-                return keeper_pid if isinstance(keeper_pid, int) else None
+            if info is None or info.get("bridge_pid") != bridge_pid:
+                continue
+            ps = info.get("bridge_proc_start")
+            if (
+                bridge_proc_start is not None
+                and isinstance(ps, (int, float))
+                and not isinstance(ps, bool)
+                and abs(float(ps) - bridge_proc_start) > _PROC_START_TOLERANCE
+            ):
+                continue
+            keeper_pid = info.get("keeper_pid")
+            if isinstance(keeper_pid, int) and not isinstance(keeper_pid, bool):
+                return keeper_pid
+            return None
         return None
 
     def _await_ready_pty(self, sidecar: Path, proc: subprocess.Popen) -> dict:
@@ -885,12 +909,20 @@ class SessionRunner:
             # resume_mode lives on ClaudeConfig, not InstanceDefaults — fall back there.
             rm = saved.get("resume_mode")
             resume_mode = rm if rm in RESUME_MODES else self._config.claude.resume_mode
+            # _expected_epoch (not bare int()) so an unparseable procStart degrades to
+            # None (cmdline-only liveness) instead of raising ValueError out of startup.
+            # Mirrors is_live_bridge, so the liveness check and this construction can't
+            # disagree. Computed once: reused for keeper matching AND the instance.
+            bridge_proc_start = procutil._expected_epoch(ptr.proc_start)
             # A "pty" bridge is held by a detached keeper that outlives a Clauster
             # restart; recover its pid from the sidecar so stop()/poll_once can reap
             # it — otherwise a rediscovered pty bridge would leak its keeper. The log
-            # path is timestamped (not derivable), so match the sidecar by bridge pid.
+            # path is timestamped (not derivable), so match the sidecar by bridge pid
+            # + proc-start (PID-reuse defense — see _recover_keeper_pid).
             keeper_pid = (
-                await asyncio.to_thread(self._recover_keeper_pid, proj.name, ptr.pid)
+                await asyncio.to_thread(
+                    self._recover_keeper_pid, proj.name, ptr.pid, bridge_proc_start
+                )
                 if resume_mode == "pty"
                 else None
             )
@@ -904,11 +936,7 @@ class SessionRunner:
                 intentional_stop=False,
                 status=InstanceStatus.RUNNING,
                 bridge_pid=ptr.pid,
-                # _expected_epoch (not bare int()) so an unparseable procStart
-                # degrades to None (cmdline-only liveness) instead of raising
-                # ValueError out of startup. Mirrors is_live_bridge, so the
-                # liveness check at line 412 and this construction can't disagree.
-                bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
+                bridge_proc_start=bridge_proc_start,
                 environment_id=ptr.environment_id,
                 starter_session_id=ptr.session_id,
                 url=f"https://claude.ai/code?environment={ptr.environment_id}",

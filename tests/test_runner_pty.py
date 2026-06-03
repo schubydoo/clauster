@@ -222,15 +222,18 @@ async def test_rediscover_recovers_keeper_pid_from_sidecar(runner_config, monkey
     StateStore(config.state_dir).save(
         {"alpha": {"label": "alpha", "intentional_stop": True, "resume_mode": "pty"}}
     )
-    # A sidecar the keeper would have written, naming the live bridge pid (4242).
+    # A sidecar the keeper would have written, naming the live bridge pid (4242)
+    # and its proc-start (12345.0 — what the patched jiffies_to_epoch below yields
+    # for the pointer's "1000").
     log_dir = config.state_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "alpha-1700000000000.keeper.json").write_text(
-        json.dumps({"keeper_pid": 9999, "bridge_pid": 4242})
+        json.dumps({"keeper_pid": 9999, "bridge_pid": 4242, "bridge_proc_start": 12345.0})
     )
-    # A stale sidecar for a different bridge pid must be ignored.
+    # A stale sidecar that RECYCLED the same pid but has a different proc-start must
+    # be rejected (PID-reuse defense), even though its bridge_pid matches.
     (log_dir / "alpha-1699999999999.keeper.json").write_text(
-        json.dumps({"keeper_pid": 1111, "bridge_pid": 1})
+        json.dumps({"keeper_pid": 1111, "bridge_pid": 4242, "bridge_proc_start": 88888.0})
     )
     runner = SessionRunner(config, claude_json=claude_json)
 
