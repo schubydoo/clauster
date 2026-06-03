@@ -208,6 +208,19 @@ docker run -d --name clauster \
 - Logs are JSON by default (`CLAUSTER_LOG_FORMAT`); health is at `/healthz`. Images
   are cosign-signed with build provenance + SBOM attestations.
 
+### Docker Compose
+
+A ready-to-edit [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) is included:
+
+```sh
+# 1. generate a password hash (runs inside the image)
+docker compose run --rm clauster clauster hash-password
+# 2. export it single-quoted, then edit the projects/claude volumes in compose.yaml
+export CLAUSTER_AUTH_PASSWORD_HASH='$argon2id$v=19$...'
+# 3. start (the image's HEALTHCHECK is inherited)
+docker compose up -d
+```
+
 ## Auth & networking
 
 Loopback (`127.0.0.1`) needs no auth. Binding to a non-loopback address is refused

@@ -1,0 +1,38 @@
+# Clauster — Docker Compose quickstart. See the README "Docker" section for the full rundown.
+#
+# Clauster binds 0.0.0.0 inside the container, so it REQUIRES enforced auth to start.
+#
+#   1. Generate a password hash (runs inside the image — nothing needed on the host):
+#        docker compose run --rm clauster clauster hash-password
+#   2. Provide the printed `$argon2id$…` hash. Easiest + safest is to export it
+#      single-quoted (single quotes stop your shell expanding the `$`):
+#        export CLAUSTER_AUTH_PASSWORD_HASH='$argon2id$v=19$...'
+#      (Or put it in a .env file beside this one — but then double every `$` to `$$`
+#       so Compose doesn't try to interpolate it.)
+#   3. Point the `projects` volume at your projects_root, and mount the `claude` CLI +
+#      credentials (Clauster spawns `claude remote-control`; the CLI is NOT in the image).
+#   4. docker compose up -d
+
+services:
+  clauster:
+    image: ghcr.io/schubydoo/clauster:latest
+    container_name: clauster
+    restart: unless-stopped
+    ports:
+      - "7621:7621"
+    environment:
+      # Non-loopback bind => enforced auth is mandatory (the container exits otherwise).
+      CLAUSTER_AUTH_ENABLED: "true"
+      CLAUSTER_AUTH_PASSWORD_REQUIRED: "true"
+      CLAUSTER_AUTH_PASSWORD_HASH: ${CLAUSTER_AUTH_PASSWORD_HASH:?run clauster hash-password and export it (see header)}
+      # Remap the runtime user to own the bind-mounts (match your host UID/GID).
+      PUID: "1000"
+      PGID: "1000"
+    volumes:
+      - ./config:/config            # clauster.yml + state_dir
+      - ./projects:/projects        # the projects_root to manage (point at your repos)
+      # `claude` is NOT baked into the image. Mount it onto PATH + mount the runtime
+      # user's ~/.claude credentials (or build a derived image that installs claude):
+      # - /usr/local/bin/claude:/usr/local/bin/claude:ro
+      # - ~/.claude:/config/.claude
+    # The image already defines a HEALTHCHECK against /healthz — Compose inherits it.
