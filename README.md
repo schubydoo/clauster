@@ -140,6 +140,33 @@ uv run clauster
 Then open <http://127.0.0.1:7621>. `claude` must be on your `PATH` (Clauster spawns
 it; it isn't vendored).
 
+## First bridge in 60 seconds
+
+With the server running (above) and `claude` on your `PATH`, spawning your first
+bridge is a handful of clicks — no terminal needed once it's started:
+
+1. **Point Clauster at your code.** Set `projects_root` in `clauster.yml` to a
+   directory whose subfolders are projects (e.g. `~/code`); each child directory
+   becomes a card.
+2. **Sanity-check the host (optional).** `clauster doctor` confirms `claude` is found
+   and new enough and that `projects_root` / the state dir are usable — fix any ✗
+   before spawning.
+3. **Open the dashboard** at <http://127.0.0.1:7621>. You'll see one card per project.
+4. **Start a bridge.** On a project's card, click **Start**. Clauster launches
+   `claude remote-control` in that directory and the card flips to *Running* with a
+   live status badge. (Pick a spawn / permission mode first if you like — the
+   defaults are safe.)
+5. **Attach from anywhere.** Use the card's **Open in Claude** link — or scan its
+   **QR code** — to pick the bridge up in `claude.ai/code` or the Claude mobile app.
+   No SSH session.
+6. **Stop or restart.** **Stop** signals the bridge; **Restart** relaunches it (with
+   `claude.resume_recap` or `resume_mode: pty` it can carry the prior conversation
+   forward — see [Opt-in extras](#opt-in-extras)).
+
+> Exposing this beyond loopback (e.g. on your LAN)? Read
+> [Auth & networking](#auth--networking) first — a non-loopback bind requires
+> authentication.
+
 ## Docker
 
 Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on each release:
