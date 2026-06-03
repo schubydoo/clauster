@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from typing import cast
@@ -106,6 +107,33 @@ async def test_spawn_is_idempotent_while_running(runner_config, monkeypatch):
     assert first.status is InstanceStatus.RUNNING
     second = await runner.spawn("alpha")  # already running -> returns the same instance
     assert second is first
+    assert runner.running_count() == 1
+    await runner.stop("alpha")
+
+
+async def test_concurrent_spawn_launches_one_bridge(runner_config, monkeypatch):
+    # Two near-simultaneous spawns of the same project (double-click / retry / two
+    # tabs) must not both pass the idempotency check across the awaits and launch
+    # two bridges — the second would clobber the first in the registry and orphan
+    # an untracked, unreapable process. The per-project lock serializes them.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+
+    popen_calls = 0
+    real_popen = runner._popen
+
+    def counting_popen(*args, **kwargs):
+        nonlocal popen_calls
+        popen_calls += 1
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_popen", counting_popen)
+
+    first, second = await asyncio.gather(runner.spawn("alpha"), runner.spawn("alpha"))
+
+    assert popen_calls == 1  # exactly one bridge process launched
+    assert first is second  # both callers get the same instance
+    assert len(runner._procs) == 1  # no orphaned, untracked process
     assert runner.running_count() == 1
     await runner.stop("alpha")
 
