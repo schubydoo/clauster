@@ -170,9 +170,10 @@ docker run -d --name clauster \
 ## Auth & networking
 
 Loopback (`127.0.0.1`) needs no auth. Binding to a non-loopback address is refused
-unless you enable one of: password login (`auth.password_required` + a hash from
-`clauster hash-password`), reverse-proxy trust (peer-IP allowlist + HMAC header), or
-an explicit `auth.allow_unauthenticated_network` opt-out for a trusted LAN. Sessions
+unless authentication is actually enforced — set `auth.enabled: true` (the master
+switch) together with either password login (`auth.password_required` + a hash from
+`clauster hash-password`) or reverse-proxy trust (peer-IP allowlist + HMAC header) —
+or, to opt out on a trusted LAN, `auth.allow_unauthenticated_network`. Sessions
 are signed cookies with server-side revocation ("log out everywhere"); WebSocket
 connections are authenticated before accept and origin-checked.
 
@@ -188,6 +189,7 @@ validate against newer versions.
 | --- | --- | --- |
 | `host` / `port` | `127.0.0.1` / `7621` | bind address (non-loopback needs auth) |
 | `projects_root` | — | directory whose children become project cards |
+| `auth.enabled` | `false` | master auth switch — must be on for password / proxy auth to apply |
 | `auth.password_required` | `false` | require login (`clauster hash-password` for the hash) |
 | `claude.resume_recap` | `false` | recap the prior transcript into a restarted bridge |
 | `claude.resume_mode` | `standard` | `pty` = native true-resume on Restart (POSIX) |
