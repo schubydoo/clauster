@@ -160,6 +160,8 @@ async def test_persist_retains_untracked_project_metadata(runner_config):
 
     reloaded = StateStore(config.state_dir).load()
     assert reloaded["alpha"]["permission_mode"] == "plan"
+    assert reloaded["alpha"]["spawn_mode"] == "same-dir"
+    assert reloaded["alpha"]["resume_mode"] == "standard"
     assert reloaded["alpha"]["label"] == "Custom Label"
     assert reloaded["alpha"]["intentional_stop"] is True
 
