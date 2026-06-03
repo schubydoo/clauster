@@ -138,6 +138,32 @@ async def test_concurrent_spawn_launches_one_bridge(runner_config, monkeypatch):
     await runner.stop("alpha")
 
 
+async def test_persist_retains_untracked_project_metadata(runner_config):
+    # A project whose bridge isn't alive at rediscover time must KEEP its persisted
+    # label/modes/intentional_stop, not be wiped from state.json on the post-rediscover
+    # save (which would later resume it with default modes — a silent downgrade).
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {
+            "alpha": {
+                "label": "Custom Label",
+                "permission_mode": "plan",
+                "spawn_mode": "same-dir",
+                "resume_mode": "standard",
+                "intentional_stop": True,
+            }
+        }
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.rediscover()  # alpha's bridge isn't alive -> not tracked
+    assert "alpha" not in runner._instances
+
+    reloaded = StateStore(config.state_dir).load()
+    assert reloaded["alpha"]["permission_mode"] == "plan"
+    assert reloaded["alpha"]["label"] == "Custom Label"
+    assert reloaded["alpha"]["intentional_stop"] is True
+
+
 async def test_stop_instance_without_pid_marks_stopped(runner_config):
     runner = _make_runner(runner_config)
     runner._instances["alpha"] = RemoteControlInstance(

@@ -154,7 +154,7 @@ class SessionRunner:
     # ----- persistence (state.json, D14) ----------------------------------
 
     def _persist_subset(self) -> dict[str, dict]:
-        return {
+        live = {
             name: {
                 "label": inst.label,
                 "intentional_stop": inst.intentional_stop,
@@ -164,6 +164,15 @@ class SessionRunner:
             }
             for name, inst in self._instances.items()
         }
+        # Overlay live instances onto the previously-persisted map rather than
+        # replacing it: a project whose bridge isn't currently tracked — its bridge
+        # died while Clauster was down, or rediscover hasn't (re)detected it — keeps
+        # its saved label/modes/intentional_stop instead of being silently wiped on
+        # the next save (which would later resume it with default modes). Live entries
+        # win for tracked projects. An entry whose project directory was removed
+        # lingers harmlessly (discovery is filesystem-based, so it's never consumed)
+        # until state.json is reset.
+        return {**self._persisted, **live}
 
     async def _persist(self) -> None:
         """Write the persisted subset off-loop, but only when it actually changed."""
@@ -172,6 +181,9 @@ class SessionRunner:
             return
         await asyncio.to_thread(self._state.save, subset)
         self._last_saved = subset
+        # Keep the merge base in sync with what's on disk so the next overlay builds
+        # on the latest saved state (live modes that changed this round are retained).
+        self._persisted = subset
 
     # ----- discovery helpers ---------------------------------------------
 
