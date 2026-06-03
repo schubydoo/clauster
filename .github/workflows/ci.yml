@@ -73,10 +73,34 @@ jobs:
           RUNNER_OS: ${{ runner.os }}
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            uv run --python "$PYTHON_VERSION" pytest -q
+            uv run --python "$PYTHON_VERSION" pytest -q \
+              --cov-report=xml --junitxml=junit.xml -o junit_family=legacy
           else
             uv run --python "$PYTHON_VERSION" pytest -q --cov-fail-under=0
           fi
+      # Upload coverage + test results to Codecov from a single Linux cell (the
+      # gate platform). Linux is where the 96% number is measured; macOS/Windows
+      # coverage is platform-partial by design (see the pytest step), so uploading
+      # them would only muddy the trend. Token-based upload (CODECOV_TOKEN secret)
+      # → no `id-token` permission needed. Both uploads are non-blocking: Codecov
+      # isn't a required check and upload flakiness must never fail CI
+      # (fail_ci_if_error: false). The test-results upload uses `!cancelled()` so a
+      # FAILED pytest run still reports which tests failed (junit.xml is written
+      # regardless of outcome) for Codecov's flaky-test analytics.
+      - name: Upload coverage to Codecov
+        if: ${{ runner.os == 'Linux' && matrix.python-version == '3.13' }}
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' }}
+        uses: codecov/test-results-action@0fa95f0e1eeaafde2c782583b36b28ad0d8c77d3 # v1.2.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: junit.xml
+          fail_ci_if_error: false
 
   # --------------------------------------------------------------------
   # Build sdist + wheel. Cheap; runs on every push and PR so we always
