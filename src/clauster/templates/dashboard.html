@@ -336,7 +336,11 @@
       // show "Restart" instead of "Start" and reuse its stored permission mode.
       isResumable(name) {
         const i = this.instances[name] || {};
-        return (i.status === "stopped" || i.status === "crashed") && !!i.environment_id;
+        // A pty (flag-form) bridge has no environment_id — true-resume works via
+        // `claude --continue`, not an environment reconnect — so treat a stopped pty
+        // instance as resumable too, else the Restart button (the only path to
+        // /resume → --continue) never renders and true-resume is unreachable.
+        return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
       },
       resumeModeOf(name) { return (this.instances[name] || {}).resume_mode || ""; },
       detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
