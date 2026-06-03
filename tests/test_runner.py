@@ -553,6 +553,41 @@ async def test_resume_reuses_modes_and_backfills_session(runner_config, monkeypa
     await runner.stop("alpha")
 
 
+async def test_resume_keeps_recorded_mode_when_config_flips(runner_config, monkeypatch):
+    # Regression: a bridge launched in "standard" must stay standard on resume
+    # even if clauster.yml is later flipped to "pty" (e.g. a config edit + restart).
+    # The mode is recorded on the instance at first launch; the global config only
+    # seeds brand-new bridges. Without this, stop() (reads instance.resume_mode)
+    # and resume() (used to re-derive from config) disagree about the same bridge.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    first = await runner.spawn("alpha")
+    assert first.resume_mode == "standard"
+    assert first.status is InstanceStatus.RUNNING
+    await runner.stop("alpha")
+
+    # Simulate editing clauster.yml -> resume_mode: pty underneath the stopped bridge.
+    runner._config.claude.resume_mode = "pty"
+
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
+
+    class FakePtr:
+        pid, proc_start = 1, "1000"
+        environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
+        session_id = "session_01RESUMEDBBBBBBBBBBB"
+
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: FakePtr())
+
+    resumed = await runner.resume("alpha")
+    # Honored the recorded mode: stayed standard, did not cross to the pty
+    # flag form / keeper despite the config now saying pty.
+    assert resumed.resume_mode == "standard"
+    assert resumed.keeper_pid is None
+    argv = _argv_of(resumed)
+    assert "remote-control" in argv and "--remote-control" not in argv
+    await runner.stop("alpha")
+
+
 async def test_resume_unknown_instance_rejected(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):

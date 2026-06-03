@@ -26,6 +26,9 @@ claude:
                                    # pty = run the `claude --remote-control` flag form under
                                    # a PTY keeper for true conversation resume on Restart
                                    # (single-session; POSIX only). Opt-in.
+                                   # This is the DEFAULT for *new* bridges only — a bridge's
+                                   # mode is fixed at launch, so editing this never changes
+                                   # how an already-running or stopped bridge resumes.
 
 instance_defaults:
   spawn_mode: same-dir             # same-dir | worktree (git repos) | session

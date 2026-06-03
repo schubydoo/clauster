@@ -246,7 +246,7 @@ validate against newer versions.
 | `auth.enabled` | `false` | master auth switch — must be on for password / proxy auth to apply |
 | `auth.password_required` | `false` | require login (`clauster hash-password` for the hash) |
 | `claude.resume_recap` | `false` | recap the prior transcript into a restarted bridge |
-| `claude.resume_mode` | `standard` | `pty` = native true-resume on Restart (POSIX) |
+| `claude.resume_mode` | `standard` | `pty` = native true-resume on Restart (POSIX); default for new bridges only — a bridge keeps the mode it launched with |
 | `reaper.ui_enabled` | `false` | expose the ghost-environment reaper in the dashboard |
 | `logs.redact_session_url` | `false` | redact the session URL on disk too, not just over WS |
 

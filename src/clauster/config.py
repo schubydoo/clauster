@@ -73,6 +73,9 @@ class ClaudeConfig(BaseModel):
     # single-session but genuinely restores prior conversation context on a
     # Restart (true resume) — unlike the recap hook, which only *recaps* it.
     # POSIX only; on Windows "pty" falls back to standard. Opt-in.
+    # This seeds the mode for *new* bridges only: a bridge's resume_mode is
+    # recorded on its instance at launch, so editing this never re-modes an
+    # already-running or stopped bridge (stop/resume always honor the record).
     resume_mode: ResumeMode = "standard"
 
 
