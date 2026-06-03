@@ -10,7 +10,7 @@ from __future__ import annotations
 import ipaddress
 import os
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
@@ -253,9 +253,6 @@ class ClausterConfig(BaseModel):
                 "Generate one with `clauster hash-password` (or set CLAUSTER_AUTH_PASSWORD_HASH)."
             )
         return self
-
-
-ConfigPath = Annotated[Path, "resolved path the config was loaded from, or None"]
 
 
 def _candidate_paths(explicit: Path | None) -> list[Path]:
