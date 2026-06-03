@@ -17,14 +17,14 @@
 
 <p align="center">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue.svg">
-  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="https://github.com/schubydoo/clauster/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="https://github.com/schubydoo/clauster/pkgs/container/clauster"><img alt="GHCR" src="https://img.shields.io/badge/ghcr.io-clauster-2496ED?logo=docker&logoColor=white"></a>
   <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
   <a href="https://pre-commit.com/"><img alt="pre-commit" src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white"></a>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/dashboard-dark.png" alt="Clauster dashboard" width="860">
+  <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/dashboard-dark.png" alt="Clauster dashboard" width="860">
 </p>
 
 Anthropic's first-party tooling assumes terminal access on the host to spawn a
@@ -40,17 +40,17 @@ a project, start a bridge, and attach to it from `claude.ai/code` or the mobile 
 <table>
   <tr>
     <td width="50%" align="center">
-      <img src="docs/screenshots/dashboard-light.png" alt="Dashboard, light theme"><br>
+      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/dashboard-light.png" alt="Dashboard, light theme"><br>
       <sub><b>Dark / light</b> — theme toggle persists across reloads</sub>
     </td>
     <td width="50%" align="center">
-      <img src="docs/screenshots/new-project-clone.png" alt="Create or clone a project"><br>
+      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/new-project-clone.png" alt="Create or clone a project"><br>
       <sub><b>Create or clone</b> — SSRF-guarded, cloned code runs only on Start</sub>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <img src="docs/screenshots/login-dark.png" alt="Password login"><br>
+      <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/login-dark.png" alt="Password login"><br>
       <sub><b>Password login</b> — for non-loopback / networked deploys</sub>
     </td>
     <td width="50%" align="center" valign="middle">
@@ -64,7 +64,7 @@ a project, start a bridge, and attach to it from `claude.ai/code` or the mobile 
 
 Everything below is implemented and shipping. Items marked **(opt-in)** are gated
 behind a config flag and off by default — the flag is named inline so you can find
-it in [`clauster.yml.example`](clauster.yml.example).
+it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example).
 
 ### Projects & bridges
 
@@ -179,7 +179,7 @@ connections are authenticated before accept and origin-checked.
 ## Configuration
 
 All settings live in `clauster.yml` — see
-[`clauster.yml.example`](clauster.yml.example) for the full, commented schema. Any
+[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) for the full, commented schema. Any
 scalar key is overridable by an environment variable of the form
 `CLAUSTER_<UPPER_SNAKE_PATH>`. The schema is additive-only — old configs always
 validate against newer versions.
@@ -234,4 +234,4 @@ and CI-gated on Linux; macOS / Windows are in the test matrix. Apache-2.0 licens
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](https://github.com/schubydoo/clauster/blob/main/LICENSE).
