@@ -102,9 +102,13 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
       - A **`↻ true-resume`** badge shows on the card (purple); hovering it explains
         "Restart restores prior conversation context (single session)." It is absent for
         `standard` bridges.
-      - Drive a conversation (give the agent a codeword), then **Restart**: the new
-        session **restores the prior conversation** (the agent recalls the codeword with
-        no tools) — true resume, not just the recap.
+      - Drive a conversation (give the agent a codeword), then **Stop**. The card must
+        then show a **Restart** button — a stopped pty bridge is *resumable* even though it
+        has **no `environment_id`** (regression guard: `isResumable` accepts
+        `resume_mode === "pty"`). Click **Restart**: the new session **restores the prior
+        conversation** (the agent recalls the codeword with no tools) — true resume, not
+        just the recap. The respawn argv carries `--continue` and the prior transcript is
+        continued (not a fresh `.jsonl`).
       - It is **single-session** (no multi-chat capacity) — the card reflects that.
       - **Stop** cleanly ends both the bridge and its keeper (no stray processes).
       - The keeper is reparented to init, so the bridge survives a Clauster restart, and
