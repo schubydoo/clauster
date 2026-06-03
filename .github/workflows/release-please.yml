@@ -58,3 +58,82 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # --- Keep uv.lock's editable self-version in sync with the release bump ---
+      # release-please bumps pyproject.toml's version but NOT uv.lock, so the lock's
+      # `[[package]] name = "clauster"` version drifts behind each release — a
+      # papercut where every local `uv` run then regenerates uv.lock into a stray
+      # diff. When a release PR is open, regenerate uv.lock on that PR branch so the
+      # lock bumps together with pyproject and lands in the same merge. A no-op on
+      # every other push (and when the lock is already in sync). It pushes only to
+      # the bot's own `release-please--*` branch, never to main.
+      - name: Detect open release PR
+        id: relpr
+        env:
+          GH_TOKEN: ${{ github.token }} # read-only default token is enough for `pr list`
+        run: |
+          set -euo pipefail
+          # Pick the release PR by *authenticated identity*, not just the branch
+          # name: it must be authored by the release App, target main, and be an
+          # in-repo (non-fork) branch. The branch-name prefix alone would let any
+          # collaborator open a `release-please--*` PR and have us check it out +
+          # run `uv lock` (which can execute the project's build backend) in this
+          # trusted push context with the app token in scope. gh renders an App
+          # author as `app/<slug>`.
+          branch="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --json headRefName,baseRefName,author,isCrossRepository \
+            --jq '[.[]
+                   | select(.headRefName | startswith("release-please--"))
+                   | select(.baseRefName == "main")
+                   | select(.isCrossRepository == false)
+                   | select(.author.login == "app/clauster-release-bot")
+                  ][0].headRefName // ""')"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if [ -n "$branch" ]; then echo "Release PR branch: $branch"; else echo "No open release PR."; fi
+
+      - name: Check out repo
+        if: ${{ steps.relpr.outputs.branch != '' }}
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up uv
+        if: ${{ steps.relpr.outputs.branch != '' }}
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          # No cache: this job can push, and setup-uv's default caching is a
+          # cache-poisoning vector (zizmor). A one-off `uv lock` doesn't need it.
+          enable-cache: false
+
+      - name: Sync uv.lock on the release PR
+        if: ${{ steps.relpr.outputs.branch != '' }}
+        env:
+          # App token (contents: write) so the push is authorized AND keeps the
+          # release PR bot-authored. Branch via env (not inlined) — no injection.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_BRANCH: ${{ steps.relpr.outputs.branch }}
+        run: |
+          set -euo pipefail
+          # Defensive: only ever touch the bot's release branch, never anything else.
+          case "$PR_BRANCH" in
+            release-please--*) ;;
+            *) echo "refusing to push to unexpected branch '$PR_BRANCH'"; exit 1 ;;
+          esac
+          git fetch --quiet origin "$PR_BRANCH"
+          git checkout -B "$PR_BRANCH" FETCH_HEAD
+          uv lock
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock already in sync — nothing to commit."
+            exit 0
+          fi
+          # Attribute the commit to the release bot (fall back to the Actions bot).
+          bot_user="clauster-release-bot[bot]"
+          bot_id="$(gh api "/users/${bot_user}" --jq '.id' 2>/dev/null || true)"
+          if [ -z "$bot_id" ]; then bot_user="github-actions[bot]"; bot_id="41898282"; fi
+          git config user.name "$bot_user"
+          git config user.email "${bot_id}+${bot_user}@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "chore: sync uv.lock to the release version"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${PR_BRANCH}"
+          echo "Pushed uv.lock sync to $PR_BRANCH."
