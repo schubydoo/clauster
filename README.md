@@ -142,20 +142,33 @@ it; it isn't vendored).
 
 ## Docker
 
-Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on each release:
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on each release.
+The image binds `0.0.0.0`, so it **requires enforced auth** to start. First generate a
+password hash — this runs `clauster` *inside* the image, so you don't need it on the host:
+
+```sh
+docker run --rm -it ghcr.io/schubydoo/clauster:latest clauster hash-password
+```
+
+Copy the printed `$argon2id$…` hash, then start the server with auth enabled:
 
 ```sh
 docker run -d --name clauster \
   -p 7621:7621 \
   -e PUID=1000 -e PGID=1000 \
-  -e CLAUSTER_AUTH_PASSWORD_HASH="$(clauster hash-password)" \
+  -e CLAUSTER_AUTH_ENABLED=true \
+  -e CLAUSTER_AUTH_PASSWORD_REQUIRED=true \
+  -e 'CLAUSTER_AUTH_PASSWORD_HASH=$argon2id$v=19$...' \
   -v /path/to/config:/config \
   -v /path/to/projects:/projects \
   ghcr.io/schubydoo/clauster:latest
 ```
 
-- The image binds `0.0.0.0`, which **requires auth** — set `CLAUSTER_AUTH_PASSWORD_HASH`
-  (or put it in `/config/clauster.yml`) or the container exits on start.
+- The image binds `0.0.0.0`, so it won't start without **enforced** auth — set
+  `CLAUSTER_AUTH_ENABLED=true` **and** `CLAUSTER_AUTH_PASSWORD_REQUIRED=true` **and** a
+  `CLAUSTER_AUTH_PASSWORD_HASH` (or configure reverse-proxy trust in `/config/clauster.yml`),
+  or the container exits on start. Single-quote the hash env value — the argon2 hash
+  contains `$` that your shell would otherwise expand.
 - `/config` holds `clauster.yml` + state; `/projects` is your `projects_root`.
   `PUID`/`PGID` remap the runtime user to own bind-mounts.
 - `claude` is **not** baked in — tell Clauster where it is one of two ways: mount the
@@ -170,9 +183,10 @@ docker run -d --name clauster \
 ## Auth & networking
 
 Loopback (`127.0.0.1`) needs no auth. Binding to a non-loopback address is refused
-unless you enable one of: password login (`auth.password_required` + a hash from
-`clauster hash-password`), reverse-proxy trust (peer-IP allowlist + HMAC header), or
-an explicit `auth.allow_unauthenticated_network` opt-out for a trusted LAN. Sessions
+unless authentication is actually enforced — set `auth.enabled: true` (the master
+switch) together with either password login (`auth.password_required` + a hash from
+`clauster hash-password`) or reverse-proxy trust (peer-IP allowlist + HMAC header) —
+or, to opt out on a trusted LAN, `auth.allow_unauthenticated_network`. Sessions
 are signed cookies with server-side revocation ("log out everywhere"); WebSocket
 connections are authenticated before accept and origin-checked.
 
@@ -188,6 +202,7 @@ validate against newer versions.
 | --- | --- | --- |
 | `host` / `port` | `127.0.0.1` / `7621` | bind address (non-loopback needs auth) |
 | `projects_root` | — | directory whose children become project cards |
+| `auth.enabled` | `false` | master auth switch — must be on for password / proxy auth to apply |
 | `auth.password_required` | `false` | require login (`clauster hash-password` for the hash) |
 | `claude.resume_recap` | `false` | recap the prior transcript into a restarted bridge |
 | `claude.resume_mode` | `standard` | `pty` = native true-resume on Restart (POSIX) |

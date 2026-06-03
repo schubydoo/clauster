@@ -47,7 +47,9 @@ COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     # Bind all interfaces (a container is useless on loopback). host!=loopback
-    # makes clauster REQUIRE auth — set CLAUSTER_AUTH_PASSWORD_HASH or it exits.
+    # makes clauster REQUIRE enforced auth — set CLAUSTER_AUTH_ENABLED=true +
+    # CLAUSTER_AUTH_PASSWORD_REQUIRED=true + CLAUSTER_AUTH_PASSWORD_HASH (or
+    # reverse-proxy trust), or it exits on start. See README "Docker".
     CLAUSTER_HOST=0.0.0.0 \
     CLAUSTER_PORT=7621 \
     CLAUSTER_LOG_FORMAT=json \
