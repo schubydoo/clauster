@@ -29,5 +29,5 @@ rules:
     level: warning
   # Workflow/config files routinely omit the `---` start marker.
   document-start: disable
-  # Probot Settings uses comments aligned under keys; don't fight that.
+  # Some config files align comments under keys; don't fight that.
   comments-indentation: disable
