@@ -25,6 +25,14 @@ _UUID_RE = re.compile(
 
 # A conservative set of obvious secret shapes, as defense-in-depth — the bridge
 # already prints "[REDACTED]" for most secrets, but never rely on that alone.
+#
+# KNOWN LIMITATION (by design): this is a shape ALLOW-LIST anchored on word
+# boundaries. It will NOT catch a novel/unstructured high-entropy secret — a
+# bearer value that isn't literally "Bearer …", a raw JWT, or a vendor token whose
+# prefix isn't listed below all pass through. That is acceptable because this layer
+# is defense-in-depth: the *primary* WS guarantees are the env_/session_/cse_ + UUID
+# redaction above (D11, the bearer-equivalent identifiers) and the bridge's own
+# "[REDACTED]". Add new shapes here as they appear rather than assuming coverage.
 _SECRET_RES = (
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"),  # GitHub tokens
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),  # GitHub fine-grained PAT
