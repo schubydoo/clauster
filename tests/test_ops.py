@@ -16,6 +16,7 @@ from clauster.ops import (
     OK,
     WARN,
     _check_auth,
+    _check_claude_login,
     _check_repo_freshness,
     _version_ge,
     make_backup,
@@ -192,6 +193,45 @@ def test_check_auth_branches(write_config, tmp_path):
     assert _check_auth(c2).status == FAIL
     c2.auth.allow_unauthenticated_network = True
     assert _check_auth(c2).status == WARN
+
+
+# ----- _check_claude_login ----------------------------------------------
+
+
+def _creds(tmp_path: Path, payload: str) -> Path:
+    p = tmp_path / ".credentials.json"
+    p.write_text(payload)
+    return p
+
+
+def test_login_ok_with_token(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    c = _check_claude_login(_creds(tmp_path, '{"claudeAiOauth": {"accessToken": "tok"}}'))
+    assert c.name == "claude-login" and c.status == OK
+
+
+def test_login_missing_file_warns(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    c = _check_claude_login(tmp_path / "nope.json")
+    assert c.status == WARN and "not logged in" in c.detail
+
+
+def test_login_api_key_overrides_absent_creds(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    c = _check_claude_login(tmp_path / "nope.json")
+    assert c.status == OK and "ANTHROPIC_API_KEY" in c.detail
+
+
+def test_login_present_but_no_token_warns(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    c = _check_claude_login(_creds(tmp_path, '{"claudeAiOauth": {}}'))
+    assert c.status == WARN and "no access token" in c.detail
+
+
+def test_login_malformed_json_warns(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    c = _check_claude_login(_creds(tmp_path, "{not json"))
+    assert c.status == WARN and "not valid JSON" in c.detail
 
 
 # ----- backup / restore -------------------------------------------------
