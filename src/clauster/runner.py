@@ -33,6 +33,7 @@ from .config import (
     SPAWN_MODES,
     ClausterConfig,
     PermissionMode,
+    ResumeMode,
     SpawnMode,
 )
 from .discovery import discover_projects, is_valid_project_name
@@ -979,26 +980,80 @@ class SessionRunner:
 
     # ----- background poll (source #2 + liveness reconcile) ---------------
 
+    def _saved_modes(self, saved: dict) -> tuple[SpawnMode, PermissionMode, ResumeMode]:
+        """Coerce persisted spawn/permission/resume modes against the allowed sets.
+
+        A hand-edited or corrupt ``state.json`` that holds an unknown mode must not
+        fail the (Literal-typed) model and abort startup — fall back to the
+        configured defaults instead. ``resume_mode`` lives on ``ClaudeConfig``, the
+        other two on ``InstanceDefaults``.
+        """
+        defaults = self._config.instance_defaults
+        sm = saved.get("spawn_mode")
+        pm = saved.get("permission_mode")
+        rm = saved.get("resume_mode")
+        return (
+            sm if sm in SPAWN_MODES else defaults.spawn_mode,
+            pm if pm in PERMISSION_MODES else defaults.permission_mode,
+            rm if rm in RESUME_MODES else self._config.claude.resume_mode,
+        )
+
+    def _stopped_from_persisted(self, name: str) -> RemoteControlInstance | None:
+        """Rebuild a STOPPED, resumable instance from a gone bridge's persisted record.
+
+        The process is typically gone because the host rebooted while Clauster (and
+        the bridge) were down. ``rediscover`` only re-materializes bridges still found
+        *alive*; without
+        this, a reboot-killed bridge stays in ``state.json`` but never reappears in
+        the UI, so the operator loses the (still-resumable) session entirely. We
+        instead surface it as a STOPPED card: a "pty" bridge then offers Resume
+        (``--continue`` recovers the conversation) and a "standard" bridge offers a
+        fresh Start (its environment server died with the host). Returns ``None``
+        when nothing was persisted for ``name`` — then there's genuinely no prior
+        session to offer, so we don't invent a phantom card.
+        """
+        saved = self._persisted.get(name)
+        if not saved:
+            return None
+        spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
+        return RemoteControlInstance(
+            project=name,
+            label=saved.get("label") or name,
+            spawn_mode=spawn_mode,
+            permission_mode=permission_mode,
+            resume_mode=resume_mode,
+            # The process is gone: no pid/keeper/env to recover. intentional_stop is
+            # carried through (a host-down bridge has it False — "interrupted" — vs a
+            # deliberate Stop's True); both render as a resumable STOPPED card.
+            intentional_stop=bool(saved.get("intentional_stop", False)),
+            status=InstanceStatus.STOPPED,
+            bridge_pid=None,
+            bridge_proc_start=None,
+            keeper_pid=None,
+        )
+
     async def rediscover(self) -> None:
-        """Read-only re-detection of bridges already running (e.g. after a restart)."""
+        """Re-detect bridges after a restart: reattach live ones, resurrect dead ones.
+
+        A bridge found *alive* is reattached as RUNNING. A discovered project whose
+        bridge is gone but which has a persisted record (its process died while
+        Clauster was down — e.g. a host reboot) is resurrected as a STOPPED,
+        resumable card instead of being dropped; one with no persisted record is
+        left absent (nothing to resume).
+        """
         for proj in self._discovered().values():
             if proj.name in self._instances:
                 continue
             ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
             if ptr is None or not await asyncio.to_thread(pointers.is_live, ptr):
+                stopped = self._stopped_from_persisted(proj.name)
+                if stopped is not None:
+                    self._instances[proj.name] = stopped
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge
             # found alive is by definition NOT intentionally stopped.
             saved = self._persisted.get(proj.name, {})
-            defaults = self._config.instance_defaults
-            # Coerce persisted modes against the allowed sets so a hand-edited /
-            # corrupt state.json can't fail the (now Literal-typed) model and abort
-            # startup — fall back to the configured default instead.
-            sm = saved.get("spawn_mode")
-            pm = saved.get("permission_mode")
-            # resume_mode lives on ClaudeConfig, not InstanceDefaults — fall back there.
-            rm = saved.get("resume_mode")
-            resume_mode = rm if rm in RESUME_MODES else self._config.claude.resume_mode
+            spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
             # _expected_epoch (not bare int()) so an unparseable procStart degrades to
             # None (cmdline-only liveness) instead of raising ValueError out of startup.
             # Mirrors is_live_bridge, so the liveness check and this construction can't
@@ -1019,8 +1074,8 @@ class SessionRunner:
             self._instances[proj.name] = RemoteControlInstance(
                 project=proj.name,
                 label=saved.get("label") or proj.name,
-                spawn_mode=sm if sm in SPAWN_MODES else defaults.spawn_mode,
-                permission_mode=pm if pm in PERMISSION_MODES else defaults.permission_mode,
+                spawn_mode=spawn_mode,
+                permission_mode=permission_mode,
                 resume_mode=resume_mode,
                 keeper_pid=keeper_pid,
                 intentional_stop=False,
