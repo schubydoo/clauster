@@ -19,7 +19,10 @@ concurrency:
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # On a release this job also builds + Sigstore-signs + uploads the dists, so
+    # give it headroom beyond the release-please/app-token steps — a timeout here
+    # would strand the release as an unpublished draft.
+    timeout-minutes: 15
     # GITHUB_TOKEN stays read-only: the App token (minted below) does all the
     # release writing (PR, version bump, draft-release assets, publish). The only
     # added scope is id-token: write, for Sigstore keyless signing (OIDC) of the
@@ -205,9 +208,19 @@ jobs:
           # the uploads host. Sigstore (v3) writes .sigstore.json bundles next to
           # each input; glob both bundle spellings defensively.
           shopt -s nullglob
-          assets=(dist/*.tar.gz dist/*.whl dist/*.sigstore dist/*.sigstore.json)
-          if [ ${#assets[@]} -eq 0 ]; then
-            echo "no build/signature artifacts to upload; aborting" >&2
+          dists=(dist/*.tar.gz dist/*.whl)
+          sigs=(dist/*.sigstore dist/*.sigstore.json)
+          assets=("${dists[@]}" "${sigs[@]}")
+          if [ ${#dists[@]} -eq 0 ]; then
+            echo "no sdist/wheel to upload; aborting" >&2
+            exit 1
+          fi
+          # Refuse to publish UNSIGNED artifacts: the whole point is signed Release
+          # assets (Scorecard). Sigstore v3 exits non-zero on a signing failure so
+          # this shouldn't trigger, but if a future glob/format change matched no
+          # bundle we'd otherwise upload dists with no signature — abort instead.
+          if [ ${#sigs[@]} -eq 0 ]; then
+            echo "no .sigstore bundles produced; refusing to publish unsigned artifacts" >&2
             exit 1
           fi
           for f in "${assets[@]}"; do
