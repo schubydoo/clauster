@@ -616,7 +616,9 @@ class SessionRunner:
         """Read the keeper's discovery JSON, or None if absent / mid-write / invalid."""
         try:
             return json.loads(sidecar.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+            # UnicodeDecodeError (a ValueError) for a non-UTF-8 sidecar must still
+            # honor the invalid -> None contract, not break readiness polling.
             return None
 
     def _recover_keeper_pid(

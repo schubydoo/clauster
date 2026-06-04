@@ -665,3 +665,11 @@ def test_read_markers_tolerates_non_utf8_bytes(tmp_path):
     markers = SessionRunner._read_markers(log)
     assert markers.poll_loop_started is True
     assert markers.environment_id == "env_ABC123"
+
+
+def test_read_sidecar_non_utf8_returns_none(tmp_path):
+    # A non-UTF-8 sidecar raises UnicodeDecodeError (a ValueError) on read; the
+    # invalid -> None contract must hold so readiness polling isn't broken.
+    sidecar = tmp_path / "x.keeper.json"
+    sidecar.write_bytes(b"\xff\xfe\x00not utf-8")
+    assert SessionRunner._read_sidecar(sidecar) is None

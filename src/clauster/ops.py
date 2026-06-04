@@ -214,7 +214,9 @@ def _check_claude_login(creds_path: Path | None = None) -> Check:
         state = "present"
     except (FileNotFoundError, OSError):
         state = "missing"  # no credentials file yet
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # A non-UTF-8 creds file (UnicodeDecodeError, a ValueError) is as unusable
+        # as invalid JSON — report it the same way instead of crashing doctor.
         state, bad_json = "bad_json", str(exc)
 
     if has_token:
