@@ -24,6 +24,21 @@
 
 * **test:** speed up the suite 48s→14s (xdist + cap the 15s ready-timeout test) ([#111](https://github.com/schubydoo/clauster/issues/111)) ([97f3469](https://github.com/schubydoo/clauster/commit/97f34694e41ed9c129d219c9f95d53b90db38de4))
 
+
+### Supply Chain & CI
+
+* **Signed Releases (OpenSSF Scorecard):** sign + attach release artifacts — the sdist/wheel are now Sigstore-signed and attached to each GitHub Release via an immutable draft→sign→publish flow ([#114](https://github.com/schubydoo/clauster/issues/114)) ([380656e](https://github.com/schubydoo/clauster/commit/380656e2490bd63b79d6740dcb056177f9664b71))
+* **review:** CodeRabbit as the automatic reviewer + Claude as an on-demand `@claude` backup; calibrated `.coderabbit.yaml` ([#120](https://github.com/schubydoo/clauster/issues/120)) ([bc45048](https://github.com/schubydoo/clauster/commit/bc4504878b73ea124325f4ff245d0af0785a73d1)) — building on [#113](https://github.com/schubydoo/clauster/issues/113), [#116](https://github.com/schubydoo/clauster/issues/116), [#117](https://github.com/schubydoo/clauster/issues/117), [#119](https://github.com/schubydoo/clauster/issues/119)
+* **security:** move the Trivy image scan to main-push + cron, off PRs ([#112](https://github.com/schubydoo/clauster/issues/112)) ([8fa8a51](https://github.com/schubydoo/clauster/commit/8fa8a510091e4e01976d3537847397f29ff513de))
+* **codecov:** tune `codecov.yml` to best practice ([#115](https://github.com/schubydoo/clauster/issues/115)) ([3e78641](https://github.com/schubydoo/clauster/commit/3e786410c6e438770a98f2ef5b45731a421f82af))
+* **codecov:** skip the coverage upload on release-please PRs ([#109](https://github.com/schubydoo/clauster/issues/109)) ([040f2ee](https://github.com/schubydoo/clauster/commit/040f2ee61c64d19fc52a43ab83cfed059d9e3402))
+
+
+### Tests
+
+* **clone:** end-to-end clone-pipeline test (POST → background task → WebSocket progress) ([#106](https://github.com/schubydoo/clauster/issues/106)) ([b1d4b7b](https://github.com/schubydoo/clauster/commit/b1d4b7b977c88df128c546bbbd628217cfedf5f7))
+* **runner:** win32 pty-mode guard coverage ([#107](https://github.com/schubydoo/clauster/issues/107)) ([0b85f4f](https://github.com/schubydoo/clauster/commit/0b85f4f68a5507f8896f0aa730bacd1ec5781b4d))
+
 ## [0.3.0](https://github.com/schubydoo/clauster/compare/v0.2.2...v0.3.0) (2026-06-03)
 
 
