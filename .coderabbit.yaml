@@ -1,28 +1,68 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # CodeRabbit configuration. Schema: https://www.coderabbit.ai/integrations/schema.v2.json
 #
+# NOTE: this repo-level file OVERRIDES the CodeRabbit web dashboard — configure
+# everything here, not in the dashboard (dashboard edits won't take effect).
+#
 # Docstrings: our gate is ruff's pydocstyle (D) rules, enforced on EVERY PR by the
 # "lint" CI job (.github/workflows/lint.yml, `on: pull_request`). It requires
 # docstrings on all public modules/classes/functions (pep257 convention; D105/D107
-# and tests/** are intentionally exempt — see pyproject.toml).
-#
-# CodeRabbit's separate docstring-coverage pre-merge check computes a raw
-# percentage that counts inner/nested helpers (preexec closures, signal handlers,
-# test fixtures) which our gate deliberately exempts, so it reports a misleadingly
-# low number against its 80% default. Defer to ruff D as the single source of
-# truth and turn the redundant check off rather than run two disagreeing gates.
+# and tests/** are intentionally exempt — see pyproject.toml). CodeRabbit's separate
+# docstring-coverage pre-merge check counts inner/nested helpers our gate exempts,
+# so it reports a misleadingly low % against its 80% default — defer to ruff D as
+# the single source of truth and turn both CodeRabbit docstring features off.
 language: "en-US"
+early_access: true
+
+# Calibrated from this repo's actual nitpick history (~63% high-signal / ~13% noise).
+# The assertive profile earns its keep on substantive bugs; this steers it toward
+# those and away from re-flagging things our CI already gates.
+tone_instructions: >-
+  Keep the assertive, detail-oriented review style — substantive nitpicks are
+  valued. Prioritize and always surface findings about: error handling and silent
+  failures; concurrency, atomicity, and resource-lifecycle bugs (locks, temp files,
+  queues, unbounded buffers, websocket/close handling); GitHub Actions and
+  release-workflow correctness (nonexistent or wrong action outputs, non-idempotent
+  steps, deprecated or yanked dependencies, CI step ordering/conditionals); frontend
+  reactive-state and state-machine correctness (stale snapshots, wrong-mode
+  relaunches, optimistic-state guards); security-guard drift or duplicated policy
+  that has fallen out of sync between modules; and tests whose assertions don't
+  actually prove the claimed behavior. For these, be specific and direct. Do NOT
+  raise style, formatting, lint, import-ordering, line-length, fenced-code-block
+  language, or deprecated-property nitpicks — ruff (incl. pydocstyle/bandit/pyupgrade),
+  pyright, markdownlint, yamllint, zizmor, trivy, codeql, and gitleaks already gate
+  those, so re-flagging them is pure noise. Skip pure prose typos and capitalization
+  fixes. Do not report Jinja2 template XSS — templates use autoescape. Suppress
+  observations you would tag low-value or trivial. When flagging documentation or
+  comments, only do so when the text is factually wrong or has drifted from the
+  code/UI (comment rot), not for wording polish.
+
 reviews:
-  profile: "chill"
-  # Don't gate merges on a CodeRabbit "request changes" state — it isn't a
-  # required check and we don't want it blocking the solo merge flow.
-  request_changes_workflow: false
-  high_level_summary: true
-  poem: false
+  profile: "assertive"
+  # Auto-approve once CodeRabbit's comments are resolved and no pre-merge checks fail.
+  request_changes_workflow: true
+  high_level_summary: false
+  high_level_summary_placeholder: ""
+  high_level_summary_in_walkthrough: true
   review_status: true
+  # Publish a pass/fail commit status (becomes a visible gate signal; not a *required*
+  # check unless added to the main ruleset).
+  fail_commit_status: true
+  estimate_code_review_effort: false
+  suggested_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: false
   pre_merge_checks:
+    # See the docstrings note at the top — ruff D is the single source of truth.
     docstrings:
       mode: "off"
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
   auto_review:
     enabled: true
     drafts: false
@@ -32,6 +72,9 @@ reviews:
     ignore_usernames:
       - "renovate[bot]"
       - "clauster-release-bot[bot]"
+  # Public repo: flag spam / low-quality drive-by PRs.
+  slop_detection:
+    enabled: true
   # Don't spend review effort on vendored / generated / lockfile content.
   path_filters:
     - "!src/clauster/static/vendor/**"
@@ -50,5 +93,14 @@ reviews:
       instructions: >-
         Tests use FastAPI's TestClient. WebSocket and background-task tests must
         wrap the client in `with _client(...)` so the app lifespan/startup runs.
+
 chat:
   auto_reply: true
+  allow_non_org_members: false
+
+knowledge_base:
+  # Review against our documented conventions, not just generic best-practice.
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "CONTRIBUTING.md"
