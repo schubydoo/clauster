@@ -67,6 +67,36 @@
         </div>
       </div>
 
+      <!-- ===== System readiness (preflight) — only shown when a check needs attention ===== -->
+      <div class="mb-3" x-show="readiness.loaded && readinessIssues().length > 0" x-cloak>
+        <div class="card">
+          <div class="card-status-start bg-warning"></div>
+          <div class="card-header">
+            <h3 class="card-title">Before you start a bridge</h3>
+            <div class="card-actions btn-list">
+              <button class="btn btn-sm btn-ghost-secondary" @click="readiness.showAll = !readiness.showAll"
+                      x-text="readiness.showAll ? 'Show only issues' : 'Show all checks'">Show all checks</button>
+              <button class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()">↻ Re-check</button>
+            </div>
+          </div>
+          <div class="list-group list-group-flush">
+            <template x-for="c in (readiness.showAll ? readiness.checks : readinessIssues())" :key="c.name">
+              <div class="list-group-item d-flex align-items-start">
+                <span class="me-2 fw-bold" :class="checkClass(c.status)" x-text="checkGlyph(c.status)"
+                      style="width:1.1rem" aria-hidden="true"></span>
+                <span class="fw-medium text-capitalize me-3" style="min-width:9rem"
+                      x-text="c.name.replace('-', ' ')"></span>
+                <span class="text-secondary small" x-text="c.detail"></span>
+              </div>
+            </template>
+          </div>
+          <div class="card-footer text-secondary small">
+            These are your <code>clauster doctor</code> checks. ⚠ are warnings — a bridge may still start;
+            ✗ must be fixed before one will.
+          </div>
+        </div>
+      </div>
+
       <!-- ===== New project ===== -->
       <div class="mb-3">
         <button class="btn btn-primary" @click="np.open = !np.open">
@@ -282,6 +312,11 @@
       np: { open: false, name: "", submittedName: "", mode: "create", url: "", shallow: false,
             gitInit: false, busy: false, error: null, warn: null,
             cloning: false, progress: { percent: null, phase: "" } },
+      // System-readiness (preflight) — the `clauster doctor` checks surfaced in the
+      // browser so a precondition (claude not logged in, dir untrusted, …) is visible
+      // up front instead of failing silently when you click Start. loaded stays false
+      // until /api/doctor answers, so the panel never flashes empty.
+      readiness: { loaded: false, ok: true, checks: [], showAll: false },
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -291,8 +326,24 @@
         this.trustState = { ...INITIAL_TRUST };
         await this.refresh();
         for (const n of PROJECT_NAMES) this.loadUsage(n);
+        this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
         setInterval(() => this.refresh(), 4000);
       },
+      // --- system readiness (preflight panel) ---
+      async loadReadiness() {
+        try {
+          const r = await fetch(ROOT + "/api/doctor");
+          if (r.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!r.ok) return;
+          const d = await r.json();
+          this.readiness.ok = !!d.ok;
+          this.readiness.checks = Array.isArray(d.checks) ? d.checks : [];
+          this.readiness.loaded = true;
+        } catch (e) { /* fetch failed -> leave loaded=false so the panel stays hidden */ }
+      },
+      readinessIssues() { return this.readiness.checks.filter((c) => c.status !== "ok"); },
+      checkGlyph(s) { return s === "ok" ? "✓" : s === "warn" ? "⚠" : "✗"; },
+      checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
       // --- toasts ---
       toast(msg, type = "info") {
         const id = ++this._toastSeq;
