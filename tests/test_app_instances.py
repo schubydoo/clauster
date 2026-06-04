@@ -102,3 +102,19 @@ def test_trust_endpoint_flips_state(runner_config, tmp_path):
         resp = client.post("/api/projects/alpha/trust")
         assert resp.status_code == 200
         assert resp.json()["trust_state"] == "trusted"
+
+
+def test_trust_endpoint_read_failure_returns_500(runner_config, monkeypatch):
+    # If ~/.claude.json exists but can't be read/written (e.g. permissions), the
+    # trust route surfaces a 500 rather than silently dropping other settings.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    def boom(*args, **kwargs):
+        raise PermissionError("simulated: cannot read claude.json")
+
+    monkeypatch.setattr("clauster.runner.trust_directory", boom)
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.post("/api/projects/alpha/trust")
+        assert resp.status_code == 500
+        assert "could not update trust state" in resp.json()["detail"]

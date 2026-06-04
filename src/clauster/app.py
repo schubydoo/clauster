@@ -604,6 +604,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return await runner.trust_project(name)
         except UnknownProject as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except OSError as exc:
+            # ~/.claude.json exists but couldn't be read/written (e.g. permissions).
+            # Surface it instead of silently dropping the operator's other settings.
+            raise HTTPException(
+                status_code=500, detail=f"could not update trust state: {exc}"
+            ) from exc
 
     async def _resolve_project_path(name: str) -> Path:
         """Map a project name to its path, refusing unknown/unsafe names (traversal)."""
