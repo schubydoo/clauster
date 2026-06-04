@@ -30,7 +30,7 @@ def _load_trusted_paths(claude_json: Path) -> set[Path]:
     Trust inherits *down* a tree, so the caller walks ancestors against this set.
     """
     try:
-        data = json.loads(claude_json.read_text())
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return set()
     projects = data.get("projects")

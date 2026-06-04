@@ -86,7 +86,7 @@ def load_credentials(
     """
     cred_file = Path(credentials_path).expanduser()
     try:
-        oauth = json.loads(cred_file.read_text()).get("claudeAiOauth") or {}
+        oauth = json.loads(cred_file.read_text(encoding="utf-8")).get("claudeAiOauth") or {}
     except (FileNotFoundError, OSError) as exc:
         raise CredentialsError(f"could not read {cred_file}: {exc}") from exc
     except json.JSONDecodeError as exc:
@@ -101,7 +101,9 @@ def load_credentials(
 
     json_file = Path(claude_json_path).expanduser()
     try:
-        org = (json.loads(json_file.read_text()).get("oauthAccount") or {}).get("organizationUuid")
+        org = (json.loads(json_file.read_text(encoding="utf-8")).get("oauthAccount") or {}).get(
+            "organizationUuid"
+        )
     except (FileNotFoundError, OSError) as exc:
         raise CredentialsError(f"could not read {json_file}: {exc}") from exc
     except json.JSONDecodeError as exc:

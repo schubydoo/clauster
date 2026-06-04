@@ -615,7 +615,7 @@ class SessionRunner:
     def _read_sidecar(sidecar: Path) -> dict | None:
         """Read the keeper's discovery JSON, or None if absent / mid-write / invalid."""
         try:
-            return json.loads(sidecar.read_text())
+            return json.loads(sidecar.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return None
 
@@ -762,7 +762,10 @@ class SessionRunner:
     @staticmethod
     def _read_markers(log_path: Path) -> bridge_log.BridgeMarkers:
         try:
-            text = log_path.read_text()
+            # errors="replace": the debug log is raw bridge output; a stray
+            # non-UTF-8 byte must not raise UnicodeDecodeError (a ValueError,
+            # which the OSError guard below would NOT catch) and lose all markers.
+            text = log_path.read_text(encoding="utf-8", errors="replace")
         except (FileNotFoundError, OSError):
             return bridge_log.BridgeMarkers()
         return bridge_log.parse_bridge_markers(text)
@@ -831,7 +834,11 @@ class SessionRunner:
         if log_path is None:
             return
         try:
-            text = cls._stderr_path_for(log_path).read_text(errors="replace").strip()
+            text = (
+                cls._stderr_path_for(log_path)
+                .read_text(encoding="utf-8", errors="replace")
+                .strip()
+            )
         except OSError:
             return
         if text:

@@ -52,7 +52,7 @@ def _write_sidecar(path: Path, data: dict[str, object]) -> None:
     """Atomically write the sidecar JSON so a polling reader never sees a partial file."""
     tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp.write_text(json.dumps(data))
+        tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, path)
     except OSError:
         # Best-effort: a transient write failure must not take the bridge down.

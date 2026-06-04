@@ -322,7 +322,7 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
         searched = ", ".join(str(p) for p in candidates)
         raise FileNotFoundError(f"no clauster.yml found (searched: {searched})")
 
-    raw = yaml.safe_load(found.read_text()) or {}
+    raw = yaml.safe_load(found.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"config root must be a mapping, got {type(raw).__name__}: {found}")
 

@@ -42,7 +42,7 @@ def pointer_path_for(project_path: Path, claude_projects_dir: Path = CLAUDE_PROJ
 def load_pointer(path: Path) -> BridgePointer | None:
     """Parse a bridge-pointer.json, or None if missing/malformed."""
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
     try:
