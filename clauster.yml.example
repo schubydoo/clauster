@@ -78,3 +78,11 @@ clone:
 # is always available; this only gates the destructive browser button. Off by default.
 reaper:
   ui_enabled: false
+
+# Per-project cost/token badge. The dollar figure is an APPROXIMATE estimate —
+# token totals from the session transcript x a hand-maintained USD price table
+# (usage.py, "as of 2026-05"); unpriced models contribute 0. Set show_cost: false
+# to hide the badge entirely (privacy when screen-sharing / recording a demo);
+# the dashboard then also skips the per-project usage fetch.
+usage:
+  show_cost: true

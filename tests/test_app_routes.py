@@ -437,3 +437,28 @@ def test_project_usage_serializes_rollup(write_config, tmp_path, monkeypatch):
     assert body["cost_usd"] == 15.0  # 1 Mtok opus input @ $15/Mtok
     assert body["by_model"]["claude-opus-4-8"]["cost_usd"] == 15.0
     assert body["unpriced_models"] == []
+
+
+# ----- usage.show_cost toggle (dashboard injection) --------------------
+
+
+def _client_with(write_config, tmp_path, extra: str) -> TestClient:
+    return TestClient(
+        create_app(
+            load_config(
+                write_config(
+                    f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{extra}"
+                )
+            )
+        )
+    )
+
+
+def test_dashboard_injects_show_cost_true_by_default(write_config, tmp_path):
+    html = _client(write_config, tmp_path).get("/").text
+    assert "const SHOW_COST = true;" in html
+
+
+def test_dashboard_injects_show_cost_false_when_disabled(write_config, tmp_path):
+    html = _client_with(write_config, tmp_path, "usage:\n  show_cost: false\n").get("/").text
+    assert "const SHOW_COST = false;" in html

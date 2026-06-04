@@ -184,6 +184,18 @@ class LogsConfig(BaseModel):
     strip_ansi_in_stream: bool = True
 
 
+class UsageConfig(BaseModel):
+    """Per-project cost/token badge on the dashboard.
+
+    The dollar figure is an *approximate* estimate (see ``usage.py``: token totals
+    from the transcript × a hand-maintained USD price table). ``show_cost`` hides
+    the whole badge — set it false for privacy when screen-sharing or recording a
+    demo; the dashboard then also skips the ``/api/projects/{name}/usage`` fetch.
+    """
+
+    show_cost: bool = True
+
+
 class ClausterConfig(BaseModel):
     """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
 
@@ -202,6 +214,7 @@ class ClausterConfig(BaseModel):
     logs: LogsConfig = Field(default_factory=LogsConfig)
     clone: CloneConfig = Field(default_factory=CloneConfig)
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
+    usage: UsageConfig = Field(default_factory=UsageConfig)
 
     _source_path: Path | None = PrivateAttr(default=None)
 
