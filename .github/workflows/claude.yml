@@ -70,3 +70,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           additional_permissions: |
             actions: read
+          # Stop Claude writing "#1"/"#2" to enumerate points — GitHub auto-links
+          # a hash+number into a link to an unrelated issue/PR.
+          claude_args: |
+            --append-system-prompt "When listing or referring to findings or numbered points, do not write them as #1, #2, etc. GitHub turns a hash followed by digits into a link to an unrelated issue or PR. Use Finding 1, (1), or a short description instead."
