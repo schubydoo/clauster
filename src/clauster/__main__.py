@@ -20,9 +20,13 @@ from .app import create_app
 from .auth import hash_password, make_hasher
 from .config import ClausterConfig, load_config
 
+# setproctitle is a required dependency (so the retitle works out of the box). The
+# guard is defensive, not optionality: a cosmetic process-rename must never crash
+# `clauster run` if the wheel is somehow missing/unbuildable on an exotic platform —
+# we degrade to a no-op instead.
 try:
     import setproctitle as _setproctitle
-except ImportError:  # pragma: no cover - optional dep; the retitle degrades to a no-op
+except ImportError:  # pragma: no cover - defensive: a cosmetic retitle must not break startup
     _setproctitle = None
 
 _COMMANDS = {
