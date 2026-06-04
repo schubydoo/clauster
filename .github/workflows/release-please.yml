@@ -183,12 +183,22 @@ jobs:
         if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          RELEASE_ID: ${{ steps.release.outputs.id }}
+          # release-please (v5) exposes NO numeric `id` output — its documented
+          # release outputs are upload_url / html_url / tag_name / version / sha
+          # / body (see the action README). The draft's numeric release id is
+          # embedded in upload_url (.../releases/{id}/assets{?name,label}), so
+          # derive it from there rather than from a non-existent `id` output.
+          UPLOAD_URL: ${{ steps.release.outputs.upload_url }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ -z "${RELEASE_ID}" ]; then
-            echo "no release id from release-please; aborting" >&2
+          # Pull the numeric {id} out of the upload_url template, then insist it
+          # is all digits — a non-match would otherwise pass through verbatim and
+          # slip past an emptiness check.
+          RELEASE_ID="$(printf '%s' "${UPLOAD_URL}" \
+            | sed -E 's#.*/releases/([0-9]+)/assets.*#\1#')"
+          if ! printf '%s' "${RELEASE_ID}" | grep -qE '^[0-9]+$'; then
+            echo "could not derive numeric release id from upload_url='${UPLOAD_URL}'; aborting" >&2
             exit 1
           fi
           # A draft has no git tag, so by-tag lookups 404 — upload by release ID via
@@ -202,6 +212,19 @@ jobs:
           fi
           for f in "${assets[@]}"; do
             name="$(basename "$f")"
+            # Idempotent re-runs: a same-named asset left by an earlier attempt
+            # makes the POST 422 (already_exists), which under `set -e` would
+            # abort before publish and strand the draft. Delete any existing
+            # same-named asset first, then upload fresh. NAME via env (not
+            # inlined into --jq) so a basename can't break out of the filter.
+            existing_id="$(NAME="$name" gh api \
+              "repos/${REPO}/releases/${RELEASE_ID}/assets" --paginate \
+              --jq '.[] | select(.name == env.NAME) | .id' | head -n1)"
+            if [ -n "$existing_id" ]; then
+              echo "replacing existing asset ${name} (id ${existing_id})"
+              gh api --method DELETE \
+                "repos/${REPO}/releases/assets/${existing_id}"
+            fi
             echo "uploading ${name}"
             gh api --method POST \
               -H "Content-Type: application/octet-stream" \
