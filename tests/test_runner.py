@@ -138,10 +138,12 @@ async def test_concurrent_spawn_launches_one_bridge(runner_config, monkeypatch):
     await runner.stop("alpha")
 
 
-async def test_persist_retains_untracked_project_metadata(runner_config):
-    # A project whose bridge isn't alive at rediscover time must KEEP its persisted
-    # label/modes/intentional_stop, not be wiped from state.json on the post-rediscover
-    # save (which would later resume it with default modes — a silent downgrade).
+async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_config):
+    # A discovered project whose bridge isn't alive at rediscover time (its process
+    # died while Clauster was down — e.g. a host reboot) is resurrected as a STOPPED,
+    # resumable card from its persisted record, AND keeps that record in state.json
+    # (not wiped on the post-rediscover save, which would later resume it with
+    # default modes — a silent downgrade).
     config, claude_json = runner_config
     StateStore(config.state_dir).save(
         {
@@ -155,15 +157,47 @@ async def test_persist_retains_untracked_project_metadata(runner_config):
         }
     )
     runner = SessionRunner(config, claude_json=claude_json)
-    await runner.rediscover()  # alpha's bridge isn't alive -> not tracked
-    assert "alpha" not in runner._instances
+    await runner.rediscover()  # bridge gone, but a persisted record exists
+
+    inst = runner._instances["alpha"]
+    assert inst.status is InstanceStatus.STOPPED  # surfaced as a resumable card
+    assert inst.bridge_pid is None and inst.keeper_pid is None  # process is gone
+    assert inst.permission_mode == "plan"  # persisted modes preserved
+    assert inst.resume_mode == "standard"
+    assert inst.label == "Custom Label"
+    assert inst.intentional_stop is True  # carried through
 
     reloaded = StateStore(config.state_dir).load()
     assert reloaded["alpha"]["permission_mode"] == "plan"
     assert reloaded["alpha"]["spawn_mode"] == "same-dir"
     assert reloaded["alpha"]["resume_mode"] == "standard"
     assert reloaded["alpha"]["label"] == "Custom Label"
-    assert reloaded["alpha"]["intentional_stop"] is True
+
+
+async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_config):
+    # A "pty" bridge killed by a host reboot returns as a STOPPED card whose
+    # resume_mode is preserved, so the UI offers true-resume (--continue restores the
+    # conversation) — this is the dogfood bug. A discovered project with NO persisted
+    # record is left absent: no phantom card offering to resume nothing.
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {
+            "alpha": {
+                "label": "alpha",
+                "spawn_mode": "same-dir",
+                "resume_mode": "pty",
+                "intentional_stop": False,
+            }
+        }
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.rediscover()
+
+    alpha = runner._instances["alpha"]
+    assert alpha.status is InstanceStatus.STOPPED
+    assert alpha.resume_mode == "pty"  # true-resume affordance survives the reboot
+    assert alpha.intentional_stop is False  # interrupted, not a deliberate stop
+    assert "beta" not in runner._instances  # discovered but unpersisted -> no phantom
 
 
 async def test_stop_instance_without_pid_marks_stopped(runner_config):

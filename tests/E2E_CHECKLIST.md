@@ -41,6 +41,11 @@ restarts — the dashboard JS/CSS are cached static assets.
       pty bridge (the `↻ true-resume` badge appears), and choosing **standard** with a
       `pty` default starts a subcommand bridge. The Mode picker is hidden on Windows
       (pty is POSIX-only).
+- [ ] **Reboot recovery** — with a bridge running, restart the host (or stop
+      Clauster, kill the bridge process, restart Clauster). The bridge reappears as a
+      **Stopped** card built from `state.json`, not lost: a **pty** bridge offers
+      **Resume** (`--continue` restores the conversation), a **standard** bridge offers
+      a fresh **Start**. A project with no persisted record shows no phantom card.
 - [ ] **Open in Claude** deep link + **QR code** render and scan.
 - [ ] **External sessions** (started outside Clauster) appear with their distinct
       indicator.
