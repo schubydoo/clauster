@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,8 @@ from clauster import trust
 needs_fcntl = pytest.mark.skipif(
     trust.fcntl is None, reason="advisory flock is POSIX-only (no fcntl)"
 )
+# fchmod-based mode preservation is POSIX-only (Windows permissions are ACL-based).
+needs_fchmod = pytest.mark.skipif(not hasattr(os, "fchmod"), reason="fchmod is POSIX-only")
 
 
 def test_trust_directory_sets_flag_and_preserves_other_keys(tmp_path: Path):
@@ -281,3 +284,31 @@ def test_concurrent_writers_without_lock_keep_valid_json(tmp_path: Path, monkeyp
 
     json.loads(cj.read_text(encoding="utf-8"))  # always valid JSON, never torn
     assert list(tmp_path.glob("claude.json.*.tmp")) == []  # no temp debris
+
+
+@needs_fchmod
+def test_atomic_write_preserves_existing_file_mode(tmp_path: Path):
+    # mkstemp creates the temp 0600; the replace must NOT silently tighten an
+    # existing ~/.claude.json — its mode is mirrored onto the temp first.
+    cj = tmp_path / "claude.json"
+    cj.write_text("{}", encoding="utf-8")
+    cj.chmod(0o644)
+    target = tmp_path / "proj"
+    target.mkdir()
+
+    trust.trust_directory(target, cj)
+
+    assert stat.S_IMODE(cj.stat().st_mode) == 0o644  # preserved, not reset to 0600
+
+
+@needs_fchmod
+def test_atomic_write_new_file_is_owner_only(tmp_path: Path):
+    # A brand-new ~/.claude.json (the file didn't exist) is created owner-only —
+    # it can hold tokens, so 0600 is the safe default rather than the umask.
+    cj = tmp_path / "claude.json"  # does not exist
+    target = tmp_path / "proj"
+    target.mkdir()
+
+    trust.trust_directory(target, cj)
+
+    assert stat.S_IMODE(cj.stat().st_mode) == 0o600

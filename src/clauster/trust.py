@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 import os
+import stat
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -120,6 +121,16 @@ def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) ->
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2))
+            # mkstemp makes the temp 0600; mirror the existing file's permissions so
+            # the atomic replace doesn't silently re-permission ~/.claude.json. A new
+            # file keeps 0600 (it can hold tokens). POSIX-only — Windows lacks fchmod
+            # and uses ACL-based permissions, so mkstemp's default is left as-is.
+            if hasattr(os, "fchmod"):
+                try:
+                    mode = stat.S_IMODE(claude_json.stat().st_mode)
+                except FileNotFoundError:
+                    mode = 0o600
+                os.fchmod(fh.fileno(), mode)
         os.replace(tmp, claude_json)
     finally:
         # On the happy path os.replace consumed the temp; this only fires if the
