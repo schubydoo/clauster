@@ -118,6 +118,16 @@ def test_load_credentials_non_utf8_claude_json(tmp_path):
         load_credentials(cred, cj)
 
 
+def test_load_credentials_non_utf8_credentials_file(tmp_path):
+    # Symmetric to the above: the FIRST read (credentials.json) being non-UTF-8
+    # must also surface as CredentialsError rather than a raw UnicodeDecodeError.
+    _, cj = _write_creds(tmp_path)
+    bad_cred = tmp_path / "bad.json"
+    bad_cred.write_bytes(b"\xff\xfe\x00not utf-8")
+    with pytest.raises(CredentialsError, match="could not read"):
+        load_credentials(bad_cred, cj)
+
+
 # ----- find_ghosts (pure) ----------------------------------------------
 
 

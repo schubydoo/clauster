@@ -41,7 +41,9 @@ class StateStore:
         """
         try:
             raw = self._path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+        except (FileNotFoundError, OSError, UnicodeDecodeError):
+            # UnicodeDecodeError (a ValueError) for a non-UTF-8 file is the "corrupt
+            # file" case the docstring promises to tolerate — degrade to {}.
             return {}
         try:
             data = json.loads(raw)
