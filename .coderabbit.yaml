@@ -14,28 +14,14 @@
 language: "en-US"
 early_access: true
 
-# Calibrated from this repo's actual nitpick history (~63% high-signal / ~13% noise).
-# The assertive profile earns its keep on substantive bugs; this steers it toward
-# those and away from re-flagging things our CI already gates.
+# Calibrated from the repo's nitpick history (~63% high-signal / ~13% noise), and
+# squeezed under CodeRabbit's 250-char tone_instructions cap. Encourage the
+# substantive categories that paid off; skip what CI already gates.
 tone_instructions: >-
-  Keep the assertive, detail-oriented review style — substantive nitpicks are
-  valued. Prioritize and always surface findings about: error handling and silent
-  failures; concurrency, atomicity, and resource-lifecycle bugs (locks, temp files,
-  queues, unbounded buffers, websocket/close handling); GitHub Actions and
-  release-workflow correctness (nonexistent or wrong action outputs, non-idempotent
-  steps, deprecated or yanked dependencies, CI step ordering/conditionals); frontend
-  reactive-state and state-machine correctness (stale snapshots, wrong-mode
-  relaunches, optimistic-state guards); security-guard drift or duplicated policy
-  that has fallen out of sync between modules; and tests whose assertions don't
-  actually prove the claimed behavior. For these, be specific and direct. Do NOT
-  raise style, formatting, lint, import-ordering, line-length, fenced-code-block
-  language, or deprecated-property nitpicks — ruff (incl. pydocstyle/bandit/pyupgrade),
-  pyright, markdownlint, yamllint, zizmor, trivy, codeql, and gitleaks already gate
-  those, so re-flagging them is pure noise. Skip pure prose typos and capitalization
-  fixes. Do not report Jinja2 template XSS — templates use autoescape. Suppress
-  observations you would tag low-value or trivial. When flagging documentation or
-  comments, only do so when the text is factually wrong or has drifted from the
-  code/UI (comment rot), not for wording polish.
+  Assertive but high-signal. Prioritize: error handling/silent failures,
+  concurrency/lifecycle bugs, Actions/release-workflow correctness, frontend
+  state, weak assertions. Skip what CI linters gate (style/lint/format), typos,
+  Jinja2-autoescape XSS.
 
 reviews:
   profile: "assertive"
