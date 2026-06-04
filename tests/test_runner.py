@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from clauster import bridge_log
+from clauster import bridge_log, inspector
 from clauster.models import (
     Attribution,
     InstanceStatus,
@@ -427,6 +427,40 @@ def test_external_sessions_by_project(runner_config):
 def test_external_sessions_empty_when_none(runner_config):
     runner = _make_runner(runner_config)
     assert runner.external_sessions_by_project() == {}
+
+
+async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monkeypatch):
+    # A phantom STOPPED instance (e.g. `_stopped_from_persisted` from a stale pointer)
+    # must not shadow a live EXTERNAL (flag-form/tmux) bridge at the same cwd: poll_once
+    # drops it so the card shows "external session active" instead of Stopped/Resume.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    sess = WorkingSession(
+        pid=999,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=999,
+        local_uuid="u",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    await runner.poll_once()
+    assert "alpha" not in runner._instances  # phantom dropped
+    assert "alpha" in runner.external_sessions_by_project()  # now surfaced as external
+
+
+async def test_poll_keeps_stopped_instance_without_external_session(runner_config, monkeypatch):
+    # The reboot-orphan path still works: a STOPPED-resumable instance with NO live
+    # session at its cwd is preserved (so Resume stays available).
+    runner = _make_runner(runner_config)
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [])
+    await runner.poll_once()
+    assert "alpha" in runner._instances  # kept — nothing live to yield to
 
 
 async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
