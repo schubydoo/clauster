@@ -72,9 +72,23 @@ def test_create_time_mismatch_rejected(monkeypatch):
             return 1000.0
 
     monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
-    # Stored epoch differs by far more than tolerance -> PID reuse -> not our bridge.
-    assert procutil.is_live_bridge(1234, 5000.0) is False
-    assert procutil.is_live_bridge(1234, 1000.5) is True  # within tolerance
+    # A float proc_start is our OWN exact create_time, so it must match the same
+    # process near-exactly (tight bound). A gap means the PID was recycled.
+    assert procutil.is_live_bridge(1234, 5000.0) is False  # far off -> reuse
+    assert procutil.is_live_bridge(1234, 1000.5) is False  # 0.5s off -> reuse (was True)
+    assert procutil.is_live_bridge(1234, 1000.0) is True  # same measurement
+    assert procutil.is_live_bridge(1234, 1000.02) is True  # hair of float jitter is fine
+
+
+def test_jiffies_pointer_keeps_loose_tolerance(monkeypatch):
+    # A pointer's jiffies epoch is derived independently of the live process's
+    # create_time, so a genuine same-process match can be a touch off -> keep the
+    # looser 2.0s tolerance (the tight exact-float bound would false-negative it).
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(ct=1000.0))
+    monkeypatch.setattr(procutil, "jiffies_to_epoch", lambda j: 1001.5)
+    assert procutil.is_live_bridge(1234, "500") is True  # 1.5s off, within 2.0s
+    monkeypatch.setattr(procutil, "jiffies_to_epoch", lambda j: 1003.0)
+    assert procutil.is_live_bridge(1234, "500") is False  # 3.0s off, beyond 2.0s
 
 
 def _fake_proc(status=psutil.STATUS_RUNNING, cmdline=("claude", "remote-control"), ct=1000.0):

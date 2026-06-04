@@ -25,6 +25,14 @@ import psutil
 _BRIDGE_CMDLINE = ("remote-control",)
 _BRIDGE_BINARY_HINT = "claude"
 
+# A proc_start we measured ourselves (a float create_time) is the SAME
+# measurement as the live process's create_time, so the same process matches it
+# near-exactly — only a hair of float jitter is plausible. A reused PID, having
+# started later, carries a measurably later create_time, so this tight bound
+# rejects it. (A pointer's jiffies epoch is derived independently and keeps the
+# caller's looser ``tolerance``.)
+_EXACT_PROC_START_TOLERANCE = 0.05
+
 
 def _clk_tck() -> int:
     try:
@@ -71,6 +79,13 @@ def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float
 
     ``proc_start`` may be a pointer's jiffies string, our own stored psutil
     create-time (float/epoch), or None to skip the start-time match.
+
+    The start-time bound depends on the source: a float we measured ourselves
+    matches the same process near-exactly, so it uses the tight
+    ``_EXACT_PROC_START_TOLERANCE`` (closing the PID-reuse window where a recycled
+    PID with the generic ``claude remote-control`` cmdline could be signalled for
+    the wrong project); a jiffies string is derived independently and keeps the
+    looser ``tolerance``.
     """
     try:
         proc = psutil.Process(pid)
@@ -89,7 +104,10 @@ def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float
         # No comparable start-time (skip or non-Linux pointer): cmdline+alive is
         # the best available trust signal.
         return True
-    return abs(create_time - expected) <= tolerance
+    # A float is our own exact create_time; a string is a pointer's jiffies.
+    exact = isinstance(proc_start, (int, float)) and not isinstance(proc_start, bool)
+    bound = _EXACT_PROC_START_TOLERANCE if exact else tolerance
+    return abs(create_time - expected) <= bound
 
 
 def _expected_epoch(proc_start: str | float | None) -> float | None:
