@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
-from . import __version__, auth, claude_cli, environments, logstream, usage
+from . import __version__, auth, claude_cli, environments, logstream, ops, usage
 from .claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
@@ -302,6 +302,28 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.get("/api/projects")
     async def api_projects() -> list[Project]:
         return await list_projects()
+
+    @app.get("/api/doctor")
+    async def api_doctor() -> dict:
+        """System-readiness checks for the dashboard preflight panel.
+
+        Surfaces the same diagnostics as the ``clauster doctor`` CLI (claude binary +
+        version, login, projects_root, state_dir, git, auth sanity, workspace trust,
+        port, source freshness) as JSON, so the browser can show a ✓/⚠/✗ checklist
+        up front instead of letting a precondition fail silently at spawn time.
+
+        Read-only and auth-gated by the guard middleware. Runs off the event loop:
+        doctor does blocking subprocess probes (``claude --version``, ``git``, a port
+        bind). It re-reads the config from ``source_path`` (same as the CLI), so it
+        also reflects on-disk edits made since boot; an env-only deploy with no config
+        file surfaces a single ``config`` FAIL, which is the honest result.
+        """
+        src = config.source_path
+        checks, ok = await asyncio.to_thread(ops.run_doctor, str(src) if src is not None else None)
+        return {
+            "ok": ok,
+            "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
+        }
 
     @app.get("/api/projects/{name}/card", response_class=HTMLResponse)
     async def api_project_card(request: Request, name: str) -> Response:
