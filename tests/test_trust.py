@@ -216,3 +216,68 @@ def test_locked_lockfile_open_failure_is_best_effort(tmp_path: Path, monkeypatch
 
     assert trust.is_trusted(target, cj) is True  # write still completed
     assert any("without a lock" in r.message for r in caplog.records)
+
+
+def test_unreadable_file_propagates_not_clobbered(tmp_path: Path, monkeypatch):
+    # A present-but-unreadable ~/.claude.json (e.g. PermissionError) must NOT be
+    # treated as empty and overwritten with only the touched keys — that would
+    # silently drop every other Claude setting. The read error propagates instead.
+    cj = tmp_path / "claude.json"
+    original = json.dumps({"projects": {"/keep": {"hasTrustDialogAccepted": True}}, "misc": 7})
+    cj.write_text(original, encoding="utf-8")
+    target = tmp_path / "proj"
+    target.mkdir()
+
+    import pathlib
+
+    real_read_text = pathlib.Path.read_text
+
+    def boom(self, *args, **kwargs):
+        if self.name == "claude.json":
+            raise PermissionError("simulated: cannot read claude.json")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", boom)
+
+    with pytest.raises(PermissionError):
+        trust.trust_directory(target, cj)
+
+    monkeypatch.undo()
+    assert cj.read_text(encoding="utf-8") == original  # untouched — nothing clobbered
+
+
+def test_atomic_write_uses_unique_temp_not_fixed_name(tmp_path: Path):
+    # The write must not leave (or depend on) a single shared `<file>.tmp`; a
+    # per-write temp is what keeps concurrent unlocked writers from stomping each
+    # other. After a successful write, no fixed-name temp lingers.
+    cj = tmp_path / "claude.json"
+    cj.write_text("{}", encoding="utf-8")
+    target = tmp_path / "proj"
+    target.mkdir()
+
+    trust.trust_directory(target, cj)
+
+    assert not cj.with_suffix(cj.suffix + ".tmp").exists()  # no fixed-name temp
+    assert trust.is_trusted(target, cj) is True
+    leftover = list(tmp_path.glob("claude.json.*.tmp"))
+    assert leftover == []  # unique temp was consumed by os.replace, none left behind
+
+
+def test_concurrent_writers_without_lock_keep_valid_json(tmp_path: Path, monkeypatch):
+    # With the lock degraded to a no-op (fcntl absent), the unique-temp write still
+    # never leaves the file half-written: every concurrent writer replaces atomically.
+    monkeypatch.setattr(trust, "fcntl", None)
+    cj = tmp_path / "claude.json"
+    cj.write_text("{}", encoding="utf-8")
+    targets = [tmp_path / f"proj{i}" for i in range(6)]
+    for t in targets:
+        t.mkdir()
+
+    threads = [threading.Thread(target=trust.trust_directory, args=(t, cj)) for t in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    json.loads(cj.read_text(encoding="utf-8"))  # always valid JSON, never torn
+    assert list(tmp_path.glob("claude.json.*.tmp")) == []  # no temp debris

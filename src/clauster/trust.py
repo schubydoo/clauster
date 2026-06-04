@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 import os
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -80,7 +81,12 @@ def _read_claude_json(claude_json: Path) -> tuple[str | None, dict]:
     try:
         raw = claude_json.read_text(encoding="utf-8")
         data = json.loads(raw)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Missing file or unparseable JSON → start from empty state (no backup).
+        # A broader OSError (e.g. PermissionError on a file that *does* exist) is
+        # deliberately NOT caught: swallowing it would treat a readable-but-failing
+        # file as empty and then replace it with only the keys we touch, silently
+        # dropping every other Claude setting. Let it propagate to the caller.
         return None, {}
     return raw, data if isinstance(data, dict) else {}
 
@@ -90,6 +96,14 @@ def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) ->
 
     Must be called inside :func:`_locked`. The backup is best-effort: a failure
     is surfaced via a warning (never a silent drop) but does not block the write.
+
+    The temp file is uniquely named (``mkstemp``), not a shared ``<file>.tmp``:
+    when :func:`_locked` degrades to a no-op (Windows / lock-open failure) two
+    writers can run concurrently, and a single fixed temp name lets them stomp
+    each other's inode — corrupting the write or failing the second ``os.replace``
+    with ``FileNotFoundError``. A per-write temp keeps each replace atomic
+    regardless of the lock. ``mkstemp`` in the target's directory keeps the
+    replace on one filesystem (so it stays atomic).
     """
     if raw is not None:
         backup = claude_json.with_suffix(claude_json.suffix + ".bak")
@@ -99,9 +113,19 @@ def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) ->
             except OSError as exc:
                 _log.warning("could not write %s backup: %s", backup, exc)
 
-    tmp = claude_json.with_suffix(claude_json.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, claude_json)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=claude_json.parent, prefix=f"{claude_json.name}.", suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2))
+        os.replace(tmp, claude_json)
+    finally:
+        # On the happy path os.replace consumed the temp; this only fires if the
+        # write/replace raised before the rename, so the temp never lingers.
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 def is_trusted(path: Path, claude_json: Path = CLAUDE_JSON) -> bool:
