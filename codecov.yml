@@ -83,7 +83,7 @@ component_management:
     - component_id: hooks_recap
       name: hooks & recap
       paths:
-        - src/clauster/hooks/
+        - src/clauster/hooks/**
         - src/clauster/recap.py
     - component_id: cli_config
       name: cli & config
