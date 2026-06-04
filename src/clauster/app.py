@@ -763,6 +763,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "default_resume_mode": config.claude.resume_mode,
                 # pty (true-resume) is POSIX-only; hide the option on Windows hosts.
                 "pty_supported": sys.platform != "win32",
+                # When false, hide the cost badge and skip the per-project usage fetch.
+                "show_cost": config.usage.show_cost,
             },
         )
 
