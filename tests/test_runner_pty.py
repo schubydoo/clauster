@@ -212,6 +212,12 @@ async def test_spawn_pty_reaches_running_then_stops(runner_config) -> None:
 async def test_spawn_pty_no_url_does_not_falsely_run(runner_config, monkeypatch) -> None:
     """A flag-form bridge that never prints a URL must not be reported RUNNING."""
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "pty_no_url")
+    # The behaviour under test (never-RUNNING without a URL) is independent of the
+    # ready-wait DURATION, so cap it instead of polling the real 15s _READY_TIMEOUT —
+    # this is the single slowest test in the suite (~15s) and the floor under the
+    # parallel run. _await_ready reads these module globals at call time.
+    monkeypatch.setattr("clauster.runner._READY_TIMEOUT", 0.5)
+    monkeypatch.setattr("clauster.runner._READY_POLL_INTERVAL", 0.05)
     runner, _ = _pty_runner(runner_config)
     inst = await runner.spawn("alpha")
     try:
