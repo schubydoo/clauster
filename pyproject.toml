@@ -129,6 +129,12 @@ convention = "pep257"
 # and temp paths — none are real security issues in test code. Tests are also
 # self-describing (the function name is the spec), so docstrings aren't required (D).
 "tests/**" = ["S101", "S104", "S105", "S106", "S107", "S108", "D"]
+# Fuzz harnesses (ClusterFuzzLite/Atheris): standalone entry points built in the
+# OSS-Fuzz image, not a package and not part of src/. Exempt docstring-coverage
+# (D), the implicit-namespace-package rule (INP001 — no __init__.py by design),
+# and assert (S101 — an assert IS the property check; Atheris reports a failing
+# assert as a fuzzer crash).
+"fuzz/**" = ["D", "INP001", "S101"]
 
 [tool.pyright]
 include = ["src/clauster"]

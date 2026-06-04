@@ -117,6 +117,21 @@ def test_url_bad_scheme_rejected(url):
         validate_clone_url(url, _cfg())
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "///[\n",  # malformed IPv6 literal -> urlsplit ValueError (found by fuzzing)
+        "https://[::1",  # unterminated IPv6 bracket
+        "https://example.com:99999/r.git",  # out-of-range port -> .port ValueError
+    ],
+)
+def test_url_malformed_rejected_not_crash(url):
+    # A malformed URL must surface as InvalidCloneUrl (-> 422), never a raw
+    # ValueError from urlsplit()/.port (-> 500).
+    with pytest.raises(InvalidCloneUrl):
+        validate_clone_url(url, _cfg())
+
+
 def test_url_private_blocked_by_default():
     with pytest.raises(BlockedCloneHost):
         validate_clone_url("https://10.0.0.1/r.git", _cfg())

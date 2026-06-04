@@ -1,0 +1,3 @@
+# ClusterFuzzLite project config. Python fuzzing runs via Atheris on the
+# OSS-Fuzz base-builder-python image. Supported sanitizers: address, undefined.
+language: python

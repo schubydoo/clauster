@@ -160,7 +160,15 @@ def validate_clone_url(url: str, cfg: CloneConfig) -> None:
     bound non-loopback (still auth-gated, and private ranges stay blocked unless the
     operator opts in via allow_private_hosts).
     """
-    parts = urlsplit(url)
+    # urlsplit() and the lazy .port property both raise ValueError on a malformed
+    # URL (e.g. a bad IPv6 literal "///[", or an out-of-range/non-numeric port).
+    # Catch it here so a rejected URL always surfaces as InvalidCloneUrl (-> 422),
+    # never a raw ValueError (-> 500). (Found by fuzzing — fuzz/validate_clone_url_fuzzer.py.)
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as exc:
+        raise InvalidCloneUrl(f"malformed clone URL: {exc}") from exc
     scheme = parts.scheme.lower()
     if scheme not in {s.lower() for s in cfg.allowed_schemes}:
         raise InvalidCloneUrl(
@@ -172,7 +180,7 @@ def validate_clone_url(url: str, cfg: CloneConfig) -> None:
 
     # A bare IP literal is checked directly; a name is resolved (all A/AAAA records).
     try:
-        infos = socket.getaddrinfo(host, parts.port or None, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, port or None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise InvalidCloneUrl(f"could not resolve host {host!r}: {exc}") from exc
     addresses = {str(info[4][0]) for info in infos}
