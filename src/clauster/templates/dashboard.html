@@ -74,9 +74,9 @@
           <div class="card-header">
             <h3 class="card-title">Before you start a bridge</h3>
             <div class="card-actions btn-list">
-              <button class="btn btn-sm btn-ghost-secondary" @click="readiness.showAll = !readiness.showAll"
+              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="readiness.showAll = !readiness.showAll"
                       x-text="readiness.showAll ? 'Show only issues' : 'Show all checks'">Show all checks</button>
-              <button class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()">↻ Re-check</button>
+              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()">↻ Re-check</button>
             </div>
           </div>
           <div class="list-group list-group-flush">
@@ -85,7 +85,7 @@
                 <span class="me-2 fw-bold" :class="checkClass(c.status)" x-text="checkGlyph(c.status)"
                       style="width:1.1rem" aria-hidden="true"></span>
                 <span class="fw-medium text-capitalize me-3" style="min-width:9rem"
-                      x-text="c.name.replace('-', ' ')"></span>
+                      x-text="c.name.split('-').join(' ')"></span>
                 <span class="text-secondary small" x-text="c.detail"></span>
               </div>
             </template>
