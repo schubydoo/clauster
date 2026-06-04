@@ -16,9 +16,10 @@ import atheris
 with atheris.instrument_imports():
     from clauster import redact
 
-# A surviving bare id in redacted output is a leak. Mirror the families redact_ids
-# masks (env_/session_/cse_ ULIDs); the assertion only fires if one slips through.
-_LEAK = re.compile(r"\b(?:env|session|cse)_[A-Za-z0-9]{8,}")
+# A surviving bare id in redacted output is a leak. Mirror redact._ID_RE exactly
+# (env_/session_/cse_ + {6,} chars) so the harness can't false-negative on a leaked
+# 6-7 char id the production matcher would have caught.
+_LEAK = re.compile(r"\b(env|session|cse)_[A-Za-z0-9]{6,}\b")
 
 
 def TestOneInput(data: bytes) -> None:
