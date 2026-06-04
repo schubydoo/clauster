@@ -123,9 +123,10 @@ def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) ->
             fh.write(json.dumps(data, indent=2))
             # mkstemp makes the temp 0600; mirror the existing file's permissions so
             # the atomic replace doesn't silently re-permission ~/.claude.json. A new
-            # file keeps 0600 (it can hold tokens). POSIX-only — Windows lacks fchmod
-            # and uses ACL-based permissions, so mkstemp's default is left as-is.
-            if hasattr(os, "fchmod"):
+            # file keeps 0600 (it can hold tokens). POSIX-only — on Windows file
+            # permissions are ACL-based (stat reports 0o666 regardless), so POSIX mode
+            # bits are meaningless and we leave mkstemp's default as-is.
+            if os.name == "posix":
                 try:
                     mode = stat.S_IMODE(claude_json.stat().st_mode)
                 except FileNotFoundError:

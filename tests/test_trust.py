@@ -16,8 +16,14 @@ from clauster import trust
 needs_fcntl = pytest.mark.skipif(
     trust.fcntl is None, reason="advisory flock is POSIX-only (no fcntl)"
 )
-# fchmod-based mode preservation is POSIX-only (Windows permissions are ACL-based).
-needs_fchmod = pytest.mark.skipif(not hasattr(os, "fchmod"), reason="fchmod is POSIX-only")
+# POSIX-only behaviours: file-mode preservation (Windows stat reports 0o666 for any
+# writable file) and atomic concurrent os.replace (Windows raises WinError 5 on a
+# racing replace; the advisory lock that would serialize it is itself POSIX-only).
+# Gate on os.name, NOT hasattr(os, "fchmod") — fchmod exists on Windows 3.13+ but the
+# POSIX mode semantics still don't apply.
+needs_posix = pytest.mark.skipif(
+    os.name != "posix", reason="POSIX file-mode / atomic-replace semantics"
+)
 
 
 def test_trust_directory_sets_flag_and_preserves_other_keys(tmp_path: Path):
@@ -266,9 +272,13 @@ def test_atomic_write_uses_unique_temp_not_fixed_name(tmp_path: Path):
     assert leftover == []  # unique temp was consumed by os.replace, none left behind
 
 
+@needs_posix
 def test_concurrent_writers_without_lock_keep_valid_json(tmp_path: Path, monkeypatch):
     # With the lock degraded to a no-op (fcntl absent), the unique-temp write still
     # never leaves the file half-written: every concurrent writer replaces atomically.
+    # POSIX-only: this relies on rename() being atomic under concurrency; Windows
+    # os.replace raises WinError 5 on a racing replace (and has no advisory lock to
+    # serialize writers), so the property simply doesn't hold there.
     monkeypatch.setattr(trust, "fcntl", None)
     cj = tmp_path / "claude.json"
     cj.write_text("{}", encoding="utf-8")
@@ -286,7 +296,7 @@ def test_concurrent_writers_without_lock_keep_valid_json(tmp_path: Path, monkeyp
     assert list(tmp_path.glob("claude.json.*.tmp")) == []  # no temp debris
 
 
-@needs_fchmod
+@needs_posix
 def test_atomic_write_preserves_existing_file_mode(tmp_path: Path):
     # mkstemp creates the temp 0600; the replace must NOT silently tighten an
     # existing ~/.claude.json — its mode is mirrored onto the temp first.
@@ -301,7 +311,7 @@ def test_atomic_write_preserves_existing_file_mode(tmp_path: Path):
     assert stat.S_IMODE(cj.stat().st_mode) == 0o644  # preserved, not reset to 0600
 
 
-@needs_fchmod
+@needs_posix
 def test_atomic_write_new_file_is_owner_only(tmp_path: Path):
     # A brand-new ~/.claude.json (the file didn't exist) is created owner-only —
     # it can hold tokens, so 0600 is the safe default rather than the umask.
