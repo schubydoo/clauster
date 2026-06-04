@@ -93,6 +93,13 @@ jobs:
 
   trivy-image:
     name: trivy image scan
+    # Building the image just to scan it costs ~75s — the long pole of this
+    # workflow. Skip it on PRs (where it's report-only anyway); run on the main
+    # push + the weekly cron, which still catch image CVEs and a broken Dockerfile
+    # before any tagged release. The `security required checks passed` aggregator
+    # treats a skipped job as passing (same as the PR-only dependency-review on
+    # push), so the required check stays green on PRs.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -105,8 +112,7 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
       # Build the amd64 image once and load it locally for the scan (no push).
-      # This runs on every PR so a broken Dockerfile or dependency bump fails
-      # here rather than after merge; the gha cache keeps cold builds cheap.
+      # The gha cache keeps cold builds cheap.
       - name: Build image
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
@@ -125,8 +131,9 @@ jobs:
           output: trivy-image.sarif
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
-          # Enforce on main + the weekly cron; report-only on PRs (see trivy-fs).
-          exit-code: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          # The job's `if` skips PRs entirely, so this only ever runs on the main
+          # push + the weekly cron — always enforce (fail on findings).
+          exit-code: "1"
       - name: Upload SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
