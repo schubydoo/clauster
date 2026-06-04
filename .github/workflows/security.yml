@@ -131,8 +131,9 @@ jobs:
           output: trivy-image.sarif
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
-          # Enforce on main + the weekly cron; report-only on PRs (see trivy-fs).
-          exit-code: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          # The job's `if` skips PRs entirely, so this only ever runs on the main
+          # push + the weekly cron — always enforce (fail on findings).
+          exit-code: "1"
       - name: Upload SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
