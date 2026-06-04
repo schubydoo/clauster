@@ -75,10 +75,12 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   (Starting / Running / Stopped / Crashed / Error). A bridge that launches but
   never registers an environment is reported honestly as `Error` after a grace
   window, not a phantom `Running`.
-- **Spawn controls** — pick the spawn mode (same-dir / worktree / session) and
-  permission mode per launch. `bypassPermissions` is double-gated: a per-project
-  config ceiling (`projects.<name>.allow_bypass_permissions`) **and** a
-  type-the-project-name confirm in the UI.
+- **Spawn controls** — pick the spawn mode (same-dir / worktree / session),
+  permission mode, and resume mode (standard / pty true-resume, POSIX) per launch;
+  `claude.resume_mode` is the pre-selected default. `bypassPermissions` is
+  double-gated: a per-project config ceiling
+  (`projects.<name>.allow_bypass_permissions`) **and** a type-the-project-name
+  confirm in the UI.
 - **Open session in Claude** — a deep link to the primary session plus a scannable QR code
   that opens it in the Claude app (claude.ai/code or mobile), attached to the
   running bridge.

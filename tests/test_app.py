@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
@@ -56,3 +58,19 @@ def test_dashboard_resume_and_start_new_controls_render(write_config):
     assert ">Resume</button>" in resp.text
     assert "startNew(" in resp.text and ">Start new session</button>" in resp.text
     assert "confirmNewStart(" in resp.text  # the warned confirm path
+
+
+def test_dashboard_renders_resume_mode_picker(write_config):
+    # PR3: the per-launch Mode picker is wired (DEFAULT_RESUME_MODE seed + the
+    # resume_mode posted in the spawn body are platform-independent); the <select>
+    # itself is gated on pty_supported (POSIX only).
+    resp = _client(write_config).get("/")
+    assert resp.status_code == 200
+    assert "DEFAULT_RESUME_MODE" in resp.text
+    assert "resume_mode:" in resp.text  # posted in the /api/instances body
+    # Start-new-session on a resumable card (Mode picker hidden) must keep the
+    # bridge's recorded mode, not silently post the global default.
+    assert "existing.resume_mode" in resp.text
+    if sys.platform != "win32":
+        assert "resumeMode['" in resp.text  # the picker <select> x-model (POSIX)
+        assert "pty (true-resume)" in resp.text

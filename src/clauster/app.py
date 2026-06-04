@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import sys
 import time
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
@@ -313,7 +314,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         proj = next((p for p in await list_projects() if p.name == name), None)
         if proj is None:
             raise HTTPException(status_code=404, detail=f"project {name!r} not found")
-        return templates.TemplateResponse(request, "_project_card.html", {"p": proj})
+        # pty_supported gates the resume-mode <option>; the fragment render must
+        # pass it too (same partial as the grid loop) or the picker vanishes.
+        return templates.TemplateResponse(
+            request,
+            "_project_card.html",
+            {"p": proj, "pty_supported": sys.platform != "win32"},
+        )
 
     @app.get("/api/projects/{name}/usage")
     async def api_project_usage(name: str) -> dict:
@@ -551,14 +558,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=422, detail="body must include a 'project' string")
         spawn_mode = body.get("spawn_mode")
         permission_mode = body.get("permission_mode")
+        resume_mode = body.get("resume_mode")
         for field, value in (
             ("spawn_mode", spawn_mode),
             ("permission_mode", permission_mode),
+            ("resume_mode", resume_mode),
         ):
             if value is not None and not isinstance(value, str):
                 raise HTTPException(status_code=422, detail=f"{field} must be a string")
         return await _spawn_or_http(
-            runner.spawn(project, spawn_mode=spawn_mode, permission_mode=permission_mode)
+            runner.spawn(
+                project,
+                spawn_mode=spawn_mode,
+                permission_mode=permission_mode,
+                resume_mode=resume_mode,
+            )
         )
 
     @app.get("/api/instances/{instance_id}")
@@ -740,6 +754,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "reaper_ui_enabled": config.reaper.ui_enabled,
                 "default_spawn_mode": config.instance_defaults.spawn_mode,
                 "default_permission_mode": config.instance_defaults.permission_mode,
+                "default_resume_mode": config.claude.resume_mode,
+                # pty (true-resume) is POSIX-only; hide the option on Windows hosts.
+                "pty_supported": sys.platform != "win32",
             },
         )
 

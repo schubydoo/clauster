@@ -236,6 +236,7 @@
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
   const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
+  const DEFAULT_RESUME_MODE = {{ default_resume_mode | tojson }};
 
   // Theme toggle (navbar) — persisted, mirrors the no-flash init above.
   document.addEventListener("DOMContentLoaded", function () {
@@ -265,6 +266,7 @@
       logs: {},
       spawnMode: {},
       permMode: {},
+      resumeMode: {},
       confirmBypass: {},
       bypassTyped: {},
       confirmNew: {},
@@ -283,6 +285,7 @@
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
           this.permMode[n] = DEFAULT_PERMISSION_MODE;
+          this.resumeMode[n] = DEFAULT_RESUME_MODE;
         }
         this.trustState = { ...INITIAL_TRUST };
         await this.refresh();
@@ -579,6 +582,7 @@
         // (init() does the same for the server-rendered cards).
         if (!(name in this.spawnMode)) this.spawnMode[name] = DEFAULT_SPAWN_MODE;
         if (!(name in this.permMode)) this.permMode[name] = DEFAULT_PERMISSION_MODE;
+        if (!(name in this.resumeMode)) this.resumeMode[name] = DEFAULT_RESUME_MODE;
         if (proj && proj.trust_state) this.trustState[name] = proj.trust_state;
         const grid = document.getElementById("project-grid");
         if (!grid) { this.reloadToProject(); return; }
@@ -618,6 +622,12 @@
       reloadToProject() { window.location.reload(); },
       async _spawn(name) {
         this.errors[name] = null;
+        // Pick the launch mode BEFORE the optimistic overwrite below. A resumable
+        // card hides the Mode picker, so on "Start new session" we keep the stopped
+        // bridge's own recorded mode rather than silently dropping to the global
+        // default; a brand-new card (no instance) uses the visible picker.
+        const existing = this.instances[name];
+        const mode = (existing && existing.resume_mode) || this.resumeMode[name];
         this.instances[name] = { project: name, status: "starting" };
         try {
           const res = await fetch(ROOT + "/api/instances", {
@@ -627,6 +637,7 @@
               project: name,
               spawn_mode: this.spawnMode[name],
               permission_mode: this.permMode[name],
+              resume_mode: mode,
             }),
           });
           const body = await res.json();
