@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from clauster import __main__ as cli
+from clauster.config import ClausterConfig
 
 # .cmd on Windows: the extensionless stub isn't launchable by subprocess, and
 # only Python 3.12+ falls back to PATHEXT to find a sibling claude.cmd — be
@@ -184,3 +185,31 @@ def test_install_service_bad_kind_exits_2():
     with pytest.raises(SystemExit) as ei:  # argparse choices -> exit 2
         cli.main(["install-service", "upstart"])
     assert ei.value.code == 2
+
+
+# ----- process title (instance_name) ------------------------------------
+
+
+def test_process_title_none_without_instance_name(projects_root):
+    assert cli._process_title(ClausterConfig(projects_root=projects_root)) is None
+
+
+def test_process_title_formats_instance_name(projects_root):
+    cfg = ClausterConfig(projects_root=projects_root, instance_name="dev")
+    assert cli._process_title(cfg) == "clauster[dev]"
+
+
+def test_set_process_title_calls_setproctitle(projects_root, monkeypatch):
+    seen: list[str] = []
+    fake = type("S", (), {"setproctitle": staticmethod(lambda t: seen.append(t))})
+    monkeypatch.setattr(cli, "_setproctitle", fake)
+    cli._set_process_title(ClausterConfig(projects_root=projects_root, instance_name="dev"))
+    assert seen == ["clauster[dev]"]
+
+
+def test_set_process_title_noop_without_name(projects_root, monkeypatch):
+    seen: list[str] = []
+    fake = type("S", (), {"setproctitle": staticmethod(lambda t: seen.append(t))})
+    monkeypatch.setattr(cli, "_setproctitle", fake)
+    cli._set_process_title(ClausterConfig(projects_root=projects_root))
+    assert seen == []

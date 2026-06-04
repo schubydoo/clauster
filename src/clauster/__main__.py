@@ -18,7 +18,12 @@ import uvicorn
 from . import __version__, claude_cli, environments, ops, usage
 from .app import create_app
 from .auth import hash_password, make_hasher
-from .config import load_config
+from .config import ClausterConfig, load_config
+
+try:
+    import setproctitle as _setproctitle
+except ImportError:  # pragma: no cover - optional dep; the retitle degrades to a no-op
+    _setproctitle = None
 
 _COMMANDS = {
     "run",
@@ -309,6 +314,25 @@ def _warn_if_cookie_insecure(config) -> None:
     )
 
 
+def _process_title(config: ClausterConfig) -> str | None:
+    """Process title for this instance (``clauster[<name>]``), or None for the default."""
+    if not config.instance_name:
+        return None
+    return f"clauster[{config.instance_name}]"
+
+
+def _set_process_title(config: ClausterConfig) -> None:
+    """Retitle the process so co-resident instances are distinct in ps/pgrep.
+
+    No-op without ``instance_name`` or if setproctitle isn't installed. This is the
+    only safe way to tell a dev instance apart from the prod service — the cmdline
+    is otherwise identical, which makes ``pkill -f`` a footgun.
+    """
+    title = _process_title(config)
+    if title and _setproctitle is not None:
+        _setproctitle.setproctitle(title)
+
+
 def _run(config_path: str | None) -> int:
     try:
         config = load_config(config_path)
@@ -331,6 +355,7 @@ def _run(config_path: str | None) -> int:
         file=sys.stderr,
     )
     _warn_if_cookie_insecure(config)
+    _set_process_title(config)
     app = create_app(config)
     # proxy_headers=False: keep request.client.host as the real socket peer so the
     # reverse-proxy IP allowlist can't be defeated via a spoofed X-Forwarded-For.

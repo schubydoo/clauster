@@ -184,3 +184,23 @@ def test_missing_config_file_raises(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with pytest.raises(FileNotFoundError):
         load_config()
+
+
+def test_instance_name_default_and_valid(write_config):
+    assert load_config(write_config()).instance_name is None
+    assert load_config(write_config("instance_name: dev\n")).instance_name == "dev"
+
+
+def test_instance_name_invalid_rejected(write_config):
+    # constrained charset (no spaces/brackets) + 32-char cap keep it safe + tidy in
+    # a process title.
+    with pytest.raises(ValueError):
+        load_config(write_config("instance_name: 'has spaces'\n"))
+    with pytest.raises(ValueError):
+        load_config(write_config(f"instance_name: {'x' * 33}\n"))
+
+
+def test_instance_name_env_override(write_config, monkeypatch):
+    # top-level scalar -> CLAUSTER_INSTANCE_NAME works for free (handy for systemd).
+    monkeypatch.setenv("CLAUSTER_INSTANCE_NAME", "prod")
+    assert load_config(write_config()).instance_name == "prod"
