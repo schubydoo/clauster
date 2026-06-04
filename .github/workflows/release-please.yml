@@ -21,10 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # GITHUB_TOKEN stays read-only: the App token (minted below) does all the
-    # writing, so the default token needs no write scope here.
+    # release writing (PR, version bump, draft-release assets, publish). The only
+    # added scope is id-token: write, for Sigstore keyless signing (OIDC) of the
+    # release artifacts in the signed-assets step below.
     permissions:
       contents: read
       pull-requests: read
+      id-token: write
     steps:
       # Mint a short-lived installation token for the Clauster release GitHub
       # App so the release PR + version-bump commits are authored by the app's
@@ -54,6 +57,7 @@ jobs:
           permission-pull-requests: write
 
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
@@ -137,3 +141,74 @@ jobs:
           git commit -m "chore: sync uv.lock to the release version"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${PR_BRANCH}"
           echo "Pushed uv.lock sync to $PR_BRANCH."
+
+      # --- Sign + attach release artifacts (OSSF Scorecard: Signed-Releases) ---
+      # release-please created the GitHub Release as a DRAFT (config draft:true) —
+      # not yet immutable, and with no git tag. GitHub's own recommended flow for
+      # immutable releases is exactly this: create a draft, attach assets, publish.
+      # We build + Sigstore-sign the sdist/wheel, attach them + their .sigstore
+      # bundles to the draft, then publish it; publishing creates the tag and locks
+      # the release immutable WITH the signed assets. Publishing via the APP token
+      # (not GITHUB_TOKEN) is what lets the resulting tag trigger release.yml
+      # (PyPI + Docker) — same anti-recursion reason as the release PR's tag.
+      # Why this exists: Scorecard scans Release ASSETS for signatures, which the
+      # registry cosign signature and PyPI-side attestations never put there, so
+      # every prior release scored 0 (asset-less). If a step here fails the release
+      # stays an unpublished draft (no tag, no PyPI/Docker) — recoverable by hand,
+      # never a half-signed publish.
+      - name: Check out the release commit
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up uv (build)
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: false # this job can push; avoid the cache-poisoning vector
+
+      - name: Build sdist + wheel
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        run: uv build
+
+      - name: Sign artifacts with Sigstore
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: sigstore/gh-action-sigstore-python@04cffa1d795717b140764e8b640de88853c92acc # v3.3.0
+        with:
+          inputs: ./dist/*.tar.gz ./dist/*.whl
+
+      - name: Attach signed assets to the draft, then publish
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_ID}" ]; then
+            echo "no release id from release-please; aborting" >&2
+            exit 1
+          fi
+          # A draft has no git tag, so by-tag lookups 404 — upload by release ID via
+          # the uploads host. Sigstore (v3) writes .sigstore.json bundles next to
+          # each input; glob both bundle spellings defensively.
+          shopt -s nullglob
+          assets=(dist/*.tar.gz dist/*.whl dist/*.sigstore dist/*.sigstore.json)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "no build/signature artifacts to upload; aborting" >&2
+            exit 1
+          fi
+          for f in "${assets[@]}"; do
+            name="$(basename "$f")"
+            echo "uploading ${name}"
+            gh api --method POST \
+              -H "Content-Type: application/octet-stream" \
+              "https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${name}" \
+              --input "$f"
+          done
+          # Publish: creates the git tag (release locks immutable with the assets);
+          # the app-token push is what triggers release.yml.
+          gh api --method PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false
+          echo "published release ${RELEASE_ID} with ${#assets[@]} assets."
