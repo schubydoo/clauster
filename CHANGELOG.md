@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.4.0](https://github.com/schubydoo/clauster/compare/v0.3.0...v0.4.0) (2026-06-04)
+
+
+### Features
+
+* **runner:** recover reboot-orphaned bridges as resumable stopped cards ([#110](https://github.com/schubydoo/clauster/issues/110)) ([1b0874e](https://github.com/schubydoo/clauster/commit/1b0874e4f729dd12d6cb77486e21508a55abe82b))
+* **ui:** per-launch standard|pty resume-mode picker ([#103](https://github.com/schubydoo/clauster/issues/103)) ([6e49f6c](https://github.com/schubydoo/clauster/commit/6e49f6c9fb7dc783360056afa7370f8c76878971))
+* **ui:** rename Restart to Resume and add a warned "Start new session" ([#101](https://github.com/schubydoo/clauster/issues/101)) ([ca2e6ab](https://github.com/schubydoo/clauster/commit/ca2e6abfd086db0c45c14ec2cff2a093490ac48c))
+* **usage:** add usage.show_cost toggle to hide the cost badge ([#121](https://github.com/schubydoo/clauster/issues/121)) ([bffa1c4](https://github.com/schubydoo/clauster/commit/bffa1c433675577c3c32b2a849bf8ef92b59788e))
+
+
+### Bug Fixes
+
+* **io:** specify explicit UTF-8 encoding on all file reads/writes ([#122](https://github.com/schubydoo/clauster/issues/122)) ([8427160](https://github.com/schubydoo/clauster/commit/8427160adabbf35c96fdef27a62deef9128238b6))
+* make a bridge's resume_mode an instance property, not a live config override ([#100](https://github.com/schubydoo/clauster/issues/100)) ([21ddd26](https://github.com/schubydoo/clauster/commit/21ddd2626ed5719942b52fd732bdfd8d5a1072b3))
+* **procutil:** tighten the PID-reuse window in is_live_bridge ([#104](https://github.com/schubydoo/clauster/issues/104)) ([583ec11](https://github.com/schubydoo/clauster/commit/583ec11ed54582c75bfb6f86cd3afb1b649fb37f))
+* **recap:** make the recap boundary un-forgeable (prompt-injection hardening) ([#105](https://github.com/schubydoo/clauster/issues/105)) ([9afd544](https://github.com/schubydoo/clauster/commit/9afd544f7a70b0c39174a95638542bdb224cc2b2))
+* **trust:** flock the ~/.claude.json read-modify-write (lost-update guard) ([#108](https://github.com/schubydoo/clauster/issues/108)) ([4ebeab5](https://github.com/schubydoo/clauster/commit/4ebeab557dcd29ede31c57a576d5a2c6f86c6b18))
+
+
+### Performance
+
+* **test:** speed up the suite 48s→14s (xdist + cap the 15s ready-timeout test) ([#111](https://github.com/schubydoo/clauster/issues/111)) ([97f3469](https://github.com/schubydoo/clauster/commit/97f34694e41ed9c129d219c9f95d53b90db38de4))
+
 ## [0.3.0](https://github.com/schubydoo/clauster/compare/v0.2.2...v0.3.0) (2026-06-03)
 
 
