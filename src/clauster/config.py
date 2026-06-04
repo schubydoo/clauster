@@ -206,6 +206,11 @@ class ClausterConfig(BaseModel):
     state_dir: Path = Path("~/.clauster")
     root_path: str = ""
     log_format: Literal["text", "json"] = "text"
+    # Optional label for THIS instance. When set, the process retitles itself
+    # `clauster[<instance_name>]` (via setproctitle) so co-resident instances are
+    # distinguishable in ps/pgrep — e.g. a dev instance vs the prod systemd service.
+    # Cosmetic only (no behavioural effect); also settable via CLAUSTER_INSTANCE_NAME.
+    instance_name: str | None = Field(default=None, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
 
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     instance_defaults: InstanceDefaults = Field(default_factory=InstanceDefaults)
