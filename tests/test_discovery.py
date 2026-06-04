@@ -55,3 +55,13 @@ def test_discover_sets_trust_from_claude_json(projects_root, tmp_path):
     )
     projects = discover_projects(projects_root, claude_json=claude_json)
     assert all(p.trust_state is TrustState.TRUSTED for p in projects)
+
+
+def test_load_trusted_paths_non_utf8_returns_empty(tmp_path):
+    # A non-UTF-8 claude.json raises UnicodeDecodeError (a ValueError) on read;
+    # it must degrade to "nothing trusted" like any other malformed file.
+    from clauster.discovery import _load_trusted_paths
+
+    claude_json = tmp_path / ".claude.json"
+    claude_json.write_bytes(b"\xff\xfe\x00not utf-8")
+    assert _load_trusted_paths(claude_json) == set()

@@ -30,8 +30,10 @@ def _load_trusted_paths(claude_json: Path) -> set[Path]:
     Trust inherits *down* a tree, so the caller walks ancestors against this set.
     """
     try:
-        data = json.loads(claude_json.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = json.loads(claude_json.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, OSError):
+        # UnicodeDecodeError (a ValueError) for a non-UTF-8 file degrades to the
+        # same "nothing trusted" result as any other malformed claude.json.
         return set()
     projects = data.get("projects")
     if not isinstance(projects, dict):

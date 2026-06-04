@@ -178,7 +178,7 @@ def _check_state_dir_writable(state_dir: Path) -> Check:
     if sd.exists():
         try:
             probe = sd / ".doctor-write-probe"
-            probe.write_text("ok")
+            probe.write_text("ok", encoding="utf-8")
             probe.unlink()
             return Check("state_dir", OK, f"{sd} (writable)")
         except OSError as exc:
@@ -206,7 +206,7 @@ def _check_claude_login(creds_path: Path | None = None) -> Check:
     state = "missing"  # missing | present | bad_json
     bad_json = ""
     try:
-        data = json.loads(creds.read_text())
+        data = json.loads(creds.read_text(encoding="utf-8"))
         # Valid JSON that isn't an object (null, a number, a list) must not crash doctor.
         oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
         oauth = oauth if isinstance(oauth, dict) else {}
@@ -214,7 +214,9 @@ def _check_claude_login(creds_path: Path | None = None) -> Check:
         state = "present"
     except (FileNotFoundError, OSError):
         state = "missing"  # no credentials file yet
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # A non-UTF-8 creds file (UnicodeDecodeError, a ValueError) is as unusable
+        # as invalid JSON — report it the same way instead of crashing doctor.
         state, bad_json = "bad_json", str(exc)
 
     if has_token:

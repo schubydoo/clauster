@@ -21,6 +21,13 @@ def test_corrupt_json_tolerated(tmp_path):
     assert StateStore(tmp_path).load() == {}
 
 
+def test_non_utf8_file_tolerated(tmp_path):
+    # A non-UTF-8 state.json raises UnicodeDecodeError (a ValueError) on read; the
+    # documented "tolerates a corrupt file" contract must still hold.
+    (tmp_path / "state.json").write_bytes(b"\xff\xfe\x00not utf-8")
+    assert StateStore(tmp_path).load() == {}
+
+
 def test_unknown_fields_dropped(tmp_path):
     (tmp_path / "state.json").write_text(
         json.dumps({"schema_version": 1, "instances": {"a": {"label": "a", "bogus": 1}}})

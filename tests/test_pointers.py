@@ -40,6 +40,14 @@ def test_load_pointer_malformed_returns_none(tmp_path: Path):
     assert pointers.load_pointer(bad) is None
 
 
+def test_load_pointer_non_utf8_returns_none(tmp_path: Path):
+    # A non-UTF-8 file raises UnicodeDecodeError (a ValueError) on read; the
+    # malformed -> None contract must still hold (not bubble the exception).
+    bad = tmp_path / "bad.json"
+    bad.write_bytes(b"\xff\xfe\x00not utf-8")
+    assert pointers.load_pointer(bad) is None
+
+
 def test_fixture_pointers_are_not_live(fixtures_dir: Path):
     # The captured pointers reference long-dead PIDs -> never trusted as live.
     for name in ("test1", "test2", "dockerize2"):

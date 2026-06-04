@@ -651,3 +651,25 @@ def test_capture_error_detail_unreadable_is_noop(tmp_path):
     inst = RemoteControlInstance(project="x", label="x", bridge_debug_log_path=log)
     SessionRunner._capture_error_detail(inst)
     assert inst.error_detail is None
+
+
+def test_read_markers_tolerates_non_utf8_bytes(tmp_path):
+    # The debug log is raw bridge output; a stray non-UTF-8 byte must NOT raise
+    # UnicodeDecodeError (a ValueError, which the read's OSError guard would not
+    # catch) and lose every marker — markers around the garbage still parse.
+    log = tmp_path / "bridge.log"
+    log.write_bytes(
+        b"[bridge:work] Starting poll loop spawnMode=same-dir environmentId=env_ABC123\n"
+        b"garbage: \xff\xfe\x80 not utf-8\n"
+    )
+    markers = SessionRunner._read_markers(log)
+    assert markers.poll_loop_started is True
+    assert markers.environment_id == "env_ABC123"
+
+
+def test_read_sidecar_non_utf8_returns_none(tmp_path):
+    # A non-UTF-8 sidecar raises UnicodeDecodeError (a ValueError) on read; the
+    # invalid -> None contract must hold so readiness polling isn't broken.
+    sidecar = tmp_path / "x.keeper.json"
+    sidecar.write_bytes(b"\xff\xfe\x00not utf-8")
+    assert SessionRunner._read_sidecar(sidecar) is None

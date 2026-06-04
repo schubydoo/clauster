@@ -159,7 +159,7 @@ def read_epoch(state_dir: Path) -> int:
     """
     path = state_dir.expanduser() / "session.epoch"
     try:
-        return int(path.read_text().strip())
+        return int(path.read_text(encoding="utf-8").strip())
     except (FileNotFoundError, OSError, ValueError):
         return 0
 
