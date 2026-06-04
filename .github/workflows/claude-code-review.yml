@@ -42,12 +42,30 @@ jobs:
         uses: anthropics/claude-code-action@70a6e5256e9e2366a1ed5c041904a982ba3a328f # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Always leave a visible mark: post a tracking comment and update it in
-          # place with the review's conclusion, so a clean PR still shows
-          # "reviewed -> no issues" instead of silence (the bare `/code-review`
-          # plugin only posts inline comments when it finds something). This is the
-          # action's documented auto-review pattern.
+          # Native auto-review — NOT the `/code-review` plugin, which posts a fresh
+          # full comment on every run (it ignores the sticky mechanism). With
+          # track_progress the summary lives in ONE comment that updates in place on
+          # each push, so re-runs don't repeat the whole review. Specific issues go
+          # as inline comments. This is the action's documented auto-review pattern.
           track_progress: true
-          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
-          plugins: "code-review@claude-code-plugins"
-          prompt: "/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          prompt: |
+            Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            The PR branch is checked out; use `gh pr diff` and `gh pr view` to see the change and its discussion.
+
+            Be a careful reviewer, not a nitpicker — flag only real, actionable issues:
+            - Correctness bugs, edge cases, and logic errors
+            - Security: injection, auth/authorization, SSRF, path traversal, secret/credential exposure, and SILENT FAILURES (swallowed exceptions, bare `except`, fallbacks that hide errors)
+            - Error handling and resource cleanup
+            - Test coverage for new or changed logic (are the important paths and edge cases tested?)
+            - Consistency with the patterns already used in the surrounding code
+            - Performance problems that actually matter
+
+            Repo context (a Python/FastAPI + Alpine.js app that spawns `claude remote-control` bridges):
+            - Jinja2 autoescaping is on, so most "template XSS" concerns are false positives.
+            - Style, formatting, and typing are enforced by ruff + pyright in CI — do NOT comment on those.
+            - Skip trivia; only raise what's worth a maintainer's attention. If nothing is significant, say so plainly.
+
+            Post specific issues as inline comments on the relevant lines. Give your overall verdict as your final summary — do not open a separate top-level comment (it lands in the tracking comment).
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --append-system-prompt "When listing or referring to findings or numbered points, do not write them as #1, #2, etc. GitHub turns a hash followed by digits into a link to an unrelated issue or PR. Use Finding 1, (1), or a short description instead."
