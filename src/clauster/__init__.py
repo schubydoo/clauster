@@ -1,3 +1,3 @@
 """Clauster — self-hosted dispatcher for Claude Code remote-control bridges."""
 
-__version__ = "0.4.0"  # x-release-please-version
+__version__ = "0.2.1"  # x-release-please-version
