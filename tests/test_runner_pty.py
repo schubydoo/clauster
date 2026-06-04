@@ -92,6 +92,21 @@ def test_is_pty_mode_explicit_request_wins(runner_config) -> None:
     assert std_runner._is_pty_mode(prior_std, requested="pty") is (sys.platform != "win32")
 
 
+def test_is_pty_mode_false_on_windows(runner_config, monkeypatch) -> None:
+    """pty is POSIX-only: on Windows the guard returns False no matter what —
+    config, an explicit request, or a prior pty instance all fall back to standard.
+    """
+    from clauster.models import RemoteControlInstance
+
+    monkeypatch.setattr("clauster.runner.sys.platform", "win32")
+    pty_runner, _ = _pty_runner(runner_config)  # config resume_mode == "pty"
+    prior_pty = RemoteControlInstance(project="a", label="a", resume_mode="pty")
+
+    assert pty_runner._is_pty_mode() is False  # config says pty, Windows overrides
+    assert pty_runner._is_pty_mode(requested="pty") is False  # explicit pty too
+    assert pty_runner._is_pty_mode(prior_pty) is False  # a recorded pty bridge too
+
+
 async def test_spawn_rejects_invalid_resume_mode(runner_config) -> None:
     """A bad per-launch resume_mode is rejected before launch (no fake claude needed)."""
     from clauster.runner import InvalidSpawnOption
