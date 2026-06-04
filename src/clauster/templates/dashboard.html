@@ -622,6 +622,12 @@
       reloadToProject() { window.location.reload(); },
       async _spawn(name) {
         this.errors[name] = null;
+        // Pick the launch mode BEFORE the optimistic overwrite below. A resumable
+        // card hides the Mode picker, so on "Start new session" we keep the stopped
+        // bridge's own recorded mode rather than silently dropping to the global
+        // default; a brand-new card (no instance) uses the visible picker.
+        const existing = this.instances[name];
+        const mode = (existing && existing.resume_mode) || this.resumeMode[name];
         this.instances[name] = { project: name, status: "starting" };
         try {
           const res = await fetch(ROOT + "/api/instances", {
@@ -631,7 +637,7 @@
               project: name,
               spawn_mode: this.spawnMode[name],
               permission_mode: this.permMode[name],
-              resume_mode: this.resumeMode[name],
+              resume_mode: mode,
             }),
           });
           const body = await res.json();

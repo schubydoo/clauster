@@ -68,6 +68,9 @@ def test_dashboard_renders_resume_mode_picker(write_config):
     assert resp.status_code == 200
     assert "DEFAULT_RESUME_MODE" in resp.text
     assert "resume_mode:" in resp.text  # posted in the /api/instances body
+    # Start-new-session on a resumable card (Mode picker hidden) must keep the
+    # bridge's recorded mode, not silently post the global default.
+    assert "existing.resume_mode" in resp.text
     if sys.platform != "win32":
         assert "resumeMode['" in resp.text  # the picker <select> x-model (POSIX)
         assert "pty (true-resume)" in resp.text
