@@ -90,15 +90,21 @@ jobs:
       # and failed tests still feed Codecov's flaky-test analytics. Test results go
       # through codecov-action with `report_type: test_results` (the standalone
       # test-results-action is deprecated), so we pin a single action SHA.
+      # Skip release-please's automated PRs: they only touch CHANGELOG / version /
+      # lockfile (no code), so coverage never moves and a Codecov status/comment on
+      # them is pure noise. Filtered on the PR *author* (not `github.actor`, which
+      # becomes the human on a manual push to the release branch) and mirrors the
+      # `.coderabbit.yaml` bot skip. `github.event.pull_request.user.login` is empty
+      # on push events, so main-branch coverage uploads are unaffected.
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' && github.event.pull_request.user.login != 'clauster-release-bot[bot]' }}
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: false
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' && github.event.pull_request.user.login != 'clauster-release-bot[bot]' }}
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
