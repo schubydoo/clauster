@@ -1,20 +1,96 @@
-# Codecov config — coverage is REPORTED here for visibility (PR comments +
-# trend graphs); the real enforcement is the local/CI 96% gate in
-# pyproject [tool.pytest.ini_options] (--cov-fail-under=96, Linux). Both
-# statuses are `informational: true` so Codecov nudges but never blocks a
-# merge — it isn't a required check and the pyproject gate is the source of
-# truth. Coverage is uploaded from one Linux cell only (see ci.yml).
+# Codecov config. Coverage is REPORTED here for visibility (PR comment + trend
+# graphs + per-component breakdown); the REAL gate is the local/CI 96% floor in
+# pyproject [tool.pytest.ini_options] (--cov-fail-under=96, enforced on the Linux
+# cell). Every Codecov status is `informational: true` — it nudges, never blocks
+# (it isn't a required check). Coverage uploads from ONE Linux 3.13 cell (see
+# ci.yml), so flags / carryforward / report-merging aren't needed.
+#
+# Validate before deploying changes:
+#   curl -X POST --data-binary @codecov.yml https://codecov.io/validate
+
+codecov:
+  # ci.yml uploads coverage even when pytest FAILS (the `!cancelled()` guard), on
+  # purpose: a coverage drop should surface exactly when a change breaks something.
+  # So don't gate the Codecov status on CI passing, and don't wait for CI before
+  # reporting — show coverage as soon as it's uploaded.
+  require_ci_to_pass: false
+  notify:
+    wait_for_ci: false
+
 coverage:
+  precision: 2
+  round: down # a strict floor rounds down, matching the --cov-fail-under gate
+  range: "90...100" # red->green band tuned to a project that sits ~96%
   status:
     project:
       default:
-        target: 96%        # mirror the pyproject gate
-        threshold: 1%      # tolerate sub-1% drift before flagging
-        informational: true
+        target: 96% # mirror the pyproject --cov-fail-under floor
+        threshold: 1% # tolerate sub-1% drift before flagging
+        informational: true # nudge, never block — pyproject is the source of truth
     patch:
       default:
-        informational: true
+        informational: true # diff (new-code) coverage, advisory only
+
+# Informational setup: the per-line PR annotations are mostly visual clutter; the
+# comment + dashboard carry the signal.
+github_checks:
+  annotations: false
 
 comment:
-  layout: "reach, diff, flags, files"
-  require_changes: true     # only comment when coverage actually moves
+  # No flags are uploaded (single cell), so drop the empty "flags" panel and show
+  # the per-component breakdown instead.
+  layout: "condensed_header, diff, components, files"
+  behavior: default # update the existing comment in place
+  require_changes: true # only comment when coverage actually moves
+  hide_project_coverage: false
+
+# Per-area coverage breakdown in the dashboard + PR comment. No `statuses` are
+# defined (here or in default_rules), so components add VISIBILITY only — they do
+# NOT create extra per-component PR status checks. Paths are globs over the
+# src/clauster modules; keep them roughly in sync as modules move.
+component_management:
+  individual_components:
+    - component_id: bridge_core
+      name: bridge core
+      paths:
+        - src/clauster/runner.py
+        - src/clauster/procutil.py
+        - src/clauster/pointers.py
+        - src/clauster/pty_keeper.py
+        - src/clauster/state.py
+        - src/clauster/inspector.py
+        - src/clauster/bridge_log.py
+    - component_id: web
+      name: web app
+      paths:
+        - src/clauster/app.py
+        - src/clauster/auth.py
+        - src/clauster/logstream.py
+        - src/clauster/usage.py
+        - src/clauster/claude_md.py
+    - component_id: provisioning
+      name: provisioning
+      paths:
+        - src/clauster/provisioning.py
+        - src/clauster/discovery.py
+        - src/clauster/clone_jobs.py
+    - component_id: trust_security
+      name: trust & redaction
+      paths:
+        - src/clauster/trust.py
+        - src/clauster/redact.py
+        - src/clauster/environments.py
+    - component_id: hooks_recap
+      name: hooks & recap
+      paths:
+        - src/clauster/hooks/**
+        - src/clauster/recap.py
+    - component_id: cli_config
+      name: cli & config
+      paths:
+        - src/clauster/ops.py
+        - src/clauster/config.py
+        - src/clauster/models.py
+        - src/clauster/claude_cli.py
+        - src/clauster/__main__.py
+        - src/clauster/__init__.py
