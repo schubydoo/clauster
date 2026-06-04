@@ -213,3 +213,14 @@ def test_set_process_title_noop_without_name(projects_root, monkeypatch):
     monkeypatch.setattr(cli, "_setproctitle", fake)
     cli._set_process_title(ClausterConfig(projects_root=projects_root))
     assert seen == []
+
+
+def test_set_process_title_swallows_runtime_error(projects_root, monkeypatch):
+    # The retitle is cosmetic: a setproctitle() that throws at runtime (restricted
+    # env / platform quirk / permissions) must never crash `clauster run`.
+    def boom(_title):
+        raise RuntimeError("no can do")
+
+    fake = type("S", (), {"setproctitle": staticmethod(boom)})
+    monkeypatch.setattr(cli, "_setproctitle", fake)
+    cli._set_process_title(ClausterConfig(projects_root=projects_root, instance_name="dev"))

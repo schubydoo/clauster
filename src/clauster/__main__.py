@@ -334,7 +334,10 @@ def _set_process_title(config: ClausterConfig) -> None:
     """
     title = _process_title(config)
     if title and _setproctitle is not None:
-        _setproctitle.setproctitle(title)
+        try:
+            _setproctitle.setproctitle(title)
+        except Exception:  # noqa: BLE001, S110 - a cosmetic retitle must never break startup
+            pass
 
 
 def _run(config_path: str | None) -> int:
