@@ -38,6 +38,15 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_dashboard_has_readiness_panel(write_config):
+    # The preflight panel + its /api/doctor wiring are present in the page (Alpine
+    # x-show hides it until a check needs attention, but the markup/JS must ship).
+    resp = _client(write_config).get("/")
+    assert "Before you start a bridge" in resp.text
+    assert "loadReadiness" in resp.text
+    assert "/api/doctor" in resp.text
+
+
 def test_dashboard_pty_bridge_is_resumable(write_config):
     # Regression (true-resume reachability): a stopped pty bridge has no
     # environment_id (the flag form leaves no env ghost), so isResumable() must
