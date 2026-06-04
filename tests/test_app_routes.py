@@ -50,6 +50,24 @@ def test_clone_missing_url_422(write_config, tmp_path):
     assert r.status_code == 422
 
 
+# ----- system readiness (dashboard preflight panel) ---------------------
+
+
+def test_doctor_endpoint_shape_and_ok(write_config, tmp_path):
+    # Surfaces run_doctor as JSON for the preflight panel. With the fake claude
+    # (v2.1.156 >= min), a real projects_root, a loopback bind and auth off, no
+    # check FAILs -> ok is True. Login may WARN (no creds in CI) but never FAILs.
+    r = _client(write_config, tmp_path).get("/api/doctor")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    names = {c["name"] for c in body["checks"]}
+    assert {"config", "claude", "claude-login", "projects_root", "auth"} <= names
+    for c in body["checks"]:
+        assert set(c) == {"name", "status", "detail"}
+        assert c["status"] in {"ok", "warn", "fail"}
+
+
 # ----- single-card fragment (reactive insertion, no full reload) --------
 
 
