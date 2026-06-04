@@ -36,13 +36,16 @@ def _drain_to_done(ws) -> list[dict]:
 
 
 def test_clone_streams_progress_then_done(write_config, tmp_path, monkeypatch):
-    # A gate lets the WS connect and read the running snapshot before the clone
-    # finishes, so we deterministically observe a progress stream + the done frame.
-    gate = threading.Event()
+    # The clone blocks until the WS has subscribed (it can't emit any progress
+    # before `connected` is set, and the test only sets it AFTER reading the
+    # running snapshot). So the WS is provably in-flight — its first frame is the
+    # running snapshot, and it then observes the FULL live 50% -> 100% -> done
+    # stream deterministically (no reliance on snapshot-vs-progress race timing).
+    connected = threading.Event()
 
     def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+        assert connected.wait(timeout=5), "websocket never subscribed before progress"
         progress_cb("Receiving objects:  50% (5/10)")
-        gate.wait(timeout=5)
         progress_cb("Receiving objects: 100% (10/10)")
 
     monkeypatch.setattr("clauster.app.clone_project", fake_clone)
@@ -57,12 +60,13 @@ def test_clone_streams_progress_then_done(write_config, tmp_path, monkeypatch):
 
         with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
             first = ws.receive_json()
-            assert first["type"] == "progress"  # the running snapshot
-            gate.set()  # release the clone to finish
+            assert first["type"] == "progress"  # the running snapshot (job not finished)
+            connected.set()  # WS is subscribed -> release the clone to emit progress
             frames = [first, *_drain_to_done(ws)]
 
     assert frames[-1] == {"type": "done", "status": "done", "error": None}
-    assert any(f.get("percent") == 100 for f in frames)  # the queued 100% frame streamed
+    streamed = [f.get("percent") for f in frames if f["type"] == "progress"]
+    assert 50 in streamed and 100 in streamed  # the full live progress stream was observed
 
 
 def test_clone_error_streams_terminal_error_frame(write_config, tmp_path, monkeypatch):
