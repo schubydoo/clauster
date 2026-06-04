@@ -100,7 +100,10 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
 - **CLAUDE.md editor** — view/edit a project's `CLAUDE.md` from the dashboard
   (size-capped, lost-update-guarded, trust-gated, audit-logged).
 - **Per-project cost badge** — approximate USD + token totals rolled up from a
-  project's session transcripts.
+  project's session transcripts. Token counts are exact (read from the transcript
+  `usage`); the dollar figure is a ballpark — a hand-maintained USD price table
+  (`usage.py`, as of 2026-05) that drifts as pricing changes, with unpriced models
+  counting as 0. Hide it with `usage.show_cost: false` (privacy / screen-share).
 
 ### Safety
 
@@ -251,6 +254,7 @@ validate against newer versions.
 | `claude.resume_recap` | `false` | recap the prior transcript into a restarted bridge |
 | `claude.resume_mode` | `standard` | `pty` = native true-resume on Resume (POSIX); default for new bridges only — a bridge keeps the mode it launched with |
 | `reaper.ui_enabled` | `false` | expose the ghost-environment reaper in the dashboard |
+| `usage.show_cost` | `true` | show the per-project cost badge; `false` hides it (and skips the usage fetch) for privacy |
 | `logs.redact_session_url` | `false` | redact the session URL on disk too, not just over WS |
 
 ## CLI

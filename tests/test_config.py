@@ -169,6 +169,15 @@ def test_reaper_ui_env_override(write_config, monkeypatch):
     assert load_config(cfg_path).reaper.ui_enabled is True
 
 
+def test_usage_show_cost_default_true(write_config):
+    assert load_config(write_config()).usage.show_cost is True
+
+
+def test_usage_show_cost_disabled_via_config(write_config):
+    config = load_config(write_config("usage:\n  show_cost: false\n"))
+    assert config.usage.show_cost is False
+
+
 def test_missing_config_file_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUSTER_CONFIG", raising=False)
     monkeypatch.delenv("CLAUSTER_HOME", raising=False)
