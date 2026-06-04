@@ -54,7 +54,7 @@ def test_unauth_html_redirects_to_login(runner_config):
 def test_public_paths_reachable_unauthenticated(runner_config):
     client = _password_client(runner_config)
     assert client.get("/login").status_code == 200
-    assert client.get("/static/clauster.css").status_code == 200
+    assert client.get("/static/favicon.svg").status_code == 200  # static mount is public
     health = client.get("/healthz")
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}  # trimmed when unauthenticated
