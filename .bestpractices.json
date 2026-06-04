@@ -125,12 +125,12 @@
   "static_analysis_fixed_justification": "Static-analysis findings are merge-blocking and fixed before merge.",
   "static_analysis_often_status": "Met",
   "static_analysis_often_justification": "Static analysis runs on every PR and push (CodeQL also on a weekly schedule).",
-  "dynamic_analysis_status": "Unmet",
-  "dynamic_analysis_justification": "No dynamic analysis or fuzzing is currently run; the project relies on static analysis plus a high-coverage test suite. Python is memory-safe.",
+  "dynamic_analysis_status": "Met",
+  "dynamic_analysis_justification": "Coverage-guided fuzzing runs in CI via ClusterFuzzLite + Atheris (.github/workflows/cflite_pr.yml). Harnesses in fuzz/ exercise the untrusted-input parsers on every PR: bridge-log marker parsing, log redaction (with a no-leak property assertion), and the clone-URL SSRF guard. Build integration in .clusterfuzzlite/. This is in addition to static analysis and the ~96% test suite.",
   "dynamic_analysis_unsafe_status": "N/A",
   "dynamic_analysis_unsafe_justification": "The project is written in Python, a memory-safe language; memory/behavior sanitizers for memory-unsafe languages do not apply.",
   "dynamic_analysis_enable_assertions_status": "Met",
   "dynamic_analysis_enable_assertions_justification": "The pytest suite exercises the code with assertions enabled throughout.",
-  "dynamic_analysis_fixed_status": "N/A",
-  "dynamic_analysis_fixed_justification": "No dynamic analysis is performed (see dynamic_analysis), so there are no such findings to fix; static analysis and tests cover this."
+  "dynamic_analysis_fixed_status": "Met",
+  "dynamic_analysis_fixed_justification": "Findings are fixed promptly. The first fuzzing run surfaced a crash in validate_clone_url (a malformed clone URL raised an uncaught ValueError from urlsplit/.port -> a 500 instead of a clean rejection); it was fixed in the same PR (#125, raising InvalidCloneUrl) before reaching any release, with a regression test."
 }
