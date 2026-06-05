@@ -8,6 +8,13 @@ name: Release Please
 on:
   push:
     branches: [main]
+  # Manual re-run. A draft release (config draft:true) has NO git tag until the
+  # publish step below un-drafts it, so the release-please step that runs *before*
+  # publish can't see the release it just cut ("No latest release found") and opens
+  # a bogus full-history "next release" PR. The post-publish reconcile step fixes
+  # that automatically, but this lets you re-trigger by hand if a release ever
+  # strands one (e.g. publish failed midway and was finished manually).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -248,3 +255,21 @@ jobs:
           # the app-token push is what triggers release.yml.
           gh api --method PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false
           echo "published release ${RELEASE_ID} with ${#assets[@]} assets."
+
+      # --- Reconcile the next-release PR now that the tag exists ---------------
+      # The release-please step at the top ran BEFORE the publish step created the
+      # git tag (draft releases carry no tag). Lacking the tag it logs "No latest
+      # release found", rebuilds from the full commit history, and opens a bogus
+      # downgrade "next release" PR (observed: 0.5.0 -> 0.2.1, #140). Now that the
+      # publish step has created the tag, re-run release-please: it finds the real
+      # latest release, sees no unreleased commits, and closes/corrects that
+      # transient PR — within this same run, so a bogus PR never lingers. A no-op
+      # on non-release pushes (gated on release_created); idempotent for the tag
+      # (already released -> it only touches the open release PR).
+      - name: Reconcile next-release PR (post-publish)
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
