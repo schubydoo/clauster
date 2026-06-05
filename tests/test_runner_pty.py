@@ -215,9 +215,12 @@ def test_keeper_marks_ready_on_resume_without_url(tmp_path, monkeypatch) -> None
 
 
 @_POSIX_ONLY
-def test_keeper_fresh_start_no_url_stays_starting(tmp_path, monkeypatch) -> None:
-    # A FRESH start (no --continue) with no URL must NOT be marked ready, so Clauster's
-    # startup-watch still ERRORs a genuinely-unregistered bridge.
+def test_keeper_fresh_start_no_url_becomes_ready(tmp_path, monkeypatch) -> None:
+    # A FRESH start (no --continue) that stays alive past the URL timeout without a URL
+    # must reach "ready", not stay "starting". Newer claude builds connect without ever
+    # printing the claude.ai/code/session_… line, so gating readiness on the URL would
+    # leave a healthy bridge stuck -> upstream false-ERROR -> the "external session
+    # active" misclassification. Mirrors the resume case above.
     import signal as _signal
 
     from clauster import pty_keeper
@@ -233,7 +236,7 @@ def test_keeper_fresh_start_no_url_stays_starting(tmp_path, monkeypatch) -> None
         pty_keeper.run_keeper(argv, tmp_path / "sc.json")
     finally:
         _signal.signal(_signal.SIGHUP, prev)
-    assert "ready" not in states  # a URL-less fresh start never claims ready
+    assert "ready" in states  # promoted on liveness once it survives the URL timeout
 
 
 def test_signal_stop_twice_sends_two_signals(monkeypatch) -> None:

@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 from typing import cast
 
 import pytest
 
-from clauster import bridge_log, inspector
+from clauster import bridge_log, inspector, procutil
 from clauster.models import (
     Attribution,
     InstanceStatus,
@@ -461,6 +462,49 @@ async def test_poll_keeps_stopped_instance_without_external_session(runner_confi
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [])
     await runner.poll_once()
     assert "alpha" in runner._instances  # kept — nothing live to yield to
+
+
+async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
+    runner_config, monkeypatch
+):
+    # Ownership of a cwd is keyed on the bridge PROCESS being alive, not on the
+    # instance's status. A fresh pty bridge that connected but never printed a
+    # scrapeable connect URL is left pre-ready (here: ERROR) yet is still OUR live
+    # process — its session must be attributed managed (TRACKED), never flagged
+    # external and phantom-deleted. Regression for the "external session active"
+    # misclassification of a clauster-launched pty bridge.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    # A live process whose cmdline reads as a bridge (is_live_bridge checks both the
+    # PID/start-time AND a `claude … remote-control` cmdline); the extra argv tokens are
+    # ignored by the sleeping stand-in.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "claude", "remote-control"]
+    )
+    try:
+        runner._instances["alpha"] = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.ERROR,
+            resume_mode="pty",
+            bridge_pid=proc.pid,
+            bridge_proc_start=procutil.proc_create_time(proc.pid),
+        )
+        sess = WorkingSession(
+            pid=999,
+            cwd=config.projects_root / "alpha",
+            kind="interactive",
+            started_at=999,
+            local_uuid="u",
+        )
+        monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+        await runner.poll_once()
+        assert "alpha" in runner._instances  # live bridge: NOT phantom-deleted
+        # the session at its cwd is managed (TRACKED), so it is not surfaced as external
+        assert "alpha" not in runner.external_sessions_by_project()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):

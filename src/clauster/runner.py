@@ -1120,6 +1120,11 @@ class SessionRunner:
 
         Off-loop work, applied on-loop.
         """
+        # Projects whose bridge PROCESS is actually alive (PID + proc-start match).
+        # This is the source of truth for "do we own the sessions at this cwd" below —
+        # NOT the instance's status field, which can lag or be wrong (a fresh pty bridge
+        # stuck pre-ready, a crash misdetection). See the `managed` set.
+        live_projects: set[str] = set()
         for instance in list(self._instances.values()):
             pid = instance.bridge_pid
             # A pty keeper is Clauster's direct child and self-exits with its bridge;
@@ -1133,6 +1138,8 @@ class SessionRunner:
                 procutil.is_live_bridge, pid, instance.bridge_proc_start
             )
             self._reconcile_status(instance, alive)
+            if alive:
+                live_projects.add(instance.project)
 
         try:
             sessions = await asyncio.to_thread(inspector.list_working_sessions, self._binary)
@@ -1147,16 +1154,19 @@ class SessionRunner:
             _log.warning("agents --json cross-check failed (continuing): %s", exc)
             return
         discovered = self._discovered()
-        # Only a LIVE managed bridge owns the working sessions at its cwd. A STOPPED/
-        # ERROR/CRASHED instance has no live process, so a session there is genuinely
-        # EXTERNAL — otherwise a phantom (e.g. a `_stopped_from_persisted` record from a
-        # stale pointer) would claim a flag-form/tmux bridge the pointer-walk can't see
-        # and suppress its "external session active" indicator.
+        # A managed bridge owns the working sessions at its cwd iff its PROCESS is alive
+        # (computed above), NOT merely if its status is RUNNING/STARTING. Keying on
+        # status mislabels our OWN live bridge as external whenever its status is wrong —
+        # e.g. a fresh pty bridge that connected but never printed a scrapeable connect
+        # URL is left pre-ready and would otherwise have its own session flagged
+        # "external session active" and the record phantom-deleted below. A genuinely
+        # dead instance (no live process — a `_stopped_from_persisted` phantom from a
+        # stale pointer) is correctly absent here, so a real flag-form/tmux bridge at its
+        # cwd still surfaces as external.
         managed = {
             Path(discovered[i.project].path): i.project
             for i in self._instances.values()
-            if i.project in discovered
-            and i.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
+            if i.project in discovered and i.project in live_projects
         }
         self._sessions = inspector.reconcile(sessions, managed)
         # Drop a non-live managed instance whose project has a live EXTERNAL session:
@@ -1174,7 +1184,7 @@ class SessionRunner:
         # spawn). Re-materialization by `_stopped_from_persisted` is cleaned by the next poll.
         for n, inst in list(self._instances.items()):
             if (
-                inst.status not in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
+                inst.project not in live_projects
                 and inst.project in discovered
                 and Path(discovered[inst.project].path).resolve() in external_cwds
             ):
