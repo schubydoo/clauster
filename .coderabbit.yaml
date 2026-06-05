@@ -59,12 +59,12 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    # Skip bot-authored PRs (Renovate, release-please). They only touch deps /
-    # CHANGELOG / version files, and skipping them lets auto-merge proceed without
-    # waiting on review-thread resolution (the `main` ruleset requires it).
-    ignore_usernames:
-      - "renovate[bot]"
-      - "clauster-release-bot[bot]"
+    # Bot PRs (Renovate, release-please) are reviewed, NOT ignored — on purpose. We
+    # gate `main` on a required `CodeRabbit` status check (fail_commit_status below);
+    # an *ignored* bot PR posts no status, so it would be unmergeable (admins are
+    # enforced — no one could override). Reviewing them is cheap (deps / CHANGELOG /
+    # version; uv.lock is path-filtered out) and keeps the gate uniform, with no
+    # ruleset bypass actors. (No `ignore_usernames` for this reason.)
   # Public repo: flag spam / low-quality drive-by PRs.
   slop_detection:
     enabled: true

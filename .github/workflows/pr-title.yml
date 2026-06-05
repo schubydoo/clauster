@@ -7,10 +7,6 @@ name: PR Title
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
-  # A merge group has no PR title to validate (it was already enforced at PR time),
-  # but the required check must still report on the queue's temp branch or the queue
-  # stalls — so the job runs and the validation step below is skipped to a pass.
-  merge_group:
 
 permissions:
   contents: read
@@ -28,7 +24,6 @@ jobs:
       pull-requests: read
     steps:
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
-        if: github.event_name == 'pull_request'  # no PR title in a merge group -> skip to pass
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

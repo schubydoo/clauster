@@ -9,7 +9,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  merge_group:   # required check must run on the queue's temp branch or it stalls
   schedule:
     - cron: "37 4 * * 1"
 
@@ -82,10 +81,9 @@ jobs:
           output: trivy-fs.sarif
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
-          # Enforce on main + the weekly cron; report-only on PRs *and* in the merge
-          # queue (which re-tests the already-reviewed diff) so CVE-feed churn never
-          # reddens an unrelated change (results still upload below).
-          exit-code: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && '0' || '1' }}
+          # Enforce on main + the weekly cron; report-only on PRs so CVE-feed
+          # churn never reddens an unrelated change (results still upload below).
+          exit-code: ${{ github.event_name == 'pull_request' && '0' || '1' }}
       - name: Upload SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
@@ -96,12 +94,12 @@ jobs:
   trivy-image:
     name: trivy image scan
     # Building the image just to scan it costs ~75s — the long pole of this
-    # workflow. Skip it on PRs AND in the merge queue (where it's report-only/
-    # already-reviewed); run on the main push + the weekly cron, which still catch
-    # image CVEs and a broken Dockerfile before any tagged release. The `security
-    # required checks passed` aggregator treats a skipped job as passing (same as
-    # the PR-only dependency-review on push), so the required check stays green.
-    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    # workflow. Skip it on PRs (where it's report-only anyway); run on the main
+    # push + the weekly cron, which still catch image CVEs and a broken Dockerfile
+    # before any tagged release. The `security required checks passed` aggregator
+    # treats a skipped job as passing (same as the PR-only dependency-review on
+    # push), so the required check stays green on PRs.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
