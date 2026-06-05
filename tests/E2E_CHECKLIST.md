@@ -10,8 +10,12 @@ dashboard JS/CSS.
 Chromium (Playwright) against a live clauster. It is opt-in — run it with
 `scripts/e2e.sh` (excluded from the default/CI run, so the required `tests` gate
 is unchanged). So far it covers the **non-bridge** flows, marked **`[auto]`**
-below; the rest are still manual. Porting more flows is tracked in
-`scratch/TODO.md` → "Automated browser E2E".
+below; the rest are still manual. The bridge-spawn slice
+(`tests/e2e/test_bridge_e2e.py`) drives a real bridge subprocess (the fake
+`claude` fixture) through the dashboard — trust-on-start, start → running →
+stop, and the spawn-option pass-through — in *standard* mode. Porting more flows
+(notably the gated pty true-resume) is tracked in `scratch/TODO.md` →
+"Automated browser E2E".
 
 > **Why this file exists:** several features are **gated behind config flags and
 > off by default**, so they don't render unless explicitly enabled. They are easy
@@ -40,18 +44,22 @@ restarts — the dashboard JS/CSS are cached static assets.
       `CLAUDE.md` / trust badges correct. **`[auto]`** (card-per-project render).
 - [ ] **Start / Stop / Resume** a bridge; status transitions
       Starting → Running → Stopped; optimistic pending states + disabled buttons.
+      **`[auto]`** for standard-mode start → running → stop (a stopped standard
+      bridge then offers **Resume**); the pty Resume *content* check stays manual.
 - [ ] **Trust-on-Start** — an untrusted dir has NO standalone "Trust directory" button.
       Clicking **Start bridge** pops a "Trust the files in `<name>`?" prompt with an
       "I trust the files in this directory" checkbox: **Trust & start** stays disabled
       until it's ticked, and the **Start** button is greyed while the prompt is open.
       Confirming trusts the dir (a green shield appears next to the name) **in place**
       (no reload) then spawns; a trusted dir starts with no prompt. **Cancel** backs out.
+      **`[auto]`** (checkbox-gated Trust & start → green shield → running).
 - [ ] **Spawn controls** — spawn-mode + permission-mode + **resume-mode (Mode)**
-      pickers render and pass through. The Mode picker (standard / pty) defaults to
-      `claude.resume_mode`; choosing **pty** with a `standard` config default starts a
-      pty bridge (the `↻ true-resume` badge appears), and choosing **standard** with a
-      `pty` default starts a subcommand bridge. The Mode picker is hidden on Windows
-      (pty is POSIX-only).
+      pickers render and pass through. **`[auto]`** for the pickers rendering and the
+      chosen spawn + permission values reaching the bridge argv. The Mode picker
+      (standard / pty) defaults to `claude.resume_mode`; choosing **pty** with a
+      `standard` config default starts a pty bridge (the `↻ true-resume` badge appears),
+      and choosing **standard** with a `pty` default starts a subcommand bridge. The
+      Mode picker is hidden on Windows (pty is POSIX-only).
 - [ ] **Reboot recovery** — with a bridge running, restart the host (or stop
       Clauster, kill the bridge process, restart Clauster). The bridge reappears as a
       **Stopped** card built from `state.json`, not lost: a **pty** bridge offers
