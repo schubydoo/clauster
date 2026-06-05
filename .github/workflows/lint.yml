@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:   # required check must run on the queue's temp branch or it stalls
 
 permissions:
   contents: read
