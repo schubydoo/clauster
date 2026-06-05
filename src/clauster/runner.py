@@ -1132,12 +1132,33 @@ class SessionRunner:
             # `agents --json` probe is observable instead of silently freezing sessions.
             _log.warning("agents --json cross-check failed (continuing): %s", exc)
             return
+        discovered = self._discovered()
+        # Only a LIVE managed bridge owns the working sessions at its cwd. A STOPPED/
+        # ERROR/CRASHED instance has no live process, so a session there is genuinely
+        # EXTERNAL — otherwise a phantom (e.g. a `_stopped_from_persisted` record from a
+        # stale pointer) would claim a flag-form/tmux bridge the pointer-walk can't see
+        # and suppress its "external session active" indicator.
         managed = {
-            Path(self._discovered()[i.project].path): i.project
+            Path(discovered[i.project].path): i.project
             for i in self._instances.values()
-            if i.project in self._discovered()
+            if i.project in discovered
+            and i.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
         }
         self._sessions = inspector.reconcile(sessions, managed)
+        # Drop a non-live managed instance whose project has a live EXTERNAL session:
+        # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record
+        # is a phantom. Showing it as a Stopped/Resume card is misleading and invites a
+        # double-spawn — let the card fall back to "external session active" instead.
+        external_cwds = {
+            s.cwd.resolve() for s in self._sessions if s.attribution is Attribution.EXTERNAL
+        }
+        for n, inst in list(self._instances.items()):
+            if (
+                inst.status not in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
+                and inst.project in discovered
+                and Path(discovered[inst.project].path).resolve() in external_cwds
+            ):
+                del self._instances[n]
 
     @staticmethod
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:
