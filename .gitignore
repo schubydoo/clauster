@@ -29,3 +29,7 @@ clauster.yml
 #     session notes, UI screenshots, a11y snapshots, Playwright/MCP logs, etc.). ---
 scratch/
 .playwright-mcp/
+
+# Stray root-level images (design/QA screenshots belong in scratch/ or, if curated
+# for the docs, docs/screenshots/) — guards against accidentally committing them.
+/*.png
