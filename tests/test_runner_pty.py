@@ -172,6 +172,70 @@ def test_apply_pty_info_status_transitions(runner_config) -> None:
     assert starting.status is InstanceStatus.STARTING
 
 
+def test_apply_pty_info_ready_without_url_is_running(runner_config) -> None:
+    # A --continue resume reaches state "ready" with NO connect_url (it reconnected
+    # without re-printing the URL). A live keeper+bridge must read RUNNING, not ERROR.
+    from clauster.models import RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    runner._apply_pty_info(inst, {"bridge_pid": 7, "state": "ready"}, _FakeProc(alive=True))
+    assert inst.status is InstanceStatus.RUNNING
+    assert inst.url is None  # no deep link captured on a URL-less resume (expected)
+
+
+def test_await_ready_pty_returns_on_ready_without_url(runner_config, tmp_path) -> None:
+    runner, _ = _pty_runner(runner_config)
+    sidecar = tmp_path / "sc.json"
+    sidecar.write_text(json.dumps({"state": "ready", "bridge_pid": 7}))
+    info = runner._await_ready_pty(sidecar, _FakeProc(alive=True))
+    assert info.get("state") == "ready"  # returns promptly on "ready", not only connect_url
+
+
+@_POSIX_ONLY
+def test_keeper_marks_ready_on_resume_without_url(tmp_path, monkeypatch) -> None:
+    # A --continue resume that never prints a connect URL must still reach "ready"
+    # (it reconnected) instead of being stuck "starting" -> a false ERROR upstream.
+    import signal as _signal
+
+    from clauster import pty_keeper
+
+    states: list = []
+    monkeypatch.setattr(
+        pty_keeper, "_write_sidecar", lambda _sc, base: states.append(base.get("state"))
+    )
+    monkeypatch.setattr(pty_keeper, "_URL_TIMEOUT", 0.2)
+    argv = [sys.executable, "-c", "import time; time.sleep(0.6)", "--continue"]
+    prev = _signal.getsignal(_signal.SIGHUP)
+    try:
+        pty_keeper.run_keeper(argv, tmp_path / "sc.json")
+    finally:
+        _signal.signal(_signal.SIGHUP, prev)  # keeper sets SIG_IGN; restore for other tests
+    assert "ready" in states  # marked ready on the resume timeout, not stuck "starting"
+
+
+@_POSIX_ONLY
+def test_keeper_fresh_start_no_url_stays_starting(tmp_path, monkeypatch) -> None:
+    # A FRESH start (no --continue) with no URL must NOT be marked ready, so Clauster's
+    # startup-watch still ERRORs a genuinely-unregistered bridge.
+    import signal as _signal
+
+    from clauster import pty_keeper
+
+    states: list = []
+    monkeypatch.setattr(
+        pty_keeper, "_write_sidecar", lambda _sc, base: states.append(base.get("state"))
+    )
+    monkeypatch.setattr(pty_keeper, "_URL_TIMEOUT", 0.2)
+    argv = [sys.executable, "-c", "import time; time.sleep(0.6)"]
+    prev = _signal.getsignal(_signal.SIGHUP)
+    try:
+        pty_keeper.run_keeper(argv, tmp_path / "sc.json")
+    finally:
+        _signal.signal(_signal.SIGHUP, prev)
+    assert "ready" not in states  # a URL-less fresh start never claims ready
+
+
 def test_signal_stop_twice_sends_two_signals(monkeypatch) -> None:
     calls: list[int] = []
     monkeypatch.setattr("clauster.runner.os.kill", lambda pid, sig: calls.append(pid))
@@ -347,3 +411,20 @@ def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) ->
 
     runner._cleanup_keeper(777)
     assert forced == [777]
+
+
+def test_backfill_starter_session_from_debug_file_on_resume(runner_config, tmp_path) -> None:
+    # pty true-resume: no pointer and the keeper captured no connect URL — recover the
+    # session the bridge resumed from its --debug-file so the "Open session" deep link
+    # works (session_url is computed from starter_session_id).
+    from clauster.models import RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+    log = tmp_path / "bridge.log"
+    log.write_text("[DEBUG] [remote-bridge] Unarchive session_01RESUMEDXYZABC status=409\n")
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", resume_mode="pty", bridge_debug_log_path=log
+    )
+    runner._backfill_starter_session(inst, tmp_path / "noproj")  # no pointer at this path
+    assert inst.starter_session_id == "session_01RESUMEDXYZABC"
+    assert inst.session_url == "https://claude.ai/code/session_01RESUMEDXYZABC?from=cli"
