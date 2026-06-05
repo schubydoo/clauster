@@ -1148,6 +1148,12 @@ class SessionRunner:
         external_cwds = {
             s.cwd.resolve() for s in self._sessions if s.attribution is Attribution.EXTERNAL
         }
+        # No _persist() after this delete, by design: this is continuous reconciliation
+        # (every poll, and the first poll runs immediately on startup), not a one-time
+        # edit — so it self-heals after any restart. Persisting would be a no-op anyway:
+        # _persist_subset overlays `live` onto the retained `_persisted` map, which keeps
+        # the record (intentionally — it preserves the project's modes for a later managed
+        # spawn). Re-materialization by `_stopped_from_persisted` is cleaned by the next poll.
         for n, inst in list(self._instances.items()):
             if (
                 inst.status not in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
