@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/schubydoo/clauster/compare/v0.5.0...v0.6.0) (2026-06-05)
+
+
+### Features
+
+* **ui:** redesign the project card — clearer hierarchy, one primary action ([#143](https://github.com/schubydoo/clauster/issues/143)) ([8723498](https://github.com/schubydoo/clauster/commit/87234980fa2cbdb4c159675ee8aa6c831fa3d8a2))
+* **ui:** trust-on-start — prompt to trust a directory at launch ([#144](https://github.com/schubydoo/clauster/issues/144)) ([110da36](https://github.com/schubydoo/clauster/commit/110da3600d4e1678b133b5de0c7b8c949df28505))
+
+
+### Bug Fixes
+
+* **doctor:** suppress the false "port in use" warning in the dashboard ([#142](https://github.com/schubydoo/clauster/issues/142)) ([5a56c5f](https://github.com/schubydoo/clauster/commit/5a56c5f826e833ffac4fb9d5a50182a196d01eaf))
+
 ## [0.5.0](https://github.com/schubydoo/clauster/compare/v0.4.0...v0.5.0) (2026-06-05)
 
 
