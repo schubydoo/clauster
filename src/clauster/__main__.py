@@ -1,8 +1,9 @@
 """Entry point: ``clauster`` / ``python -m clauster``.
 
 Subcommands: ``run`` (default), ``hash-password``, ``doctor``, ``backup``,
-``restore``, ``migrate``, ``install-service``. Bare ``clauster`` and
-``clauster -c <cfg>`` still mean ``run`` for backward compatibility.
+``restore``, ``migrate``, ``install-service``, ``reap-environments``,
+``usage``. Bare ``clauster`` and ``clauster -c <cfg>`` still mean ``run``
+for backward compatibility.
 """
 
 from __future__ import annotations

@@ -115,8 +115,8 @@ def _expected_epoch(proc_start: str | float | None) -> float | None:
     if proc_start is None:
         return None
     if isinstance(proc_start, (int, float)) and not isinstance(proc_start, bool):
-        # Already an epoch create-time (our own spawn). Jiffies would be a huge
-        # integer; treat values that look epoch-scaled (> year 2001) as epoch.
+        # Already an epoch create-time: our own spawn stores create_time as a
+        # float. A pointer's jiffies arrive as a string and are parsed below.
         return float(proc_start)
     try:
         jiffies = int(str(proc_start))

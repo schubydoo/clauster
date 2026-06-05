@@ -1,7 +1,8 @@
 """Thin wrappers around the `claude` CLI binary.
 
-v0.1 needs only a version probe; bridge spawn / `claude agents --json` polling
-land in later sprints (features 2-4).
+PATH resolution (`resolve_binary`) and a version probe (`claude_version`).
+Bridge spawn lives in `runner`; `claude agents --json` polling in `inspector`
+(both reuse `resolve_binary`).
 """
 
 from __future__ import annotations
