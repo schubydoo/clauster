@@ -225,8 +225,22 @@
         {% for p in projects %}{% include "_project_card.html" %}{% endfor %}
       </div>
       <div class="empty" id="empty-state"{% if projects %} style="display: none"{% endif %}>
-        <p class="empty-title">No projects found</p>
-        <p class="empty-subtitle text-secondary">Nothing under <code>{{ projects_root }}</code>.</p>
+        <p class="empty-title">No projects yet</p>
+        <p class="empty-subtitle text-secondary">
+          Clauster spawns a Claude bridge per project directory under
+          <code>{{ projects_root }}</code>. Create one or clone a git repo to get started —
+          or drop a directory there and it appears here.
+        </p>
+        <div class="empty-action">
+          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'"
+                  title="Create an empty project directory under projects_root.">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
+          </button>
+          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'"
+                  title="Clone a git repository into a new project directory.">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
+          </button>
+        </div>
       </div>
 
       <!-- ===== Toasts ===== -->
