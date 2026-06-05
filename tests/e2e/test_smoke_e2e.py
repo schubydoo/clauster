@@ -39,9 +39,11 @@ def test_login_rejects_wrong_password_then_accepts_correct(
     page.goto(f"{auth_server}/login")
     page.locator("#password").fill("definitely-not-the-password")
     page.get_by_role("button", name="Sign in").click()
-    # Still gated: back on the login page, dashboard grid not reachable.
+    # Still gated: back on the login page with the rejection surfaced, and the
+    # dashboard grid not reachable.
     expect(page).to_have_url(re.compile(r"/login"))
     expect(page.locator("#password")).to_be_visible()
+    expect(page.get_by_role("alert")).to_contain_text("Incorrect password.")
 
     page.locator("#password").fill(e2e_password)
     page.get_by_role("button", name="Sign in").click()
