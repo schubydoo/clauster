@@ -249,15 +249,17 @@
 <script>
   const STATUS_LABELS = {
     starting: "Starting", running: "Running", stopping: "Stopping", stopped: "Stopped",
-    crashed: "Crashed", error: "Failed to start",
+    interrupted: "Interrupted", crashed: "Crashed", error: "Failed to start",
   };
+  // Amber = recoverable, you didn't end it (interrupted/crashed -> Resume). Red = you
+  // must intervene (error: never started -> fix config). Grey = you stopped it.
   const STATUS_BADGE = {
     running: "bg-green-lt", starting: "bg-azure-lt", stopping: "bg-orange-lt",
-    crashed: "bg-red-lt", error: "bg-red-lt", stopped: "bg-secondary-lt",
+    interrupted: "bg-yellow-lt", crashed: "bg-yellow-lt", error: "bg-red-lt", stopped: "bg-secondary-lt",
   };
   const STATUS_DOT = {
     running: "bg-green", starting: "bg-azure status-dot-animated", stopping: "bg-orange status-dot-animated",
-    crashed: "bg-red", error: "bg-red", stopped: "bg-secondary",
+    interrupted: "bg-yellow", crashed: "bg-yellow", error: "bg-red", stopped: "bg-secondary",
   };
   const ROOT = "{{ request.scope.root_path }}";
   const MAX_LOG_LINES = 1000;
@@ -379,9 +381,25 @@
         else if (++this._refreshFails >= 2) this.connLost = true;
       },
       statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
-      statusLabel(name) { return STATUS_LABELS[this.statusOf(name)] || "Stopped"; },
-      statusBadgeClass(name) { return STATUS_BADGE[this.statusOf(name)] || "bg-secondary-lt"; },
-      statusDotClass(name) { return STATUS_DOT[this.statusOf(name)] || "bg-secondary"; },
+      // Display status: an "interrupted" bridge is one that stopped WITHOUT a
+      // deliberate Stop (host restart / external kill). It's the same backend status
+      // as "stopped" (intentional_stop tells them apart), but reads + acts differently:
+      // amber + Resume-forward, vs a neutral "you stopped this" -> Start.
+      displayStatus(name) {
+        const i = this.instances[name] || {};
+        const s = i.status || "stopped";
+        return (s === "stopped" && i.intentional_stop === false) ? "interrupted" : s;
+      },
+      statusLabel(name) { return STATUS_LABELS[this.displayStatus(name)] || "Stopped"; },
+      statusBadgeClass(name) { return STATUS_BADGE[this.displayStatus(name)] || "bg-secondary-lt"; },
+      statusDotClass(name) { return STATUS_DOT[this.displayStatus(name)] || "bg-secondary"; },
+      // A one-line "why" + nudge for the two recoverable, you-didn't-end-it states.
+      statusNote(name) {
+        const s = this.displayStatus(name);
+        if (s === "interrupted") return "Ended without a Stop (host restart or external exit) — Resume to continue.";
+        if (s === "crashed") return "The bridge exited unexpectedly — Resume to continue.";
+        return null;
+      },
       isRunning(name) { return this.statusOf(name) === "running"; },
       isBusy(name) { return this.statusOf(name) === "starting"; },
       isStopping(name) { return this.statusOf(name) === "stopping"; },
