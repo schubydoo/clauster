@@ -43,7 +43,8 @@ CREDENTIALS_PATH = Path("~/.claude/.credentials.json")
 CLAUDE_JSON_PATH = Path("~/.claude.json")
 
 # A transport maps (method, url, headers, body) -> (status, raw_bytes). The default
-# uses urllib; tests inject a fake so nothing hits the network.
+# (``_https_transport``) uses http.client.HTTPSConnection; tests inject a fake so
+# nothing hits the network.
 Transport = Callable[[str, str, dict, bytes | None], "tuple[int, bytes]"]
 
 

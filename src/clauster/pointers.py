@@ -7,7 +7,8 @@ the ``claude remote-control`` process), so it drives liveness + stop.
 
 Rediscovery is **read-only**: a pointer yields env_id, parent pid, proc_start,
 and — via its directory name — the cwd. It does NOT carry ``intentional_stop``
-or ``label`` (no ``state.json`` in v0.1); liveness is authoritative instead.
+or ``label`` — the runner merges those from ``state.json`` (see
+:mod:`clauster.state`); the pointer itself yields only live-derived facts.
 
 The pointer directory name is Claude's sanitized cwd: every non-alphanumeric
 character becomes ``-`` (verified: ``/srv/projects/my_project`` →
