@@ -83,10 +83,15 @@ def test_card_renders_known_project(write_config, tmp_path):
 
 
 def test_card_reflects_project_shape(write_config, tmp_path):
-    # Per-project Jinja conditionals render: the CLAUDE.md badge only where present.
+    # Per-project Jinja conditionals render: the CLAUDE.md meta-row indicator (the
+    # ic-page icon) only appears where a CLAUDE.md is present.
     client = _client(write_config, tmp_path)
-    assert "bg-azure-lt" in client.get("/api/projects/beta/card").text  # beta ships CLAUDE.md
-    assert "bg-azure-lt" not in client.get("/api/projects/gamma/card").text  # gamma doesn't
+    assert (
+        '<use href="#ic-page"' in client.get("/api/projects/beta/card").text
+    )  # beta ships CLAUDE.md
+    assert (
+        '<use href="#ic-page"' not in client.get("/api/projects/gamma/card").text
+    )  # gamma doesn't
 
 
 def test_card_unknown_project_404(write_config, tmp_path):
