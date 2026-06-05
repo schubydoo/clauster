@@ -7,14 +7,16 @@ clauster whose ``claude`` binary is the fake bridge in ``tests/fixtures/fake_cla
 through the dashboard UI. See ``tests/E2E_CHECKLIST.md`` for the full manual list;
 these port the **Start / Stop**, **Trust-on-Start**, and **Spawn controls** rows.
 
-These cover the *standard* (subcommand) mode; the gated pty true-resume flow stays
-manual for now (it brings up a PTY keeper subprocess — a heavier moving part to
-automate reliably).
+These cover the *standard* (subcommand) mode plus the gated **pty true-resume**
+lifecycle (a real PTY keeper subprocess + the ``--continue`` resume signal). The
+pty Resume *content* check — that the prior conversation is actually restored —
+stays manual, since the fake bridge has no conversation to restore.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -112,3 +114,40 @@ def test_spawn_options_pass_through_to_bridge_argv(page: Page, bridge_server: Se
     argv = _read_launch_argv(bridge_server.state_dir, "alpha")
     assert argv[argv.index("--spawn") + 1] == "session"
     assert argv[argv.index("--permission-mode") + 1] == "plan"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty mode is POSIX-only")
+def test_pty_mode_start_then_resume_adds_continue(page: Page, bridge_server_pty: Server) -> None:
+    """In pty (true-resume) mode the bridge comes up under a PTY keeper with the
+    ↻ true-resume badge; the fresh Start carries no ``--continue`` while Resume,
+    after a Stop, re-spawns the flag form WITH ``--continue`` (the resume signal)."""
+    page.goto(bridge_server_pty.url)
+    card = page.locator('[data-project="gamma"]')
+    expect(card).to_be_visible()
+
+    # Trust-on-start (same gate as standard mode), then the pty bridge reaches RUNNING.
+    card.get_by_role("button", name="Start bridge").click()
+    card.get_by_role("checkbox").check()
+    card.get_by_role("button", name="Trust & start").click()
+    status = card.get_by_role("status")
+    expect(status).to_contain_text("Running", timeout=_STATUS_TIMEOUT)
+    # The purple ↻ true-resume badge marks a pty (single-session) bridge (the span,
+    # not the Mode picker's "pty (true-resume)" <option>).
+    expect(card.locator("span.text-purple", has_text="true-resume")).to_be_visible()
+
+    # The fresh start uses the flag form (not the subcommand) and no --continue.
+    start_argv = _read_launch_argv(bridge_server_pty.state_dir, "gamma")
+    assert "--remote-control" in start_argv  # the flag form...
+    assert "remote-control" not in start_argv  # ...never the subcommand form
+    assert "--continue" not in start_argv
+
+    # Stop leaves a resumable pty card; Resume re-spawns the flag form with --continue.
+    card.get_by_role("button", name="Stop bridge").click()
+    expect(status).to_contain_text("Stopped", timeout=_STATUS_TIMEOUT)
+    resume = card.get_by_role("button", name="Resume")
+    expect(resume).to_be_visible()
+    resume.click()
+    expect(status).to_contain_text("Running", timeout=_STATUS_TIMEOUT)
+
+    resume_argv = _read_launch_argv(bridge_server_pty.state_dir, "gamma")
+    assert "--continue" in resume_argv  # true-resume restores the prior session
