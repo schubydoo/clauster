@@ -176,6 +176,10 @@ def test_doctor_port_in_use_warns(write_config, tmp_path):
         )
         by = {c.name: c for c in run_doctor(cfg)[0]}
         assert by["port"].status == WARN and str(port) in by["port"].detail
+        # check_port=False (the running server's dashboard preflight): the port is held
+        # by that server, so the probe is a guaranteed false positive — omit it entirely.
+        names = {c.name for c in run_doctor(cfg, check_port=False)[0]}
+        assert "port" not in names
     finally:
         srv.close()
 

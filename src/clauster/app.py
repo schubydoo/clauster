@@ -309,17 +309,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
         Surfaces the same diagnostics as the ``clauster doctor`` CLI (claude binary +
         version, login, projects_root, state_dir, git, auth sanity, workspace trust,
-        port, source freshness) as JSON, so the browser can show a ✓/⚠/✗ checklist
-        up front instead of letting a precondition fail silently at spawn time.
+        source freshness) as JSON, so the browser can show a ✓/⚠/✗ checklist up front
+        instead of letting a precondition fail silently at spawn time. The CLI's
+        listen-port probe is omitted here (``check_port=False``): this server holds the
+        port, so it would always false-warn "already in use", and the port isn't a
+        bridge prerequisite anyway.
 
         Read-only and auth-gated by the guard middleware. Runs off the event loop:
-        doctor does blocking subprocess probes (``claude --version``, ``git``, a port
-        bind). It re-reads the config from ``source_path`` (same as the CLI), so it
-        also reflects on-disk edits made since boot; an env-only deploy with no config
-        file surfaces a single ``config`` FAIL, which is the honest result.
+        doctor does blocking subprocess probes (``claude --version``, ``git``). It
+        re-reads the config from ``source_path`` (same as the CLI), so it also reflects
+        on-disk edits made since boot; an env-only deploy with no config file surfaces a
+        single ``config`` FAIL, which is the honest result.
         """
         src = config.source_path
-        checks, ok = await asyncio.to_thread(ops.run_doctor, str(src) if src is not None else None)
+        # check_port=False: this server holds config.port, so the availability probe
+        # would always warn "already in use (Clauster already running?)" — a false
+        # positive in the dashboard (the port isn't a bridge prerequisite either).
+        checks, ok = await asyncio.to_thread(
+            ops.run_doctor, str(src) if src is not None else None, check_port=False
+        )
         return {
             "ok": ok,
             "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
