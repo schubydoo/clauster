@@ -35,13 +35,15 @@ jobs:
     # would strand the release as an unpublished draft.
     timeout-minutes: 15
     # GITHUB_TOKEN stays read-only: the App token (minted below) does all the
-    # release writing (PR, version bump, draft-release assets, publish). The only
-    # added scope is id-token: write, for Sigstore keyless signing (OIDC) of the
-    # release artifacts in the signed-assets step below.
+    # release writing (PR, version bump, draft-release assets, publish). The added
+    # scopes are id-token: write, for Sigstore keyless signing (OIDC) of the release
+    # artifacts; and attestations: write, so actions/attest-build-provenance can
+    # record the SLSA build provenance (both used in the signed-assets step below).
     permissions:
       contents: read
       pull-requests: read
       id-token: write
+      attestations: write
     steps:
       # Mint a short-lived installation token for the Clauster release GitHub
       # App so the release PR + version-bump commits are authored by the app's
@@ -128,6 +130,31 @@ jobs:
         with:
           inputs: ./dist/*.tar.gz ./dist/*.whl
 
+      # SLSA build provenance (OSSF Scorecard Signed-Releases: the provenance half,
+      # i.e. the jump from 8/10 to 10/10). Generates a signed in-toto provenance
+      # statement covering BOTH dists and records it on GitHub's attestation API;
+      # ``bundle-path`` is the local bundle we also attach to the draft as a
+      # ``*.intoto.jsonl`` Release asset (the publish step below), since Scorecard
+      # scans Release ASSETS, not the attestation API.
+      #
+      # Why this step (actions/attest-build-provenance) and NOT the slsa-github-
+      # generator reusable workflow: the generator is a job-level ``uses:`` that
+      # attaches provenance to the release by TAG, after publish — but our flow
+      # creates the release as a DRAFT (config draft:true), attaches signed assets
+      # while it is still tag-less, then publishes (which locks it immutable, #98).
+      # A draft has no tag for the generator to target, and immutable releases
+      # forbid adding assets after publish — so provenance MUST be attached to the
+      # draft in THIS job, which only a step-level action can do. The output bundle
+      # is a Sigstore-wrapped in-toto statement; named ``*.intoto.jsonl`` it
+      # satisfies Scorecard's provenance heuristic (confirm on the next release
+      # re-scan — Scorecard re-scores Signed-Releases on a push to main).
+      - name: Generate SLSA build provenance for the dists
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        id: provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: "dist/*.tar.gz,dist/*.whl"
+
       - name: Attach signed assets to the draft, then publish
         if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
@@ -139,6 +166,10 @@ jobs:
           # derive it from there rather than from a non-existent `id` output.
           UPLOAD_URL: ${{ steps.release.outputs.upload_url }}
           REPO: ${{ github.repository }}
+          # The SLSA provenance bundle written by attest-build-provenance; attached
+          # below (renamed *.intoto.jsonl) so Scorecard's Signed-Releases provenance
+          # probe credits it. Empty if the provenance step was skipped/failed.
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
         run: |
           set -euo pipefail
           # Pull the numeric {id} out of the upload_url template, then insist it
@@ -169,6 +200,17 @@ jobs:
             echo "no .sigstore bundles produced; refusing to publish unsigned artifacts" >&2
             exit 1
           fi
+          # SLSA provenance: attest-build-provenance wrote one in-toto bundle for
+          # both dists. Attach it as multiple.intoto.jsonl (the slsa-github-generator
+          # filename Scorecard's provenance heuristic recognizes). Refuse to publish
+          # without it — the whole point of this change is the provenance asset.
+          if [ -z "${PROVENANCE_BUNDLE:-}" ] || [ ! -s "${PROVENANCE_BUNDLE}" ]; then
+            echo "no SLSA provenance bundle produced; refusing to publish without provenance" >&2
+            exit 1
+          fi
+          provenance="dist/multiple.intoto.jsonl"
+          cp "${PROVENANCE_BUNDLE}" "${provenance}"
+          assets+=("${provenance}")
           for f in "${assets[@]}"; do
             name="$(basename "$f")"
             # Idempotent re-runs: a same-named asset left by an earlier attempt
