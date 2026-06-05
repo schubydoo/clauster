@@ -4,8 +4,14 @@ Manual browser-verification checklist. The pytest suite (`tests/test_*.py`)
 covers logic at the route/unit level via Starlette's `TestClient`; **it does not
 drive a real browser.** This checklist is the standing list of flows to click
 through in an actual browser (Chromium) before a release or after touching the
-dashboard JS/CSS — until the automated browser suite exists (see
-`scratch/TODO.md` → "Automated browser E2E").
+dashboard JS/CSS.
+
+**Automated suite (first slice landed).** `tests/e2e/` now drives real headless
+Chromium (Playwright) against a live clauster. It is opt-in — run it with
+`scripts/e2e.sh` (excluded from the default/CI run, so the required `tests` gate
+is unchanged). So far it covers the **non-bridge** flows, marked **`[auto]`**
+below; the rest are still manual. Porting more flows is tracked in
+`scratch/TODO.md` → "Automated browser E2E".
 
 > **Why this file exists:** several features are **gated behind config flags and
 > off by default**, so they don't render unless explicitly enabled. They are easy
@@ -31,7 +37,7 @@ restarts — the dashboard JS/CSS are cached static assets.
 ## Always-on flows
 
 - [ ] **Project grid** renders one card per dir under `projects_root`; git /
-      `CLAUDE.md` / trust badges correct.
+      `CLAUDE.md` / trust badges correct. **`[auto]`** (card-per-project render).
 - [ ] **Start / Stop / Resume** a bridge; status transitions
       Starting → Running → Stopped; optimistic pending states + disabled buttons.
 - [ ] **Trust-on-Start** — an untrusted dir has NO standalone "Trust directory" button.
@@ -68,9 +74,10 @@ restarts — the dashboard JS/CSS are cached static assets.
 - [ ] **Per-project cost badge** lazy-loads `≈$X.XX` after first paint; blank
       project shows no badge.
 - [ ] **Login / logout** (when `auth.password_required`): login, then logout
-      revokes everywhere (old cookie rejected).
+      revokes everywhere (old cookie rejected). **`[auto]`** for login (wrong
+      password gated, correct reaches the dashboard); logout-revocation still manual.
 - [ ] **Theme toggle** (dark/light) persists across reload — sun/moon Iconoir
-      icons render (no broken `<use>` refs).
+      icons render (no broken `<use>` refs). **`[auto]`** (persistence across reload).
 - [ ] **Action-button icons** (Iconoir) render on Start/Stop/Resume/Trust/Edit/
       logs/QR/copy/Open and follow the button text color in both themes.
 - [ ] **Connection-lost banner** — stop the server (or block `/api/instances`);
