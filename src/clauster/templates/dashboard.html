@@ -316,6 +316,8 @@
       resumeMode: {},
       confirmBypass: {},
       bypassTyped: {},
+      confirmTrust: {},
+      trustConfirmed: {},   // the "I trust…" checkbox in the trust-on-start dialog
       confirmNew: {},
       cmd: {},
       usage: {},
@@ -487,12 +489,30 @@
                    copied ? "success" : "error");
       },
       async start(name) {
+        // Trust gate — like Claude Code's "Do you trust the files in this folder?":
+        // an untrusted dir prompts on Start (rather than a standalone Trust button),
+        // then trusts + starts. Checked before bypass so the order is trust → bypass.
+        if (this.trustState[name] !== "trusted") {
+          this.errors[name] = null;
+          this.trustConfirmed[name] = false;   // require a fresh, deliberate tick each time
+          this.confirmTrust[name] = true;
+          return;
+        }
         if (this.permMode[name] === "bypassPermissions") {
           this.errors[name] = null;
           this.confirmBypass[name] = true;
           return;
         }
         await this._spawn(name);
+      },
+      async confirmTrustStart(name) {
+        await this.trust(name);            // trusts; sets the inline error on failure
+        this.confirmTrust[name] = false;   // close the dialog either way
+        if (this.trustState[name] === "trusted") this.start(name);  // now-trusted → spawn
+      },
+      cancelTrust(name) {
+        this.confirmTrust[name] = false;
+        this.trustConfirmed[name] = false;
       },
       // "Start new session" on a resumable bridge: a fresh start (resume=false)
       // is deliberately distinct from Resume, so warn first — a new session won't

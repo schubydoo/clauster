@@ -79,6 +79,28 @@ def test_dashboard_resume_and_start_new_controls_render(write_config):
     assert "confirmNewStart(" in resp.text  # the warned confirm path
 
 
+def test_trust_on_start_replaces_trust_button(write_config):
+    # Trust-on-Start: there is NO standalone "Trust directory" button. Instead Start
+    # gates on trust — an untrusted dir gets a confirm dialog (with a safety checkbox)
+    # that trusts then spawns, like Claude Code's "Do you trust the files in this
+    # folder?". Trusted dirs skip the prompt.
+    txt = _client(write_config).get("/").text
+    assert "Trust directory" not in txt  # the standalone button is gone
+    assert "I trust the files in this directory" in txt  # the safety checkbox
+    assert "confirmTrustStart(" in txt  # the "Trust & start" handler
+    assert 'this.trustState[name] !== "trusted"' in txt  # the start() trust gate
+
+
+def test_trust_on_start_guards(write_config):
+    # Guards: "Trust & start" is disabled until the checkbox is ticked; the Start
+    # button is greyed while a trust/bypass confirm is open (so a re-click can't reset
+    # the checkbox); a trusted dir shows a green shield by its name (no prompt needed).
+    txt = _client(write_config).get("/").text
+    assert ':disabled="!trustConfirmed[' in txt  # checkbox gates Trust & start
+    assert ':disabled="confirmTrust[' in txt  # Start greyed while deciding
+    assert "Directory trusted" in txt  # the trusted-shield tooltip
+
+
 def test_dashboard_renders_resume_mode_picker(write_config):
     # PR3: the per-launch Mode picker is wired (DEFAULT_RESUME_MODE seed + the
     # resume_mode posted in the spawn body are platform-independent); the <select>

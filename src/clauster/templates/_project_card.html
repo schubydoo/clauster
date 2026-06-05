@@ -3,7 +3,15 @@
         <div class="col-md-6 col-xl-4" data-project="{{ p.name }}">
           <div class="card">
             <div class="card-header">
-              <h3 class="card-title text-truncate fw-bold" style="font-size:1.05rem">{{ p.name }}</h3>
+              <div class="d-flex align-items-center gap-2" style="min-width:0">
+                <h3 class="card-title text-truncate fw-bold mb-0" style="font-size:1.05rem">{{ p.name }}</h3>
+                <!-- Trusted confirmation: a green shield-check by the name once the dir is
+                     trusted (so a bridge starts without the trust prompt). Untrusted shows
+                     nothing here — that surfaces just-in-time on Start. -->
+                <svg class="ico text-success" style="flex:none" x-cloak
+                     x-show="trustState['{{ p.name }}'] === 'trusted'"
+                     title="Directory trusted"><use href="#ic-trust"/></svg>
+              </div>
               <div class="card-actions d-flex align-items-center gap-2">
                 <span class="badge" :class="statusBadgeClass('{{ p.name }}')"
                       role="status" aria-live="polite">
@@ -39,8 +47,7 @@
                   <div class="text-secondary small project-meta" data-meta="attributes">
                     {% if p.is_git_repo %}<span title="This directory is a git repository"><svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Git repo</span>{% endif %}
                     {% if p.has_claude_md %}<span title="A CLAUDE.md file is present"><svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>CLAUDE.md</span>{% endif %}
-                    <span :class="trustState['{{ p.name }}'] === 'trusted' ? 'text-success' : 'text-warning'"
-                          x-text="trustState['{{ p.name }}']">{{ p.trust_state.value }}</span>
+                    <!-- Trust is shown by the green shield-check next to the name (header). -->
                     <span x-show="usageLabel('{{ p.name }}')" x-cloak
                           :title="usageTitle('{{ p.name }}')" x-text="usageLabel('{{ p.name }}')"></span>
                     <span class="text-purple" x-show="resumeModeOf('{{ p.name }}') === 'pty'" x-cloak
@@ -92,18 +99,11 @@
                 </div>
               </div>
 
-              <!-- Trust (untrusted only; updates in place) -->
-              <button class="btn btn-sm btn-outline-warning mb-2" @click="trust('{{ p.name }}')"
-                      x-show="trustState['{{ p.name }}'] === 'untrusted' && !isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}')"
-                      x-cloak :disabled="trusting['{{ p.name }}']">
-                <span class="spinner-border spinner-border-sm me-1" x-show="trusting['{{ p.name }}']" x-cloak></span>
-                <svg class="ico me-1" x-show="!trusting['{{ p.name }}']" x-cloak aria-hidden="true"><use href="#ic-trust"/></svg>Trust directory
-              </button>
-
               <hr class="my-2">
               <!-- Tier 1: exactly one primary action per state, full-width at the card foot. -->
               <div class="btn-list">
                 <button type="button" class="btn btn-success w-100" @click="start('{{ p.name }}')"
+                        :disabled="confirmTrust['{{ p.name }}'] || confirmBypass['{{ p.name }}']"
                         x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Start bridge</button>
                 <button type="button" class="btn btn-success w-100" @click="resume('{{ p.name }}')"
                         x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
@@ -117,6 +117,31 @@
                 </button>
                 <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="isBusy('{{ p.name }}')" x-cloak>
                   <span class="spinner-border spinner-border-sm me-1"></span>starting…</span>
+              </div>
+
+              <!-- trust-on-start confirm: an untrusted dir prompts on Start (like Claude
+                   Code's "Do you trust the files in this folder?"), then trusts + spawns.
+                   Wrapped in one div because Tabler's .alert is display:flex (else the text
+                   and buttons split into two columns). The checkbox guards the action so an
+                   accidental click can't trust the dir + run its code. -->
+              <div class="alert alert-warning mt-2" x-show="confirmTrust['{{ p.name }}']" x-cloak>
+                <div>
+                  <p class="mb-2">⚠ Trust the files in <code>{{ p.name }}</code>? Starting a bridge here
+                    lets it run tools and execute any code in <code>CLAUDE.md</code> /
+                    <code>.claude</code> in this directory.</p>
+                  <label class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" x-model="trustConfirmed['{{ p.name }}']">
+                    <span class="form-check-label">I trust the files in this directory</span>
+                  </label>
+                  <div class="btn-list justify-content-center">
+                    <button type="button" class="btn btn-sm btn-warning" @click="confirmTrustStart('{{ p.name }}')"
+                            :disabled="!trustConfirmed['{{ p.name }}'] || trusting['{{ p.name }}']">
+                      <span class="spinner-border spinner-border-sm me-1" x-show="trusting['{{ p.name }}']" x-cloak></span>
+                      Trust &amp; start
+                    </button>
+                    <button type="button" class="btn btn-sm btn-ghost-secondary" @click="cancelTrust('{{ p.name }}')">Cancel</button>
+                  </div>
+                </div>
               </div>
 
               <!-- bypassPermissions typed-confirm -->

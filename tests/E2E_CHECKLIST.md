@@ -34,7 +34,12 @@ restarts — the dashboard JS/CSS are cached static assets.
       `CLAUDE.md` / trust badges correct.
 - [ ] **Start / Stop / Resume** a bridge; status transitions
       Starting → Running → Stopped; optimistic pending states + disabled buttons.
-- [ ] **Trust directory** flips the badge in place (no full reload).
+- [ ] **Trust-on-Start** — an untrusted dir has NO standalone "Trust directory" button.
+      Clicking **Start bridge** pops a "Trust the files in `<name>`?" prompt with an
+      "I trust the files in this directory" checkbox: **Trust & start** stays disabled
+      until it's ticked, and the **Start** button is greyed while the prompt is open.
+      Confirming trusts the dir (a green shield appears next to the name) **in place**
+      (no reload) then spawns; a trusted dir starts with no prompt. **Cancel** backs out.
 - [ ] **Spawn controls** — spawn-mode + permission-mode + **resume-mode (Mode)**
       pickers render and pass through. The Mode picker (standard / pty) defaults to
       `claude.resume_mode`; choosing **pty** with a `standard` config default starts a
