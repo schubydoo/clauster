@@ -667,7 +667,7 @@ class SessionRunner:
             info = self._read_sidecar(sidecar) or info
             if proc.poll() is not None:  # keeper (and thus bridge) gone before ready
                 return self._read_sidecar(sidecar) or info
-            if info.get("connect_url") or info.get("state") == "error":
+            if info.get("connect_url") or info.get("state") in ("ready", "error"):
                 return info
             time.sleep(_READY_POLL_INTERVAL)
         return info
@@ -688,7 +688,11 @@ class SessionRunner:
             instance.url = url
 
         keeper_dead = proc.poll() is not None
-        if info.get("connect_url") and not keeper_dead:
+        # A pty bridge is RUNNING once the keeper reports readiness: either a captured
+        # connect URL, or state == "ready" (a --continue resume that reconnected without
+        # re-printing the URL). A live keeper+bridge must never read as ERROR.
+        ready = bool(info.get("connect_url")) or info.get("state") == "ready"
+        if ready and not keeper_dead:
             instance.status = InstanceStatus.RUNNING
         elif info.get("state") == "error" or keeper_dead:
             instance.status = InstanceStatus.ERROR
