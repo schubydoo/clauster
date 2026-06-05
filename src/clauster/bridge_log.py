@@ -22,6 +22,11 @@ _RE_BRIDGE_ID = re.compile(r"\[bridge:init\][^\n]*\bbridgeId=([0-9a-fA-F-]{8,})"
 _RE_ENV_ID = re.compile(r"\benvironment_id=(env_[A-Za-z0-9]+)")
 _RE_ENV_ID_ALT = re.compile(r"\benvironmentId=(env_[A-Za-z0-9]+)")
 _RE_STARTER = re.compile(r"Created initial session\s+(session_[A-Za-z0-9]+)")
+# A `--continue` resume reconnects to an EXISTING session and never logs "Created
+# initial session"; instead it logs the session it resumed as a `[remote-bridge]
+# Unarchive session_<id>` line. Recovering it keeps the `session_url` deep link
+# working after a true-resume (pty mode, where there's also no pointer to fall back on).
+_RE_RESUME_SESSION = re.compile(r"\[remote-bridge\][^\n]*\bUnarchive\s+(session_[A-Za-z0-9]+)")
 _RE_POLL_LOOP = re.compile(r"\[bridge:work\][^\n]*Starting poll loop")
 _RE_SPAWN_MODE = re.compile(r"\bspawnMode=([A-Za-z0-9-]+)")
 _RE_SESSION_PID = re.compile(r"\[bridge:session\][^\n]*\bpid=(\d+)")
@@ -63,6 +68,8 @@ def parse_bridge_markers(text: str) -> BridgeMarkers:
         m.environment_id = hit.group(1)
     if (hit := _RE_STARTER.search(text)) is not None:
         m.starter_session_id = hit.group(1)
+    elif (hit := _RE_RESUME_SESSION.search(text)) is not None:
+        m.starter_session_id = hit.group(1)  # a --continue resume never logs "Created…"
     if (hit := _RE_SPAWN_MODE.search(text)) is not None:
         m.spawn_mode = hit.group(1)
 

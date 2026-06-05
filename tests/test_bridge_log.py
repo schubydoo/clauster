@@ -47,3 +47,21 @@ def test_empty_log_is_blank():
     assert m.bridge_id is None
     assert m.environment_id is None
     assert m.is_ready is False
+
+
+def test_resume_session_from_unarchive_line():
+    # A --continue resume reconnects to an existing session and never logs "Created
+    # initial session"; it logs the session it resumed as "[remote-bridge] Unarchive
+    # session_<id>". Recover it so the deep link works after a true-resume.
+    text = "[DEBUG] [remote-bridge] Unarchive session_01WE4dP9b4JoxYfV5r4X6PFG status=409\n"
+    assert parse_bridge_markers(text).starter_session_id == "session_01WE4dP9b4JoxYfV5r4X6PFG"
+
+
+def test_created_initial_session_wins_over_unarchive():
+    # A fresh start's explicit "Created initial session" takes precedence over a
+    # later Unarchive line (first-wins, fresh source preferred).
+    text = (
+        "Created initial session session_FRESH01\n"
+        "[remote-bridge] Unarchive session_OLD02 status=409\n"
+    )
+    assert parse_bridge_markers(text).starter_session_id == "session_FRESH01"

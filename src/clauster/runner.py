@@ -817,21 +817,35 @@ class SessionRunner:
         elif instance.status in (InstanceStatus.ERROR, InstanceStatus.CRASHED):
             await asyncio.to_thread(self._capture_error_detail, instance)
 
-    @staticmethod
-    def _backfill_starter_session(instance: RemoteControlInstance, project_path: Path) -> None:
-        """Recover the session id from the bridge-pointer when the log omitted it.
+    @classmethod
+    def _backfill_starter_session(
+        cls, instance: RemoteControlInstance, project_path: Path
+    ) -> None:
+        """Recover the session id when the log/keeper omitted it, for the deep link.
 
         A *reconnecting* bridge re-logs its environment but NOT "Created initial
         session", so ``starter_session_id`` (and thus ``session_url``, the primary
         deep link) would be empty after a resume without this. No-op for a fresh
         start, which logs the session directly. (The environment id never needs
         backfilling: this only runs once RUNNING, which already requires it.)
+
+        Two sources, in order: the subcommand bridge-pointer, then — for a pty/
+        flag-form true-resume, which leaves no pointer and whose keeper can't capture
+        the connect URL (a reconnect never reprints it) — the bridge's ``--debug-file``,
+        where a ``--continue`` logs the session it resumed as ``[remote-bridge]
+        Unarchive session_<id>`` (see ``bridge_log._RE_RESUME_SESSION``).
         """
         if instance.starter_session_id is not None:
             return
         ptr = pointers.pointer_for_project(project_path)
         if ptr is not None and ptr.session_id:
             instance.starter_session_id = ptr.session_id
+            return
+        log_path = instance.bridge_debug_log_path
+        if log_path is not None:
+            sid = cls._read_markers(log_path).starter_session_id
+            if sid:
+                instance.starter_session_id = sid
 
     @classmethod
     def _capture_error_detail(cls, instance: RemoteControlInstance) -> None:
