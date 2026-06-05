@@ -25,6 +25,13 @@ tone_instructions: >-
 
 reviews:
   profile: "assertive"
+  # Nitpicks — there is NO setting to force them inline (verified vs schema.v2 +
+  # empirically on PR #136). CodeRabbit posts a nitpick as an inline, *resolvable*
+  # thread whenever it can anchor to a CHANGED line in the diff; the `main` ruleset's
+  # required_conversation_resolution then forces resolving each before merge. It only
+  # falls back to the collapsed "Nitpick comments" section in the review body for
+  # OUT-OF-DIFF lines, which GitHub's review API physically can't anchor as a thread —
+  # no config relocates those; treat that section as advisory (it's unchanged code).
   # Auto-approve once CodeRabbit's comments are resolved and no pre-merge checks fail.
   request_changes_workflow: true
   high_level_summary: false
