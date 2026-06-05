@@ -667,7 +667,7 @@ class SessionRunner:
             info = self._read_sidecar(sidecar) or info
             if proc.poll() is not None:  # keeper (and thus bridge) gone before ready
                 return self._read_sidecar(sidecar) or info
-            if info.get("connect_url") or info.get("state") == "error":
+            if info.get("connect_url") or info.get("state") in ("ready", "error"):
                 return info
             time.sleep(_READY_POLL_INTERVAL)
         return info
@@ -688,7 +688,11 @@ class SessionRunner:
             instance.url = url
 
         keeper_dead = proc.poll() is not None
-        if info.get("connect_url") and not keeper_dead:
+        # A pty bridge is RUNNING once the keeper reports readiness: either a captured
+        # connect URL, or state == "ready" (a --continue resume that reconnected without
+        # re-printing the URL). A live keeper+bridge must never read as ERROR.
+        ready = bool(info.get("connect_url")) or info.get("state") == "ready"
+        if ready and not keeper_dead:
             instance.status = InstanceStatus.RUNNING
         elif info.get("state") == "error" or keeper_dead:
             instance.status = InstanceStatus.ERROR
@@ -813,21 +817,35 @@ class SessionRunner:
         elif instance.status in (InstanceStatus.ERROR, InstanceStatus.CRASHED):
             await asyncio.to_thread(self._capture_error_detail, instance)
 
-    @staticmethod
-    def _backfill_starter_session(instance: RemoteControlInstance, project_path: Path) -> None:
-        """Recover the session id from the bridge-pointer when the log omitted it.
+    @classmethod
+    def _backfill_starter_session(
+        cls, instance: RemoteControlInstance, project_path: Path
+    ) -> None:
+        """Recover the session id when the log/keeper omitted it, for the deep link.
 
         A *reconnecting* bridge re-logs its environment but NOT "Created initial
         session", so ``starter_session_id`` (and thus ``session_url``, the primary
         deep link) would be empty after a resume without this. No-op for a fresh
         start, which logs the session directly. (The environment id never needs
         backfilling: this only runs once RUNNING, which already requires it.)
+
+        Two sources, in order: the subcommand bridge-pointer, then — for a pty/
+        flag-form true-resume, which leaves no pointer and whose keeper can't capture
+        the connect URL (a reconnect never reprints it) — the bridge's ``--debug-file``,
+        where a ``--continue`` logs the session it resumed as ``[remote-bridge]
+        Unarchive session_<id>`` (see ``bridge_log._RE_RESUME_SESSION``).
         """
         if instance.starter_session_id is not None:
             return
         ptr = pointers.pointer_for_project(project_path)
         if ptr is not None and ptr.session_id:
             instance.starter_session_id = ptr.session_id
+            return
+        log_path = instance.bridge_debug_log_path
+        if log_path is not None:
+            sid = cls._read_markers(log_path).starter_session_id
+            if sid:
+                instance.starter_session_id = sid
 
     @classmethod
     def _capture_error_detail(cls, instance: RemoteControlInstance) -> None:
@@ -1148,6 +1166,12 @@ class SessionRunner:
         external_cwds = {
             s.cwd.resolve() for s in self._sessions if s.attribution is Attribution.EXTERNAL
         }
+        # No _persist() after this delete, by design: this is continuous reconciliation
+        # (every poll, and the first poll runs immediately on startup), not a one-time
+        # edit — so it self-heals after any restart. Persisting would be a no-op anyway:
+        # _persist_subset overlays `live` onto the retained `_persisted` map, which keeps
+        # the record (intentionally — it preserves the project's modes for a later managed
+        # spawn). Re-materialization by `_stopped_from_persisted` is cleaned by the next poll.
         for n, inst in list(self._instances.items()):
             if (
                 inst.status not in (InstanceStatus.RUNNING, InstanceStatus.STARTING)

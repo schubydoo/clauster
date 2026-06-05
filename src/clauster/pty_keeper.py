@@ -143,6 +143,9 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
     flags = fcntl.fcntl(master, fcntl.F_GETFL)
     fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
+    # A `--continue` resume reconnects to its existing session and does NOT re-print
+    # the connect URL, so the URL never appears even though the bridge is healthy.
+    is_resume = "--continue" in bridge_argv
     buf = bytearray()
     url_found = False
     url_deadline = time.monotonic() + _URL_TIMEOUT
@@ -167,10 +170,17 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
         except (OSError, BlockingIOError):
             time.sleep(0.2)
         if not url_found and time.monotonic() > url_deadline:
-            # Stop accumulating an unbounded buffer if the URL never appears; the
-            # bridge keeps running and Clauster's startup-watch decides its fate.
+            # The connect URL never appeared. Stop accumulating an unbounded buffer.
             url_found = True
             buf = bytearray()
+            # On a resume the missing URL is expected and the bridge is connected:
+            # publish "ready" (no URL) so Clauster promotes it to RUNNING instead of
+            # false-ERRORing a live resumed session. A FRESH start with no URL is
+            # genuinely unregistered -> leave it "starting" so the startup-watch
+            # still ERRORs it.
+            if is_resume and base.get("state") == "starting":
+                base["state"] = "ready"
+                _write_sidecar(sidecar, base)
 
     rc = proc.poll() or 0
     base.update(state="exited", bridge_exit=rc)

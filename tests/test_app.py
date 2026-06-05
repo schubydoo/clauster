@@ -47,6 +47,16 @@ def test_dashboard_has_readiness_panel(write_config):
     assert "/api/doctor" in resp.text
 
 
+def test_dashboard_has_interrupted_status_logic(write_config):
+    # The "interrupted vs stopped" distinction (a bridge that ended without a Stop)
+    # is derived client-side from intentional_stop; the helper + state map + the card
+    # note must ship in the page.
+    resp = _client(write_config).get("/")
+    assert "displayStatus" in resp.text
+    assert "interrupted:" in resp.text  # present in the STATUS_* maps
+    assert "statusNote" in resp.text  # the recoverable-state nudge
+
+
 def test_dashboard_pty_bridge_is_resumable(write_config):
     # Regression (true-resume reachability): a stopped pty bridge has no
     # environment_id (the flag form leaves no env ghost), so isResumable() must
