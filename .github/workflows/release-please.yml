@@ -4,16 +4,20 @@ name: Release Please
 # that bumps the version (src/clauster/__init__.py + pyproject.toml) and rewrites
 # CHANGELOG.md. Merging that PR tags the commit (e.g. `v0.2.0`), which fires
 # release.yml (`on: push: tags`).
+#
+# This workflow runs release-please as TWO separate invocations on purpose: one
+# that ONLY cuts the draft release, and — after the publish step has created the
+# git tag — one that ONLY opens/updates the next release PR. Splitting the two
+# halves is what stops release-please from opening a bogus full-history downgrade
+# PR while the draft release is still tag-less (see the per-step notes below).
 
 on:
   push:
     branches: [main]
-  # Manual re-run. A draft release (config draft:true) has NO git tag until the
-  # publish step below un-drafts it, so the release-please step that runs *before*
-  # publish can't see the release it just cut ("No latest release found") and opens
-  # a bogus full-history "next release" PR. The post-publish reconcile step fixes
-  # that automatically, but this lets you re-trigger by hand if a release ever
-  # strands one (e.g. publish failed midway and was finished manually).
+  # Manual re-run, for the rare case a publish fails midway and is finished by
+  # hand: re-running opens/updates the next release PR against the now-published
+  # tag. The "open next PR" step is idempotent and gated on success(), so a
+  # by-hand re-trigger can't open a PR against a half-published release.
   workflow_dispatch:
 
 permissions:
@@ -66,91 +70,26 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      # --- Cut the release ONLY (never the next PR) --------------------------
+      # release-please normally does two things per run: (1) cut a GitHub Release
+      # when a release PR was just merged, and (2) open/update the NEXT release
+      # PR. We split those. Here we do (1) only, via skip-github-pull-request,
+      # because our releases are drafts (config draft:true, so we can attach
+      # Sigstore-signed assets before they lock immutable) and a draft carries NO
+      # git tag until the publish step below un-drafts it. If we let release-please
+      # compute the next PR now — while the just-cut release is still tag-less —
+      # it logs "No latest release found", rebuilds from the full commit history,
+      # and opens a bogus downgrade PR (observed: 0.6.0 -> 0.2.1, #147). Deferring
+      # (2) until after the tag exists (the "Open the next release PR" step below)
+      # means that bogus PR is never created — no open-then-close churn.
+      - name: Cut the draft release (no PR)
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-      # --- Keep uv.lock's editable self-version in sync with the release bump ---
-      # release-please bumps pyproject.toml's version but NOT uv.lock, so the lock's
-      # `[[package]] name = "clauster"` version drifts behind each release — a
-      # papercut where every local `uv` run then regenerates uv.lock into a stray
-      # diff. When a release PR is open, regenerate uv.lock on that PR branch so the
-      # lock bumps together with pyproject and lands in the same merge. A no-op on
-      # every other push (and when the lock is already in sync). It pushes only to
-      # the bot's own `release-please--*` branch, never to main.
-      - name: Detect open release PR
-        id: relpr
-        env:
-          GH_TOKEN: ${{ github.token }} # read-only default token is enough for `pr list`
-        run: |
-          set -euo pipefail
-          # Pick the release PR by *authenticated identity*, not just the branch
-          # name: it must be authored by the release App, target main, and be an
-          # in-repo (non-fork) branch. The branch-name prefix alone would let any
-          # collaborator open a `release-please--*` PR and have us check it out +
-          # run `uv lock` (which can execute the project's build backend) in this
-          # trusted push context with the app token in scope. gh renders an App
-          # author as `app/<slug>`.
-          branch="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
-            --json headRefName,baseRefName,author,isCrossRepository \
-            --jq '[.[]
-                   | select(.headRefName | startswith("release-please--"))
-                   | select(.baseRefName == "main")
-                   | select(.isCrossRepository == false)
-                   | select(.author.login == "app/clauster-release-bot")
-                  ][0].headRefName // ""')"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-          if [ -n "$branch" ]; then echo "Release PR branch: $branch"; else echo "No open release PR."; fi
-
-      - name: Check out repo
-        if: ${{ steps.relpr.outputs.branch != '' }}
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up uv
-        if: ${{ steps.relpr.outputs.branch != '' }}
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          # No cache: this job can push, and setup-uv's default caching is a
-          # cache-poisoning vector (zizmor). A one-off `uv lock` doesn't need it.
-          enable-cache: false
-
-      - name: Sync uv.lock on the release PR
-        if: ${{ steps.relpr.outputs.branch != '' }}
-        env:
-          # App token (contents: write) so the push is authorized AND keeps the
-          # release PR bot-authored. Branch via env (not inlined) — no injection.
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_BRANCH: ${{ steps.relpr.outputs.branch }}
-        run: |
-          set -euo pipefail
-          # Defensive: only ever touch the bot's release branch, never anything else.
-          case "$PR_BRANCH" in
-            release-please--*) ;;
-            *) echo "refusing to push to unexpected branch '$PR_BRANCH'"; exit 1 ;;
-          esac
-          git fetch --quiet origin "$PR_BRANCH"
-          git checkout -B "$PR_BRANCH" FETCH_HEAD
-          uv lock
-          if git diff --quiet -- uv.lock; then
-            echo "uv.lock already in sync — nothing to commit."
-            exit 0
-          fi
-          # Attribute the commit to the release bot (fall back to the Actions bot).
-          bot_user="clauster-release-bot[bot]"
-          bot_id="$(gh api "/users/${bot_user}" --jq '.id' 2>/dev/null || true)"
-          if [ -z "$bot_id" ]; then bot_user="github-actions[bot]"; bot_id="41898282"; fi
-          git config user.name "$bot_user"
-          git config user.email "${bot_id}+${bot_user}@users.noreply.github.com"
-          git add uv.lock
-          git commit -m "chore: sync uv.lock to the release version"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${PR_BRANCH}"
-          echo "Pushed uv.lock sync to $PR_BRANCH."
+          skip-github-pull-request: true
 
       # --- Sign + attach release artifacts (OSSF Scorecard: Signed-Releases) ---
       # release-please created the GitHub Release as a DRAFT (config draft:true) —
@@ -256,20 +195,101 @@ jobs:
           gh api --method PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false
           echo "published release ${RELEASE_ID} with ${#assets[@]} assets."
 
-      # --- Reconcile the next-release PR now that the tag exists ---------------
-      # The release-please step at the top ran BEFORE the publish step created the
-      # git tag (draft releases carry no tag). Lacking the tag it logs "No latest
-      # release found", rebuilds from the full commit history, and opens a bogus
-      # downgrade "next release" PR (observed: 0.5.0 -> 0.2.1, #140). Now that the
-      # publish step has created the tag, re-run release-please: it finds the real
-      # latest release, sees no unreleased commits, and closes/corrects that
-      # transient PR — within this same run, so a bogus PR never lingers. A no-op
-      # on non-release pushes (gated on release_created); idempotent for the tag
-      # (already released -> it only touches the open release PR).
-      - name: Reconcile next-release PR (post-publish)
-        if: ${{ steps.release.outputs.release_created == 'true' }}
+      # --- Open or update the next release PR (now the tag exists) ------------
+      # The deferred half of release-please: open/update the PR that proposes the
+      # NEXT release. skip-github-release means it never touches the release — it
+      # only manages the `release-please--*` PR. By now the publish step (if this
+      # push was a release) has created the git tag, so release-please sees the
+      # real latest version: 0 unreleased commits -> it opens nothing; new commits
+      # -> a correct PR based off the true latest tag. On an ordinary feature push
+      # (no release this run) this is the step that keeps the pending release PR
+      # current. Default `if: success()`, so a failed/half publish above leaves the
+      # draft for hand-recovery instead of opening a PR against stale state.
+      - name: Open the next release PR (no release)
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release_pr
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-release: true
+
+      # --- Keep uv.lock's editable self-version in sync with the release bump ---
+      # release-please bumps pyproject.toml's version but NOT uv.lock, so the lock's
+      # `[[package]] name = "clauster"` version drifts behind each release — a
+      # papercut where every local `uv` run then regenerates uv.lock into a stray
+      # diff. When a release PR is open (just created/updated by the step above),
+      # regenerate uv.lock on that PR branch so the lock bumps together with
+      # pyproject and lands in the same merge. A no-op on every other push (and when
+      # the lock is already in sync). It pushes only to the bot's own
+      # `release-please--*` branch, never to main.
+      - name: Detect open release PR
+        id: relpr
+        env:
+          GH_TOKEN: ${{ github.token }} # read-only default token is enough for `pr list`
+        run: |
+          set -euo pipefail
+          # Pick the release PR by *authenticated identity*, not just the branch
+          # name: it must be authored by the release App, target main, and be an
+          # in-repo (non-fork) branch. The branch-name prefix alone would let any
+          # collaborator open a `release-please--*` PR and have us check it out +
+          # run `uv lock` (which can execute the project's build backend) in this
+          # trusted push context with the app token in scope. gh renders an App
+          # author as `app/<slug>`.
+          branch="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --json headRefName,baseRefName,author,isCrossRepository \
+            --jq '[.[]
+                   | select(.headRefName | startswith("release-please--"))
+                   | select(.baseRefName == "main")
+                   | select(.isCrossRepository == false)
+                   | select(.author.login == "app/clauster-release-bot")
+                  ][0].headRefName // ""')"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if [ -n "$branch" ]; then echo "Release PR branch: $branch"; else echo "No open release PR."; fi
+
+      - name: Check out repo
+        if: ${{ steps.relpr.outputs.branch != '' }}
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up uv
+        if: ${{ steps.relpr.outputs.branch != '' }}
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          # No cache: this job can push, and setup-uv's default caching is a
+          # cache-poisoning vector (zizmor). A one-off `uv lock` doesn't need it.
+          enable-cache: false
+
+      - name: Sync uv.lock on the release PR
+        if: ${{ steps.relpr.outputs.branch != '' }}
+        env:
+          # App token (contents: write) so the push is authorized AND keeps the
+          # release PR bot-authored. Branch via env (not inlined) — no injection.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_BRANCH: ${{ steps.relpr.outputs.branch }}
+        run: |
+          set -euo pipefail
+          # Defensive: only ever touch the bot's release branch, never anything else.
+          case "$PR_BRANCH" in
+            release-please--*) ;;
+            *) echo "refusing to push to unexpected branch '$PR_BRANCH'"; exit 1 ;;
+          esac
+          git fetch --quiet origin "$PR_BRANCH"
+          git checkout -B "$PR_BRANCH" FETCH_HEAD
+          uv lock
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock already in sync — nothing to commit."
+            exit 0
+          fi
+          # Attribute the commit to the release bot (fall back to the Actions bot).
+          bot_user="clauster-release-bot[bot]"
+          bot_id="$(gh api "/users/${bot_user}" --jq '.id' 2>/dev/null || true)"
+          if [ -z "$bot_id" ]; then bot_user="github-actions[bot]"; bot_id="41898282"; fi
+          git config user.name "$bot_user"
+          git config user.email "${bot_id}+${bot_user}@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "chore: sync uv.lock to the release version"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${PR_BRANCH}"
+          echo "Pushed uv.lock sync to $PR_BRANCH."
