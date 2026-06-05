@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.0](https://github.com/schubydoo/clauster/compare/v0.4.0...v0.5.0) (2026-06-05)
+
+
+### Features
+
+* **api:** GET /api/doctor — surface system readiness as JSON ([#127](https://github.com/schubydoo/clauster/issues/127)) ([070a39c](https://github.com/schubydoo/clauster/commit/070a39c275a5fa1b35331eb4d22cb8118fe7d0ef))
+* **cli:** instance_name — retitle process clauster[&lt;name&gt;] for ps/pgrep ([#130](https://github.com/schubydoo/clauster/issues/130)) ([254379d](https://github.com/schubydoo/clauster/commit/254379d8cf4cb6d30636b885bef3a7c4b7d9d2e1))
+* **pty:** recover the "Open session" deep link on a --continue resume ([44d58e4](https://github.com/schubydoo/clauster/commit/44d58e48671a7a2010e00a986f5fbd658f399b50))
+* **pty:** recover the Open-session deep link on a --continue resume ([#135](https://github.com/schubydoo/clauster/issues/135)) ([44d58e4](https://github.com/schubydoo/clauster/commit/44d58e48671a7a2010e00a986f5fbd658f399b50))
+* **ui:** distinguish "Interrupted" from "Stopped" on the card ([91d5c87](https://github.com/schubydoo/clauster/commit/91d5c87f39bd4a04f7ce55bb3b3d9e8b85607be9))
+* **ui:** distinguish "Interrupted" from "Stopped" on the dashboard card ([#136](https://github.com/schubydoo/clauster/issues/136)) ([91d5c87](https://github.com/schubydoo/clauster/commit/91d5c87f39bd4a04f7ce55bb3b3d9e8b85607be9))
+* **ui:** system-readiness (preflight) panel on the dashboard ([#129](https://github.com/schubydoo/clauster/issues/129)) ([d752cda](https://github.com/schubydoo/clauster/commit/d752cda9d9d6a99866bceeeed2301b1f3336444d))
+
+
+### Bug Fixes
+
+* **pty:** --continue resume reads "Failed to start" while actually running ([#134](https://github.com/schubydoo/clauster/issues/134)) ([c39829c](https://github.com/schubydoo/clauster/commit/c39829ca9ebe3f6417f370499ef08397c30fc463))
+* **pty:** a --continue resume must not read "Failed to start" while alive ([c39829c](https://github.com/schubydoo/clauster/commit/c39829ca9ebe3f6417f370499ef08397c30fc463))
+* **runner:** a phantom STOPPED instance must not shadow a live external bridge ([c08395b](https://github.com/schubydoo/clauster/commit/c08395b9274108691f40780ddd52a98587fd7225))
+* **runner:** phantom STOPPED instance shadows a live external bridge ([#133](https://github.com/schubydoo/clauster/issues/133)) ([c08395b](https://github.com/schubydoo/clauster/commit/c08395b9274108691f40780ddd52a98587fd7225))
+
 ## [0.4.0](https://github.com/schubydoo/clauster/compare/v0.3.0...v0.4.0) (2026-06-04)
 
 
