@@ -52,8 +52,19 @@ def _version_ge(have: str, want: str) -> bool:
     return a + (0,) * (n - len(a)) >= b + (0,) * (n - len(b))
 
 
-def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
-    """Return (checks, ok). ok is False if any check FAILed. Resilient to a broken config."""
+def run_doctor(
+    config_path: str | None = None, *, check_port: bool = True
+) -> tuple[list[Check], bool]:
+    """Return (checks, ok). ok is False if any check FAILed. Resilient to a broken config.
+
+    ``check_port`` gates the listen-port availability probe. It's a meaningful
+    *pre-launch* check for the ``clauster doctor`` CLI (is the port free to bind?),
+    but a guaranteed false positive when the **running server** calls this for the
+    dashboard preflight panel — the port is in use *by that very server*, so it would
+    always warn "already in use (Clauster already running?)". The server passes
+    ``check_port=False`` to omit it (the port isn't a bridge prerequisite anyway —
+    bridges don't bind it).
+    """
     checks: list[Check] = []
 
     try:
@@ -115,8 +126,10 @@ def run_doctor(config_path: str | None = None) -> tuple[list[Check], bool]:
         )
     )
 
-    # port (warn-only: in-use may be this very server)
-    checks.append(_check_port(config.host, config.port))
+    # port (warn-only). Skipped for the running server's dashboard preflight, where the
+    # port is in use *by this very server* and the warning is always a false positive.
+    if check_port:
+        checks.append(_check_port(config.host, config.port))
 
     # source-checkout freshness (only for editable/from-source installs)
     fresh = _check_repo_freshness()
