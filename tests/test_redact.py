@@ -86,3 +86,15 @@ def test_no_env_or_session_id_ever_leaks():
 
 def test_sanitize_can_keep_ansi_when_disabled():
     assert "\x1b" in redact.sanitize_line("\x1b[31mhi\x1b[0m", strip_ansi_seq=False)
+
+
+def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():
+    # ANSI bytes interleaved inside an identifier must NOT let it bypass redaction
+    # when strip_ansi_in_stream is disabled. Redaction runs against a stripped view;
+    # since the colored line would leak, we fall back to the stripped+redacted form
+    # (color sacrificed for safety on that one line).
+    line = "env_01ABCDEFG\x1b[0mHIJKLMNOP detail"
+    out = redact.sanitize_line(line, strip_ansi_seq=False)
+    assert "env_01ABCDEFGHIJKLMNOP" not in out
+    assert "env_<redacted>" in out
+    assert "\x1b" not in out  # fell back to the safe stripped form for this line

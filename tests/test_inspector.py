@@ -30,6 +30,16 @@ def test_parse_agents_json_skips_malformed():
     assert sessions[0].local_uuid == "uuid-1"
 
 
+def test_parse_agents_json_tolerates_scalar_top_level():
+    # Valid JSON but an unexpected top-level shape (scalar/None/bool) must return
+    # [] rather than raising AttributeError on ``.get`` — fail-closed liveness is
+    # preserved because genuinely malformed JSON still raises at ``json.loads``.
+    assert inspector.parse_agents_json("5") == []
+    assert inspector.parse_agents_json('"a string"') == []
+    assert inspector.parse_agents_json("true") == []
+    assert inspector.parse_agents_json("null") == []
+
+
 def test_reconcile_attributes_by_resolved_cwd(tmp_path: Path):
     proj = tmp_path / "alpha"
     proj.mkdir()

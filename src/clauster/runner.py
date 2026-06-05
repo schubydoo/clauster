@@ -960,6 +960,7 @@ class SessionRunner:
             if keeper_pid is not None:
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
+            self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
             return instance
 
         # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
@@ -972,6 +973,7 @@ class SessionRunner:
         if keeper_pid is not None:
             await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
         instance.status = InstanceStatus.STOPPED
+        self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
         return instance
 
     @staticmethod
@@ -1189,6 +1191,7 @@ class SessionRunner:
                 and Path(discovered[inst.project].path).resolve() in external_cwds
             ):
                 del self._instances[n]
+                self._procs.pop(n, None)  # don't leak the phantom's dead Popen handle
 
     @staticmethod
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:

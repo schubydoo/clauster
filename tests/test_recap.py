@@ -130,6 +130,15 @@ def test_build_recap_trims_oldest_when_over_budget() -> None:
     assert "trimmed" in recap
 
 
+def test_build_recap_caps_an_oversized_most_recent_turn() -> None:
+    # The single most-recent turn alone exceeds the budget. The old loop always
+    # kept the first turn whole, so ``max_chars`` wasn't a real ceiling; now it is.
+    huge = "X" * 5000
+    recap = hook.build_recap([("assistant", huge)], max_chars=500)
+    assert hook._TURN_TRUNCATED in recap  # the truncation marker is present
+    assert recap.count("X") <= 500  # the turn body respects the budget (was 5000)
+
+
 def test_build_recap_sentinel_bounds_are_unforgeable() -> None:
     # Prompt-injection across restart: a malicious prior turn forges the
     # end-of-recap footer and tries to inject post-recap "instructions". The
