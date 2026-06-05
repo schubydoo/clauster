@@ -41,12 +41,15 @@ def parse_agents_json(stdout: str) -> list[WorkingSession]:
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        items = data.get("agents", data.get("sessions", []))
+        items = data.get("agents", data.get("sessions"))
     else:
-        # Valid JSON but an unexpected top-level shape (scalar/None) carries no
-        # session list — return empty rather than raising AttributeError on ``.get``.
-        # (A genuinely malformed payload still fails at ``json.loads`` above, which
-        # stays strict by design — fail-closed liveness.)
+        items = None
+    if not isinstance(items, list):
+        # Valid JSON but an unexpected shape — a top-level scalar/None, or a dict
+        # whose agents/sessions value isn't a list ({"agents": null}, {"agents": 5}).
+        # Return empty rather than raising AttributeError on ``.get`` or TypeError on
+        # iteration. (A genuinely malformed payload still fails at ``json.loads`` above,
+        # which stays strict by design — fail-closed liveness.)
         return []
     sessions: list[WorkingSession] = []
     for item in items:

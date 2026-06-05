@@ -30,14 +30,20 @@ def test_parse_agents_json_skips_malformed():
     assert sessions[0].local_uuid == "uuid-1"
 
 
-def test_parse_agents_json_tolerates_scalar_top_level():
-    # Valid JSON but an unexpected top-level shape (scalar/None/bool) must return
-    # [] rather than raising AttributeError on ``.get`` — fail-closed liveness is
-    # preserved because genuinely malformed JSON still raises at ``json.loads``.
+def test_parse_agents_json_tolerates_unexpected_shapes():
+    # Valid JSON but an unexpected shape must return [] rather than crashing: a
+    # top-level scalar/None/bool would raise AttributeError on ``.get``, and a dict
+    # whose agents/sessions value isn't a list would raise TypeError on iteration.
+    # (fail-closed liveness holds: malformed JSON still raises at json.loads.)
     assert inspector.parse_agents_json("5") == []
     assert inspector.parse_agents_json('"a string"') == []
     assert inspector.parse_agents_json("true") == []
     assert inspector.parse_agents_json("null") == []
+    # dict with a non-list agents/sessions value (CodeRabbit catch)
+    assert inspector.parse_agents_json('{"agents": null}') == []
+    assert inspector.parse_agents_json('{"agents": 5}') == []
+    assert inspector.parse_agents_json('{"sessions": "nope"}') == []
+    assert inspector.parse_agents_json("{}") == []  # neither key present
 
 
 def test_reconcile_attributes_by_resolved_cwd(tmp_path: Path):
