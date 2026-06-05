@@ -347,3 +347,20 @@ def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) ->
 
     runner._cleanup_keeper(777)
     assert forced == [777]
+
+
+def test_backfill_starter_session_from_debug_file_on_resume(runner_config, tmp_path) -> None:
+    # pty true-resume: no pointer and the keeper captured no connect URL — recover the
+    # session the bridge resumed from its --debug-file so the "Open session" deep link
+    # works (session_url is computed from starter_session_id).
+    from clauster.models import RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+    log = tmp_path / "bridge.log"
+    log.write_text("[DEBUG] [remote-bridge] Unarchive session_01RESUMEDXYZABC status=409\n")
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", resume_mode="pty", bridge_debug_log_path=log
+    )
+    runner._backfill_starter_session(inst, tmp_path / "noproj")  # no pointer at this path
+    assert inst.starter_session_id == "session_01RESUMEDXYZABC"
+    assert inst.session_url == "https://claude.ai/code/session_01RESUMEDXYZABC?from=cli"
