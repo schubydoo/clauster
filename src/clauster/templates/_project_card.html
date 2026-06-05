@@ -5,7 +5,8 @@
             <div class="card-header">
               <h3 class="card-title text-truncate">{{ p.name }}</h3>
               <div class="card-actions">
-                <span class="badge" :class="statusBadgeClass('{{ p.name }}')">
+                <span class="badge" :class="statusBadgeClass('{{ p.name }}')"
+                      role="status" aria-live="polite">
                   <span class="status-dot" :class="statusDotClass('{{ p.name }}')"></span>
                   <span x-text="statusLabel('{{ p.name }}')">Stopped</span>
                 </span>
@@ -22,6 +23,10 @@
                 <span class="badge bg-purple-lt me-1" x-show="resumeModeOf('{{ p.name }}') === 'pty'" x-cloak
                       title="Resume restores prior conversation context (single session).">↻ true-resume</span>
               </div>
+
+              <!-- recoverable, you-didn't-end-it states (interrupted / crashed): a one-line why + nudge -->
+              <div class="text-warning small mb-2" x-show="statusNote('{{ p.name }}')" x-cloak
+                   x-text="statusNote('{{ p.name }}')"></div>
 
               <!-- Trust (untrusted only; updates in place) -->
               <button class="btn btn-sm btn-outline-warning mb-2" @click="trust('{{ p.name }}')"
