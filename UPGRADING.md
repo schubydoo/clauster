@@ -32,11 +32,12 @@ docker compose up -d                              # recreate the container
 Your `state_dir` and config must be on a mounted volume so they survive the
 container swap (see the README's Docker section and `clauster.yml.example`).
 
-## From source (editable git + venv)
+## From source (editable git + venv — local development)
 
-This is how the dogfood/dev deploy runs (a systemd service exec'ing the repo's
-`.venv`). Because it's an **editable** install, a `git pull` + restart is all it
-takes — no reinstall unless dependencies changed:
+If you run clauster from a git checkout (an **editable** install, typically for
+local development), a `git pull` + restart is all it takes — no reinstall unless
+dependencies changed. (Production/dogfood deploys use the PyPI `uv tool` path
+above, not an editable checkout.)
 
 ```bash
 cd /path/to/clauster

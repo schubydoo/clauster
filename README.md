@@ -107,8 +107,10 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
 
 ### Safety
 
-- **Workspace trust** — a "Trust directory" action writes the Claude workspace-trust
-  flag before spawning; untrusted directories are refused.
+- **Workspace trust** — starting a bridge in an untrusted directory prompts a
+  just-in-time "trust the files in this folder?" confirm (an explicit checkbox) that
+  writes the Claude workspace-trust flag and then spawns; trusted directories show a
+  green shield by the project name and start with no prompt.
 - **Auto-enable remote control** — before the first spawn, Clauster marks remote
   control as acknowledged in the runtime user's `~/.claude.json` so a detached-stdin
   bridge isn't stuck on the one-time interactive "Enable Remote Control?" prompt. On

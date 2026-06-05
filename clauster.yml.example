@@ -11,6 +11,9 @@ port: 7621
 state_dir: ~/.clauster             # state, logs, pid files
 root_path: ""                      # subpath when behind a reverse proxy
 log_format: text                   # text | json (json for Docker/Loki)
+# instance_name: prod              # optional label; retitles the process to
+                                   # clauster[<name>] for ps/pgrep (<=32 chars,
+                                   # [A-Za-z0-9_.-]); also CLAUSTER_INSTANCE_NAME
 
 claude:
   binary: claude                   # name on PATH or absolute path
