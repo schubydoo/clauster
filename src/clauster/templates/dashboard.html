@@ -28,6 +28,16 @@
     /* Inline Iconoir icons (sprite at templates/_iconoir_sprite.html): em-sized to
        scale with the button text, currentColor for theming. */
     .ico { width: 1.05em; height: 1.05em; vertical-align: -.15em; flex: none; stroke-width: 1.5; }
+    /* Quiet attribute meta-row (Tier 2): dot-separated, color reserved for status. */
+    .project-meta { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem 0; }
+    /* Separator: the bullet owns the horizontal spacing (no column-gap, so it isn't
+       double-spaced); body color + explicit so it stays visible and doesn't inherit
+       the colored span it precedes (the bullet before "untrusted" was taking amber). */
+    .project-meta > span:not(:first-child)::before { content: "•"; margin: 0 .4rem; font-size: .8em; vertical-align: middle; color: var(--tblr-body-color); }
+    /* Card-header overflow menu (Alpine-driven; Tabler's dropdown positions via
+       Bootstrap JS/Popper, which we don't load — so place + show it ourselves). */
+    .card-menu { position: relative; }
+    .card-menu > .dropdown-menu { position: absolute; top: 100%; right: 0; left: auto; display: block; margin-top: .25rem; }
     [x-cloak] { display: none !important; }
   </style>
 </head>
@@ -208,7 +218,10 @@
       {% endif %}
 
       <!-- ===== Project grid ===== -->
-      <div class="row row-cards" id="project-grid">
+      <!-- align-items-start: cards size to their own content. Without it the row
+           stretches every card to the tallest one, so expanding one card's CLAUDE.md
+           editor / logs blows up its siblings into giant empty boxes. -->
+      <div class="row row-cards align-items-start" id="project-grid">
         {% for p in projects %}{% include "_project_card.html" %}{% endfor %}
       </div>
       <div class="empty" id="empty-state"{% if projects %} style="display: none"{% endif %}>
@@ -235,12 +248,9 @@
   <footer class="footer footer-transparent d-print-none">
     <div class="container-xl">
       <div class="text-center text-secondary small py-2">
-        Built with
-        <a href="https://tabler.io" target="_blank" rel="noopener noreferrer" class="link-secondary">Tabler</a>
-        and
-        <a href="https://alpinejs.dev" target="_blank" rel="noopener noreferrer" class="link-secondary">Alpine.js</a>
-        — both <a href="https://github.com/schubydoo/clauster/blob/main/THIRD_PARTY_NOTICES.md"
-                  target="_blank" rel="noopener noreferrer" class="link-secondary">MIT licensed</a>.
+        <a href="https://github.com/schubydoo/clauster" target="_blank" rel="noopener noreferrer"
+           class="link-secondary">Clauster</a>
+        — self-hosted <code>claude</code> bridges
       </div>
     </div>
   </footer>
@@ -255,7 +265,11 @@
   // must intervene (error: never started -> fix config). Grey = you stopped it.
   const STATUS_BADGE = {
     running: "bg-green-lt", starting: "bg-azure-lt", stopping: "bg-orange-lt",
-    interrupted: "bg-yellow-lt", crashed: "bg-yellow-lt", error: "bg-red-lt", stopped: "bg-secondary-lt",
+    interrupted: "bg-yellow-lt", crashed: "bg-yellow-lt", error: "bg-red-lt",
+    // Resting state: no fill. A filled pill is reserved for states that need
+    // attention (running/error/interrupted) so a wall of grey pills doesn't read
+    // as "everything is flagged"; stopped is just quiet text + its dot.
+    stopped: "bg-transparent text-secondary px-1",
   };
   const STATUS_DOT = {
     running: "bg-green", starting: "bg-azure status-dot-animated", stopping: "bg-orange status-dot-animated",

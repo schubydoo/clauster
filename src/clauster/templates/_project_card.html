@@ -1,32 +1,96 @@
 {# Single project card. Rendered both by the dashboard grid loop and by
    GET /api/projects/{name}/card for reactive insertion (no full reload). #}
         <div class="col-md-6 col-xl-4" data-project="{{ p.name }}">
-          <div class="card h-100">
+          <div class="card">
             <div class="card-header">
-              <h3 class="card-title text-truncate">{{ p.name }}</h3>
-              <div class="card-actions">
+              <h3 class="card-title text-truncate fw-bold" style="font-size:1.05rem">{{ p.name }}</h3>
+              <div class="card-actions d-flex align-items-center gap-2">
                 <span class="badge" :class="statusBadgeClass('{{ p.name }}')"
                       role="status" aria-live="polite">
                   <span class="status-dot" :class="statusDotClass('{{ p.name }}')"></span>
                   <span x-text="statusLabel('{{ p.name }}')">Stopped</span>
                 </span>
+                <!-- Tier 4: secondary / rare actions tucked into a "···" overflow menu so
+                     the body keeps a single primary action. Alpine toggles it (no Bootstrap JS). -->
+                <div class="card-menu" x-data="{ menu: false }" @click.outside="menu = false"
+                     @keydown.escape.window="menu = false">
+                  <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="menu = !menu"
+                          :aria-expanded="menu" aria-haspopup="true" aria-label="More actions" title="More actions">
+                    <svg class="ico" aria-hidden="true"><use href="#ic-more"/></svg>
+                  </button>
+                  <div class="dropdown-menu" x-show="menu" x-cloak>
+                    <button type="button" class="dropdown-item" @click="toggleClaudeMd('{{ p.name }}'); menu = false">
+                      <svg class="ico me-2" aria-hidden="true"><use href="#ic-edit"/></svg><span
+                        x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</span>
+                    </button>
+                    <button type="button" class="dropdown-item" @click="startNew('{{ p.name }}'); menu = false"
+                            x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak>
+                      <svg class="ico me-2" aria-hidden="true"><use href="#ic-play"/></svg>Start new session
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="card-body">
-              <div class="mb-2">
-                {% if p.is_git_repo %}<span class="badge bg-secondary-lt me-1">git</span>{% endif %}
-                {% if p.has_claude_md %}<span class="badge bg-azure-lt me-1">CLAUDE.md</span>{% endif %}
-                <span class="badge me-1" :class="trustState['{{ p.name }}'] === 'trusted' ? 'bg-green-lt' : 'bg-yellow-lt'"
-                      x-text="trustState['{{ p.name }}']">{{ p.trust_state.value }}</span>
-                <span class="badge bg-teal-lt me-1" x-show="usageLabel('{{ p.name }}')" x-cloak
-                      :title="usageTitle('{{ p.name }}')" x-text="usageLabel('{{ p.name }}')"></span>
-                <span class="badge bg-purple-lt me-1" x-show="resumeModeOf('{{ p.name }}') === 'pty'" x-cloak
-                      title="Resume restores prior conversation context (single session).">↻ true-resume</span>
-              </div>
+              <div x-data="{ adv: false }">
+                <!-- Tier 2 quiet meta-row (facts), with the Tier-3 "Options" toggle right-
+                     aligned on the SAME line (shown only when a fresh Start is offered). -->
+                <div class="d-flex align-items-center mb-2">
+                  <div class="text-secondary small project-meta" data-meta="attributes">
+                    {% if p.is_git_repo %}<span title="This directory is a git repository"><svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Git repo</span>{% endif %}
+                    {% if p.has_claude_md %}<span title="A CLAUDE.md file is present"><svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>CLAUDE.md</span>{% endif %}
+                    <span :class="trustState['{{ p.name }}'] === 'trusted' ? 'text-success' : 'text-warning'"
+                          x-text="trustState['{{ p.name }}']">{{ p.trust_state.value }}</span>
+                    <span x-show="usageLabel('{{ p.name }}')" x-cloak
+                          :title="usageTitle('{{ p.name }}')" x-text="usageLabel('{{ p.name }}')"></span>
+                    <span class="text-purple" x-show="resumeModeOf('{{ p.name }}') === 'pty'" x-cloak
+                          title="Resume restores prior conversation context (single session).">↻ true-resume</span>
+                  </div>
+                  <button type="button" class="btn btn-sm btn-ghost-secondary px-1 ms-auto flex-shrink-0" @click="adv = !adv"
+                          x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak
+                          :aria-expanded="adv"
+                          x-text="adv ? 'Hide options ⌃' : 'Options ⌄'">Options ⌄</button>
+                </div>
 
-              <!-- recoverable, you-didn't-end-it states (interrupted / crashed): a one-line why + nudge -->
-              <div class="text-warning small mb-2" x-show="statusNote('{{ p.name }}')" x-cloak
-                   x-text="statusNote('{{ p.name }}')"></div>
+                <!-- recoverable, you-didn't-end-it states (interrupted / crashed): a one-line why + nudge -->
+                <div class="text-warning small mb-2" x-show="statusNote('{{ p.name }}')" x-cloak
+                     x-text="statusNote('{{ p.name }}')"></div>
+
+                <!-- Spawn / permissions / mode — revealed by the Options toggle above. Start
+                     uses the configured defaults; expand to override. -->
+                <div class="row g-2 mb-2"
+                     x-show="adv && !isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>
+                  <div class="col-6">
+                    <label class="form-label small mb-1">Spawn</label>
+                    <select class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']">
+                      <option value="same-dir">same-dir</option>
+                      {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
+                      <option value="session">session</option>
+                    </select>
+                  </div>
+                  <div class="col-6">
+                    <label class="form-label small mb-1">Permissions</label>
+                    <select class="form-select form-select-sm" x-model="permMode['{{ p.name }}']">
+                      <option value="default">default</option>
+                      <option value="plan">plan</option>
+                      <option value="acceptEdits">acceptEdits</option>
+                      <option value="auto">auto</option>
+                      <option value="dontAsk">dontAsk</option>
+                      {% if p.allow_bypass_permissions %}<option value="bypassPermissions">bypassPermissions ⚠</option>{% endif %}
+                    </select>
+                  </div>
+                  {% if pty_supported %}
+                  <div class="col-6">
+                    <label class="form-label small mb-1">Mode</label>
+                    <select class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
+                            title="standard = multi-session server. pty = single-session true-resume (restores prior conversation on Resume).">
+                      <option value="standard">standard</option>
+                      <option value="pty">pty (true-resume)</option>
+                    </select>
+                  </div>
+                  {% endif %}
+                </div>
+              </div>
 
               <!-- Trust (untrusted only; updates in place) -->
               <button class="btn btn-sm btn-outline-warning mb-2" @click="trust('{{ p.name }}')"
@@ -36,49 +100,15 @@
                 <svg class="ico me-1" x-show="!trusting['{{ p.name }}']" x-cloak aria-hidden="true"><use href="#ic-trust"/></svg>Trust directory
               </button>
 
-              <!-- Spawn controls -->
-              <div class="row g-2 mb-2" x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak>
-                <div class="col-6">
-                  <label class="form-label small mb-1">Spawn</label>
-                  <select class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']">
-                    <option value="same-dir">same-dir</option>
-                    {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
-                    <option value="session">session</option>
-                  </select>
-                </div>
-                <div class="col-6">
-                  <label class="form-label small mb-1">Permissions</label>
-                  <select class="form-select form-select-sm" x-model="permMode['{{ p.name }}']">
-                    <option value="default">default</option>
-                    <option value="plan">plan</option>
-                    <option value="acceptEdits">acceptEdits</option>
-                    <option value="auto">auto</option>
-                    <option value="dontAsk">dontAsk</option>
-                    {% if p.allow_bypass_permissions %}<option value="bypassPermissions">bypassPermissions ⚠</option>{% endif %}
-                  </select>
-                </div>
-                {% if pty_supported %}
-                <div class="col-6">
-                  <label class="form-label small mb-1">Mode</label>
-                  <select class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
-                          title="standard = multi-session server. pty = single-session true-resume (restores prior conversation on Resume).">
-                    <option value="standard">standard</option>
-                    <option value="pty">pty (true-resume)</option>
-                  </select>
-                </div>
-                {% endif %}
-              </div>
-
+              <hr class="my-2">
+              <!-- Tier 1: exactly one primary action per state, full-width at the card foot. -->
               <div class="btn-list">
-                <button class="btn btn-sm btn-success" @click="start('{{ p.name }}')"
+                <button type="button" class="btn btn-success w-100" @click="start('{{ p.name }}')"
                         x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && !isResumable('{{ p.name }}')" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Start bridge</button>
-                <button class="btn btn-sm btn-success" @click="resume('{{ p.name }}')"
+                <button type="button" class="btn btn-success w-100" @click="resume('{{ p.name }}')"
                         x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
                         :title="'Resume the bridge — reconnects its prior session and keeps ' + resumeModeOf('{{ p.name }}') + ' mode.'"><svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Resume</button>
-                <button class="btn btn-sm btn-outline-secondary" @click="startNew('{{ p.name }}')"
-                        x-show="!isRunning('{{ p.name }}') && !isBusy('{{ p.name }}') && !isStopping('{{ p.name }}') && isResumable('{{ p.name }}')" x-cloak
-                        title="Start a new session instead of resuming the prior one."><svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Start new session</button>
-                <button class="btn btn-sm btn-danger" @click="stop('{{ p.name }}')"
+                <button type="button" class="btn btn-danger w-100" @click="stop('{{ p.name }}')"
                         x-show="isRunning('{{ p.name }}') || isStopping('{{ p.name }}')" x-cloak
                         :disabled="isStopping('{{ p.name }}')">
                   <span class="spinner-border spinner-border-sm me-1" x-show="isStopping('{{ p.name }}')" x-cloak></span>
@@ -87,9 +117,6 @@
                 </button>
                 <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="isBusy('{{ p.name }}')" x-cloak>
                   <span class="spinner-border spinner-border-sm me-1"></span>starting…</span>
-                <button class="btn btn-sm" @click="toggleClaudeMd('{{ p.name }}')">
-                  <svg class="ico me-1" aria-hidden="true"><use href="#ic-edit"/></svg><span
-                    x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</span></button>
               </div>
 
               <!-- bypassPermissions typed-confirm -->
