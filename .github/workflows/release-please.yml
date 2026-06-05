@@ -285,8 +285,10 @@ jobs:
           fi
           # Attribute the commit to the release bot (fall back to the Actions bot).
           bot_user="clauster-release-bot[bot]"
-          bot_id="$(gh api "/users/${bot_user}" --jq '.id' 2>/dev/null || true)"
-          if [ -z "$bot_id" ]; then bot_user="github-actions[bot]"; bot_id="41898282"; fi
+          if ! bot_id="$(gh api "/users/${bot_user}" --jq '.id' 2>&1)" || [ -z "$bot_id" ]; then
+            echo "::notice::could not resolve ${bot_user} id (${bot_id:-empty}); using github-actions[bot]"
+            bot_user="github-actions[bot]"; bot_id="41898282"
+          fi
           git config user.name "$bot_user"
           git config user.email "${bot_id}+${bot_user}@users.noreply.github.com"
           git add uv.lock
