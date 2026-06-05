@@ -36,8 +36,8 @@ container swap (see the README's Docker section and `clauster.yml.example`).
 
 If you run clauster from a git checkout (an **editable** install, typically for
 local development), a `git pull` + restart is all it takes — no reinstall unless
-dependencies changed. (Production/dogfood deploys use the PyPI `uv tool` path
-above, not an editable checkout.)
+dependencies changed. (Production/dogfood deploys should follow the PyPI install
+path above, not an editable checkout.)
 
 ```bash
 cd /path/to/clauster
