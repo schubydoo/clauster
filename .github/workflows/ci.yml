@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  merge_group:   # required checks must run on the queue's temp branch or it stalls
 
 permissions:
   contents: read
@@ -98,14 +97,14 @@ jobs:
       # `.coderabbit.yaml` bot skip. `github.event.pull_request.user.login` is empty
       # on push events, so main-branch coverage uploads are unaffected.
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' && github.event_name != 'merge_group' && github.event.pull_request.user.login != 'clauster-release-bot[bot]' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' && github.event.pull_request.user.login != 'clauster-release-bot[bot]' }}
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: false
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' && github.event_name != 'merge_group' && github.event.pull_request.user.login != 'clauster-release-bot[bot]' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' && github.event.pull_request.user.login != 'clauster-release-bot[bot]' }}
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
