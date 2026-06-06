@@ -543,3 +543,43 @@ def test_dashboard_injects_metrics_flags(write_config, tmp_path):
     assert "const METRICS_ENABLED = true;" in html
     assert "const METRICS_SHOW_DISK = true;" in html
     assert "const METRICS_POLL_MS = 4000;" in html
+
+
+def _running_metrics_client(write_config, tmp_path):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = os.getpid()
+    client.app.state.runner._instances["alpha"] = inst
+    return client, inst
+
+
+def test_metrics_sampler_failure_returns_false(write_config, tmp_path, monkeypatch):
+    # Fail closed: a sampling exception must yield {running: false}, never a 500.
+    from clauster import metrics as metrics_mod
+
+    client, _ = _running_metrics_client(write_config, tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(metrics_mod, "sample_tree", boom)
+    r = client.get("/api/projects/alpha/metrics")
+    assert r.status_code == 200
+    assert r.json() == {"running": False}
+
+
+def test_metrics_pid_reuse_guard_returns_false(write_config, tmp_path):
+    # A recorded start time that no longer matches the live PID = reuse → not-running.
+    client, inst = _running_metrics_client(write_config, tmp_path)
+    inst.bridge_proc_start = 1.0  # nowhere near os.getpid()'s real create time
+    assert client.get("/api/projects/alpha/metrics").json() == {"running": False}
+
+
+def test_metrics_gone_pid_returns_false(write_config, tmp_path):
+    # No proc_start recorded (guard skipped) + a dead PID → sample is None → false.
+    client, inst = _running_metrics_client(write_config, tmp_path)
+    inst.bridge_pid = 2_147_483_646
+    assert client.get("/api/projects/alpha/metrics").json() == {"running": False}

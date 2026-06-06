@@ -513,16 +513,20 @@
         } catch (e) { /* keep the last sample; a blip is fine */ }
       },
       refreshMetrics() {
-        // Own cadence (metrics.poll_seconds), decoupled from the status poll. Reads
-        // the latest statuses the status poll keeps current; fetch only the running.
+        // Own cadence (metrics.poll_seconds), decoupled from the status poll. Iterate
+        // the *current* instances (not the static PROJECT_NAMES) so projects added
+        // after load are polled too; drop stale samples for anything not running.
         if (!METRICS_ENABLED) return;
-        for (const n of PROJECT_NAMES) {
+        for (const n of Object.keys(this.instances)) {
           if ((this.instances[n] || {}).status === "running") this.loadMetrics(n);
-          else if (this.metrics[n]) this.metrics[n] = null;
+        }
+        for (const n of Object.keys(this.metrics)) {
+          if ((this.instances[n] || {}).status !== "running") this.metrics[n] = null;
         }
       },
       metricsLabel(name) {
         if (!METRICS_ENABLED) return null;
+        if (this.statusOf(name) !== "running") return null;  // race: a stopped card must not flash stale metrics
         const m = this.metrics[name];
         if (!m || !m.running) return null;  // x-show hides the line when not running
         const rate = (bps) => bps >= 1048576 ? (bps / 1048576).toFixed(1) + " MB/s" : Math.round(bps / 1024) + " KB/s";

@@ -56,3 +56,15 @@ def test_sample_tree_normalize_cpu_divides_by_cores(monkeypatch):
     assert s is not None
     assert s["cpu_normalized"] is True
     assert s["cpu_percent"] >= 0.0
+
+
+def test_sample_tree_proc_vanishes_during_second_snapshot(monkeypatch):
+    # memory_info is read only in the second snapshot; raising there exercises the
+    # mid-sample skip (a proc exiting between snapshots) without faulting the sample.
+    def boom(self):
+        raise psutil.NoSuchProcess(self.pid)
+
+    monkeypatch.setattr(psutil.Process, "memory_info", boom)
+    s = metrics.sample_tree(os.getpid(), interval=0.01)
+    assert s is not None
+    assert s["rss_bytes"] == 0
