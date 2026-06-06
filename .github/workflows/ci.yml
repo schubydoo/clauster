@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled`/`unlabeled` (beyond the opened/synchronize/reopened defaults) so
+    # toggling the `full-ci` label re-triggers CI and immediately flips the
+    # matrix between the subset and the full grid — otherwise the label only
+    # takes effect on the next push.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   # Nightly full sweep on main: catches a portability/CVE/dep regression that a
   # trimmed internal-PR matrix would skip, without waiting for the next release.
   schedule:
