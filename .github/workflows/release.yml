@@ -68,6 +68,13 @@ jobs:
     name: GHCR image (multi-arch)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Deployment environment for the GHCR push — gives an audit trail of every
+    # image publish and a place to attach protection (deployment ref policy,
+    # optional required reviewer). The nightly `:edge` push uses the same `ghcr`
+    # environment; its ref policy allows `main` (edge) + `v*` tags (releases).
+    environment:
+      name: ghcr
+      url: https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
     permissions:
       contents: read
       packages: write # push to ghcr.io
