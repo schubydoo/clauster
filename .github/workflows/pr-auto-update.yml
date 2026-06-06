@@ -67,7 +67,17 @@ jobs:
                 core.info(`updated #${pr.number} ${pr.title}`);
                 updated++;
               } catch (err) {
-                core.warning(`skip #${pr.number}: ${err.message}`);
+                // 409 (merge conflict) and 422 (head moved / nothing to update)
+                // are expected per-PR conditions — skip and continue. Anything
+                // else (401/403 token or rate-limit, 5xx outage) is systemic:
+                // fail the job loudly rather than passing green having updated
+                // nothing.
+                const status = err?.status ?? err?.response?.status;
+                if (status === 409 || status === 422) {
+                  core.warning(`skip #${pr.number} (${status}): ${err.message}`);
+                  continue;
+                }
+                throw err;
               }
             }
             core.info(`updated ${updated} of ${prs.length} open PR(s) targeting ${base}`);
