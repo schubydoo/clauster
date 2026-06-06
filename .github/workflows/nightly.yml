@@ -131,26 +131,67 @@ jobs:
           # sign covers both.
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
-  dist:
-    name: nightly sdist + wheel (artifact)
+  testpypi:
+    name: nightly dev build → TestPyPI
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Explicit (matches the top-level default) — upload-artifact uses the
-    # ACTIONS_RUNTIME_TOKEN, not GITHUB_TOKEN, so read is all this needs.
+    # Trusted Publishing to TestPyPI (OIDC) — no stored token. This needs a
+    # publisher configured on test.pypi.org FIRST (Account → Publishing → add a
+    # pending publisher): PyPI project `clauster`, owner `schubydoo`, repo
+    # `clauster`, workflow `nightly.yml`, environment `testpypi`. Until that
+    # exists the publish step 403s (there is nothing to add on our side).
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/clauster/
+    # Job-level permissions REPLACE the workflow default, so re-declare
+    # contents: read (checkout) alongside id-token: write (OIDC).
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: refs/heads/main # always build main (gate already enforces this)
           persist-credentials: false
-      - name: Set up uv + Python
-        uses: ./.github/actions/setup
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
-          python-version: "3.13"
-          extras: "" # build backend only
+          # No cache in a publishing job (zizmor cache-poisoning): a cache
+          # restored from a lower-privilege context could taint the artifact
+          # this OIDC step ships. A once-a-night build gains little from a cache.
+          enable-cache: false
+      - name: Set up Python 3.13
+        run: uv python install 3.13
+      # Stamp a unique PEP 440 dev version: the NEXT minor + `.dev<run_id>`, e.g.
+      # 0.7.0 -> 0.8.0.dev27076179745. github.run_id is globally monotonic, so
+      # each nightly sorts above the previous; the dev segment marks the build as
+      # a pre-release of the next release (above the last real one, below its
+      # final). Edits the CI checkout only — never committed.
+      - name: Stamp nightly dev version
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib
+          n = os.environ["RUN_ID"]
+          init = pathlib.Path("src/clauster/__init__.py")
+          pyproj = pathlib.Path("pyproject.toml")
+          text = init.read_text()
+          cur = re.search(r'__version__\s*=\s*"([^"]+)"', text).group(1)
+          parts = cur.split(".")
+          major, minor = int(parts[0]), int(parts[1])
+          dev = f"{major}.{minor + 1}.0.dev{n}"
+          init.write_text(
+              re.sub(r'(__version__\s*=\s*")[^"]+(")', lambda m: m.group(1) + dev + m.group(2), text, count=1)
+          )
+          pt = pyproj.read_text()
+          pt = re.sub(r'(?m)^(version\s*=\s*")[^"]+(")', lambda m: m.group(1) + dev + m.group(2), pt, count=1)
+          pyproj.write_text(pt)
+          print(f"::notice::nightly version {dev}")
+          PY
       - name: Build
         run: uv build
       - name: Upload nightly dist
@@ -160,3 +201,10 @@ jobs:
           path: dist/
           retention-days: 14
           if-no-files-found: error
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          # A re-dispatch of the same run would reuse the version; don't fail on it.
+          skip-existing: true
