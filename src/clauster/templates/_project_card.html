@@ -63,6 +63,10 @@
                 <div class="text-warning small mb-2" x-show="statusNote('{{ p.name }}')" x-cloak
                      x-text="statusNote('{{ p.name }}')"></div>
 
+                <!-- live per-bridge resource usage (CPU / memory / disk) while running -->
+                <div class="text-secondary small mb-2" x-show="metricsLabel('{{ p.name }}')" x-cloak
+                     :title="metricsTitle('{{ p.name }}')" x-text="metricsLabel('{{ p.name }}')"></div>
+
                 <!-- Spawn / permissions / mode — revealed by the Options toggle above. Start
                      uses the configured defaults; expand to override. -->
                 <div class="row g-2 mb-2"

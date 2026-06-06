@@ -497,3 +497,30 @@ def test_dashboard_injects_currency_usd_by_default(write_config, tmp_path):
 def test_dashboard_injects_currency_custom_when_set(write_config, tmp_path):
     html = _client_with(write_config, tmp_path, "usage:\n  currency: EUR\n").get("/").text
     assert 'const CURRENCY = "EUR";' in html
+
+
+# ----- /api/projects/{name}/metrics (live per-bridge resource sample) ----
+
+
+def test_metrics_invalid_name_returns_422(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/bad%20name/metrics")
+    assert r.status_code == 422
+
+
+def test_metrics_no_running_bridge_returns_false(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/nope/metrics")
+    assert r.status_code == 200
+    assert r.json() == {"running": False}
+
+
+def test_metrics_running_bridge_returns_sample(write_config, tmp_path):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = os.getpid()  # a live pid → a real sample
+    client.app.state.runner._instances["alpha"] = inst
+    body = client.get("/api/projects/alpha/metrics").json()
+    assert body["running"] is True
+    assert "cpu_percent" in body and "rss_bytes" in body and body["procs"] >= 1

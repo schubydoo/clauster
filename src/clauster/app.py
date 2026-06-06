@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
-from . import __version__, auth, claude_cli, environments, logstream, ops, usage
+from . import __version__, auth, claude_cli, environments, logstream, metrics, ops, usage
 from .claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
@@ -382,6 +382,22 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 for model, t in sorted(rollup.by_model.items())
             },
         }
+
+    @app.get("/api/projects/{name}/metrics")
+    async def api_project_metrics(name: str) -> dict:
+        # Live CPU/memory/disk for a project's running bridge (dashboard badge).
+        # Meaningful only while a bridge runs; otherwise {running: false}. The
+        # ~0.15s two-sample read runs off the event loop. No discovery scan needed:
+        # an unknown name simply has no running instance.
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        inst = runner.get_instance(name)
+        if inst is None or inst.status is not InstanceStatus.RUNNING or inst.bridge_pid is None:
+            return {"running": False}
+        sample = await asyncio.to_thread(metrics.sample_tree, inst.bridge_pid)
+        if sample is None:  # pid vanished between the status check and the sample
+            return {"running": False}
+        return {"running": True, **sample}
 
     # --- ghost-environment reaper (spec §11), dashboard surface ----------------
     # Destructive first-party API, so: opt-in config gate, fail-closed live set,

@@ -336,6 +336,7 @@
       confirmNew: {},
       cmd: {},
       usage: {},
+      metrics: {},        // project name -> live CPU/mem/disk sample (null when not running)
       trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
       trusting: {},       // project name -> bool (trust request in flight)
       toasts: [],
@@ -402,6 +403,12 @@
               if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
             }
             this.instances = next;
+            // Live resource metrics: fetch only for running bridges (the sample is
+            // a ~0.15s server-side read), and drop stale samples for the rest.
+            for (const n of PROJECT_NAMES) {
+              if ((next[n] || {}).status === "running") this.loadMetrics(n);
+              else if (this.metrics[n]) this.metrics[n] = null;
+            }
           } else { ok = false; }
           if (sRes.ok) this.externalSessions = await sRes.json();
           else { ok = false; }
@@ -498,6 +505,28 @@
           s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
         }
         return s;
+      },
+      async loadMetrics(name) {
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/metrics");
+          if (res.ok) { const m = await res.json(); this.metrics[name] = m.running ? m : null; }
+        } catch (e) { /* keep the last sample; a blip is fine */ }
+      },
+      metricsLabel(name) {
+        const m = this.metrics[name];
+        if (!m || !m.running) return null;  // x-show hides the line when not running
+        const rate = (bps) => bps >= 1048576 ? (bps / 1048576).toFixed(1) + " MB/s" : Math.round(bps / 1024) + " KB/s";
+        let s = Math.round(m.cpu_percent) + "% CPU · " + Math.round(m.rss_bytes / 1048576) + " MB";
+        if (m.disk_read_bps != null) s += " · ⬇" + rate(m.disk_read_bps) + " ⬆" + rate(m.disk_write_bps);
+        return s;
+      },
+      metricsTitle(name) {
+        const m = this.metrics[name];
+        if (!m || !m.running) return "";
+        let s = "Live usage of the bridge process tree (" + m.procs + " process" + (m.procs === 1 ? "" : "es") +
+                "): CPU% is summed across cores (can exceed 100%); memory is summed RSS";
+        if (m.disk_read_bps == null) s += "; disk I/O isn't available on this platform";
+        return s + ".";
       },
       qrSrc(name) {
         return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);
