@@ -524,3 +524,22 @@ def test_metrics_running_bridge_returns_sample(write_config, tmp_path):
     body = client.get("/api/projects/alpha/metrics").json()
     assert body["running"] is True
     assert "cpu_percent" in body and "rss_bytes" in body and body["procs"] >= 1
+
+
+def test_metrics_disabled_returns_false_even_when_running(write_config, tmp_path):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client_with(write_config, tmp_path, "metrics:\n  enabled: false\n")
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = os.getpid()
+    client.app.state.runner._instances["alpha"] = inst
+    # The gate fires before sampling, so a live running bridge still reports false.
+    assert client.get("/api/projects/alpha/metrics").json() == {"running": False}
+
+
+def test_dashboard_injects_metrics_flags(write_config, tmp_path):
+    html = _client(write_config, tmp_path).get("/").text
+    assert "const METRICS_ENABLED = true;" in html
+    assert "const METRICS_SHOW_DISK = true;" in html
+    assert "const METRICS_POLL_MS = 4000;" in html

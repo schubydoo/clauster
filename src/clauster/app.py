@@ -386,15 +386,22 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.get("/api/projects/{name}/metrics")
     async def api_project_metrics(name: str) -> dict:
         # Live CPU/memory/disk for a project's running bridge (dashboard badge).
-        # Meaningful only while a bridge runs; otherwise {running: false}. The
-        # ~0.15s two-sample read runs off the event loop. No discovery scan needed:
-        # an unknown name simply has no running instance.
+        # Meaningful only while a bridge runs (and metrics are enabled); otherwise
+        # {running: false}. The two-sample read runs off the event loop. No discovery
+        # scan needed: an unknown name simply has no running instance.
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
+        if not config.metrics.enabled:  # feature off → never sample, even on a direct hit
+            return {"running": False}
         inst = runner.get_instance(name)
         if inst is None or inst.status is not InstanceStatus.RUNNING or inst.bridge_pid is None:
             return {"running": False}
-        sample = await asyncio.to_thread(metrics.sample_tree, inst.bridge_pid)
+        sample = await asyncio.to_thread(
+            metrics.sample_tree,
+            inst.bridge_pid,
+            interval=config.metrics.sample_interval_seconds,
+            normalize_cpu=config.metrics.normalize_cpu,
+        )
         if sample is None:  # pid vanished between the status check and the sample
             return {"running": False}
         return {"running": True, **sample}
@@ -813,6 +820,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "show_cost": config.usage.show_cost,
                 # Badge label only: "$" for USD, else the USD figure suffixed "USD".
                 "currency": config.usage.currency,
+                # Live per-bridge metrics: master toggle, disk-part toggle, poll cadence.
+                "metrics_enabled": config.metrics.enabled,
+                "metrics_show_disk": config.metrics.show_disk,
+                "metrics_poll_ms": int(config.metrics.poll_seconds * 1000),
             },
         )
 

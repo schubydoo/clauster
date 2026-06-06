@@ -28,15 +28,16 @@ def _io_bytes(proc: psutil.Process) -> tuple[int, int] | None:
         return None
 
 
-def sample_tree(pid: int, *, interval: float = 0.15) -> dict | None:
+def sample_tree(pid: int, *, interval: float = 0.15, normalize_cpu: bool = False) -> dict | None:
     """Sample CPU% / RSS / disk-I/O rate over the process tree rooted at ``pid``.
 
     Walks ``pid`` plus all descendants (a bridge spawns a ``claude`` process tree),
     takes two snapshots ``interval`` seconds apart, and returns aggregate figures —
     or ``None`` if ``pid`` is already gone. ``cpu_percent`` is summed across the
-    tree and may exceed 100% on multiple cores. ``rss_bytes`` is summed (shared
-    pages are slightly double-counted). The ``disk_*`` fields are ``None`` on
-    platforms without ``io_counters`` (e.g. macOS).
+    tree and may exceed 100% on multiple cores; with ``normalize_cpu`` it is divided
+    by the host core count instead (0–100% of the machine) and ``cpu_normalized`` is
+    set. ``rss_bytes`` is summed (shared pages are slightly double-counted). The
+    ``disk_*`` fields are ``None`` on platforms without ``io_counters`` (e.g. macOS).
 
     Blocks for ``interval`` seconds — call it off the event loop
     (``asyncio.to_thread``), as the dashboard endpoint does.
@@ -78,9 +79,13 @@ def sample_tree(pid: int, *, interval: float = 0.15) -> dict | None:
             write_delta += max(0, io_now[1] - prior[1][1])
             disk_ok = True
 
+    cpu = round(max(0.0, cpu_delta) / interval * 100, 1)
+    if normalize_cpu:
+        cpu = round(cpu / (psutil.cpu_count() or 1), 1)
     return {
         "procs": len(procs),
-        "cpu_percent": round(max(0.0, cpu_delta) / interval * 100, 1),
+        "cpu_percent": cpu,
+        "cpu_normalized": normalize_cpu,
         "rss_bytes": rss,
         "disk_read_bps": round(read_delta / interval) if disk_ok else None,
         "disk_write_bps": round(write_delta / interval) if disk_ok else None,

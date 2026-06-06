@@ -203,6 +203,27 @@ class UsageConfig(BaseModel):
     currency: str = "USD"
 
 
+class MetricsConfig(BaseModel):
+    """Live per-bridge resource metrics (CPU / memory / disk) on the dashboard card.
+
+    A point-in-time sample of the bridge's process tree (see ``metrics.py``), shown
+    only while a bridge runs. ``enabled`` hides the line **and** skips both the
+    ``/api/projects/{name}/metrics`` fetch and the server-side sample.
+    ``normalize_cpu`` divides the summed CPU% by the host core count (0–100% of the
+    machine) instead of the raw across-cores figure (which can exceed 100%).
+    ``show_disk`` toggles the disk read/write rate portion. ``sample_interval_seconds``
+    is the two-snapshot window — longer is steadier but each fetch blocks a worker
+    thread for that long. ``poll_seconds`` is the dashboard's metrics refresh cadence
+    (decoupled from the status poll).
+    """
+
+    enabled: bool = True
+    normalize_cpu: bool = False
+    show_disk: bool = True
+    sample_interval_seconds: float = Field(default=0.15, gt=0, le=2.0)
+    poll_seconds: float = Field(default=4.0, ge=1.0)
+
+
 class ClausterConfig(BaseModel):
     """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
 
@@ -227,6 +248,7 @@ class ClausterConfig(BaseModel):
     clone: CloneConfig = Field(default_factory=CloneConfig)
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
     usage: UsageConfig = Field(default_factory=UsageConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
 
     _source_path: Path | None = PrivateAttr(default=None)
 

@@ -12,6 +12,7 @@ def test_sample_tree_live_process_returns_aggregate():
     assert s is not None
     assert s["procs"] >= 1
     assert s["cpu_percent"] >= 0.0
+    assert s["cpu_normalized"] is False
     assert s["rss_bytes"] > 0
     # disk fields are ints where io_counters is supported (Linux/Windows) or None (macOS).
     assert s["disk_read_bps"] is None or isinstance(s["disk_read_bps"], int)
@@ -46,3 +47,12 @@ def test_sample_tree_survives_vanishing_procs(monkeypatch):
     assert s is not None
     assert s["cpu_percent"] == 0.0
     assert s["rss_bytes"] == 0
+
+
+def test_sample_tree_normalize_cpu_divides_by_cores(monkeypatch):
+    # normalize_cpu divides the summed figure by the core count and flags it.
+    monkeypatch.setattr(psutil, "cpu_count", lambda: 4)
+    s = metrics.sample_tree(os.getpid(), interval=0.05, normalize_cpu=True)
+    assert s is not None
+    assert s["cpu_normalized"] is True
+    assert s["cpu_percent"] >= 0.0
