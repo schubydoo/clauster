@@ -50,6 +50,11 @@ package = [
     # Built in CI / a full environment, not in the dev sandbox.
     "pyinstaller>=6.0",
 ]
+docs = [
+    # Build the mkdocs-material documentation site (see mkdocs.yml + docs/).
+    # Not needed at runtime; `mkdocs build --strict` / `mkdocs serve` only.
+    "mkdocs-material>=9.5",
+]
 
 [project.scripts]
 clauster = "clauster.__main__:main"
