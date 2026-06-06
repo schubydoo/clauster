@@ -1,0 +1,91 @@
+name: Docs
+
+# Build the mkdocs-material site (sources added in #176) and publish it to
+# GitHub Pages on every push to main. On PRs that touch the docs we run
+# `mkdocs build --strict` as a gate (broken links / nav fail the build) but do
+# NOT deploy — so a docs change can't reach the live site without landing on
+# main first.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build docs (strict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Per-ref build group: a newer push/PR-sync supersedes an in-flight build.
+    # Use github.ref (refs/pull/<n>/merge on PRs — unique per PR) rather than
+    # github.head_ref (the source branch name), so two PRs that happen to share
+    # a branch name (e.g. forks both on `main`/`patch-1`) don't cancel each
+    # other. Deploy is a SEPARATE group (below) that never cancels — so this
+    # fast cancellation can't kill a live Pages upload.
+    concurrency:
+      group: docs-build-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup
+        with:
+          python-version: "3.13"
+          extras: docs
+      - name: mkdocs build --strict
+        run: uv run mkdocs build --strict
+      # Only stage the artifact for deployment off main — PRs stop at the build
+      # gate above, and a workflow_dispatch from a feature branch must NOT stage
+      # that branch's docs (hence ref, not just != pull_request).
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    # Deploy ONLY main — `!= pull_request` would also be true for a
+    # workflow_dispatch off a feature branch, which would publish unreleased
+    # docs to the live site.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Dedicated, non-cancelling deploy group: serialize Pages deploys and never
+    # SIGKILL one mid-upload (which can strand Pages "in progress").
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write # deploy to Pages
+      id-token: write # OIDC for the Pages deployment
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # enablement:true turns Pages on (Source: GitHub Actions) the first time
+      # this runs, so no manual Settings step is needed. If the token isn't
+      # allowed to enable Pages, flip it once in Settings → Pages → Source:
+      # GitHub Actions, and this becomes a no-op.
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+        with:
+          enablement: true
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
