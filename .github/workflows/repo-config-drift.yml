@@ -53,59 +53,71 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           drift=0
-
-          # --- LABELS ----------------------------------------------------
-          # Normalise both sides identically: sort by name, sort object keys.
-          gh label list --repo "$REPO" --json name,color,description \
-            | jq -S 'sort_by(.name)' > live-labels.json
-          jq -S 'sort_by(.name)' .github/repo-config/labels.json \
-            > baseline-labels.json
+          degraded=0
 
           {
             echo "## Repo config drift (advisory — does not block merge)"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if diff -u baseline-labels.json live-labels.json > labels.diff; then
-            echo "### Labels: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
+          # --- LABELS ----------------------------------------------------
+          # Normalise both sides identically: sort by name, sort object keys.
+          # The fetch is guarded: a gh/jq failure (token / rate-limit / API blip)
+          # is reported as "degraded" rather than silently writing an empty file
+          # that the diff would then misread as massive drift (fail loud, not closed-
+          # green). With `set -e` the bare fetch would abort the step; wrapping it in
+          # the `if` keeps the job advisory while still surfacing the failure.
+          if gh label list --repo "$REPO" --json name,color,description \
+               | jq -S 'sort_by(.name)' > live-labels.json \
+             && jq -S 'sort_by(.name)' .github/repo-config/labels.json \
+               > baseline-labels.json; then
+            if diff -u baseline-labels.json live-labels.json > labels.diff; then
+              echo "### Labels: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
+            else
+              drift=1
+              {
+                echo "### Labels: DRIFT ⚠️"
+                echo ""
+                echo "Live labels differ from \`.github/repo-config/labels.json\`."
+                echo ""
+                echo '```diff'
+                cat labels.diff
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
-            drift=1
-            {
-              echo "### Labels: DRIFT ⚠️"
-              echo ""
-              echo "Live labels differ from \`.github/repo-config/labels.json\`."
-              echo ""
-              echo '```diff'
-              cat labels.diff
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            degraded=1
+            echo "### Labels: check degraded ⚠️ (API / permission / rate-limit)" >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           # --- SETTINGS --------------------------------------------------
-          gh api "repos/$REPO" --jq '{
-            description, homepage, topics: (.topics | sort),
-            has_issues, has_wiki, has_projects,
-            allow_squash_merge, allow_merge_commit, allow_rebase_merge,
-            delete_branch_on_merge
-          }' | jq -S '.' > live-settings.json
-          jq -S '.' .github/repo-config/settings.json > baseline-settings.json
-
-          if diff -u baseline-settings.json live-settings.json > settings.diff; then
-            echo "### Settings: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
+          if gh api "repos/$REPO" --jq '{
+               description, homepage, topics: (.topics | sort),
+               has_issues, has_wiki, has_projects,
+               allow_squash_merge, allow_merge_commit, allow_rebase_merge,
+               delete_branch_on_merge
+             }' | jq -S '.' > live-settings.json \
+             && jq -S '.' .github/repo-config/settings.json > baseline-settings.json; then
+            if diff -u baseline-settings.json live-settings.json > settings.diff; then
+              echo "### Settings: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
+            else
+              drift=1
+              {
+                echo "### Settings: DRIFT ⚠️"
+                echo ""
+                echo "Live settings differ from \`.github/repo-config/settings.json\`."
+                echo ""
+                echo '```diff'
+                cat settings.diff
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
-            drift=1
-            {
-              echo "### Settings: DRIFT ⚠️"
-              echo ""
-              echo "Live settings differ from \`.github/repo-config/settings.json\`."
-              echo ""
-              echo '```diff'
-              cat settings.diff
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            degraded=1
+            echo "### Settings: check degraded ⚠️ (API / permission / rate-limit)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "$drift" -ne 0 ]; then
@@ -118,5 +130,14 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          # Always succeed: advisory check must never gate a merge.
+          if [ "$degraded" -ne 0 ]; then
+            {
+              echo ""
+              echo "> ⚠️ One or more checks were **degraded** (a \`gh\`/\`jq\` call failed) —"
+              echo "> the drift result above may be incomplete. Still advisory; never blocks."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Advisory: never gate a merge. `continue-on-error` on the step covers any
+          # unexpected `set -e` exit; the normal / drift / degraded paths reach here.
           exit 0
