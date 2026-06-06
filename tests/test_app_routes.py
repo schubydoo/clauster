@@ -583,3 +583,46 @@ def test_metrics_gone_pid_returns_false(write_config, tmp_path):
     client, inst = _running_metrics_client(write_config, tmp_path)
     inst.bridge_pid = 2_147_483_646
     assert client.get("/api/projects/alpha/metrics").json() == {"running": False}
+
+
+# ----- Prometheus /metrics exposition (gated, default off) --------------
+
+
+def test_prometheus_disabled_returns_404(write_config, tmp_path):
+    # Default off → the endpoint does not exist (404), even behind the auth guard.
+    r = _client(write_config, tmp_path).get("/metrics")
+    assert r.status_code == 404
+
+
+def test_prometheus_enabled_returns_exposition(write_config, tmp_path):
+    from clauster import __version__
+
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "text/plain; version=0.0.4; charset=utf-8"
+    body = r.text
+    # build_info carries the running version; every InstanceStatus appears (0 here);
+    # the discovery fixture exposes three valid projects (alpha/beta/gamma).
+    assert f'clauster_build_info{{version="{__version__}"}} 1' in body
+    assert "# TYPE clauster_bridges gauge" in body
+    for status in ("starting", "running", "stopped", "crashed", "error"):
+        assert f'clauster_bridges{{status="{status}"}} 0' in body
+    assert "clauster_projects_total 3" in body
+
+
+def test_prometheus_counts_reflect_seeded_instances(write_config, tmp_path):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    runner = client.app.state.runner
+    running = RemoteControlInstance(project="alpha", label="alpha")
+    running.status = InstanceStatus.RUNNING
+    stopped = RemoteControlInstance(project="beta", label="beta")
+    stopped.status = InstanceStatus.STOPPED
+    runner._instances["alpha"] = running
+    runner._instances["beta"] = stopped
+    body = client.get("/metrics").text
+    assert 'clauster_bridges{status="running"} 1' in body
+    assert 'clauster_bridges{status="stopped"} 1' in body
+    assert 'clauster_bridges{status="starting"} 0' in body

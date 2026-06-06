@@ -169,6 +169,21 @@ def test_reaper_ui_env_override(write_config, monkeypatch):
     assert load_config(cfg_path).reaper.ui_enabled is True
 
 
+def test_observability_prometheus_disabled_by_default(write_config):
+    assert load_config(write_config()).observability.prometheus_enabled is False
+
+
+def test_observability_prometheus_enabled_via_config(write_config):
+    config = load_config(write_config("observability:\n  prometheus_enabled: true\n"))
+    assert config.observability.prometheus_enabled is True
+
+
+def test_observability_prometheus_env_override(write_config, monkeypatch):
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_OBSERVABILITY_PROMETHEUS_ENABLED", "true")
+    assert load_config(cfg_path).observability.prometheus_enabled is True
+
+
 def test_usage_show_cost_default_true(write_config):
     assert load_config(write_config()).usage.show_cost is True
 
