@@ -178,6 +178,15 @@ def test_usage_show_cost_disabled_via_config(write_config):
     assert config.usage.show_cost is False
 
 
+def test_usage_currency_default_usd(write_config):
+    assert load_config(write_config()).usage.currency == "USD"
+
+
+def test_usage_currency_override_via_config(write_config):
+    config = load_config(write_config("usage:\n  currency: EUR\n"))
+    assert config.usage.currency == "EUR"
+
+
 def test_missing_config_file_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUSTER_CONFIG", raising=False)
     monkeypatch.delenv("CLAUSTER_HOME", raising=False)

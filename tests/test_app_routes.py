@@ -487,3 +487,13 @@ def test_dashboard_injects_show_cost_true_by_default(write_config, tmp_path):
 def test_dashboard_injects_show_cost_false_when_disabled(write_config, tmp_path):
     html = _client_with(write_config, tmp_path, "usage:\n  show_cost: false\n").get("/").text
     assert "const SHOW_COST = false;" in html
+
+
+def test_dashboard_injects_currency_usd_by_default(write_config, tmp_path):
+    html = _client(write_config, tmp_path).get("/").text
+    assert 'const CURRENCY = "USD";' in html
+
+
+def test_dashboard_injects_currency_custom_when_set(write_config, tmp_path):
+    html = _client_with(write_config, tmp_path, "usage:\n  currency: EUR\n").get("/").text
+    assert 'const CURRENCY = "EUR";' in html

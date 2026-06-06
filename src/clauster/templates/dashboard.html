@@ -298,6 +298,7 @@
   const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
   const DEFAULT_RESUME_MODE = {{ default_resume_mode | tojson }};
   const SHOW_COST = {{ show_cost | tojson }};  // usage.show_cost — hide the cost badge entirely
+  const CURRENCY = {{ currency | tojson }};  // usage.currency — label only; "$" iff "USD" (no FX)
 
   // Theme toggle (navbar) — persisted, mirrors the no-flash init above.
   document.addEventListener("DOMContentLoaded", function () {
@@ -478,14 +479,21 @@
         if (!SHOW_COST) return null;  // x-show hides the badge when cost display is off
         const u = this.usage[name];
         if (!u || !u.transcripts) return null;
-        return "≈$" + (u.cost_usd || 0).toFixed(2);
+        const v = (u.cost_usd || 0).toFixed(2);
+        // Prices are USD with no FX conversion, so show the "$" symbol only for
+        // USD; any other configured currency gets the (still-USD) figure labelled
+        // "USD" rather than a foreign symbol stamped on a dollar amount.
+        return CURRENCY === "USD" ? "≈$" + v : "≈" + v + " USD";
       },
       usageTitle(name) {
         const u = this.usage[name];
         if (!u) return "";
         const tokens = (u.total_tokens || 0).toLocaleString();
         const sessions = u.transcripts + (u.transcripts === 1 ? " session" : " sessions");
-        let s = tokens + " tokens across " + sessions + " · approximate cost";
+        let s = tokens + " tokens across " + sessions + " · approximate cost in USD";
+        if (CURRENCY !== "USD") {
+          s += " (usage.currency " + CURRENCY + " not converted — no FX rate)";
+        }
         if (u.unpriced_models && u.unpriced_models.length) {
           s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
         }
