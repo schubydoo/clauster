@@ -41,6 +41,7 @@ DEFAULT_MAX_CHARS = 8000
 # Marks our own injected recap so a later restart never recaps the recap
 # (compounding). Kept short and unlikely to collide with real prose.
 SENTINEL = "⟦clauster-recap⟧"
+_TURN_TRUNCATED = " …[turn truncated to fit the recap budget]"
 # SessionStart sources where a prior-conversation recap makes sense. "compact"
 # and "clear" mean the user/tooling deliberately reset context — don't fight it.
 RECAP_SOURCES = {"", "startup", "resume"}
@@ -141,6 +142,12 @@ def build_recap(turns: list[tuple[str, str]], max_chars: int) -> str:
     kept: list[str] = []
     used = 0
     for block in reversed(rendered):
+        if not kept and len(block) + 2 > max_chars:
+            # The most-recent turn alone exceeds the budget. Hard-cap it so
+            # ``max_chars`` is a real ceiling — the old loop always kept the first
+            # turn whole, so a single huge final turn blew the limit. SENTINEL is
+            # already neutralized above, so truncating can't reintroduce it.
+            block = block[: max(0, max_chars - 2 - len(_TURN_TRUNCATED))] + _TURN_TRUNCATED
         cost = len(block) + 2  # +2 for the joining blank line
         if kept and used + cost > max_chars:
             break

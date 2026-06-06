@@ -66,7 +66,19 @@ def redact_secrets(text: str) -> str:
 
 
 def sanitize_line(line: str, *, strip_ansi_seq: bool = True) -> str:
-    """Full sanitization for one streamed log line."""
+    r"""Full sanitization for one streamed log line.
+
+    Redaction always runs against an ANSI-stripped view, so escape sequences can
+    never split an identifier past the ``\b``-anchored regexes and smuggle a
+    secret through. When ``strip_ansi_seq`` is False the colored line is kept in
+    the output — but only if it is provably as redacted as the stripped view;
+    otherwise the stripped+redacted form is emitted (color sacrificed for safety
+    on that one line).
+    """
+    stripped_safe = redact_secrets(redact_ids(strip_ansi(line)))
     if strip_ansi_seq:
-        line = strip_ansi(line)
-    return redact_secrets(redact_ids(line))
+        return stripped_safe
+    colored = redact_secrets(redact_ids(line))
+    # If stripping the colored result reveals a secret the colored pass missed
+    # (ANSI bytes split the identifier), the colored line is unsafe — fall back.
+    return colored if strip_ansi(colored) == stripped_safe else stripped_safe

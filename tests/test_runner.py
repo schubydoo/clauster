@@ -42,6 +42,17 @@ async def test_spawn_ready_then_stop(runner_config, monkeypatch):
     assert runner.running_count() == 0
 
 
+async def test_stop_releases_proc_handle(runner_config, monkeypatch):
+    # The dead Popen handle must be dropped from _procs on stop — it was never
+    # removed, leaking dead handles across spawn/stop cycles.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    await runner.spawn("alpha")
+    assert "alpha" in runner._procs
+    await runner.stop("alpha")
+    assert "alpha" not in runner._procs
+
+
 async def test_stop_signals_graceful_shutdown(runner_config, monkeypatch):
     # The bridge must receive the graceful stop signal (SIGINT on POSIX,
     # CTRL_BREAK on Windows) and log its shutdown marker before exiting — proves

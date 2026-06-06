@@ -33,12 +33,24 @@ def list_working_sessions(binary: str, *, timeout: float = 10.0) -> list[Working
 
 
 def parse_agents_json(stdout: str) -> list[WorkingSession]:
-    """Parse the JSON array; tolerate empty output and skip malformed items."""
+    """Parse the JSON array; tolerate empty output / unexpected shape, skip malformed items."""
     text = stdout.strip()
     if not text:
         return []
     data = json.loads(text)
-    items = data if isinstance(data, list) else data.get("agents", data.get("sessions", []))
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("agents", data.get("sessions"))
+    else:
+        items = None
+    if not isinstance(items, list):
+        # Valid JSON but an unexpected shape — a top-level scalar/None, or a dict
+        # whose agents/sessions value isn't a list ({"agents": null}, {"agents": 5}).
+        # Return empty rather than raising AttributeError on ``.get`` or TypeError on
+        # iteration. (A genuinely malformed payload still fails at ``json.loads`` above,
+        # which stays strict by design — fail-closed liveness.)
+        return []
     sessions: list[WorkingSession] = []
     for item in items:
         try:
