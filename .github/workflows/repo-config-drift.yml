@@ -1,0 +1,143 @@
+name: Repo Config Drift
+
+# Advisory, READ-ONLY drift check for repository LABELS and a few basic repo
+# settings against the committed baselines in .github/repo-config/.
+#
+# SAFETY — this workflow is deliberately the safe, read-only half of a
+# settings-reconciler. It NEVER writes:
+#   * Only `gh api` GETs with the default GITHUB_TOKEN — no secrets, no PATs.
+#   * Plain `pull_request` trigger (NOT pull_request_target) + read-only
+#     permissions, so it is safe to run on fork PRs: a fork contributor cannot
+#     exfiltrate anything or mutate repo config.
+#   * It does NOT touch branch protection or rulesets — the repo ruleset owns
+#     those and they are intentionally out of scope.
+#
+# NON-BLOCKING — this is advisory only and must NEVER gate a merge:
+#   * Do not add it to the repo's required status checks.
+#   * The drift step always exits 0 (it just prints a diff to the job summary),
+#     and is additionally guarded with continue-on-error so a transient gh/api
+#     failure can never block a PR.
+#
+# The apply/reconcile half (writing labels/settings back) is intentionally NOT
+# built here: it needs a privileged App token and is maintainer-side.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read # labels live on the issues API surface
+
+concurrency:
+  group: repo-config-drift-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: repo-config drift (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # SHA-pinned (repo policy requires full-length commit SHAs) and
+      # persist-credentials:false — this job only reads via `gh api`, it never
+      # uses the git credential, so don't leave the token in .git/config.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Check labels + settings drift (advisory, never blocks)
+        id: drift
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          drift=0
+          degraded=0
+
+          {
+            echo "## Repo config drift (advisory — does not block merge)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # --- LABELS ----------------------------------------------------
+          # Normalise both sides identically: sort by name, sort object keys.
+          # The fetch is guarded: a gh/jq failure (token / rate-limit / API blip)
+          # is reported as "degraded" rather than silently writing an empty file
+          # that the diff would then misread as massive drift (fail loud, not closed-
+          # green). With `set -e` the bare fetch would abort the step; wrapping it in
+          # the `if` keeps the job advisory while still surfacing the failure.
+          if gh label list --repo "$REPO" --json name,color,description \
+               | jq -S 'sort_by(.name)' > live-labels.json \
+             && jq -S 'sort_by(.name)' .github/repo-config/labels.json \
+               > baseline-labels.json; then
+            if diff -u baseline-labels.json live-labels.json > labels.diff; then
+              echo "### Labels: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
+            else
+              drift=1
+              {
+                echo "### Labels: DRIFT ⚠️"
+                echo ""
+                echo "Live labels differ from \`.github/repo-config/labels.json\`."
+                echo ""
+                echo '```diff'
+                cat labels.diff
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            degraded=1
+            echo "### Labels: check degraded ⚠️ (API / permission / rate-limit)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # --- SETTINGS --------------------------------------------------
+          if gh api "repos/$REPO" --jq '{
+               description, homepage, topics: (.topics | sort),
+               has_issues, has_wiki, has_projects,
+               allow_squash_merge, allow_merge_commit, allow_rebase_merge,
+               delete_branch_on_merge
+             }' | jq -S '.' > live-settings.json \
+             && jq -S '.' .github/repo-config/settings.json > baseline-settings.json; then
+            if diff -u baseline-settings.json live-settings.json > settings.diff; then
+              echo "### Settings: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
+            else
+              drift=1
+              {
+                echo "### Settings: DRIFT ⚠️"
+                echo ""
+                echo "Live settings differ from \`.github/repo-config/settings.json\`."
+                echo ""
+                echo '```diff'
+                cat settings.diff
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            degraded=1
+            echo "### Settings: check degraded ⚠️ (API / permission / rate-limit)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$drift" -ne 0 ]; then
+            {
+              echo ""
+              echo "> Drift detected. This check is **advisory only** and does"
+              echo "> not block merge. To accept the live state as the new"
+              echo "> baseline, refresh the JSON in \`.github/repo-config/\`"
+              echo "> (see that folder's README)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$degraded" -ne 0 ]; then
+            {
+              echo ""
+              echo "> ⚠️ One or more checks were **degraded** (a \`gh\`/\`jq\` call failed) —"
+              echo "> the drift result above may be incomplete. Still advisory; never blocks."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Advisory: never gate a merge. `continue-on-error` on the step covers any
+          # unexpected `set -e` exit; the normal / drift / degraded paths reach here.
+          exit 0
