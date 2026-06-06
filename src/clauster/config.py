@@ -224,6 +224,19 @@ class MetricsConfig(BaseModel):
     poll_seconds: float = Field(default=4.0, ge=1.0)
 
 
+class ObservabilityConfig(BaseModel):
+    """Read-only observability surfaces (a Prometheus ``/metrics`` exposition).
+
+    ``prometheus_enabled`` gates a text-format ``/metrics`` endpoint that exposes a
+    handful of point-in-time gauges (build info, bridge counts by status, project
+    count) from live runner state. Off by default — opt in explicitly. When off,
+    ``/metrics`` returns 404. The endpoint stays **behind** the auth guard, so a
+    scraper must satisfy whatever auth the deployment enforces (see the PR note).
+    """
+
+    prometheus_enabled: bool = False
+
+
 class ClausterConfig(BaseModel):
     """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
 
@@ -249,6 +262,7 @@ class ClausterConfig(BaseModel):
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
     usage: UsageConfig = Field(default_factory=UsageConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
     _source_path: Path | None = PrivateAttr(default=None)
 

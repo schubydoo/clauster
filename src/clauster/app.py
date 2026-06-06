@@ -16,7 +16,18 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
-from . import __version__, auth, claude_cli, environments, logstream, metrics, ops, procutil, usage
+from . import (
+    __version__,
+    auth,
+    claude_cli,
+    environments,
+    logstream,
+    metrics,
+    ops,
+    procutil,
+    prometheus,
+    usage,
+)
 from .claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
@@ -298,6 +309,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "claude_version": version,
             "instances_running": runner.running_count(),
         }
+
+    @app.get("/metrics")
+    async def prometheus_metrics() -> Response:
+        # Stays behind the auth guard like every route; scraping a guarded deploy
+        # needs auth/network handling (see the PR's follow-up note).
+        if not config.observability.prometheus_enabled:
+            raise HTTPException(status_code=404, detail="metrics endpoint is disabled")
+        projects = await list_projects()
+        body = prometheus.render_metrics(
+            version=__version__,
+            instances=runner.list_instances(),
+            project_count=len(projects),
+        )
+        return Response(content=body, media_type=prometheus.CONTENT_TYPE)
 
     @app.get("/api/projects")
     async def api_projects() -> list[Project]:
