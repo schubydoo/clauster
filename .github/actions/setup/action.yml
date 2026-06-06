@@ -1,0 +1,30 @@
+name: "Set up uv + Python"
+description: >-
+  Install uv (with GitHub-cache) and sync the locked dev environment for a
+  given Python version. DRY: the same three-step uv dance is used by the tests,
+  build, and lint jobs. Checkout must already have run — a local composite action
+  can't check itself out (the runner needs the repo present to read this file).
+inputs:
+  python-version:
+    description: "Python version to install and uv-sync against (e.g. 3.13)."
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      with:
+        enable-cache: true
+    # The version flows through an env var (not inlined into `run:`) so zizmor's
+    # template-injection analysis stays quiet; the value is always a hard-coded
+    # matrix string, never PR-controlled input.
+    - name: Set up Python
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: uv python install "$PYTHON_VERSION"
+    - name: Install
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: uv sync --extra dev --python "$PYTHON_VERSION"
