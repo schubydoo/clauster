@@ -1,22 +1,21 @@
 # Keep open PRs current with main so the strict-up-to-date ruleset never forces
 # a manual "Update branch" click. When main moves, merge it into every open PR's
-# branch (the same operation as the GitHub "Update branch" button). Squash-merge
-# collapses those merge commits, so main's history stays linear.
+# branch (the same effect as the "Update branch" button). Squash-merge collapses
+# those merge commits, so main's history stays linear.
 #
-# Rolled in-repo (one `pulls.updateBranch` call via the first-party, SHA-pinned
-# actions/github-script) rather than a third-party action — zero supply-chain
-# surface to re-audit on version bumps.
+# Rolled in-repo (the first-party, SHA-pinned actions/github-script) rather than a
+# third-party action — zero supply-chain surface to re-audit on version bumps.
 #
-# Auth: the default GITHUB_TOKEN CANNOT drive update-branch — github-actions[bot]
-# lacks push rights to the head branch, so it 403s ("user doesn't have permission
-# to update head repository"). We mint a short-lived token for the existing
-# clauster-release-bot App (already has contents + PR write for release PRs),
-# reusing the release-please secrets — no new credential. An App token also
-# re-triggers the updated PR's CI (GITHUB_TOKEN would not), which we want.
+# Auth + API: the pulls.updateBranch REST endpoint is NOT available to GitHub Apps
+# (its OpenAPI enabledForGitHubApps is false), and the default GITHUB_TOKEN is
+# App-backed — so it can never call it (403 "user doesn't have permission to update
+# head repository"). We instead use the repos.merge endpoint (enabledForGitHubApps
+# true), authorized by a short-lived clauster-ci App token (reuses the release-please
+# secrets — no new credential). An App token also re-triggers the updated PR's CI.
 #
-# Bot-authored PRs (release-please App, Renovate) are skipped automatically by
-# the `user.type === "Bot"` check; the excluded labels are belt-and-suspenders
-# in case a release/dependency PR is ever opened by a non-bot.
+# Bot-authored PRs (release-please App, Renovate) are skipped via the
+# `user.type === "Bot"` check; fork PRs (head in another repo) and the excluded
+# labels are skipped too.
 name: Auto-update PRs
 
 on:
@@ -38,16 +37,16 @@ jobs:
     permissions:
       contents: read # job token only reads; the App token (below) does the writes
     steps:
-      - name: Mint a clauster-release-bot token (reuses the release-please App secrets)
+      - name: Mint a clauster-ci App token (reuses the release-please App secrets)
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-          # Scope the minted token to ONLY what update-branch needs, not the
-          # App's full permission set (the x-accepted-github-permissions for
-          # update-branch is pull_requests=write).
-          permission-pull-requests: write
+          # Exactly what the merges API needs: contents:write to push the merge
+          # commit, pull_requests:read to list the open PRs.
+          permission-contents: write
+          permission-pull-requests: read
       - name: Update open PRs targeting the default branch
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
@@ -61,6 +60,7 @@ jobs:
               "autorelease: published",
             ]);
             const base = context.payload.repository.default_branch;
+            const repoFullName = context.payload.repository.full_name;
             const prs = await github.paginate(github.rest.pulls.list, {
               ...context.repo,
               base,
@@ -73,24 +73,30 @@ jobs:
             for (const pr of prs) {
               if (pr.draft) continue;
               if (pr.user?.type === "Bot") continue; // release-please + Renovate
+              if (pr.head?.repo?.full_name !== repoFullName) continue; // fork PR
               if (pr.labels.some((l) => EXCLUDE.has(l.name))) continue;
               try {
-                await github.rest.pulls.updateBranch({
+                // merges API (App-enabled, unlike update-branch): merge the default
+                // branch INTO the PR's branch — same effect as "Update branch".
+                const resp = await github.rest.repos.merge({
                   ...context.repo,
-                  pull_number: pr.number,
-                  // No-op (422) if the head moved under us — never clobbers a racing push.
-                  expected_head_sha: pr.head.sha,
+                  base: pr.head.ref, // target: the PR branch
+                  head: base, // source: the default branch
                 });
-                core.info(`updated #${pr.number} ${pr.title}`);
-                updated++;
+                // 201 = merge commit created; 204 = already up to date (no-op).
+                if (resp.status === 201) {
+                  core.info(`updated #${pr.number} ${pr.title}`);
+                  updated++;
+                } else {
+                  core.info(`#${pr.number} already current`);
+                }
               } catch (err) {
-                // 409 (merge conflict) and 422 (head moved / nothing to update)
-                // are expected per-PR conditions — skip and continue. Anything
-                // else (401/403 token or rate-limit, 5xx outage) is systemic:
-                // fail the job loudly rather than passing green having updated
+                // 409 (merge conflict) and 404 (branch vanished) are expected
+                // per-PR conditions — skip. Anything else (403 token, 5xx outage)
+                // is systemic: fail loudly rather than passing green having done
                 // nothing.
                 const status = err?.status ?? err?.response?.status;
-                if (status === 409 || status === 422) {
+                if (status === 409 || status === 404) {
                   core.warning(`skip #${pr.number} (${status}): ${err.message}`);
                   continue;
                 }
