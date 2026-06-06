@@ -29,7 +29,7 @@ def render_metrics(
 
     Exposes ``clauster_build_info`` (info gauge), ``clauster_bridges`` (a gauge per
     :class:`InstanceStatus`, 0 when none have that status), and
-    ``clauster_projects_total`` (discovered-project count). All values derive from
+    ``clauster_projects`` (discovered-project count). All values derive from
     the supplied live state; nothing is invented.
     """
     counts: dict[InstanceStatus, int] = {status: 0 for status in InstanceStatus}
@@ -49,9 +49,11 @@ def render_metrics(
             f'clauster_bridges{{status="{_escape_label_value(status.value)}"}} {counts[status]}'
         )
 
-    lines.append("# HELP clauster_projects_total Number of discovered projects.")
-    lines.append("# TYPE clauster_projects_total gauge")
-    lines.append(f"clauster_projects_total {project_count}")
+    # No `_total` suffix: that's reserved for counters. This is a gauge (projects can
+    # be removed), so `clauster_projects` keeps promtool / Grafana type-inference happy.
+    lines.append("# HELP clauster_projects Number of discovered projects.")
+    lines.append("# TYPE clauster_projects gauge")
+    lines.append(f"clauster_projects {project_count}")
 
     # A trailing newline is conventional for the exposition format.
     return "\n".join(lines) + "\n"

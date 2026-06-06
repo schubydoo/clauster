@@ -312,9 +312,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/metrics")
     async def prometheus_metrics() -> Response:
-        # Read-only Prometheus exposition, gated by observability.prometheus_enabled
-        # (default off → 404). Stays behind the auth guard middleware like every
-        # other route; scraping a guarded deploy needs auth/network handling.
+        # Stays behind the auth guard like every route; scraping a guarded deploy
+        # needs auth/network handling (see the PR's follow-up note).
         if not config.observability.prometheus_enabled:
             raise HTTPException(status_code=404, detail="metrics endpoint is disabled")
         projects = await list_projects()

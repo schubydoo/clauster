@@ -617,6 +617,7 @@ def test_prometheus_disabled_returns_404(write_config, tmp_path):
 
 def test_prometheus_enabled_returns_exposition(write_config, tmp_path):
     from clauster import __version__
+    from clauster.models import InstanceStatus
 
     client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
     r = client.get("/metrics")
@@ -627,9 +628,11 @@ def test_prometheus_enabled_returns_exposition(write_config, tmp_path):
     # the discovery fixture exposes three valid projects (alpha/beta/gamma).
     assert f'clauster_build_info{{version="{__version__}"}} 1' in body
     assert "# TYPE clauster_bridges gauge" in body
-    for status in ("starting", "running", "stopped", "crashed", "error"):
-        assert f'clauster_bridges{{status="{status}"}} 0' in body
-    assert "clauster_projects_total 3" in body
+    # Iterate the enum (source of truth) so a new InstanceStatus can't silently go
+    # unexposed.
+    for status in InstanceStatus:
+        assert f'clauster_bridges{{status="{status.value}"}} 0' in body
+    assert "clauster_projects 3" in body
 
 
 def test_prometheus_counts_reflect_seeded_instances(write_config, tmp_path):
