@@ -4,6 +4,12 @@
           <div class="card">
             <div class="card-header">
               <div class="d-flex align-items-center gap-2" style="min-width:0">
+                <!-- rows-layout accordion caret: collapses/expands this row's body. Hidden in
+                     cards layout (where the body always shows). -->
+                <button type="button" class="row-caret" x-show="layout === 'rows'" x-cloak
+                        @click="toggleRow('{{ p.name }}')" :aria-expanded="!!rowExpanded['{{ p.name }}']"
+                        :aria-label="(rowExpanded['{{ p.name }}'] ? 'Collapse ' : 'Expand ') + '{{ p.name }}'"
+                        x-text="rowExpanded['{{ p.name }}'] ? '▾' : '▸'">▸</button>
                 <h3 class="card-title text-truncate fw-bold mb-0" style="font-size:1.05rem">{{ p.name }}</h3>
                 <!-- Trusted confirmation: a green shield-check by the name once the dir is
                      trusted (so a bridge starts without the trust prompt). Untrusted shows
@@ -18,6 +24,12 @@
                   <span class="status-dot" :class="statusDotClass('{{ p.name }}')"></span>
                   <span x-text="statusLabel('{{ p.name }}')">Stopped</span>
                 </span>
+                <!-- rows layout: surface the live metrics inline on the collapsed row so
+                     CPU/mem is visible at a glance without expanding. Hidden in cards layout
+                     (the body already shows the full metrics line there). -->
+                <span class="text-secondary small text-nowrap" x-cloak
+                      x-show="layout === 'rows' && metricsLabel('{{ p.name }}')"
+                      :title="metricsTitle('{{ p.name }}')" x-text="metricsLabel('{{ p.name }}')"></span>
                 <!-- Tier 4: secondary / rare actions tucked into a "···" overflow menu so
                      the body keeps a single primary action. Alpine toggles it (no Bootstrap JS). -->
                 <div class="card-menu" x-data="{ menu: false }" @click.outside="menu = false"
@@ -39,7 +51,7 @@
                 </div>
               </div>
             </div>
-            <div class="card-body">
+            <div class="card-body" x-show="rowOpen('{{ p.name }}')" x-cloak>
               <div x-data="{ adv: false }">
                 <!-- Tier 2 quiet meta-row (facts), with the Tier-3 "Options" toggle right-
                      aligned on the SAME line (shown only when a fresh Start is offered). -->
