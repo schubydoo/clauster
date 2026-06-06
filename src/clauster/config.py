@@ -191,9 +191,16 @@ class UsageConfig(BaseModel):
     from the transcript × a hand-maintained USD price table). ``show_cost`` hides
     the whole badge — set it false for privacy when screen-sharing or recording a
     demo; the dashboard then also skips the ``/api/projects/{name}/usage`` fetch.
+
+    ``currency`` controls only the badge *label*. The price table is USD and there
+    is no FX conversion, so the ``$`` symbol is shown **only** when this is
+    ``"USD"``; any other value renders the (still-USD) figure explicitly suffixed
+    ``USD`` rather than stamping a foreign symbol on a dollar amount. It is a
+    forward hook for a future ``fx_rate`` — today non-USD just means "label it USD".
     """
 
     show_cost: bool = True
+    currency: str = "USD"
 
 
 class ClausterConfig(BaseModel):

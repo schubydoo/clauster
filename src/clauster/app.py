@@ -795,6 +795,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "pty_supported": sys.platform != "win32",
                 # When false, hide the cost badge and skip the per-project usage fetch.
                 "show_cost": config.usage.show_cost,
+                # Badge label only: "$" for USD, else the USD figure suffixed "USD".
+                "currency": config.usage.currency,
             },
         )
 
