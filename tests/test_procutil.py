@@ -168,3 +168,24 @@ def test_force_kill_tree_kills_process():
 
 def test_force_kill_tree_safe_on_dead_pid():
     procutil.force_kill_tree(2_000_000_000)  # absent PID -> no raise
+
+
+def test_force_kill_tree_swallows_kill_race(monkeypatch):
+    # A target that dies between enumeration and kill (NoSuchProcess on .kill())
+    # must be swallowed per-process, not abort the whole tree-kill.
+    class Racy:
+        def kill(self):
+            raise psutil.NoSuchProcess(1234)
+
+    class FakeProc:
+        def __init__(self, pid):
+            pass
+
+        def children(self, recursive=False):
+            return [Racy()]
+
+        def kill(self):
+            raise psutil.NoSuchProcess(1234)
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    procutil.force_kill_tree(1234)  # both children and parent race -> no raise

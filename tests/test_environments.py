@@ -108,6 +108,16 @@ def test_load_credentials_bad_json(tmp_path):
         load_credentials(cred, cj)
 
 
+def test_load_credentials_bad_json_in_claude_json(tmp_path):
+    # The org source (claude.json) being invalid JSON surfaces distinctly from the
+    # credentials.json read failure (separate except-clause: JSONDecodeError on the
+    # SECOND file, not the first).
+    cred, cj = _write_creds(tmp_path)
+    cj.write_text("{not json either")
+    with pytest.raises(CredentialsError, match="not valid JSON"):
+        load_credentials(cred, cj)
+
+
 def test_load_credentials_non_utf8_claude_json(tmp_path):
     # Valid creds, but the claude.json (org source) isn't UTF-8: the read raises
     # UnicodeDecodeError (a ValueError) — it must surface as CredentialsError, not
@@ -221,6 +231,30 @@ def test_client_list_pagination_cycle_guard():
     assert len(envs) == 2
 
 
+def test_client_list_pagination_hits_page_ceiling(monkeypatch, caplog):
+    # An endpoint that hands back an ever-new cursor must terminate at the page
+    # ceiling (not loop unbounded) and return the partial list it collected, with a
+    # warning so the truncation isn't silent. Shrink the ceiling to keep it fast.
+    monkeypatch.setattr(environments, "_MAX_LIST_PAGES", 3)
+
+    counter = {"n": 0}
+
+    def transport(method, url, headers, body):
+        counter["n"] += 1
+        payload = {
+            "data": [{"id": f"env_{counter['n']}", "config": {"type": "bridge"}}],
+            "next_page": f"cursor_{counter['n']}",  # always fresh -> never the cycle/None exit
+        }
+        return 200, json.dumps(payload).encode()
+
+    client = EnvironmentsClient(Credentials("tokX", "org9"), transport=transport)
+    with caplog.at_level("WARNING", logger="clauster.environments"):
+        envs = client.list_environments()
+    assert counter["n"] == 3  # stopped exactly at the ceiling
+    assert len(envs) == 3  # returned the partial list collected so far
+    assert any("ceiling" in r.message for r in caplog.records)  # surfaced, not silent
+
+
 def test_client_request_non_json_body_raises():
     # A 2xx with a non-JSON body surfaces as an API error, not a bare JSONDecodeError.
     client, _ = _client([(200, b"<html>502 Bad Gateway</html>")])
@@ -256,6 +290,22 @@ def test_live_dirs_includes_live_pointer_projects(monkeypatch, tmp_path):
     monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
     dirs = environments.live_bridge_directories("claude", tmp_path)
     assert str(tmp_path / "p") in dirs
+
+
+def test_live_dirs_skips_projects_without_a_live_pointer(monkeypatch, tmp_path):
+    # A discovered project whose pointer is missing (None) — or present but dead —
+    # must NOT be counted as a live bridge dir. Exercises the false side of the
+    # "pointer is not None and is_live" guard so a dead pointer can't shield a ghost.
+    from clauster.models import Project
+
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda b: [])
+    no_ptr = Project(name="dead", path=tmp_path / "dead")
+    monkeypatch.setattr("clauster.discovery.discover_projects", lambda root: [no_ptr])
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+    dirs = environments.live_bridge_directories("claude", tmp_path)
+    assert str(tmp_path / "dead") not in dirs  # no live pointer -> not a live dir
+    assert dirs == set()
 
 
 def test_live_dirs_propagates_probe_failure(monkeypatch):
