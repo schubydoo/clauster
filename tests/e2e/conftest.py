@@ -169,3 +169,18 @@ def bridge_server(
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge")
     yield from _start_server(tmp, projects_tree)
+
+
+@pytest.fixture
+def bridge_server_pty(
+    tmp_path_factory: pytest.TempPathFactory, projects_tree: Path
+) -> Iterator[Server]:
+    """A loopback clauster defaulting to pty (true-resume) mode for the bridge lifecycle.
+
+    Like :func:`bridge_server` but with ``claude.resume_mode: pty`` so a started
+    bridge comes up under a real :mod:`clauster.pty_keeper` running the ``claude
+    --remote-control`` flag form — the true-resume path (Resume re-spawns it with
+    ``--continue``). pty mode is POSIX-only; the E2E host is Linux.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-bridge-pty")
+    yield from _start_server(tmp, projects_tree, extra="  resume_mode: pty\n")

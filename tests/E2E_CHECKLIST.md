@@ -125,19 +125,20 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
         POST 403s on the origin check.
 - [ ] **On-disk URL redaction** — set `logs.redact_session_url: true`; confirm the
       session URL is redacted in the on-disk bridge log too (not just over WS).
-- [ ] **PTY true-resume mode** — set `claude.resume_mode: pty` (POSIX only). Start a
+- [ ] **PTY true-resume mode** `[auto]` — set `claude.resume_mode: pty` (POSIX only). Start a
       bridge: it spawns the `claude --remote-control` flag form under a PTY keeper and
       reaches RUNNING with a `claude.ai/code/session_…` link.
       - A **`↻ true-resume`** badge shows on the card (purple); hovering it explains
         "Resume restores prior conversation context (single session)." It is absent for
-        `standard` bridges.
-      - Drive a conversation (give the agent a codeword), then **Stop**. The card must
+        `standard` bridges. `[auto]`
+      - `[auto]` Drive a conversation (give the agent a codeword), then **Stop**. The card must
         then show a **Resume** button — a stopped pty bridge is *resumable* even though it
         has **no `environment_id`** (regression guard: `isResumable` accepts
-        `resume_mode === "pty"`). Click **Resume**: the new session **restores the prior
-        conversation** (the agent recalls the codeword with no tools) — true resume, not
-        just the recap. The respawn argv carries `--continue` and the prior transcript is
-        continued (not a fresh `.jsonl`).
+        `resume_mode === "pty"`). Click **Resume**: the respawn argv carries `--continue`
+        (asserted by the E2E). The *content* check — the new session **restores the prior
+        conversation** (the agent recalls the codeword with no tools), true resume not just
+        the recap, continuing the prior transcript rather than a fresh `.jsonl` — stays
+        **manual** (the fake bridge has no conversation to restore).
       - Beside **Resume** the card also shows **Start new session**. Clicking it raises a
         warning (a new session won't restore the prior one and Resume may no longer reach
         it); confirming launches a **fresh** bridge (no `--continue`, the codeword is NOT
