@@ -39,7 +39,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      # SHA-pinned (repo policy requires full-length commit SHAs) and
+      # persist-credentials:false — this job only reads via `gh api`, it never
+      # uses the git credential, so don't leave the token in .git/config.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Check labels + settings drift (advisory, never blocks)
         id: drift
