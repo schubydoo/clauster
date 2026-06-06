@@ -33,3 +33,6 @@ scratch/
 # Stray root-level images (design/QA screenshots belong in scratch/ or, if curated
 # for the docs, docs/screenshots/) — guards against accidentally committing them.
 /*.png
+
+# mkdocs-material build output (`mkdocs build`) — generated, never committed.
+/site/
