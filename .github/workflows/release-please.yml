@@ -116,7 +116,7 @@ jobs:
 
       - name: Set up uv (build)
         if: ${{ steps.release.outputs.release_created == 'true' }}
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: false # this job can push; avoid the cache-poisoning vector
 
@@ -301,7 +301,7 @@ jobs:
 
       - name: Set up uv
         if: ${{ steps.relpr.outputs.branch != '' }}
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           # No cache: this job can push, and setup-uv's default caching is a
           # cache-poisoning vector (zizmor). A one-off `uv lock` doesn't need it.
