@@ -48,6 +48,23 @@ def test_load_pointer_non_utf8_returns_none(tmp_path: Path):
     assert pointers.load_pointer(bad) is None
 
 
+def test_load_pointer_valid_json_wrong_shape_returns_none(tmp_path: Path):
+    # Parseable JSON whose shape doesn't satisfy BridgePointer (missing required
+    # fields) raises a pydantic ValidationError (a ValueError) on model_validate;
+    # the malformed -> None contract must still hold.
+    import json
+
+    bad = tmp_path / "wrong_shape.json"
+    bad.write_text(json.dumps({"sessionId": "s", "unexpected": True}))
+    assert pointers.load_pointer(bad) is None
+
+
+def test_pointer_for_project_forward_resolves_and_loads(fixtures_dir: Path):
+    # pointer_for_project maps a project path forward to its sanitized dir under
+    # claude_projects_dir; with no pointer there it returns None (not an error).
+    assert pointers.pointer_for_project(Path("/no/such/project"), fixtures_dir) is None
+
+
 def test_fixture_pointers_are_not_live(fixtures_dir: Path):
     # The captured pointers reference long-dead PIDs -> never trusted as live.
     for name in ("test1", "test2", "dockerize2"):
