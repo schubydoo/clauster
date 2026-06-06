@@ -74,7 +74,7 @@ jobs:
     # environment; its ref policy allows `main` (edge) + `v*` tags (releases).
     environment:
       name: ghcr
-      url: https://github.com/${{ github.repository }}/pkgs/container/clauster
+      url: https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
     permissions:
       contents: read
       packages: write # push to ghcr.io
