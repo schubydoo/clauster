@@ -276,11 +276,14 @@ jobs:
             "from clauster.auth import hash_password, make_hasher; print(hash_password(make_hasher(), 'ci-smoke'))")
           echo "::add-mask::$HASH"
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-      # Minimal config in the mounted /config (clauster needs a clauster.yml to
-      # exist; env vars only override scalars). projects_root=/projects exists in
-      # the image; auth + host come from env. Used by both the run and the
-      # compose step (compose bind-mounts ./config → /config).
-      - name: Write a minimal smoke config
+      # Boot prerequisites the image deliberately omits:
+      #  • clauster.yml — clauster needs one to exist (env vars only override
+      #    scalars); projects_root=/projects exists in the image.
+      #  • a `claude` binary — clauster resolves it on PATH at startup and exits
+      #    if missing. The image ships WITHOUT claude by design (users mount it —
+      #    see compose.yaml), so we mount a tiny stub, exactly as documented. The
+      #    compose override mirrors compose.yaml's commented-out claude mount.
+      - name: Write smoke config + claude stub
         run: |
           set -euo pipefail
           mkdir -p config projects
@@ -289,6 +292,24 @@ jobs:
           projects_root: /projects
           state_dir: /config/state
           log_format: json
+          YML
+          cat > claude-stub <<'SH'
+          #!/bin/sh
+          case "$1" in
+            --version) echo "2.1.200 (Claude Code)" ;;
+            agents)    echo "[]" ;;
+            *)         echo "[]" ;;
+          esac
+          SH
+          chmod +x claude-stub
+          cat > compose.ci.yaml <<'YML'
+          # CI-only override: mount the stub claude onto PATH (compose.yaml ships
+          # this commented out). Not committed — written by the smoke-test job.
+          services:
+            clauster:
+              image: clauster:smoke
+              volumes:
+                - ./claude-stub:/usr/local/bin/claude:ro
           YML
       - name: docker run → /healthz
         env:
@@ -301,6 +322,7 @@ jobs:
             -e CLAUSTER_AUTH_PASSWORD_HASH="$HASH" \
             -v "$PWD/config:/config" \
             -v "$PWD/projects:/projects" \
+            -v "$PWD/claude-stub:/usr/local/bin/claude:ro" \
             clauster:smoke
           ok=false
           for _ in $(seq 1 30); do
@@ -322,8 +344,7 @@ jobs:
           CLAUSTER_AUTH_PASSWORD_HASH: ${{ steps.hash.outputs.hash }}
         run: |
           set -euo pipefail
-          mkdir -p config projects
-          docker compose up -d
+          docker compose -f compose.yaml -f compose.ci.yaml up -d
           ok=false
           for _ in $(seq 1 30); do
             code=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:7621/healthz || true)
@@ -332,13 +353,13 @@ jobs:
           done
           if [ "$ok" != "true" ]; then
             echo "::error::docker compose: /healthz never returned 200"
-            docker compose logs || true
+            docker compose -f compose.yaml -f compose.ci.yaml logs || true
             exit 1
           fi
           echo "docker compose: /healthz 200 ✓"
       - name: Tear down compose
         if: always()
-        run: docker compose down -v || true
+        run: docker compose -f compose.yaml -f compose.ci.yaml down -v || true
 
   # --------------------------------------------------------------------
   # Required-checks aggregator. ONE check for the `main` ruleset to gate
