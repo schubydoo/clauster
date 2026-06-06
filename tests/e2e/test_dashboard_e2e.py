@@ -72,7 +72,10 @@ def test_overflow_menu_opens_claude_md_editor_and_saves(page: Page, bridge_serve
     card.get_by_role("button", name="Save").click()
     expect(card.get_by_text("✓ saved")).to_be_visible()
 
-    # Re-opening the editor shows the persisted edit (close, then reopen).
+    # Re-opening the editor shows the persisted edit (close, then reopen). Assert the
+    # Cancel button is present first, so an auto-collapse-on-save regression fails here
+    # explicitly rather than as an opaque no-op click + later hidden-state assertion.
+    expect(card.get_by_role("button", name="Cancel")).to_be_visible()
     card.get_by_role("button", name="Cancel").click()
     expect(editor).to_be_hidden()
     card.get_by_role("button", name="More actions").click()
@@ -128,12 +131,15 @@ def test_create_empty_project_inserts_card_in_place(page: Page, bridge_server: S
     page.locator('input[x-model="np.name"]').fill("delta")
     page.get_by_role("button", name="Create", exact=True).click()
 
-    # The new card appears in place...
+    # The new card appears in place (the create API call can be slow in CI, so give it
+    # the same headroom as the other waitable assertions in this file)...
     new_card = page.locator('[data-project="delta"]')
-    expect(new_card).to_be_visible()
+    expect(new_card).to_be_visible(timeout=_STATUS_TIMEOUT)
     expect(new_card.get_by_role("heading", name="delta")).to_be_visible()
     # ...and the page never navigated (sentinel intact).
-    assert page.evaluate("window.__e2e_no_reload") is True
+    assert page.evaluate("window.__e2e_no_reload") is True, (
+        "page navigated during project creation — the window sentinel was wiped"
+    )
 
     # The inserted card is fully interactive without a refresh: an untrusted new
     # project offers Start, which opens the trust prompt rather than spawning.
