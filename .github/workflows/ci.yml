@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled`/`unlabeled` (beyond the opened/synchronize/reopened defaults) so
+    # toggling the `full-ci` label re-triggers CI and immediately flips the
+    # matrix between the subset and the full grid — otherwise the label only
+    # takes effect on the next push.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  # Nightly full sweep on main: catches a portability/CVE/dep regression that a
+  # trimmed internal-PR matrix would skip, without waiting for the next release.
+  schedule:
+    - cron: "27 6 * * *"
 
 permissions:
   contents: read
@@ -14,62 +23,157 @@ concurrency:
 
 jobs:
   # --------------------------------------------------------------------
-  # Unit tests across the supported Python versions (Linux only — clauster
-  # targets a Linux/NAS host; psutil/proc + bridge management aren't
-  # exercised on macOS/Windows). The 96% coverage gate lives in
-  # pyproject [tool.pytest.ini_options] addopts (--cov-fail-under=96), so
-  # a bare `pytest` enforces it on every cell.
+  # setup — emit the test matrix + classify the diff. ONE cheap job that
+  # decides everything downstream:
+  #   • matrix:  internal PR  → a representative SUBSET (all 4 Pythons + all
+  #              3 OSes in 4 legs, Windows-weighted since it's the buggiest
+  #              platform, and ubuntu+3.13 always present = the coverage-gate
+  #              and Codecov cell). push:main / nightly cron / fork PRs (after
+  #              approval) / a `full-ci`-labelled PR → the FULL 3×4 = 12 grid.
+  #              Trimming applies ONLY to internal PRs; main + nightly always
+  #              run the full grid (release safety-net — a release is only ever
+  #              cut from a green main).
+  #   • code:    true unless the PR touches ONLY docs/meta files. The heavy
+  #              jobs (tests, build, docker) gate on this so a docs-only PR
+  #              skips them entirely. Fail-safe: anything unrecognised, an
+  #              empty diff, or any non-PR event → code=true (never skip on
+  #              main/cron). The `ci required checks passed` aggregator counts a
+  #              skipped job as passing, so the required check still reports.
+  # --------------------------------------------------------------------
+  setup:
+    name: setup (matrix + change filter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Need both PR endpoints in history to diff base..head.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed files (code vs docs-only)
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Non-PR events (push:main, schedule) never skip — release safety-net.
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Event '$EVENT_NAME' → code=true (main/cron never skip)."
+            exit 0
+          fi
+          # Three-dot = files changed on the PR branch since its merge-base,
+          # matching GitHub's "Files changed" tab (two-dot would also count
+          # commits that landed on the base since the branch forked).
+          files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" || true)
+          if [ -z "$files" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Empty/failed diff → code=true (fail-safe toward running)."
+            exit 0
+          fi
+          # A path is non-code (docs/meta) IFF it matches this allowlist. Any file
+          # outside it flips the whole PR to code=true — we err toward running CI,
+          # never toward skipping it. Note .github/**/*.md is docs but a workflow
+          # *.yml change is code (CI must test itself).
+          noncode='(\.md$|^docs/|^mkdocs\.yml$|^scratch/|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/.*\.md$|^\.github/(CODEOWNERS|FUNDING\.yml)$)'
+          code=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if ! printf '%s\n' "$f" | grep -Eq "$noncode"; then
+              code=true
+              break
+            fi
+          done <<< "$files"
+          echo "Changed files:"; printf '%s\n' "$files" | sed 's/^/  /'
+          echo "=> code=$code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+      - name: Decide matrix (subset vs full)
+        id: matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # FULL 3×4 grid. macOS/Windows were brought green via a .cmd test-stub
+          # entrypoint + cross-platform guards; the full sweep keeps a
+          # version-specific portability bug from hiding on an untested OS×py cell.
+          full='{"include":[
+            {"os":"ubuntu-latest","python":"3.11"},
+            {"os":"ubuntu-latest","python":"3.12"},
+            {"os":"ubuntu-latest","python":"3.13"},
+            {"os":"ubuntu-latest","python":"3.14"},
+            {"os":"macos-latest","python":"3.11"},
+            {"os":"macos-latest","python":"3.12"},
+            {"os":"macos-latest","python":"3.13"},
+            {"os":"macos-latest","python":"3.14"},
+            {"os":"windows-latest","python":"3.11"},
+            {"os":"windows-latest","python":"3.12"},
+            {"os":"windows-latest","python":"3.13"},
+            {"os":"windows-latest","python":"3.14"}
+          ]}'
+          # SUBSET for internal PRs: 4 legs covering all 4 Pythons and all 3 OSes.
+          # ubuntu+3.13 is mandatory (coverage gate + Codecov upload live there);
+          # Windows gets two legs (our buggiest platform); one macOS leg.
+          subset='{"include":[
+            {"os":"ubuntu-latest","python":"3.13"},
+            {"os":"windows-latest","python":"3.11"},
+            {"os":"windows-latest","python":"3.14"},
+            {"os":"macos-latest","python":"3.12"}
+          ]}'
+          use_full=false
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            use_full=true                                   # push:main, schedule
+          elif [ "$IS_FORK" = "true" ]; then
+            use_full=true                                   # fork PR → full gamut
+          elif printf '%s' "$LABELS" | grep -q '"full-ci"'; then
+            use_full=true                                   # escape hatch label
+          fi
+          if [ "$use_full" = "true" ]; then
+            echo "Using FULL matrix (event=$EVENT_NAME fork=$IS_FORK)."
+            echo "matrix=$(printf '%s' "$full" | jq -c .)" >> "$GITHUB_OUTPUT"
+          else
+            echo "Using SUBSET matrix (internal PR)."
+            echo "matrix=$(printf '%s' "$subset" | jq -c .)" >> "$GITHUB_OUTPUT"
+          fi
+
+  # --------------------------------------------------------------------
+  # Unit tests across the matrix `setup` emitted. The 96% coverage gate
+  # lives in pyproject addopts (--cov-fail-under=96); only Linux enforces
+  # it (macOS/Windows report coverage but pass --cov-fail-under=0, since
+  # branches like Linux jiffies / Windows O_BINARY are platform-specific
+  # and no single OS reaches 96%). Skipped wholesale on a docs-only PR.
   # --------------------------------------------------------------------
   tests:
-    name: tests (${{ matrix.os }}, ${{ matrix.python-version }})
+    name: tests (${{ matrix.os }}, ${{ matrix.python }})
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
-    # Ubuntu, macOS, and Windows are all required (spec target: tri-platform).
-    # macOS + Windows were brought green via a .cmd entrypoint for the test stubs
-    # plus cross-platform guards; they now block merges like Linux, so a future
-    # regression on any platform can't silently rot the way these 29 once did.
     strategy:
       fail-fast: false
-      # Spec target is Ubuntu + macOS + Windows (conductor_spec_v3 §"Ubuntu,
-      # macOS, Windows" + 4-runner PyInstaller matrix; psutil was chosen for
-      # cross-platform liveness). Full Python sweep on every OS (3 × 4 = 12
-      # cells) so a version-specific portability bug can't hide on an untested
-      # OS×version combo. Public repo → Actions minutes are free; cells run in
-      # parallel. Only Linux enforces the coverage gate (see the pytest step).
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup
         with:
-          enable-cache: true
-      # Matrix values flow through env vars (not inlined into `run:`) so zizmor's
-      # template-injection analysis doesn't flag the shell blocks. The matrix is
-      # hard-coded above, not derived from any PR-controlled input. `shell: bash`
-      # keeps one script across all three runners (Git Bash ships on Windows).
-      - name: Set up Python ${{ matrix.python-version }}
-        shell: bash
-        env:
-          PYTHON_VERSION: ${{ matrix.python-version }}
-        run: uv python install "$PYTHON_VERSION"
-      - name: Install
-        shell: bash
-        env:
-          PYTHON_VERSION: ${{ matrix.python-version }}
-        run: uv sync --extra dev --python "$PYTHON_VERSION"
-      # Linux enforces the 96% coverage gate (pyproject addopts). macOS + Windows
-      # still REPORT coverage (term-missing, for visibility into platform-specific
-      # gaps) but don't gate on it — `--cov-fail-under=0` overrides the addopts
-      # threshold — since branches are inherently platform-specific (Linux jiffies
-      # procStart, Windows O_BINARY/WNOHANG guards) and no single OS reaches 96%.
+          python-version: ${{ matrix.python }}
+      # `shell: bash` keeps one script across all three runners (Git Bash ships
+      # on Windows). Matrix values flow through env (not inlined) for zizmor.
       - name: pytest
         shell: bash
         env:
-          PYTHON_VERSION: ${{ matrix.python-version }}
+          PYTHON_VERSION: ${{ matrix.python }}
           RUNNER_OS: ${{ runner.os }}
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -78,33 +182,24 @@ jobs:
           else
             uv run --python "$PYTHON_VERSION" pytest -q --cov-fail-under=0
           fi
-      # Upload coverage + test results to Codecov from a single Linux cell (the
-      # gate platform). Linux is where the 96% number is measured; macOS/Windows
-      # coverage is platform-partial by design (see the pytest step), so uploading
-      # them would only muddy the trend. Token-based upload (CODECOV_TOKEN secret)
-      # → no `id-token` permission needed. Both uploads are non-blocking: Codecov
-      # isn't a required check and upload flakiness must never fail CI
-      # (fail_ci_if_error: false). Both use `!cancelled()` so a FAILED pytest run
-      # still uploads — pytest writes coverage.xml/junit.xml before the gate check,
-      # so a coverage drop shows up in the Codecov trend precisely when it matters,
-      # and failed tests still feed Codecov's flaky-test analytics. Test results go
-      # through codecov-action with `report_type: test_results` (the standalone
-      # test-results-action is deprecated), so we pin a single action SHA.
-      # Skip release-please's automated PRs: they only touch CHANGELOG / version /
-      # lockfile (no code), so coverage never moves and a Codecov status/comment on
-      # them is pure noise. Filtered on the PR *author* (not `github.actor`, which
-      # becomes the human on a manual push to the release branch) and mirrors the
-      # `.coderabbit.yaml` bot skip. `github.event.pull_request.user.login` is empty
-      # on push events, so main-branch coverage uploads are unaffected.
+      # Upload coverage + test results from the single Linux 3.13 cell (the gate
+      # platform — always present in both the subset and the full matrix).
+      # Token-based upload (no id-token perm). Non-blocking: Codecov isn't a
+      # required check and upload flakiness must never fail CI. `!cancelled()` so
+      # a FAILED pytest still uploads (pytest writes the reports before the gate),
+      # surfacing a coverage drop precisely when it matters. Skips release-please's
+      # bot PRs (code never moves; the status/comment is pure noise) — filtered on
+      # the PR author, mirroring the .coderabbit.yaml bot skip; the login is empty
+      # on push, so main-branch uploads are unaffected.
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: false
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python-version == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
+        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
         uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -113,23 +208,23 @@ jobs:
           fail_ci_if_error: false
 
   # --------------------------------------------------------------------
-  # Build sdist + wheel. Cheap; runs on every push and PR so we always
-  # know the package is shippable.
+  # Build sdist + wheel. Cheap; confirms the package is shippable.
   # --------------------------------------------------------------------
   build:
     name: build sdist + wheel
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup
         with:
-          enable-cache: true
-      - name: Set up Python 3.13
-        run: uv python install 3.13
+          python-version: "3.13"
+          extras: ""   # build only needs the build backend, not test/lint tooling
       - name: Build
         run: uv build
       - name: Upload dist artefacts
@@ -141,18 +236,156 @@ jobs:
           if-no-files-found: error
 
   # --------------------------------------------------------------------
-  # Required-checks aggregator. ONE check for branch protection to gate
-  # on, regardless of how many underlying jobs exist. `if: always()` so it
-  # runs even when a need failed; jq fails the aggregator iff any listed
-  # job is not success-or-skipped. Add a new ci.yml job by appending to
-  # `needs:` — branch protection lists only this one name.
+  # Docker smoke-test. The image is built + Trivy-scanned in security.yml
+  # but never RUN there — this is the runtime regression net. Build once,
+  # then prove the server actually boots and serves /healthz two ways:
+  #   1. `docker run`     — the image itself.
+  #   2. `docker compose` — the published compose.yaml (#97).
+  # The image binds 0.0.0.0, so it requires enforced auth to start; we mint
+  # a throwaway argon2id hash from the image's own auth module (no real
+  # secret) — /healthz is public, so liveness needs no login. Docs-only PRs
+  # skip it.
+  # --------------------------------------------------------------------
+  docker:
+    name: docker smoke-test
+    needs: setup
+    if: needs.setup.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      # Build amd64 once, load locally, and tag it as the compose image name too
+      # so `docker compose` uses this build (pull policy "missing" → local hit),
+      # never the published :latest. The gha cache keeps cold builds cheap.
+      - name: Build image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: |
+            clauster:smoke
+            ghcr.io/schubydoo/clauster:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # Throwaway hash from the image's OWN auth code — non-interactive (the CLI's
+      # hash-password uses getpass), no hard-coded credential to scan-flag.
+      - name: Mint a throwaway auth hash
+        id: hash
+        run: |
+          set -euo pipefail
+          HASH=$(docker run --rm --entrypoint python clauster:smoke -c \
+            "from clauster.auth import hash_password, make_hasher; print(hash_password(make_hasher(), 'ci-smoke'))")
+          echo "::add-mask::$HASH"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+      # Boot prerequisites the image deliberately omits:
+      #  • clauster.yml — clauster needs one to exist (env vars only override
+      #    scalars); projects_root=/projects exists in the image.
+      #  • a `claude` binary — clauster resolves it on PATH at startup and exits
+      #    if missing. The image ships WITHOUT claude by design (users mount it —
+      #    see compose.yaml), so we mount a tiny stub, exactly as documented. The
+      #    compose override mirrors compose.yaml's commented-out claude mount.
+      - name: Write smoke config + claude stub
+        run: |
+          set -euo pipefail
+          mkdir -p config projects
+          cat > config/clauster.yml <<'YML'
+          schema_version: 1
+          projects_root: /projects
+          state_dir: /config/state
+          log_format: json
+          YML
+          cat > claude-stub <<'SH'
+          #!/bin/sh
+          case "$1" in
+            --version) echo "2.1.200 (Claude Code)" ;;
+            agents)    echo "[]" ;;
+            *)         echo "[]" ;;
+          esac
+          SH
+          chmod +x claude-stub
+          cat > compose.ci.yaml <<'YML'
+          # CI-only override: mount the stub claude onto PATH (compose.yaml ships
+          # this commented out). Not committed — written by the smoke-test job.
+          services:
+            clauster:
+              image: clauster:smoke
+              volumes:
+                - ./claude-stub:/usr/local/bin/claude:ro
+          YML
+      - name: docker run → /healthz
+        env:
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          set -euo pipefail
+          docker run -d --name clauster-smoke -p 7621:7621 \
+            -e CLAUSTER_AUTH_ENABLED=true \
+            -e CLAUSTER_AUTH_PASSWORD_REQUIRED=true \
+            -e CLAUSTER_AUTH_PASSWORD_HASH="$HASH" \
+            -v "$PWD/config:/config" \
+            -v "$PWD/projects:/projects" \
+            -v "$PWD/claude-stub:/usr/local/bin/claude:ro" \
+            clauster:smoke
+          ok=false
+          for _ in $(seq 1 30); do
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:7621/healthz || true)
+            if [ "$code" = "200" ]; then ok=true; break; fi
+            sleep 2
+          done
+          if [ "$ok" != "true" ]; then
+            echo "::error::docker run: /healthz never returned 200"
+            docker logs clauster-smoke || true
+            exit 1
+          fi
+          echo "docker run: /healthz 200 ✓"
+          docker rm -f clauster-smoke
+      - name: docker compose → /healthz
+        env:
+          # compose.yaml requires this (its `:?` guard); a real env var holds the
+          # literal hash fine — only .env files need the `$`→`$$` doubling.
+          CLAUSTER_AUTH_PASSWORD_HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          set -euo pipefail
+          docker compose -f compose.yaml -f compose.ci.yaml up -d
+          ok=false
+          for _ in $(seq 1 30); do
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:7621/healthz || true)
+            if [ "$code" = "200" ]; then ok=true; break; fi
+            sleep 2
+          done
+          if [ "$ok" != "true" ]; then
+            echo "::error::docker compose: /healthz never returned 200"
+            docker compose -f compose.yaml -f compose.ci.yaml logs || true
+            exit 1
+          fi
+          echo "docker compose: /healthz 200 ✓"
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f compose.yaml -f compose.ci.yaml down -v || true
+          # Also reap the docker-run container — a failed healthz poll exits
+          # before its inline `docker rm`, leaving it bound to port 7621.
+          docker rm -f clauster-smoke || true
+
+  # --------------------------------------------------------------------
+  # Required-checks aggregator. ONE check for the `main` ruleset to gate
+  # on (context: "ci required checks passed"), regardless of how many
+  # underlying jobs exist. `if: always()` so it runs even when a need
+  # failed or was skipped; jq fails it iff any listed job is neither
+  # success nor skipped. Add a ci.yml job by appending to `needs:`.
   # --------------------------------------------------------------------
   ci-required-checks-passed:
     name: ci required checks passed
     if: always()
     needs:
+      - setup
       - tests
       - build
+      - docker
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

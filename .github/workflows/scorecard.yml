@@ -6,6 +6,12 @@ on:
     - cron: "18 7 * * 1"
   push:
     branches: [main]
+  # Re-score right after a release publishes. The push:main scan races ~18s
+  # ahead of release-please's publish, so it counts the prior release's signed
+  # assets; this trigger lets Signed-Releases see the new .sigstore.json +
+  # .intoto.jsonl as soon as they exist.
+  release:
+    types: [published]
 
 permissions:
   contents: read
