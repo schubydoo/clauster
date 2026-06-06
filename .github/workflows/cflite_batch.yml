@@ -1,0 +1,49 @@
+# ClusterFuzzLite — scheduled BATCH fuzzing (the deep counterpart to cflite_pr.yml).
+# PR fuzzing only exercises code touched by a diff for 180s (`mode: code-change`);
+# this runs EVERY harness in fuzz/ for longer on a schedule and lets a corpus
+# accumulate across runs (via the GitHub Actions cache — no separate storage repo
+# or secret needed), so it reaches bugs the per-PR run never can. A reproducible
+# crash surfaces here and as SARIF in the Security tab. NOT a required check, so a
+# finding never blocks a merge — it's a signal, not a gate.
+# Cost knobs (see the CI-cost-audit TODO): the `cron` cadence and `fuzz-seconds`.
+# Docs: https://google.github.io/clusterfuzzlite/
+name: ClusterFuzzLite batch fuzzing
+
+on:
+  schedule:
+    - cron: "27 4 * * *" # daily, 04:27 UTC (off-peak; offset from the other crons)
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  batch-fuzzing:
+    name: batch fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # checkout + build the harnesses
+      security-events: write # upload crash SARIF to the Security tab
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.sanitizer }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address]
+    steps:
+      - name: Build fuzzers (${{ matrix.sanitizer }})
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          sanitizer: ${{ matrix.sanitizer }}
+      - name: Run fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 600
+          mode: batch
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true
