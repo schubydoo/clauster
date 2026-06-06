@@ -70,7 +70,9 @@ restarts — the dashboard JS/CSS are cached static assets.
       indicator.
 - [ ] **Live log tail** streams over WS; ANSI stripped; IDs/tokens redacted.
 - [ ] **CLAUDE.md editor** — load, edit, save; stale-bridge banner; 409 conflict
-      surfaces.
+      surfaces. **`[auto]`** for open-via-··· (the overflow menu) → load → edit →
+      save (`✓ saved`, persisted on reopen) plus the running-bridge banner; the
+      409-conflict check stays manual.
 - [ ] **Create project** (empty) and **clone** a git URL — the new card appears
       **in place with no full-page reload** (empty grid → first card, or appended
       to existing). Clone shows the **live progress bar**; repos shipping
@@ -79,6 +81,10 @@ restarts — the dashboard JS/CSS are cached static assets.
       is fully interactive (Start/Trust/spawn selects) without a refresh.
       Clicking the warning's **"Show it"** CTA reveals and focuses the new card
       (scrolls into view + lands focus) instead of forcing a full-page reload.
+      **`[auto]`** for the create-empty path: the form's name-gated submit + the
+      clone-mode Git-URL toggle, the inserted card appearing in place with **no
+      full-page reload**, and that card being Start/Trust-interactive without a
+      refresh. The clone download, progress bar, and "Show it" CTA stay manual.
 - [ ] **Per-project cost badge** lazy-loads `≈$X.XX` after first paint; blank
       project shows no badge.
 - [ ] **Login / logout** (when `auth.password_required`): login, then logout
