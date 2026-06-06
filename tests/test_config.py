@@ -154,6 +154,18 @@ def test_env_override_nested_bool(write_config, monkeypatch):
     assert config.logs.strip_ansi_in_stream is False
 
 
+def test_env_override_merges_into_existing_nested_mapping(write_config, monkeypatch):
+    # When the yaml already defines the parent mapping (`logs`), a nested env
+    # override must merge into the existing dict rather than replacing it — i.e.
+    # _set_nested reuses the present sub-dict (the keep-existing branch) so the
+    # config-file sibling key survives alongside the env-set one.
+    cfg_path = write_config("logs:\n  keep_rotated: 9\n")
+    monkeypatch.setenv("CLAUSTER_LOGS_STRIP_ANSI_IN_STREAM", "false")
+    config = load_config(cfg_path)
+    assert config.logs.strip_ansi_in_stream is False  # env override applied
+    assert config.logs.keep_rotated == 9  # the file-set sibling key was preserved
+
+
 def test_reaper_ui_disabled_by_default(write_config):
     assert load_config(write_config()).reaper.ui_enabled is False
 

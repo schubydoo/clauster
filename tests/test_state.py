@@ -72,3 +72,29 @@ def test_migrate_backup_failure_is_logged_not_silent(tmp_path, caplog, monkeypat
 def test_non_dict_root_returns_empty(tmp_path):
     (tmp_path / "state.json").write_text(json.dumps(["not", "a", "dict"]))
     assert StateStore(tmp_path).load() == {}
+
+
+def test_non_dict_instance_values_are_skipped(tmp_path):
+    # A well-formed file whose `instances` map has a non-dict value (e.g. a list)
+    # for one project drops that entry while keeping the valid ones — no crash.
+    (tmp_path / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "instances": {"good": {"label": "g"}, "junk": ["not", "a", "dict"]},
+            }
+        )
+    )
+    assert StateStore(tmp_path).load() == {"good": {"label": "g"}}
+
+
+def test_migrate_does_not_overwrite_existing_backup(tmp_path):
+    # When a .bak already exists, migration must NOT clobber it (the pre-migration
+    # snapshot is taken once). The migration still coerces and loads the legacy data.
+    (tmp_path / "state.json").write_text(
+        json.dumps({"schema_version": 0, "instances": {"a": {"label": "a"}}})
+    )
+    (tmp_path / "state.json.bak").write_text("ORIGINAL BACKUP")
+    loaded = StateStore(tmp_path).load()
+    assert loaded == {"a": {"label": "a"}}
+    assert (tmp_path / "state.json.bak").read_text() == "ORIGINAL BACKUP"  # preserved
