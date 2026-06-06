@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 
-from . import __version__, auth, claude_cli, environments, logstream, ops, usage
+from . import __version__, auth, claude_cli, environments, logstream, metrics, ops, procutil, usage
 from .claude_md import (
     ClaudeMdConflict,
     ClaudeMdError,
@@ -382,6 +382,40 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 for model, t in sorted(rollup.by_model.items())
             },
         }
+
+    @app.get("/api/projects/{name}/metrics")
+    async def api_project_metrics(name: str) -> dict:
+        # Live CPU/memory/disk for a project's running bridge (dashboard badge).
+        # Meaningful only while a bridge runs (and metrics are enabled); otherwise
+        # {running: false}. The two-sample read runs off the event loop. No discovery
+        # scan needed: an unknown name simply has no running instance.
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        if not config.metrics.enabled:  # feature off → never sample, even on a direct hit
+            return {"running": False}
+        inst = runner.get_instance(name)
+        if inst is None or inst.status is not InstanceStatus.RUNNING or inst.bridge_pid is None:
+            return {"running": False}
+        try:
+            # Guard PID reuse since the last poll: if the live PID's start time no
+            # longer matches the bridge we recorded, the OS recycled it onto an
+            # unrelated process — don't attribute its metrics to this bridge.
+            start = inst.bridge_proc_start
+            if start is not None:
+                cur = await asyncio.to_thread(procutil.proc_create_time, inst.bridge_pid)
+                if cur is None or abs(cur - start) > 2.0:
+                    return {"running": False}
+            sample = await asyncio.to_thread(
+                metrics.sample_tree,
+                inst.bridge_pid,
+                interval=config.metrics.sample_interval_seconds,
+                normalize_cpu=config.metrics.normalize_cpu,
+            )
+        except Exception:  # fail closed — a sampling error must never 500 the endpoint
+            return {"running": False}
+        if sample is None:  # pid vanished between the status check and the sample
+            return {"running": False}
+        return {"running": True, **sample}
 
     # --- ghost-environment reaper (spec §11), dashboard surface ----------------
     # Destructive first-party API, so: opt-in config gate, fail-closed live set,
@@ -797,6 +831,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "show_cost": config.usage.show_cost,
                 # Badge label only: "$" for USD, else the USD figure suffixed "USD".
                 "currency": config.usage.currency,
+                # Live per-bridge metrics: master toggle, disk-part toggle, poll cadence.
+                "metrics_enabled": config.metrics.enabled,
+                "metrics_show_disk": config.metrics.show_disk,
+                "metrics_poll_ms": int(config.metrics.poll_seconds * 1000),
             },
         )
 

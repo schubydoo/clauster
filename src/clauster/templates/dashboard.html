@@ -299,6 +299,9 @@
   const DEFAULT_RESUME_MODE = {{ default_resume_mode | tojson }};
   const SHOW_COST = {{ show_cost | tojson }};  // usage.show_cost — hide the cost badge entirely
   const CURRENCY = {{ currency | tojson }};  // usage.currency — label only; "$" iff "USD" (no FX)
+  const METRICS_ENABLED = {{ metrics_enabled | tojson }};  // metrics.enabled — live CPU/mem/disk line
+  const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
+  const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
 
   // Theme toggle (navbar) — persisted, mirrors the no-flash init above.
   document.addEventListener("DOMContentLoaded", function () {
@@ -336,6 +339,7 @@
       confirmNew: {},
       cmd: {},
       usage: {},
+      metrics: {},        // project name -> live CPU/mem/disk sample (null when not running)
       trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
       trusting: {},       // project name -> bool (trust request in flight)
       toasts: [],
@@ -361,6 +365,8 @@
         for (const n of PROJECT_NAMES) this.loadUsage(n);
         this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
         setInterval(() => this.refresh(), 4000);
+        // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
+        if (METRICS_ENABLED) { this.refreshMetrics(); setInterval(() => this.refreshMetrics(), METRICS_POLL_MS); }
       },
       // --- system readiness (preflight panel) ---
       async loadReadiness() {
@@ -498,6 +504,46 @@
           s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
         }
         return s;
+      },
+      async loadMetrics(name) {
+        if (!METRICS_ENABLED) return;
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/metrics");
+          if (res.ok) { const m = await res.json(); this.metrics[name] = m.running ? m : null; }
+        } catch (e) { /* keep the last sample; a blip is fine */ }
+      },
+      refreshMetrics() {
+        // Own cadence (metrics.poll_seconds), decoupled from the status poll. Iterate
+        // the *current* instances (not the static PROJECT_NAMES) so projects added
+        // after load are polled too; drop stale samples for anything not running.
+        if (!METRICS_ENABLED) return;
+        for (const n of Object.keys(this.instances)) {
+          if ((this.instances[n] || {}).status === "running") this.loadMetrics(n);
+        }
+        for (const n of Object.keys(this.metrics)) {
+          if ((this.instances[n] || {}).status !== "running") this.metrics[n] = null;
+        }
+      },
+      metricsLabel(name) {
+        if (!METRICS_ENABLED) return null;
+        if (this.statusOf(name) !== "running") return null;  // race: a stopped card must not flash stale metrics
+        const m = this.metrics[name];
+        if (!m || !m.running) return null;  // x-show hides the line when not running
+        const rate = (bps) => bps >= 1048576 ? (bps / 1048576).toFixed(1) + " MB/s" : Math.round(bps / 1024) + " KB/s";
+        let s = Math.round(m.cpu_percent) + "% CPU · " + Math.round(m.rss_bytes / 1048576) + " MB";
+        if (METRICS_SHOW_DISK && m.disk_read_bps != null) s += " · ⬇" + rate(m.disk_read_bps) + " ⬆" + rate(m.disk_write_bps);
+        return s;
+      },
+      metricsTitle(name) {
+        const m = this.metrics[name];
+        if (!m || !m.running) return "";
+        const cpuNote = m.cpu_normalized
+          ? "CPU% is the share of total host capacity (all cores)"
+          : "CPU% is summed across cores (can exceed 100%)";
+        let s = "Live usage of the bridge process tree (" + m.procs + " process" + (m.procs === 1 ? "" : "es") +
+                "): " + cpuNote + "; memory is summed RSS";
+        if (METRICS_SHOW_DISK && m.disk_read_bps == null) s += "; disk I/O isn't available on this platform";
+        return s + ".";
       },
       qrSrc(name) {
         return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);

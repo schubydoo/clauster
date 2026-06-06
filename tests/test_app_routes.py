@@ -497,3 +497,89 @@ def test_dashboard_injects_currency_usd_by_default(write_config, tmp_path):
 def test_dashboard_injects_currency_custom_when_set(write_config, tmp_path):
     html = _client_with(write_config, tmp_path, "usage:\n  currency: EUR\n").get("/").text
     assert 'const CURRENCY = "EUR";' in html
+
+
+# ----- /api/projects/{name}/metrics (live per-bridge resource sample) ----
+
+
+def test_metrics_invalid_name_returns_422(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/bad%20name/metrics")
+    assert r.status_code == 422
+
+
+def test_metrics_no_running_bridge_returns_false(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/nope/metrics")
+    assert r.status_code == 200
+    assert r.json() == {"running": False}
+
+
+def test_metrics_running_bridge_returns_sample(write_config, tmp_path):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = os.getpid()  # a live pid → a real sample
+    client.app.state.runner._instances["alpha"] = inst
+    body = client.get("/api/projects/alpha/metrics").json()
+    assert body["running"] is True
+    assert "cpu_percent" in body and "rss_bytes" in body and body["procs"] >= 1
+
+
+def test_metrics_disabled_returns_false_even_when_running(write_config, tmp_path):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client_with(write_config, tmp_path, "metrics:\n  enabled: false\n")
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = os.getpid()
+    client.app.state.runner._instances["alpha"] = inst
+    # The gate fires before sampling, so a live running bridge still reports false.
+    assert client.get("/api/projects/alpha/metrics").json() == {"running": False}
+
+
+def test_dashboard_injects_metrics_flags(write_config, tmp_path):
+    html = _client(write_config, tmp_path).get("/").text
+    assert "const METRICS_ENABLED = true;" in html
+    assert "const METRICS_SHOW_DISK = true;" in html
+    assert "const METRICS_POLL_MS = 4000;" in html
+
+
+def _running_metrics_client(write_config, tmp_path):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = os.getpid()
+    client.app.state.runner._instances["alpha"] = inst
+    return client, inst
+
+
+def test_metrics_sampler_failure_returns_false(write_config, tmp_path, monkeypatch):
+    # Fail closed: a sampling exception must yield {running: false}, never a 500.
+    from clauster import metrics as metrics_mod
+
+    client, _ = _running_metrics_client(write_config, tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(metrics_mod, "sample_tree", boom)
+    r = client.get("/api/projects/alpha/metrics")
+    assert r.status_code == 200
+    assert r.json() == {"running": False}
+
+
+def test_metrics_pid_reuse_guard_returns_false(write_config, tmp_path):
+    # A recorded start time that no longer matches the live PID = reuse → not-running.
+    client, inst = _running_metrics_client(write_config, tmp_path)
+    inst.bridge_proc_start = 1.0  # nowhere near os.getpid()'s real create time
+    assert client.get("/api/projects/alpha/metrics").json() == {"running": False}
+
+
+def test_metrics_gone_pid_returns_false(write_config, tmp_path):
+    # No proc_start recorded (guard skipped) + a dead PID → sample is None → false.
+    client, inst = _running_metrics_client(write_config, tmp_path)
+    inst.bridge_pid = 2_147_483_646
+    assert client.get("/api/projects/alpha/metrics").json() == {"running": False}

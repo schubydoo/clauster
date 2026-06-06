@@ -187,6 +187,38 @@ def test_usage_currency_override_via_config(write_config):
     assert config.usage.currency == "EUR"
 
 
+def test_metrics_defaults(write_config):
+    m = load_config(write_config()).metrics
+    assert m.enabled is True
+    assert m.normalize_cpu is False
+    assert m.show_disk is True
+    assert m.sample_interval_seconds == 0.15
+    assert m.poll_seconds == 4.0
+
+
+def test_metrics_overrides_via_config(write_config):
+    m = load_config(
+        write_config(
+            "metrics:\n  enabled: false\n  normalize_cpu: true\n  show_disk: false\n"
+            "  sample_interval_seconds: 0.5\n  poll_seconds: 10\n"
+        )
+    ).metrics
+    assert m.enabled is False
+    assert m.normalize_cpu is True
+    assert m.show_disk is False
+    assert m.sample_interval_seconds == 0.5
+    assert m.poll_seconds == 10.0
+
+
+def test_metrics_out_of_range_rejected(write_config):
+    with pytest.raises(ValueError):
+        load_config(write_config("metrics:\n  sample_interval_seconds: 0\n"))
+    with pytest.raises(ValueError):
+        load_config(write_config("metrics:\n  sample_interval_seconds: 5\n"))  # > 2.0 cap
+    with pytest.raises(ValueError):
+        load_config(write_config("metrics:\n  poll_seconds: 0.5\n"))  # < 1.0 floor
+
+
 def test_missing_config_file_raises(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUSTER_CONFIG", raising=False)
     monkeypatch.delenv("CLAUSTER_HOME", raising=False)
