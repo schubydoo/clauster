@@ -78,3 +78,17 @@ def test_broadcast_reaches_every_subscriber():
         assert (await asyncio.wait_for(q2.get(), timeout=1))["percent"] == 99
 
     asyncio.run(_run())
+
+
+def test_unsubscribe_unknown_queue_is_a_noop():
+    async def _run():
+        mgr = CloneJobManager()
+        job = mgr.create("proj")
+        live = job.subscribe()
+        stray: asyncio.Queue = asyncio.Queue()  # never registered with this job
+        job.unsubscribe(stray)  # not in _subscribers -> silently ignored, no raise
+        # The genuinely-subscribed queue is untouched and still receives events.
+        mgr.push_progress(job, "Receiving objects: 33%")
+        assert (await asyncio.wait_for(live.get(), timeout=1))["percent"] == 33
+
+    asyncio.run(_run())
