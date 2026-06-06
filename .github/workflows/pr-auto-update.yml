@@ -7,6 +7,13 @@
 # actions/github-script) rather than a third-party action — zero supply-chain
 # surface to re-audit on version bumps.
 #
+# Auth: the default GITHUB_TOKEN CANNOT drive update-branch — github-actions[bot]
+# lacks push rights to the head branch, so it 403s ("user doesn't have permission
+# to update head repository"). We mint a short-lived token for the existing
+# clauster-release-bot App (already has contents + PR write for release PRs),
+# reusing the release-please secrets — no new credential. An App token also
+# re-triggers the updated PR's CI (GITHUB_TOKEN would not), which we want.
+#
 # Bot-authored PRs (release-please App, Renovate) are skipped automatically by
 # the `user.type === "Bot"` check; the excluded labels are belt-and-suspenders
 # in case a release/dependency PR is ever opened by a non-bot.
@@ -29,12 +36,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read # github-script token: read PR list + branch metadata
-      pull-requests: write # pulls.updateBranch: merge main into open PR branches
+      contents: read # job token only reads; the App token (below) does the writes
     steps:
+      - name: Mint a clauster-release-bot token (reuses the release-please App secrets)
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          # Scope the minted token to ONLY what update-branch needs, not the
+          # App's full permission set (the x-accepted-github-permissions for
+          # update-branch is pull_requests=write).
+          permission-pull-requests: write
       - name: Update open PRs targeting the default branch
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const EXCLUDE = new Set([
               "dependencies",
