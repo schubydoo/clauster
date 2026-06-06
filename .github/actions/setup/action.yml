@@ -8,6 +8,12 @@ inputs:
   python-version:
     description: "Python version to install and uv-sync against (e.g. 3.13)."
     required: true
+  extras:
+    description: >-
+      Dependency extra to sync (e.g. "dev"). Empty string syncs no extras — the
+      build job only needs the build backend, not the test/lint tooling.
+    required: false
+    default: dev
 runs:
   using: composite
   steps:
@@ -27,4 +33,10 @@ runs:
       shell: bash
       env:
         PYTHON_VERSION: ${{ inputs.python-version }}
-      run: uv sync --extra dev --python "$PYTHON_VERSION"
+        EXTRAS: ${{ inputs.extras }}
+      run: |
+        if [ -n "$EXTRAS" ]; then
+          uv sync --extra "$EXTRAS" --python "$PYTHON_VERSION"
+        else
+          uv sync --python "$PYTHON_VERSION"
+        fi

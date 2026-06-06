@@ -90,7 +90,7 @@ jobs:
               break
             fi
           done <<< "$files"
-          echo "Changed files:"; printf '  %s\n' $files
+          echo "Changed files:"; printf '%s\n' "$files" | sed 's/^/  /'
           echo "=> code=$code"
           echo "code=$code" >> "$GITHUB_OUTPUT"
       - name: Decide matrix (subset vs full)
@@ -224,6 +224,7 @@ jobs:
         uses: ./.github/actions/setup
         with:
           python-version: "3.13"
+          extras: ""   # build only needs the build backend, not test/lint tooling
       - name: Build
         run: uv build
       - name: Upload dist artefacts
@@ -362,9 +363,13 @@ jobs:
             exit 1
           fi
           echo "docker compose: /healthz 200 ✓"
-      - name: Tear down compose
+      - name: Tear down
         if: always()
-        run: docker compose -f compose.yaml -f compose.ci.yaml down -v || true
+        run: |
+          docker compose -f compose.yaml -f compose.ci.yaml down -v || true
+          # Also reap the docker-run container — a failed healthz poll exits
+          # before its inline `docker rm`, leaving it bound to port 7621.
+          docker rm -f clauster-smoke || true
 
   # --------------------------------------------------------------------
   # Required-checks aggregator. ONE check for the `main` ruleset to gate
