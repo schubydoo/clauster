@@ -150,4 +150,6 @@ def test_pty_mode_start_then_resume_adds_continue(page: Page, bridge_server_pty:
     expect(status).to_contain_text("Running", timeout=_STATUS_TIMEOUT)
 
     resume_argv = _read_launch_argv(bridge_server_pty.state_dir, "gamma")
+    assert "--remote-control" in resume_argv  # resume stays on the flag form...
+    assert "remote-control" not in resume_argv  # ...never the subcommand form
     assert "--continue" in resume_argv  # true-resume restores the prior session
