@@ -50,7 +50,7 @@
         <span class="text-secondary fs-5 fw-normal">v{{ version }}</span></span>
       <span class="text-secondary small d-none d-lg-inline ms-2 text-truncate">{{ projects_root }}</span>
       <div class="navbar-nav flex-row ms-auto align-items-center" style="gap:.5rem">
-        <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme">
+        <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme" title="Toggle dark / light theme">
           <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
           <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
         </button>
@@ -429,6 +429,20 @@
         if (s === "interrupted") return "Ended without a Stop (host restart or external exit) — Resume to continue.";
         if (s === "crashed") return "The bridge exited unexpectedly — Resume to continue.";
         return null;
+      },
+      // Hover hint on the status badge — what each state means (the recoverable
+      // states reuse statusNote so the wording stays in one place).
+      statusTitle(name) {
+        const s = this.displayStatus(name);
+        return {
+          running: "The bridge is live and managing sessions.",
+          starting: "The bridge is launching…",
+          stopping: "The bridge is shutting down…",
+          stopped: "Stopped — Resume the prior session or start a new one.",
+          interrupted: this.statusNote(name),
+          crashed: this.statusNote(name),
+          error: "The bridge failed to start — see the detail below.",
+        }[s] || null;
       },
       isRunning(name) { return this.statusOf(name) === "running"; },
       isBusy(name) { return this.statusOf(name) === "starting"; },
