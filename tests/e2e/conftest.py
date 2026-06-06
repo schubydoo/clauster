@@ -123,17 +123,30 @@ def _start_server(tmp: Path, projects_root: Path, extra: str = "") -> Iterator[S
             proc.wait(timeout=5)
 
 
-@pytest.fixture(scope="module")
-def projects_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A projects_root with three discoverable projects: a git repo, a CLAUDE.md
+def _build_projects_tree(root: Path) -> Path:
+    """Populate ``root`` with three discoverable projects: a git repo, a CLAUDE.md
     project, and a plain one — rendered as cards in the dashboard grid."""
-    root = tmp_path_factory.mktemp("e2e-projects")
     (root / "alpha" / ".git").mkdir(parents=True)
     beta = root / "beta"
     beta.mkdir()
     (beta / "CLAUDE.md").write_text("# beta\n")
     (root / "gamma").mkdir()
     return root
+
+
+@pytest.fixture(scope="module")
+def projects_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A shared, read-only projects_root for the module-scoped (read-only) servers."""
+    return _build_projects_tree(tmp_path_factory.mktemp("e2e-projects"))
+
+
+@pytest.fixture
+def mutable_projects_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A fresh, per-test projects_root for write-path tests (a saved CLAUDE.md, a
+    created project). The module-scoped ``projects_tree`` is shared, so an on-disk
+    write there would leak into later tests in the module; this gives each function a
+    clean tree so write tests can't observe each other's mutations."""
+    return _build_projects_tree(tmp_path_factory.mktemp("e2e-projects-mut"))
 
 
 @pytest.fixture(scope="module")
@@ -158,22 +171,23 @@ def auth_server(tmp_path_factory: pytest.TempPathFactory, projects_tree: Path) -
 
 @pytest.fixture
 def bridge_server(
-    tmp_path_factory: pytest.TempPathFactory, projects_tree: Path
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:
     """A loopback clauster for driving the real bridge lifecycle (trust → start → stop).
 
     Function-scoped (unlike the module-scoped read-only servers above) so each
-    bridge test gets a clean trust store, instance registry, and state_dir — a
-    spawned/trusted bridge in one test never leaks into the next. Yields the full
-    :class:`Server` so tests can read the launch argv from ``state_dir``.
+    bridge test gets a clean trust store, instance registry, state_dir, AND projects
+    tree — a spawned/trusted bridge or an on-disk write (saved CLAUDE.md, created
+    project) in one test never leaks into the next. Yields the full :class:`Server`
+    so tests can read the launch argv from ``state_dir``.
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge")
-    yield from _start_server(tmp, projects_tree)
+    yield from _start_server(tmp, mutable_projects_tree)
 
 
 @pytest.fixture
 def bridge_server_pty(
-    tmp_path_factory: pytest.TempPathFactory, projects_tree: Path
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:
     """A loopback clauster defaulting to pty (true-resume) mode for the bridge lifecycle.
 
@@ -183,4 +197,4 @@ def bridge_server_pty(
     ``--continue``). pty mode is POSIX-only; the E2E host is Linux.
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge-pty")
-    yield from _start_server(tmp, projects_tree, extra="  resume_mode: pty\n")
+    yield from _start_server(tmp, mutable_projects_tree, extra="  resume_mode: pty\n")
