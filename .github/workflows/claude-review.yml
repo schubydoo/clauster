@@ -43,9 +43,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout repository
+      - name: Check out the PR head
+        # An issue_comment-triggered run checks out the default branch by default, so
+        # without this Claude's Read/Grep/Glob would see `main`, not the PR's code, and
+        # could miss regressions. Pin to the PR head: refs/pull/<n>/head is maintained on
+        # the base repo for every open PR (fork PRs included), and for a comment on a PR
+        # github.event.issue.number IS the PR number (a GitHub-typed integer, not
+        # attacker-controllable text, so it's safe in `ref:`).
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
           fetch-depth: 1
           persist-credentials: false
       - name: Claude inline review
