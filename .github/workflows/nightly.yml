@@ -175,21 +175,39 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os, re, pathlib
+          import os, re, pathlib, sys
           n = os.environ["RUN_ID"]
           init = pathlib.Path("src/clauster/__init__.py")
           pyproj = pathlib.Path("pyproject.toml")
+
+          def fail(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              sys.exit(1)
+
           text = init.read_text()
-          cur = re.search(r'__version__\s*=\s*"([^"]+)"', text).group(1)
+          m = re.search(r'__version__\s*=\s*"([^"]+)"', text)
+          if not m:
+              fail("__version__ not found in src/clauster/__init__.py")
+          cur = m.group(1)
           parts = cur.split(".")
-          major, minor = int(parts[0]), int(parts[1])
-          dev = f"{major}.{minor + 1}.0.dev{n}"
-          init.write_text(
-              re.sub(r'(__version__\s*=\s*")[^"]+(")', lambda m: m.group(1) + dev + m.group(2), text, count=1)
+          if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+              fail(f"unexpected version format '{cur}' (want major.minor[.patch])")
+          dev = f"{int(parts[0])}.{int(parts[1]) + 1}.0.dev{n}"
+
+          # re.subn returns the replacement count — refuse to continue if a
+          # pattern didn't match, so we never build/publish the stale real
+          # version (which uv reads from pyproject) instead of the dev one.
+          new_init, ni = re.subn(
+              r'(__version__\s*=\s*")[^"]+(")', lambda x: x.group(1) + dev + x.group(2), text, count=1
           )
-          pt = pyproj.read_text()
-          pt = re.sub(r'(?m)^(version\s*=\s*")[^"]+(")', lambda m: m.group(1) + dev + m.group(2), pt, count=1)
-          pyproj.write_text(pt)
+          new_pt, npp = re.subn(
+              r'(?m)^(version\s*=\s*")[^"]+(")', lambda x: x.group(1) + dev + x.group(2),
+              pyproj.read_text(), count=1,
+          )
+          if ni != 1 or npp != 1:
+              fail(f"version substitution failed (init={ni}, pyproject={npp}) — refusing to publish a stale version")
+          init.write_text(new_init)
+          pyproj.write_text(new_pt)
           print(f"::notice::nightly version {dev}")
           PY
       - name: Build
