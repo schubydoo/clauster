@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Locator, Page, expect
 
 if TYPE_CHECKING:
     from .conftest import Server
@@ -75,7 +75,7 @@ def test_overflow_menu_toggles_claude_md_editor(page: Page, open_server: str) ->
     expect(card.get_by_role("button", name="Edit CLAUDE.md")).to_be_hidden()
 
 
-def _start_bridge(page: Page, card) -> None:
+def _start_bridge(page: Page, card: Locator) -> None:
     """Trust-on-start a fresh bridge and wait for RUNNING (mirrors test_bridge_e2e)."""
     card.get_by_role("button", name="Start bridge").click()
     card.get_by_role("checkbox").check()
@@ -127,6 +127,10 @@ def test_running_bridge_copy_session_link_toasts(page: Page, bridge_server: Serv
 
     _start_bridge(page, card)
 
-    card.locator('button[title="Copy the session link to the clipboard."]').click()
+    # Wait for the control to render before clicking (matches the sibling test) so a
+    # session-URL/RUNNING race can't flake the click.
+    copy_btn = card.locator('button[title="Copy the session link to the clipboard."]')
+    expect(copy_btn).to_be_visible()
+    copy_btn.click()
     # copy() toasts "Link copied" (or a manual-copy fallback) — assert a toast surfaces.
     expect(page.get_by_text("Link copied")).to_be_visible()
