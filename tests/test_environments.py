@@ -293,19 +293,26 @@ def test_live_dirs_includes_live_pointer_projects(monkeypatch, tmp_path):
 
 
 def test_live_dirs_skips_projects_without_a_live_pointer(monkeypatch, tmp_path):
-    # A discovered project whose pointer is missing (None) — or present but dead —
-    # must NOT be counted as a live bridge dir. Exercises the false side of the
-    # "pointer is not None and is_live" guard so a dead pointer can't shield a ghost.
+    # Both non-live cases in one pass, so a dead pointer can't shield a ghost:
+    #   * a project with NO pointer (None) → the `pointer is not None` guard short-circuits
+    #   * a project with a pointer that is DEAD → `is_live(...)` returns False
+    # Exercises BOTH sides of the `pointer is not None and is_live(pointer)` guard.
     from clauster.models import Project
 
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda b: [])
-    no_ptr = Project(name="dead", path=tmp_path / "dead")
-    monkeypatch.setattr("clauster.discovery.discover_projects", lambda root: [no_ptr])
-    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
-    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+    none_proj = Project(name="nopointer", path=tmp_path / "nopointer")
+    dead_proj = Project(name="deadpointer", path=tmp_path / "deadpointer")
+    monkeypatch.setattr(
+        "clauster.discovery.discover_projects", lambda root: [none_proj, dead_proj]
+    )
+    # None for the first project, a (dead) pointer for the second.
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: None if path == none_proj.path else object(),
+    )
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: False)  # the pointer is dead
     dirs = environments.live_bridge_directories("claude", tmp_path)
-    assert str(tmp_path / "dead") not in dirs  # no live pointer -> not a live dir
-    assert dirs == set()
+    assert dirs == set()  # neither a missing nor a dead pointer counts as a live dir
 
 
 def test_live_dirs_propagates_probe_failure(monkeypatch):

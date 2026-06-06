@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -139,22 +140,20 @@ def test_write_replace_failure_tolerates_unlink_failure(tmp_path, monkeypatch):
     # If the atomic write fails AND the temp-file cleanup ALSO fails, the original
     # write error must still surface as ClaudeMdError (the unlink OSError is swallowed,
     # not re-raised over the real cause).
-    import pathlib
-
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setattr(
         "clauster.claude_md.os.replace",
         lambda s, d: (_ for _ in ()).throw(OSError("cross-device")),
     )
-    real_unlink = pathlib.Path.unlink
+    real_unlink = Path.unlink
 
     def boom_unlink(self, *args, **kwargs):
         if self.suffix == ".tmp":
             raise OSError("simulated: temp cleanup failed")
         return real_unlink(self, *args, **kwargs)
 
-    monkeypatch.setattr(pathlib.Path, "unlink", boom_unlink)
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
     with pytest.raises(ClaudeMdError, match="could not write"):
         write_claude_md(proj, "hello\n")
 
