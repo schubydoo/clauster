@@ -57,7 +57,9 @@ timing oracle.
 ### Sessions & cookies
 
 - Sessions are **signed cookies** (`itsdangerous`) with server-side revocation —
-  "log out everywhere" rotates the session secret.
+  "log out everywhere" bumps a persistent session epoch; cookies issued before
+  the bump are rejected even if they have not yet expired. (The signing secret
+  itself is constant across logouts.)
 - `session_max_age_seconds` defaults to 7 days.
 - `cookie_secure` controls the `Secure` flag: `auto` sets it only over https (or
   behind a trusted proxy reporting `X-Forwarded-Proto=https`); `always` forces
@@ -113,9 +115,9 @@ word-boundary-anchored regexes.
 Three layers:
 
 1. **ID redaction (primary guarantee).** Masks `env_` / `session_` / `cse_`
-   identifiers (the prefix is kept readable) and **bare UUIDs** (account /
-   instance identifiers the bridge prints in full). These act as bearer-equivalent
-   credentials in a URL.
+   identifiers (the prefix is kept readable) — these act as bearer-equivalent
+   credentials in a URL — and **bare UUIDs** (account / instance identifiers the
+   bridge prints in full; not bearer credentials, but kept off the stream).
 2. **Secret-shape redaction (defense-in-depth).** A conservative allow-list of
    obvious secret shapes — GitHub tokens (`ghp_`/`gho_`/… , `github_pat_`),
    GitLab PATs (`glpat-`), AWS access-key IDs (`AKIA…`), OpenAI/Anthropic-style
