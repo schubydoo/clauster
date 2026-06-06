@@ -30,7 +30,12 @@ permissions:
 
 concurrency:
   group: claude-review-${{ github.event.issue.number }}
-  cancel-in-progress: true
+  # MUST stay false: the action posts its own "Claude Code is working…" tracking
+  # comment mid-review, which fires another issue_comment in this same group. With
+  # cancel-in-progress: true that self-triggered run cancels the real review before
+  # it finishes (the duplicate then harmlessly skips via the job `if:`). Keeping it
+  # false lets the review run to completion; the duplicate queues and skips.
+  cancel-in-progress: false
 
 jobs:
   review:
