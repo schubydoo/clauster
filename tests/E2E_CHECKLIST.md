@@ -65,14 +65,19 @@ restarts — the dashboard JS/CSS are cached static assets.
       **Stopped** card built from `state.json`, not lost: a **pty** bridge offers
       **Resume** (`--continue` restores the conversation), a **standard** bridge offers
       a fresh **Start**. A project with no persisted record shows no phantom card.
-- [ ] **Open in Claude** deep link + **QR code** render and scan.
+- [ ] **Open in Claude** deep link + **QR code** render and scan. **`[auto]`** for
+      the running-bridge session-link row: the **Open in Claude** link, the **copy**
+      button (toasts "Link copied"), and the **QR** show/hide toggle (image appears
+      then clears); the phone-scan check stays manual.
 - [ ] **External sessions** (started outside Clauster) appear with their distinct
       indicator.
 - [ ] **Live log tail** streams over WS; ANSI stripped; IDs/tokens redacted.
 - [ ] **CLAUDE.md editor** — load, edit, save; stale-bridge banner; 409 conflict
       surfaces. **`[auto]`** for open-via-··· (the overflow menu) → load → edit →
-      save (`✓ saved`, persisted on reopen) plus the running-bridge banner; the
-      409-conflict check stays manual.
+      save (`✓ saved`, persisted on reopen) plus the running-bridge banner
+      (`test_dashboard_e2e`), and the **··· menu open/close** (Alpine-driven,
+      `@click.outside` closes it) + its **Edit CLAUDE.md** item opening the editor
+      (`test_controls_e2e`); the 409-conflict check stays manual.
 - [ ] **Create project** (empty) and **clone** a git URL — the new card appears
       **in place with no full-page reload** (empty grid → first card, or appended
       to existing). Clone shows the **live progress bar**; repos shipping
