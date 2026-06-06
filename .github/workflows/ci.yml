@@ -276,6 +276,20 @@ jobs:
             "from clauster.auth import hash_password, make_hasher; print(hash_password(make_hasher(), 'ci-smoke'))")
           echo "::add-mask::$HASH"
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+      # Minimal config in the mounted /config (clauster needs a clauster.yml to
+      # exist; env vars only override scalars). projects_root=/projects exists in
+      # the image; auth + host come from env. Used by both the run and the
+      # compose step (compose bind-mounts ./config → /config).
+      - name: Write a minimal smoke config
+        run: |
+          set -euo pipefail
+          mkdir -p config projects
+          cat > config/clauster.yml <<'YML'
+          schema_version: 1
+          projects_root: /projects
+          state_dir: /config/state
+          log_format: json
+          YML
       - name: docker run → /healthz
         env:
           HASH: ${{ steps.hash.outputs.hash }}
@@ -285,6 +299,8 @@ jobs:
             -e CLAUSTER_AUTH_ENABLED=true \
             -e CLAUSTER_AUTH_PASSWORD_REQUIRED=true \
             -e CLAUSTER_AUTH_PASSWORD_HASH="$HASH" \
+            -v "$PWD/config:/config" \
+            -v "$PWD/projects:/projects" \
             clauster:smoke
           ok=false
           for _ in $(seq 1 30); do
