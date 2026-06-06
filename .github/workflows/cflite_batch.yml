@@ -1,0 +1,63 @@
+# ClusterFuzzLite — scheduled BATCH fuzzing (the deep counterpart to cflite_pr.yml).
+# PR fuzzing (cflite_pr.yml) only exercises code touched by a diff (`mode:
+# code-change`); this runs EVERY harness in fuzz/ on a schedule, so unchanged
+# code is re-fuzzed regularly and each target gets a longer run than the per-PR
+# pass. A reproducible crash surfaces here and as SARIF in the Security tab. NOT
+# a required check — it signals, it never gates.
+#
+# Corpus persistence: this runs WITHOUT a `storage-repo`, so the coverage corpus
+# is NOT carried across runs — each run re-explores from the in-repo seed corpus.
+# That is still strictly more than PR fuzzing (every harness, not just the diff)
+# and needs zero setup. To make the corpus *accumulate* over time (and reach the
+# deeper bugs that compounding coverage finds), opt into a storage repo: create a
+# separate git repo + a PAT secret with write access to it, then uncomment the
+# `storage-repo` lines below. See https://google.github.io/clusterfuzzlite/.
+#
+# Cost knobs (see the CI-cost-audit TODO): the `cron` cadence and `fuzz-seconds`.
+# NB `fuzz-seconds` is PER fuzz target, so wall-clock ≈ fuzz-seconds × harness
+# count (3 today) + build — keep that under `timeout-minutes`.
+name: ClusterFuzzLite batch fuzzing
+
+on:
+  schedule:
+    - cron: "27 4 * * *" # daily, 04:27 UTC (off-peak; offset from the other crons)
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  batch-fuzzing:
+    name: batch fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # ≈ 300s × 3 harnesses + build, with headroom
+    permissions:
+      contents: read # checkout + build the harnesses
+      security-events: write # upload crash SARIF to the Security tab
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.sanitizer }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address]
+    steps:
+      - name: Build fuzzers (${{ matrix.sanitizer }})
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: ${{ matrix.sanitizer }}
+      - name: Run fuzzers (${{ matrix.sanitizer }})
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300 # PER fuzz target → wall-clock ≈ 300 × harness count
+          mode: batch
+          sanitizer: ${{ matrix.sanitizer }}
+          output-sarif: true
+          # Corpus persistence (opt-in — accumulates a corpus across runs). Create
+          # a storage repo + a PAT secret with write access, then uncomment:
+          # storage-repo: https://${{ secrets.FUZZ_STORAGE_TOKEN }}@github.com/schubydoo/clauster-fuzz-corpus.git
+          # storage-repo-branch: main
