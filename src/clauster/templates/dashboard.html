@@ -38,6 +38,21 @@
        Bootstrap JS/Popper, which we don't load — so place + show it ourselves). */
     .card-menu { position: relative; }
     .card-menu > .dropdown-menu { position: absolute; top: 100%; right: 0; left: auto; display: block; margin-top: .25rem; }
+    /* Compact "rows" layout (the cards⇄rows toggle). The SAME cards are restyled into
+       full-width stacked rows with the body collapsed behind a per-row caret (accordion);
+       no second template, so the grid loop and /card reactive insertion are reused verbatim.
+       The card-body's x-show="rowOpen(name)" does the collapsing; this just lays them out. */
+    #project-grid.layout-rows { --tblr-gutter-y: 0; }
+    #project-grid.layout-rows > [data-project] { flex: 0 0 100%; max-width: 100%; }
+    #project-grid.layout-rows .card { margin-bottom: 0; border-radius: 0; }
+    #project-grid.layout-rows > [data-project] + [data-project] .card { border-top: 0; }
+    #project-grid.layout-rows > [data-project]:first-child .card {
+      border-top-left-radius: var(--tblr-card-border-radius); border-top-right-radius: var(--tblr-card-border-radius); }
+    #project-grid.layout-rows > [data-project]:last-child .card {
+      border-bottom-left-radius: var(--tblr-card-border-radius); border-bottom-right-radius: var(--tblr-card-border-radius); }
+    #project-grid.layout-rows .card-header { padding-top: .5rem; padding-bottom: .5rem; }
+    .row-caret { background: none; border: 0; padding: 0 .35rem 0 0; line-height: 1; cursor: pointer;
+                 color: var(--tblr-secondary); font-size: .8rem; flex: none; }
     [x-cloak] { display: none !important; }
   </style>
 </head>
@@ -218,10 +233,22 @@
       {% endif %}
 
       <!-- ===== Project grid ===== -->
+      {% if projects %}
+      <!-- View toggle: cards grid ⇄ compact rows, persisted in localStorage (like the theme). -->
+      <div class="d-flex align-items-center mb-2">
+        <div class="btn-group btn-group-sm ms-auto" role="group" aria-label="Project layout">
+          <button type="button" class="btn" @click="setLayout('cards')" :aria-pressed="layout === 'cards'"
+                  :class="layout === 'cards' ? 'btn-primary' : 'btn-ghost-secondary'" title="Card grid">Cards</button>
+          <button type="button" class="btn" @click="setLayout('rows')" :aria-pressed="layout === 'rows'"
+                  :class="layout === 'rows' ? 'btn-primary' : 'btn-ghost-secondary'" title="Compact rows">Rows</button>
+        </div>
+      </div>
+      {% endif %}
       <!-- align-items-start: cards size to their own content. Without it the row
            stretches every card to the tallest one, so expanding one card's CLAUDE.md
            editor / logs blows up its siblings into giant empty boxes. -->
-      <div class="row row-cards align-items-start" id="project-grid">
+      <div class="row row-cards align-items-start" id="project-grid"
+           :class="layout === 'rows' ? 'layout-rows' : 'layout-cards'">
         {% for p in projects %}{% include "_project_card.html" %}{% endfor %}
       </div>
       <div class="empty" id="empty-state"{% if projects %} style="display: none"{% endif %}>
@@ -354,6 +381,11 @@
       // up front instead of failing silently when you click Start. loaded stays false
       // until /api/doctor answers, so the panel never flashes empty.
       readiness: { loaded: false, ok: true, checks: [], showAll: false },
+      // Dashboard layout: "cards" grid (default) or compact "rows" list, persisted in
+      // localStorage like the theme. rowExpanded tracks per-project accordion state in
+      // rows mode; in cards mode rowOpen() is always true so the body always shows.
+      layout: (localStorage.getItem("clauster-layout") === "rows") ? "rows" : "cards",
+      rowExpanded: {},
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -383,6 +415,14 @@
       readinessIssues() { return this.readiness.checks.filter((c) => c.status !== "ok"); },
       checkGlyph(s) { return s === "ok" ? "✓" : s === "warn" ? "⚠" : "✗"; },
       checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
+      // --- layout (cards ⇄ rows) ---
+      setLayout(v) {
+        this.layout = (v === "rows") ? "rows" : "cards";
+        localStorage.setItem("clauster-layout", this.layout);
+      },
+      toggleRow(name) { this.rowExpanded[name] = !this.rowExpanded[name]; },
+      // Body is shown when in cards mode, or in rows mode once the row is expanded.
+      rowOpen(name) { return this.layout === "cards" || !!this.rowExpanded[name]; },
       // --- toasts ---
       toast(msg, type = "info") {
         const id = ++this._toastSeq;

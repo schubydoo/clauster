@@ -499,6 +499,27 @@ def test_dashboard_injects_currency_custom_when_set(write_config, tmp_path):
     assert 'const CURRENCY = "EUR";' in html
 
 
+# ----- cards ⇄ rows layout toggle ----------------------------------------
+
+
+def test_dashboard_has_cards_rows_layout_toggle(write_config, tmp_path):
+    # The cards⇄rows view toggle + its Alpine wiring render on the dashboard, and
+    # the choice persists in localStorage the same way the theme does.
+    html = _client(write_config, tmp_path).get("/").text
+    assert 'aria-label="Project layout"' in html  # the toggle button group
+    assert "setLayout('cards')" in html and "setLayout('rows')" in html
+    assert "layout === 'rows' ? 'layout-rows' : 'layout-cards'" in html  # grid class binding
+    assert 'localStorage.getItem("clauster-layout")' in html  # persisted like the theme
+
+
+def test_card_has_rows_accordion_scaffold(write_config, tmp_path):
+    # The reused card carries the rows-layout caret + body accordion gate, so the
+    # /card reactive insertion respects the active layout too (no second template).
+    html = _client(write_config, tmp_path).get("/api/projects/alpha/card").text
+    assert "toggleRow('alpha')" in html  # expand/collapse caret
+    assert "rowOpen('alpha')" in html  # body shown in cards mode / when expanded
+
+
 # ----- /api/projects/{name}/metrics (live per-bridge resource sample) ----
 
 
