@@ -29,10 +29,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Per-ref build group: a newer push/PR-sync supersedes an in-flight build.
-    # Deploy is a SEPARATE group (below) that never cancels — so this fast
-    # cancellation can't kill a live Pages upload.
+    # Use github.ref (refs/pull/<n>/merge on PRs — unique per PR) rather than
+    # github.head_ref (the source branch name), so two PRs that happen to share
+    # a branch name (e.g. forks both on `main`/`patch-1`) don't cancel each
+    # other. Deploy is a SEPARATE group (below) that never cancels — so this
+    # fast cancellation can't kill a live Pages upload.
     concurrency:
-      group: docs-build-${{ github.head_ref || github.ref }}
+      group: docs-build-${{ github.ref }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
