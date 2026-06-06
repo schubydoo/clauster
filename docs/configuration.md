@@ -23,7 +23,7 @@ joined with underscores. For example:
 
 - `auth.enabled` → `CLAUSTER_AUTH_ENABLED`
 - `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH`
-- `claude.resume_mode` → `CLAUSTER_RESUME_MODE` *(see note)*
+- `claude.resume_mode` → `CLAUSTER_CLAUDE_RESUME_MODE` *(full dotted path — see note)*
 
 !!! note "Env mapping is by leaf path"
     The mapping recurses nested models and uses the *full dotted path*, so
