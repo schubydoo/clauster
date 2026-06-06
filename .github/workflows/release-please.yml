@@ -287,7 +287,7 @@ jobs:
                    | select(.headRefName | startswith("release-please--"))
                    | select(.baseRefName == "main")
                    | select(.isCrossRepository == false)
-                   | select(.author.login == "app/clauster-release-bot")
+                   | select(.author.login == "app/clauster-ci")
                   ][0].headRefName // ""')"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           if [ -n "$branch" ]; then echo "Release PR branch: $branch"; else echo "No open release PR."; fi
@@ -329,7 +329,7 @@ jobs:
             exit 0
           fi
           # Attribute the commit to the release bot (fall back to the Actions bot).
-          bot_user="clauster-release-bot[bot]"
+          bot_user="clauster-ci[bot]"
           if ! bot_id="$(gh api "/users/${bot_user}" --jq '.id' 2>&1)" || [ -z "$bot_id" ]; then
             echo "::notice::could not resolve ${bot_user} id (${bot_id:-empty}); using github-actions[bot]"
             bot_user="github-actions[bot]"; bot_id="41898282"
