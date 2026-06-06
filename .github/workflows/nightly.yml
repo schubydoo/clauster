@@ -1,0 +1,144 @@
+name: Nightly
+
+# Daily build off main: push a rolling `:edge` multi-arch image to GHCR (signed
+# with cosign, same as a release) and stash the nightly sdist+wheel as a
+# downloadable workflow artifact. Skips itself when main hasn't moved in the
+# last day (nothing new to rebuild); `workflow_dispatch` always runs.
+#
+# `:edge` is explicitly NOT `:latest` — the newest stable `v*` release keeps
+# both the `:latest` image tag and GitHub's "Latest" release. This workflow
+# never creates a GitHub Release.
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: changed since yesterday?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Was there a commit in the last day?
+        id: check
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch → build."
+            exit 0
+          fi
+          last=$(git log -1 --format=%ct)
+          now=$(date -u +%s)
+          age=$(( now - last ))
+          # ~25h window (a little over the daily cron period) so a commit since
+          # the last run always triggers, with margin for runner scheduling jitter.
+          if [ "$age" -le 90000 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "HEAD is ${age}s old → build."
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No commit in ~25h (HEAD ${age}s old) → skip."
+          fi
+
+  image:
+    name: nightly :edge image (amd64 + arm64)
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Deployment environment for the GHCR push (audit trail; protection rules,
+    # if any, are managed repo-side). Same name the release GHCR push uses.
+    environment: ghcr
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+      id-token: write # cosign keyless signing (OIDC)
+      attestations: write # build provenance / SBOM attestations
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # `edge` = the rolling main build; `sha-<short>` pins each night's build.
+          # Deliberately NOT `latest` (that stays on the newest stable release).
+          tags: |
+            type=raw,value=edge
+            type=sha,format=short
+      - name: Build and push (amd64 + arm64)
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the image (keyless, by digest)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            cosign sign --yes "${tag%%:*}@${DIGEST}"
+          done <<< "$TAGS"
+
+  dist:
+    name: nightly sdist + wheel (artifact)
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup
+        with:
+          python-version: "3.13"
+          extras: "" # build backend only
+      - name: Build
+        run: uv build
+      - name: Upload nightly dist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-dist
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
