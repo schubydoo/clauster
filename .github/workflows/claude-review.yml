@@ -1,0 +1,86 @@
+name: Claude Code Review
+
+# On-demand INLINE PR review — the Claude analogue of CodeRabbit, for when CodeRabbit
+# is rate-limited or you just want a second pass. It NEVER auto-fires: it runs only when
+# a repo collaborator posts a top-level PR comment containing "@claude review".
+#
+# Unlike claude.yml (the interactive @claude assistant, which posts a single comment),
+# this runs claude-code-action in review/tracking mode (track_progress) with the GitHub
+# review MCP tools enabled, so findings land as INLINE comments on the diff lines plus a
+# summary, submitted as a non-blocking COMMENT review (never REQUEST_CHANGES).
+#
+# SECURITY (same model as claude.yml): issue_comment runs in the BASE repo context WITH
+# the OAuth token and can be triggered by ANYONE who can comment — the repo's
+# "require approval for external contributors" Actions policy does NOT cover comment
+# events. So the job is gated on the commenter's association: only OWNER / MEMBER /
+# COLLABORATOR can invoke it. A non-collaborator's "@claude review" is ignored — no run,
+# no token spend, no attacker-supplied instructions reach the agent.
+#
+# Advisory only: contents:read (can't push) and the review is submitted as COMMENT, so it
+# never blocks a PR. Actions are SHA-pinned (zizmor); the job is concurrency- + time-bound.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write # post the review + inline comments
+  id-token: write
+
+concurrency:
+  group: claude-review-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Manual trigger only: a top-level comment on a PR (issue.pull_request is set) whose
+    # body contains "@claude review", from a trusted collaborator. Nothing else fires it.
+    if: >-
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude review') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Claude inline review
+        id: claude
+        uses: anthropics/claude-code-action@64de744025ca9e24df2b88204b4f1e968f39f009 # v1.0.139
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Review/tracking mode: maintains a tracking comment and a pending review.
+          track_progress: true
+          prompt: |
+            Review this pull request and post line-specific findings as INLINE review
+            comments using the GitHub review system — do not dump everything into one
+            block comment. Steps:
+
+            1. Start a pending review: `mcp__github__create_pending_pull_request_review`.
+            2. Read the diff + line numbers: `mcp__github__get_pull_request_diff`
+               (paginate if the diff is large).
+            3. For each line-specific finding, add an INLINE comment via
+               `mcp__github__add_pull_request_review_comment_to_pending_review` (a.k.a.
+               `mcp__github__add_comment_to_pending_review`) or
+               `mcp__github_inline_comment__create_inline_comment`. Prefix each with
+               `issue:`, `nitpick:`, or `question:`, and use ```suggestion``` blocks for
+               concrete code fixes.
+            4. Put any feedback that is NOT tied to specific lines in the review summary body.
+            5. Submit with `mcp__github__submit_pending_pull_request_review` using event
+               type "COMMENT" (never "REQUEST_CHANGES") so the review never blocks the PR.
+
+            Focus on correctness, security, silent failures, edge cases, test coverage, and
+            this project's conventions in CLAUDE.md. Be concise — only flag real issues; if
+            the PR is clean, say so briefly. When listing findings do NOT write them as
+            "#1"/"#2" (GitHub auto-links a hash+number to an unrelated issue/PR) — use
+            "Finding 1", "(1)", or a short description instead.
+          # Enable the GitHub review MCP tools. Both old and new tool-name spellings are
+          # listed because github-mcp-server renamed several (a silent cause of "no inline
+          # comments" otherwise). Read/Grep/Glob let Claude check findings against the
+          # wider codebase before commenting.
+          claude_args: |
+            --allowedTools "Read,Grep,Glob,mcp__github__get_pull_request,mcp__github__get_pull_request_diff,mcp__github__create_pending_pull_request_review,mcp__github__add_pull_request_review_comment_to_pending_review,mcp__github__add_comment_to_pending_review,mcp__github__submit_pending_pull_request_review,mcp__github_inline_comment__create_inline_comment,mcp__github_comment__update_claude_comment"
