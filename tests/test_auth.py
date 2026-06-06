@@ -257,6 +257,10 @@ def test_build_allowed_origins(tmp_path):
         ("not-an-ip", ["127.0.0.1"], False),
         (None, ["127.0.0.1"], False),
         ("127.0.0.1", [], False),
+        # A malformed CIDR entry is skipped, not fatal: a later valid entry still matches.
+        ("10.0.0.5", ["garbage/cidr", "10.0.0.0/8"], True),
+        # Only a malformed entry -> nothing to match -> untrusted (no crash).
+        ("10.0.0.5", ["garbage/cidr"], False),
     ],
 )
 def test_peer_trusted(ip, nets, expected):

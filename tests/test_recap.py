@@ -77,6 +77,20 @@ def test_extract_turns_missing_file_returns_empty(tmp_path: Path) -> None:
     assert hook.extract_turns(str(tmp_path / "nope.jsonl")) == []
 
 
+def test_extract_turns_skips_blank_lines(tmp_path: Path) -> None:
+    # Blank lines interspersed in the transcript are skipped (not parsed as JSON).
+    t = tmp_path / "s.jsonl"
+    t.write_text(
+        "\n"
+        + json.dumps({"type": "user", "message": {"content": "first"}})
+        + "\n\n   \n"  # blank + whitespace-only lines between real rows
+        + json.dumps({"type": "assistant", "message": {"content": "second"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert hook.extract_turns(str(t)) == [("user", "first"), ("assistant", "second")]
+
+
 def test_text_from_content_ignores_non_text() -> None:
     assert hook._text_from_content(None) == ""
     assert hook._text_from_content(123) == ""
@@ -104,6 +118,16 @@ def test_find_prior_none_when_only_current(tmp_path: Path) -> None:
 
 
 def test_find_prior_none_when_empty_dir(tmp_path: Path) -> None:
+    assert hook.find_prior_transcript(str(tmp_path), "cur") is None
+
+
+def test_find_prior_returns_none_when_glob_raises(monkeypatch, tmp_path: Path) -> None:
+    # An unreadable project dir (glob raises OSError) degrades to None rather than
+    # propagating — the hook is best-effort and must never crash the SessionStart.
+    def boom(_pattern):
+        raise OSError("simulated: directory unreadable")
+
+    monkeypatch.setattr(hook.glob, "glob", boom)
     assert hook.find_prior_transcript(str(tmp_path), "cur") is None
 
 
@@ -374,3 +398,33 @@ def test_hook_command_quotes_interpreter_and_script() -> None:
     script = Path("/x/resume_recap.py")
     cmd = hook_command(python="/usr/bin/python3", script=script)
     assert cmd == f'"/usr/bin/python3" "{script}"'
+
+
+def test_installer_recovers_from_non_dict_json_settings(tmp_path: Path) -> None:
+    # Valid JSON, but the top level is a list (not an object). The loaded value is
+    # ignored and we start from {} rather than crashing on a non-dict settings.json.
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps(["not", "an", "object"]))
+    assert ensure_recap_hook_installed(settings) is True
+    data = json.loads(settings.read_text())
+    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+
+
+def test_installer_cleans_up_temp_file_when_atomic_write_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # _atomic_write_json must not leak its mkstemp temp file if the replace fails.
+    # Force os.replace to raise after the temp file is written and assert nothing
+    # is left behind in the settings dir, while the original error surfaces.
+    import clauster.recap as recap_mod
+
+    settings = tmp_path / "settings.json"
+
+    def boom(_src, _dst):
+        raise OSError("simulated: replace failed")
+
+    monkeypatch.setattr(recap_mod.os, "replace", boom)
+    with pytest.raises(OSError, match="replace failed"):
+        ensure_recap_hook_installed(settings)
+    leftovers = [p.name for p in tmp_path.iterdir()]
+    assert leftovers == []  # the .settings.*.tmp temp file was cleaned up
