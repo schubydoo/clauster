@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/schubydoo/clauster/compare/v0.6.0...v0.7.0) (2026-06-06)
+
+
+### Features
+
+* **ui:** actionable empty-state CTA ([#159](https://github.com/schubydoo/clauster/issues/159)) ([f382c1a](https://github.com/schubydoo/clauster/commit/f382c1aec4b5fddc03f7ba4169932b50efb50e50))
+* **ui:** tooltips pass across the dashboard card ([#158](https://github.com/schubydoo/clauster/issues/158)) ([68c4009](https://github.com/schubydoo/clauster/commit/68c4009fbcd59c7233d6cff646b208ce8e804da0))
+
+
+### Bug Fixes
+
+* address four low-severity review findings ([#155](https://github.com/schubydoo/clauster/issues/155)) ([824c234](https://github.com/schubydoo/clauster/commit/824c23416a5ef26656bd7ed90fad9f764c27dce4))
+* stop misclassifying a live clauster-launched pty bridge as external ([#153](https://github.com/schubydoo/clauster/issues/153)) ([3d12a6b](https://github.com/schubydoo/clauster/commit/3d12a6bfe0615e569518daeade90f78605c741cb))
+
 ## [0.6.0](https://github.com/schubydoo/clauster/compare/v0.5.0...v0.6.0) (2026-06-05)
 
 
