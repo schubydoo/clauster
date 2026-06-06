@@ -79,7 +79,7 @@
                   <div class="col-6">
                     <label class="form-label small mb-1">Permissions</label>
                     <select class="form-select form-select-sm" x-model="permMode['{{ p.name }}']"
-                            title="How much the agent may do without asking: default prompts · plan = read-only planning · acceptEdits auto-accepts file edits · auto · dontAsk · bypassPermissions runs tools with no prompts (gated).">
+                            title="What the agent may do without asking: default = prompts each time · plan = read-only planning · acceptEdits = auto-accepts file edits · auto = model auto-approves what it judges safe · dontAsk = never prompts, denies anything not pre-approved{% if p.allow_bypass_permissions %} · bypassPermissions = skips all checks (gated ⚠){% endif %}.">
                       <option value="default">default</option>
                       <option value="plan">plan</option>
                       <option value="acceptEdits">acceptEdits</option>
