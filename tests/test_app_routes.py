@@ -694,3 +694,6 @@ def test_widget_counts_reflect_seeded_instances(write_config, tmp_path):
     assert body["bridges"]["stopped"] == 1
     assert body["bridges"]["crashed"] == 0
     assert body["running_total"] == body["bridges"]["running"] == 2
+    # Confirm the at-rest fields still hold under the seeded-instance scenario.
+    assert body["projects_total"] == 3
+    assert body["version"]
