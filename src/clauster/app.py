@@ -619,6 +619,42 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_instances() -> list[RemoteControlInstance]:
         return runner.list_instances()
 
+    @app.get("/api/widget")
+    async def api_widget() -> dict:
+        """Compact dashboard-widget summary (e.g. Homepage/Homarr custom API widgets).
+
+        Returns a small, stable, flat JSON shape sourced entirely from live runner
+        state plus the project list — the same data the dashboard already renders, so
+        nothing here is computed or invented beyond what's observable.
+
+        Shape::
+
+            {
+                "projects_total": int,                # discovered projects under projects_root
+                "bridges": {<InstanceStatus>: int},   # every status key present, 0 when none
+                "running_total": int,                 # == bridges["running"]
+                "version": str,                       # clauster package version
+            }
+
+        Read-only and auth-gated by the guard middleware like every other ``/api/*``
+        route. NB: a Homepage-style scraper hitting an auth-enabled deploy still needs
+        to supply auth / network reachability itself — that's not solved here (same
+        follow-up as the metrics endpoints).
+        """
+        instances = runner.list_instances()
+        # Enumerate the enum so every status key is always present (0 when none),
+        # giving the widget a stable schema regardless of the current bridge mix.
+        by_status = {status.value: 0 for status in InstanceStatus}
+        for inst in instances:
+            by_status[inst.status.value] += 1
+        projects = await list_projects()
+        return {
+            "projects_total": len(projects),
+            "bridges": by_status,
+            "running_total": by_status[InstanceStatus.RUNNING.value],
+            "version": __version__,
+        }
+
     @app.get("/api/sessions")
     async def api_sessions() -> dict[str, list[WorkingSession]]:
         """External (unmanaged) working sessions grouped by project name (bug #4)."""

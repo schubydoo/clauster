@@ -650,3 +650,47 @@ def test_prometheus_counts_reflect_seeded_instances(write_config, tmp_path):
     assert 'clauster_bridges{status="running"} 1' in body
     assert 'clauster_bridges{status="stopped"} 1' in body
     assert 'clauster_bridges{status="starting"} 0' in body
+
+
+# ----- /api/widget (homepage-dashboard summary) -------------------------
+
+
+def test_widget_shape_empty(write_config, tmp_path):
+    # Stable, flat JSON: every InstanceStatus key present (0 when none), correct
+    # projects_total (conftest seeds alpha/beta/gamma; bad-name + dotdir skipped),
+    # version present, and content-type JSON. No bridges seeded → all zero.
+    from clauster.models import InstanceStatus
+
+    with _client(write_config, tmp_path) as client:
+        r = client.get("/api/widget")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/json")
+    body = r.json()
+    assert set(body) == {"projects_total", "bridges", "running_total", "version"}
+    # Every enum status is a key, all zero with no bridges seeded.
+    assert set(body["bridges"]) == {s.value for s in InstanceStatus}
+    assert all(v == 0 for v in body["bridges"].values())
+    assert body["running_total"] == 0
+    assert body["projects_total"] == 3
+    assert body["version"]
+
+
+def test_widget_counts_reflect_seeded_instances(write_config, tmp_path):
+    # by-status counts reflect the seeded mix; running_total == bridges["running"].
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    with _client(write_config, tmp_path) as client:
+        runner = client.app.state.runner
+        for name, status in (
+            ("alpha", InstanceStatus.RUNNING),
+            ("beta", InstanceStatus.RUNNING),
+            ("gamma", InstanceStatus.STOPPED),
+        ):
+            inst = RemoteControlInstance(project=name, label=name)
+            inst.status = status
+            runner._instances[name] = inst
+        body = client.get("/api/widget").json()
+    assert body["bridges"]["running"] == 2
+    assert body["bridges"]["stopped"] == 1
+    assert body["bridges"]["crashed"] == 0
+    assert body["running_total"] == body["bridges"]["running"] == 2
