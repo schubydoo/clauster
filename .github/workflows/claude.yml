@@ -41,6 +41,7 @@ jobs:
       (
         github.event_name == 'issue_comment' &&
         contains(github.event.comment.body, '@claude') &&
+        !contains(github.event.comment.body, '@claude review') &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
       ) || (
         github.event_name == 'pull_request_review_comment' &&
