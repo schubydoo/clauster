@@ -38,6 +38,22 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_dashboard_footer_credits_vendored_assets(write_config):
+    # The footer must credit the bundled MIT front-end assets (Tabler + Alpine.js)
+    # and link the third-party notices. This regressed once when a card redesign
+    # silently replaced the attribution with a tagline (#143); this guards it.
+    # Assert the visible credit (link text + phrasing), not the raw hrefs: a
+    # `"https://host" in page` check trips CodeQL's url-substring rule, and the
+    # anchor text is footer-specific (stray Tabler/Alpine mentions elsewhere in
+    # the page — CSS link, JS comments — can't satisfy these).
+    page = _client(write_config).get("/").text
+    assert "Built with" in page
+    assert ">Tabler</a>" in page
+    assert ">Alpine.js</a>" in page
+    assert "MIT licensed" in page
+    assert "THIRD_PARTY_NOTICES.md" in page
+
+
 def test_dashboard_has_readiness_panel(write_config):
     # The preflight panel + its /api/doctor wiring are present in the page (Alpine
     # x-show hides it until a check needs attention, but the markup/JS must ship).
