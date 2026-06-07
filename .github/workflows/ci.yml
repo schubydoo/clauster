@@ -53,46 +53,11 @@ jobs:
           # Need both PR endpoints in history to diff base..head.
           fetch-depth: 0
           persist-credentials: false
+      # Shared classifier (also used by security.yml) — keep the docs/meta
+      # allowlist in one place.
       - name: Classify changed files (code vs docs-only)
         id: changes
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Non-PR events (push:main, schedule) never skip — release safety-net.
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            echo "Event '$EVENT_NAME' → code=true (main/cron never skip)."
-            exit 0
-          fi
-          # Three-dot = files changed on the PR branch since its merge-base,
-          # matching GitHub's "Files changed" tab (two-dot would also count
-          # commits that landed on the base since the branch forked).
-          files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" || true)
-          if [ -z "$files" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            echo "Empty/failed diff → code=true (fail-safe toward running)."
-            exit 0
-          fi
-          # A path is non-code (docs/meta) IFF it matches this allowlist. Any file
-          # outside it flips the whole PR to code=true — we err toward running CI,
-          # never toward skipping it. Note .github/**/*.md is docs but a workflow
-          # *.yml change is code (CI must test itself).
-          noncode='(\.md$|^docs/|^mkdocs\.yml$|^scratch/|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/.*\.md$|^\.github/(CODEOWNERS|FUNDING\.yml)$)'
-          code=false
-          while IFS= read -r f; do
-            [ -z "$f" ] && continue
-            if ! printf '%s\n' "$f" | grep -Eq "$noncode"; then
-              code=true
-              break
-            fi
-          done <<< "$files"
-          echo "Changed files:"; printf '%s\n' "$files" | sed 's/^/  /'
-          echo "=> code=$code"
-          echo "code=$code" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/changed-code
       - name: Decide matrix (subset vs full)
         id: matrix
         env:
