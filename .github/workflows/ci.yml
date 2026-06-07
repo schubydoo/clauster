@@ -158,14 +158,14 @@ jobs:
       # on push, so main-branch uploads are unaffected.
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
-        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: false
       - name: Upload test results to Codecov
         if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
-        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: junit.xml
