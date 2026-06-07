@@ -140,8 +140,12 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
       `auth.password_required` (or reverse-proxy / `allow_unauthenticated_network`).
       - Login is enforced; the correct `allowed_origins` must be set or the login
         POST 403s on the origin check.
-- [ ] **On-disk URL redaction** — set `logs.redact_session_url: true`; confirm the
-      session URL is redacted in the on-disk bridge log too (not just over WS).
+- [ ] **On-disk bridge-log redaction** — set `logs.redact_session_url: true`. The bridge
+      writes a private `0600` raw debug log; the public on-disk bridge log becomes a
+      redacted mirror (session/env ids masked) while readiness + the deep link still work
+      (parsed from the raw copy) and the WS stream is unchanged. **`[auto]`** (runner
+      integration test). **Scope:** the bridge debug log only — the pty keeper sidecar +
+      `state.json` still record ids as perms-protected operational state (follow-up #8c).
 - [ ] **PTY true-resume mode** `[auto]` — set `claude.resume_mode: pty` (POSIX only). Start a
       bridge: it spawns the `claude --remote-control` flag form under a PTY keeper and
       reaches RUNNING with a `claude.ai/code/session_…` link.

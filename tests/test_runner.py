@@ -42,6 +42,106 @@ async def test_spawn_ready_then_stop(runner_config, monkeypatch):
     assert runner.running_count() == 0
 
 
+async def test_redact_session_url_splits_raw_and_redacted_on_disk(runner_config, monkeypatch):
+    # With logs.redact_session_url on, the bridge writes a private 0600 raw debug log
+    # (the verbatim parse-source for readiness + the deep link), and the public on-disk
+    # bridge log is a redacted mirror of it.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.logs.redact_session_url = True
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.RUNNING
+    # Readiness + identifiers still resolve — parsed from the verbatim raw copy.
+    assert inst.environment_id == "env_01TESTENVAAAAAAAAAAAAAAAA"
+    assert inst.starter_session_id == "session_01TESTSTARTERAAAAAAAAAA"
+
+    raw, public = inst.bridge_raw_log_path, inst.bridge_debug_log_path
+    assert raw is not None and public is not None and raw != public
+
+    raw_text = raw.read_text(encoding="utf-8")
+    assert "session_01TESTSTARTERAAAAAAAAAA" in raw_text  # raw stays verbatim
+    assert "env_01TESTENVAAAAAAAAAAAAAAAA" in raw_text
+    if sys.platform != "win32":  # POSIX perms; Windows doesn't honor 0o600
+        assert raw.stat().st_mode & 0o077 == 0  # private: no group/other access
+
+    public_text = public.read_text(encoding="utf-8")
+    assert "session_01TESTSTARTERAAAAAAAAAA" not in public_text  # public is redacted
+    assert "env_01TESTENVAAAAAAAAAAAAAAAA" not in public_text
+    assert "_<redacted>" in public_text
+
+    await runner.stop("alpha")
+
+
+async def test_no_redaction_keeps_a_single_verbatim_bridge_log(runner_config, monkeypatch):
+    # Default (flag off): no split — the bridge log is the single verbatim file, exactly
+    # as before. Readers and the WS tail point at the same path.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    assert config.logs.redact_session_url is False
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.bridge_raw_log_path == inst.bridge_debug_log_path
+    assert inst.bridge_debug_log_path is not None
+    assert "session_01TESTSTARTERAAAAAAAAAA" in inst.bridge_debug_log_path.read_text(
+        encoding="utf-8"
+    )
+    await runner.stop("alpha")
+
+
+def test_flush_redacted_mirror_is_best_effort(runner_config, tmp_path):
+    # The mirror flush must never raise on FS trouble (it runs in the poll loop and
+    # at spawn): missing raw, an unreadable raw, and an unwritable public are all no-ops.
+    runner = _make_runner(runner_config)
+    raw, public = tmp_path / "b.raw.log", tmp_path / "b.log"
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_raw_log_path=raw,
+        bridge_debug_log_path=public,
+    )
+    # Raw not written yet -> no-op, no public file created.
+    runner._flush_redacted_mirror(inst)
+    assert not public.exists()
+
+    # Raw verbatim -> public becomes the redacted mirror.
+    raw.write_text("session_01ABCDEFGHIJKLMNOP here\n", encoding="utf-8")
+    runner._flush_redacted_mirror(inst)
+    assert "session_01ABCDEFGHIJKLMNOP" not in public.read_text(encoding="utf-8")
+    assert "session_<redacted>" in public.read_text(encoding="utf-8")
+
+    # Unreadable raw (a directory) -> read OSError branch, no raise.
+    bad_raw = tmp_path / "dir.raw.log"
+    bad_raw.mkdir()
+    inst.bridge_raw_log_path = bad_raw
+    runner._flush_redacted_mirror(inst)
+
+    # Unwritable public (a directory) -> write OSError branch, no raise.
+    bad_public = tmp_path / "pub.dir"
+    bad_public.mkdir()
+    inst.bridge_raw_log_path, inst.bridge_debug_log_path = raw, bad_public
+    runner._flush_redacted_mirror(inst)
+
+
+def test_flush_redacted_mirror_noop_when_paths_coincide(runner_config, tmp_path):
+    # Redaction off -> raw == public; the verbatim log must be left untouched.
+    runner = _make_runner(runner_config)
+    p = tmp_path / "b.log"
+    p.write_text("session_01ABCDEFGHIJKLMNOP\n", encoding="utf-8")
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_raw_log_path=p,
+        bridge_debug_log_path=p,
+    )
+    runner._flush_redacted_mirror(inst)
+    assert "session_01ABCDEFGHIJKLMNOP" in p.read_text(encoding="utf-8")
+
+
 async def test_stop_releases_proc_handle(runner_config, monkeypatch):
     # The dead Popen handle must be dropped from _procs on stop — it was never
     # removed, leaking dead handles across spawn/stop cycles.

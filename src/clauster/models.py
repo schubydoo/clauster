@@ -70,6 +70,11 @@ class RemoteControlInstance(BaseModel):
     intentional_stop: bool = False
     started_at: datetime | None = None
     bridge_debug_log_path: Path | None = None
+    # The private, verbatim parse-source the bridge actually writes its --debug-file to
+    # when `logs.redact_session_url` is on; `bridge_debug_log_path` is then a redacted
+    # at-rest mirror of it. When redaction is off this equals `bridge_debug_log_path`
+    # (a single verbatim file). Readers parse markers from here; the mirror redacts it.
+    bridge_raw_log_path: Path | None = None
     # Tail of the bridge's stdout/stderr, captured when a spawn fails (ERROR/CRASHED)
     # so the UI can show *why* instead of a bare "Failed to start". None on success.
     error_detail: str | None = None

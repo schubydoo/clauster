@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from . import bridge_log, inspector, pointers, procutil
+from . import bridge_log, inspector, pointers, procutil, redact
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
@@ -331,11 +331,20 @@ class SessionRunner:
             self._recap_hook_ensured = True
 
         log_path = self._unique_log_path(name)
+        raw_path = self._raw_log_path_for(log_path)
+        if raw_path != log_path:
+            # Create the private parse-source 0600 from the first inode — os.open(O_CREAT
+            # | O_EXCL, 0o600), NOT touch()+chmod. touch() honours the umask, so the
+            # verbatim session URL would be briefly group/world-readable in the window
+            # before chmod ran (and a reader's open fd survives the chmod). O_EXCL also
+            # refuses a pre-planted symlink at this per-spawn-unique path.
+            os.close(os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         instance = RemoteControlInstance(
             project=name,
             label=name,
             status=InstanceStatus.STARTING,
             bridge_debug_log_path=log_path,
+            bridge_raw_log_path=raw_path,
             started_at=datetime.now(UTC),
             # Validated above (_validate_spawn_options raises on a bad value), so
             # these str inputs are known-good members of the Literal types.
@@ -358,7 +367,7 @@ class SessionRunner:
 
         try:
             proc = await asyncio.to_thread(
-                self._popen, proj.path, log_path, name, spawn_mode, permission_mode
+                self._popen, proj.path, log_path, name, spawn_mode, permission_mode, raw_path
             )
         except (OSError, ClaudeNotFound) as exc:
             # Binary unresolvable / not executable: fail the instance cleanly
@@ -371,8 +380,9 @@ class SessionRunner:
         instance.bridge_pid = proc.pid
         instance.bridge_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
 
-        markers = await asyncio.to_thread(self._await_ready, log_path, proc)
+        markers = await asyncio.to_thread(self._await_ready, raw_path, proc)
         self._apply_markers(instance, markers, proc)
+        await asyncio.to_thread(self._flush_redacted_mirror, instance)
         await self._post_spawn_enrich(instance, proj.path)
         await self._persist()
         # A bridge still STARTING after the synchronous readiness wait may yet
@@ -440,6 +450,44 @@ class SessionRunner:
         # Unique per spawn so the parser never reads a previous run's markers.
         return self._log_dir / f"{name}-{int(time.time() * 1000)}.log"
 
+    def _raw_log_path_for(self, log_path: Path) -> Path:
+        """Return the verbatim parse-source the bridge writes its ``--debug-file`` to.
+
+        With ``logs.redact_session_url`` false (default) this **is** ``log_path``: a
+        single verbatim debug log, exactly as before. When true the bridge writes to a
+        private ``0600`` sibling instead, which Clauster parses for readiness markers +
+        the session-URL deep link, while ``log_path`` (the public, ops-facing bridge
+        log) becomes a redacted mirror of it (see :meth:`_flush_redacted_mirror`).
+        """
+        if not self._config.logs.redact_session_url:
+            return log_path
+        return log_path.with_name(log_path.stem + ".raw.log")
+
+    def _flush_redacted_mirror(self, instance: RemoteControlInstance) -> None:
+        """Refresh the public bridge log as a redacted copy of the private raw log.
+
+        No-op unless ``logs.redact_session_url`` redirected the bridge to a separate raw
+        file. Re-redacts the whole raw file and overwrites the public log each call —
+        simple and correct under rotation/truncation (the debug log is bounded by
+        ``logs.bridge_log_max_size_mb``). Best-effort: a transient FS error must never
+        break the poll loop or a spawn, only delay the at-rest redaction by a tick.
+        """
+        raw = instance.bridge_raw_log_path
+        public = instance.bridge_debug_log_path
+        if raw is None or public is None or raw == public:
+            return
+        try:
+            text = raw.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            return  # bridge hasn't written yet; nothing to mirror
+        except OSError as exc:
+            _log.warning("could not read raw bridge log for %s: %s", instance.project, exc)
+            return
+        try:
+            public.write_text(redact.redact_for_disk(text), encoding="utf-8")
+        except OSError as exc:
+            _log.warning("could not write redacted bridge log for %s: %s", instance.project, exc)
+
     def _build_cmd(
         self, log_path: Path, name: str, spawn_mode: str, permission_mode: str
     ) -> list[str]:
@@ -475,8 +523,12 @@ class SessionRunner:
         name: str,
         spawn_mode: str,
         permission_mode: str,
+        debug_path: Path | None = None,
     ) -> subprocess.Popen:
-        cmd = self._build_cmd(log_path, name, spawn_mode, permission_mode)
+        # The bridge writes its --debug-file to `debug_path` (the private raw parse-
+        # source when on-disk redaction is on); the captured-stderr sibling stays keyed
+        # off the public `log_path`. They coincide when redaction is off.
+        cmd = self._build_cmd(debug_path or log_path, name, spawn_mode, permission_mode)
         # Exec the RESOLVED absolute path, not the bare configured name: Windows
         # CreateProcess only auto-appends .exe (never the .cmd/.ps1 shim npm installs
         # for `claude`), so a bare name that the version probe resolves via
@@ -715,8 +767,11 @@ class SessionRunner:
         resume: bool,
     ) -> RemoteControlInstance:
         """Spawn path for `resume_mode == "pty"`: launch the keeper, discover via sidecar."""
+        # The sidecar stays keyed off the public log_path; the bridge's --debug-file goes
+        # to the private raw parse-source (== log_path unless on-disk redaction is on).
         sidecar = self._sidecar_path_for(log_path)
-        bridge_argv = self._build_pty_bridge_argv(log_path, name, permission_mode, resume=resume)
+        debug_path = instance.bridge_raw_log_path or log_path
+        bridge_argv = self._build_pty_bridge_argv(debug_path, name, permission_mode, resume=resume)
         try:
             bridge_argv[0] = resolve_binary(bridge_argv[0])
             proc = await asyncio.to_thread(self._popen_keeper, proj.path, sidecar, bridge_argv)
@@ -729,6 +784,7 @@ class SessionRunner:
         instance.keeper_pid = proc.pid
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
         self._apply_pty_info(instance, info, proc)
+        await asyncio.to_thread(self._flush_redacted_mirror, instance)
         if instance.status is InstanceStatus.ERROR:
             # Surface whatever the keeper recorded (openpty/spawn failure); the
             # bridge's own failure reason, if any, is in its --debug-file on disk.
@@ -847,7 +903,8 @@ class SessionRunner:
         if ptr is not None and ptr.session_id:
             instance.starter_session_id = ptr.session_id
             return
-        log_path = instance.bridge_debug_log_path
+        # Parse the verbatim raw log (the public mirror has the session id redacted).
+        log_path = instance.bridge_raw_log_path or instance.bridge_debug_log_path
         if log_path is not None:
             sid = cls._read_markers(log_path).starter_session_id
             if sid:
@@ -924,12 +981,19 @@ class SessionRunner:
                 sidecar = self._sidecar_path_for(log_path)
                 info = await asyncio.to_thread(self._read_sidecar, sidecar)
                 self._apply_pty_info(instance, info or {}, proc)
+                # Keep the at-rest mirror current during pty startup too: poll_once
+                # can't yet (bridge_pid is still unknown until the sidecar reveals it),
+                # so without this the public log would stale out after _spawn_pty's
+                # one-time flush if the bridge logs more before registering.
+                await asyncio.to_thread(self._flush_redacted_mirror, instance)
                 if instance.status is not InstanceStatus.STARTING:
                     await self._persist()
                     return
             else:
-                markers = await asyncio.to_thread(self._read_markers, log_path)
+                raw = instance.bridge_raw_log_path or log_path
+                markers = await asyncio.to_thread(self._read_markers, raw)
                 self._apply_markers(instance, markers, proc)
+                await asyncio.to_thread(self._flush_redacted_mirror, instance)  # at-rest log
                 if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
                     await self._post_spawn_enrich(instance, self._project_path(name) or log_path)
                     await self._persist()
@@ -1154,6 +1218,9 @@ class SessionRunner:
                 self._notify_crash(instance)
             if alive:
                 live_projects.add(instance.project)
+                # Keep the public bridge log redacted-current as the bridge writes.
+                # No-op unless on-disk redaction split the raw/public paths.
+                await asyncio.to_thread(self._flush_redacted_mirror, instance)
 
         try:
             sessions = await asyncio.to_thread(inspector.list_working_sessions, self._binary)

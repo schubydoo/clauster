@@ -258,8 +258,13 @@ class LogsConfig(BaseModel):
     )
     redact_session_url: bool = Field(
         default=False,
-        description="`false` = hybrid (verbatim on disk, redacted over the WebSocket). "
-        "`true` redacts the session URL on disk too.",
+        description="`false` = hybrid: the bridge debug log is verbatim on disk, "
+        "redacted only over the WebSocket. `true` also redacts the on-disk bridge "
+        "debug log — the bridge writes a private `0600` raw copy (which Clauster still "
+        "parses for readiness + the deep link) and the public log becomes a redacted "
+        "mirror of it. Scope is the bridge log only: the pty keeper sidecar and "
+        "`state.json` still record session/environment ids as operational state, "
+        "protected by `state_dir` permissions.",
     )
     strip_ansi_in_stream: bool = Field(
         default=True, description="Strip ANSI escape sequences from the streamed log."

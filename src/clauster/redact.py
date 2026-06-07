@@ -82,3 +82,18 @@ def sanitize_line(line: str, *, strip_ansi_seq: bool = True) -> str:
     # If stripping the colored result reveals a secret the colored pass missed
     # (ANSI bytes split the identifier), the colored line is unsafe — fall back.
     return colored if strip_ansi(colored) == stripped_safe else stripped_safe
+
+
+def redact_for_disk(text: str) -> str:
+    r"""Redact a chunk of bridge-log text for the at-rest on-disk mirror.
+
+    Used only when ``logs.redact_session_url`` is true: the bridge writes a verbatim
+    private parse-source (which Clauster still reads for readiness markers + the
+    session-URL deep-link recovery), and this produces the redacted copy that becomes
+    the public on-disk bridge log. Unlike :func:`sanitize_line` it works over a
+    multi-line chunk, but applies the same safety order — strip ANSI first so an
+    escape sequence can never split an ``env_/session_/cse_`` id (or a secret) past
+    the ``\b``-anchored regexes — so the persisted file never carries a bearer-
+    equivalent session/env identifier or an obvious secret.
+    """
+    return redact_secrets(redact_ids(strip_ansi(text)))

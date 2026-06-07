@@ -88,6 +88,25 @@ def test_sanitize_can_keep_ansi_when_disabled():
     assert "\x1b" in redact.sanitize_line("\x1b[31mhi\x1b[0m", strip_ansi_seq=False)
 
 
+def test_redact_for_disk_masks_session_url_and_secrets_over_a_chunk():
+    # The at-rest on-disk redactor (logs.redact_session_url: true) runs over a
+    # multi-line chunk, not one streamed line. It must mask the session-URL
+    # identifiers and obvious secrets, and strip ANSI so a split id can't smuggle one.
+    chunk = (
+        "[bridge:init] Created initial session session_01ABCDEFGHIJKLMNOP\n"
+        "open https://claude.ai/code/session_01ABCDEFGHIJKLMNOP\n"
+        "\x1b[33menvironment_id=env_01ZZZZZZZZZZZZ\x1b[0m token sk-abcdef0123456789\n"
+    )
+    out = redact.redact_for_disk(chunk)
+    assert "session_01" not in out
+    assert "env_01" not in out
+    assert "sk-abcdef0123456789" not in out
+    assert "\x1b" not in out
+    # Non-secret structure is preserved (so the log stays useful at rest).
+    assert "Created initial session" in out
+    assert "claude.ai/code/session_<redacted>" in out
+
+
 def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():
     # ANSI bytes interleaved inside an identifier must NOT let it bypass redaction
     # when strip_ansi_in_stream is disabled. Redaction runs against a stripped view;
