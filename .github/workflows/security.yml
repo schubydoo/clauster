@@ -20,8 +20,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Classify the PR diff so the heavy analysers skip a docs-only change. The
+  # `security required checks passed` aggregator still runs (it counts a skipped
+  # job as passing), so the required context keeps reporting on docs-only PRs —
+  # which is why these can't use a top-level `paths-ignore` (that would make the
+  # required check never report and the PR hang "Expected — waiting").
+  changes:
+    name: classify changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: changes
+        uses: ./.github/actions/changed-code
+
   codeql:
     name: codeql analyze
+    # Skip the Python analysis on a docs-only PR (no code to analyse).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -64,6 +86,9 @@ jobs:
 
   trivy-fs:
     name: trivy filesystem scan
+    # Skip on a docs-only PR — no dependency/source change to scan.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -169,7 +194,9 @@ jobs:
 
   dependency-review:
     name: dependency review
-    if: github.event_name == 'pull_request'
+    # PR-only, and only when the diff actually changes code/deps.
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -189,6 +216,7 @@ jobs:
     name: security required checks passed
     if: always()
     needs:
+      - changes
       - codeql
       - gitleaks
       - trivy-fs
