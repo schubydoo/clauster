@@ -136,3 +136,64 @@ clauster usage <transcript>   # token + approximate cost for a session transcrip
 `clauster doctor` confirms `claude` is found and new enough and that
 `projects_root` and the state dir are usable — run it before your first spawn
 and fix any ✗.
+
+## Run as a systemd service (Linux)
+
+`clauster install-service systemd` **prints** a ready-to-use unit (it does not
+install it), so you can review it before writing it into place. Run Clauster as a
+**dedicated user** — it spawns `claude` and needs that user's `~/.claude`
+credentials:
+
+```sh
+# 1. Put the config where the unit expects it (default: /etc/clauster/clauster.yml)
+sudo install -Dm600 clauster.yml /etc/clauster/clauster.yml
+
+# 2. Generate the unit with the SAME clauster you installed (so ExecStart points at
+#    the right interpreter), run-as the clauster user, and write it into place
+clauster install-service systemd --user clauster | sudo tee /etc/systemd/system/clauster.service
+
+# 3. Enable + start; follow the logs with journalctl
+sudo systemctl daemon-reload
+sudo systemctl enable --now clauster
+journalctl -u clauster -f
+```
+
+The generated unit:
+
+```ini
+[Unit]
+Description=Clauster — browser-driven claude remote-control manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clauster
+ExecStart=/path/to/python -m clauster run -c /etc/clauster/clauster.yml
+WorkingDirectory=/etc/clauster
+Environment=CLAUSTER_CONFIG=/etc/clauster/clauster.yml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+!!! warning "A restart stops running bridges — `pty` sessions do not survive it"
+    Clauster's spawned bridges run inside the service's cgroup, so the default
+    `KillMode=control-group` means a `systemctl restart` / `stop` also stops every
+    running bridge — including `pty` true-resume sessions (recover one afterwards
+    with `claude --continue`). If you want bridges to outlive a Clauster restart,
+    add `KillMode=process` to `[Service]` so systemd signals only the Clauster
+    process and leaves the detached bridges running.
+
+!!! note "Auth + sandboxing"
+    A non-loopback bind **refuses to start without enforced auth** — set the
+    `CLAUSTER_AUTH_*` vars and a password hash, or bind to loopback (see
+    [Networking](networking.md)). Be conservative with systemd sandboxing:
+    Clauster needs the run-as user's real `~/.claude` and spawns `claude`
+    subprocesses, so options like `ProtectHome=`, `PrivateUsers=`, or a
+    restrictive `SystemCallFilter=` can break it. `NoNewPrivileges=true` plus
+    `ProtectSystem=strict` (with the `state_dir` and `~/.claude` listed under
+    `ReadWritePaths=`) are reasonable starting points — test a spawn after adding
+    any hardening.
