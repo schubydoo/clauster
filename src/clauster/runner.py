@@ -44,6 +44,7 @@ from .models import (
     RemoteControlInstance,
     WorkingSession,
 )
+from .notify import Notifier
 from .recap import ensure_recap_hook_installed
 from .state import StateStore
 from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
@@ -112,6 +113,11 @@ class SessionRunner:
         self._state = StateStore(config.state_dir)
         self._persisted: dict[str, dict] = self._state.load()
         self._last_saved: dict[str, dict] | None = None
+        # Best-effort outbound notifications (Apprise; optional extra). No-op unless
+        # enabled + configured + Apprise installed. Fire-and-forget crash alerts are
+        # tracked here so the tasks aren't garbage-collected mid-flight.
+        self._notifier = Notifier(config.notifications)
+        self._notify_tasks: set[asyncio.Task] = set()
 
     # ----- read API -------------------------------------------------------
 
@@ -1139,7 +1145,13 @@ class SessionRunner:
             alive = await asyncio.to_thread(
                 procutil.is_live_bridge, pid, instance.bridge_proc_start
             )
+            prev_status = instance.status
             self._reconcile_status(instance, alive)
+            if (
+                prev_status is not InstanceStatus.CRASHED
+                and instance.status is InstanceStatus.CRASHED
+            ):
+                self._notify_crash(instance)
             if alive:
                 live_projects.add(instance.project)
 
@@ -1208,6 +1220,25 @@ class SessionRunner:
         # the startup-watch via _apply_markers). A bridge can stay alive without
         # ever authenticating to the controller — liveness is not usability, and
         # promoting on it reported uncontrollable bridges as RUNNING.
+
+    def _notify_crash(self, instance: RemoteControlInstance) -> None:
+        """Fire a best-effort crash notification (off-loop; never blocks/raises the poll).
+
+        Called when a bridge transitions to CRASHED — an unexpected exit, i.e. not via
+        the Stop button. No-op unless notifications are active and crash alerts are on.
+        """
+        if not self._notifier.active or not self._config.notifications.notify_on_crash:
+            return
+        title = f"clauster: bridge crashed — {instance.label}"
+        body = (
+            f"The bridge for project {instance.project!r} exited unexpectedly "
+            f"(not via Stop) — mode {instance.resume_mode}/{instance.spawn_mode}."
+        )
+        # Fire-and-forget: anotify sends off-thread and swallows its own errors. Keep a
+        # reference so the task isn't GC'd mid-send; drop it on completion.
+        task = asyncio.create_task(self._notifier.anotify(title, body))
+        self._notify_tasks.add(task)
+        task.add_done_callback(self._notify_tasks.discard)
 
     # ----- lifecycle ------------------------------------------------------
 

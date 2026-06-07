@@ -53,8 +53,8 @@ unknown per-project keys are ignored.
 <!-- END GEN: clauster -->
 
 Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
-`clone`, `reaper`, `usage`, `metrics`, `observability` — each documented below
-(`auth.reverse_proxy` is nested under `auth`).
+`clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications` — each
+documented below (`auth.reverse_proxy` is nested under `auth`).
 
 ## `claude` — binary & bridge spawn (`ClaudeConfig`)
 
@@ -219,6 +219,38 @@ auth guard. See [Networking](networking.md) for scraping behind auth.
 | --- | --- | --- | --- |
 | `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard. |
 <!-- END GEN: observability -->
+
+## `notifications` — outbound alerts via Apprise (`NotificationsConfig`)
+
+Best-effort, fail-closed notifications on bridge lifecycle events. Off by default
+and requires the optional `notify` extra:
+
+```sh
+pip install 'clauster[notify]'    # or: uv tool install 'clauster[notify]'
+```
+
+If `enabled` but the extra isn't installed, Clauster logs a warning at startup and
+sends nothing — a notification failure never affects a bridge's lifecycle.
+
+<!-- BEGIN GEN: notifications -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch for outbound notifications. |
+| `urls` | list[str] | `[]` | Apprise notification URLs (e.g. `slack://`, `discord://`, `tgram://`). Requires the `notify` extra. A non-loopback secret in a URL is the operator's responsibility to keep out of shared configs. |
+| `notify_on_crash` | bool | `true` | Notify when a bridge exits unexpectedly (CRASHED — i.e. not via the Stop button). |
+<!-- END GEN: notifications -->
+
+```yaml
+notifications:
+  enabled: true
+  urls:
+    - "slack://tokenA/tokenB/tokenC/#alerts"
+    - "tgram://bottoken/ChatID"
+  notify_on_crash: true
+```
+
+See the [Apprise URL list](https://github.com/caronc/apprise/wiki) for supported
+services.
 
 ## Minimal example
 
