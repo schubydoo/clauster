@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from . import claude_cli, environments
 from .config import ClausterConfig, _missing_enforced_auth, load_config
-from .discovery import _load_trusted_paths, trust_state_for
+from .discovery import Project, _load_trusted_paths, trust_state_for
 from .state import CURRENT_SCHEMA, StateStore
 
 # ----- doctor -----------------------------------------------------------
@@ -137,6 +137,37 @@ def run_doctor(
         checks.append(fresh)
 
     return checks, all(c.status != FAIL for c in checks)
+
+
+def project_preflight_checks(project: Project) -> list[Check]:
+    """Per-project spawn-readiness checks (trust + git), mirroring the doctor shape.
+
+    Complements the system-wide ``run_doctor`` panel with the two preconditions that
+    are specific to *one* project's bridge launch: workspace **trust** (a standard
+    spawn raises ``NotTrusted`` without it) and whether the directory is a **git
+    repo** (required for the ``worktree`` spawn mode). Both are advisory (``WARN``,
+    never ``FAIL``) — each is recoverable from the UI (trust-on-start; pick a
+    non-worktree mode) — so the panel informs without blocking. Pure/read-only:
+    derives from the already-discovered ``Project`` (no extra subprocess or fs scan).
+    """
+    trusted = project.trust_state.value == "trusted"
+    return [
+        Check(
+            "trust",
+            OK if trusted else WARN,
+            "workspace trusted"
+            if trusted
+            else f"directory is {project.trust_state.value} — Trust before starting "
+            "(or use trust-on-start)",
+        ),
+        Check(
+            "git",
+            OK if project.is_git_repo else WARN,
+            "git repository"
+            if project.is_git_repo
+            else "not a git repository — the worktree spawn mode is unavailable",
+        ),
+    ]
 
 
 def _check_repo_freshness(repo: Path | None = None) -> Check | None:

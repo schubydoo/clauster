@@ -70,6 +70,34 @@ def test_doctor_endpoint_shape_and_ok(write_config, tmp_path):
         assert c["status"] in {"ok", "warn", "fail"}
 
 
+# ----- per-project preflight (spawn-readiness for one project) ----------
+
+
+def test_project_preflight_invalid_name_422(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/bad.name/preflight")
+    assert r.status_code == 422
+
+
+def test_project_preflight_unknown_project_404(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/ghostproj/preflight")
+    assert r.status_code == 404
+
+
+def test_project_preflight_shape_and_checks(write_config, tmp_path):
+    # Contract: the per-project checklist carries the project name, an `ok` bool, and
+    # trust + git checks in the same {name, status, detail} shape the doctor panel uses.
+    r = _client(write_config, tmp_path).get("/api/projects/alpha/preflight")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["project"] == "alpha"
+    assert isinstance(body["ok"], bool)
+    names = {c["name"] for c in body["checks"]}
+    assert {"trust", "git"} <= names
+    for c in body["checks"]:
+        assert set(c) == {"name", "status", "detail"}
+        assert c["status"] in {"ok", "warn", "fail"}
+
+
 # ----- single-card fragment (reactive insertion, no full reload) --------
 
 

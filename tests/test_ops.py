@@ -21,6 +21,7 @@ from clauster.ops import (
     _version_ge,
     make_backup,
     migrate_state,
+    project_preflight_checks,
     render_service_unit,
     restore_backup,
     run_doctor,
@@ -197,6 +198,49 @@ def test_check_auth_branches(write_config, tmp_path):
     assert _check_auth(c2).status == FAIL
     c2.auth.allow_unauthenticated_network = True
     assert _check_auth(c2).status == WARN
+
+
+# ----- project_preflight_checks -----------------------------------------
+
+
+def _preflight(project):
+    return {c.name: c for c in project_preflight_checks(project)}
+
+
+def test_project_preflight_trusted_git_all_ok():
+    from clauster.models import Project, TrustState
+
+    proj = Project(
+        name="alpha",
+        path=Path("/p/alpha"),
+        is_git_repo=True,
+        trust_state=TrustState.TRUSTED,
+    )
+    checks = _preflight(proj)
+    assert checks["trust"].status == OK
+    assert checks["git"].status == OK
+    # advisory only: trust/git are never FAIL, so a preflight never hard-blocks
+    assert all(c.status != FAIL for c in checks.values())
+
+
+def test_project_preflight_untrusted_warns():
+    from clauster.models import Project, TrustState
+
+    proj = Project(name="alpha", path=Path("/p/alpha"), trust_state=TrustState.UNTRUSTED)
+    check = _preflight(proj)["trust"]
+    assert check.status == WARN
+    assert "untrusted" in check.detail and "Trust" in check.detail
+
+
+def test_project_preflight_non_git_warns_about_worktree():
+    from clauster.models import Project, TrustState
+
+    proj = Project(
+        name="alpha", path=Path("/p/alpha"), is_git_repo=False, trust_state=TrustState.TRUSTED
+    )
+    check = _preflight(proj)["git"]
+    assert check.status == WARN
+    assert "worktree" in check.detail
 
 
 # ----- _check_claude_login ----------------------------------------------
