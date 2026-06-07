@@ -333,10 +333,12 @@ class SessionRunner:
         log_path = self._unique_log_path(name)
         raw_path = self._raw_log_path_for(log_path)
         if raw_path != log_path:
-            # Pre-create the private parse-source 0600 so the verbatim session URL is
-            # never world-readable at rest (chmod after touch — umask-independent).
-            raw_path.touch()
-            raw_path.chmod(0o600)
+            # Create the private parse-source 0600 from the first inode — os.open(O_CREAT
+            # | O_EXCL, 0o600), NOT touch()+chmod. touch() honours the umask, so the
+            # verbatim session URL would be briefly group/world-readable in the window
+            # before chmod ran (and a reader's open fd survives the chmod). O_EXCL also
+            # refuses a pre-planted symlink at this per-spawn-unique path.
+            os.close(os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         instance = RemoteControlInstance(
             project=name,
             label=name,
