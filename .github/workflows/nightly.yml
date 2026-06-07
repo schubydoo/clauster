@@ -223,7 +223,13 @@ jobs:
           print(f"::notice::nightly version {dev}")
           PY
       - name: Build
-        run: uv build
+        # Pin the build interpreter to the 3.13 installed above — `uv python
+        # install` only puts it on PATH, it doesn't make `uv build` select it
+        # (it would otherwise resolve whatever Python uv finds). clauster is
+        # pure-Python (py3-none-any wheel) so the artifact is identical across
+        # interpreters, but pinning keeps the build deterministic regardless of
+        # ubuntu-latest's system Python.
+        run: uv build --python 3.13
       - name: Upload nightly dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
