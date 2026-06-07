@@ -38,6 +38,16 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_dashboard_footer_credits_vendored_assets(write_config):
+    # The footer must credit the bundled MIT front-end assets (Tabler + Alpine.js)
+    # and link the third-party notices. This regressed once when a card redesign
+    # silently replaced the attribution with a tagline (#143); this guards it.
+    page = _client(write_config).get("/").text
+    assert "https://tabler.io" in page
+    assert "https://alpinejs.dev" in page
+    assert "THIRD_PARTY_NOTICES.md" in page
+
+
 def test_dashboard_has_readiness_panel(write_config):
     # The preflight panel + its /api/doctor wiring are present in the page (Alpine
     # x-show hides it until a check needs attention, but the markup/JS must ship).
