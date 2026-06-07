@@ -853,7 +853,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if instance is None or instance.bridge_debug_log_path is None:
             await websocket.close(code=1008)  # nothing to stream
             return
-        path = instance.bridge_debug_log_path
+        # Stream the verbatim raw parse-source (== the debug log unless on-disk
+        # redaction split it off), sanitizing each line in-flight as always — so the
+        # live stream stays current regardless of the at-rest mirror's refresh cadence.
+        path = instance.bridge_raw_log_path or instance.bridge_debug_log_path
         strip = config.logs.strip_ansi_in_stream
         offset = await asyncio.to_thread(logstream.initial_offset, path)
         carry = ""

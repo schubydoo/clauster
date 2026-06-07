@@ -146,7 +146,7 @@ See [Security](security.md) and [Networking](networking.md) for the full matrix.
 | --- | --- | --- | --- |
 | `bridge_log_max_size_mb` | int | `10` | Per-bridge debug-log rotation size (≥1 MB). |
 | `keep_rotated` | int | `5` | Number of rotated log files to keep (≥0). |
-| `redact_session_url` | bool | `false` | `false` = hybrid (verbatim on disk, redacted over the WebSocket). `true` redacts the session URL on disk too. |
+| `redact_session_url` | bool | `false` | `false` = hybrid: the bridge debug log is verbatim on disk, redacted only over the WebSocket. `true` also redacts the on-disk bridge debug log — the bridge writes a private `0600` raw copy (which Clauster still parses for readiness + the deep link) and the public log becomes a redacted mirror of it. Scope is the bridge log only: the pty keeper sidecar and `state.json` still record session/environment ids as operational state, protected by `state_dir` permissions. |
 | `strip_ansi_in_stream` | bool | `true` | Strip ANSI escape sequences from the streamed log. |
 <!-- END GEN: logs -->
 
