@@ -520,6 +520,20 @@ def test_card_has_rows_accordion_scaffold(write_config, tmp_path):
     assert "rowOpen('alpha')" in html  # body shown in cards mode / when expanded
 
 
+def test_card_metrics_line_not_duplicated_across_layouts(write_config, tmp_path):
+    # Regression: the live metrics line must render in exactly one place per layout —
+    # the collapsed-row header inline (rows) OR the body (cards), never both. An
+    # expanded row showed it twice when the body line lacked its `layout === 'cards'`
+    # guard. The header inline is rows-gated; the body is cards-gated; the old
+    # unguarded `x-show="metricsLabel(...)"` body form must not reappear.
+    html = _client(write_config, tmp_path).get("/api/projects/alpha/card").text
+    # count == 1 (not just presence): catches a re-introduced duplicate of the *same*
+    # guarded line, which `in html` would miss — that's the duplication class guarded here.
+    assert html.count("layout === 'rows' && metricsLabel('alpha')") == 1  # header inline (rows)
+    assert html.count("layout === 'cards' && metricsLabel('alpha')") == 1  # body line (cards)
+    assert "x-show=\"metricsLabel('alpha')\"" not in html  # the unguarded form = the bug
+
+
 # ----- /api/projects/{name}/metrics (live per-bridge resource sample) ----
 
 
