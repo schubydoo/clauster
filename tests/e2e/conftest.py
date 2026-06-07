@@ -169,6 +169,35 @@ def auth_server(tmp_path_factory: pytest.TempPathFactory, projects_tree: Path) -
         yield server.url
 
 
+@pytest.fixture(scope="module")
+def reaper_server(tmp_path_factory: pytest.TempPathFactory, projects_tree: Path) -> Iterator[str]:
+    """A loopback clauster with the ghost-environment reaper UI enabled.
+
+    Sets ``reaper.ui_enabled: true`` so the dashboard panel renders and
+    ``/api/environments/ghosts`` is no longer gated off (404). Read-only — the gating
+    assertions never mutate state — so a shared module-scoped server is fine.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-reaper")
+    for server in _start_server(tmp, projects_tree, extra="reaper:\n  ui_enabled: true\n"):
+        yield server.url
+
+
+@pytest.fixture
+def bypass_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A loopback clauster that opens the bypassPermissions ceiling for ``gamma``.
+
+    Sets ``projects.gamma.allow_bypass_permissions: true`` so the footgun permission
+    option renders for ``gamma`` only. Function-scoped (like ``bridge_server``): the
+    typed-confirm flow trusts ``gamma``, writing the isolated trust store, so a fresh
+    server + projects tree per test keeps that mutation from leaking into the next.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-bypass")
+    extra = "projects:\n  gamma:\n    allow_bypass_permissions: true\n"
+    yield from _start_server(tmp, mutable_projects_tree, extra)
+
+
 @pytest.fixture
 def bridge_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path

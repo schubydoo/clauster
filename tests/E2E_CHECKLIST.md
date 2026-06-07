@@ -118,6 +118,9 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
       - **Permanently delete** stays **disabled** until `DELETE` is typed exactly.
       - With the flag unset, the panel is absent *and* `GET
         /api/environments/ghosts` 404s.
+      - **`[auto]`** for the **gating** only: the panel renders with the flag, and is
+        absent + the endpoint 404s with it unset (`test_gated_e2e.py`). The ghost-list
+        / archive / typed-DELETE flow needs cloud-env data and stays manual.
 - [ ] **Conversation recap on restart** — set `claude.resume_recap: true`.
       - On bridge **Restart**, the new session receives a recap of the prior
         transcript (verify in the attached Claude session that prior context is
@@ -130,6 +133,9 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
       - Selecting it requires typing the project name to confirm before spawn.
       - For a project *without* the ceiling, the option is absent (cannot be
         forced from the client).
+      - **`[auto]`** (`test_gated_e2e.py`): the option renders only for the opted-in
+        project, is absent otherwise, and the typed-name confirm blocks the spawn (a
+        wrong name is rejected inline).
 - [ ] **Non-loopback + auth** — bind a non-loopback host with
       `auth.password_required` (or reverse-proxy / `allow_unauthenticated_network`).
       - Login is enforced; the correct `allowed_origins` must be set or the login
