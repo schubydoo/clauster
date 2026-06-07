@@ -324,11 +324,23 @@
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
   const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
   const DEFAULT_RESUME_MODE = {{ default_resume_mode | tojson }};
-  const SHOW_COST = {{ show_cost | tojson }};  // usage.show_cost — hide the cost badge entirely
-  const CURRENCY = {{ currency | tojson }};  // usage.currency — label only; "$" iff "USD" (no FX)
+  const USAGE_MODE = {{ usage_mode | tojson }};  // usage.mode — "cost" | "tokens" | "off"
+  const CURRENCY = {{ currency | tojson }};  // usage.currency — code, shown in the tooltip
+  const CURRENCY_SYMBOL = {{ currency_symbol | tojson }};  // resolved symbol for cost mode
+  const FX_RATE = {{ fx_rate | tojson }};  // usage.fx_rate — static USD->display multiplier
+  const TOKENS_INCLUDE_CACHE = {{ token_total_includes_cache | tojson }};  // count cache in the total?
   const METRICS_ENABLED = {{ metrics_enabled | tojson }};  // metrics.enabled — live CPU/mem/disk line
   const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
   const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
+
+  // Humanize a token count for the compact badge (1.2M / 3.4k); the exact value
+  // lives in the tooltip (usageTitle).
+  function fmtTokens(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    return String(n);
+  }
 
   // Theme toggle (navbar) — persisted, mirrors the no-flash init above.
   document.addEventListener("DOMContentLoaded", function () {
@@ -515,31 +527,47 @@
       },
       hasExternal(name) { return this.externalCount(name) > 0; },
       async loadUsage(name) {
-        if (!SHOW_COST) return;  // cost badge disabled — don't even fetch usage
+        if (USAGE_MODE === "off") return;  // badge disabled — don't even fetch usage
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/usage");
           if (res.ok) this.usage[name] = await res.json();
         } catch (e) { /* badge stays hidden */ }
       },
+      // Tokens counted toward the displayed total: all categories, or input+output
+      // only when usage.token_total_includes_cache is false (cache usually dominates).
+      displayTokens(u) {
+        if (TOKENS_INCLUDE_CACHE) return u.total_tokens || 0;
+        const b = u.token_breakdown || {};
+        return (b.input || 0) + (b.output || 0);
+      },
       usageLabel(name) {
-        if (!SHOW_COST) return null;  // x-show hides the badge when cost display is off
+        if (USAGE_MODE === "off") return null;  // x-show hides the badge when off
         const u = this.usage[name];
         if (!u || !u.transcripts) return null;
-        const v = (u.cost_usd || 0).toFixed(2);
-        // Prices are USD with no FX conversion, so show the "$" symbol only for
-        // USD; any other configured currency gets the (still-USD) figure labelled
-        // "USD" rather than a foreign symbol stamped on a dollar amount.
-        return CURRENCY === "USD" ? "≈$" + v : "≈" + v + " USD";
+        if (USAGE_MODE === "tokens") return fmtTokens(this.displayTokens(u)) + " tok";
+        // cost mode: convert the USD figure with the static fx_rate, prefix the symbol.
+        return "≈" + CURRENCY_SYMBOL + ((u.cost_usd || 0) * FX_RATE).toFixed(2);
       },
       usageTitle(name) {
         const u = this.usage[name];
         if (!u) return "";
-        const tokens = (u.total_tokens || 0).toLocaleString();
+        const b = u.token_breakdown || {};
+        const exact = (u.total_tokens || 0).toLocaleString();
         const sessions = u.transcripts + (u.transcripts === 1 ? " session" : " sessions");
-        let s = tokens + " tokens across " + sessions + " · approximate cost in USD";
-        if (CURRENCY !== "USD") {
-          s += " (usage.currency " + CURRENCY + " not converted — no FX rate)";
+        const split = "in " + (b.input || 0).toLocaleString() +
+          " · out " + (b.output || 0).toLocaleString() +
+          " · cache-write " + (b.cache_creation || 0).toLocaleString() +
+          " · cache-read " + (b.cache_read || 0).toLocaleString();
+        if (USAGE_MODE === "tokens") {
+          let s = exact + " tokens across " + sessions + " (" + split + ")";
+          if (!TOKENS_INCLUDE_CACHE) s += "; badge total excludes cache";
+          return s;
         }
+        // cost mode
+        let s = exact + " tokens across " + sessions + " · approximate cost";
+        if (FX_RATE !== 1) s += " (USD × " + FX_RATE + " → " + CURRENCY + ")";
+        else if (CURRENCY !== "USD") s += " (label only — usage.fx_rate not set, figure is USD)";
+        else s += " in USD";
         if (u.unpriced_models && u.unpriced_models.length) {
           s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
         }

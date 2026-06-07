@@ -396,6 +396,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "transcripts": rollup.transcript_count,
             "messages": tot.messages,
             "total_tokens": tot.total_tokens,
+            # Per-category split so the badge can show a cache-excluded total
+            # (token_total_includes_cache) and a breakdown tooltip.
+            "token_breakdown": {
+                "input": tot.input,
+                "output": tot.output,
+                "cache_creation": tot.cache_creation,
+                "cache_read": tot.cache_read,
+            },
             "cost_usd": round(rollup.cost_usd(), 4),
             "approximate": True,  # hand-maintained price table; counts exact, $ ballpark
             "unpriced_models": rollup.unpriced_models(),
@@ -888,10 +896,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "default_resume_mode": config.claude.resume_mode,
                 # pty (true-resume) is POSIX-only; hide the option on Windows hosts.
                 "pty_supported": sys.platform != "win32",
-                # When false, hide the cost badge and skip the per-project usage fetch.
-                "show_cost": config.usage.show_cost,
-                # Badge label only: "$" for USD, else the USD figure suffixed "USD".
+                # Usage badge: mode ("cost"|"tokens"|"off"), the currency code + its
+                # resolved symbol, the static USD->display multiplier, and whether
+                # cache tokens count toward the displayed token total. mode "off"
+                # hides the badge and skips the per-project /usage fetch.
+                "usage_mode": config.usage.mode,
                 "currency": config.usage.currency,
+                "currency_symbol": config.usage.effective_symbol,
+                "fx_rate": config.usage.fx_rate,
+                "token_total_includes_cache": config.usage.token_total_includes_cache,
                 # Live per-bridge metrics: master toggle, disk-part toggle, poll cadence.
                 "metrics_enabled": config.metrics.enabled,
                 "metrics_show_disk": config.metrics.show_disk,

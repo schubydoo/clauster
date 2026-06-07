@@ -8,12 +8,15 @@ Schema is additive-only: old configs must always validate against newer versions
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 from pathlib import Path
 from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+
+_log = logging.getLogger("clauster.config")
 
 SCHEMA_VERSION = 1
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -187,20 +190,74 @@ class LogsConfig(BaseModel):
 class UsageConfig(BaseModel):
     """Per-project cost/token badge on the dashboard.
 
-    The dollar figure is an *approximate* estimate (see ``usage.py``: token totals
-    from the transcript × a hand-maintained USD price table). ``show_cost`` hides
-    the whole badge — set it false for privacy when screen-sharing or recording a
-    demo; the dashboard then also skips the ``/api/projects/{name}/usage`` fetch.
+    ``mode`` selects what the badge shows:
 
-    ``currency`` controls only the badge *label*. The price table is USD and there
-    is no FX conversion, so the ``$`` symbol is shown **only** when this is
-    ``"USD"``; any other value renders the (still-USD) figure explicitly suffixed
-    ``USD`` rather than stamping a foreign symbol on a dollar amount. It is a
-    forward hook for a future ``fx_rate`` — today non-USD just means "label it USD".
+    - ``"cost"``  — an approximate cost (token totals × a hand-maintained USD price
+      table; see ``usage.py``), multiplied by ``fx_rate`` and prefixed with
+      ``currency_symbol``.
+    - ``"tokens"`` — the total token count only (no cost/currency at all).
+    - ``"off"``   — hide the badge entirely; the dashboard also skips the
+      ``/api/projects/{name}/usage`` fetch.
+
+    The price table is **USD**. ``fx_rate`` is a *static, user-supplied* multiplier
+    applied to the USD figure before display — there is no live FX lookup, so leave
+    it ``1.0`` for USD and set it explicitly for any other currency. ``currency`` is
+    the code shown in the tooltip; ``currency_symbol`` is what ``cost`` mode renders
+    (defaults to ``$`` when unset and ``currency`` is ``USD``, otherwise the code).
+    A non-USD ``currency`` left at ``fx_rate: 1.0`` is almost certainly a mistake —
+    it stamps a foreign symbol on a dollar amount — so it is logged at load.
+
+    ``token_total_includes_cache`` controls whether cache (creation + read) tokens
+    count toward the displayed token total; they usually dominate, so set it false
+    for a leaner "conversation size" figure. The per-category breakdown is always in
+    the tooltip.
+
+    ``show_cost`` is a **deprecated** back-compat alias: ``show_cost: false`` forces
+    ``mode: "off"`` (its only historical effect was hiding the badge).
     """
 
-    show_cost: bool = True
+    mode: Literal["cost", "tokens", "off"] = "cost"
     currency: str = "USD"
+    currency_symbol: str | None = None
+    fx_rate: float = Field(default=1.0, gt=0)
+    token_total_includes_cache: bool = True
+    show_cost: bool = True  # deprecated alias for mode != "off"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _coerce_yaml_off(cls, v: object) -> object:
+        # YAML 1.1 parses an unquoted ``off`` as the boolean False (like yes/no/on/off),
+        # so ``usage: {mode: off}`` would otherwise fail the Literal. Map it back to the
+        # string so the config works without quoting. (``on``/True isn't a valid mode.)
+        return "off" if v is False else v
+
+    @model_validator(mode="after")
+    def _resolve_mode_and_warn(self) -> UsageConfig:
+        # Back-compat: show_cost=false historically hid the whole badge -> mode off.
+        if not self.show_cost:
+            if "mode" in self.model_fields_set and self.mode != "off":
+                _log.warning(
+                    "usage.show_cost=false overrides usage.mode=%r (badge hidden); "
+                    "show_cost is deprecated — set usage.mode='off' instead.",
+                    self.mode,
+                )
+            self.mode = "off"
+        # A foreign currency with no FX rate paints a foreign symbol on a USD figure.
+        if self.mode == "cost" and self.currency != "USD" and self.fx_rate == 1.0:
+            _log.warning(
+                "usage.currency=%r but usage.fx_rate=1.0 — the cost badge will show a "
+                "USD amount labelled %r; set usage.fx_rate to convert from USD.",
+                self.currency,
+                self.currency,
+            )
+        return self
+
+    @property
+    def effective_symbol(self) -> str:
+        """The symbol the ``cost`` badge renders (explicit, or ``$``/code fallback)."""
+        if self.currency_symbol is not None:
+            return self.currency_symbol
+        return "$" if self.currency == "USD" else f"{self.currency} "
 
 
 class MetricsConfig(BaseModel):

@@ -459,12 +459,18 @@ def test_project_usage_serializes_rollup(write_config, tmp_path, monkeypatch):
     assert body["transcripts"] == 2
     assert body["messages"] == 3
     assert body["total_tokens"] == 1_000_000
+    assert body["token_breakdown"] == {
+        "input": 1_000_000,
+        "output": 0,
+        "cache_creation": 0,
+        "cache_read": 0,
+    }
     assert body["cost_usd"] == 15.0  # 1 Mtok opus input @ $15/Mtok
     assert body["by_model"]["claude-opus-4-8"]["cost_usd"] == 15.0
     assert body["unpriced_models"] == []
 
 
-# ----- usage.show_cost toggle (dashboard injection) --------------------
+# ----- usage badge config (dashboard injection) ------------------------
 
 
 def _client_with(write_config, tmp_path, extra: str) -> TestClient:
@@ -479,24 +485,45 @@ def _client_with(write_config, tmp_path, extra: str) -> TestClient:
     )
 
 
-def test_dashboard_injects_show_cost_true_by_default(write_config, tmp_path):
+def test_dashboard_injects_usage_mode_cost_by_default(write_config, tmp_path):
     html = _client(write_config, tmp_path).get("/").text
-    assert "const SHOW_COST = true;" in html
+    assert 'const USAGE_MODE = "cost";' in html
 
 
-def test_dashboard_injects_show_cost_false_when_disabled(write_config, tmp_path):
+def test_dashboard_injects_usage_mode_tokens_when_set(write_config, tmp_path):
+    html = _client_with(write_config, tmp_path, "usage:\n  mode: tokens\n").get("/").text
+    assert 'const USAGE_MODE = "tokens";' in html
+
+
+def test_dashboard_injects_usage_mode_off_via_legacy_show_cost(write_config, tmp_path):
+    # The deprecated show_cost alias still flips the badge off through to the frontend.
     html = _client_with(write_config, tmp_path, "usage:\n  show_cost: false\n").get("/").text
-    assert "const SHOW_COST = false;" in html
+    assert 'const USAGE_MODE = "off";' in html
 
 
 def test_dashboard_injects_currency_usd_by_default(write_config, tmp_path):
     html = _client(write_config, tmp_path).get("/").text
     assert 'const CURRENCY = "USD";' in html
+    assert 'const CURRENCY_SYMBOL = "$";' in html
+    assert "const FX_RATE = 1.0;" in html
+    assert "const TOKENS_INCLUDE_CACHE = true;" in html
 
 
 def test_dashboard_injects_currency_custom_when_set(write_config, tmp_path):
-    html = _client_with(write_config, tmp_path, "usage:\n  currency: EUR\n").get("/").text
+    extra = "usage:\n  currency: EUR\n  currency_symbol: '€'\n  fx_rate: 0.92\n"
+    html = _client_with(write_config, tmp_path, extra).get("/").text
     assert 'const CURRENCY = "EUR";' in html
+    assert 'const CURRENCY_SYMBOL = "\\u20ac";' in html  # tojson ASCII-escapes € as €
+    assert "const FX_RATE = 0.92;" in html
+
+
+def test_dashboard_injects_tokens_exclude_cache_when_set(write_config, tmp_path):
+    html = (
+        _client_with(write_config, tmp_path, "usage:\n  token_total_includes_cache: false\n")
+        .get("/")
+        .text
+    )
+    assert "const TOKENS_INCLUDE_CACHE = false;" in html
 
 
 # ----- cards ⇄ rows layout toggle ----------------------------------------
