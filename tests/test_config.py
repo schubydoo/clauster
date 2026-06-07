@@ -234,6 +234,15 @@ def test_usage_currency_override_via_config(write_config):
     assert load_config(write_config("usage:\n  currency: EUR\n")).usage.currency == "EUR"
 
 
+def test_usage_currency_normalized_to_uppercase(write_config, caplog):
+    # A lowercase code must compare equal to USD (no spurious symbol/FX fallback).
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        u = load_config(write_config("usage:\n  currency: ' usd '\n")).usage
+    assert u.currency == "USD"
+    assert u.effective_symbol == "$"
+    assert not any("fx_rate" in r.message for r in caplog.records)
+
+
 def test_usage_fx_rate_default_one(write_config):
     assert load_config(write_config()).usage.fx_rate == 1.0
 

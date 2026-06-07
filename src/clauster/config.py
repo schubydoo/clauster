@@ -223,6 +223,13 @@ class UsageConfig(BaseModel):
     token_total_includes_cache: bool = True
     show_cost: bool = True  # deprecated alias for mode != "off"
 
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _normalize_currency(cls, v: object) -> object:
+        # Normalize the code so "usd"/" USD " compare equal to "USD" — otherwise a
+        # lowercase code spuriously trips the no-FX warning and the symbol fallback.
+        return v.strip().upper() if isinstance(v, str) else v
+
     @field_validator("mode", mode="before")
     @classmethod
     def _coerce_yaml_off(cls, v: object) -> object:
