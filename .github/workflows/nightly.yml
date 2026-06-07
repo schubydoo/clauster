@@ -28,6 +28,10 @@ jobs:
     timeout-minutes: 5
     outputs:
       run: ${{ steps.check.outputs.run }}
+      # The exact main commit this run evaluated — the build jobs check out THIS,
+      # not `refs/heads/main`, so a push to main mid-run can't make image/testpypi
+      # build a different (or mismatched) commit than the gate saw.
+      sha: ${{ steps.check.outputs.sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -42,6 +46,8 @@ jobs:
           REF: ${{ github.ref }}
         run: |
           set -euo pipefail
+          # Freeze the commit the rest of the run builds (HEAD = main's tip here).
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           # Publish from main only. A workflow_dispatch can be launched from any
           # ref; refuse anything but main so we never push a feature branch to
           # `:edge` / nightly-dist.
@@ -85,7 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: refs/heads/main # always build main (gate already enforces this)
+          ref: ${{ needs.gate.outputs.sha }} # the exact commit the gate froze
           persist-credentials: false
       - name: Set up QEMU
         uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
@@ -131,28 +137,99 @@ jobs:
           # sign covers both.
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
-  dist:
-    name: nightly sdist + wheel (artifact)
+  testpypi:
+    name: nightly dev build → TestPyPI
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Explicit (matches the top-level default) — upload-artifact uses the
-    # ACTIONS_RUNTIME_TOKEN, not GITHUB_TOKEN, so read is all this needs.
+    # Trusted Publishing to TestPyPI (OIDC) — no stored token. This needs a
+    # publisher configured on test.pypi.org FIRST (Account → Publishing → add a
+    # pending publisher): PyPI project `clauster`, owner `schubydoo`, repo
+    # `clauster`, workflow `nightly.yml`, environment `testpypi`. Until that
+    # exists the publish step 403s (there is nothing to add on our side).
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/clauster/
+    # Job-level permissions REPLACE the workflow default, so re-declare
+    # contents: read (checkout) alongside id-token: write (OIDC).
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: refs/heads/main # always build main (gate already enforces this)
+          ref: ${{ needs.gate.outputs.sha }} # the exact commit the gate froze
           persist-credentials: false
-      - name: Set up uv + Python
-        uses: ./.github/actions/setup
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
-          python-version: "3.13"
-          extras: "" # build backend only
+          # No cache in a publishing job (zizmor cache-poisoning): a cache
+          # restored from a lower-privilege context could taint the artifact
+          # this OIDC step ships. A once-a-night build gains little from a cache.
+          enable-cache: false
+      - name: Set up Python 3.13 (for uv build)
+        run: uv python install 3.13
+      # Stamp a unique PEP 440 dev version: the NEXT minor + `.dev<run_id>`, e.g.
+      # 0.7.0 -> 0.8.0.dev27076179745. github.run_id increases monotonically per
+      # repo, so each nightly sorts above the previous; the dev segment marks the
+      # build as a pre-release of the next release (above the last real one, below
+      # its final). The stamp script is stdlib-only, so it runs on the runner's
+      # system python3 (no uv project sync needed); uv build below uses the 3.13
+      # installed above. Edits the CI checkout only — never committed.
+      - name: Stamp nightly dev version
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib, sys
+          n = os.environ["RUN_ID"]
+          init = pathlib.Path("src/clauster/__init__.py")
+          pyproj = pathlib.Path("pyproject.toml")
+
+          def fail(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              sys.exit(1)
+
+          text = init.read_text()
+          m = re.search(r'__version__\s*=\s*"([^"]+)"', text)
+          if not m:
+              fail("__version__ not found in src/clauster/__init__.py")
+          cur = m.group(1)
+          parts = cur.split(".")
+          if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+              fail(f"unexpected version format '{cur}' (want major.minor[.patch])")
+          dev = f"{int(parts[0])}.{int(parts[1]) + 1}.0.dev{n}"
+
+          # re.subn returns the replacement count — refuse to continue if a
+          # pattern didn't match, so we never build/publish the stale real
+          # version (which uv reads from pyproject) instead of the dev one.
+          new_init, ni = re.subn(
+              r'(__version__\s*=\s*")[^"]+(")', lambda x: x.group(1) + dev + x.group(2), text, count=1
+          )
+          # Anchor to the [project] table so a stray `version = "..."` in an
+          # earlier [tool.*] section can't be stamped by mistake (which would be
+          # a single, wrong replacement the count guard wouldn't catch).
+          new_pt, npp = re.subn(
+              r'(?ms)(^\[project\].*?\n)(version\s*=\s*")[^"]+(")',
+              lambda x: x.group(1) + x.group(2) + dev + x.group(3),
+              pyproj.read_text(), count=1,
+          )
+          if ni != 1 or npp != 1:
+              fail(f"version substitution failed (init={ni}, pyproject={npp}) — refusing to publish a stale version")
+          init.write_text(new_init)
+          pyproj.write_text(new_pt)
+          print(f"::notice::nightly version {dev}")
+          PY
       - name: Build
-        run: uv build
+        # Pin the build interpreter to the 3.13 installed above — `uv python
+        # install` only puts it on PATH, it doesn't make `uv build` select it
+        # (it would otherwise resolve whatever Python uv finds). clauster is
+        # pure-Python (py3-none-any wheel) so the artifact is identical across
+        # interpreters, but pinning keeps the build deterministic regardless of
+        # ubuntu-latest's system Python.
+        run: uv build --python 3.13
       - name: Upload nightly dist
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -160,3 +237,10 @@ jobs:
           path: dist/
           retention-days: 14
           if-no-files-found: error
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+          # A re-dispatch of the same run would reuse the version; don't fail on it.
+          skip-existing: true
