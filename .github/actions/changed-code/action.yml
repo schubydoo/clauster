@@ -1,0 +1,52 @@
+name: "Classify changed files"
+description: >-
+  Output `code=true` unless a PR touches ONLY docs/meta files (so heavy jobs can
+  be skipped on docs-only PRs). Fail-safe: any unrecognised path, an empty diff,
+  or any non-PR event (push:main, schedule) resolves to code=true — we never skip
+  on main/cron. Requires a prior `actions/checkout` with `fetch-depth: 0` (the
+  three-dot diff needs the merge-base). Single source of truth shared by ci.yml,
+  security.yml, etc. — keep the allowlist here, not duplicated per workflow.
+outputs:
+  code:
+    description: "true unless the PR diff is docs/meta-only"
+    value: ${{ steps.classify.outputs.code }}
+runs:
+  using: composite
+  steps:
+    - id: classify
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        # Non-PR events (push:main, schedule) never skip — release safety-net.
+        if [ "$EVENT_NAME" != "pull_request" ]; then
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "Event '$EVENT_NAME' → code=true (main/cron never skip)."
+          exit 0
+        fi
+        # Three-dot = files changed on the PR branch since its merge-base,
+        # matching GitHub's "Files changed" tab.
+        files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" || true)
+        if [ -z "$files" ]; then
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "Empty/failed diff → code=true (fail-safe toward running)."
+          exit 0
+        fi
+        # A path is non-code (docs/meta) IFF it matches this allowlist. Any file
+        # outside it flips the whole PR to code=true — err toward running CI.
+        # Note: .github/**/*.md is docs, but a workflow *.yml change is code.
+        noncode='(\.md$|^docs/|^mkdocs\.yml$|^scratch/|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/.*\.md$|^\.github/(CODEOWNERS|FUNDING\.yml)$)'
+        code=false
+        while IFS= read -r f; do
+          [ -z "$f" ] && continue
+          if ! printf '%s\n' "$f" | grep -Eq "$noncode"; then
+            code=true
+            break
+          fi
+        done <<< "$files"
+        echo "Changed files:"; printf '%s\n' "$files" | sed 's/^/  /'
+        echo "=> code=$code"
+        echo "code=$code" >> "$GITHUB_OUTPUT"
