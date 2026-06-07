@@ -97,7 +97,9 @@ def _render_value(val: object) -> str:
     if isinstance(val, str):
         return '`""`' if val == "" else f"`{val}`"
     if isinstance(val, Path):
-        return f"`{val}`"
+        # as_posix() so the rendered default is platform-independent — str(WindowsPath)
+        # would emit backslashes (`~\.clauster`) and make the doc read "stale" on Windows.
+        return f"`{val.as_posix()}`"
     if isinstance(val, list):
         if not val:
             return "`[]`"
