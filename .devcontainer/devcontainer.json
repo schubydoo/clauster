@@ -1,6 +1,6 @@
 {
   "name": "clauster",
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "image": "mcr.microsoft.com/devcontainers/python:3-3.12-bookworm",
   "postCreateCommand": "pip install uv==0.11.19 && uv sync --extra dev",
   "forwardPorts": [7621],
   "portsAttributes": {
