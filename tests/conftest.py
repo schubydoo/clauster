@@ -36,7 +36,9 @@ def projects_root(tmp_path: Path) -> Path:
 def write_config(tmp_path: Path, projects_root: Path):
     def _write(extra: str = "") -> Path:
         cfg = tmp_path / "clauster.yml"
-        cfg.write_text(f"projects_root: {projects_root}\n{extra}")
+        # encoding="utf-8" matches how load_config reads it (config.py); without it
+        # the platform default (cp1252 on Windows) mangles non-ASCII symbols like €.
+        cfg.write_text(f"projects_root: {projects_root}\n{extra}", encoding="utf-8")
         return cfg
 
     return _write

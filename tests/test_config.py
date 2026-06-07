@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from clauster.config import load_config
@@ -196,13 +198,32 @@ def test_observability_prometheus_env_override(write_config, monkeypatch):
     assert load_config(cfg_path).observability.prometheus_enabled is True
 
 
-def test_usage_show_cost_default_true(write_config):
-    assert load_config(write_config()).usage.show_cost is True
+def test_usage_mode_default_cost(write_config):
+    u = load_config(write_config()).usage
+    assert u.mode == "cost"
+    assert u.show_cost is True  # deprecated alias still present, default on
 
 
-def test_usage_show_cost_disabled_via_config(write_config):
+def test_usage_mode_tokens_via_config(write_config):
+    assert load_config(write_config("usage:\n  mode: tokens\n")).usage.mode == "tokens"
+
+
+def test_usage_mode_off_via_config(write_config):
+    assert load_config(write_config("usage:\n  mode: off\n")).usage.mode == "off"
+
+
+def test_usage_show_cost_false_resolves_to_mode_off(write_config):
+    # Back-compat: show_cost was the old hide switch -> it must force mode "off".
     config = load_config(write_config("usage:\n  show_cost: false\n"))
     assert config.usage.show_cost is False
+    assert config.usage.mode == "off"
+
+
+def test_usage_show_cost_false_overrides_explicit_mode_with_warning(write_config, caplog):
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config("usage:\n  mode: tokens\n  show_cost: false\n"))
+    assert config.usage.mode == "off"  # show_cost=false wins
+    assert any("show_cost=false overrides" in r.message for r in caplog.records)
 
 
 def test_usage_currency_default_usd(write_config):
@@ -210,8 +231,57 @@ def test_usage_currency_default_usd(write_config):
 
 
 def test_usage_currency_override_via_config(write_config):
-    config = load_config(write_config("usage:\n  currency: EUR\n"))
-    assert config.usage.currency == "EUR"
+    assert load_config(write_config("usage:\n  currency: EUR\n")).usage.currency == "EUR"
+
+
+def test_usage_currency_normalized_to_uppercase(write_config, caplog):
+    # A lowercase code must compare equal to USD (no spurious symbol/FX fallback).
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        u = load_config(write_config("usage:\n  currency: ' usd '\n")).usage
+    assert u.currency == "USD"
+    assert u.effective_symbol == "$"
+    assert not any("fx_rate" in r.message for r in caplog.records)
+
+
+def test_usage_fx_rate_default_one(write_config):
+    assert load_config(write_config()).usage.fx_rate == 1.0
+
+
+def test_usage_fx_rate_must_be_positive(write_config):
+    with pytest.raises(ValueError):
+        load_config(write_config("usage:\n  fx_rate: 0\n"))
+
+
+def test_usage_token_total_includes_cache_default_true(write_config):
+    assert load_config(write_config()).usage.token_total_includes_cache is True
+
+
+def test_usage_effective_symbol_defaults_to_dollar_for_usd(write_config):
+    assert load_config(write_config()).usage.effective_symbol == "$"
+
+
+def test_usage_effective_symbol_explicit_wins(write_config):
+    u = load_config(write_config("usage:\n  currency: EUR\n  currency_symbol: '€'\n")).usage
+    assert u.effective_symbol == "€"
+
+
+def test_usage_effective_symbol_non_usd_falls_back_to_code(write_config):
+    # No explicit symbol + non-USD currency -> the code is the prefix (not a bare "$").
+    u = load_config(write_config("usage:\n  currency: GBP\n  fx_rate: 0.79\n")).usage
+    assert u.effective_symbol == "GBP "
+
+
+def test_usage_foreign_currency_without_fx_rate_warns(write_config, caplog):
+    # currency != USD while fx_rate stays 1.0 would paint a foreign label on a USD figure.
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        load_config(write_config("usage:\n  currency: EUR\n"))
+    assert any("fx_rate=1.0" in r.message for r in caplog.records)
+
+
+def test_usage_foreign_currency_with_fx_rate_does_not_warn(write_config, caplog):
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        load_config(write_config("usage:\n  currency: EUR\n  fx_rate: 0.92\n"))
+    assert not any("fx_rate" in r.message for r in caplog.records)
 
 
 def test_metrics_defaults(write_config):
