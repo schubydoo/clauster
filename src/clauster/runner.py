@@ -380,7 +380,7 @@ class SessionRunner:
 
         markers = await asyncio.to_thread(self._await_ready, raw_path, proc)
         self._apply_markers(instance, markers, proc)
-        self._flush_redacted_mirror(instance)
+        await asyncio.to_thread(self._flush_redacted_mirror, instance)
         await self._post_spawn_enrich(instance, proj.path)
         await self._persist()
         # A bridge still STARTING after the synchronous readiness wait may yet
@@ -782,7 +782,7 @@ class SessionRunner:
         instance.keeper_pid = proc.pid
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
         self._apply_pty_info(instance, info, proc)
-        self._flush_redacted_mirror(instance)
+        await asyncio.to_thread(self._flush_redacted_mirror, instance)
         if instance.status is InstanceStatus.ERROR:
             # Surface whatever the keeper recorded (openpty/spawn failure); the
             # bridge's own failure reason, if any, is in its --debug-file on disk.
@@ -986,7 +986,7 @@ class SessionRunner:
                 raw = instance.bridge_raw_log_path or log_path
                 markers = await asyncio.to_thread(self._read_markers, raw)
                 self._apply_markers(instance, markers, proc)
-                self._flush_redacted_mirror(instance)  # keep the at-rest log current
+                await asyncio.to_thread(self._flush_redacted_mirror, instance)  # at-rest log
                 if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
                     await self._post_spawn_enrich(instance, self._project_path(name) or log_path)
                     await self._persist()
