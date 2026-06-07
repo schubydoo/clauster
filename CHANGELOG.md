@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.0](https://github.com/schubydoo/clauster/compare/v0.7.0...v0.8.0) (2026-06-07)
+
+
+### Features
+
+* add gated Prometheus /metrics endpoint ([#178](https://github.com/schubydoo/clauster/issues/178)) ([adac1c6](https://github.com/schubydoo/clauster/commit/adac1c65ea54ec5e486624b57e8a2102846a8fab))
+* add read-only /api/widget summary endpoint ([#179](https://github.com/schubydoo/clauster/issues/179)) ([b38f71d](https://github.com/schubydoo/clauster/commit/b38f71dbc409f3092f0a7b439cb4317164ecd24f))
+* **ui:** cards ⇄ rows dashboard layout toggle ([#173](https://github.com/schubydoo/clauster/issues/173)) ([da027f0](https://github.com/schubydoo/clauster/commit/da027f07e0338f94b6450eb22f689ba188ace231))
+* **ui:** honest currency label on the cost badge (symbol only for USD) ([#167](https://github.com/schubydoo/clauster/issues/167)) ([ce5321c](https://github.com/schubydoo/clauster/commit/ce5321cdb6f54ab28494cc579a3f497094529812))
+* **ui:** live per-bridge resource metrics (CPU / memory / disk) ([#172](https://github.com/schubydoo/clauster/issues/172)) ([bc2992e](https://github.com/schubydoo/clauster/commit/bc2992e5eaf4bf505f3591e079f1aa770a207bda))
+
+
+### Bug Fixes
+
+* **ci:** stop [@claude](https://github.com/claude) review from cancelling itself ([#183](https://github.com/schubydoo/clauster/issues/183)) ([abbd8bf](https://github.com/schubydoo/clauster/commit/abbd8bf6fb6f2a1dc6410290e04bd25739ee3d2f))
+* **ui:** correct and clarify the permission-mode tooltip ([#165](https://github.com/schubydoo/clauster/issues/165)) ([5e6539e](https://github.com/schubydoo/clauster/commit/5e6539eeec8acf2b4329a24a6ac2171bc62d4b7b))
+
 ## [0.7.0](https://github.com/schubydoo/clauster/compare/v0.6.0...v0.7.0) (2026-06-06)
 
 
