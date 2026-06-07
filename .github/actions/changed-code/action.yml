@@ -37,8 +37,11 @@ runs:
         fi
         # A path is non-code (docs/meta) IFF it matches this allowlist. Any file
         # outside it flips the whole PR to code=true — err toward running CI.
-        # Note: .github/**/*.md is docs, but a workflow *.yml change is code.
-        noncode='(\.md$|^docs/|^mkdocs\.yml$|^scratch/|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/.*\.md$|^\.github/(CODEOWNERS|FUNDING\.yml)$)'
+        # `\.md$` already covers .github/**/*.md (so no separate entry). `scratch/`
+        # is gitignored and never appears in a committed diff, so it's omitted —
+        # if anything there were ever force-committed it'd be treated as code
+        # (scanned), not silently skipped.
+        noncode='(\.md$|^docs/|^mkdocs\.yml$|^LICENSE$|\.(png|jpe?g|gif|svg|ico)$|^\.github/(CODEOWNERS|FUNDING\.yml)$)'
         code=false
         while IFS= read -r f; do
           [ -z "$f" ] && continue
