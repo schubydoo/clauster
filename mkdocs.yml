@@ -51,6 +51,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Quickstart: quickstart.md
   - Installation: installation.md
   - Configuration: configuration.md
   - Security: security.md
