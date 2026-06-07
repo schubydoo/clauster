@@ -358,6 +358,27 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
         }
 
+    @app.get("/api/projects/{name}/preflight")
+    async def api_project_preflight(name: str) -> dict:
+        """Per-project spawn-readiness checks (the system-wide panel is ``/api/doctor``).
+
+        Reports the two preconditions specific to *this* project's bridge launch —
+        workspace trust and whether it's a git repo (worktree mode) — as the same
+        ``{name, status, detail}`` shape the doctor panel consumes. Derived from the
+        discovered project (so trust/git match the card); read-only and auth-gated.
+        """
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        proj = next((p for p in await list_projects() if p.name == name), None)
+        if proj is None:
+            raise HTTPException(status_code=404, detail=f"project {name!r} not found")
+        checks = ops.project_preflight_checks(proj)
+        return {
+            "project": name,
+            "ok": all(c.status != ops.FAIL for c in checks),
+            "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
+        }
+
     @app.get("/api/projects/{name}/card", response_class=HTMLResponse)
     async def api_project_card(request: Request, name: str) -> Response:
         """Render one project's card for reactive insertion (no full-page reload).
