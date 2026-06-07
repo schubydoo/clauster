@@ -29,7 +29,7 @@ uvx clauster run -c clauster.yml      # or: uvx clauster doctor / hash-password
 
 `uvx` re-resolves the package on every invocation, so for a server you keep
 running prefer `uv tool install` above; pin a version for a reproducible one-off
-with `uvx clauster@<version> …`.
+with `uvx clauster@<version> run -c clauster.yml`.
 
 ## With pip / pipx
 
