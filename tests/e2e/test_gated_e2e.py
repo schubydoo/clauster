@@ -39,6 +39,12 @@ _BYPASS_OPTION = "option[value='bypassPermissions']"
 # A trust write + the dashboard's status poll need headroom on a slow CI host.
 _GATE_TIMEOUT = 20_000
 
+# The reaper button renders as "👻 Reap ghost environments". `get_by_role(name=...)`
+# matches the accessible name as a case-insensitive *substring* (not exact), so we
+# intentionally drop the leading emoji here — the substring still matches, and stays
+# robust if the emoji ever changes.
+_REAPER_BUTTON = "Reap ghost environments"
+
 
 def test_bypass_option_only_renders_for_opted_in_project(
     page: Page, bypass_server: Server
@@ -101,7 +107,7 @@ def test_bypass_requires_typed_confirmation_before_spawn(
 def test_reaper_panel_present_when_enabled(page: Page, reaper_server: str) -> None:
     """With ``reaper.ui_enabled: true``, the ghost-reaper panel renders above the grid."""
     page.goto(reaper_server)
-    expect(page.get_by_role("button", name="Reap ghost environments")).to_be_visible()
+    expect(page.get_by_role("button", name=_REAPER_BUTTON)).to_be_visible()
     # The gate is open: the endpoint no longer 404s (it fails later on absent cloud
     # credentials, which is out of scope for this gating row).
     assert page.request.get(reaper_server + "/api/environments/ghosts").status != 404
@@ -110,5 +116,5 @@ def test_reaper_panel_present_when_enabled(page: Page, reaper_server: str) -> No
 def test_reaper_panel_and_endpoint_absent_when_disabled(page: Page, open_server: str) -> None:
     """With the reaper flag unset, the panel is absent and the endpoint 404s."""
     page.goto(open_server)
-    expect(page.get_by_role("button", name="Reap ghost environments")).to_have_count(0)
+    expect(page.get_by_role("button", name=_REAPER_BUTTON)).to_have_count(0)
     assert page.request.get(open_server + "/api/environments/ghosts").status == 404
