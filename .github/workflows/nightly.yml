@@ -168,13 +168,15 @@ jobs:
           # restored from a lower-privilege context could taint the artifact
           # this OIDC step ships. A once-a-night build gains little from a cache.
           enable-cache: false
-      - name: Set up Python 3.13
+      - name: Set up Python 3.13 (for uv build)
         run: uv python install 3.13
       # Stamp a unique PEP 440 dev version: the NEXT minor + `.dev<run_id>`, e.g.
-      # 0.7.0 -> 0.8.0.dev27076179745. github.run_id is globally monotonic, so
-      # each nightly sorts above the previous; the dev segment marks the build as
-      # a pre-release of the next release (above the last real one, below its
-      # final). Edits the CI checkout only — never committed.
+      # 0.7.0 -> 0.8.0.dev27076179745. github.run_id increases monotonically per
+      # repo, so each nightly sorts above the previous; the dev segment marks the
+      # build as a pre-release of the next release (above the last real one, below
+      # its final). The stamp script is stdlib-only, so it runs on the runner's
+      # system python3 (no uv project sync needed); uv build below uses the 3.13
+      # installed above. Edits the CI checkout only — never committed.
       - name: Stamp nightly dev version
         env:
           RUN_ID: ${{ github.run_id }}
@@ -206,8 +208,12 @@ jobs:
           new_init, ni = re.subn(
               r'(__version__\s*=\s*")[^"]+(")', lambda x: x.group(1) + dev + x.group(2), text, count=1
           )
+          # Anchor to the [project] table so a stray `version = "..."` in an
+          # earlier [tool.*] section can't be stamped by mistake (which would be
+          # a single, wrong replacement the count guard wouldn't catch).
           new_pt, npp = re.subn(
-              r'(?m)^(version\s*=\s*")[^"]+(")', lambda x: x.group(1) + dev + x.group(2),
+              r'(?ms)(^\[project\].*?\n)(version\s*=\s*")[^"]+(")',
+              lambda x: x.group(1) + x.group(2) + dev + x.group(3),
               pyproj.read_text(), count=1,
           )
           if ni != 1 or npp != 1:
