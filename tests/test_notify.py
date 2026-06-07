@@ -86,3 +86,12 @@ async def test_anotify_swallows_send_error(monkeypatch, caplog):
 async def test_anotify_noop_when_inactive():
     # No apprise, disabled — anotify is a no-op and never raises.
     await Notifier(NotificationsConfig(enabled=False)).anotify("t", "b")
+
+
+def test_send_is_noop_without_apprise():
+    # _send guards on its own (defence-in-depth, not relying on anotify's check): a
+    # direct call with no apprise is a safe no-op and never raises — the fail-closed
+    # contract holds even if a future caller reaches _send without going via anotify.
+    n = Notifier(NotificationsConfig(enabled=False))
+    assert n._apprise is None
+    n._send("t", "b")

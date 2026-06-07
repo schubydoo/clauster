@@ -66,6 +66,27 @@ async def test_notify_crash_noop_when_crash_alerts_off(runner_config):
     assert not runner._notify_tasks
 
 
+async def test_poll_once_crash_fires_notification(runner_config, monkeypatch):
+    # Drive the real poll_once path: a RUNNING bridge whose process is gone (and not an
+    # intentional stop) reconciles to CRASHED and fires the crash notification.
+    from clauster import inspector  # noqa: F401 - patched by string path below
+
+    runner = _runner(runner_config, notifications={"enabled": True, "urls": ["slack://x"]})
+    rec = _RecordingNotifier()
+    runner._notifier = rec
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_pid=4242
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.reap_if_exited", lambda *a, **k: None)
+    monkeypatch.setattr("clauster.runner.inspector.list_working_sessions", lambda *a, **k: [])
+
+    await runner.poll_once()
+    assert runner._instances["alpha"].status is InstanceStatus.CRASHED
+    await asyncio.gather(*runner._notify_tasks)
+    assert len(rec.calls) == 1
+
+
 async def test_reconcile_to_crashed_then_notify(runner_config):
     # The transition guard in poll_once fires only RUNNING/STARTING -> CRASHED. Verify
     # _reconcile_status produces CRASHED for an unexpected exit, which is what gates notify.
