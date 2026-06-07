@@ -20,6 +20,17 @@ Upgrade later with:
 uv tool upgrade clauster
 ```
 
+Or run it **without installing** — `uvx` fetches and runs Clauster in one shot,
+handy for a quick try or a one-off command:
+
+```sh
+uvx clauster run -c clauster.yml      # or: uvx clauster doctor / hash-password
+```
+
+`uvx` re-resolves the package on every invocation, so for a server you keep
+running prefer `uv tool install` above; pin a version for a reproducible one-off
+with `uvx clauster@<version> run -c clauster.yml`.
+
 ## With pip / pipx
 
 ```sh
