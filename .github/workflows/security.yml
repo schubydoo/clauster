@@ -41,9 +41,13 @@ jobs:
 
   codeql:
     name: codeql analyze
-    # Skip the Python analysis on a docs-only PR (no code to analyse).
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # ALWAYS run — never gate on the docs-only classifier. The `main` ruleset has
+    # a `code_scanning` rule requiring the CodeQL tool to have results; GitHub's
+    # merge protection treats a required tool that produced no results (a skipped
+    # job) as unsatisfied, so a docs-only PR would sit at mergeStateStatus=BLOCKED
+    # forever even with every required status check green. Re-analysing unchanged
+    # code costs a little CI time, but minutes are free on this public repo and
+    # this keeps the required code-scanning tool satisfiable on every PR.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
