@@ -32,6 +32,7 @@ from clauster.config import (
     InstanceDefaults,
     LogsConfig,
     MetricsConfig,
+    NotificationsConfig,
     ObservabilityConfig,
     ProjectConfig,
     ReaperConfig,
@@ -56,6 +57,7 @@ SECTIONS: list[tuple[str, type[BaseModel]]] = [
     ("usage", UsageConfig),
     ("metrics", MetricsConfig),
     ("observability", ObservabilityConfig),
+    ("notifications", NotificationsConfig),
 ]
 
 

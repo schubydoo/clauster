@@ -430,6 +430,30 @@ class ObservabilityConfig(BaseModel):
     )
 
 
+class NotificationsConfig(BaseModel):
+    """Outbound notifications on bridge lifecycle events, sent via Apprise.
+
+    Off by default. Requires the optional ``notify`` extra
+    (``pip install 'clauster[notify]'``); if it's enabled but Apprise isn't
+    installed, Clauster logs a warning at startup and sends nothing (fail-closed —
+    a notify failure never affects the bridge lifecycle). Sends are best-effort and
+    run off the event loop.
+    """
+
+    enabled: bool = Field(default=False, description="Master switch for outbound notifications.")
+    urls: list[str] = Field(
+        default_factory=list,
+        description="Apprise notification URLs (e.g. `slack://`, `discord://`, "
+        "`tgram://`). Requires the `notify` extra. A non-loopback secret in a URL is "
+        "the operator's responsibility to keep out of shared configs.",
+    )
+    notify_on_crash: bool = Field(
+        default=True,
+        description="Notify when a bridge exits unexpectedly (CRASHED — i.e. not via "
+        "the Stop button).",
+    )
+
+
 class ClausterConfig(BaseModel):
     """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
 
@@ -479,6 +503,7 @@ class ClausterConfig(BaseModel):
     usage: UsageConfig = Field(default_factory=UsageConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
 
     _source_path: Path | None = PrivateAttr(default=None)
 

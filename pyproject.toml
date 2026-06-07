@@ -55,6 +55,12 @@ docs = [
     # Not needed at runtime; `mkdocs build --strict` / `mkdocs serve` only.
     "mkdocs-material>=9.5",
 ]
+notify = [
+    # Outbound crash/lifecycle notifications (see notify.py + notifications.*).
+    # Optional: install with `pip install 'clauster[notify]'`. Apprise fans a single
+    # call out to Slack/Discord/Telegram/email/etc.
+    "apprise>=1.9",
+]
 
 [project.scripts]
 clauster = "clauster.__main__:main"
