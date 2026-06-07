@@ -91,6 +91,57 @@ async def test_no_redaction_keeps_a_single_verbatim_bridge_log(runner_config, mo
     await runner.stop("alpha")
 
 
+def test_flush_redacted_mirror_is_best_effort(runner_config, tmp_path):
+    # The mirror flush must never raise on FS trouble (it runs in the poll loop and
+    # at spawn): missing raw, an unreadable raw, and an unwritable public are all no-ops.
+    runner = _make_runner(runner_config)
+    raw, public = tmp_path / "b.raw.log", tmp_path / "b.log"
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_raw_log_path=raw,
+        bridge_debug_log_path=public,
+    )
+    # Raw not written yet -> no-op, no public file created.
+    runner._flush_redacted_mirror(inst)
+    assert not public.exists()
+
+    # Raw verbatim -> public becomes the redacted mirror.
+    raw.write_text("session_01ABCDEFGHIJKLMNOP here\n", encoding="utf-8")
+    runner._flush_redacted_mirror(inst)
+    assert "session_01ABCDEFGHIJKLMNOP" not in public.read_text(encoding="utf-8")
+    assert "session_<redacted>" in public.read_text(encoding="utf-8")
+
+    # Unreadable raw (a directory) -> read OSError branch, no raise.
+    bad_raw = tmp_path / "dir.raw.log"
+    bad_raw.mkdir()
+    inst.bridge_raw_log_path = bad_raw
+    runner._flush_redacted_mirror(inst)
+
+    # Unwritable public (a directory) -> write OSError branch, no raise.
+    bad_public = tmp_path / "pub.dir"
+    bad_public.mkdir()
+    inst.bridge_raw_log_path, inst.bridge_debug_log_path = raw, bad_public
+    runner._flush_redacted_mirror(inst)
+
+
+def test_flush_redacted_mirror_noop_when_paths_coincide(runner_config, tmp_path):
+    # Redaction off -> raw == public; the verbatim log must be left untouched.
+    runner = _make_runner(runner_config)
+    p = tmp_path / "b.log"
+    p.write_text("session_01ABCDEFGHIJKLMNOP\n", encoding="utf-8")
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_raw_log_path=p,
+        bridge_debug_log_path=p,
+    )
+    runner._flush_redacted_mirror(inst)
+    assert "session_01ABCDEFGHIJKLMNOP" in p.read_text(encoding="utf-8")
+
+
 async def test_stop_releases_proc_handle(runner_config, monkeypatch):
     # The dead Popen handle must be dropped from _procs on stop — it was never
     # removed, leaking dead handles across spawn/stop cycles.
