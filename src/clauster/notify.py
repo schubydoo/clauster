@@ -36,7 +36,7 @@ class Notifier:
 
     def _build(self) -> None:
         try:
-            import apprise
+            import apprise  # type: ignore[import-not-found]  # optional `notify` extra
         except ImportError:
             _log.warning(
                 "notifications enabled but Apprise is not installed — install the extra "

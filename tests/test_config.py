@@ -249,6 +249,14 @@ def test_notifications_via_config(write_config):
     assert n.urls == ["slack://x"]
 
 
+def test_notifications_notify_on_crash_override(write_config):
+    extra = (
+        "notifications:\n  enabled: true\n  urls:\n    - 'slack://x'\n  notify_on_crash: false\n"
+    )
+    n = load_config(write_config(extra)).notifications
+    assert n.notify_on_crash is False
+
+
 def test_usage_currency_normalized_to_uppercase(write_config, caplog):
     # A lowercase code must compare equal to USD (no spurious symbol/FX fallback).
     with caplog.at_level(logging.WARNING, logger="clauster.config"):
