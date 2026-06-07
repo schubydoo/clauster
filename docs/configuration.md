@@ -2,8 +2,10 @@
 
 All settings live in `clauster.yml`. The full, commented schema is in
 [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example).
-This page is the exhaustive field reference, derived from the pydantic models in
-`src/clauster/config.py`.
+This page is the exhaustive field reference. The tables below are **generated from
+the pydantic models** in `src/clauster/config.py` (via
+`scripts/gen_config_reference.py`), so they never drift from the code — a CI check
+fails the build if a field is added or changed without regenerating this page.
 
 ## Loading & overrides
 
@@ -37,22 +39,26 @@ unknown per-project keys are ignored.
 
 ## Top level (`ClausterConfig`)
 
+<!-- BEGIN GEN: clauster -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `schema_version` | int | `1` | Config schema version (additive-only). |
 | `projects_root` | path | *(required)* | Directory whose children become project cards. Must exist, be a directory, and be readable — validated at load. `~` is expanded. |
-| `host` | str | `127.0.0.1` | Bind address. A non-loopback host requires enforced auth (see [Networking](networking.md)). |
+| `host` | str | `127.0.0.1` | Bind address. A non-loopback host requires enforced auth (see Networking). |
 | `port` | int | `7621` | Bind port (1–65535). |
 | `state_dir` | path | `~/.clauster` | Where `state.json` and runtime state live. `~` is expanded. |
 | `root_path` | str | `""` | ASGI `root_path` for serving under a reverse-proxy sub-path. |
 | `log_format` | `text` \| `json` | `text` | Application log format. |
 | `instance_name` | str \| null | `null` | Optional label (≤32 chars, `[A-Za-z0-9_.-]`). When set, retitles the process to `clauster[<name>]` so co-resident instances are distinguishable in `ps`/`pgrep`. Cosmetic only. |
+<!-- END GEN: clauster -->
 
 Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
-`clone`, `reaper`, `usage`, `metrics` — each documented below.
+`clone`, `reaper`, `usage`, `metrics`, `observability` — each documented below
+(`auth.reverse_proxy` is nested under `auth`).
 
 ## `claude` — binary & bridge spawn (`ClaudeConfig`)
 
+<!-- BEGIN GEN: claude -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `binary` | str | `claude` | The `claude` binary name or path (resolved to an absolute path before spawning). |
@@ -63,14 +69,17 @@ Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
 | `resume_recap` | bool | `false` | Install a `SessionStart` hook in the runtime user's `~/.claude/settings.json` that recaps the most recent prior transcript for the cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude settings and injects prior turns. |
 | `resume_recap_max_chars` | int | `8000` | Character budget (≥500) for the recap injection (most recent turns kept). |
 | `resume_mode` | `standard` \| `pty` | `standard` | Launch mode for **new** bridges. `pty` = native true-resume under a PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the mode it launched with — editing this never re-modes a running or stopped bridge. |
+<!-- END GEN: claude -->
 
 ## `instance_defaults` — new-bridge defaults (`InstanceDefaults`)
 
+<!-- BEGIN GEN: instance_defaults -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `spawn_mode` | `same-dir` \| `worktree` \| `session` | `same-dir` | Default spawn mode for new bridges. `worktree` requires a git repo. |
-| `permission_mode` | see below | `default` | Default permission mode for new bridges. |
+| `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` | `default` | Default permission mode for new bridges. |
 | `capacity` | int | `32` | Max concurrent bridges (≥1). |
+<!-- END GEN: instance_defaults -->
 
 Permission modes: `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
 `bypassPermissions`. `bypassPermissions` is footgun-gated — see
@@ -80,9 +89,11 @@ Permission modes: `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
 
 A map of project name → settings. Additive-only; unknown keys ignored.
 
+<!-- BEGIN GEN: projects -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `allow_bypass_permissions` | bool | `false` | The **hard ceiling** for the bypassPermissions footgun gate. A project can never be spawned with `--permission-mode bypassPermissions` unless this is set here in `clauster.yml`. The dashboard's per-session typed-confirm is the second layer. |
+<!-- END GEN: projects -->
 
 ```yaml
 projects:
@@ -92,19 +103,21 @@ projects:
 
 ## `auth` — authentication (`AuthConfig`)
 
+<!-- BEGIN GEN: auth -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | **Master auth switch.** Must be `true` for password / reverse-proxy auth to actually gate requests. |
 | `password_required` | bool | `false` | Require password login. Needs `password_hash`. |
 | `password_hash` | str \| null | `null` | argon2id hash from `clauster hash-password`. |
-| `reverse_proxy` | object | *(see below)* | Trusted-reverse-proxy auth settings. |
 | `allow_unauthenticated_network` | bool | `false` | Explicit opt-out: permit a non-loopback bind **without** enforced auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. |
 | `cookie_secure` | `auto` \| `always` \| `never` | `auto` | Session-cookie `Secure` flag. `auto` = Secure only over https (or a trusted proxy's `X-Forwarded-Proto=https`). |
 | `session_max_age_seconds` | int | `604800` | Session lifetime (≥1; default 7 days). |
 | `allowed_origins` | list[str] | `[]` | Extra WebSocket / CSRF origins (e.g. the proxy domain). |
+<!-- END GEN: auth -->
 
 ### `auth.reverse_proxy` (`ReverseProxyConfig`)
 
+<!-- BEGIN GEN: reverse_proxy -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Enable trusted-reverse-proxy auth. |
@@ -113,6 +126,7 @@ projects:
 | `trusted_ips` | list[str] | `[]` | Peer-IP allowlist for the proxy. |
 | `shared_secret` | str \| null | `null` | HMAC key the proxy signs `X-Proxy-Auth` with. |
 | `hmac_window_seconds` | int | `60` | Clock-skew / replay window (≥0). |
+<!-- END GEN: reverse_proxy -->
 
 !!! danger "Two fail-closed validators"
     1. A **non-loopback** `host` is refused unless auth is *actually enforced* —
@@ -127,18 +141,21 @@ See [Security](security.md) and [Networking](networking.md) for the full matrix.
 
 ## `logs` — bridge-log rotation & redaction (`LogsConfig`)
 
+<!-- BEGIN GEN: logs -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `bridge_log_max_size_mb` | int | `10` | Per-bridge debug-log rotation size (≥1 MB). |
 | `keep_rotated` | int | `5` | Number of rotated log files to keep (≥0). |
 | `redact_session_url` | bool | `false` | `false` = hybrid (verbatim on disk, redacted over the WebSocket). `true` redacts the session URL on disk too. |
 | `strip_ansi_in_stream` | bool | `true` | Strip ANSI escape sequences from the streamed log. |
+<!-- END GEN: logs -->
 
 ## `clone` — project clone/create guards (`CloneConfig`)
 
 Clone URLs are user-supplied and hit the network from the host, so defaults are
 strict.
 
+<!-- BEGIN GEN: clone -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Allow cloning/creating projects. |
@@ -147,30 +164,42 @@ strict.
 | `allowed_private_cidrs` | list[str] | `[]` | Targeted LAN opt-in. Each entry is validated as a CIDR at load (a malformed entry fails fast rather than silently never matching). |
 | `timeout_seconds` | int | `300` | Clone timeout (≥1). |
 | `max_mb` | int | `2048` | Post-clone size cap (≥0; `0` = unlimited). |
+<!-- END GEN: clone -->
 
 ## `reaper` — ghost-environment reaper (`ReaperConfig`)
 
+<!-- BEGIN GEN: reaper -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `ui_enabled` | bool | `false` | Expose the ghost-environment reaper in the **dashboard**. The CLI (`clauster reap-environments`) is always available; this gates only the destructive browser surface. |
+<!-- END GEN: reaper -->
 
-## `usage` — per-project cost badge (`UsageConfig`)
+## `usage` — per-project cost/token badge (`UsageConfig`)
 
+<!-- BEGIN GEN: usage -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `show_cost` | bool | `true` | Show the per-project cost/token badge. `false` hides the badge **and** skips the `/api/projects/{name}/usage` fetch (privacy / screen-share). |
-| `currency` | str | `USD` | Badge **label** only. The price table is USD with no FX conversion: the `$` symbol shows only when this is `"USD"`; any other value renders the (still-USD) figure suffixed `USD`. A forward hook for a future `fx_rate`. |
+| `mode` | `cost` \| `tokens` \| `off` | `cost` | What the badge shows. `cost` = approximate cost (USD price table × `fx_rate`, prefixed with `currency_symbol`); `tokens` = total token count only; `off` = hide the badge and skip the `/api/projects/{name}/usage` fetch. (`mode: off` may be written unquoted — YAML's boolean `off` is coerced back.) |
+| `currency` | str | `USD` | Currency code shown in the tooltip (normalized to upper-case). |
+| `currency_symbol` | str \| null | `null` | Symbol rendered in `cost` mode. Defaults to `$` when `currency` is `USD`, otherwise the currency code. |
+| `fx_rate` | float | `1.0` | **Static, user-supplied** multiplier applied to the USD cost before display (>0; no live FX lookup). Leave `1.0` for USD; a non-USD `currency` left at `1.0` logs a warning (it would label a USD figure with a foreign symbol). |
+| `token_total_includes_cache` | bool | `true` | Whether cache (creation + read) tokens count toward the displayed token total; they usually dominate, so set `false` for a leaner figure. The per-category breakdown is always in the tooltip. |
+| `show_cost` | bool | `true` | **Deprecated** back-compat alias: `show_cost: false` forces `mode: off`. |
+<!-- END GEN: usage -->
 
 !!! info "Cost is approximate"
     Token counts are exact (read from transcript `usage`); the dollar figure is
     a ballpark from a hand-maintained USD price table (`usage.py`) that drifts as
-    pricing changes — unpriced models count as 0.
+    pricing changes — unpriced models count as 0. `fx_rate` is a static,
+    user-supplied multiplier (no live FX), so a non-USD `currency` needs an
+    `fx_rate` to be meaningful.
 
 ## `metrics` — live per-bridge resource metrics (`MetricsConfig`)
 
 A point-in-time sample of the bridge's process tree, shown only while a bridge
 runs.
 
+<!-- BEGIN GEN: metrics -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Show the metrics line. When `false`, hides it **and** skips both the `/api/projects/{name}/metrics` fetch and the server-side sample. |
@@ -178,6 +207,18 @@ runs.
 | `show_disk` | bool | `true` | Toggle the disk read/write rate portion. |
 | `sample_interval_seconds` | float | `0.15` | Two-snapshot sampling window (>0, ≤2.0). Longer is steadier but each fetch blocks a worker thread for that long. |
 | `poll_seconds` | float | `4.0` | Dashboard metrics refresh cadence (≥1.0), decoupled from the status poll. |
+<!-- END GEN: metrics -->
+
+## `observability` — read-only metrics endpoint (`ObservabilityConfig`)
+
+A Prometheus exposition of point-in-time gauges, off by default and behind the
+auth guard. See [Networking](networking.md) for scraping behind auth.
+
+<!-- BEGIN GEN: observability -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard. |
+<!-- END GEN: observability -->
 
 ## Minimal example
 

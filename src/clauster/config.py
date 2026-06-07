@@ -46,48 +46,62 @@ PERMISSION_MODES: tuple[str, ...] = (
 class ClaudeConfig(BaseModel):
     """Settings for the `claude` binary and bridge-spawn behavior."""
 
-    binary: str = "claude"
-    min_version: str = "2.1.145"
-    agents_json_poll_interval_seconds: int = Field(default=300, ge=1)
-    # How long a freshly-spawned bridge may stay alive without registering an
-    # environment before Clauster gives up and marks it ERROR. A bridge that
-    # launches but can't authenticate to the remote-control controller stays
-    # alive yet never becomes connectable; liveness alone is not "running".
-    startup_grace_seconds: float = Field(default=60.0, gt=0)
-    # Before spawning the first bridge, mark remote control as acknowledged in the
-    # runtime user's ~/.claude.json (hasUsedRemoteControl/remoteDialogSeen).
-    # `claude remote-control` otherwise blocks on a one-time interactive "Enable
-    # Remote Control? (y/n)" prompt that Clauster can never answer (the bridge's
-    # stdin is detached) — so the bridge would sit alive-but-unregistered forever.
-    # Set false to manage those flags yourself.
-    auto_enable_remote_control: bool = True
-    # `claude remote-control` restart spawns a fresh session with an empty
-    # context window — it has no resume flag, so a restarted bridge "forgets"
-    # the prior conversation. When true, Clauster installs a SessionStart hook
-    # (in the runtime user's ~/.claude/settings.json) that recaps the most
-    # recent prior transcript for the cwd back into the new session. Opt-in: it
-    # edits the user's Claude settings and injects prior turns into context.
-    resume_recap: bool = False
-    # Character budget for the recap injection (most recent turns kept).
-    resume_recap_max_chars: int = Field(default=8000, ge=500)
-    # How bridges are launched. "standard" (default) is the headless
-    # `claude remote-control` subcommand server. "pty" runs the
-    # `claude --remote-control` flag form under a PTY keeper, which is
-    # single-session but genuinely restores prior conversation context on a
-    # Restart (true resume) — unlike the recap hook, which only *recaps* it.
-    # POSIX only; on Windows "pty" falls back to standard. Opt-in.
-    # This seeds the mode for *new* bridges only: a bridge's resume_mode is
-    # recorded on its instance at launch, so editing this never re-modes an
-    # already-running or stopped bridge (stop/resume always honor the record).
-    resume_mode: ResumeMode = "standard"
+    binary: str = Field(
+        default="claude",
+        description="The `claude` binary name or path (resolved to an absolute path "
+        "before spawning).",
+    )
+    min_version: str = Field(default="2.1.145", description="Minimum acceptable `claude` version.")
+    agents_json_poll_interval_seconds: int = Field(
+        default=300,
+        ge=1,
+        description="How often (≥1) the inspector cross-checks `claude agents --json` "
+        "for liveness.",
+    )
+    startup_grace_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="How long (>0) a freshly-spawned bridge may stay alive without "
+        'registering an environment before it is marked `ERROR`. Liveness alone is not "running".',
+    )
+    auto_enable_remote_control: bool = Field(
+        default=True,
+        description="Before the first spawn, mark remote control acknowledged "
+        "(`hasUsedRemoteControl` / `remoteDialogSeen`) in `~/.claude.json` so a "
+        "detached-stdin bridge isn't stuck on the one-time \"Enable Remote Control? "
+        '(y/n)" prompt. Set `false` to manage it yourself.',
+    )
+    resume_recap: bool = Field(
+        default=False,
+        description="Install a `SessionStart` hook in the runtime user's "
+        "`~/.claude/settings.json` that recaps the most recent prior transcript for the "
+        "cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude "
+        "settings and injects prior turns.",
+    )
+    resume_recap_max_chars: int = Field(
+        default=8000,
+        ge=500,
+        description="Character budget (≥500) for the recap injection (most recent turns kept).",
+    )
+    resume_mode: ResumeMode = Field(
+        default="standard",
+        description="Launch mode for **new** bridges. `pty` = native true-resume under a "
+        "PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the "
+        "mode it launched with — editing this never re-modes a running or stopped bridge.",
+    )
 
 
 class InstanceDefaults(BaseModel):
     """Default spawn/permission mode and capacity applied to new bridges."""
 
-    spawn_mode: SpawnMode = "same-dir"
-    permission_mode: PermissionMode = "default"
-    capacity: int = Field(default=32, ge=1)
+    spawn_mode: SpawnMode = Field(
+        default="same-dir",
+        description="Default spawn mode for new bridges. `worktree` requires a git repo.",
+    )
+    permission_mode: PermissionMode = Field(
+        default="default", description="Default permission mode for new bridges."
+    )
+    capacity: int = Field(default=32, ge=1, description="Max concurrent bridges (≥1).")
 
 
 class ProjectConfig(BaseModel):
@@ -98,34 +112,72 @@ class ProjectConfig(BaseModel):
     here in clauster.yml. The dashboard's per-session typed-confirm is the second layer.
     """
 
-    allow_bypass_permissions: bool = False
+    allow_bypass_permissions: bool = Field(
+        default=False,
+        description="The **hard ceiling** for the bypassPermissions footgun gate. A "
+        "project can never be spawned with `--permission-mode bypassPermissions` unless "
+        "this is set here in `clauster.yml`. The dashboard's per-session typed-confirm "
+        "is the second layer.",
+    )
 
 
 class ReverseProxyConfig(BaseModel):
     """Trusted-reverse-proxy auth: user header, HMAC-signed secret, and IP allowlist."""
 
-    enabled: bool = False
-    user_header: str = "Remote-User"
-    shared_secret_header: str = "X-Proxy-Auth"  # noqa: S105 — HTTP header name, not a secret
-    trusted_ips: list[str] = Field(default_factory=list)
-    shared_secret: str | None = None  # HMAC key the proxy signs X-Proxy-Auth with
-    hmac_window_seconds: int = Field(default=60, ge=0)  # clock skew / replay window
+    enabled: bool = Field(default=False, description="Enable trusted-reverse-proxy auth.")
+    user_header: str = Field(
+        default="Remote-User", description="Header carrying the authenticated user."
+    )
+    shared_secret_header: str = Field(
+        default="X-Proxy-Auth",  # noqa: S105 — HTTP header name, not a secret
+        description="Header carrying the HMAC signature.",
+    )
+    trusted_ips: list[str] = Field(
+        default_factory=list, description="Peer-IP allowlist for the proxy."
+    )
+    shared_secret: str | None = Field(
+        default=None, description="HMAC key the proxy signs `X-Proxy-Auth` with."
+    )
+    hmac_window_seconds: int = Field(
+        default=60, ge=0, description="Clock-skew / replay window (≥0)."
+    )
 
 
 class AuthConfig(BaseModel):
     """v0.2 auth foundation. Parsed (and ignored) since v0.1; enforced when enabled."""
 
-    enabled: bool = False
-    password_required: bool = False
-    password_hash: str | None = None  # argon2id hash; see `clauster hash-password`
-    reverse_proxy: ReverseProxyConfig = Field(default_factory=ReverseProxyConfig)
-    allow_unauthenticated_network: bool = False
-    # auto = Secure only over https (or trusted-proxy X-Forwarded-Proto=https)
-    cookie_secure: Literal["auto", "always", "never"] = "auto"
-    session_max_age_seconds: int = Field(default=604800, ge=1)  # 7 days
+    enabled: bool = Field(
+        default=False,
+        description="**Master auth switch.** Must be `true` for password / "
+        "reverse-proxy auth to actually gate requests.",
+    )
+    password_required: bool = Field(
+        default=False, description="Require password login. Needs `password_hash`."
+    )
+    password_hash: str | None = Field(
+        default=None, description="argon2id hash from `clauster hash-password`."
+    )
+    reverse_proxy: ReverseProxyConfig = Field(
+        default_factory=ReverseProxyConfig,
+        description="Trusted-reverse-proxy auth settings.",
+    )
+    allow_unauthenticated_network: bool = Field(
+        default=False,
+        description="Explicit opt-out: permit a non-loopback bind **without** enforced "
+        "auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning.",
+    )
+    cookie_secure: Literal["auto", "always", "never"] = Field(
+        default="auto",
+        description="Session-cookie `Secure` flag. `auto` = Secure only over https (or "
+        "a trusted proxy's `X-Forwarded-Proto=https`).",
+    )
+    session_max_age_seconds: int = Field(
+        default=604800, ge=1, description="Session lifetime (≥1; default 7 days)."
+    )
     allowed_origins: list[str] = Field(
-        default_factory=list
-    )  # extra WS/CSRF origins (proxy domain)
+        default_factory=list,
+        description="Extra WebSocket / CSRF origins (e.g. the proxy domain).",
+    )
 
 
 def _missing_enforced_auth(host: str, auth: AuthConfig) -> bool:
@@ -150,12 +202,24 @@ class CloneConfig(BaseModel):
     defaults are strict.
     """
 
-    enabled: bool = True
-    allowed_schemes: list[str] = Field(default_factory=lambda: ["https", "ssh"])
-    allow_private_hosts: bool = False  # block private/LAN IPs by default (SSRF)
-    allowed_private_cidrs: list[str] = Field(default_factory=list)  # targeted LAN opt-in
-    timeout_seconds: int = Field(default=300, ge=1)
-    max_mb: int = Field(default=2048, ge=0)  # post-clone size cap; 0 = unlimited
+    enabled: bool = Field(default=True, description="Allow cloning/creating projects.")
+    allowed_schemes: list[str] = Field(
+        default_factory=lambda: ["https", "ssh"],
+        description="Permitted clone URL schemes.",
+    )
+    allow_private_hosts: bool = Field(
+        default=False,
+        description="Block private/LAN IP targets by default (SSRF guard).",
+    )
+    allowed_private_cidrs: list[str] = Field(
+        default_factory=list,
+        description="Targeted LAN opt-in. Each entry is validated as a CIDR at load (a "
+        "malformed entry fails fast rather than silently never matching).",
+    )
+    timeout_seconds: int = Field(default=300, ge=1, description="Clone timeout (≥1).")
+    max_mb: int = Field(
+        default=2048, ge=0, description="Post-clone size cap (≥0; `0` = unlimited)."
+    )
 
     @field_validator("allowed_private_cidrs")
     @classmethod
@@ -175,16 +239,31 @@ class ReaperConfig(BaseModel):
     browser. Off by default — opt in explicitly.
     """
 
-    ui_enabled: bool = False
+    ui_enabled: bool = Field(
+        default=False,
+        description="Expose the ghost-environment reaper in the **dashboard**. The CLI "
+        "(`clauster reap-environments`) is always available; this gates only the "
+        "destructive browser surface.",
+    )
 
 
 class LogsConfig(BaseModel):
     """Bridge-log rotation sizing and WebSocket redaction/ANSI-stripping toggles."""
 
-    bridge_log_max_size_mb: int = Field(default=10, ge=1)
-    keep_rotated: int = Field(default=5, ge=0)
-    redact_session_url: bool = False  # false=hybrid (verbatim disk, redacted WS)
-    strip_ansi_in_stream: bool = True
+    bridge_log_max_size_mb: int = Field(
+        default=10, ge=1, description="Per-bridge debug-log rotation size (≥1 MB)."
+    )
+    keep_rotated: int = Field(
+        default=5, ge=0, description="Number of rotated log files to keep (≥0)."
+    )
+    redact_session_url: bool = Field(
+        default=False,
+        description="`false` = hybrid (verbatim on disk, redacted over the WebSocket). "
+        "`true` redacts the session URL on disk too.",
+    )
+    strip_ansi_in_stream: bool = Field(
+        default=True, description="Strip ANSI escape sequences from the streamed log."
+    )
 
 
 class UsageConfig(BaseModel):
@@ -216,12 +295,39 @@ class UsageConfig(BaseModel):
     ``mode: "off"`` (its only historical effect was hiding the badge).
     """
 
-    mode: Literal["cost", "tokens", "off"] = "cost"
-    currency: str = "USD"
-    currency_symbol: str | None = None
-    fx_rate: float = Field(default=1.0, gt=0)
-    token_total_includes_cache: bool = True
-    show_cost: bool = True  # deprecated alias for mode != "off"
+    mode: Literal["cost", "tokens", "off"] = Field(
+        default="cost",
+        description="What the badge shows. `cost` = approximate cost (USD price table × "
+        "`fx_rate`, prefixed with `currency_symbol`); `tokens` = total token count only; "
+        "`off` = hide the badge and skip the `/api/projects/{name}/usage` fetch. "
+        "(`mode: off` may be written unquoted — YAML's boolean `off` is coerced back.)",
+    )
+    currency: str = Field(
+        default="USD",
+        description="Currency code shown in the tooltip (normalized to upper-case).",
+    )
+    currency_symbol: str | None = Field(
+        default=None,
+        description="Symbol rendered in `cost` mode. Defaults to `$` when `currency` is "
+        "`USD`, otherwise the currency code.",
+    )
+    fx_rate: float = Field(
+        default=1.0,
+        gt=0,
+        description="**Static, user-supplied** multiplier applied to the USD cost before "
+        "display (>0; no live FX lookup). Leave `1.0` for USD; a non-USD `currency` left "
+        "at `1.0` logs a warning (it would label a USD figure with a foreign symbol).",
+    )
+    token_total_includes_cache: bool = Field(
+        default=True,
+        description="Whether cache (creation + read) tokens count toward the displayed "
+        "token total; they usually dominate, so set `false` for a leaner figure. The "
+        "per-category breakdown is always in the tooltip.",
+    )
+    show_cost: bool = Field(
+        default=True,
+        description="**Deprecated** back-compat alias: `show_cost: false` forces `mode: off`.",
+    )
 
     @field_validator("currency", mode="before")
     @classmethod
@@ -281,11 +387,29 @@ class MetricsConfig(BaseModel):
     (decoupled from the status poll).
     """
 
-    enabled: bool = True
-    normalize_cpu: bool = False
-    show_disk: bool = True
-    sample_interval_seconds: float = Field(default=0.15, gt=0, le=2.0)
-    poll_seconds: float = Field(default=4.0, ge=1.0)
+    enabled: bool = Field(
+        default=True,
+        description="Show the metrics line. When `false`, hides it **and** skips both "
+        "the `/api/projects/{name}/metrics` fetch and the server-side sample.",
+    )
+    normalize_cpu: bool = Field(
+        default=False,
+        description="Divide summed CPU% by the host core count (0–100% of the machine) "
+        "instead of the raw across-cores figure (which can exceed 100%).",
+    )
+    show_disk: bool = Field(default=True, description="Toggle the disk read/write rate portion.")
+    sample_interval_seconds: float = Field(
+        default=0.15,
+        gt=0,
+        le=2.0,
+        description="Two-snapshot sampling window (>0, ≤2.0). Longer is steadier but "
+        "each fetch blocks a worker thread for that long.",
+    )
+    poll_seconds: float = Field(
+        default=4.0,
+        ge=1.0,
+        description="Dashboard metrics refresh cadence (≥1.0), decoupled from the status poll.",
+    )
 
 
 class ObservabilityConfig(BaseModel):
@@ -298,28 +422,56 @@ class ObservabilityConfig(BaseModel):
     scraper must satisfy whatever auth the deployment enforces (see the PR note).
     """
 
-    prometheus_enabled: bool = False
+    prometheus_enabled: bool = Field(
+        default=False,
+        description="Gate a text-format `/metrics` endpoint (build info, bridge counts "
+        "by status, project count). Off by default; when off, `/metrics` returns 404. "
+        "The endpoint stays **behind** the auth guard.",
+    )
 
 
 class ClausterConfig(BaseModel):
     """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
 
-    schema_version: int = SCHEMA_VERSION
-    projects_root: Path
-    host: str = "127.0.0.1"
-    port: int = Field(default=7621, ge=1, le=65535)
-    state_dir: Path = Path("~/.clauster")
-    root_path: str = ""
-    log_format: Literal["text", "json"] = "text"
-    # Optional label for THIS instance. When set, the process retitles itself
-    # `clauster[<instance_name>]` (via setproctitle) so co-resident instances are
-    # distinguishable in ps/pgrep — e.g. a dev instance vs the prod systemd service.
-    # Cosmetic only (no behavioural effect); also settable via CLAUSTER_INSTANCE_NAME.
-    instance_name: str | None = Field(default=None, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
+    schema_version: int = Field(
+        default=SCHEMA_VERSION, description="Config schema version (additive-only)."
+    )
+    projects_root: Path = Field(
+        description="Directory whose children become project cards. Must exist, be a "
+        "directory, and be readable — validated at load. `~` is expanded.",
+    )
+    host: str = Field(
+        default="127.0.0.1",
+        description="Bind address. A non-loopback host requires enforced auth (see Networking).",
+    )
+    port: int = Field(default=7621, ge=1, le=65535, description="Bind port (1–65535).")
+    state_dir: Path = Field(
+        default=Path("~/.clauster"),
+        description="Where `state.json` and runtime state live. `~` is expanded.",
+    )
+    root_path: str = Field(
+        default="",
+        description="ASGI `root_path` for serving under a reverse-proxy sub-path.",
+    )
+    log_format: Literal["text", "json"] = Field(
+        default="text", description="Application log format."
+    )
+    instance_name: str | None = Field(
+        default=None,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9_.-]+$",
+        description="Optional label (≤32 chars, `[A-Za-z0-9_.-]`). When set, retitles "
+        "the process to `clauster[<name>]` so co-resident instances are distinguishable "
+        "in `ps`/`pgrep`. Cosmetic only.",
+    )
 
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     instance_defaults: InstanceDefaults = Field(default_factory=InstanceDefaults)
-    projects: dict[str, ProjectConfig] = Field(default_factory=dict)
+    projects: dict[str, ProjectConfig] = Field(
+        default_factory=dict,
+        description="Per-project settings, keyed by project name (additive-only; "
+        "unknown keys ignored). See the `projects` section.",
+    )
     auth: AuthConfig = Field(default_factory=AuthConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
     clone: CloneConfig = Field(default_factory=CloneConfig)
