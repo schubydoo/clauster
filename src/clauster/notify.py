@@ -43,15 +43,22 @@ class Notifier:
                 "(pip install 'clauster[notify]'). Notifications disabled."
             )
             return
-        ap = apprise.Apprise()
-        accepted = 0
-        for url in self._config.urls:
-            # ap.add returns False on a malformed/unsupported URL. Don't log the URL
-            # itself — it can carry a token/secret.
-            if ap.add(url):
-                accepted += 1
-            else:
-                _log.warning("notifications: Apprise rejected a url (redacted); skipping it")
+        try:
+            ap = apprise.Apprise()
+            accepted = 0
+            for url in self._config.urls:
+                # ap.add returns False on a malformed/unsupported URL. Don't log the URL
+                # itself — it can carry a token/secret.
+                if ap.add(url):
+                    accepted += 1
+                else:
+                    _log.warning("notifications: Apprise rejected a url (redacted); skipping it")
+        except Exception:  # noqa: BLE001 - construction must never raise into bridge startup
+            # Honours the "Construction never raises" contract: any unexpected Apprise
+            # error degrades to inactive (self._apprise stays None) instead of taking the
+            # bridge down at startup.
+            _log.exception("notifications: building the Apprise client failed; disabling")
+            return
         if accepted:
             self._apprise = ap
         else:

@@ -88,6 +88,23 @@ async def test_anotify_noop_when_inactive():
     await Notifier(NotificationsConfig(enabled=False)).anotify("t", "b")
 
 
+def test_build_degrades_when_apprise_raises(monkeypatch, caplog):
+    # Fail-closed construction: a non-ImportError from Apprise (a future API change, an
+    # internal error) must degrade to inactive, not propagate out of __init__ into bridge
+    # startup — the module's "Construction never raises" contract.
+    class _BoomApprise:
+        def __init__(self) -> None:
+            raise RuntimeError("apprise blew up")
+
+    class _BoomModule:
+        Apprise = _BoomApprise
+
+    monkeypatch.setitem(sys.modules, "apprise", _BoomModule())
+    n = Notifier(NotificationsConfig(enabled=True, urls=["slack://x"]))  # must not raise
+    assert n.active is False
+    assert any("building the Apprise client failed" in r.message for r in caplog.records)
+
+
 def test_send_is_noop_without_apprise():
     # _send guards on its own (defence-in-depth, not relying on anotify's check): a
     # direct call with no apprise is a safe no-op and never raises — the fail-closed
