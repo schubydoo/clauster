@@ -979,6 +979,11 @@ class SessionRunner:
                 sidecar = self._sidecar_path_for(log_path)
                 info = await asyncio.to_thread(self._read_sidecar, sidecar)
                 self._apply_pty_info(instance, info or {}, proc)
+                # Keep the at-rest mirror current during pty startup too: poll_once
+                # can't yet (bridge_pid is still unknown until the sidecar reveals it),
+                # so without this the public log would stale out after _spawn_pty's
+                # one-time flush if the bridge logs more before registering.
+                await asyncio.to_thread(self._flush_redacted_mirror, instance)
                 if instance.status is not InstanceStatus.STARTING:
                     await self._persist()
                     return
