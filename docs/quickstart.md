@@ -7,10 +7,12 @@ LAN / remote access, add auth afterwards — see [Networking](networking.md).
 ## 1. Prerequisites
 
 - **Python 3.11+**.
-- The **`claude` CLI on your `PATH`**, logged in (or `ANTHROPIC_API_KEY` set).
-  Clauster *spawns* `claude` — it doesn't vendor it — and a spawned bridge
-  inherits your `claude` login. Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview)
-  separately and run a normal `claude` session once to confirm it's signed in.
+- The **`claude` CLI on your `PATH`**, authenticated — either logged in via
+  `claude`'s interactive login **or** with `ANTHROPIC_API_KEY` set in the
+  environment (either satisfies the check). Clauster *spawns* `claude` — it
+  doesn't vendor it — and a spawned bridge inherits that authentication. Install
+  [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview)
+  separately; `clauster doctor` (step 4) confirms it's found and authenticated.
 - A **directory that holds your projects** — each child directory becomes a card.
 
 ```sh
