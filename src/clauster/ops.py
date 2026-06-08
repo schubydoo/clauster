@@ -136,6 +136,11 @@ def run_doctor(
     if fresh is not None:
         checks.append(fresh)
 
+    # systemd cgroup-reap guard (only when an installed Clauster unit is loaded)
+    killmode = _check_systemd_killmode()
+    if killmode is not None:
+        checks.append(killmode)
+
     return checks, all(c.status != FAIL for c in checks)
 
 
@@ -208,6 +213,50 @@ def _check_repo_freshness(repo: Path | None = None) -> Check | None:
         )
     suffix = f" (+{ahead} local)" if ahead else ""
     return Check("version", OK, f"up to date with upstream{suffix}")
+
+
+def _check_systemd_killmode(unit: str = "clauster.service") -> Check | None:
+    """Warn when an installed systemd unit would reap live pty bridges on restart.
+
+    A pty (true-resume) bridge is a detached child living in Clauster's service
+    cgroup. With systemd's default ``KillMode=control-group``, a ``systemctl
+    restart``/``stop`` kills the whole cgroup — taking live bridges down with the
+    service, even though Clauster's own shutdown leaves them running and
+    :meth:`SessionRunner.rediscover` would otherwise reattach them on startup.
+    ``KillMode=process`` signals only the main process, so the bridges survive.
+
+    Asks systemd directly (``systemctl show``) so the answer reflects the loaded
+    unit, not a guessed file path. Returns None when there's nothing to advise on:
+    no ``systemctl`` (non-systemd host — macOS/Windows/Docker) or no loaded Clauster
+    unit under the conventional ``clauster.service`` name.
+    """
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return None  # not a systemd host — nothing to advise
+    try:
+        out = subprocess.run(
+            [systemctl, "show", unit, "--property=LoadState,KillMode"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None  # systemctl present but unusable (no manager, container) — stay quiet
+    if out.returncode != 0:
+        return None
+    props = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
+    if props.get("LoadState") != "loaded":
+        return None  # no installed Clauster unit to advise on
+    kill_mode = props.get("KillMode", "control-group")
+    if kill_mode in ("process", "none"):
+        return Check("systemd", OK, f"{unit}: KillMode={kill_mode} (bridges survive a restart)")
+    return Check(
+        "systemd",
+        WARN,
+        f"{unit}: KillMode={kill_mode} reaps live pty bridges on restart — set "
+        "KillMode=process (regenerate via `clauster install-service systemd`, then "
+        "reinstall + daemon-reload) so true-resume bridges survive",
+    )
 
 
 def claude_cli_json() -> Path:
@@ -524,7 +573,12 @@ def render_service_unit(
             f"WorkingDirectory={wd}\n"
             f"Environment=CLAUSTER_CONFIG={cfg}\n"
             "Restart=on-failure\n"
-            "RestartSec=5\n\n"
+            "RestartSec=5\n"
+            "# Signal only the main process on stop/restart. Detached pty (true-resume)\n"
+            "# bridges live in this service's cgroup; the default KillMode=control-group\n"
+            "# would reap them on every restart. KillMode=process leaves them running so\n"
+            "# Clauster reattaches them on startup (see runner.rediscover).\n"
+            "KillMode=process\n\n"
             "[Install]\n"
             "WantedBy=multi-user.target\n"
         )
