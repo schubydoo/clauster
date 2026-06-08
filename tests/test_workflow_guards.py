@@ -40,6 +40,11 @@ def _job_ifs(doc):
     return [job["if"] for job in doc.get("jobs", {}).values() if "if" in job]
 
 
+def _jobs_without_if(doc):
+    """Return job names with no `if:` — they run unconditionally, bypassing the gate."""
+    return [name for name, job in doc.get("jobs", {}).items() if "if" not in job]
+
+
 # ----- detectors (return the offending items; empty/False == clean) ----------
 
 
@@ -108,7 +113,12 @@ def test_actions_are_sha_pinned(name):
 
 @pytest.mark.parametrize("name", CLAUDE_WORKFLOWS)
 def test_every_job_has_author_association_gate(name):
-    job_ifs = _job_ifs(_doc(name))
+    doc = _doc(name)
+    # An if-less job runs unconditionally — it never reaches _gate_ok, so check first
+    # that EVERY job carries an `if:` before validating the gates themselves.
+    missing = _jobs_without_if(doc)
+    assert not missing, f"{name}: ungated jobs {missing} — every job must have an `if:` gate"
+    job_ifs = _job_ifs(doc)
     assert job_ifs, f"{name}: no gated job — a claude workflow must gate its job `if:`"
     assert all(_gate_ok(j) for j in job_ifs)
 
@@ -141,6 +151,13 @@ def test_detector_passes_a_sha_pinned_action():
     sha = "0" * 40
     doc = {"jobs": {"j": {"steps": [{"uses": f"actions/checkout@{sha}"}]}}}
     assert _unpinned_uses(doc) == []
+
+
+def test_detector_flags_job_without_if():
+    # A job with no `if:` runs unconditionally (ungated) and would never reach _gate_ok —
+    # the fail-open hole. _jobs_without_if must surface it.
+    doc = {"jobs": {"gated": {"if": "x"}, "ungated": {"steps": []}}}
+    assert _jobs_without_if(doc) == ["ungated"]
 
 
 def test_detector_rejects_missing_association_gate():
