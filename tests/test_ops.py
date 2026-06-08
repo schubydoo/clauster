@@ -18,6 +18,7 @@ from clauster.ops import (
     _check_auth,
     _check_claude_login,
     _check_repo_freshness,
+    _check_systemd_killmode,
     _version_ge,
     make_backup,
     migrate_state,
@@ -143,6 +144,66 @@ def test_repo_freshness_no_upstream_ok(tmp_path, monkeypatch):
     _fake_git(monkeypatch, returncode=128, stdout="")  # @{upstream} unresolvable
     c = _check_repo_freshness(tmp_path)
     assert c is not None and c.status == OK and "no upstream" in c.detail
+
+
+# ----- _check_systemd_killmode ------------------------------------------
+
+
+def _fake_systemctl(monkeypatch, *, present=True, returncode=0, stdout=""):
+    import subprocess as sp
+
+    monkeypatch.setattr(
+        "clauster.ops.shutil.which", lambda n: "/bin/systemctl" if present else None
+    )
+
+    def fake_run(*a, **k):
+        return sp.CompletedProcess(a[0] if a else [], returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("clauster.ops.subprocess.run", fake_run)
+
+
+def test_killmode_no_systemctl_returns_none(monkeypatch):
+    _fake_systemctl(monkeypatch, present=False)
+    assert _check_systemd_killmode() is None
+
+
+def test_killmode_unit_not_loaded_returns_none(monkeypatch):
+    _fake_systemctl(monkeypatch, stdout="LoadState=not-found\nKillMode=control-group\n")
+    assert _check_systemd_killmode() is None
+
+
+def test_killmode_query_failure_returns_none(monkeypatch):
+    _fake_systemctl(monkeypatch, returncode=1, stdout="")
+    assert _check_systemd_killmode() is None
+
+
+def test_killmode_process_ok(monkeypatch):
+    _fake_systemctl(monkeypatch, stdout="LoadState=loaded\nKillMode=process\n")
+    c = _check_systemd_killmode()
+    assert c is not None and c.status == OK and "process" in c.detail
+
+
+def test_killmode_none_ok(monkeypatch):
+    _fake_systemctl(monkeypatch, stdout="LoadState=loaded\nKillMode=none\n")
+    c = _check_systemd_killmode()
+    assert c is not None and c.status == OK
+
+
+def test_killmode_control_group_warns(monkeypatch):
+    _fake_systemctl(monkeypatch, stdout="LoadState=loaded\nKillMode=control-group\n")
+    c = _check_systemd_killmode()
+    assert c is not None and c.status == WARN
+    assert "KillMode=process" in c.detail and "pty" in c.detail
+
+
+def test_killmode_subprocess_error_returns_none(monkeypatch):
+    monkeypatch.setattr("clauster.ops.shutil.which", lambda n: "/bin/systemctl")
+
+    def boom(*a, **k):
+        raise OSError("no systemd")
+
+    monkeypatch.setattr("clauster.ops.subprocess.run", boom)
+    assert _check_systemd_killmode() is None
 
 
 def test_doctor_state_dir_not_writable_fails(write_config, tmp_path):
@@ -477,6 +538,9 @@ def test_service_systemd():
     )
     assert "[Service]" in unit and "ExecStart=/usr/bin/python3 -m clauster run" in unit
     assert "User=clauster" in unit and "Restart=on-failure" in unit
+    # KillMode=process so detached pty (true-resume) bridges survive a restart
+    # instead of being reaped with the service cgroup (the default control-group).
+    assert "KillMode=process" in unit
 
 
 def test_service_launchd():

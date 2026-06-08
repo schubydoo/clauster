@@ -174,18 +174,26 @@ WorkingDirectory=/etc/clauster
 Environment=CLAUSTER_CONFIG=/etc/clauster/clauster.yml
 Restart=on-failure
 RestartSec=5
+# Leave detached pty (true-resume) bridges running across a restart (see below).
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-!!! warning "A restart stops running bridges — `pty` sessions do not survive it"
-    Clauster's spawned bridges run inside the service's cgroup, so the default
-    `KillMode=control-group` means a `systemctl restart` / `stop` also stops every
-    running bridge — including `pty` true-resume sessions (recover one afterwards
-    with `claude --continue`). If you want bridges to outlive a Clauster restart,
-    add `KillMode=process` to `[Service]` so systemd signals only the Clauster
-    process and leaves the detached bridges running.
+!!! note "`KillMode=process` keeps bridges alive across a restart"
+    Clauster's spawned bridges run inside the service's cgroup, so systemd's
+    default `KillMode=control-group` would reap every running bridge — including
+    `pty` true-resume sessions — on a `systemctl restart` / `stop`. The generated
+    unit sets **`KillMode=process`** so systemd signals only the Clauster process;
+    the detached bridges keep running and Clauster reattaches them on startup. A
+    deliberate `stop` therefore leaves bridges running (orphaned until the next
+    start re-adopts them) — that's intentional, so an upgrade restart doesn't drop
+    live coding sessions. Already running an **older unit** without it? Regenerate
+    (`clauster install-service systemd …`), reinstall, and `sudo systemctl
+    daemon-reload`; `clauster doctor` warns when the loaded `clauster.service`
+    still uses a reaping `KillMode`. (A bridge truly lost to a crash or reboot is
+    still recoverable with `claude --continue`.)
 
 !!! note "Auth + sandboxing"
     A non-loopback bind **refuses to start without enforced auth** — set the
