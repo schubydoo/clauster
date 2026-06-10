@@ -15,7 +15,6 @@ node_modules/
 
 # --- Local tooling (not part of the project) ---
 .claude/
-.logfire/
 .vscode/settings.json
 CLAUDE.md
 AGENTS.md
