@@ -31,6 +31,10 @@ PermissionMode = Literal["default", "plan", "acceptEdits", "auto", "dontAsk", "b
 # "pty" = the `claude --remote-control` flag form under a PTY keeper, which is
 # single-session but genuinely restores prior context on restart (true resume).
 ResumeMode = Literal["standard", "pty"]
+# Orthogonal to ResumeMode: which substrate hosts a managed session. "remote-control"
+# is the bridge (standard/pty modes above); "hosted" is the claustrum-daemon headless
+# stream-json channel (CL-4). ResumeMode applies only to the remote-control channel.
+SessionChannel = Literal["remote-control", "hosted"]
 SPAWN_MODES: tuple[str, ...] = ("same-dir", "worktree", "session")
 RESUME_MODES: tuple[str, ...] = ("standard", "pty")
 PERMISSION_MODES: tuple[str, ...] = (
