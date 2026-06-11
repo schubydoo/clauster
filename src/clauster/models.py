@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, computed_field
 
-from .config import PermissionMode, ResumeMode, SpawnMode
+from .config import PermissionMode, ResumeMode, SessionChannel, SpawnMode
 
 
 class InstanceStatus(StrEnum):
@@ -78,6 +78,20 @@ class RemoteControlInstance(BaseModel):
     # Tail of the bridge's stdout/stderr, captured when a spawn fails (ERROR/CRASHED)
     # so the UI can show *why* instead of a bare "Failed to start". None on success.
     error_detail: str | None = None
+
+    # --- hosted channel (CL-4) ------------------------------------------------
+    # Orthogonal axis to resume_mode: "hosted" sessions run a headless stream-json
+    # `claude` on the claustrum daemon's pipes rather than a remote-control bridge.
+    # All fields below are nullable/defaulted so existing remote-control state.json
+    # rows load unchanged (additive-only schema). They are populated only when
+    # channel == "hosted"; CL-4b wires spawn dispatch, persistence, and the UI.
+    channel: SessionChannel = "remote-control"
+    claustrum_process_id: str | None = None  # client-chosen ULID for the daemon spawn
+    agent_pid: int | None = None  # the agent's OS pid (claustrum CT-1 opt-in; None pre-CT-1)
+    agent_proc_start: float | None = None  # CT-1 startTime; PID-reuse defense parity
+    claude_session_uuid: str | None = None  # RFC 4122 from the init frame; drives --resume
+    daemon_last_seq: int = 0  # highest daemon frame seq seen; reattach cursor across restarts
+    hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
 
     @computed_field  # type: ignore[prop-decorator]
     @property
