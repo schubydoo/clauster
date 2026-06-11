@@ -53,8 +53,9 @@ unknown per-project keys are ignored.
 <!-- END GEN: clauster -->
 
 Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
-`clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications` — each
-documented below (`auth.reverse_proxy` is nested under `auth`).
+`clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications`,
+`claustrum` — each documented below (`auth.reverse_proxy` is nested under
+`auth`).
 
 ## `claude` — binary & bridge spawn (`ClaudeConfig`)
 
@@ -251,6 +252,35 @@ notifications:
 
 See the [Apprise URL list](https://github.com/caronc/apprise/wiki) for supported
 services.
+
+## `claustrum` — hosted live-view channel (`ClaustrumConfig`)
+
+**Experimental / in development.** Off by default. When `enabled`, Clauster
+connect-or-spawns a single `claustrum` daemon per deployment (the maintainer's Go
+`claude-ssh` reimplementation) at startup and surfaces its health under
+`/healthz`. The daemon self-daemonizes, so it survives a Clauster restart and
+Clauster simply reconnects. Fail-closed: an unreachable daemon or a rejected auth
+token is reported in health and never affects the bridge lifecycle.
+
+The socket and a `0600` auth token live under `<state_dir>/claustrum/` (`0700`).
+This is the foundation for the hosted-session channel; user-facing session
+features land in later releases.
+
+<!-- BEGIN GEN: claustrum -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch for the claustrum hosted channel. When true, Clauster connect-or-spawns the daemon at startup. |
+| `binary` | str | `claustrum` | The `claustrum` binary name or path (resolved to an absolute path before spawning). |
+| `socket_path` | str \| null | `null` | Path to the daemon's AF_UNIX socket. Defaults to `<state_dir>/claustrum/daemon.sock`. |
+| `spawn_timeout_seconds` | float | `10.0` | How long (>0) to wait for a freshly spawned daemon to detach and accept its first connection before giving up. |
+| `request_timeout_seconds` | float | `30.0` | Per-request timeout (>0) for RPCs on the daemon connection. |
+<!-- END GEN: claustrum -->
+
+```yaml
+claustrum:
+  enabled: true
+  binary: claustrum
+```
 
 ## Minimal example
 

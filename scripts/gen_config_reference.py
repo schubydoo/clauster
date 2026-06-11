@@ -28,6 +28,7 @@ from clauster.config import (
     AuthConfig,
     ClaudeConfig,
     ClausterConfig,
+    ClaustrumConfig,
     CloneConfig,
     InstanceDefaults,
     LogsConfig,
@@ -58,6 +59,7 @@ SECTIONS: list[tuple[str, type[BaseModel]]] = [
     ("metrics", MetricsConfig),
     ("observability", ObservabilityConfig),
     ("notifications", NotificationsConfig),
+    ("claustrum", ClaustrumConfig),
 ]
 
 

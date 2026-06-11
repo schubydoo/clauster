@@ -28,6 +28,9 @@ Key modules under `src/clauster/`:
 | `metrics.py` | Per-bridge resource sampling (CPU / memory / disk). |
 | `usage.py` | Token + approximate-cost rollup from session transcripts. |
 | `environments.py` | Server-side bridge-environment listing + reaper logic. |
+| `supervisor.py` | Read / dispatch / stop Claude Code agent-view background sessions (`claude --bg`); backs the background-agents panel + `/api/agents`. |
+| `claustrum_client.py` | Async unix-socket NDJSON JSON-RPC client for the claustrum daemon (hosted live-view channel; experimental). |
+| `claustrum_daemon.py` | Connect-or-spawn lifecycle + auth-token management + health for the per-deployment claustrum daemon (experimental). |
 | `hooks/resume_recap.py` | The `SessionStart` hook that recaps the prior conversation into a restarted bridge. |
 
 ## The two bridge modes
