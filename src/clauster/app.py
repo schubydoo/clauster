@@ -26,6 +26,7 @@ from . import (
     ops,
     procutil,
     prometheus,
+    supervisor,
     usage,
 )
 from .claude_md import (
@@ -40,6 +41,7 @@ from .clone_jobs import CloneJob, CloneJobManager
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
 from .models import (
+    BackgroundJob,
     ClaudeMdDoc,
     InstanceStatus,
     Project,
@@ -688,6 +690,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_sessions() -> dict[str, list[WorkingSession]]:
         """External (unmanaged) working sessions grouped by project name (bug #4)."""
         return runner.external_sessions_by_project()
+
+    @app.get("/api/agents")
+    async def api_agents() -> list[BackgroundJob]:
+        """Agent-view background sessions (`claude --bg`), observed read-only.
+
+        Sourced from the supervisor's docs-acknowledged on-disk state
+        (``jobs/<id>/state.json`` + ``daemon/roster.json``) — no subprocess, no
+        daemon protocol. Empty list when agent view is unused. Auth-gated by the
+        guard middleware like every other ``/api/*`` route.
+        """
+        return await asyncio.to_thread(supervisor.list_background_jobs)
 
     async def _spawn_or_http(coro: Awaitable[RemoteControlInstance]) -> RemoteControlInstance:
         """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.

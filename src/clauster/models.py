@@ -155,3 +155,34 @@ class BridgePointer(BaseModel):
     proc_start: str = Field(alias="procStart")  # Linux jiffies, as a string
 
     model_config = {"populate_by_name": True}
+
+
+class BackgroundJob(BaseModel):
+    """One agent-view background session (`claude --bg`), observed — not managed.
+
+    Sourced from ``~/.claude/jobs/<id>/state.json`` joined with
+    ``~/.claude/daemon/roster.json`` — the supervisor's on-disk surface, listed
+    in the agent-view docs (Claude Code 2.1.139+, research preview). The shape
+    is Anthropic-controlled; ``clauster.supervisor`` maps it tolerantly and
+    redacts every free-text field before it gets here. ``worker_pid`` /
+    ``worker_alive`` are Clauster-derived: a roster pid counts only after the
+    pid+procStart liveness check (same posture as :class:`BridgePointer`).
+    """
+
+    id: str  # the supervisor's short id (jobs/<id>/ dir name), e.g. "3c509237"
+    state: str = ""  # working/blocked/done/failed/stopped ("" if absent)
+    detail: str = ""  # human-readable progress line, redacted
+    tempo: str = ""  # active/blocked/idle ("" if absent)
+    needs: str | None = None  # what the session is waiting on, redacted
+    result: str | None = None  # output.result final text, redacted + truncated
+    intent: str = ""  # the original dispatch prompt, redacted
+    name: str | None = None  # display name (often supervisor auto-named), redacted
+    cwd: Path | None = None
+    session_id: str | None = None  # local RFC-4122 uuid — the `--resume` handle
+    bridge_session_id: str | None = None  # cse_… when --rc registered the cloud door
+    transcript_path: Path | None = None  # linkScanPath: the session's .jsonl
+    cli_version: str = ""
+    created_at: str = ""  # ISO-8601 strings, kept verbatim
+    updated_at: str = ""
+    worker_pid: int | None = None  # set only when worker_alive
+    worker_alive: bool = False
