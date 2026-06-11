@@ -69,7 +69,7 @@ def test_dashboard_has_bg_agent_dispatch_and_stop_controls(write_config):
     page = _client(write_config).get("/").text
     assert "New background agent" in page  # the always-visible launcher
     assert "dispatchAgent" in page and "stopAgent" in page
-    assert "agentDispatchOpen" in page and "agentForm" in page
+    assert "agentDispatchOpen" in page and "agentForm" in page and "agentStopping" in page
     assert "/api/agents" in page
 
 

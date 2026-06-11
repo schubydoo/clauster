@@ -201,8 +201,8 @@
           <div class="card-body border-bottom" x-show="agentDispatchOpen" x-cloak>
             <div class="row g-2 align-items-end">
               <div class="col-auto">
-                <label class="form-label small mb-1">Project</label>
-                <select class="form-select" x-model="agentForm.project">
+                <label for="agent-dispatch-project" class="form-label small mb-1">Project</label>
+                <select id="agent-dispatch-project" class="form-select" x-model="agentForm.project">
                   <option value="">Choose…</option>
                   <template x-for="n in PROJECT_NAMES" :key="n">
                     <option :value="n" x-text="n"></option>
@@ -210,8 +210,8 @@
                 </select>
               </div>
               <div class="col">
-                <label class="form-label small mb-1">Prompt <span class="text-secondary">(optional)</span></label>
-                <input class="form-control" x-model="agentForm.prompt"
+                <label for="agent-dispatch-prompt" class="form-label small mb-1">Prompt <span class="text-secondary">(optional)</span></label>
+                <input id="agent-dispatch-prompt" class="form-control" x-model="agentForm.prompt"
                        placeholder="Initial instruction for the session…"
                        @keydown.enter="dispatchAgent()">
               </div>
