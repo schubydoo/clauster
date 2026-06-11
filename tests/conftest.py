@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+import tempfile
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import pytest
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# Make importable fixture modules (e.g. fake_claustrum) reachable by bare name.
+if str(FIXTURES) not in sys.path:
+    sys.path.insert(0, str(FIXTURES))
 
 # Windows CreateProcess can't launch the extensionless Python stubs, so on Windows
 # the fixtures expose a same-named `.cmd` wrapper that shells out to `python`.
@@ -51,6 +58,33 @@ FAKE_CLAUDE = FIXTURES / "fake_claude" / f"claude{WIN_STUB_SUFFIX}"
 def fake_claude() -> Path:
     """Absolute path to the parameterizable fake `claude` binary."""
     return FAKE_CLAUDE
+
+
+@pytest.fixture
+async def fake_claustrum() -> AsyncIterator[Callable[..., Awaitable]]:
+    """Factory yielding started :class:`FakeClaustrum` daemons, all stopped on teardown.
+
+    Uses a short ``mkdtemp`` socket dir rather than ``tmp_path`` so the ``AF_UNIX``
+    path stays under the ~108-char kernel limit.
+    """
+    from fake_claustrum import FakeClaustrum
+
+    started: list[FakeClaustrum] = []
+    sock_dir = Path(tempfile.mkdtemp(prefix="fclaustrum-"))
+
+    async def _make(*, token: str = "tok", **kwargs) -> FakeClaustrum:
+        sock = str(sock_dir / f"d{len(started)}.sock")
+        fake = FakeClaustrum(sock, token, **kwargs)
+        await fake.start()
+        started.append(fake)
+        return fake
+
+    try:
+        yield _make
+    finally:
+        for fake in started:
+            await fake.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 @pytest.fixture
