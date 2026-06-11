@@ -61,6 +61,15 @@ notify = [
     # call out to Slack/Discord/Telegram/email/etc.
     "apprise>=1.9",
 ]
+fuzz = [
+    # Run the fuzz/ harnesses locally: `uv pip install '.[fuzz]'` then
+    # `python fuzz/<name>_fuzzer.py -max_total_time=60`. Kept OUT of `dev` on
+    # purpose, and marked linux-only — atheris has no Windows wheels, so an
+    # unmarked dep would break `uv lock` (it resolves cross-platform) and the
+    # Windows/macOS test cells. In CI the OSS-Fuzz base-builder-python image
+    # (ClusterFuzzLite) already provides atheris, so build.sh doesn't need this.
+    "atheris>=3.0.0; sys_platform == 'linux'",
+]
 
 [project.scripts]
 clauster = "clauster.__main__:main"
