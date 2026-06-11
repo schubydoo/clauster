@@ -29,8 +29,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 from .claude_cli import resolve_binary
@@ -323,3 +326,139 @@ def dispatch_background_job(
     if job_id is None:
         raise DispatchError("`claude --bg` exited 0 but printed no job id")
     return job_id
+
+
+# ---------------------------------------------------------------------------
+# Stop (BG-3) — cloud-deregistering teardown of a `claude --bg` session.
+# ---------------------------------------------------------------------------
+
+# Job id shape (== sessionId[:8], `daemonShort`): eight lowercase hex. Validating
+# it also guards the `claude rm <id>` argv against injection.
+_JOB_ID_RE = re.compile(r"[0-9a-f]{8}")
+
+# How long to wait for the SIGINT'd session to actually exit (orderly settle).
+_SETTLE_TIMEOUT = 20.0
+_SETTLE_POLL = 0.5
+# Gap between the two SIGINTs ("double-SIGINT" — the second is a harmless no-op
+# once the first has settled it; belt-and-suspenders for the rare slow case).
+_SIGINT_GAP = 1.5
+
+# `claude rm` soft-fails with this wording when the transient supervisor has
+# idle-exited — the process is already gone, so it's reported, not raised.
+_RM_SOFT_FAIL = "couldn't confirm stopped"
+
+
+class StopError(RuntimeError):
+    """A background-session stop could not complete cleanly (raised fail-closed)."""
+
+
+def valid_job_id(job_id: object) -> bool:
+    """Whether ``job_id`` matches the 8-hex short-id shape (argv-injection guard)."""
+    return isinstance(job_id, str) and _JOB_ID_RE.fullmatch(job_id) is not None
+
+
+def _live_session_pid(job_id: str, workers: dict[str, dict]) -> int | None:
+    """Return the roster pid for ``job_id`` only if it passes the liveness guard.
+
+    None when the job has no roster worker (already settled / supervisor down) OR
+    the pid fails the pid+procStart match — i.e. we never return a pid we would
+    not be safe to signal. Fail-closed: an unvalidated or recycled pid reads as
+    "nothing live to stop", not "signal it anyway".
+    """
+    worker = workers.get(job_id)
+    if not isinstance(worker, dict):
+        return None
+    pid = worker.get("pid")
+    if not worker_alive(pid, worker.get("procStart")):
+        return None
+    return pid if isinstance(pid, int) else None
+
+
+def _await_exit(pid: int, proc_start: object, *, timeout: float) -> bool:
+    """Poll until the validated pid is no longer alive (orderly settle). True if it exited."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not worker_alive(pid, proc_start):
+            return True
+        time.sleep(_SETTLE_POLL)
+    return not worker_alive(pid, proc_start)
+
+
+def stop_background_job(
+    job_id: str,
+    *,
+    binary: str = "claude",
+    roster_json: Path | None = None,
+    settle_timeout: float = _SETTLE_TIMEOUT,
+) -> dict:
+    """Stop a ``claude --bg`` session the cloud-deregistering way, then remove it.
+
+    The clean teardown (empirically verified — probe ``dereg-probe``, 2026-06-11)
+    is a **double-SIGINT to the session process**: the CLI runs an orderly
+    shutdown, logs ``bg settled <id> (done)``, and DEREGISTERS the cloud bridge
+    session. (``claude stop`` SIGKILLs → ``settled (killed)`` → a cloud orphan, so
+    it is deliberately NOT used here.) All steps fail closed:
+
+    1. Resolve the session pid from the roster (``state.json`` carries no pid) and
+       validate it with the pid+procStart liveness check — NEVER signal an
+       unvalidated or recycled pid. No live worker ⇒ already stopped; skip to rm.
+    2. SIGINT twice (idempotent — the second is a no-op once it has exited).
+    3. Await the process actually exiting within ``settle_timeout``; raise
+       :class:`StopError` if it does not. We do NOT escalate to SIGKILL —
+       that would orphan the cloud session; escalation is the operator's call.
+    4. ``claude rm <id>`` to drop the job dir. The transient supervisor may have
+       idle-exited, making rm soft-fail; that is reported (``removed=False``),
+       not raised — the process is already gone.
+
+    Returns ``{"id", "settled": bool, "removed": bool, "detail": str}``.
+    """
+    if not valid_job_id(job_id):
+        raise StopError(f"invalid job id: {job_id!r}")
+    resolved = resolve_binary(binary)  # absolute path, or ClaudeNotFound
+    workers = load_roster_workers(roster_json)
+    pid = _live_session_pid(job_id, workers)
+
+    settled = True
+    if pid is not None:
+        proc_start = workers[job_id].get("procStart")
+        try:
+            os.kill(pid, signal.SIGINT)
+            time.sleep(_SIGINT_GAP)
+            # Re-validate before the second SIGINT: during the gap the first
+            # signal may have settled the session and the kernel may have
+            # recycled its pid to an unrelated process (the live clauster
+            # service, this agent's own bridge). Never signal a recycled pid —
+            # if it already exited/changed, the second SIGINT is unneeded anyway.
+            if worker_alive(pid, proc_start):
+                os.kill(pid, signal.SIGINT)  # second of the double-SIGINT
+        except ProcessLookupError:
+            pass  # exited between checks — that's the goal
+        except OSError as exc:
+            raise StopError(f"could not signal session {job_id} (pid {pid}): {exc}") from exc
+        settled = _await_exit(pid, proc_start, timeout=settle_timeout)
+        if not settled:
+            raise StopError(
+                f"session {job_id} did not settle within {settle_timeout:g}s "
+                "(not force-killing — that would orphan the cloud session)"
+            )
+
+    removed, detail = _remove_job(resolved, job_id)
+    return {"id": job_id, "settled": settled, "removed": removed, "detail": detail}
+
+
+def _remove_job(resolved_binary: str, job_id: str) -> tuple[bool, str]:
+    """Run ``claude rm <id>``; tolerate the supervisor-down soft-fail. (removed, detail)."""
+    try:
+        proc = subprocess.run(
+            [resolved_binary, "rm", job_id], capture_output=True, text=True, timeout=30
+        )
+    except subprocess.TimeoutExpired:
+        return False, "`claude rm` timed out"
+    output = _clean(proc.stdout) or _clean(proc.stderr)
+    if proc.returncode == 0:
+        return True, output
+    # A transient-supervisor-down rm reports the soft-fail wording; the process is
+    # already settled, so surface it without raising (the row clears on next rm).
+    if _RM_SOFT_FAIL in (proc.stdout + proc.stderr).lower():
+        return False, output or _RM_SOFT_FAIL
+    return False, output or f"`claude rm` exit {proc.returncode}"
