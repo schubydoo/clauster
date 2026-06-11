@@ -63,6 +63,16 @@ def test_dashboard_has_readiness_panel(write_config):
     assert "/api/doctor" in resp.text
 
 
+def test_dashboard_has_bg_agent_dispatch_and_stop_controls(write_config):
+    # BG-4: the background-agents panel ships a dispatch form (POST /api/agents) and
+    # a per-row Stop button (DELETE /api/agents/{id}), plus the launcher + handlers.
+    page = _client(write_config).get("/").text
+    assert "New background agent" in page  # the always-visible launcher
+    assert "dispatchAgent" in page and "stopAgent" in page
+    assert "agentDispatchOpen" in page and "agentForm" in page and "agentStopping" in page
+    assert "/api/agents" in page
+
+
 def test_dashboard_has_interrupted_status_logic(write_config):
     # The "interrupted vs stopped" distinction (a bridge that ended without a Stop)
     # is derived client-side from intentional_stop; the helper + state map + the card
