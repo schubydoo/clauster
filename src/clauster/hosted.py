@@ -32,14 +32,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections import deque
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream
+from .models import InstanceStatus, RemoteControlInstance
 from .redact import sanitize_line
 
 logger = logging.getLogger(__name__)
+
+# HostedSession status string → the dashboard's InstanceStatus enum.
+_STATUS_MAP: dict[str, InstanceStatus] = {
+    "starting": InstanceStatus.STARTING,
+    "running": InstanceStatus.RUNNING,
+    "stopped": InstanceStatus.STOPPED,
+    "crashed": InstanceStatus.CRASHED,
+    "error": InstanceStatus.ERROR,
+}
 
 # The observed claude-ssh headless spawn contract (the "minimal mimic": no
 # --plugin-dir/--allowedTools/--settings, no --remote-control — adding
@@ -180,6 +192,11 @@ class HostedSession:
     def pending_requests(self) -> list[_ControlRequest]:
         """Snapshot of parked control requests awaiting a response (CL-5 surfaces these)."""
         return list(self._pending.values())
+
+    @property
+    def last_event_seq(self) -> int:
+        """Highest clauster-side ``event_seq`` emitted so far (the WS replay cursor)."""
+        return self._event_seq
 
     async def start(
         self,
@@ -397,6 +414,104 @@ class HostedSession:
         if self._stream is not None and self._source is not None:
             self._stream.unsubscribe(self._source)
             self._source = None
+
+
+class HostedManager:
+    """Owns the live :class:`HostedSession` objects and their dashboard instances.
+
+    Kept separate from :class:`~clauster.runner.SessionRunner`'s bridge registry,
+    which is project-keyed and bridge-shaped (one bridge per project): hosted
+    sessions are keyed by a client-chosen id and there may be several per project.
+    A deliberate divergence from the design doc's "single registry" — the bridge
+    registry's invariants don't fit, and keeping them apart means hosted plumbing
+    touches no bridge-lifecycle code. The dashboard unions both for display.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty manager (no sessions until :meth:`spawn`)."""
+        self._sessions: dict[str, HostedSession] = {}
+        self._instances: dict[str, RemoteControlInstance] = {}
+
+    def list_instances(self) -> list[RemoteControlInstance]:
+        """Snapshot of every hosted instance, each synced to its live session state."""
+        return [self._synced(inst) for inst in self._instances.values()]
+
+    def get_instance(self, hosted_id: str) -> RemoteControlInstance | None:
+        """Return the hosted instance for ``hosted_id`` (status-synced), or None."""
+        inst = self._instances.get(hosted_id)
+        return self._synced(inst) if inst is not None else None
+
+    def session(self, hosted_id: str) -> HostedSession | None:
+        """Return the live :class:`HostedSession` for ``hosted_id``, or None."""
+        return self._sessions.get(hosted_id)
+
+    async def spawn(
+        self,
+        client: ClaustrumClient,
+        *,
+        project: str,
+        label: str,
+        cwd: str,
+        claude_binary: str,
+        permission_mode: str,
+        resume_uuid: str | None = None,
+    ) -> RemoteControlInstance:
+        """Start a hosted session and register its dashboard instance.
+
+        ``client`` is the connected daemon client (the caller sources it from
+        ``app.state.claustrum_daemon``). Propagates :class:`ClaustrumError` if the
+        spawn RPC fails — the caller maps it to an HTTP error and nothing is
+        registered.
+        """
+        process_id = uuid.uuid4().hex
+        session = HostedSession(client, process_id, claude_binary)
+        await session.start(
+            cwd=cwd, permission_mode=permission_mode, resume_uuid=resume_uuid, want_pid=True
+        )
+        instance = RemoteControlInstance(
+            project=project,
+            label=label,
+            channel="hosted",
+            permission_mode=permission_mode,  # type: ignore[arg-type]
+            claustrum_process_id=process_id,
+            agent_pid=session.agent_pid,
+            agent_proc_start=session.agent_proc_start,
+            status=InstanceStatus.RUNNING,
+            started_at=datetime.now(UTC),
+        )
+        self._sessions[process_id] = session
+        self._instances[process_id] = instance
+        return self._synced(instance)
+
+    async def send(self, hosted_id: str, text: str) -> None:
+        """Route a user turn to a hosted session (404/409 mapping is the caller's)."""
+        await self._require(hosted_id).send_message(text)
+
+    async def stop(self, hosted_id: str) -> RemoteControlInstance:
+        """Stop a hosted session and return its final (status-synced) instance."""
+        await self._require(hosted_id).stop()
+        return self._synced(self._instances[hosted_id])
+
+    async def aclose(self) -> None:
+        """Stop every live hosted session (app shutdown)."""
+        for session in list(self._sessions.values()):
+            await session.stop()
+
+    def _require(self, hosted_id: str) -> HostedSession:
+        session = self._sessions.get(hosted_id)
+        if session is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        return session
+
+    def _synced(self, instance: RemoteControlInstance) -> RemoteControlInstance:
+        """Reflect the live session's status + captured uuid onto its instance row."""
+        session = self._sessions.get(instance.claustrum_process_id or "")
+        if session is not None:
+            instance.status = _STATUS_MAP.get(session.status, instance.status)
+            if session.claude_session_uuid:
+                instance.claude_session_uuid = session.claude_session_uuid
+            instance.daemon_last_seq = max(instance.daemon_last_seq, session.last_event_seq)
+        return instance
 
 
 def _redact_obj(obj: Any) -> Any:

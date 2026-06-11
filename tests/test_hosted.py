@@ -16,7 +16,13 @@ from contextlib import asynccontextmanager
 import pytest
 
 from clauster.claustrum_client import ClaustrumClient
-from clauster.hosted import HostedSession, HostedSessionError, build_hosted_argv
+from clauster.hosted import (
+    HostedManager,
+    HostedSession,
+    HostedSessionError,
+    build_hosted_argv,
+)
+from clauster.models import InstanceStatus
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="claustrum hosted channel is POSIX-only (AF_UNIX)"
@@ -378,3 +384,108 @@ def test_subscriber_overflow_inserts_gap_marker():
     assert sub.queue.get_nowait() == {"type": "gap", "dropped": 2}
     assert sub.queue.get_nowait() == {"event_seq": 5}
     assert sub.dropped == 0
+
+
+# -- HostedManager ---------------------------------------------------------
+
+
+@asynccontextmanager
+async def _manager(fake_factory):
+    fake = await fake_factory()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager()
+        try:
+            yield fake, client, mgr
+        finally:
+            await mgr.aclose()
+
+
+async def _spawn(mgr, client, *, project="proj"):
+    return await mgr.spawn(
+        client,
+        project=project,
+        label=f"hosted:{project}",
+        cwd=f"/tmp/{project}",
+        claude_binary=_BIN,
+        permission_mode="acceptEdits",
+    )
+
+
+async def test_manager_spawn_registers_running_instance(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        assert inst.channel == "hosted"
+        assert inst.status is InstanceStatus.RUNNING
+        pid = inst.claustrum_process_id
+        assert pid and len(fake.spawned) == 1 and fake.spawned[0]["id"] == pid
+        assert mgr.get_instance(pid).project == "proj"
+        assert mgr.session(pid) is not None
+        assert [i.claustrum_process_id for i in mgr.list_instances()] == [pid]
+
+
+async def test_manager_unknown_id_returns_none(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, _client, mgr):
+        assert mgr.get_instance("nope") is None
+        assert mgr.session("nope") is None
+
+
+async def test_manager_send_routes_to_session(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        await mgr.send(inst.claustrum_process_id, "hello")
+        await asyncio.sleep(0.05)
+        frames = _stdin_frames(fake, inst.claustrum_process_id)
+        assert frames == [{"type": "user", "message": {"role": "user", "content": "hello"}}]
+
+
+async def test_manager_send_unknown_raises(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, _client, mgr):
+        with pytest.raises(HostedSessionError):
+            await mgr.send("nope", "hi")
+
+
+async def test_manager_synced_reflects_exit(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit(
+            pid, "stdout", (json.dumps({"type": "system", "session_id": "u-1"}) + "\n").encode()
+        )
+        await fake.emit_exit(pid, 0)
+        await asyncio.sleep(0.05)
+        synced = mgr.get_instance(pid)
+        assert synced.status is InstanceStatus.STOPPED
+        assert synced.claude_session_uuid == "u-1"
+        assert synced.daemon_last_seq > 0
+
+
+async def test_manager_stop_returns_synced_instance(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit_exit(pid, 0)  # exit first so stop() doesn't wait out the grace
+        await asyncio.sleep(0.05)
+        result = await mgr.stop(pid)
+        assert result.status is InstanceStatus.STOPPED
+
+
+async def test_manager_aclose_stops_all(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        a = await _spawn(mgr, client, project="a")
+        b = await _spawn(mgr, client, project="b")
+        for inst in (a, b):
+            await fake.emit_exit(inst.claustrum_process_id, 0)
+        await asyncio.sleep(0.05)
+        await mgr.aclose()  # idempotent over already-exited sessions
+        assert all(
+            mgr.get_instance(i.claustrum_process_id).status is InstanceStatus.STOPPED
+            for i in (a, b)
+        )
+
+
+async def test_manager_synced_tolerates_missing_session(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        mgr._sessions.pop(pid)  # session gone, instance row remains → synced is a no-op
+        assert mgr.get_instance(pid) is not None
