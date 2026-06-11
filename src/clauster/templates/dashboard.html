@@ -187,6 +187,36 @@
         </div>
       </div>
 
+      <!-- ===== Background agents (claude --bg / agent view) — hidden until used ===== -->
+      <div class="mb-3" x-show="agents.length > 0" x-cloak>
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">Background agents</h3>
+            <span class="card-subtitle"><code>claude --bg</code> sessions on this host — observed, read-only</span>
+          </div>
+          <div class="list-group list-group-flush">
+            <template x-for="j in agents" :key="j.id">
+              <div class="list-group-item">
+                <div class="d-flex align-items-center flex-wrap gap-1">
+                  <span class="badge me-1" :class="agentBadgeClass(j.state)" x-text="j.state || '—'"></span>
+                  <span class="fw-medium me-1" x-text="j.name || j.intent || j.id"></span>
+                  <span class="badge bg-azure-lt me-1" x-show="j.bridge_session_id" x-cloak
+                        title="Registered with Remote Control — visible on claude.ai">cloud</span>
+                  <span class="status-dot me-1" :class="j.worker_alive ? 'status-dot-animated bg-green' : 'bg-secondary'"
+                        :title="j.worker_alive ? 'Worker process is live' : 'No live worker process (state kept on disk)'"
+                        aria-hidden="true"></span>
+                  <span class="text-secondary small" x-text="j.worker_alive ? ('pid ' + j.worker_pid) : 'no process'"></span>
+                  <span class="ms-auto text-secondary small" x-text="agentWhen(j)"></span>
+                </div>
+                <div class="text-secondary small mt-1" x-show="j.detail" x-text="j.detail"></div>
+                <div class="small mt-1 text-warning" x-show="j.needs" x-text="'needs: ' + j.needs"></div>
+                <div class="small mt-1 text-secondary" x-show="j.cwd"><code x-text="j.cwd"></code></div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
       {% if reaper_ui_enabled %}
       <!-- ===== Ghost-environment reaper ===== -->
       <div class="mb-3" x-data="reaper()">
@@ -372,6 +402,7 @@
     return {
       instances: {},
       externalSessions: {},
+      agents: [],
       errors: {},
       qrOpen: {},
       qrNonce: {},
@@ -453,12 +484,13 @@
       async refresh() {
         let ok = true;
         try {
-          const [iRes, sRes] = await Promise.all([
+          const [iRes, sRes, aRes] = await Promise.all([
             fetch(ROOT + "/api/instances"),
             fetch(ROOT + "/api/sessions"),
+            fetch(ROOT + "/api/agents"),
           ]);
           // Session expired mid-use -> bounce to login instead of silently showing stale data.
-          if (iRes.status === 401 || sRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (iRes.status === 401 || sRes.status === 401 || aRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
           if (iRes.ok) {
             const list = await iRes.json();
             const next = {};
@@ -471,11 +503,28 @@
           } else { ok = false; }
           if (sRes.ok) this.externalSessions = await sRes.json();
           else { ok = false; }
+          if (aRes.ok) this.agents = await aRes.json();
+          else { ok = false; }
         } catch (e) { ok = false; }
         // A single blip is normal; only surface a *persistent* outage so the user
         // knows the data is stale and we're retrying — never fail silently.
         if (ok) { this._refreshFails = 0; this.connLost = false; }
         else if (++this._refreshFails >= 2) this.connLost = true;
+      },
+      // --- background agents (agent view) ---
+      agentBadgeClass(state) {
+        const map = {
+          working: "bg-blue-lt", blocked: "bg-orange-lt", done: "bg-green-lt",
+          failed: "bg-red-lt", stopped: "bg-secondary-lt",
+        };
+        // Object.hasOwn so a state like "constructor" can't resolve up the
+        // prototype chain to a function instead of the fallback class.
+        return Object.hasOwn(map, state) ? map[state] : "bg-secondary-lt";
+      },
+      agentWhen(j) {
+        if (!j.updated_at) return "";
+        const d = new Date(j.updated_at);
+        return isNaN(d.getTime()) ? "" : d.toLocaleString();
       },
       statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
       // Display status: an "interrupted" bridge is one that stopped WITHOUT a
