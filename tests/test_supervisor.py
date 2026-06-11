@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 from pathlib import Path
 
 import pytest
@@ -505,4 +506,168 @@ def test_api_dispatch_agent_maps_claude_not_found(write_config, tmp_path, monkey
 
     monkeypatch.setattr(supervisor, "dispatch_background_job", boom)
     r = _client(write_config, tmp_path).post("/api/agents", json={"project": "alpha"})
+    assert r.status_code == 503
+
+
+# --- stop (BG-3) -----------------------------------------------------------
+
+_JID = "2045a6c1"
+
+
+def test_valid_job_id():
+    assert supervisor.valid_job_id("2045a6c1")
+    assert supervisor.valid_job_id("16771706")  # all-digit is still 8-hex
+    assert not supervisor.valid_job_id("DEADBEEF")  # uppercase rejected
+    assert not supervisor.valid_job_id("short")
+    assert not supervisor.valid_job_id("2045a6c1x")  # 9 chars
+    assert not supervisor.valid_job_id("../etc/pw")
+    assert not supervisor.valid_job_id(123)
+
+
+def test_live_session_pid_fails_closed_on_nonint_pid(monkeypatch):
+    # worker_alive (mocked True) can't make a non-int pid signalable
+    monkeypatch.setattr(supervisor, "worker_alive", lambda p, ps, **k: True)
+    assert supervisor._live_session_pid(_JID, {_JID: {"pid": "nope", "procStart": 1}}) is None
+
+
+def _stop_setup(monkeypatch, tmp_path, *, alive_seq, rm=None, pid=4242, proc_start=999):
+    """Wire stop_background_job's side-effecting deps; return (roster_path, kills)."""
+    monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
+    roster = _roster(tmp_path, {_JID: {"pid": pid, "procStart": proc_start}})
+    it = iter(alive_seq)
+    monkeypatch.setattr(supervisor, "worker_alive", lambda p, ps, **k: next(it, False))
+    kills: list = []
+    monkeypatch.setattr(supervisor.os, "kill", lambda p, s: kills.append((p, s)))
+    monkeypatch.setattr(supervisor.time, "sleep", lambda *_: None)
+    proc = rm if rm is not None else _FakeProc(stdout="removed 2045a6c1")
+    monkeypatch.setattr(supervisor.subprocess, "run", lambda *a, **k: proc)
+    return roster, kills
+
+
+def test_stop_happy_double_sigint_polls_then_rm(tmp_path, monkeypatch):
+    # validation True, re-validate True (-> 2nd SIGINT), one poll still alive
+    # (exercises the settle sleep), then exited
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, True, True, False])
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert kills == [(4242, signal.SIGINT), (4242, signal.SIGINT)]  # double-SIGINT
+    assert res == {"id": _JID, "settled": True, "removed": True, "detail": "removed 2045a6c1"}
+
+
+def test_stop_no_live_worker_skips_signal_but_still_rm(tmp_path, monkeypatch):
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[False])
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert kills == []  # nothing validated-live to signal
+    assert res["settled"] is True and res["removed"] is True
+
+
+def test_stop_job_absent_from_roster_just_rm(tmp_path, monkeypatch):
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[True])
+    res = supervisor.stop_background_job("deadbeef", roster_json=roster)  # not in roster
+    assert kills == []
+    assert res["removed"] is True
+
+
+def test_stop_single_sigint_when_settles_during_gap(tmp_path, monkeypatch):
+    # validation True, then re-validate False (exited in the gap) -> NO second kill
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, False])
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert kills == [(4242, signal.SIGINT)]  # second SIGINT skipped — pid may be recycled
+    assert res["settled"] is True
+
+
+def test_stop_not_settled_raises_without_force_kill(tmp_path, monkeypatch):
+    # never exits: validation, re-validate (still alive -> 2nd kill), await still alive
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, True, True])
+    with pytest.raises(supervisor.StopError, match="did not settle"):
+        supervisor.stop_background_job(_JID, roster_json=roster, settle_timeout=0)
+    assert kills == [(4242, signal.SIGINT), (4242, signal.SIGINT)]
+
+
+def test_stop_process_already_exited_between_checks(tmp_path, monkeypatch):
+    roster, _ = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, False])
+
+    def gone(_p, _s):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(supervisor.os, "kill", gone)
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert res["settled"] is True  # vanished == the goal
+
+
+def test_stop_signal_oserror_raises(tmp_path, monkeypatch):
+    roster, _ = _stop_setup(monkeypatch, tmp_path, alive_seq=[True])
+
+    def denied(_p, _s):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(supervisor.os, "kill", denied)
+    with pytest.raises(supervisor.StopError, match="could not signal"):
+        supervisor.stop_background_job(_JID, roster_json=roster)
+
+
+def test_stop_rm_soft_fail_reported_not_raised(tmp_path, monkeypatch):
+    rm = _FakeProc(
+        returncode=1, stderr="Couldn't confirm stopped — background service may be restarting"
+    )
+    roster, _ = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, False], rm=rm)
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert res["settled"] is True
+    assert res["removed"] is False
+    assert "couldn't confirm stopped" in res["detail"].lower()
+
+
+def test_stop_rm_hard_error_reported(tmp_path, monkeypatch):
+    rm = _FakeProc(returncode=2, stderr="boom")
+    roster, _ = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, False], rm=rm)
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert res["removed"] is False and "boom" in res["detail"]
+
+
+def test_stop_rm_timeout_reported(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise supervisor.subprocess.TimeoutExpired(a[0], 30)
+
+    roster, _ = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, False])
+    monkeypatch.setattr(supervisor.subprocess, "run", boom)
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert res["removed"] is False and "timed out" in res["detail"]
+
+
+@pytest.mark.parametrize("bad", ["ghijklmn", "short", "DEADBEEF", "../x"])
+def test_stop_invalid_job_id_raises(bad):
+    with pytest.raises(supervisor.StopError, match="invalid job id"):
+        supervisor.stop_background_job(bad)
+
+
+def test_api_stop_agent_happy(write_config, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        supervisor,
+        "stop_background_job",
+        lambda jid, **k: {"id": jid, "settled": True, "removed": True, "detail": "removed"},
+    )
+    r = _client(write_config, tmp_path).delete(f"/api/agents/{_JID}")
+    assert r.status_code == 200
+    assert r.json() == {"id": _JID, "settled": True, "removed": True, "detail": "removed"}
+
+
+def test_api_stop_agent_invalid_id(write_config, tmp_path):
+    r = _client(write_config, tmp_path).delete("/api/agents/ghijklmn")
+    assert r.status_code == 422
+
+
+def test_api_stop_agent_not_settled_is_409(write_config, tmp_path, monkeypatch):
+    def boom(jid, **k):
+        raise supervisor.StopError("did not settle")
+
+    monkeypatch.setattr(supervisor, "stop_background_job", boom)
+    r = _client(write_config, tmp_path).delete(f"/api/agents/{_JID}")
+    assert r.status_code == 409
+
+
+def test_api_stop_agent_claude_not_found_is_503(write_config, tmp_path, monkeypatch):
+    def boom(jid, **k):
+        raise ClaudeNotFound("no claude")
+
+    monkeypatch.setattr(supervisor, "stop_background_job", boom)
+    r = _client(write_config, tmp_path).delete(f"/api/agents/{_JID}")
     assert r.status_code == 503

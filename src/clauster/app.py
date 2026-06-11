@@ -768,6 +768,31 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return {"id": job_id}
 
+    @app.delete("/api/agents/{job_id}")
+    async def api_stop_agent(job_id: str) -> dict:
+        """Stop a `claude --bg` background session and remove its job, cleanly.
+
+        Double-SIGINTs the session process so the CLI runs an orderly shutdown and
+        deregisters its cloud bridge session (vs `claude stop`, which SIGKILLs and
+        leaves a cloud orphan), then `claude rm`s the job. The job id is validated
+        to the 8-hex short-id shape (also the `claude rm` argv-injection guard).
+
+        Returns `{id, settled, removed, detail}`. A `settled:false` row that didn't
+        exit in time is a 409 (escalate from the CLI — we don't force-kill, which
+        would orphan the cloud session); `removed:false` (supervisor idle-exited)
+        is reported in the body, not an error — the session is already stopped.
+        """
+        if not supervisor.valid_job_id(job_id):
+            raise HTTPException(status_code=422, detail="invalid job id")
+        try:
+            return await asyncio.to_thread(
+                supervisor.stop_background_job, job_id, binary=config.claude.binary
+            )
+        except claude_cli.ClaudeNotFound as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except supervisor.StopError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     async def _spawn_or_http(coro: Awaitable[RemoteControlInstance]) -> RemoteControlInstance:
         """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.
 
