@@ -702,6 +702,61 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """
         return await asyncio.to_thread(supervisor.list_background_jobs)
 
+    @app.post("/api/agents", status_code=201)
+    async def api_dispatch_agent(body: dict) -> dict:
+        """Dispatch a `claude --bg` background session in a managed project.
+
+        Validates the project name (same guard as the other project routes),
+        pre-trusts the cwd, and fires `claude --bg [--rc <name>]`; returns the new
+        job id. The bg-agents panel reflects its live state via `GET /api/agents`.
+
+        Body: ``{project, prompt?, rc_name?, model?, permission_mode?}``. A
+        ``rc_name`` opens the cloud door (a cloud-visible Remote Control session).
+        NOTE: stop/teardown is a later slice — a dispatched `--rc` session must
+        currently be stopped from the CLI (and a local stop only orphans the cloud
+        registration), so no dispatch control is wired into the UI yet.
+        """
+        name = str(body.get("project") or "").strip()
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+
+        def _opt_text(field: str) -> str | None:
+            """Validate an optional text field from the arbitrary JSON body.
+
+            None/missing/empty → None; a present non-string → 422 (rather than
+            letting a bad type reach — and partially execute — the spawn path).
+            """
+            value = body.get(field)
+            if value is None or value == "":
+                return None
+            if not isinstance(value, str):
+                raise HTTPException(status_code=422, detail=f"{field} must be a string")
+            return value
+
+        prompt = _opt_text("prompt")
+        rc_name = _opt_text("rc_name")
+        model = _opt_text("model")
+        permission_mode = _opt_text("permission_mode")
+        cwd = config.projects_root / name
+        if not await asyncio.to_thread(cwd.is_dir):
+            raise HTTPException(status_code=404, detail=f"project {name!r} not found")
+        try:
+            job_id = await asyncio.to_thread(
+                supervisor.dispatch_background_job,
+                cwd,
+                prompt=prompt,
+                rc_name=rc_name,
+                model=model,
+                permission_mode=permission_mode,
+                binary=config.claude.binary,
+                claude_json=runner.claude_json,
+            )
+        except claude_cli.ClaudeNotFound as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except supervisor.DispatchError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"id": job_id}
+
     async def _spawn_or_http(coro: Awaitable[RemoteControlInstance]) -> RemoteControlInstance:
         """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.
 

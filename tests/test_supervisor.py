@@ -4,10 +4,12 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clauster import supervisor
 from clauster.app import create_app
+from clauster.claude_cli import ClaudeNotFound
 from clauster.config import load_config
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
@@ -281,3 +283,188 @@ def test_api_agents_empty_when_unused(write_config, tmp_path, monkeypatch):
     r = _client(write_config, tmp_path).get("/api/agents")
     assert r.status_code == 200
     assert r.json() == []
+
+
+# --- dispatch (BG-2) -------------------------------------------------------
+
+# The real `claude --bg` success banner (captured 2026-06-11); id == sessionId[:8].
+_BANNER = "Starting background service…\nbackgrounded · 29e8026f\n  claude agents   list\n"
+
+
+class _FakeProc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_build_dispatch_argv_bare_and_full():
+    assert supervisor.build_dispatch_argv("/abs/claude") == ["/abs/claude", "--bg"]
+    assert supervisor.build_dispatch_argv(
+        "/abs/claude", rc_name="proj-rc", model="opus", permission_mode="auto", prompt="go"
+    ) == [
+        "/abs/claude",
+        "--bg",
+        "--rc",
+        "proj-rc",
+        "--model",
+        "opus",
+        "--permission-mode",
+        "auto",
+        "--",
+        "go",
+    ]
+
+
+def test_build_dispatch_argv_dash_prompt_is_positional_after_separator():
+    # a prompt that looks like a flag lands after `--`, so claude can't parse it as one
+    assert supervisor.build_dispatch_argv("/abs/claude", prompt="--dangerously-skip") == [
+        "/abs/claude",
+        "--bg",
+        "--",
+        "--dangerously-skip",
+    ]
+
+
+def test_parse_job_id_banner_ack_noise_and_fallback():
+    assert supervisor.parse_job_id(_BANNER) == "29e8026f"
+    # the dispatcher's internal retry line still carries the right id
+    assert supervisor.parse_job_id("bg: ack-timeout for 8662a9aa, retrying (1/2)") == "8662a9aa"
+    # no banner -> bare-hex fallback
+    assert supervisor.parse_job_id("queued deadbeef ok") == "deadbeef"
+    assert supervisor.parse_job_id("nothing id-shaped here") is None
+
+
+def _patch_dispatch(monkeypatch, *, proc=None, run=None):
+    """Stub out the three side-effecting deps of dispatch_background_job."""
+    monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
+    trusted: list = []
+    monkeypatch.setattr(supervisor, "trust_directory", lambda *a: trusted.append(a))
+    seen: dict = {}
+
+    def default_run(argv, **kw):
+        seen["argv"] = argv
+        seen["cwd"] = kw.get("cwd")
+        return proc if proc is not None else _FakeProc(stdout=_BANNER)
+
+    monkeypatch.setattr(supervisor.subprocess, "run", run or default_run)
+    return trusted, seen
+
+
+def test_dispatch_happy_pretrusts_and_returns_id(tmp_path, monkeypatch):
+    trusted, seen = _patch_dispatch(monkeypatch)
+    cj = tmp_path / "claude.json"
+    job_id = supervisor.dispatch_background_job(
+        tmp_path, prompt="hi", rc_name="proj-rc", binary="claude", claude_json=cj
+    )
+    assert job_id == "29e8026f"
+    assert trusted == [(tmp_path, cj)]  # cwd pre-trusted with the given claude.json
+    assert seen["argv"] == ["/abs/claude", "--bg", "--rc", "proj-rc", "--", "hi"]
+    assert seen["cwd"] == str(tmp_path)
+
+
+def test_dispatch_default_claude_json_path(tmp_path, monkeypatch):
+    trusted, _ = _patch_dispatch(monkeypatch)
+    supervisor.dispatch_background_job(tmp_path)
+    assert trusted == [(tmp_path,)]  # no claude_json -> trust_directory called with cwd only
+
+
+def test_dispatch_rejects_nondir_cwd(tmp_path, monkeypatch):
+    _patch_dispatch(monkeypatch)
+    with pytest.raises(supervisor.DispatchError, match="not a directory"):
+        supervisor.dispatch_background_job(tmp_path / "nope")
+
+
+@pytest.mark.parametrize("field", ["rc_name", "model", "permission_mode"])
+@pytest.mark.parametrize("bad", ["-x", 5, ["-x"]])
+def test_dispatch_rejects_flag_like_or_nonstring_values(tmp_path, monkeypatch, field, bad):
+    trusted, _ = _patch_dispatch(monkeypatch)
+    with pytest.raises(supervisor.DispatchError, match="invalid"):
+        supervisor.dispatch_background_job(tmp_path, **{field: bad})
+    assert trusted == []  # rejected before the trust write — no side effect
+
+
+def test_dispatch_rejects_nonstring_prompt_before_trust(tmp_path, monkeypatch):
+    trusted, _ = _patch_dispatch(monkeypatch)
+    with pytest.raises(supervisor.DispatchError, match="invalid prompt"):
+        supervisor.dispatch_background_job(tmp_path, prompt=["not", "a", "string"])
+    assert trusted == []  # a malformed request must not trust the cwd then 500
+
+
+def test_dispatch_nonzero_exit_raises_with_redacted_detail(tmp_path, monkeypatch):
+    _patch_dispatch(monkeypatch, proc=_FakeProc(returncode=1, stderr="boom"))
+    with pytest.raises(supervisor.DispatchError, match="exit 1.*boom"):
+        supervisor.dispatch_background_job(tmp_path)
+
+
+def test_dispatch_no_id_raises(tmp_path, monkeypatch):
+    _patch_dispatch(monkeypatch, proc=_FakeProc(stdout="all done, nothing here"))
+    with pytest.raises(supervisor.DispatchError, match="no job id"):
+        supervisor.dispatch_background_job(tmp_path)
+
+
+def test_dispatch_timeout_raises(tmp_path, monkeypatch):
+    def boom(argv, **kw):
+        raise supervisor.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+
+    _patch_dispatch(monkeypatch, run=boom)
+    with pytest.raises(supervisor.DispatchError, match="timed out"):
+        supervisor.dispatch_background_job(tmp_path, timeout=5)
+
+
+def test_dispatch_claude_not_found_propagates(tmp_path, monkeypatch):
+    monkeypatch.setattr(supervisor, "resolve_binary", _raise_not_found)
+    with pytest.raises(ClaudeNotFound):
+        supervisor.dispatch_background_job(tmp_path)
+
+
+def _raise_not_found(_binary):
+    raise ClaudeNotFound("nope")
+
+
+def test_api_dispatch_agent_dispatches(write_config, tmp_path, monkeypatch):
+    monkeypatch.setattr(supervisor, "dispatch_background_job", lambda *a, **k: "deadbeef")
+    r = _client(write_config, tmp_path).post(
+        "/api/agents", json={"project": "alpha", "prompt": "hi", "rc_name": "alpha-rc"}
+    )
+    assert r.status_code == 201
+    assert r.json() == {"id": "deadbeef"}
+
+
+def test_api_dispatch_agent_invalid_name(write_config, tmp_path):
+    r = _client(write_config, tmp_path).post("/api/agents", json={"project": "bad name!"})
+    assert r.status_code == 422
+
+
+def test_api_dispatch_agent_unknown_project(write_config, tmp_path):
+    r = _client(write_config, tmp_path).post("/api/agents", json={"project": "ghost"})
+    assert r.status_code == 404
+
+
+def test_api_dispatch_agent_rejects_nonstring_field(write_config, tmp_path, monkeypatch):
+    # a non-string body field is a clean 422 at the boundary, never a 500 mid-spawn
+    called: list = []
+    monkeypatch.setattr(supervisor, "dispatch_background_job", lambda *a, **k: called.append(1))
+    r = _client(write_config, tmp_path).post(
+        "/api/agents", json={"project": "alpha", "rc_name": 5}
+    )
+    assert r.status_code == 422
+    assert called == []  # dispatch never reached
+
+
+def test_api_dispatch_agent_maps_dispatch_error(write_config, tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise supervisor.DispatchError("nope")
+
+    monkeypatch.setattr(supervisor, "dispatch_background_job", boom)
+    r = _client(write_config, tmp_path).post("/api/agents", json={"project": "alpha"})
+    assert r.status_code == 502
+
+
+def test_api_dispatch_agent_maps_claude_not_found(write_config, tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise ClaudeNotFound("no claude on PATH")
+
+    monkeypatch.setattr(supervisor, "dispatch_background_job", boom)
+    r = _client(write_config, tmp_path).post("/api/agents", json={"project": "alpha"})
+    assert r.status_code == 503
