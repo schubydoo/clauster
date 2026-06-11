@@ -9,11 +9,13 @@ endpoints, and the ``/ws/hosted`` stream — no real socket or cross-loop client
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 import clauster.app as app_module
+from clauster import claude_cli
 from clauster.app import create_app
 from clauster.claustrum_client import ClaustrumError
 from clauster.config import load_config
@@ -135,7 +137,7 @@ def test_spawn_hosted_dispatches_to_manager(write_config, projects_root, monkeyp
     assert r.json()["channel"] == "hosted"
     assert manager.spawn_calls[0]["project"] == "alpha"
     assert manager.spawn_calls[0]["binary"] == "/usr/bin/claude"
-    assert manager.spawn_calls[0]["cwd"].endswith("/alpha")
+    assert Path(manager.spawn_calls[0]["cwd"]).name == "alpha"  # platform-agnostic separator
 
 
 def test_spawn_hosted_without_daemon_is_503(write_config, projects_root):
@@ -230,7 +232,7 @@ def test_spawn_hosted_binary_missing_is_503(write_config, projects_root, monkeyp
     monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
 
     def _missing(_binary):
-        raise FileNotFoundError("claude not found on PATH")
+        raise claude_cli.ClaudeNotFound("claude not found on PATH")
 
     monkeypatch.setattr(app_module.claude_cli, "resolve_binary", _missing)
     app = _app(write_config, daemon=_StubDaemon())

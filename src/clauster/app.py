@@ -884,7 +884,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         try:
             binary = await asyncio.to_thread(claude_cli.resolve_binary, config.claude.binary)
-        except FileNotFoundError as exc:
+        except claude_cli.ClaudeNotFound as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         pm = permission_mode or config.instance_defaults.permission_mode
         try:
