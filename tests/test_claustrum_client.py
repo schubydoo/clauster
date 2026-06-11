@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import sys
 
 import pytest
 
@@ -20,6 +21,14 @@ from clauster.claustrum_client import (
     DaemonUnreachable,
     ProcessStream,
     RpcError,
+)
+
+# The claustrum client speaks JSON-RPC over an AF_UNIX socket; asyncio has no
+# start_unix_server/open_unix_connection on Windows (same posture as the pty
+# tests). The Windows CI cell runs with --cov-fail-under=0, so skipping here
+# costs no coverage there; the gate is enforced on the Linux cell.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="claustrum client is POSIX-only (AF_UNIX)"
 )
 
 
