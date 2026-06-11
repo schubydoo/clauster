@@ -7,3 +7,9 @@
 # maintainer set grows.
 
 * @schubydoo
+
+# Renovate-managed paths — no code owner, so dependency PRs don't auto-request review.
+/uv.lock
+/Dockerfile
+/.devcontainer/devcontainer.json
+/.github/workflows/
