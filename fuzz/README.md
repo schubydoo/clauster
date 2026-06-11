@@ -1,9 +1,13 @@
 # Fuzzing (ClusterFuzzLite + Atheris)
 
 Coverage-guided fuzz harnesses for clauster's untrusted-input parsers. They run
-in CI via [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) on every
-PR (`.github/workflows/cflite_pr.yml`, `address` sanitizer, ~180s, informational
-— never blocks a merge). Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
+in CI via [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) two ways:
+per-PR over the changed code (`.github/workflows/cflite_pr.yml`, `address`
+sanitizer, ~180s) and a daily scheduled batch over **every** harness
+(`.github/workflows/cflite_batch.yml`, 300s each) whose corpus **persists across
+runs** in a private storage repo, so coverage compounds over time. Both are
+informational — never block a merge; a reproducible crash surfaces as SARIF in
+the Security tab. Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
 
 ## Harnesses
 
@@ -12,14 +16,16 @@ PR (`.github/workflows/cflite_pr.yml`, `address` sanitizer, ~180s, informational
 | `parse_markers_fuzzer.py` | `bridge_log.parse_bridge_markers` | regex parse of raw bridge debug output; must tolerate any input without raising (cf. the #122 `UnicodeDecodeError` class) |
 | `redact_fuzzer.py` | `redact.sanitize_line` | ANSI-strip + ID/secret redaction over untrusted log lines; checks for crashes/ReDoS **and** asserts no bare `env_`/`session_`/`cse_` id leaks through |
 | `validate_clone_url_fuzzer.py` | `provisioning.validate_clone_url` | the SSRF/URL guard; DNS is monkeypatched so fuzzing is deterministic + offline. Expected `ProvisionError` rejections are caught; any other exception is a bug |
+| `claustrum_client_fuzzer.py` | `claustrum_client.ClaustrumClient._dispatch` + `ProcessStream.feed` | NDJSON demux + base64 line-reassembly of daemon stream frames (which relay attacker-influenceable agent stdout); must tolerate any bytes/shape without raising |
 
 ## Running a harness locally
 
-Atheris only builds on Linux/macOS. Quick smoke run:
+Atheris has no Windows wheels. On Linux, install it via the `fuzz` extra (it is
+kept out of `dev` on purpose and marked linux-only so the default sync stays
+cross-platform); on macOS, `pip install atheris` directly. Quick smoke run:
 
 ```sh
-pip install atheris
-pip install .                       # install clauster into the env
+uv pip install '.[fuzz]'            # clauster + atheris (Linux)
 python fuzz/redact_fuzzer.py -atheris_runs=100000     # finite run
 # or let it run until a crash / Ctrl-C:
 python fuzz/parse_markers_fuzzer.py
