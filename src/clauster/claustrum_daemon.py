@@ -274,6 +274,7 @@ class ClaustrumDaemon:
 
         stdin = proc.stdin
         if stdin is None:  # pragma: no cover - stdin=PIPE always yields a writer
+            log_file.close()
             raise DaemonSpawnError("claustrum launcher exposes no stdin pipe")
         try:
             stdin.write(token.encode("utf-8") + b"\n")
