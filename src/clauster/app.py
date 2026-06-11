@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import sys
 import time
 from collections.abc import Awaitable
@@ -37,6 +38,8 @@ from .claude_md import (
     read_claude_md,
     write_claude_md,
 )
+from .claustrum_client import ClaustrumError
+from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJob, CloneJobManager
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
@@ -67,6 +70,8 @@ from .runner import (
     SpawnError,
     UnknownProject,
 )
+
+logger = logging.getLogger(__name__)
 
 _SESSION_COOKIE = "clauster_session"
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -113,9 +118,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await runner.start_poll_loop()  # rediscover running bridges + begin polling
+        if config.claustrum.enabled:
+            daemon = ClaustrumDaemon(config)
+            app.state.claustrum_daemon = daemon
+            try:
+                await daemon.ensure()  # connect-or-spawn the hosted-channel daemon
+            except ClaustrumError as exc:
+                # Fail-closed: the daemon's health carries the error and hosted
+                # spawns are refused, but bridges (and startup) are unaffected.
+                logger.warning("claustrum daemon unavailable at startup: %s", exc)
         try:
             yield
         finally:
+            daemon = getattr(app.state, "claustrum_daemon", None)
+            if daemon is not None:
+                await daemon.aclose()  # drop our connection; leave the daemon running
             await runner.shutdown()  # cancel poll task; leave bridges running
 
     app = FastAPI(
@@ -126,6 +143,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     )
     app.state.config = config
     app.state.runner = runner
+    app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
     clone_jobs = CloneJobManager()
     app.state.clone_jobs = clone_jobs
     # Drop a finished clone job after this grace so a client that disconnected
@@ -304,13 +322,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except Exception:
             version = None
             claude_ok = False
-        return {
+        result: dict[str, object] = {
             "status": "ok",
             "version": __version__,
             "claude_ok": claude_ok,
             "claude_version": version,
             "instances_running": runner.running_count(),
         }
+        if config.claustrum.enabled:
+            daemon = getattr(app.state, "claustrum_daemon", None)
+            result["claustrum"] = (
+                await daemon.probe() if daemon is not None else {"enabled": True, "running": False}
+            )
+        return result
 
     @app.get("/metrics")
     async def prometheus_metrics() -> Response:

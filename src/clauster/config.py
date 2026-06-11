@@ -459,6 +459,45 @@ class NotificationsConfig(BaseModel):
     )
 
 
+class ClaustrumConfig(BaseModel):
+    """Settings for the optional claustrum hosted live-view channel (CL-2).
+
+    Off by default. When enabled, Clauster connect-or-spawns a single
+    ``claustrum`` daemon per deployment (the maintainer's Go ``claude-ssh``
+    reimpl) and surfaces its health in ``/healthz``. The daemon self-daemonizes
+    (it survives Clauster restarts; Clauster reconnects + reattaches), so it is
+    deliberately not a systemd unit in v1. Fail-closed: an unreachable daemon or
+    rejected auth surfaces in health and never affects the bridge lifecycle.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Master switch for the claustrum hosted channel. When true, "
+        "Clauster connect-or-spawns the daemon at startup.",
+    )
+    binary: str = Field(
+        default="claustrum",
+        description="The `claustrum` binary name or path (resolved to an absolute "
+        "path before spawning).",
+    )
+    socket_path: str | None = Field(
+        default=None,
+        description="Path to the daemon's AF_UNIX socket. Defaults to "
+        "`<state_dir>/claustrum/daemon.sock`.",
+    )
+    spawn_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="How long (>0) to wait for a freshly spawned daemon to detach "
+        "and accept its first connection before giving up.",
+    )
+    request_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Per-request timeout (>0) for RPCs on the daemon connection.",
+    )
+
+
 class ClausterConfig(BaseModel):
     """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
 
@@ -509,6 +548,7 @@ class ClausterConfig(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    claustrum: ClaustrumConfig = Field(default_factory=ClaustrumConfig)
 
     _source_path: Path | None = PrivateAttr(default=None)
 
