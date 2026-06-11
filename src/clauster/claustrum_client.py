@@ -155,6 +155,14 @@ class ProcessStream:
         self.last_seq = seq
         stream = frame.get("stream")
         if stream == "exit":
+            # Flush any unterminated partial line on each channel first, so a
+            # final write without a trailing newline (common for CLI tools) is
+            # delivered before the terminal exit event rather than lost.
+            for channel in ("stdout", "stderr"):
+                leftover = self._buffers[channel]
+                if leftover:
+                    self._buffers[channel] = b""
+                    self._emit_line(channel, seq, leftover)
             code = frame.get("exitCode")
             self.exit_code = code if isinstance(code, int) else None
             self.exited.set()
@@ -169,14 +177,12 @@ class ProcessStream:
         *lines, rest = buf.split(b"\n")
         self._buffers[stream] = rest
         for line in lines:
-            self._broadcast(
-                {
-                    "type": "line",
-                    "stream": stream,
-                    "seq": seq,
-                    "line": line.decode("utf-8", "replace"),
-                }
-            )
+            self._emit_line(stream, seq, line)
+
+    def _emit_line(self, stream: str, seq: int, line: bytes) -> None:
+        self._broadcast(
+            {"type": "line", "stream": stream, "seq": seq, "line": line.decode("utf-8", "replace")}
+        )
 
     @staticmethod
     def _decode(data: Any) -> bytes | None:

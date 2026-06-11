@@ -134,6 +134,22 @@ async def test_exit_latch_and_event(fake_claustrum):
         assert stream.exit_code == 0
 
 
+async def test_partial_line_flushed_on_exit():
+    stream = ProcessStream("p1")
+    queue = stream.subscribe()
+    # A final write with no trailing newline, then exit -> the partial line must
+    # be flushed before the terminal exit event rather than swallowed.
+    stream.feed(_frame("stdout", 1, b"no newline here"))
+    stream.feed(_frame("stderr", 2, b"warn tail"))
+    stream.feed({"type": "stream", "stream": "exit", "seq": 3, "exitCode": 1})
+    flushed_out = await _drain(queue)
+    flushed_err = await _drain(queue)
+    exit_event = await _drain(queue)
+    assert flushed_out == {"type": "line", "stream": "stdout", "seq": 3, "line": "no newline here"}
+    assert flushed_err == {"type": "line", "stream": "stderr", "seq": 3, "line": "warn tail"}
+    assert exit_event == {"type": "exit", "seq": 3, "exit_code": 1}
+
+
 async def test_duplicate_and_stale_seq_ignored():
     stream = ProcessStream("p1")
     queue = stream.subscribe()

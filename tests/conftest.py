@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -83,6 +84,7 @@ async def fake_claustrum() -> AsyncIterator[Callable[..., Awaitable]]:
     finally:
         for fake in started:
             await fake.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 @pytest.fixture
