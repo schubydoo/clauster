@@ -137,7 +137,8 @@ def test_spawn_hosted_dispatches_to_manager(write_config, projects_root, monkeyp
     assert r.json()["channel"] == "hosted"
     assert manager.spawn_calls[0]["project"] == "alpha"
     assert manager.spawn_calls[0]["binary"] == "/usr/bin/claude"
-    assert Path(manager.spawn_calls[0]["cwd"]).name == "alpha"  # platform-agnostic separator
+    # Full path (resolve() normalizes separators) — basename alone would pass a wrong path.
+    assert Path(manager.spawn_calls[0]["cwd"]).resolve() == (projects_root / "alpha").resolve()
 
 
 def test_spawn_hosted_without_daemon_is_503(write_config, projects_root):
