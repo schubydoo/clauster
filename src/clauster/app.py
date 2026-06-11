@@ -332,7 +332,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if config.claustrum.enabled:
             daemon = getattr(app.state, "claustrum_daemon", None)
             result["claustrum"] = (
-                daemon.status() if daemon is not None else {"enabled": True, "running": False}
+                await daemon.probe() if daemon is not None else {"enabled": True, "running": False}
             )
         return result
 

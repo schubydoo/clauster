@@ -11,6 +11,7 @@ POSIX-only: the daemon uses ``AF_UNIX`` + ``setsid`` and is skipped on Windows.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import signal
@@ -220,3 +221,35 @@ async def test_custom_version_surfaced(make_daemon, monkeypatch):
     daemon = make_daemon()
     await daemon.ensure()
     assert daemon.status()["version"] == "fake-9.9.9"
+
+
+async def test_ensure_revalidates_and_recovers_dead_client(make_daemon):
+    """A cached-but-dead connection is dropped and re-established on ensure()."""
+    daemon = make_daemon()
+    first = await daemon.ensure()
+    await first.close()  # connection dies, but the daemon process stays up
+
+    second = await daemon.ensure()  # revalidation ping fails → reconnect
+    assert second is not first
+    assert (await second.ping())["pong"] is True
+
+
+async def test_probe_reports_and_clears_dead_client(make_daemon):
+    """probe() pings the cached client and clears it (running=False) if dead."""
+    daemon = make_daemon()
+    await daemon.ensure()
+    assert (await daemon.probe())["running"] is True
+
+    await daemon.client.close()  # connection dies under the daemon
+    status = await daemon.probe()
+    assert status["running"] is False
+    assert "lost" in (status["error"] or "")
+    assert daemon.client is None
+
+
+async def test_concurrent_ensure_spawns_once(make_daemon):
+    """The lifecycle lock makes concurrent ensure() calls share one daemon."""
+    daemon = make_daemon(spawn_timeout_seconds=3.0)
+    results = await asyncio.gather(*[daemon.ensure() for _ in range(5)])
+    assert all(client is results[0] for client in results)
+    assert (await results[0].ping())["pong"] is True

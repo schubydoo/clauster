@@ -39,6 +39,10 @@ class _StubDaemon:
             "error": None,
         }
 
+    async def probe(self) -> dict:
+        """Live health probe (no real socket) — mirror status()."""
+        return self.status()
+
     async def aclose(self) -> None:
         """Record shutdown."""
         self.closed = True

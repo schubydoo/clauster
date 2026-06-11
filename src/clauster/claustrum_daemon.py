@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 # ``claustrum.spawn_timeout_seconds``.
 _POLL_INTERVAL = 0.1
 
+# Bounded timeout for a liveness ping (revalidating a cached connection / serving
+# ``/healthz``). Kept short so a hung daemon can't stall a health check; a dead
+# socket fails the ping near-instantly regardless.
+_HEALTH_PING_TIMEOUT = 2.0
+
 
 class DaemonSpawnError(ClaustrumError):
     """The ``claustrum -serve`` launcher failed to start a usable daemon."""
@@ -79,6 +84,10 @@ class ClaustrumDaemon:
         self._client: ClaustrumClient | None = None
         self._version: str | None = None
         self._error: str | None = None
+        # Serializes every lifecycle transition (ensure / probe / aclose) so
+        # concurrent callers can't race into double-spawns or close a connection
+        # another waiter just established.
+        self._lock = asyncio.Lock()
 
     @property
     def client(self) -> ClaustrumClient | None:
@@ -103,6 +112,11 @@ class ClaustrumDaemon:
     async def ensure(self) -> ClaustrumClient:
         """Connect to a running daemon, or spawn one and connect (idempotent).
 
+        A cached connection is revalidated with a bounded ping before reuse — a
+        daemon that died after startup is dropped and reconnected/respawned
+        rather than handed back dead. Serialized by the lifecycle lock so
+        concurrent callers spawn at most one daemon.
+
         Returns the live :class:`ClaustrumClient`. Raises :class:`AuthRejected`
         if a running daemon rejects the persisted token (Clauster must not spawn
         a second daemon over a healthy one), :class:`DaemonSpawnError` if the
@@ -110,8 +124,38 @@ class ClaustrumDaemon:
         never accepts a connection. On any failure :meth:`status` carries the
         reason.
         """
-        if self._client is not None:
-            return self._client
+        async with self._lock:
+            if self._client is not None:
+                if await self._is_alive(self._client):
+                    return self._client
+                # Cached connection is dead — drop it and reconnect/spawn below.
+                await self._client.close()
+                self._client = None
+            return await self._connect_or_spawn()
+
+    async def probe(self) -> dict[str, Any]:
+        """Live health for ``/healthz``: ping the cached client, drop it if dead.
+
+        Unlike :meth:`ensure` this never reconnects or spawns — it reports the
+        current truth and clears a dead connection so the next :meth:`ensure`
+        recovers. (Background auto-reconnect without a caller is CL-6.)
+        """
+        async with self._lock:
+            if self._client is not None and not await self._is_alive(self._client):
+                await self._client.close()
+                self._client = None
+                self._error = "claustrum daemon connection lost"
+            return self.status()
+
+    async def aclose(self) -> None:
+        """Drop Clauster's connection; leave the daemon running."""
+        async with self._lock:
+            if self._client is not None:
+                await self._client.close()
+                self._client = None
+
+    async def _connect_or_spawn(self) -> ClaustrumClient:
+        """Connect to a running daemon or spawn one (caller holds the lock)."""
         self._error = None
         self._prepare_dir()
         self._token = token = self._read_or_create_token()
@@ -137,11 +181,13 @@ class ClaustrumDaemon:
         logger.info("claustrum: spawned daemon at %s", self._socket)
         return self._client
 
-    async def aclose(self) -> None:
-        """Drop Clauster's connection; leave the daemon running."""
-        if self._client is not None:
-            await self._client.close()
-            self._client = None
+    async def _is_alive(self, client: ClaustrumClient) -> bool:
+        """Whether a connection still answers a bounded liveness ping."""
+        try:
+            await asyncio.wait_for(client.ping(), timeout=_HEALTH_PING_TIMEOUT)
+        except (ClaustrumError, TimeoutError):
+            return False
+        return True
 
     # -- internals ---------------------------------------------------------
 
@@ -221,20 +267,22 @@ class ClaustrumDaemon:
                 stderr=log_file,
                 start_new_session=True,
             )
-        except OSError as exc:
+        except OSError as exc:  # pragma: no cover - exec failure after which() resolved
             log_file.close()
             self._error = f"could not launch claustrum: {exc}"
             raise DaemonSpawnError(self._error) from exc
 
-        if proc.stdin is not None:
-            try:
-                proc.stdin.write(token.encode("utf-8") + b"\n")
-                await proc.stdin.drain()
-                proc.stdin.close()
-            except (OSError, ConnectionError):
-                # The launcher may have already read its token and closed fd 0;
-                # any real failure surfaces via the returncode / poll below.
-                logger.debug("claustrum: writing token to launcher stdin failed (already closed?)")
+        stdin = proc.stdin
+        if stdin is None:  # pragma: no cover - stdin=PIPE always yields a writer
+            raise DaemonSpawnError("claustrum launcher exposes no stdin pipe")
+        try:
+            stdin.write(token.encode("utf-8") + b"\n")
+            await stdin.drain()
+            stdin.close()
+        except (OSError, ConnectionError):  # pragma: no cover - racy; backstopped by returncode
+            # The launcher may have already read its token and closed fd 0; any
+            # real failure surfaces via the returncode / poll below.
+            logger.debug("claustrum: writing token to launcher stdin failed (already closed?)")
 
         remaining = max(0.0, deadline - asyncio.get_running_loop().time())
         try:
