@@ -5,17 +5,18 @@
 # pass. A reproducible crash surfaces here and as SARIF in the Security tab. NOT
 # a required check — it signals, it never gates.
 #
-# Corpus persistence: this runs WITHOUT a `storage-repo`, so the coverage corpus
-# is NOT carried across runs — each run re-explores from the in-repo seed corpus.
-# That is still strictly more than PR fuzzing (every harness, not just the diff)
-# and needs zero setup. To make the corpus *accumulate* over time (and reach the
-# deeper bugs that compounding coverage finds), opt into a storage repo: create a
-# separate git repo + a PAT secret with write access to it, then uncomment the
-# `storage-repo` lines below. See https://google.github.io/clusterfuzzlite/.
+# Corpus persistence: this run clones the corpus from a private `storage-repo`
+# (schubydoo/clauster-fuzz-corpus, auth via the FUZZ_STORAGE_TOKEN PAT), fuzzes,
+# and pushes the grown corpus back — so coverage *compounds* across runs and
+# reaches the deeper bugs a from-seed run never finds. The write PAT lives ONLY
+# here (cron + workflow_dispatch, no fork exposure); cflite_pr.yml deliberately
+# does NOT carry it (a fork PR with a write secret is an exfil surface). If the
+# PAT is ever rotated/expired, this job keeps passing but silently stops
+# accumulating. See https://google.github.io/clusterfuzzlite/.
 #
 # Cost knobs (see the CI-cost-audit TODO): the `cron` cadence and `fuzz-seconds`.
 # NB `fuzz-seconds` is PER fuzz target, so wall-clock ≈ fuzz-seconds × harness
-# count (3 today) + build — keep that under `timeout-minutes`.
+# count + build — keep that under `timeout-minutes`.
 name: ClusterFuzzLite batch fuzzing
 
 on:
@@ -57,7 +58,7 @@ jobs:
           mode: batch
           sanitizer: ${{ matrix.sanitizer }}
           output-sarif: true
-          # Corpus persistence (opt-in — accumulates a corpus across runs). Create
-          # a storage repo + a PAT secret with write access, then uncomment:
-          # storage-repo: https://${{ secrets.FUZZ_STORAGE_TOKEN }}@github.com/schubydoo/clauster-fuzz-corpus.git
-          # storage-repo-branch: main
+          # Corpus persistence — accumulates the coverage corpus across runs so
+          # fuzzing compounds toward deeper bugs (see the header note).
+          storage-repo: https://${{ secrets.FUZZ_STORAGE_TOKEN }}@github.com/schubydoo/clauster-fuzz-corpus.git
+          storage-repo-branch: main
