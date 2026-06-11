@@ -3,6 +3,12 @@
 Two ID namespaces (see spec §8):
   - API namespace:   session_<ULID>, cse_<ULID>, env_<ULID>  (bridge log, pointer, URL)
   - Local UUID:      RFC 4122  (claude agents --json `sessionId`, JSONL transcript filenames)
+
+`RemoteControlInstance` spans both managed-session channels via its `channel`
+field: "remote-control" (the bridge — its `resume_mode` and env/url fields) and
+"hosted" (the claustrum stream-json session — its `claustrum_process_id`,
+`agent_pid`, `claude_session_uuid`, … fields). Channel-specific fields are
+nullable so a row of either channel validates.
 """
 
 from __future__ import annotations

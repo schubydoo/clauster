@@ -31,6 +31,7 @@ Key modules under `src/clauster/`:
 | `supervisor.py` | Read / dispatch / stop Claude Code agent-view background sessions (`claude --bg`); backs the background-agents panel + `/api/agents`. |
 | `claustrum_client.py` | Async unix-socket NDJSON JSON-RPC client for the claustrum daemon (hosted live-view channel; experimental). |
 | `claustrum_daemon.py` | Connect-or-spawn lifecycle + auth-token management + health for the per-deployment claustrum daemon (experimental). |
+| `hosted.py` | Hosted-channel session engine — `HostedSession` (stream-json spawn, stdout control-plane routing, redaction + ring buffer + fan-out) and `HostedManager` (registry, separate from the bridge runner). Experimental; no UI yet. |
 | `hooks/resume_recap.py` | The `SessionStart` hook that recaps the prior conversation into a restarted bridge. |
 
 ## The two bridge modes
@@ -38,6 +39,11 @@ Key modules under `src/clauster/`:
 A bridge is a `claude` process Clauster launches in a project directory. The two
 modes have **different argv and different readiness logic** and are deliberately
 not unified.
+
+> Orthogonal to these modes is an experimental **hosted channel** (`hosted.py`):
+> a headless stream-json `claude` run on the claustrum daemon's pipes rather than
+> as a remote-control bridge. It is a separate `channel` axis on the instance
+> model, not a third bridge mode, and has no UI yet.
 
 ### standard (`claude remote-control`)
 
