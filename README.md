@@ -136,6 +136,10 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   **dashboard UI is opt-in** (`reaper.ui_enabled`) because it exposes a destructive
   first-party API in the browser. Archive is reversible; force-delete requires
   typing `DELETE`.
+- **Background agents (experimental)** — a dashboard panel that lists, dispatches,
+  and stops Claude Code *background* sessions (`claude --bg`), backed by
+  `GET/POST/DELETE /api/agents`. It rides Claude Code's **agent-view research
+  preview**, so it's experimental and may change with the upstream CLI.
 
 ## Quick start (dev)
 

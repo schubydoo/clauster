@@ -30,7 +30,7 @@ jobs:
   batch-fuzzing:
     name: batch fuzzing
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # ≈ 300s × 3 harnesses + build, with headroom
+    timeout-minutes: 30 # ≈ 300s × 4 harnesses + build, with headroom
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # upload crash SARIF to the Security tab

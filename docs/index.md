@@ -73,6 +73,9 @@ mode, this *recaps* the prior conversation rather than truly restoring it.
 - Native true-resume PTY mode (`claude.resume_mode: pty`).
 - Ghost-environment reaper (CLI always available; dashboard gated by
   `reaper.ui_enabled`).
+- Background agents (**experimental**) — list / dispatch / stop `claude --bg`
+  sessions from a dashboard panel (`/api/agents`); rides Claude Code's agent-view
+  research preview, so it may change with the upstream CLI.
 
 ## Where to next
 
