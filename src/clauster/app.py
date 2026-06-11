@@ -716,27 +716,38 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         currently be stopped from the CLI (and a local stop only orphans the cloud
         registration), so no dispatch control is wired into the UI yet.
         """
-        name = str(body.get("project") or "").strip()
+        raw_name = body.get("project")
+        if not isinstance(raw_name, str):
+            raise HTTPException(status_code=422, detail="project must be a string")
+        name = raw_name.strip()
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
 
-        def _opt_text(field: str) -> str | None:
+        def _opt_text(field: str, *, empty_ok: bool = True) -> str | None:
             """Validate an optional text field from the arbitrary JSON body.
 
-            None/missing/empty → None; a present non-string → 422 (rather than
-            letting a bad type reach — and partially execute — the spawn path).
+            Absent/null → None. A present non-string → 422 (rather than letting a
+            bad type reach — and partially execute — the spawn path). A present
+            empty string → None when ``empty_ok`` (a missing prompt), else 422:
+            an explicit empty ``rc_name``/``model``/``permission_mode`` is a
+            caller mistake, not "use the default", so it fails loudly instead of
+            silently dispatching a different session than intended.
             """
             value = body.get(field)
-            if value is None or value == "":
+            if value is None:
                 return None
             if not isinstance(value, str):
                 raise HTTPException(status_code=422, detail=f"{field} must be a string")
+            if value == "":
+                if empty_ok:
+                    return None
+                raise HTTPException(status_code=422, detail=f"{field} must not be empty")
             return value
 
         prompt = _opt_text("prompt")
-        rc_name = _opt_text("rc_name")
-        model = _opt_text("model")
-        permission_mode = _opt_text("permission_mode")
+        rc_name = _opt_text("rc_name", empty_ok=False)
+        model = _opt_text("model", empty_ok=False)
+        permission_mode = _opt_text("permission_mode", empty_ok=False)
         cwd = config.projects_root / name
         if not await asyncio.to_thread(cwd.is_dir):
             raise HTTPException(status_code=404, detail=f"project {name!r} not found")

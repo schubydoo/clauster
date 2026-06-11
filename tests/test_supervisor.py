@@ -452,6 +452,44 @@ def test_api_dispatch_agent_rejects_nonstring_field(write_config, tmp_path, monk
     assert called == []  # dispatch never reached
 
 
+def test_api_dispatch_agent_rejects_nonstring_project(write_config, tmp_path, monkeypatch):
+    # a non-string `project` must 422, not coerce (123 -> "123") into a 404/dispatch
+    called: list = []
+    monkeypatch.setattr(supervisor, "dispatch_background_job", lambda *a, **k: called.append(1))
+    r = _client(write_config, tmp_path).post("/api/agents", json={"project": 123})
+    assert r.status_code == 422
+    assert called == []
+
+
+@pytest.mark.parametrize("field", ["rc_name", "model", "permission_mode"])
+def test_api_dispatch_agent_rejects_present_empty_option(
+    write_config, tmp_path, monkeypatch, field
+):
+    # an explicit empty rc_name/model/permission_mode is a caller mistake -> 422,
+    # not silently dropped (which would dispatch a different session than intended)
+    called: list = []
+    monkeypatch.setattr(supervisor, "dispatch_background_job", lambda *a, **k: called.append(1))
+    r = _client(write_config, tmp_path).post("/api/agents", json={"project": "alpha", field: ""})
+    assert r.status_code == 422
+    assert called == []
+
+
+def test_api_dispatch_agent_empty_prompt_is_allowed(write_config, tmp_path, monkeypatch):
+    # an empty prompt legitimately means "no prompt" -> dropped to None, dispatch proceeds
+    seen: dict = {}
+
+    def fake(*a, **k):
+        seen.update(k)
+        return "deadbeef"
+
+    monkeypatch.setattr(supervisor, "dispatch_background_job", fake)
+    r = _client(write_config, tmp_path).post(
+        "/api/agents", json={"project": "alpha", "prompt": ""}
+    )
+    assert r.status_code == 201
+    assert seen["prompt"] is None
+
+
 def test_api_dispatch_agent_maps_dispatch_error(write_config, tmp_path, monkeypatch):
     def boom(*a, **k):
         raise supervisor.DispatchError("nope")
