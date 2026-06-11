@@ -187,12 +187,50 @@
         </div>
       </div>
 
-      <!-- ===== Background agents (claude --bg / agent view) — hidden until used ===== -->
-      <div class="mb-3" x-show="agents.length > 0" x-cloak>
+      <!-- ===== Background agents (claude --bg / agent view) ===== -->
+      <!-- Read-only list auto-shows when sessions exist (BG-1); a small launcher
+           opens the dispatch form so the first agent can be started from an
+           otherwise-hidden panel. Stop tears a session down the deregistering way. -->
+      <div class="mb-3" x-show="agents.length > 0 || agentDispatchOpen" x-cloak>
         <div class="card">
           <div class="card-header">
             <h3 class="card-title">Background agents</h3>
-            <span class="card-subtitle"><code>claude --bg</code> sessions on this host — observed, read-only</span>
+            <span class="card-subtitle"><code>claude --bg</code> sessions on this host</span>
+          </div>
+          <!-- dispatch form (opened via the launcher button below) -->
+          <div class="card-body border-bottom" x-show="agentDispatchOpen" x-cloak>
+            <div class="row g-2 align-items-end">
+              <div class="col-auto">
+                <label class="form-label small mb-1">Project</label>
+                <select class="form-select" x-model="agentForm.project">
+                  <option value="">Choose…</option>
+                  <template x-for="n in PROJECT_NAMES" :key="n">
+                    <option :value="n" x-text="n"></option>
+                  </template>
+                </select>
+              </div>
+              <div class="col">
+                <label class="form-label small mb-1">Prompt <span class="text-secondary">(optional)</span></label>
+                <input class="form-control" x-model="agentForm.prompt"
+                       placeholder="Initial instruction for the session…"
+                       @keydown.enter="dispatchAgent()">
+              </div>
+              <div class="col-auto">
+                <label class="form-check mb-2" title="Open as a Remote Control session — visible on claude.ai">
+                  <input class="form-check-input" type="checkbox" x-model="agentForm.cloud">
+                  <span class="form-check-label">cloud</span>
+                </label>
+              </div>
+              <div class="col-auto">
+                <button class="btn btn-primary" :disabled="!agentForm.project || agentForm.busy"
+                        @click="dispatchAgent()">
+                  <span x-text="agentForm.busy ? 'Dispatching…' : 'Dispatch'">Dispatch</span>
+                </button>
+              </div>
+            </div>
+            <div class="small text-secondary mt-1">
+              Spawns a detached <code>claude --bg</code> session; <strong>cloud</strong> also opens it on claude.ai. Stop it here to tear down cleanly (a forced kill would strand a cloud session).
+            </div>
           </div>
           <div class="list-group list-group-flush">
             <template x-for="j in agents" :key="j.id">
@@ -206,7 +244,12 @@
                         :title="j.worker_alive ? 'Worker process is live' : 'No live worker process (state kept on disk)'"
                         aria-hidden="true"></span>
                   <span class="text-secondary small" x-text="j.worker_alive ? ('pid ' + j.worker_pid) : 'no process'"></span>
-                  <span class="ms-auto text-secondary small" x-text="agentWhen(j)"></span>
+                  <span class="ms-auto text-secondary small me-2" x-text="agentWhen(j)"></span>
+                  <button class="btn btn-sm btn-ghost-danger" :disabled="agentStopping[j.id]"
+                          @click="stopAgent(j)"
+                          :title="j.bridge_session_id ? 'Stop and deregister the cloud session' : 'Stop and remove this session'">
+                    <span x-text="agentStopping[j.id] ? 'Stopping…' : 'Stop'">Stop</span>
+                  </button>
                 </div>
                 <div class="text-secondary small mt-1" x-show="j.detail" x-text="j.detail"></div>
                 <div class="small mt-1 text-warning" x-show="j.needs" x-text="'needs: ' + j.needs"></div>
@@ -215,6 +258,13 @@
             </template>
           </div>
         </div>
+      </div>
+      <!-- launcher: always available so the first session can be dispatched even
+           while the panel above is hidden (zero agents). -->
+      <div class="mb-3">
+        <button class="btn btn-ghost-secondary" @click="agentDispatchOpen = !agentDispatchOpen">
+          <span x-text="agentDispatchOpen ? '× Close background-agent dispatch' : '🤖 New background agent'">🤖 New background agent</span>
+        </button>
       </div>
 
       {% if reaper_ui_enabled %}
@@ -403,6 +453,9 @@
       instances: {},
       externalSessions: {},
       agents: [],
+      agentDispatchOpen: false,
+      agentForm: { project: "", prompt: "", cloud: false, busy: false },
+      agentStopping: {},   // job id -> true while a stop request is in flight
       errors: {},
       qrOpen: {},
       qrNonce: {},
@@ -525,6 +578,48 @@
         if (!j.updated_at) return "";
         const d = new Date(j.updated_at);
         return isNaN(d.getTime()) ? "" : d.toLocaleString();
+      },
+      async dispatchAgent() {
+        const f = this.agentForm;
+        if (!f.project || f.busy) return;
+        f.busy = true;
+        try {
+          const body = { project: f.project };
+          if (f.prompt.trim()) body.prompt = f.prompt.trim();
+          // "cloud" opens a Remote Control session named after the project.
+          if (f.cloud) body.rc_name = f.project;
+          const res = await fetch(ROOT + "/api/agents", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) {
+            this.toast("background agent dispatched", "success");
+            f.prompt = "";  // keep project + cloud for a quick repeat dispatch
+          } else {
+            this.toast("dispatch failed — " + (b.detail || res.status), "error");
+          }
+        } catch (e) { this.toast("dispatch failed", "error"); }
+        f.busy = false;
+        await this.refresh();
+      },
+      async stopAgent(j) {
+        const label = j.name || j.id;
+        const msg = j.bridge_session_id
+          ? "Stop \"" + label + "\"? This deregisters its cloud session."
+          : "Stop and remove \"" + label + "\"?";
+        if (!window.confirm(msg)) return;
+        this.agentStopping[j.id] = true;
+        try {
+          const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id), { method: "DELETE" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok && b.removed) this.toast(label + ": stopped", "success");
+          else if (res.ok) this.toast(label + ": stopped (cleanup pending — " + (b.detail || "supervisor restarting") + ")", "warning");
+          else this.toast(label + ": stop failed — " + (b.detail || res.status), "error");
+        } catch (e) { this.toast(label + ": stop failed", "error"); }
+        this.agentStopping[j.id] = false;
+        await this.refresh();
       },
       statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
       // Display status: an "interrupted" bridge is one that stopped WITHOUT a
