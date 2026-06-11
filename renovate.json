@@ -80,6 +80,13 @@
       "automerge": true
     },
     {
+      "description": "Auto-merge base-image digest re-pins (same tag, new SHA) once CI passes. Keeps OS security patches flowing without waiting on a weekly manual merge: the runtime apt-upgrade layer is keyed on the FROM digest, so a digest bump is what busts the gha build cache and re-pulls Debian fixes (see PR #216, where a lagging bump let 15 OpenSSL CVEs accumulate). Digest-only — a uv/base version bump is a different updateType and is NOT auto-merged.",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "docker base-image digests",
+      "automerge": true
+    },
+    {
       "description": "Group security-tooling actions — same security.yml scanners, useful to review together.",
       "matchManagers": ["github-actions"],
       "matchPackageNames": [
