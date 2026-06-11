@@ -323,6 +323,7 @@ class HostedSession:
             self._emit({"type": "lost", "reason": str(exc)})
 
     async def _on_line(self, stream: Any, line: str) -> None:
+        """Route one reassembled output line: stderr/non-JSON as text, else by frame type."""
         if stream == "stderr":
             self._emit({"type": "stderr", "text": sanitize_line(line)})
             return
@@ -344,6 +345,7 @@ class HostedSession:
         self._emit({"type": "frame", "frame": _redact_obj(frame)})
 
     async def _handle_control_request(self, frame: dict[str, Any]) -> None:
+        """Auto-ack an MCP-handshake request; park anything else (fail-closed)."""
         request_id = frame.get("request_id")
         request = frame.get("request")
         request = request if isinstance(request, dict) else {}
@@ -369,6 +371,7 @@ class HostedSession:
         )
 
     def _capture_session_uuid(self, frame: dict[str, Any]) -> None:
+        """Latch the first ``session_id`` seen (drives ``--resume``); never overwrite it."""
         if self.claude_session_uuid is not None:
             return
         sid = frame.get("session_id")
@@ -376,15 +379,18 @@ class HostedSession:
             self.claude_session_uuid = sid
 
     def _on_exit(self, exit_code: Any) -> None:
+        """Latch the terminal status (stopped/crashed) and emit the exit event."""
         self.exit_code = exit_code if isinstance(exit_code, int) else None
         self.status = "stopped" if self.exit_code == 0 else "crashed"
         self._emit({"type": "exit", "exit_code": self.exit_code})
 
     async def _write_stdin(self, frame: dict[str, Any]) -> None:
+        """Serialize one NDJSON frame and write it to the agent's stdin."""
         data = (json.dumps(frame, separators=(",", ":")) + "\n").encode("utf-8")
         await self._client.stdin(self._process_id, data)
 
     async def _send_control_response(self, request_id: str, response: dict[str, Any]) -> None:
+        """Write a success ``control_response`` for ``request_id`` to stdin."""
         await self._write_stdin(
             {
                 "type": "control_response",
@@ -397,6 +403,7 @@ class HostedSession:
         )
 
     def _emit(self, payload: dict[str, Any]) -> None:
+        """Stamp an ``event_seq``, append to the ring, and fan out to subscribers."""
         self._event_seq += 1
         event = {"event_seq": self._event_seq, **payload}
         self._ring.append(event)
@@ -404,6 +411,7 @@ class HostedSession:
             sub.offer(event)
 
     async def _teardown(self) -> None:
+        """Cancel the pump task and drop the stream subscription (idempotent)."""
         if self._pump_task is not None:
             self._pump_task.cancel()
             try:
@@ -498,6 +506,7 @@ class HostedManager:
             await session.stop()
 
     def _require(self, hosted_id: str) -> HostedSession:
+        """Return the live session for ``hosted_id`` or raise ``HostedSessionError``."""
         session = self._sessions.get(hosted_id)
         if session is None:
             raise HostedSessionError(f"no such hosted session: {hosted_id}")
