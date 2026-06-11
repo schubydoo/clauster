@@ -175,6 +175,51 @@ async def test_stderr_emitted_and_redacted(fake_claustrum):
         assert "env_<redacted>" in event["text"]
 
 
+async def test_redacts_secret_nested_in_list(fake_claustrum):
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        frame = {"type": "assistant", "items": ["leak env_01ABCDEFGHIJKLMNOPQRSTUV"]}
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        event = await _drain_until(queue, "frame")
+        assert event["frame"]["items"] == ["leak env_<redacted>"]
+
+
+async def test_blank_stdout_line_is_ignored(fake_claustrum):
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        await fake.emit(_PID, "stdout", b"   \n")  # whitespace-only → skipped
+        await fake.emit(_PID, "stdout", (json.dumps({"type": "user", "n": 1}) + "\n").encode())
+        event = await _drain_until(queue, "frame")
+        assert event["frame"]["n"] == 1
+
+
+async def test_control_request_without_id_is_ignored(fake_claustrum):
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {"type": "control_request", "request": {"subtype": "initialize"}}  # no request_id
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await asyncio.sleep(0.05)
+        assert session.pending_requests == []
+        assert _stdin_frames(fake) == []  # not acked, not parked
+
+
+async def test_unsubscribe_stops_delivery(fake_claustrum):
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        session.unsubscribe(queue)
+        await fake.emit(_PID, "stdout", (json.dumps({"type": "user", "n": 1}) + "\n").encode())
+        await asyncio.sleep(0.05)
+        assert queue.empty()
+
+
+async def test_stop_before_start_is_safe(fake_claustrum):
+    # A session that never started (status "starting", no stream) must stop cleanly.
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.stop()
+        assert "INT" in [k.get("signal") for k in fake.killed]
+
+
 # -- control plane ---------------------------------------------------------
 
 
