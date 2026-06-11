@@ -43,6 +43,7 @@ from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJob, CloneJobManager
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
+from .hosted import HostedManager, HostedSessionError
 from .models import (
     BackgroundJob,
     ClaudeMdDoc,
@@ -70,6 +71,7 @@ from .runner import (
     SpawnError,
     UnknownProject,
 )
+from .trust import is_trusted
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         try:
             yield
         finally:
+            await app.state.hosted.aclose()  # stop live hosted sessions
             daemon = getattr(app.state, "claustrum_daemon", None)
             if daemon is not None:
                 await daemon.aclose()  # drop our connection; leave the daemon running
@@ -144,6 +147,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.state.config = config
     app.state.runner = runner
     app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
+    app.state.hosted = HostedManager()  # hosted-channel sessions (CL-4); always present
     clone_jobs = CloneJobManager()
     app.state.clone_jobs = clone_jobs
     # Drop a finished clone job after this grace so a client that disconnected
@@ -841,13 +845,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         spawn_mode = body.get("spawn_mode")
         permission_mode = body.get("permission_mode")
         resume_mode = body.get("resume_mode")
+        channel = body.get("channel", "remote-control")
         for field, value in (
             ("spawn_mode", spawn_mode),
             ("permission_mode", permission_mode),
             ("resume_mode", resume_mode),
+            ("channel", channel),
         ):
             if value is not None and not isinstance(value, str):
                 raise HTTPException(status_code=422, detail=f"{field} must be a string")
+        if channel == "hosted":
+            return await _spawn_hosted(project, permission_mode)
+        if channel != "remote-control":
+            raise HTTPException(status_code=422, detail=f"unknown channel: {channel!r}")
         return await _spawn_or_http(
             runner.spawn(
                 project,
@@ -857,15 +867,65 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         )
 
+    async def _spawn_hosted(project: str, permission_mode: str | None) -> RemoteControlInstance:
+        """Start a hosted (claustrum stream-json) session for ``project``."""
+        daemon = getattr(app.state, "claustrum_daemon", None)
+        client = daemon.client if daemon is not None else None
+        if client is None:
+            raise HTTPException(
+                status_code=503,
+                detail="hosted channel unavailable: claustrum daemon not connected",
+            )
+        path = await _resolve_project_path(project)
+        if not await asyncio.to_thread(is_trusted, path, runner.claude_json):
+            raise HTTPException(
+                status_code=409,
+                detail=f"directory not trusted: {path}. Use the Trust action first.",
+            )
+        try:
+            binary = await asyncio.to_thread(claude_cli.resolve_binary, config.claude.binary)
+        except claude_cli.ClaudeNotFound as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        pm = permission_mode or config.instance_defaults.permission_mode
+        try:
+            return await app.state.hosted.spawn(
+                client,
+                project=project,
+                label=f"hosted:{project}",
+                cwd=str(path),
+                claude_binary=binary,
+                permission_mode=pm,
+            )
+        except ClaustrumError as exc:
+            raise HTTPException(status_code=502, detail=f"hosted spawn failed: {exc}") from exc
+
     @app.get("/api/instances/{instance_id}")
     async def api_instance(instance_id: str) -> RemoteControlInstance:
-        instance = runner.get_instance(instance_id)
+        instance = runner.get_instance(instance_id) or app.state.hosted.get_instance(instance_id)
         if instance is None:
             raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
         return instance
 
+    @app.post("/api/instances/{instance_id}/message", status_code=202)
+    async def api_hosted_message(instance_id: str, body: dict) -> dict:
+        """Send one user turn to a hosted session (the conversation input path)."""
+        text = body.get("text")
+        if not isinstance(text, str) or not text:
+            raise HTTPException(
+                status_code=422, detail="body must include a non-empty 'text' string"
+            )
+        if app.state.hosted.get_instance(instance_id) is None:
+            raise HTTPException(status_code=404, detail=f"no such hosted session: {instance_id}")
+        try:
+            await app.state.hosted.send(instance_id, text)
+        except HostedSessionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True}
+
     @app.delete("/api/instances/{instance_id}")
     async def api_stop(instance_id: str) -> RemoteControlInstance:
+        if app.state.hosted.get_instance(instance_id) is not None:
+            return await app.state.hosted.stop(instance_id)
         try:
             return await runner.stop(instance_id)
         except UnknownProject as exc:
@@ -1000,6 +1060,30 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 await asyncio.sleep(0.5)
         except (WebSocketDisconnect, RuntimeError):
             return
+
+    @app.websocket("/ws/hosted/{instance_id}")
+    async def ws_hosted(websocket: WebSocket, instance_id: str) -> None:
+        """Stream a hosted session's live events, replaying the ring past ``?after=``."""
+        if config.auth.enabled and not _ws_authorized(websocket):
+            await websocket.close(code=1008)  # validate before accept
+            return
+        await websocket.accept()
+        session = app.state.hosted.session(instance_id)
+        if session is None:
+            await websocket.close(code=1008)  # unknown / already gone
+            return
+        try:
+            after = int(websocket.query_params.get("after", "0"))
+        except (TypeError, ValueError):
+            after = 0
+        queue = session.subscribe(after_seq=after)
+        try:
+            while True:
+                await websocket.send_json(await queue.get())
+        except (WebSocketDisconnect, RuntimeError):
+            return
+        finally:
+            session.unsubscribe(queue)
 
     @app.websocket("/ws/clone-progress/{job_id}")
     async def ws_clone_progress(websocket: WebSocket, job_id: str) -> None:
