@@ -4,6 +4,12 @@ Secondary, ~5-min cadence. The JSON is a flat list of working sessions with no
 bridge/env grouping (Capture B), so attribution joins on ``cwd`` — the only link
 back to a managed bridge. ``sessionId`` here is the local RFC-4122 UUID, never
 the API ULID.
+
+Agent view (Claude Code 2.1.139+) lists `claude --bg` background sessions in the
+same output, tagged ``kind: "background"`` and carrying a lifecycle ``state``.
+The cwd join is therefore gated on ``kind`` (a background session in a managed
+project's dir is not the bridge's session) and terminal-state entries are
+dropped at parse (a finished session is not a working session).
 """
 
 from __future__ import annotations
@@ -14,6 +20,14 @@ from pathlib import Path
 
 from .claude_cli import resolve_binary
 from .models import Attribution, WorkingSession
+
+# Agent-view lifecycle states that mean the session is over — not live anywhere,
+# neither for bridge attribution nor for the ghost-reaper's keep set.
+_TERMINAL_STATES = frozenset({"done", "failed", "stopped"})
+# Kinds eligible for the cwd→bridge join. Bridge child sessions are observed
+# "interactive"; "" tolerates a pre-agent-view CLI that omits the field. Anything
+# else ("background", future kinds) is allowlisted out — fail-closed attribution.
+_BRIDGE_KINDS = frozenset({"", "interactive"})
 
 
 def list_working_sessions(binary: str, *, timeout: float = 10.0) -> list[WorkingSession]:
@@ -54,9 +68,12 @@ def parse_agents_json(stdout: str) -> list[WorkingSession]:
     sessions: list[WorkingSession] = []
     for item in items:
         try:
-            sessions.append(WorkingSession.from_agents_json(item))
+            session = WorkingSession.from_agents_json(item)
         except (KeyError, TypeError, ValueError):
             continue
+        if session.state in _TERMINAL_STATES:
+            continue
+        sessions.append(session)
     return sessions
 
 
@@ -67,10 +84,16 @@ def reconcile(
 
     ``managed_cwds`` maps a resolved project path → instance id. Sessions whose
     cwd matches become TRACKED (and carry ``parent_instance``); the rest are
-    EXTERNAL (a bridge/session Clauster doesn't manage).
+    EXTERNAL (a bridge/session Clauster doesn't manage). Non-bridge kinds never
+    join: a `claude --bg` session sharing a managed cwd must not read as the
+    bridge's session (TRACKED = false liveness) nor as an unmanaged bridge
+    (EXTERNAL phantom-deletes a stopped record) — it stays UNTRACKED.
     """
     resolved = {p.resolve(): inst_id for p, inst_id in managed_cwds.items()}
     for s in sessions:
+        if s.kind not in _BRIDGE_KINDS:
+            s.attribution = Attribution.UNTRACKED
+            continue
         inst_id = resolved.get(s.cwd.resolve())
         if inst_id is not None:
             s.parent_instance = inst_id

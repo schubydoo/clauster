@@ -7,14 +7,17 @@ from clauster import inspector
 from clauster.models import Attribution
 
 
-def _agent(pid, cwd, sid, kind="interactive", started=1716998400000):
-    return {
+def _agent(pid, cwd, sid, kind="interactive", started=1716998400000, state=None):
+    item = {
         "pid": pid,
         "cwd": cwd,
         "kind": kind,
         "startedAt": started,
         "sessionId": sid,
     }
+    if state is not None:
+        item["state"] = state
+    return item
 
 
 def test_parse_agents_json_empty():
@@ -64,4 +67,67 @@ def test_reconcile_normalizes_trailing_slash(tmp_path: Path):
     proj.mkdir()
     sessions = inspector.parse_agents_json(json.dumps([_agent(12, str(proj) + "/", "u")]))
     result = inspector.reconcile(sessions, {proj: "beta"})
+    assert result[0].attribution is Attribution.TRACKED
+
+
+def test_parse_agents_json_drops_terminal_states():
+    # Agent view (2.1.139+) can list finished sessions; done/failed/stopped are
+    # not working sessions and must not count as live anywhere.
+    payload = json.dumps(
+        [
+            _agent(1, "/a", "u-working", state="working"),
+            _agent(2, "/a", "u-blocked", state="blocked"),
+            _agent(3, "/a", "u-legacy"),  # pre-agent-view item: no state field
+            _agent(4, "/a", "u-done", state="done"),
+            _agent(5, "/a", "u-failed", state="failed"),
+            _agent(6, "/a", "u-stopped", state="stopped"),
+        ]
+    )
+    sessions = inspector.parse_agents_json(payload)
+    assert [s.local_uuid for s in sessions] == ["u-working", "u-blocked", "u-legacy"]
+    assert sessions[0].state == "working"
+    assert sessions[2].state == ""
+
+
+def test_reconcile_background_kind_never_tracked(tmp_path: Path):
+    # A `claude --bg` session in a managed project's cwd is NOT the bridge's
+    # session — attributing it TRACKED would be a false liveness signal.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(
+        json.dumps([_agent(10, str(proj), "u-bg", kind="background", state="working")])
+    )
+    result = inspector.reconcile(sessions, {proj: "alpha"})
+    assert result[0].attribution is Attribution.UNTRACKED
+    assert result[0].parent_instance is None
+
+
+def test_reconcile_background_kind_never_external():
+    # EXTERNAL would phantom-delete a stopped managed record and surface
+    # "external session active" for what is not a bridge.
+    sessions = inspector.parse_agents_json(
+        json.dumps([_agent(11, "/somewhere/else", "u-bg", kind="background")])
+    )
+    result = inspector.reconcile(sessions, {})
+    assert result[0].attribution is Attribution.UNTRACKED
+
+
+def test_reconcile_unknown_kind_stays_untracked(tmp_path: Path):
+    # Allowlist, not blocklist: a future kind doesn't join either (fail-closed).
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(
+        json.dumps([_agent(12, str(proj), "u-new", kind="subagent")])
+    )
+    result = inspector.reconcile(sessions, {proj: "alpha"})
+    assert result[0].attribution is Attribution.UNTRACKED
+
+
+def test_reconcile_missing_kind_still_joins(tmp_path: Path):
+    # Pre-agent-view CLI compat: an item without `kind` still attributes by cwd.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    item = _agent(13, str(proj), "u-old")
+    del item["kind"]
+    result = inspector.reconcile(inspector.parse_agents_json(json.dumps([item])), {proj: "alpha"})
     assert result[0].attribution is Attribution.TRACKED

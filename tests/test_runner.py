@@ -563,6 +563,29 @@ async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monk
     assert "alpha" in runner.external_sessions_by_project()  # now surfaced as external
 
 
+async def test_poll_ignores_background_session_at_stopped_cwd(runner_config, monkeypatch):
+    # A `claude --bg` background session (agent view, 2.1.139+) at a STOPPED
+    # project's cwd is NOT an external bridge: the stopped record must survive
+    # (Resume stays available) and nothing surfaces as "external session active".
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STOPPED, resume_mode="pty"
+    )
+    sess = WorkingSession(
+        pid=999,
+        cwd=config.projects_root / "alpha",
+        kind="background",
+        state="working",
+        started_at=999,
+        local_uuid="u-bg",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    await runner.poll_once()
+    assert "alpha" in runner._instances  # kept — a bg session is not a bridge
+    assert runner.external_sessions_by_project() == {}
+
+
 async def test_poll_keeps_stopped_instance_without_external_session(runner_config, monkeypatch):
     # The reboot-orphan path still works: a STOPPED-resumable instance with NO live
     # session at its cwd is preserved (so Resume stays available).

@@ -271,7 +271,9 @@ def live_bridge_directories(binary: str, projects_root: Path | None = None) -> s
     """Directories that currently host a live bridge (the reaper's "keep" set).
 
     Sourced from ``claude agents --json`` cwds (host-wide live sessions) plus a
-    live-pointer walk under projects_root. **Deliberately NOT best-effort**: if the
+    live-pointer walk under projects_root. Unlike bridge attribution (which
+    kind-gates, see ``inspector``), live `claude --bg` sessions count here too —
+    over-keeping is the safe direction for the reaper. **Deliberately NOT best-effort**: if the
     agents-json probe fails this raises, because reaping with an incomplete live set
     could archive a still-live bridge. The CLI must abort rather than guess.
     """

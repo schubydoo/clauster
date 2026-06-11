@@ -113,13 +113,16 @@ class Attribution(StrEnum):
 class WorkingSession(BaseModel):
     """A `claude agents --json` working session — observed, not managed.
 
-    The raw list-item shape is {pid, cwd, kind, startedAt, sessionId}; the rest of
-    the fields here are Clauster-derived.
+    The raw list-item shape is {pid, cwd, kind, startedAt, sessionId}; agent view
+    (Claude Code 2.1.139+) adds id/state/status/waitingFor/name and lists
+    `claude --bg` background sessions alongside bridge children. The rest of the
+    fields here are Clauster-derived.
     """
 
     pid: int
     cwd: Path  # the only link back to a bridge (join key)
-    kind: str  # observed "interactive" for bridge child sessions
+    kind: str  # "interactive" for bridge child sessions; "background" = `claude --bg`
+    state: str = ""  # agent-view lifecycle (working/blocked/done/failed/stopped); "" pre-2.1.139
     started_at: int  # epoch ms (NOT an ISO string)
     local_uuid: str  # the JSON `sessionId` (RFC 4122), never the API ULID
     parent_instance: str | None = None  # derived by matching cwd to a managed bridge
@@ -132,6 +135,7 @@ class WorkingSession(BaseModel):
             pid=item["pid"],
             cwd=Path(item["cwd"]),
             kind=item.get("kind", ""),
+            state=item.get("state", ""),
             started_at=item["startedAt"],
             local_uuid=item["sessionId"],
         )
