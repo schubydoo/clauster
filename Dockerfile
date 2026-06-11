@@ -8,7 +8,7 @@
 # that installs it) along with ~/.claude credentials and your projects dir.
 
 # ----- builder: resolve the locked deps into a self-contained venv -----------
-FROM python:3.14-slim-trixie@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97 AS builder
+FROM python:3.14-slim-trixie@sha256:81ada6cb56bcbe3909644b4cb76ebe5354c65eaaad788a437bc1340a7638d49d AS builder
 
 # renovate: datasource=docker depName=ghcr.io/astral-sh/uv
 COPY --from=ghcr.io/astral-sh/uv:0.11.20@sha256:eaa5f1a3305307aaf9e67fe2bbba1d85ebbb2d8a63bce23af21797bfafbe0f8b /uv /uvx /bin/
@@ -28,11 +28,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable
 
 # ----- runtime ---------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97 AS runtime
+FROM python:3.14-slim-trixie@sha256:81ada6cb56bcbe3909644b4cb76ebe5354c65eaaad788a437bc1340a7638d49d AS runtime
 
-# apt upgrade pulls any Debian security fixes published since the base image was
-# built (defense-in-depth on rebuilds). git: provisioning (create --git-init /
-# clone). gosu + passwd: PUID/PGID remap then privilege-drop in the entrypoint.
+# apt upgrade pulls Debian security fixes published since the base image was
+# built. NB: this layer is keyed on the FROM digest, so the CI build cache
+# (cache-from/to: gha) only re-runs it when the base digest above changes —
+# bumping that pin (Renovate, or manually) is what refreshes OS CVEs; a rebuild
+# at the same digest reuses the cached layer. git: provisioning (create
+# --git-init / clone). gosu + passwd: PUID/PGID remap + privilege-drop in entry.
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends git gosu passwd \
