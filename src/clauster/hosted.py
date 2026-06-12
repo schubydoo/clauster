@@ -579,6 +579,53 @@ class HostedManager:
         await self._persist()
         return self._synced(self._instances[hosted_id])
 
+    async def resume(
+        self,
+        client: ClaustrumClient,
+        hosted_id: str,
+        *,
+        cwd: str,
+        claude_binary: str,
+    ) -> RemoteControlInstance:
+        """Respawn a lost/ended hosted session from its captured ``claude_session_uuid``.
+
+        The original daemon process is gone (stopped/crashed/error/daemon-restart), so
+        this starts a *fresh* process with ``--resume <uuid>`` to reload the
+        conversation — keyed by a new ``claustrum_process_id``; the dead row is retired
+        once the resumed one is live. Raises :class:`HostedSessionError` if the session
+        is unknown, still running, or has no captured uuid to resume from. A
+        :class:`ClaustrumError` from the spawn propagates (the caller maps it).
+        """
+        old = self._instances.get(hosted_id)
+        if old is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        old_session = self._sessions.get(hosted_id)
+        if old_session is not None and old_session.status in ("running", "starting"):
+            raise HostedSessionError(f"hosted session {hosted_id} is still running")
+        resume_uuid = old.claude_session_uuid
+        if not resume_uuid:
+            raise HostedSessionError("no captured session uuid to resume from")
+        # A same-runtime crash leaves a dead session object behind; detach it before
+        # the fresh spawn so its (already-exited) pump/subscription is released.
+        if old_session is not None:
+            await old_session.detach()
+            self._sessions.pop(hosted_id, None)
+        instance = await self.spawn(
+            client,
+            project=old.project,
+            label=old.label,
+            cwd=cwd,
+            claude_binary=claude_binary,
+            permission_mode=old.permission_mode,
+            resume_uuid=resume_uuid,
+        )
+        # Carry the uuid forward so the resumed row is itself re-resumable before its
+        # first frame re-captures it, then retire the dead row.
+        instance.claude_session_uuid = resume_uuid
+        self._instances.pop(hosted_id, None)
+        await self._persist()
+        return instance
+
     async def aclose(self) -> None:
         """Detach every live hosted session at app shutdown — leave them running.
 

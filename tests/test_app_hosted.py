@@ -53,9 +53,11 @@ class _StubManager:
         self.sent: list[tuple[str, str]] = []
         self.responded: list[tuple[str, str, dict]] = []
         self.stopped: list[str] = []
+        self.resumed: list[dict] = []
         self.spawn_error: Exception | None = None
         self.send_error: Exception | None = None
         self.respond_error: Exception | None = None
+        self.resume_error: Exception | None = None
 
     def seed(self) -> RemoteControlInstance:
         inst = RemoteControlInstance(
@@ -113,6 +115,20 @@ class _StubManager:
         inst = self.instances[hosted_id]
         inst.status = InstanceStatus.STOPPED
         return inst
+
+    async def resume(self, client, hosted_id, *, cwd, claude_binary):
+        if self.resume_error is not None:
+            raise self.resume_error
+        self.resumed.append({"id": hosted_id, "cwd": cwd, "binary": claude_binary})
+        new = RemoteControlInstance(
+            project="alpha",
+            label="hosted:alpha",
+            channel="hosted",
+            claustrum_process_id="hid-2",
+            status=InstanceStatus.RUNNING,
+        )
+        self.instances["hid-2"] = new
+        return new
 
     async def aclose(self) -> None:
         pass
@@ -326,6 +342,57 @@ def test_permission_unparked_request_is_409(write_config, projects_root):
     with TestClient(app) as client:
         r = client.post(f"/api/instances/{_HID}/permissions/perm-1", json={"decision": "allow"})
     assert r.status_code == 409
+
+
+# -- resume (CL-7) ---------------------------------------------------------
+
+
+def test_resume_routes_hosted_to_manager(write_config, projects_root, monkeypatch):
+    monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    manager.seed()
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/resume")
+    assert r.status_code == 200
+    assert manager.resumed[0]["id"] == _HID
+    assert manager.resumed[0]["binary"] == "/usr/bin/claude"
+    assert r.json()["claustrum_process_id"] == "hid-2"  # the fresh resumed instance
+
+
+def test_resume_hosted_without_daemon_is_503(write_config, projects_root):
+    manager = _StubManager()
+    manager.seed()
+    app = _app(write_config, manager=manager, daemon=None)  # claustrum disabled
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/resume")
+    assert r.status_code == 503
+    assert manager.resumed == []
+
+
+def test_resume_hosted_session_error_is_409(write_config, projects_root, monkeypatch):
+    monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    manager.seed()
+    manager.resume_error = HostedSessionError("no captured session uuid to resume from")
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/resume")
+    assert r.status_code == 409
+
+
+def test_resume_hosted_daemon_error_is_502(write_config, projects_root, monkeypatch):
+    monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    manager = _StubManager()
+    manager.seed()
+    manager.resume_error = ClaustrumError("daemon went away")
+    app = _app(write_config, manager=manager, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/resume")
+    assert r.status_code == 502
 
 
 # -- stop dispatch ---------------------------------------------------------

@@ -892,8 +892,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         )
 
-    async def _spawn_hosted(project: str, permission_mode: str | None) -> RemoteControlInstance:
-        """Start a hosted (claustrum stream-json) session for ``project``."""
+    async def _hosted_prereqs(project: str) -> tuple[object, Path, str]:
+        """Resolve (daemon client, trusted project path, claude binary) for a hosted op.
+
+        Shared by hosted spawn and resume; raises the same HTTP errors the spawn path
+        has always used (503 no daemon / 503 binary missing, 409 untrusted directory).
+        """
         daemon = getattr(app.state, "claustrum_daemon", None)
         client = daemon.client if daemon is not None else None
         if client is None:
@@ -911,6 +915,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             binary = await asyncio.to_thread(claude_cli.resolve_binary, config.claude.binary)
         except claude_cli.ClaudeNotFound as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return client, path, binary
+
+    async def _spawn_hosted(project: str, permission_mode: str | None) -> RemoteControlInstance:
+        """Start a hosted (claustrum stream-json) session for ``project``."""
+        client, path, binary = await _hosted_prereqs(project)
         pm = permission_mode or config.instance_defaults.permission_mode
         try:
             return await app.state.hosted.spawn(
@@ -923,6 +932,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except ClaustrumError as exc:
             raise HTTPException(status_code=502, detail=f"hosted spawn failed: {exc}") from exc
+
+    async def _resume_hosted(
+        hosted_id: str, instance: RemoteControlInstance
+    ) -> RemoteControlInstance:
+        """Resume a lost/ended hosted session by id, respawning with ``--resume <uuid>``.
+
+        ``instance`` is the row the route already fetched. Maps the engine's
+        :class:`HostedSessionError` (unknown / still-running / no-uuid) to 409 and a
+        daemon spawn failure to 502.
+        """
+        client, path, binary = await _hosted_prereqs(instance.project)
+        try:
+            return await app.state.hosted.resume(
+                client, hosted_id, cwd=str(path), claude_binary=binary
+            )
+        except HostedSessionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ClaustrumError as exc:
+            raise HTTPException(status_code=502, detail=f"hosted resume failed: {exc}") from exc
 
     @app.get("/api/instances/{instance_id}")
     async def api_instance(instance_id: str) -> RemoteControlInstance:
@@ -989,11 +1017,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/api/instances/{instance_id}/resume")
     async def api_resume(instance_id: str) -> RemoteControlInstance:
-        """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
+        """Re-spawn a stopped/crashed bridge or hosted session into its prior conversation.
 
-        Reuses the bridge's stored spawn/permission modes (so resume keeps the same
-        permission mode rather than dropping to the default).
+        Bridges reuse their stored spawn/permission modes; a hosted session respawns
+        a fresh daemon process with ``--resume <claude_session_uuid>`` (CL-7).
         """
+        hosted = app.state.hosted.get_instance(instance_id)
+        if hosted is not None:
+            return await _resume_hosted(instance_id, hosted)
         return await _spawn_or_http(runner.resume(instance_id))
 
     @app.post("/api/projects/{name}/trust")
