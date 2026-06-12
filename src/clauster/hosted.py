@@ -42,6 +42,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream
 from .hosted_state import HostedStateStore
 from .models import InstanceStatus, RemoteControlInstance
@@ -577,6 +578,10 @@ class HostedManager:
         await session.start(
             cwd=cwd, permission_mode=permission_mode, resume_uuid=resume_uuid, want_pid=True
         )
+        # Measure our OWN psutil create_time of the (CT-1-reported) pid — that's what
+        # CL-8 orphan validation compares against, NOT the daemon's startTime token
+        # (decision (b)). None when there's no pid (pre-CT-1 daemon) or it's unreadable.
+        proc_start = procutil.proc_create_time(session.agent_pid) if session.agent_pid else None
         instance = RemoteControlInstance(
             project=project,
             label=label,
@@ -584,7 +589,7 @@ class HostedManager:
             permission_mode=permission_mode,  # type: ignore[arg-type]
             claustrum_process_id=process_id,
             agent_pid=session.agent_pid,
-            agent_proc_start=session.agent_proc_start,
+            agent_proc_start=proc_start,
             status=InstanceStatus.RUNNING,
             started_at=datetime.now(UTC),
         )
@@ -657,9 +662,50 @@ class HostedManager:
         if old_session is not None:
             await old_session.detach()
             self._sessions.pop(hosted_id, None)
+        elif old.is_orphan and old.agent_pid is not None:
+            # Orphan survivor still running on this conversation — kill it (gated on a
+            # pid+create_time match) so the resumed agent doesn't share its session.
+            await asyncio.to_thread(procutil.kill_if_match, old.agent_pid, old.agent_proc_start)
         self._instances.pop(hosted_id, None)
         await self._persist()
         return self._synced(instance)
+
+    async def kill_orphan(self, hosted_id: str) -> RemoteControlInstance:
+        """Terminate a survived-but-orphaned hosted agent and mark its row stopped (CL-8).
+
+        For an orphan (a live agent the restarted daemon no longer manages): hard-kill
+        the survivor pid+tree — gated on a pid + create_time + hosted-cmdline match so a
+        reused/unrelated PID is never touched — then mark the row stopped. Raises
+        :class:`HostedSessionError` for an unknown id.
+        """
+        inst = self._instances.get(hosted_id)
+        if inst is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        if inst.agent_pid is not None:
+            await asyncio.to_thread(procutil.kill_if_match, inst.agent_pid, inst.agent_proc_start)
+        inst.is_orphan = False
+        inst.intentional_stop = True
+        inst.status = InstanceStatus.STOPPED
+        # Clear any orphan/loss recovery prompt — the row is now a clean stop, not a
+        # "Resume or Kill" survivor, so a stale detail would mislead the UI.
+        inst.error_detail = None
+        await self._persist()
+        return self._synced(inst)
+
+    @staticmethod
+    def _is_orphan(instance: RemoteControlInstance) -> bool:
+        """Whether a not-found instance is a recoverable (killable) survivor.
+
+        Uses the same fail-closed predicate as the guarded kill, so a row is only
+        classified as an orphan when we actually have killable ``(pid, create_time)``
+        evidence. A survivor we can't safely kill (e.g. a pre-CL-8 row with no recorded
+        ``agent_proc_start``) is treated as lost, not as a recoverable orphan — otherwise
+        ``kill_orphan``/resume would transition the row to a clean stop while the process
+        kept running.
+        """
+        return instance.agent_pid is not None and procutil.is_killable_hosted(
+            instance.agent_pid, instance.agent_proc_start
+        )
 
     async def aclose(self) -> None:
         """Detach every live hosted session at app shutdown — leave them running.
@@ -702,8 +748,17 @@ class HostedManager:
                 logger.warning("hosted: reattach of %s failed: %s", process_id, exc)
                 continue
             if not result.get("found"):
+                # The new daemon doesn't know this process. If -keep-children left the
+                # agent running (CL-8), its (pid, create_time) still matches a live
+                # process → it's an orphan we can recover; otherwise it's truly lost.
                 instance.status = InstanceStatus.CRASHED
-                instance.error_detail = "daemon restarted; session lost"
+                if self._is_orphan(instance):
+                    instance.is_orphan = True
+                    instance.error_detail = (
+                        "survived a daemon restart — Resume to recover, or Kill"
+                    )
+                else:
+                    instance.error_detail = "daemon restarted; session lost"
                 continue
             self._sessions[process_id] = session
         await self._persist()

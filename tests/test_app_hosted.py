@@ -53,11 +53,13 @@ class _StubManager:
         self.sent: list[tuple[str, str]] = []
         self.responded: list[tuple[str, str, dict]] = []
         self.stopped: list[str] = []
+        self.killed_orphans: list[str] = []
         self.resumed: list[dict] = []
         self.spawn_error: Exception | None = None
         self.send_error: Exception | None = None
         self.respond_error: Exception | None = None
         self.resume_error: Exception | None = None
+        self.kill_orphan_error: Exception | None = None
 
     def seed(self) -> RemoteControlInstance:
         inst = RemoteControlInstance(
@@ -114,6 +116,15 @@ class _StubManager:
         self.stopped.append(hosted_id)
         inst = self.instances[hosted_id]
         inst.status = InstanceStatus.STOPPED
+        return inst
+
+    async def kill_orphan(self, hosted_id: str) -> RemoteControlInstance:
+        if self.kill_orphan_error is not None:
+            raise self.kill_orphan_error
+        self.killed_orphans.append(hosted_id)
+        inst = self.instances[hosted_id]
+        inst.status = InstanceStatus.STOPPED
+        inst.is_orphan = False
         return inst
 
     async def resume(self, client, hosted_id, *, cwd, claude_binary):
@@ -410,6 +421,33 @@ def test_delete_routes_hosted_to_manager(write_config, projects_root):
     assert r.status_code == 200
     assert manager.stopped == [_HID]
     assert r.json()["status"] == "stopped"
+
+
+def test_delete_orphan_routes_to_kill(write_config, projects_root):
+    # No live session (an orphan that survived a daemon restart) → DELETE kills it
+    # via kill_orphan, not stop (which would require a session).
+    manager = _StubManager()
+    manager.seed()
+    del manager.sessions[_HID]  # orphan: instance row present, no live session
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.delete(f"/api/instances/{_HID}")
+    assert r.status_code == 200
+    assert manager.killed_orphans == [_HID]
+    assert manager.stopped == []  # took the kill path, not stop
+
+
+def test_delete_hosted_race_returns_404(write_config, projects_root):
+    # The row vanishes (concurrent stop/reattach) between the existence check and the
+    # awaited kill — the endpoint maps HostedSessionError to 404, not an unhandled 500.
+    manager = _StubManager()
+    manager.seed()
+    del manager.sessions[_HID]  # no live session → kill_orphan path
+    manager.kill_orphan_error = HostedSessionError("no such hosted session: gone")
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.delete(f"/api/instances/{_HID}")
+    assert r.status_code == 404
 
 
 # -- websocket -------------------------------------------------------------

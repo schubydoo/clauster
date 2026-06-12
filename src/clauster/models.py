@@ -95,10 +95,14 @@ class RemoteControlInstance(BaseModel):
     channel: SessionChannel = "remote-control"
     claustrum_process_id: str | None = None  # client-chosen ULID for the daemon spawn
     agent_pid: int | None = None  # the agent's OS pid (claustrum CT-1 opt-in; None pre-CT-1)
-    agent_proc_start: float | None = None  # CT-1 startTime; PID-reuse defense parity
+    # Clauster's own psutil create_time of agent_pid, measured at spawn (NOT the CT-1
+    # daemon startTime token, which is daemon-internal). Backs CL-8 orphan validation:
+    # a not-found reattach whose (pid, this) still matches a live process is a survivor.
+    agent_proc_start: float | None = None
     claude_session_uuid: str | None = None  # RFC 4122 from the init frame; drives --resume
     daemon_last_seq: int = 0  # highest daemon frame seq seen; reattach cursor across restarts
     hosted_log_path: Path | None = None  # redacted on-disk mirror of the hosted stream
+    is_orphan: bool = False  # CL-8: survived a daemon restart (live pid, no daemon session)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
