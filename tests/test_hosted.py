@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from clauster.claustrum_client import ClaustrumClient
+from clauster.claustrum_client import ClaustrumClient, DaemonUnreachable
 from clauster.hosted import (
     HostedManager,
     HostedSession,
@@ -679,15 +679,31 @@ async def test_manager_public_persist_invokes_store(fake_claustrum, tmp_path):
         assert inst.claustrum_process_id in store.load()
 
 
+class _BoomReattachClient:
+    """A stub daemon client whose reattach raises — isolates the error path."""
+
+    def stream(self, process_id):
+        class _Stream:
+            def subscribe(self):
+                return asyncio.Queue()
+
+            def unsubscribe(self, queue):
+                pass
+
+        return _Stream()
+
+    async def reattach(self, process_id, from_seq=0):
+        raise DaemonUnreachable("daemon gone")
+
+
 async def test_manager_reattach_daemon_error_is_recorded(fake_claustrum, tmp_path):
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
     pid = await _spawn_gen1(fake, store)
-    # An unconnected client makes every reattach raise DaemonUnreachable — recorded
-    # per-session as ERROR, never crashing reattach_all / startup.
-    client = ClaustrumClient(fake.socket_path, fake.token)  # never connected
+    # A daemon error on reattach is recorded per-session as ERROR, never crashing
+    # reattach_all / startup.
     mgr = HostedManager(store)
-    await mgr.reattach_all(client)
+    await mgr.reattach_all(_BoomReattachClient())
     inst = mgr.get_instance(pid)
     assert inst.status is InstanceStatus.ERROR
     assert "reattach failed" in (inst.error_detail or "")
