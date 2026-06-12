@@ -301,7 +301,7 @@ class HostedSession:
             raise HostedSessionError(f"cannot respond on a {self.status} hosted session")
         if request_id not in self._pending:
             raise HostedSessionError(f"no parked control request {request_id!r}")
-        parked = self._pending.pop(request_id)
+        parked = self._pending[request_id]
         if response.get("behavior") == "allow" and "updatedInput" not in response:
             # The CLI's can_use_tool response schema requires updatedInput on every
             # allow (a bare {"behavior": "allow"} fails its union validation and the
@@ -313,6 +313,11 @@ class HostedSession:
                 "updatedInput": tool_input if isinstance(tool_input, dict) else {},
             }
         await self._send_control_response(request_id, response)
+        # Consume only after the write succeeded: a failed write must leave the
+        # request parked and retryable, never silently lost with the agent
+        # unanswered. pop-with-default because a concurrent responder may have
+        # raced us past the existence check while we awaited the write.
+        self._pending.pop(request_id, None)
         self._emit(
             {
                 "type": "control_resolved",

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from clauster.claustrum_client import ClaustrumClient, DaemonUnreachable
+from clauster.claustrum_client import ClaustrumClient, ClaustrumError, DaemonUnreachable
 from clauster.hosted import (
     HostedManager,
     HostedSession,
@@ -285,14 +285,22 @@ async def test_permission_request_is_parked_not_auto_answered(fake_claustrum):
         assert resolved["request_id"] == "perm-1" and resolved["behavior"] == "allow"
 
 
-async def test_allow_without_parked_input_sends_empty_record(fake_claustrum):
+@pytest.mark.parametrize(
+    "request_payload",
+    [
+        {"subtype": "can_use_tool", "tool_name": "Bash"},  # no input at all
+        {"subtype": "can_use_tool", "tool_name": "Bash", "input": "bogus"},  # non-dict
+    ],
+    ids=["missing-input", "non-dict-input"],
+)
+async def test_allow_without_parked_input_sends_empty_record(fake_claustrum, request_payload):
     # The schema wants a record; a parked request with no (or non-dict) input still
     # needs updatedInput on allow — default to {} rather than omit it.
     async with _session(fake_claustrum) as (fake, session):
         frame = {
             "request_id": "perm-1",
             "type": "control_request",
-            "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": "bogus"},
+            "request": request_payload,
         }
         await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
         await _drain_until(session.subscribe(), "control_request")
@@ -300,6 +308,40 @@ async def test_allow_without_parked_input_sends_empty_record(fake_claustrum):
         await asyncio.sleep(0.05)
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses[0]["response"]["response"] == {"behavior": "allow", "updatedInput": {}}
+
+
+async def test_failed_response_write_leaves_request_parked(fake_claustrum, monkeypatch):
+    # The stdin write fails while the session is still running: the error must
+    # surface AND the request must stay parked so the operator can retry —
+    # never consumed with the agent left waiting unanswered.
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "echo hi"},
+            },
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+
+        async def _boom(request_id, response):
+            raise ClaustrumError("stdin write failed")
+
+        monkeypatch.setattr(session, "_send_control_response", _boom)
+        with pytest.raises(ClaustrumError):
+            await session.respond_control("perm-1", {"behavior": "allow"})
+        assert [r.request_id for r in session.pending_requests] == ["perm-1"]
+
+        # Retry once the transport recovers: the same request answers cleanly.
+        monkeypatch.undo()
+        await session.respond_control("perm-1", {"behavior": "allow"})
+        await asyncio.sleep(0.05)
+        assert session.pending_requests == []
+        responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert responses and responses[-1]["response"]["request_id"] == "perm-1"
 
 
 async def test_allow_with_explicit_updated_input_is_preserved(fake_claustrum):
