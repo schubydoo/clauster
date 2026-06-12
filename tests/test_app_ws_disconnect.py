@@ -77,20 +77,26 @@ async def test_client_chatter_is_ignored_until_disconnect():
     # A client that sends messages must not end the stream — only disconnect does.
     ws = _FakeWS()
     sent: list[int] = []
+    started = asyncio.Event()
     proceed = asyncio.Event()
+    advanced = asyncio.Event()
 
     async def _stream() -> None:
         sent.append(1)
+        started.set()
         await proceed.wait()
         sent.append(2)
+        advanced.set()
         await asyncio.Event().wait()  # then idle forever
 
     task = asyncio.ensure_future(stream_until_disconnect(ws, _stream))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
     ws.push({"type": "websocket.receive", "text": "ping"})
-    await asyncio.sleep(0.05)
-    assert not task.done()  # chatter did not end the helper
     proceed.set()
-    await asyncio.sleep(0.05)
+    # If the chatter had ended the helper, the stream would be cancelled before
+    # appending 2 and this wait would time out.
+    await asyncio.wait_for(advanced.wait(), timeout=1.0)
+    assert not task.done()  # chatter did not end the helper
     assert sent == [1, 2]  # the stream kept running through the chatter
     ws.push({"type": "websocket.disconnect", "code": 1000})
     await asyncio.wait_for(task, timeout=1.0)
