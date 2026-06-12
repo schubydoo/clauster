@@ -255,3 +255,13 @@ def test_kill_if_match_fails_closed_without_comparable_start(monkeypatch):
     assert procutil.kill_if_match(1234, None) is False
     assert procutil.kill_if_match(1234, "garbage") is False
     assert killed == []
+
+
+def test_is_killable_hosted_requires_comparable_start(monkeypatch):
+    # The shared orphan-classification/kill predicate: alive + comparable create-time.
+    monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
+    assert procutil.is_killable_hosted(1234, 1000.0) is True  # comparable + alive
+    assert procutil.is_killable_hosted(1234, None) is False  # no create-time evidence
+    assert procutil.is_killable_hosted(1234, "garbage") is False  # uncomparable
+    monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
+    assert procutil.is_killable_hosted(1234, 1000.0) is False  # comparable but dead

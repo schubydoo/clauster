@@ -137,21 +137,30 @@ def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float
     return is_live_process(pid, proc_start, tolerance=tolerance, require_cmdline=is_bridge_cmdline)
 
 
-def kill_if_match(pid: int, proc_start: str | float | None) -> bool:
-    """Hard-kill a hosted agent ``pid`` (and its tree) only if it's still that process.
+def is_killable_hosted(pid: int, proc_start: str | float | None) -> bool:
+    """Whether ``pid`` is a live hosted agent we can *safely* hard-kill (CL-8).
 
-    Gated on :func:`is_live_process` with the hosted cmdline + exact create-time match,
-    so a reused/unrelated PID is never killed. Returns whether a kill was issued. Used
-    by hosted orphan cleanup (CL-8).
-
-    Fails closed: unlike the lenient liveness check, a missing or uncomparable
-    ``proc_start`` (None, or a non-numeric string) is refused rather than degrading to
-    cmdline+alive alone — without a create-time match this destructive path could kill
-    an unrelated process that reused the PID.
+    The single predicate behind both orphan classification (``HostedManager._is_orphan``)
+    and the guarded kill (:func:`kill_if_match`), so a row is only ever treated as a
+    recoverable orphan when it is actually killable. Fails closed: unlike the lenient
+    liveness check, a missing or uncomparable ``proc_start`` (None, or a non-numeric
+    string) returns False rather than degrading to cmdline+alive alone — without a
+    create-time match a kill could hit an unrelated process that reused the PID, and a
+    state transition gated on a "kill" that never happened would silently mislead.
     """
     if _expected_epoch(proc_start) is None:
         return False
-    if not is_live_process(pid, proc_start, require_cmdline=is_hosted_cmdline):
+    return is_live_process(pid, proc_start, require_cmdline=is_hosted_cmdline)
+
+
+def kill_if_match(pid: int, proc_start: str | float | None) -> bool:
+    """Hard-kill a hosted agent ``pid`` (and its tree) only if it's still that process.
+
+    Gated on :func:`is_killable_hosted` (live + hosted cmdline + exact create-time match),
+    so a reused/unrelated/uncomparable PID is never killed. Returns whether a kill was
+    issued. Used by hosted orphan cleanup (CL-8).
+    """
+    if not is_killable_hosted(pid, proc_start):
         return False
     force_kill_tree(pid)
     return True

@@ -694,11 +694,17 @@ class HostedManager:
 
     @staticmethod
     def _is_orphan(instance: RemoteControlInstance) -> bool:
-        """Whether a not-found instance is a recoverable survivor (live pid + match)."""
-        return instance.agent_pid is not None and procutil.is_live_process(
-            instance.agent_pid,
-            instance.agent_proc_start,
-            require_cmdline=procutil.is_hosted_cmdline,
+        """Whether a not-found instance is a recoverable (killable) survivor.
+
+        Uses the same fail-closed predicate as the guarded kill, so a row is only
+        classified as an orphan when we actually have killable ``(pid, create_time)``
+        evidence. A survivor we can't safely kill (e.g. a pre-CL-8 row with no recorded
+        ``agent_proc_start``) is treated as lost, not as a recoverable orphan — otherwise
+        ``kill_orphan``/resume would transition the row to a clean stop while the process
+        kept running.
+        """
+        return instance.agent_pid is not None and procutil.is_killable_hosted(
+            instance.agent_pid, instance.agent_proc_start
         )
 
     async def aclose(self) -> None:

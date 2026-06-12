@@ -922,6 +922,36 @@ async def test_manager_reattach_lost_when_no_survivor(fake_claustrum, tmp_path, 
         assert "session lost" in (inst.error_detail or "")
 
 
+async def test_manager_reattach_lost_when_survivor_not_killable(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    # A pre-CL-8 row has no agent_proc_start, so we have no create-time evidence to
+    # safely kill the survivor. Even though the pid is alive, it must be classified
+    # LOST — never a recoverable orphan — so kill_orphan/resume can't report a clean
+    # stop while the process keeps running.
+    monkeypatch.setattr("clauster.procutil.is_live_process", lambda *a, **k: True)
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = "01GONEPROCESS00000000000"
+    store.save(
+        {
+            pid: {
+                "project": "proj",
+                "label": "hosted:proj",
+                "agent_pid": 4242,
+                # no agent_proc_start → uncomparable → not killable
+            }
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        inst = mgr.get_instance(pid)
+        assert inst.status is InstanceStatus.CRASHED
+        assert inst.is_orphan is False  # unkillable survivor is lost, not orphan
+        assert "session lost" in (inst.error_detail or "")
+
+
 async def test_manager_kill_orphan_terminates_and_stops(monkeypatch):
     killed: list[tuple] = []
     monkeypatch.setattr(
