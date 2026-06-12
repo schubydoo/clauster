@@ -929,12 +929,14 @@ async def test_manager_kill_orphan_terminates_and_stops(monkeypatch):
     )
     mgr = HostedManager()
     inst = _orphan_instance()
+    inst.error_detail = "Resume to recover, or Kill"  # stale orphan recovery prompt
     mgr._instances[inst.claustrum_process_id] = inst
     result = await mgr.kill_orphan(inst.claustrum_process_id)
     assert killed == [(4242, 1000.0)]  # match-gated kill issued for the survivor
     assert result.status is InstanceStatus.STOPPED
     assert result.intentional_stop is True
     assert result.is_orphan is False
+    assert result.error_detail is None  # stale recovery prompt cleared on clean stop
 
 
 async def test_manager_kill_orphan_unknown_raises():

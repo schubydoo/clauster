@@ -59,6 +59,7 @@ class _StubManager:
         self.send_error: Exception | None = None
         self.respond_error: Exception | None = None
         self.resume_error: Exception | None = None
+        self.kill_orphan_error: Exception | None = None
 
     def seed(self) -> RemoteControlInstance:
         inst = RemoteControlInstance(
@@ -118,6 +119,8 @@ class _StubManager:
         return inst
 
     async def kill_orphan(self, hosted_id: str) -> RemoteControlInstance:
+        if self.kill_orphan_error is not None:
+            raise self.kill_orphan_error
         self.killed_orphans.append(hosted_id)
         inst = self.instances[hosted_id]
         inst.status = InstanceStatus.STOPPED
@@ -432,6 +435,19 @@ def test_delete_orphan_routes_to_kill(write_config, projects_root):
     assert r.status_code == 200
     assert manager.killed_orphans == [_HID]
     assert manager.stopped == []  # took the kill path, not stop
+
+
+def test_delete_hosted_race_returns_404(write_config, projects_root):
+    # The row vanishes (concurrent stop/reattach) between the existence check and the
+    # awaited kill — the endpoint maps HostedSessionError to 404, not an unhandled 500.
+    manager = _StubManager()
+    manager.seed()
+    del manager.sessions[_HID]  # no live session → kill_orphan path
+    manager.kill_orphan_error = HostedSessionError("no such hosted session: gone")
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.delete(f"/api/instances/{_HID}")
+    assert r.status_code == 404
 
 
 # -- websocket -------------------------------------------------------------

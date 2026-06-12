@@ -1329,14 +1329,17 @@
         const id = h.claustrum_process_id;
         if (!window.confirm("Kill the orphaned session \"" + (h.label || id) + "\"? This terminates the surviving agent.")) return;
         this.hostedStopping[id] = true;
+        let killed = false;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (res.ok) this.toast("orphaned session killed", "success");
+          if (res.ok) { killed = true; this.toast("orphaned session killed", "success"); }
           else { const b = await res.json().catch(() => ({})); this.toast("kill failed — " + (b.detail || res.status), "error"); }
         } catch (e) { this.toast("kill failed", "error"); }
         this.hostedStopping[id] = false;
-        this.closeHosted(id);
+        // Only tear down the view on a successful kill; a failed kill leaves the orphan
+        // actionable (refresh re-fetches its row so it stays in the list).
+        if (killed) this.closeHosted(id);
         await this.refresh();
       },
       async resumeHosted(h) {

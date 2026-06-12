@@ -1012,9 +1012,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # A live hosted session stops cleanly; one with no live session (an orphan
             # that survived a daemon restart, or an already-dead row) is killed/cleaned
             # up by id — kill_orphan, not stop, since stop requires a live session.
-            if app.state.hosted.session(instance_id) is not None:
-                return await app.state.hosted.stop(instance_id)
-            return await app.state.hosted.kill_orphan(instance_id)
+            try:
+                if app.state.hosted.session(instance_id) is not None:
+                    return await app.state.hosted.stop(instance_id)
+                return await app.state.hosted.kill_orphan(instance_id)
+            except HostedSessionError as exc:
+                # The row vanished between the existence check and the awaited call
+                # (concurrent stop/reattach) — treat as gone, not a 500.
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
         try:
             return await runner.stop(instance_id)
         except UnknownProject as exc:

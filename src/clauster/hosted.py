@@ -686,6 +686,9 @@ class HostedManager:
         inst.is_orphan = False
         inst.intentional_stop = True
         inst.status = InstanceStatus.STOPPED
+        # Clear any orphan/loss recovery prompt — the row is now a clean stop, not a
+        # "Resume or Kill" survivor, so a stale detail would mislead the UI.
+        inst.error_detail = None
         await self._persist()
         return self._synced(inst)
 

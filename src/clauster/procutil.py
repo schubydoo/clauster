@@ -143,7 +143,14 @@ def kill_if_match(pid: int, proc_start: str | float | None) -> bool:
     Gated on :func:`is_live_process` with the hosted cmdline + exact create-time match,
     so a reused/unrelated PID is never killed. Returns whether a kill was issued. Used
     by hosted orphan cleanup (CL-8).
+
+    Fails closed: unlike the lenient liveness check, a missing or uncomparable
+    ``proc_start`` (None, or a non-numeric string) is refused rather than degrading to
+    cmdline+alive alone — without a create-time match this destructive path could kill
+    an unrelated process that reused the PID.
     """
+    if _expected_epoch(proc_start) is None:
+        return False
     if not is_live_process(pid, proc_start, require_cmdline=is_hosted_cmdline):
         return False
     force_kill_tree(pid)

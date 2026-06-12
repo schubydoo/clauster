@@ -244,3 +244,14 @@ def test_kill_if_match_kills_only_on_match(monkeypatch):
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
     assert procutil.kill_if_match(1234, 1000.0) is False
     assert killed == []  # never killed when the match fails
+
+
+def test_kill_if_match_fails_closed_without_comparable_start(monkeypatch):
+    # Even if liveness would pass, a missing/uncomparable proc_start must NOT kill:
+    # without a create-time match this destructive path could hit a reused PID.
+    killed: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: killed.append(pid))
+    monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
+    assert procutil.kill_if_match(1234, None) is False
+    assert procutil.kill_if_match(1234, "garbage") is False
+    assert killed == []
