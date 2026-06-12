@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from clauster.claustrum_client import ClaustrumClient, DaemonUnreachable
+from clauster.claustrum_client import ClaustrumClient, ClaustrumError, DaemonUnreachable
 from clauster.hosted import (
     HostedManager,
     HostedSession,
@@ -256,7 +256,11 @@ async def test_permission_request_is_parked_not_auto_answered(fake_claustrum):
         frame = {
             "request_id": "perm-1",
             "type": "control_request",
-            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "echo hi"},
+            },
         }
         await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
         event = await _drain_until(queue, "control_request")
@@ -269,10 +273,153 @@ async def test_permission_request_is_parked_not_auto_answered(fake_claustrum):
         await asyncio.sleep(0.05)
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses and responses[0]["response"]["request_id"] == "perm-1"
+        # The CLI requires updatedInput on every allow — defaulted from the parked
+        # request's original input ("allow unchanged").
+        assert responses[0]["response"]["response"] == {
+            "behavior": "allow",
+            "updatedInput": {"command": "echo hi"},
+        }
         assert session.pending_requests == []
         # A control_resolved event fans out so reconnects see the request is answered.
         resolved = await _drain_until(queue, "control_resolved")
         assert resolved["request_id"] == "perm-1" and resolved["behavior"] == "allow"
+
+
+@pytest.mark.parametrize(
+    "request_payload",
+    [
+        {"subtype": "can_use_tool", "tool_name": "Bash"},  # no input at all
+        {"subtype": "can_use_tool", "tool_name": "Bash", "input": "bogus"},  # non-dict
+    ],
+    ids=["missing-input", "non-dict-input"],
+)
+async def test_allow_without_parked_input_sends_empty_record(fake_claustrum, request_payload):
+    # The schema wants a record; a parked request with no (or non-dict) input still
+    # needs updatedInput on allow — default to {} rather than omit it.
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": request_payload,
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+        await session.respond_control("perm-1", {"behavior": "allow"})
+        await asyncio.sleep(0.05)
+        responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert responses[0]["response"]["response"] == {"behavior": "allow", "updatedInput": {}}
+
+
+async def test_failed_response_write_leaves_request_parked(fake_claustrum, monkeypatch):
+    # The stdin write fails while the session is still running: the error must
+    # surface AND the request must stay parked so the operator can retry —
+    # never consumed with the agent left waiting unanswered.
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "echo hi"},
+            },
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+
+        async def _boom(request_id, response):
+            raise ClaustrumError("stdin write failed")
+
+        monkeypatch.setattr(session, "_send_control_response", _boom)
+        with pytest.raises(ClaustrumError):
+            await session.respond_control("perm-1", {"behavior": "allow"})
+        assert [r.request_id for r in session.pending_requests] == ["perm-1"]
+
+        # Retry once the transport recovers: the same request answers cleanly.
+        monkeypatch.undo()
+        await session.respond_control("perm-1", {"behavior": "allow"})
+        await asyncio.sleep(0.05)
+        assert session.pending_requests == []
+        responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert responses and responses[-1]["response"]["request_id"] == "perm-1"
+
+
+async def test_concurrent_responders_answer_a_request_once(fake_claustrum, monkeypatch):
+    # Two responders race to answer the same parked request. The claim is atomic
+    # (pop before the await), so exactly one control_response is written and the
+    # loser fails the existence check instead of writing a duplicate frame.
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "echo hi"},
+            },
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+
+        original = session._send_control_response
+
+        async def _slow(request_id, response):
+            # Yield so both coroutines are in flight across the write boundary.
+            await asyncio.sleep(0.01)
+            await original(request_id, response)
+
+        monkeypatch.setattr(session, "_send_control_response", _slow)
+        results = await asyncio.gather(
+            session.respond_control("perm-1", {"behavior": "allow"}),
+            session.respond_control("perm-1", {"behavior": "allow"}),
+            return_exceptions=True,
+        )
+        errors = [r for r in results if isinstance(r, Exception)]
+        assert len(errors) == 1 and isinstance(errors[0], HostedSessionError)
+        await asyncio.sleep(0.05)
+        responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert len(responses) == 1
+        assert session.pending_requests == []
+
+
+async def test_allow_with_explicit_updated_input_is_preserved(fake_claustrum):
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "echo hi"},
+            },
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+        await session.respond_control(
+            "perm-1", {"behavior": "allow", "updatedInput": {"command": "echo edited"}}
+        )
+        await asyncio.sleep(0.05)
+        responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert responses[0]["response"]["response"]["updatedInput"] == {"command": "echo edited"}
+
+
+async def test_deny_response_is_not_modified(fake_claustrum):
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "echo hi"},
+            },
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+        await session.respond_control("perm-1", {"behavior": "deny", "message": "no"})
+        await asyncio.sleep(0.05)
+        responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert responses[0]["response"]["response"] == {"behavior": "deny", "message": "no"}
 
 
 async def test_respond_to_unknown_request_raises(fake_claustrum):
@@ -344,6 +491,26 @@ async def test_stop_sends_sigint_then_settles(fake_claustrum):
         signals = [k.get("signal") for k in fake.killed]
         assert "INT" in signals
         assert "KILL" not in signals
+        assert session.status == "stopped"
+
+
+async def test_stop_latches_status_when_pump_misses_the_exit(fake_claustrum):
+    # Live, the stream latches `exited` before the exit event reaches the pump's
+    # queue; stop() wakes on the latch and its teardown cancels the pump before it
+    # can route the event — the row then stays "running" forever and resume 409s.
+    # Simulate the lost race by cancelling the pump outright before the exit lands.
+    async with _session(fake_claustrum) as (fake, session):
+        session._pump_task.cancel()
+
+        async def _exit_soon():
+            await asyncio.sleep(0.02)
+            await fake.emit_exit(_PID, 0)
+
+        task = asyncio.create_task(_exit_soon())
+        await session.stop()
+        await task
+        assert session.status == "stopped"
+        assert session.exit_code == 0
 
 
 async def test_stop_escalates_to_sigkill_on_grace_timeout(fake_claustrum):
@@ -353,6 +520,25 @@ async def test_stop_escalates_to_sigkill_on_grace_timeout(fake_claustrum):
         signals = [k.get("signal") for k in fake.killed]
         assert signals[0] == "INT"
         assert "KILL" in signals
+
+
+async def test_stop_kill_escalation_waits_for_exit_and_latches(fake_claustrum):
+    # The exit frame only lands after the KILL — stop() must wait for it (second
+    # grace window) and latch the terminal status rather than tear down with the
+    # row still "running".
+    async with _session(fake_claustrum, stop_grace=0.2) as (fake, session):
+
+        async def _exit_after_kill():
+            while not any(k.get("signal") == "KILL" for k in fake.killed):
+                await asyncio.sleep(0.01)
+            await fake.emit_exit(_PID, 9)
+
+        task = asyncio.create_task(_exit_after_kill())
+        await session.stop()
+        await task
+        assert "KILL" in [k.get("signal") for k in fake.killed]
+        assert session.status == "crashed"
+        assert session.exit_code == 9
 
 
 # -- ring replay -----------------------------------------------------------
