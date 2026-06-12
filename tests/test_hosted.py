@@ -269,12 +269,36 @@ async def test_permission_request_is_parked_not_auto_answered(fake_claustrum):
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses and responses[0]["response"]["request_id"] == "perm-1"
         assert session.pending_requests == []
+        # A control_resolved event fans out so reconnects see the request is answered.
+        resolved = await _drain_until(queue, "control_resolved")
+        assert resolved["request_id"] == "perm-1" and resolved["behavior"] == "allow"
 
 
 async def test_respond_to_unknown_request_raises(fake_claustrum):
     async with _session(fake_claustrum) as (_fake, session):
         with pytest.raises(HostedSessionError):
             await session.respond_control("nope", {})
+
+
+async def test_respond_after_exit_raises_not_claustrum_error(fake_claustrum):
+    # A request parked while running, then the session exits before the operator
+    # answers: respond must raise HostedSessionError (API → 409), not let the stdin
+    # write throw a bare ClaustrumError (API → 500) with the request consumed.
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+        await fake.emit_exit(_PID, 3)  # session crashes while the request is parked
+        await asyncio.sleep(0.05)
+        assert session.status == "crashed"
+        with pytest.raises(HostedSessionError):
+            await session.respond_control("perm-1", {"behavior": "allow"})
+        # Request not consumed — still parked, just unanswerable on a dead session.
+        assert [r.request_id for r in session.pending_requests] == ["perm-1"]
 
 
 # -- input + lifecycle -----------------------------------------------------
@@ -442,6 +466,29 @@ async def test_manager_send_unknown_raises(fake_claustrum):
     async with _manager(fake_claustrum) as (_fake, _client, mgr):
         with pytest.raises(HostedSessionError):
             await mgr.send("nope", "hi")
+
+
+async def test_manager_respond_routes_to_session(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(pid, "stdout", (json.dumps(frame) + "\n").encode())
+        await asyncio.sleep(0.05)
+        await mgr.respond(pid, "perm-1", {"behavior": "allow"})
+        await asyncio.sleep(0.05)
+        responses = [f for f in _stdin_frames(fake, pid) if f.get("type") == "control_response"]
+        assert responses and responses[0]["response"]["request_id"] == "perm-1"
+
+
+async def test_manager_respond_unknown_raises(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, _client, mgr):
+        with pytest.raises(HostedSessionError):
+            await mgr.respond("nope", "perm-1", {"behavior": "allow"})
 
 
 async def test_manager_synced_reflects_exit(fake_claustrum):

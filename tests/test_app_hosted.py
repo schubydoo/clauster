@@ -51,9 +51,11 @@ class _StubManager:
         self.sessions: dict[str, _StubSession] = {}
         self.spawn_calls: list[dict] = []
         self.sent: list[tuple[str, str]] = []
+        self.responded: list[tuple[str, str, dict]] = []
         self.stopped: list[str] = []
         self.spawn_error: Exception | None = None
         self.send_error: Exception | None = None
+        self.respond_error: Exception | None = None
 
     def seed(self) -> RemoteControlInstance:
         inst = RemoteControlInstance(
@@ -92,6 +94,13 @@ class _StubManager:
         if hosted_id not in self.sessions:
             raise HostedSessionError(f"no such hosted session: {hosted_id}")
         self.sent.append((hosted_id, text))
+
+    async def respond(self, hosted_id: str, request_id: str, response: dict) -> None:
+        if self.respond_error is not None:
+            raise self.respond_error
+        if hosted_id not in self.sessions:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        self.responded.append((hosted_id, request_id, response))
 
     async def stop(self, hosted_id: str) -> RemoteControlInstance:
         self.stopped.append(hosted_id)
@@ -248,6 +257,69 @@ def test_message_unknown_instance_is_404(write_config, projects_root):
     with TestClient(app) as client:
         r = client.post("/api/instances/nope/message", json={"text": "hi"})
     assert r.status_code == 404
+
+
+# -- permissions (CL-5) ----------------------------------------------------
+
+
+def test_permission_allow_routes_to_manager(write_config, projects_root):
+    manager = _StubManager()
+    manager.seed()
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/permissions/perm-1", json={"decision": "allow"})
+    assert r.status_code == 202
+    assert manager.responded == [(_HID, "perm-1", {"behavior": "allow"})]
+
+
+def test_permission_deny_carries_message(write_config, projects_root):
+    manager = _StubManager()
+    manager.seed()
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.post(
+            f"/api/instances/{_HID}/permissions/perm-1",
+            json={"decision": "deny", "message": "nope"},
+        )
+    assert r.status_code == 202
+    assert manager.responded == [(_HID, "perm-1", {"behavior": "deny", "message": "nope"})]
+
+
+def test_permission_deny_defaults_message(write_config, projects_root):
+    manager = _StubManager()
+    manager.seed()
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/permissions/perm-1", json={"decision": "deny"})
+    assert r.status_code == 202
+    assert manager.responded[0][2] == {"behavior": "deny", "message": "Denied by operator"}
+
+
+def test_permission_bad_decision_is_422(write_config, projects_root):
+    manager = _StubManager()
+    manager.seed()
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/permissions/perm-1", json={"decision": "maybe"})
+    assert r.status_code == 422
+    assert manager.responded == []
+
+
+def test_permission_unknown_instance_is_404(write_config, projects_root):
+    app = _app(write_config)
+    with TestClient(app) as client:
+        r = client.post("/api/instances/nope/permissions/perm-1", json={"decision": "allow"})
+    assert r.status_code == 404
+
+
+def test_permission_unparked_request_is_409(write_config, projects_root):
+    manager = _StubManager()
+    manager.seed()
+    manager.respond_error = HostedSessionError("no parked control request 'perm-1'")
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/permissions/perm-1", json={"decision": "allow"})
+    assert r.status_code == 409
 
 
 # -- stop dispatch ---------------------------------------------------------
