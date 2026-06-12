@@ -7,7 +7,7 @@ import io
 import logging
 import sys
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -112,6 +112,48 @@ class LoginThrottle:
 _PKG_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
+
+
+def _reap_ws_task(task: asyncio.Task) -> None:
+    """Retrieve a finished WS helper task's outcome so the loop never warns about it."""
+    if not task.cancelled() and task.exception() is not None:
+        logger.debug("ws stream helper task ended with %r", task.exception())
+
+
+async def stream_until_disconnect(
+    websocket: WebSocket, stream: Callable[[], Awaitable[None]]
+) -> None:
+    """Run a send-only WebSocket ``stream`` until it finishes or the client goes away.
+
+    A send-only handler never awaits ``receive()``, so it cannot observe the
+    client's disconnect (or the server's shutdown close): blocked on its idle event
+    source, it becomes a ghost ASGI task that uvicorn's graceful shutdown waits on
+    forever — and its subscription leaks. Race the stream against a receive loop:
+    the first ``websocket.disconnect`` cancels the stream; anything else the client
+    sends is ignored. Errors from the stream itself (e.g. send-after-close) still
+    propagate to the caller.
+    """
+    stream_task = asyncio.ensure_future(stream())
+    recv_task = asyncio.ensure_future(websocket.receive())
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {stream_task, recv_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stream_task in done:
+                stream_task.result()  # propagate the stream's exception, if any
+                return
+            if recv_task.result()["type"] == "websocket.disconnect":
+                return
+            recv_task = asyncio.ensure_future(websocket.receive())
+    finally:
+        for task in (stream_task, recv_task):
+            task.cancel()
+            # Reap via callback instead of awaiting here: an await inside this
+            # finally re-receives the handler's own in-flight cancellation (the
+            # test client / server re-delivers it until its scope exits) and turns
+            # a clean close into a cancelled ASGI task.
+            task.add_done_callback(_reap_ws_task)
 
 
 def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> FastAPI:
@@ -1144,10 +1186,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         path = instance.bridge_raw_log_path or instance.bridge_debug_log_path
         strip = config.logs.strip_ansi_in_stream
         offset = await asyncio.to_thread(logstream.initial_offset, path)
-        carry = ""
-        try:
+
+        async def _stream() -> None:
+            carry = ""
+            local_offset = offset
             while True:
-                offset, text = await asyncio.to_thread(logstream.read_new, path, offset)
+                local_offset, text = await asyncio.to_thread(
+                    logstream.read_new, path, local_offset
+                )
                 if text:
                     # Buffer whole lines so redaction never misses an id split
                     # across two reads.
@@ -1155,6 +1201,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     for line in lines:
                         await websocket.send_text(sanitize_line(line, strip_ansi_seq=strip))
                 await asyncio.sleep(0.5)
+
+        try:
+            await stream_until_disconnect(websocket, _stream)
         except (WebSocketDisconnect, RuntimeError):
             return
 
@@ -1174,9 +1223,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except (TypeError, ValueError):
             after = 0
         queue = session.subscribe(after_seq=after)
-        try:
+
+        async def _stream() -> None:
             while True:
                 await websocket.send_json(await queue.get())
+
+        try:
+            await stream_until_disconnect(websocket, _stream)
         except (WebSocketDisconnect, RuntimeError):
             return
         finally:
@@ -1196,7 +1249,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # Subscribe before the status check so a terminal that fires between the
         # check and the snapshot send below lands in our queue, not the void.
         queue = job.subscribe()
-        try:
+
+        async def _stream() -> None:
             if job.status != "running":
                 # Already finished (e.g. a reconnect after completion).
                 await websocket.send_json(job.terminal_event())
@@ -1207,6 +1261,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 await websocket.send_json(event)
                 if event.get("type") == "done":
                     break
+
+        try:
+            await stream_until_disconnect(websocket, _stream)
         except (WebSocketDisconnect, RuntimeError):
             return
         finally:
