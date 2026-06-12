@@ -301,7 +301,11 @@ class HostedSession:
             raise HostedSessionError(f"cannot respond on a {self.status} hosted session")
         if request_id not in self._pending:
             raise HostedSessionError(f"no parked control request {request_id!r}")
-        parked = self._pending[request_id]
+        # Claim the request atomically (no await between the check and the pop, so
+        # under asyncio's cooperative model this is exclusive): a concurrent
+        # responder would now fail the existence check rather than racing us past
+        # it and writing a second control_response for the same request_id.
+        parked = self._pending.pop(request_id)
         if response.get("behavior") == "allow" and "updatedInput" not in response:
             # The CLI's can_use_tool response schema requires updatedInput on every
             # allow (a bare {"behavior": "allow"} fails its union validation and the
@@ -312,12 +316,13 @@ class HostedSession:
                 **response,
                 "updatedInput": tool_input if isinstance(tool_input, dict) else {},
             }
-        await self._send_control_response(request_id, response)
-        # Consume only after the write succeeded: a failed write must leave the
-        # request parked and retryable, never silently lost with the agent
-        # unanswered. pop-with-default because a concurrent responder may have
-        # raced us past the existence check while we awaited the write.
-        self._pending.pop(request_id, None)
+        try:
+            await self._send_control_response(request_id, response)
+        except ClaustrumError:
+            # Restore the claim if the transport write fails: the request must stay
+            # parked and retryable, never silently lost with the agent unanswered.
+            self._pending.setdefault(request_id, parked)
+            raise
         self._emit(
             {
                 "type": "control_resolved",

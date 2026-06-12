@@ -344,6 +344,44 @@ async def test_failed_response_write_leaves_request_parked(fake_claustrum, monke
         assert responses and responses[-1]["response"]["request_id"] == "perm-1"
 
 
+async def test_concurrent_responders_answer_a_request_once(fake_claustrum, monkeypatch):
+    # Two responders race to answer the same parked request. The claim is atomic
+    # (pop before the await), so exactly one control_response is written and the
+    # loser fails the existence check instead of writing a duplicate frame.
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "echo hi"},
+            },
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+
+        original = session._send_control_response
+
+        async def _slow(request_id, response):
+            # Yield so both coroutines are in flight across the write boundary.
+            await asyncio.sleep(0.01)
+            await original(request_id, response)
+
+        monkeypatch.setattr(session, "_send_control_response", _slow)
+        results = await asyncio.gather(
+            session.respond_control("perm-1", {"behavior": "allow"}),
+            session.respond_control("perm-1", {"behavior": "allow"}),
+            return_exceptions=True,
+        )
+        errors = [r for r in results if isinstance(r, Exception)]
+        assert len(errors) == 1 and isinstance(errors[0], HostedSessionError)
+        await asyncio.sleep(0.05)
+        responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        assert len(responses) == 1
+        assert session.pending_requests == []
+
+
 async def test_allow_with_explicit_updated_input_is_preserved(fake_claustrum):
     async with _session(fake_claustrum) as (fake, session):
         frame = {
