@@ -6,7 +6,7 @@
 # ci.yml), so flags / carryforward / report-merging aren't needed.
 #
 # Validate before deploying changes:
-#   curl -X POST --data-binary @codecov.yml https://codecov.io/validate
+#   curl -X POST --data-binary @codecov.yml https://api.codecov.io/validate
 
 codecov:
   # ci.yml uploads coverage even when pytest FAILS (the `!cancelled()` guard), on
@@ -59,7 +59,15 @@ component_management:
         - src/clauster/pty_keeper.py
         - src/clauster/state.py
         - src/clauster/inspector.py
+        - src/clauster/supervisor.py
         - src/clauster/bridge_log.py
+    - component_id: hosted
+      name: hosted channel
+      paths:
+        - src/clauster/hosted.py
+        - src/clauster/hosted_state.py
+        - src/clauster/claustrum_client.py
+        - src/clauster/claustrum_daemon.py
     - component_id: web
       name: web app
       paths:
@@ -67,6 +75,9 @@ component_management:
         - src/clauster/auth.py
         - src/clauster/logstream.py
         - src/clauster/usage.py
+        - src/clauster/metrics.py
+        - src/clauster/prometheus.py
+        - src/clauster/notify.py
         - src/clauster/claude_md.py
     - component_id: provisioning
       name: provisioning
