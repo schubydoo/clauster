@@ -939,6 +939,22 @@ async def test_manager_kill_orphan_terminates_and_stops(monkeypatch):
     assert result.error_detail is None  # stale recovery prompt cleared on clean stop
 
 
+async def test_manager_kill_orphan_without_pid_skips_kill(monkeypatch):
+    # A row with no agent_pid (no survivor to terminate) still stops cleanly and never
+    # issues a kill — covers the pid-absent branch of kill_orphan.
+    killed: list[tuple] = []
+    monkeypatch.setattr(
+        "clauster.procutil.kill_if_match", lambda pid, ps: killed.append((pid, ps))
+    )
+    mgr = HostedManager()
+    inst = _orphan_instance(pid=None)
+    mgr._instances[inst.claustrum_process_id] = inst
+    result = await mgr.kill_orphan(inst.claustrum_process_id)
+    assert killed == []  # no pid → no kill attempted
+    assert result.status is InstanceStatus.STOPPED
+    assert result.is_orphan is False
+
+
 async def test_manager_kill_orphan_unknown_raises():
     mgr = HostedManager()
     with pytest.raises(HostedSessionError):
