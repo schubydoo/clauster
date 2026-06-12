@@ -310,6 +310,7 @@ async def test_spawn_scrubs_ambient_daemon_sentinel(make_daemon, monkeypatch):
     it makes the launcher skip its -token-fd read and exit 1. Unrelated env survives.
     """
     monkeypatch.setenv("CLAUDE_SSH_DAEMON_CHILD", "1")
+    monkeypatch.setenv("CLAUSTRUM_DAEMON_CHILD", "1")
     monkeypatch.setenv("CLAUSTRUM_TOKEN_PIPE", "9")
     monkeypatch.setenv("CLAUSTRUM_KEEP_THIS", "ok")
     env = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]["env"]
