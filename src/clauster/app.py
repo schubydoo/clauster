@@ -44,6 +44,7 @@ from .clone_jobs import CloneJob, CloneJobManager
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
 from .hosted import HostedManager, HostedSessionError
+from .hosted_state import HostedStateStore
 from .models import (
     BackgroundJob,
     ClaudeMdDoc,
@@ -125,6 +126,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             app.state.claustrum_daemon = daemon
             try:
                 await daemon.ensure()  # connect-or-spawn the hosted-channel daemon
+                # CL-6: reattach hosted sessions that kept running on the daemon
+                # while we were down. Best-effort — a reattach failure is recorded
+                # per-session, never blocks startup. Skip if the daemon came up
+                # without a live client (nothing to reattach through).
+                if daemon.client is not None:
+                    await app.state.hosted.reattach_all(daemon.client)
             except ClaustrumError as exc:
                 # Fail-closed: the daemon's health carries the error and hosted
                 # spawns are refused, but bridges (and startup) are unaffected.
@@ -147,7 +154,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.state.config = config
     app.state.runner = runner
     app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
-    app.state.hosted = HostedManager()  # hosted-channel sessions (CL-4); always present
+    # Hosted-channel sessions (CL-4); always present. The store (CL-6) persists them
+    # so a clauster restart can reattach the survivors via lifespan reattach_all.
+    app.state.hosted = HostedManager(HostedStateStore(config.state_dir))
     clone_jobs = CloneJobManager()
     app.state.clone_jobs = clone_jobs
     # Drop a finished clone job after this grace so a client that disconnected
@@ -688,7 +697,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         hosted panel polls this; empty list when the channel is unused. Auth-gated
         by the guard middleware like every other ``/api/*`` route.
         """
-        return app.state.hosted.list_instances()
+        instances = app.state.hosted.list_instances()
+        # Debounced (no-op when unchanged): refresh the persisted reattach cursors on
+        # the dashboard's poll cadence, so a restart replays from a recent daemon seq.
+        await app.state.hosted.persist()
+        return instances
 
     @app.get("/api/widget")
     async def api_widget() -> dict:
