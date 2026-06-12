@@ -651,6 +651,26 @@ async def test_manager_reattach_daemon_error_is_recorded(fake_claustrum, tmp_pat
     assert "reattach failed" in (inst.error_detail or "")
 
 
+async def test_manager_persist_tolerates_write_failure(fake_claustrum, caplog):
+    # A non-authoritative store: a save OSError must not break spawn or the poll —
+    # it degrades to a stale cursor with a logged warning.
+    class _BoomStore:
+        def load(self):
+            return {}
+
+        def save(self, sessions):
+            raise OSError("disk full")
+
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        mgr._store = _BoomStore()
+        mgr._last_saved = None
+        with caplog.at_level("WARNING"):
+            inst = await _spawn(mgr, client)  # spawn → _persist → save raises → swallowed
+        assert inst.status is InstanceStatus.RUNNING  # spawn still succeeded
+        assert any("could not persist" in r.message for r in caplog.records)
+        assert mgr._last_saved is None  # not marked saved → retried next time
+
+
 async def test_manager_aclose_detaches_without_killing(fake_claustrum, tmp_path):
     # aclose must leave sessions running for reattach (detach, not kill) — so a fresh
     # generation can reattach the same process afterward.

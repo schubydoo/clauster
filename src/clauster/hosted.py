@@ -651,14 +651,24 @@ class HostedManager:
         return instance
 
     async def _persist(self) -> None:
-        """Write the registry's persisted subset, but only when it actually changed."""
+        """Write the registry's persisted subset, but only when it actually changed.
+
+        Best-effort: the store is non-authoritative, so a write failure (disk full,
+        revoked perms) degrades to a stale reattach cursor — never a failed spawn/stop
+        or a 500 on the dashboard poll. ``_last_saved`` is left unchanged on failure so
+        the next persist retries.
+        """
         if self._store is None:
             return
         subset = {pid: self._record(self._synced(inst)) for pid, inst in self._instances.items()}
         if subset == self._last_saved:
             return
+        try:
+            await asyncio.to_thread(self._store.save, subset)
+        except OSError as exc:
+            logger.warning("hosted: could not persist session state: %s", exc)
+            return
         self._last_saved = subset
-        await asyncio.to_thread(self._store.save, subset)
 
     @staticmethod
     def _record(instance: RemoteControlInstance) -> dict[str, Any]:
