@@ -56,7 +56,11 @@ def _stdin_frames(fake, pid: str = _PID) -> list[dict]:
 
 
 @asynccontextmanager
-async def _session(fake_factory, *, stop_grace: float = 5.0, **start_kwargs):
+async def _session(fake_factory, *, stop_grace: float = 0.1, **start_kwargs):
+    # Small default grace: the fake's process.kill never emits a terminal exit
+    # frame, so a default-grace teardown otherwise waits out the full SIGINT +
+    # SIGKILL windows (~10s/test). Tests that assert on the escalation timing pass
+    # their own stop_grace; functional tests only need stop() to tear down.
     fake = await fake_factory()
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
         session = HostedSession(client, _PID, _BIN, stop_grace=stop_grace)
