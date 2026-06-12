@@ -934,6 +934,37 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True}
 
+    @app.post("/api/instances/{instance_id}/permissions/{request_id}", status_code=202)
+    async def api_hosted_permission(instance_id: str, request_id: str, body: dict) -> dict:
+        """Answer a parked tool-permission request on a hosted session (CL-5).
+
+        The engine parks every tool-permission ``control_request`` and waits
+        (fail-closed) until something answers — this is that explicit human gate.
+        ``decision`` is ``"allow"`` or ``"deny"`` (a deny may carry a short
+        ``message``), mapped to the SDK ``can_use_tool`` response ``{"behavior": …}``.
+        """
+        decision = body.get("decision")
+        if decision not in ("allow", "deny"):
+            raise HTTPException(status_code=422, detail="decision must be 'allow' or 'deny'")
+        if app.state.hosted.get_instance(instance_id) is None:
+            raise HTTPException(status_code=404, detail=f"no such hosted session: {instance_id}")
+        if decision == "allow":
+            response: dict = {"behavior": "allow"}
+        else:
+            message = body.get("message")
+            response = {
+                "behavior": "deny",
+                "message": message
+                if isinstance(message, str) and message
+                else "Denied by operator",
+            }
+        try:
+            await app.state.hosted.respond(instance_id, request_id, response)
+        except HostedSessionError as exc:
+            # Already answered, or no such parked request — not in a state to answer.
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True}
+
     @app.delete("/api/instances/{instance_id}")
     async def api_stop(instance_id: str) -> RemoteControlInstance:
         if app.state.hosted.get_instance(instance_id) is not None:

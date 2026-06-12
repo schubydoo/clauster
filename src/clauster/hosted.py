@@ -248,13 +248,22 @@ class HostedSession:
     async def respond_control(self, request_id: str, response: dict[str, Any]) -> None:
         """Answer a parked control request with a success ``control_response``.
 
-        Removes it from :attr:`pending_requests`. CL-5 supplies the permission
-        allow/deny ``response`` payload; this slice only owns the transport.
+        Removes it from :attr:`pending_requests` and fans out a ``control_resolved``
+        event so other watchers (and browser reconnects replaying the ring) see the
+        request is answered, not still actionable. CL-5 supplies the permission
+        allow/deny ``response`` payload (``{"behavior": ...}``); this owns transport.
         """
         if request_id not in self._pending:
             raise HostedSessionError(f"no parked control request {request_id!r}")
         del self._pending[request_id]
         await self._send_control_response(request_id, response)
+        self._emit(
+            {
+                "type": "control_resolved",
+                "request_id": request_id,
+                "behavior": response.get("behavior"),
+            }
+        )
 
     async def stop(self) -> None:
         """Interrupt the agent (SIGINT), then escalate to SIGKILL if it lingers.
@@ -497,6 +506,10 @@ class HostedManager:
     async def send(self, hosted_id: str, text: str) -> None:
         """Route a user turn to a hosted session (404/409 mapping is the caller's)."""
         await self._require(hosted_id).send_message(text)
+
+    async def respond(self, hosted_id: str, request_id: str, response: dict[str, Any]) -> None:
+        """Answer a parked control request on a hosted session (caller maps 404/409)."""
+        await self._require(hosted_id).respond_control(request_id, response)
 
     async def stop(self, hosted_id: str) -> RemoteControlInstance:
         """Stop a hosted session and return its final (status-synced) instance."""

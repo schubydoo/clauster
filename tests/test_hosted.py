@@ -269,6 +269,9 @@ async def test_permission_request_is_parked_not_auto_answered(fake_claustrum):
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses and responses[0]["response"]["request_id"] == "perm-1"
         assert session.pending_requests == []
+        # A control_resolved event fans out so reconnects see the request is answered.
+        resolved = await _drain_until(queue, "control_resolved")
+        assert resolved["request_id"] == "perm-1" and resolved["behavior"] == "allow"
 
 
 async def test_respond_to_unknown_request_raises(fake_claustrum):

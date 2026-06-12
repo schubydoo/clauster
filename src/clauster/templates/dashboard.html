@@ -350,7 +350,22 @@
                             <div class="text-secondary small text-center" x-text="it.text"></div>
                           </template>
                           <template x-if="it.kind === 'permission'">
-                            <div class="text-warning small">⏸ <span x-text="it.text"></span></div>
+                            <div class="alert py-1 px-2 mb-1" :class="it.resolved ? 'alert-secondary' : 'alert-warning'">
+                              <div class="d-flex align-items-center flex-wrap gap-1">
+                                <span class="me-1">⏸ permission<template x-if="it.tool">: <code x-text="it.tool"></code></template></span>
+                                <code class="small text-secondary" x-show="it.input" x-text="it.input"></code>
+                                <template x-if="!it.resolved">
+                                  <span class="ms-auto">
+                                    <button class="btn btn-sm btn-success me-1" @click="respondHosted(h.claustrum_process_id, it.request_id, 'allow')">Allow</button>
+                                    <button class="btn btn-sm btn-ghost-danger" @click="respondHosted(h.claustrum_process_id, it.request_id, 'deny')">Deny</button>
+                                  </span>
+                                </template>
+                                <template x-if="it.resolved">
+                                  <span class="ms-auto small" :class="it.decision === 'allow' ? 'text-success' : 'text-secondary'"
+                                        x-text="it.decision === 'allow' ? '✓ allowed' : (it.decision === 'deny' ? '✕ denied' : 'answered')"></span>
+                                </template>
+                              </div>
+                            </div>
                           </template>
                           <template x-if="it.kind === 'gap'">
                             <div class="text-warning small text-center" x-text="it.text"></div>
@@ -1327,17 +1342,38 @@
         const v = this.hostedView[id];
         if (!v) return;
         if (typeof e.event_seq === "number") { v.lastSeq = e.event_seq; v.connLost = false; }
+        // A resolution flips the matching parked-permission item; it adds no new line.
+        if (e.type === "control_resolved") {
+          this._resolveHostedPermission(id, e.request_id, e.behavior);
+          this.$nextTick(() => this.scrollHosted(id));
+          return;
+        }
         for (const it of this._hostedEventToItems(e)) v.events.push(it);
         if (v.events.length > MAX_LOG_LINES) v.events.splice(0, v.events.length - MAX_LOG_LINES);
         this.$nextTick(() => this.scrollHosted(id));
+      },
+      _resolveHostedPermission(id, requestId, behavior) {
+        const v = this.hostedView[id];
+        if (!v) return;
+        for (const it of v.events) {
+          if (it.kind === "permission" && it.request_id === requestId) {
+            it.resolved = true;
+            it.decision = (behavior === "allow" || behavior === "deny") ? behavior : "answered";
+          }
+        }
       },
       // Translate one fanned event into renderable conversation items (per the design
       // doc's frame table: gap → "output lost (N frames)", lost → error, etc.).
       _hostedEventToItems(e) {
         switch (e.type) {
           case "frame": return this._hostedFrameToItems(e.frame || {});
-          case "control_request":
-            return [{ kind: "permission", text: "Awaiting permission" + (e.subtype ? " (" + e.subtype + ")" : "") }];
+          case "control_request": {
+            const req = e.request || {};
+            let input = "";
+            if (req.input != null) { try { input = JSON.stringify(req.input); } catch (_) { input = ""; } }
+            return [{ kind: "permission", request_id: e.request_id, subtype: e.subtype || "",
+                      tool: req.tool_name || "", input, resolved: false, decision: null }];
+          }
           case "control_ack": return [];  // MCP handshake; nothing user-facing
           case "stderr": case "text": return [{ kind: "stderr", text: e.text || "" }];
           case "exit":
@@ -1400,6 +1436,20 @@
           else { const b = await res.json().catch(() => ({})); this.toast("send failed — " + (b.detail || res.status), "error"); }
         } catch (e) { this.toast("send failed", "error"); }
         v.sending = false;
+      },
+      // Answer a parked tool-permission request (CL-5). Optimistically flips the item
+      // on success; the control_resolved event confirms it (idempotent).
+      async respondHosted(id, requestId, decision) {
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) +
+                                  "/permissions/" + encodeURIComponent(requestId), {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ decision }),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) { this._resolveHostedPermission(id, requestId, decision); }
+          else { const b = await res.json().catch(() => ({})); this.toast("permission " + decision + " failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("permission " + decision + " failed", "error"); }
       },
       // --- log streaming ---
       toggleLogs(name) {
