@@ -281,3 +281,40 @@ async def test_spawn_includes_keep_children_by_default(make_daemon, monkeypatch)
 async def test_spawn_omits_keep_children_when_disabled(make_daemon, monkeypatch):
     argv = await _capture_spawn_argv(make_daemon, monkeypatch, keep_children=False)
     assert "-keep-children" not in argv
+
+
+# -- env-sentinel scrub (claustrum daemonize collision) --------------------
+
+
+async def _capture_spawn_call(make_daemon, monkeypatch, **kwargs) -> dict:
+    """Run ensure() with create_subprocess_exec stubbed to capture args + kwargs."""
+    captured: dict = {}
+
+    async def fake_exec(*args, **kw):
+        captured["argv"] = args
+        captured["kwargs"] = kw
+        raise OSError("short-circuit after capturing call")  # → DaemonSpawnError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    daemon = make_daemon(**kwargs)
+    with pytest.raises(DaemonSpawnError):
+        await daemon.ensure()
+    return captured
+
+
+async def test_spawn_scrubs_ambient_daemon_sentinel(make_daemon, monkeypatch):
+    """An ambient CLAUDE_SSH_DAEMON_CHILD must never reach the spawned daemon.
+
+    The claude-ssh / ccd-cli daemon Clauster may run under exports that var to its
+    descendants; claustrum reuses the same name as its re-exec sentinel, so leaking
+    it makes the launcher skip its -token-fd read and exit 1. Unrelated env survives.
+    """
+    monkeypatch.setenv("CLAUDE_SSH_DAEMON_CHILD", "1")
+    monkeypatch.setenv("CLAUSTRUM_DAEMON_CHILD", "1")
+    monkeypatch.setenv("CLAUSTRUM_TOKEN_PIPE", "9")
+    monkeypatch.setenv("CLAUSTRUM_KEEP_THIS", "ok")
+    env = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]["env"]
+    assert "CLAUDE_SSH_DAEMON_CHILD" not in env
+    assert "CLAUSTRUM_DAEMON_CHILD" not in env
+    assert "CLAUSTRUM_TOKEN_PIPE" not in env
+    assert env.get("CLAUSTRUM_KEEP_THIS") == "ok"  # unrelated env preserved

@@ -56,6 +56,21 @@ _POLL_INTERVAL = 0.1
 # socket fails the ping near-instantly regardless.
 _HEALTH_PING_TIMEOUT = 2.0
 
+# Env vars that must NOT leak into a spawned ``claustrum``. ``CLAUDE_SSH_DAEMON_CHILD``
+# is claustrum's internal "I am the re-exec'd daemon child" sentinel — the SAME name
+# the ambient claude-ssh / ccd-cli daemon exports to its descendants. If Clauster is
+# started from inside such a session (interactive / agent terminals; NOT systemd,
+# whose env is clean), the launcher would inherit it ``=1``, skip its ``-token-fd``
+# read, and exit 1 (``read --token-file: open : no such file``). Stripping the
+# sentinel(s) makes the launcher always run its parent branch. The token travels on
+# stdin, never env, so this is auth-neutral. ``CLAUSTRUM_DAEMON_CHILD`` is included so
+# Clauster stays correct after claustrum namespaces its own sentinel;
+# ``CLAUSTRUM_TOKEN_PIPE`` is hygiene (a leaked pipe-fd marker would mislead the child).
+# See ``scratch/claustrum-token-fd-env-collision.md``.
+_DAEMON_SENTINEL_ENV = frozenset(
+    {"CLAUDE_SSH_DAEMON_CHILD", "CLAUSTRUM_DAEMON_CHILD", "CLAUSTRUM_TOKEN_PIPE"}
+)
+
 
 class DaemonSpawnError(ClaustrumError):
     """The ``claustrum -serve`` launcher failed to start a usable daemon."""
@@ -258,6 +273,10 @@ class ClaustrumDaemon:
         argv = [binary, "-serve", "-socket", str(self._socket), "-token-fd", "0"]
         if self._cfg.keep_children:
             argv.append("-keep-children")
+        # Defensive: scrub claustrum's daemonize sentinel from the child env (see
+        # _DAEMON_SENTINEL_ENV) so an ambient CLAUDE_SSH_DAEMON_CHILD can't make the
+        # launcher mistake itself for its own re-exec'd child and skip the token read.
+        env = {k: v for k, v in os.environ.items() if k not in _DAEMON_SENTINEL_ENV}
         # Append-mode log: the detached daemon keeps writing here after we return.
         log_file = open(self._log_path, "ab")  # noqa: SIM115 - handed to the child; closed below
         try:
@@ -267,6 +286,7 @@ class ClaustrumDaemon:
                 stdout=log_file,
                 stderr=log_file,
                 start_new_session=True,
+                env=env,
             )
         except OSError as exc:  # pragma: no cover - exec failure after which() resolved
             log_file.close()
