@@ -23,6 +23,7 @@ class _StubDaemon:
     def __init__(self, config) -> None:  # noqa: ANN001 - mirrors the real signature
         self.ensured = False
         self.closed = False
+        self.client = None  # no live client → lifespan skips hosted reattach (CL-6)
 
     async def ensure(self):
         """Record that the lifespan asked us to come up."""

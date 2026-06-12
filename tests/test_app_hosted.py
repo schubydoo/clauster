@@ -88,6 +88,12 @@ class _StubManager:
     def list_instances(self):
         return list(self.instances.values())
 
+    async def reattach_all(self, client):
+        return list(self.instances.values())
+
+    async def persist(self):
+        pass
+
     async def send(self, hosted_id: str, text: str) -> None:
         if self.send_error is not None:
             raise self.send_error

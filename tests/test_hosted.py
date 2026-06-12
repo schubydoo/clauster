@@ -15,13 +15,14 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from clauster.claustrum_client import ClaustrumClient
+from clauster.claustrum_client import ClaustrumClient, DaemonUnreachable
 from clauster.hosted import (
     HostedManager,
     HostedSession,
     HostedSessionError,
     build_hosted_argv,
 )
+from clauster.hosted_state import HostedStateStore
 from clauster.models import InstanceStatus
 
 pytestmark = pytest.mark.skipif(
@@ -516,14 +517,16 @@ async def test_manager_stop_returns_synced_instance(fake_claustrum):
         assert result.status is InstanceStatus.STOPPED
 
 
-async def test_manager_aclose_stops_all(fake_claustrum):
+async def test_manager_aclose_idempotent_over_exited(fake_claustrum):
+    # aclose detaches (CL-6: leave running for reattach); over already-exited
+    # sessions it's a harmless no-op and their STOPPED status is preserved.
     async with _manager(fake_claustrum) as (fake, client, mgr):
         a = await _spawn(mgr, client, project="a")
         b = await _spawn(mgr, client, project="b")
         for inst in (a, b):
             await fake.emit_exit(inst.claustrum_process_id, 0)
         await asyncio.sleep(0.05)
-        await mgr.aclose()  # idempotent over already-exited sessions
+        await mgr.aclose()
         assert all(
             mgr.get_instance(i.claustrum_process_id).status is InstanceStatus.STOPPED
             for i in (a, b)
@@ -536,3 +539,205 @@ async def test_manager_synced_tolerates_missing_session(fake_claustrum):
         pid = inst.claustrum_process_id
         mgr._sessions.pop(pid)  # session gone, instance row remains → synced is a no-op
         assert mgr.get_instance(pid) is not None
+
+
+# -- reattach + persistence (CL-6) -----------------------------------------
+
+
+async def _spawn_gen1(fake, store):
+    """Spawn one hosted session through a first manager generation, then detach.
+
+    Returns the process id. Mirrors a clauster shutdown: ``aclose`` detaches (leaves
+    the daemon-owned agent running) and flushes the persisted reattach cursor.
+    """
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        inst = await mgr.spawn(
+            client,
+            project="proj",
+            label="hosted:proj",
+            cwd="/tmp/proj",
+            claude_binary=_BIN,
+            permission_mode="acceptEdits",
+        )
+        pid = inst.claustrum_process_id
+        await fake.emit(pid, "stdout", b'{"type":"system","subtype":"init"}\n')
+        await asyncio.sleep(0.05)  # let the pump drain the frame + advance daemon_last_seq
+        await mgr.aclose()  # detach (NOT kill) + persist the cursor
+    return pid
+
+
+async def test_session_detach_leaves_remote_running(fake_claustrum):
+    # detach() drops the local pump/subscription but never signals the agent.
+    async with _session(fake_claustrum) as (fake, session):
+        await session.detach()
+        assert fake.killed == []  # no process.kill was sent
+        assert session.status == "running"  # remote process still alive
+
+
+async def test_session_reattach_not_found_is_crashed(fake_claustrum):
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, "01UNKNOWNPROCESS000000000", _BIN)
+        result = await session.reattach(0)
+        assert result["found"] is False
+        assert session.status == "crashed"
+        assert session._pump_task is None  # nothing to pump for a lost session
+
+
+async def test_manager_reattach_restores_running_session(fake_claustrum, tmp_path):
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    # New generation: fresh manager + client reattaches from the persisted store.
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        restored = await mgr.reattach_all(client)
+        assert [i.claustrum_process_id for i in restored] == [pid]
+        inst = mgr.get_instance(pid)
+        assert inst.status is InstanceStatus.RUNNING
+        assert inst.project == "proj"
+        assert mgr.session(pid) is not None  # a live, pumping session
+        await mgr.aclose()
+
+
+async def test_manager_reattach_intentional_stop_not_reattached(fake_claustrum, tmp_path):
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    # Generation 1: spawn then STOP (records intentional_stop).
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        inst = await mgr.spawn(
+            client,
+            project="proj",
+            label="hosted:proj",
+            cwd="/tmp/proj",
+            claude_binary=_BIN,
+            permission_mode="acceptEdits",
+        )
+        pid = inst.claustrum_process_id
+        await mgr.stop(pid)
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        assert mgr.get_instance(pid).status is InstanceStatus.STOPPED
+        assert mgr.session(pid) is None  # not reattached — it was stopped on purpose
+
+
+async def test_manager_reattach_unknown_process_is_crashed(fake_claustrum, tmp_path):
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    # Persisted records the daemon no longer knows (session lost while we were
+    # down). Two records exercise both started_at paths in _instance_from_record:
+    # a bad ISO string (parse → None) and a missing one (skip parse → None).
+    store.save(
+        {
+            "01GONEPROCESS00000000000": {
+                "project": "proj",
+                "label": "hosted:proj",
+                "started_at": "not-a-date",  # unparseable → None
+            },
+            "01GONEPROCESS00000000001": {"project": "proj", "label": "hosted:b"},  # no started_at
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        for pid in ("01GONEPROCESS00000000000", "01GONEPROCESS00000000001"):
+            inst = mgr.get_instance(pid)
+            assert inst.status is InstanceStatus.CRASHED
+            assert "session lost" in (inst.error_detail or "")
+            assert inst.started_at is None
+
+
+async def test_session_reattach_already_started_rejected(fake_claustrum):
+    async with _session(fake_claustrum) as (_fake, session):
+        with pytest.raises(HostedSessionError):
+            await session.reattach(0)  # already pumping from start()
+
+
+async def test_pump_tolerates_event_without_seq(fake_claustrum):
+    # An event with no/invalid seq (e.g. an overflow marker) must not advance — or
+    # crash — the reattach cursor; the seq latch simply skips it.
+    async with _session(fake_claustrum) as (_fake, session):
+        before = session.daemon_last_seq
+        session._source.put_nowait({"type": "line", "stream": "stdout", "line": "no-seq\n"})
+        await asyncio.sleep(0.05)
+        assert session.daemon_last_seq == before
+
+
+async def test_manager_public_persist_invokes_store(fake_claustrum, tmp_path):
+    store = HostedStateStore(tmp_path)
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        mgr._store = store
+        inst = await _spawn(mgr, client)
+        # Isolate the public path: drop the file + the diff-check cache so persist()
+        # can't early-return, then assert the public call itself rewrote the record.
+        (tmp_path / "hosted_state.json").unlink()
+        mgr._last_saved = None
+        await mgr.persist()  # public entry (the dashboard-poll path)
+        assert inst.claustrum_process_id in store.load()
+
+
+class _BoomReattachClient:
+    """A stub daemon client whose reattach raises — isolates the error path."""
+
+    def stream(self, process_id):
+        class _Stream:
+            def subscribe(self):
+                return asyncio.Queue()
+
+            def unsubscribe(self, queue):
+                pass
+
+        return _Stream()
+
+    async def reattach(self, process_id, from_seq=0):
+        raise DaemonUnreachable("daemon gone")
+
+
+async def test_manager_reattach_daemon_error_is_recorded(fake_claustrum, tmp_path):
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    # A daemon error on reattach is recorded per-session as ERROR, never crashing
+    # reattach_all / startup.
+    mgr = HostedManager(store)
+    await mgr.reattach_all(_BoomReattachClient())
+    inst = mgr.get_instance(pid)
+    assert inst.status is InstanceStatus.ERROR
+    assert "reattach failed" in (inst.error_detail or "")
+
+
+async def test_manager_persist_tolerates_write_failure(fake_claustrum, caplog):
+    # A non-authoritative store: a save OSError must not break spawn or the poll —
+    # it degrades to a stale cursor with a logged warning.
+    class _BoomStore:
+        def load(self):
+            return {}
+
+        def save(self, sessions):
+            raise OSError("disk full")
+
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        mgr._store = _BoomStore()
+        mgr._last_saved = None
+        with caplog.at_level("WARNING"):
+            inst = await _spawn(mgr, client)  # spawn → _persist → save raises → swallowed
+        assert inst.status is InstanceStatus.RUNNING  # spawn still succeeded
+        assert any("could not persist" in r.message for r in caplog.records)
+        assert mgr._last_saved is None  # not marked saved → retried next time
+
+
+async def test_manager_aclose_detaches_without_killing(fake_claustrum, tmp_path):
+    # aclose must leave sessions running for reattach (detach, not kill) — so a fresh
+    # generation can reattach the same process afterward.
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    assert fake.killed == []  # aclose sent no process.kill
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        assert mgr.get_instance(pid).status is InstanceStatus.RUNNING
+        await mgr.aclose()

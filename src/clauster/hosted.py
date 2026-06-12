@@ -39,9 +39,11 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream
+from .hosted_state import HostedStateStore
 from .models import InstanceStatus, RemoteControlInstance
 from .redact import sanitize_line
 
@@ -178,6 +180,9 @@ class HostedSession:
         self.claude_session_uuid: str | None = None
         self.agent_pid: int | None = None
         self.agent_proc_start: float | None = None
+        # Highest *daemon* frame seq drained — the reattach replay cursor across
+        # clauster restarts (distinct from _event_seq, the clauster-side ring seq).
+        self.daemon_last_seq = 0
         self._ring: deque[dict[str, Any]] = deque(maxlen=ring_size)
         self._event_seq = 0
         self._subscribers: list[_Subscriber] = []
@@ -195,11 +200,6 @@ class HostedSession:
     def pending_requests(self) -> list[_ControlRequest]:
         """Snapshot of parked control requests awaiting a response (CL-5 surfaces these)."""
         return list(self._pending.values())
-
-    @property
-    def last_event_seq(self) -> int:
-        """Highest clauster-side ``event_seq`` emitted so far (the WS replay cursor)."""
-        return self._event_seq
 
     async def start(
         self,
@@ -233,6 +233,46 @@ class HostedSession:
         self.agent_proc_start = float(start_time) if isinstance(start_time, (int, float)) else None
         self.status = "running"
         self._pump_task = asyncio.create_task(self._pump())
+
+    async def reattach(self, from_seq: int = 0) -> dict[str, Any]:
+        """Reattach to an already-running daemon process, replaying frames past ``from_seq``.
+
+        Used on clauster restart (CL-6): the agent kept running on the daemon while
+        we were down. Subscribes before the ``process.reattach`` RPC so no replayed
+        frame is missed, then — if the process is *found* — pumps the replay + live
+        tail. A not-found process means the session was lost while we were down, so
+        status latches to ``crashed`` and nothing is pumped. Returns the daemon's
+        ``{found, running, firstSeq, lastSeq}`` result. ``from_seq`` is the persisted
+        :attr:`daemon_last_seq`; a stale/zero value only costs replay overlap (the
+        client de-dupes by seq), never a double-emit.
+        """
+        if self._pump_task is not None:
+            raise HostedSessionError("hosted session already started")
+        self._stream = self._client.stream(self._process_id)
+        self._source = self._stream.subscribe()
+        result = await self._client.reattach(self._process_id, from_seq)
+        if not result.get("found"):
+            # Session gone while we were down — drop the subscription we just made.
+            self._stream.unsubscribe(self._source)
+            self._stream, self._source = None, None
+            self.status = "crashed"
+            return result
+        self.daemon_last_seq = max(self.daemon_last_seq, from_seq)
+        # If not running, the exit frame (seq > from_seq) replays through the pump,
+        # which latches the terminal status; "stopped" is the neutral default until.
+        self.status = "running" if result.get("running") else "stopped"
+        self._pump_task = asyncio.create_task(self._pump())
+        return result
+
+    async def detach(self) -> None:
+        """Drop the local pump + stream subscription *without* killing the agent.
+
+        Clauster-shutdown counterpart to :meth:`stop`: the daemon owns the agent and
+        survives our restart (it ``setsid``s away from our cgroup), so we leave it
+        running for :meth:`reattach` next start rather than sending it a signal.
+        Idempotent; leaves status untouched (the remote process is still alive).
+        """
+        await self._teardown()
 
     async def send_message(self, text: str) -> None:
         """Send one user turn to the agent as a stream-json input frame.
@@ -325,6 +365,9 @@ class HostedSession:
             while True:
                 event = await source.get()
                 etype = event.get("type")
+                seq = event.get("seq")
+                if isinstance(seq, int) and seq > self.daemon_last_seq:
+                    self.daemon_last_seq = seq  # advance the reattach replay cursor
                 if etype == "line":
                     await self._on_line(event.get("stream"), event.get("line", ""))
                 elif etype == "exit":
@@ -452,10 +495,21 @@ class HostedManager:
     touches no bridge-lifecycle code. The dashboard unions both for display.
     """
 
-    def __init__(self) -> None:
-        """Create an empty manager (no sessions until :meth:`spawn`)."""
+    def __init__(self, store: HostedStateStore | None = None) -> None:
+        """Create an empty manager (no sessions until :meth:`spawn`/:meth:`reattach_all`).
+
+        ``store`` enables CL-6 restart resilience: spawn/stop persist the registry and
+        :meth:`reattach_all` restores it on startup. ``None`` (the default, used in
+        unit tests) keeps the manager purely in-memory — persistence calls no-op.
+        """
         self._sessions: dict[str, HostedSession] = {}
         self._instances: dict[str, RemoteControlInstance] = {}
+        self._store = store
+        self._last_saved: dict[str, dict] | None = None
+        # Serialize persist: spawn/stop/aclose/poll can race, and an older snapshot
+        # finishing last would overwrite a newer file (dropping a session / regressing
+        # the cursor). The lock makes snapshot→save→_last_saved atomic per writer.
+        self._persist_lock = asyncio.Lock()
 
     def list_instances(self) -> list[RemoteControlInstance]:
         """Snapshot of every hosted instance, each synced to its live session state."""
@@ -506,6 +560,7 @@ class HostedManager:
         )
         self._sessions[process_id] = session
         self._instances[process_id] = instance
+        await self._persist()  # record the new session so a restart can reattach it
         return self._synced(instance)
 
     async def send(self, hosted_id: str, text: str) -> None:
@@ -519,12 +574,62 @@ class HostedManager:
     async def stop(self, hosted_id: str) -> RemoteControlInstance:
         """Stop a hosted session and return its final (status-synced) instance."""
         await self._require(hosted_id).stop()
+        # Mark the intent so a restart shows it as stopped, not "lost"/crashed.
+        self._instances[hosted_id].intentional_stop = True
+        await self._persist()
         return self._synced(self._instances[hosted_id])
 
     async def aclose(self) -> None:
-        """Stop every live hosted session (app shutdown)."""
+        """Detach every live hosted session at app shutdown — leave them running.
+
+        Clauster restart resilience (CL-6): the daemon owns the agents and survives
+        our restart, so we drop our local pump/subscription (``detach``) rather than
+        killing them (``stop``). :meth:`reattach_all` restores them next start. A
+        final persist flushes the freshest ``daemon_last_seq`` cursor for each.
+        """
         for session in list(self._sessions.values()):
-            await session.stop()
+            await session.detach()
+        await self._persist()
+
+    async def reattach_all(self, client: ClaustrumClient) -> list[RemoteControlInstance]:
+        """Restore persisted hosted sessions on startup, reattaching the live ones.
+
+        For each persisted record: an intentionally-stopped one is rebuilt as a
+        stopped row (no reattach); otherwise we ``process.reattach`` from its saved
+        ``daemon_last_seq``. Found+running → a live, pumping session; found+exited →
+        finalized via the replayed exit; not-found → a CRASHED "session lost" row.
+        Tolerates a daemon error per session (records it, keeps going — one bad
+        reattach never blocks the rest or startup). Returns the restored instances.
+        """
+        records = self._store.load() if self._store is not None else {}
+        for process_id, fields in records.items():
+            instance = self._instance_from_record(process_id, fields)
+            self._instances[process_id] = instance
+            if fields.get("intentional_stop"):
+                instance.status = InstanceStatus.STOPPED
+                continue
+            # reattach() never builds argv (it binds by process id), so the binary is
+            # unused here — a respawn path (CL-7) re-resolves it from config.
+            session = HostedSession(client, process_id, "")
+            session.claude_session_uuid = fields.get("claude_session_uuid")
+            try:
+                result = await session.reattach(int(fields.get("daemon_last_seq") or 0))
+            except ClaustrumError as exc:
+                instance.status = InstanceStatus.ERROR
+                instance.error_detail = f"reattach failed: {exc}"
+                logger.warning("hosted: reattach of %s failed: %s", process_id, exc)
+                continue
+            if not result.get("found"):
+                instance.status = InstanceStatus.CRASHED
+                instance.error_detail = "daemon restarted; session lost"
+                continue
+            self._sessions[process_id] = session
+        await self._persist()
+        return [self._synced(inst) for inst in self._instances.values()]
+
+    async def persist(self) -> None:
+        """Public debounced persist — the dashboard poll calls this to refresh cursors."""
+        await self._persist()
 
     def _require(self, hosted_id: str) -> HostedSession:
         """Return the live session for ``hosted_id`` or raise ``HostedSessionError``."""
@@ -534,14 +639,79 @@ class HostedManager:
         return session
 
     def _synced(self, instance: RemoteControlInstance) -> RemoteControlInstance:
-        """Reflect the live session's status + captured uuid onto its instance row."""
+        """Reflect the live session's status + captured uuid + reattach cursor onto the row."""
         session = self._sessions.get(instance.claustrum_process_id or "")
         if session is not None:
             instance.status = _STATUS_MAP.get(session.status, instance.status)
             if session.claude_session_uuid:
                 instance.claude_session_uuid = session.claude_session_uuid
-            instance.daemon_last_seq = max(instance.daemon_last_seq, session.last_event_seq)
+            # The reattach cursor is the *daemon* seq, not the clauster ring seq.
+            instance.daemon_last_seq = max(instance.daemon_last_seq, session.daemon_last_seq)
         return instance
+
+    async def _persist(self) -> None:
+        """Write the registry's persisted subset, but only when it actually changed.
+
+        Best-effort: the store is non-authoritative, so a write failure (disk full,
+        revoked perms) degrades to a stale reattach cursor — never a failed spawn/stop
+        or a 500 on the dashboard poll. ``_last_saved`` is left unchanged on failure so
+        the next persist retries.
+        """
+        if self._store is None:
+            return
+        async with self._persist_lock:
+            subset = {pid: self._record(self._synced(i)) for pid, i in self._instances.items()}
+            if subset == self._last_saved:
+                return
+            try:
+                await asyncio.to_thread(self._store.save, subset)
+            except OSError as exc:
+                logger.warning("hosted: could not persist session state: %s", exc)
+                return
+            self._last_saved = subset
+
+    @staticmethod
+    def _record(instance: RemoteControlInstance) -> dict[str, Any]:
+        """Project a hosted instance to its JSON-safe persisted record (Path/datetime → str)."""
+        return {
+            "project": instance.project,
+            "label": instance.label,
+            "permission_mode": instance.permission_mode,
+            "claude_session_uuid": instance.claude_session_uuid,
+            "daemon_last_seq": instance.daemon_last_seq,
+            "hosted_log_path": str(instance.hosted_log_path) if instance.hosted_log_path else None,
+            "agent_pid": instance.agent_pid,
+            "agent_proc_start": instance.agent_proc_start,
+            "started_at": instance.started_at.isoformat() if instance.started_at else None,
+            "intentional_stop": instance.intentional_stop,
+        }
+
+    @staticmethod
+    def _instance_from_record(process_id: str, fields: dict) -> RemoteControlInstance:
+        """Rebuild a hosted instance row from a persisted record (inverse of _record)."""
+        started_at = fields.get("started_at")
+        parsed_start: datetime | None = None
+        if isinstance(started_at, str):
+            try:
+                parsed_start = datetime.fromisoformat(started_at)
+            except ValueError:
+                parsed_start = None
+        log_path = fields.get("hosted_log_path")
+        return RemoteControlInstance(
+            project=fields.get("project", ""),
+            label=fields.get("label", f"hosted:{process_id[:8]}"),
+            channel="hosted",
+            permission_mode=fields.get("permission_mode", "default"),
+            claustrum_process_id=process_id,
+            claude_session_uuid=fields.get("claude_session_uuid"),
+            daemon_last_seq=int(fields.get("daemon_last_seq") or 0),
+            hosted_log_path=Path(log_path) if isinstance(log_path, str) and log_path else None,
+            agent_pid=fields.get("agent_pid"),
+            agent_proc_start=fields.get("agent_proc_start"),
+            started_at=parsed_start,
+            intentional_stop=bool(fields.get("intentional_stop", False)),
+            status=InstanceStatus.STARTING,
+        )
 
 
 def _redact_obj(obj: Any) -> Any:
