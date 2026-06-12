@@ -201,11 +201,6 @@ class HostedSession:
         """Snapshot of parked control requests awaiting a response (CL-5 surfaces these)."""
         return list(self._pending.values())
 
-    @property
-    def last_event_seq(self) -> int:
-        """Highest clauster-side ``event_seq`` emitted so far (the WS replay cursor)."""
-        return self._event_seq
-
     async def start(
         self,
         *,
@@ -511,6 +506,10 @@ class HostedManager:
         self._instances: dict[str, RemoteControlInstance] = {}
         self._store = store
         self._last_saved: dict[str, dict] | None = None
+        # Serialize persist: spawn/stop/aclose/poll can race, and an older snapshot
+        # finishing last would overwrite a newer file (dropping a session / regressing
+        # the cursor). The lock makes snapshot→save→_last_saved atomic per writer.
+        self._persist_lock = asyncio.Lock()
 
     def list_instances(self) -> list[RemoteControlInstance]:
         """Snapshot of every hosted instance, each synced to its live session state."""
@@ -660,15 +659,16 @@ class HostedManager:
         """
         if self._store is None:
             return
-        subset = {pid: self._record(self._synced(inst)) for pid, inst in self._instances.items()}
-        if subset == self._last_saved:
-            return
-        try:
-            await asyncio.to_thread(self._store.save, subset)
-        except OSError as exc:
-            logger.warning("hosted: could not persist session state: %s", exc)
-            return
-        self._last_saved = subset
+        async with self._persist_lock:
+            subset = {pid: self._record(self._synced(i)) for pid, i in self._instances.items()}
+            if subset == self._last_saved:
+                return
+            try:
+                await asyncio.to_thread(self._store.save, subset)
+            except OSError as exc:
+                logger.warning("hosted: could not persist session state: %s", exc)
+                return
+            self._last_saved = subset
 
     @staticmethod
     def _record(instance: RemoteControlInstance) -> dict[str, Any]:

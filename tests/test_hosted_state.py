@@ -40,6 +40,64 @@ def test_corrupt_file_loads_empty(tmp_path):
     assert HostedStateStore(tmp_path).load() == {}
 
 
+def test_non_utf8_file_tolerated(tmp_path):
+    (tmp_path / "hosted_state.json").write_bytes(b"\xff\xfe not utf-8")
+    assert HostedStateStore(tmp_path).load() == {}
+
+
+def test_non_dict_root_returns_empty(tmp_path):
+    (tmp_path / "hosted_state.json").write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+    assert HostedStateStore(tmp_path).load() == {}
+
+
+def test_non_dict_sessions_returns_empty(tmp_path):
+    # A current-schema file whose `sessions` is not a map degrades to empty.
+    (tmp_path / "hosted_state.json").write_text(
+        json.dumps({"schema_version": CURRENT_SCHEMA, "sessions": "garbage"}), encoding="utf-8"
+    )
+    assert HostedStateStore(tmp_path).load() == {}
+
+
+def test_non_dict_session_values_are_skipped(tmp_path):
+    (tmp_path / "hosted_state.json").write_text(
+        json.dumps({"schema_version": CURRENT_SCHEMA, "sessions": {"pid-1": _REC, "junk": ["x"]}}),
+        encoding="utf-8",
+    )
+    assert HostedStateStore(tmp_path).load() == {"pid-1": _REC}
+
+
+def test_migrate_backup_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch):
+    # A failed pre-migration .bak write is surfaced (no silent drop) while the load
+    # still succeeds. Monkeypatch the write rather than chmod (Windows ignores it).
+    import pathlib
+
+    (tmp_path / "hosted_state.json").write_text(
+        json.dumps({"schema_version": 0, "sessions": {"pid-1": _REC}}), encoding="utf-8"
+    )
+    real_write_text = pathlib.Path.write_text
+
+    def boom(self, *args, **kwargs):
+        if self.suffix == ".bak":
+            raise OSError("simulated: backup write failed")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", boom)
+    with caplog.at_level("WARNING", logger="clauster.hosted_state"):
+        loaded = HostedStateStore(tmp_path).load()
+    assert loaded == {"pid-1": _REC}  # migration still succeeded
+    assert not (tmp_path / "hosted_state.json.bak").exists()
+    assert any("backup" in r.message for r in caplog.records)
+
+
+def test_migrate_does_not_overwrite_existing_backup(tmp_path):
+    (tmp_path / "hosted_state.json").write_text(
+        json.dumps({"schema_version": 0, "sessions": {"pid-1": _REC}}), encoding="utf-8"
+    )
+    (tmp_path / "hosted_state.json.bak").write_text("ORIGINAL", encoding="utf-8")
+    assert HostedStateStore(tmp_path).load() == {"pid-1": _REC}
+    assert (tmp_path / "hosted_state.json.bak").read_text(encoding="utf-8") == "ORIGINAL"
+
+
 def test_unknown_fields_dropped(tmp_path):
     path = tmp_path / "hosted_state.json"
     path.write_text(

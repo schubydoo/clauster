@@ -627,14 +627,52 @@ async def test_manager_reattach_intentional_stop_not_reattached(fake_claustrum, 
 async def test_manager_reattach_unknown_process_is_crashed(fake_claustrum, tmp_path):
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
-    # A persisted record the daemon no longer knows (session lost while we were down).
-    store.save({"01GONEPROCESS00000000000": {"project": "proj", "label": "hosted:proj"}})
+    # Persisted records the daemon no longer knows (session lost while we were
+    # down). Two records exercise both started_at paths in _instance_from_record:
+    # a bad ISO string (parse → None) and a missing one (skip parse → None).
+    store.save(
+        {
+            "01GONEPROCESS00000000000": {
+                "project": "proj",
+                "label": "hosted:proj",
+                "started_at": "not-a-date",  # unparseable → None
+            },
+            "01GONEPROCESS00000000001": {"project": "proj", "label": "hosted:b"},  # no started_at
+        }
+    )
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
         mgr = HostedManager(store)
         await mgr.reattach_all(client)
-        inst = mgr.get_instance("01GONEPROCESS00000000000")
-        assert inst.status is InstanceStatus.CRASHED
-        assert "session lost" in (inst.error_detail or "")
+        for pid in ("01GONEPROCESS00000000000", "01GONEPROCESS00000000001"):
+            inst = mgr.get_instance(pid)
+            assert inst.status is InstanceStatus.CRASHED
+            assert "session lost" in (inst.error_detail or "")
+            assert inst.started_at is None
+
+
+async def test_session_reattach_already_started_rejected(fake_claustrum):
+    async with _session(fake_claustrum) as (_fake, session):
+        with pytest.raises(HostedSessionError):
+            await session.reattach(0)  # already pumping from start()
+
+
+async def test_pump_tolerates_event_without_seq(fake_claustrum):
+    # An event with no/invalid seq (e.g. an overflow marker) must not advance — or
+    # crash — the reattach cursor; the seq latch simply skips it.
+    async with _session(fake_claustrum) as (_fake, session):
+        before = session.daemon_last_seq
+        session._source.put_nowait({"type": "line", "stream": "stdout", "line": "no-seq\n"})
+        await asyncio.sleep(0.05)
+        assert session.daemon_last_seq == before
+
+
+async def test_manager_public_persist_invokes_store(fake_claustrum, tmp_path):
+    store = HostedStateStore(tmp_path)
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        mgr._store = store
+        inst = await _spawn(mgr, client)
+        await mgr.persist()  # public entry (the dashboard-poll path)
+        assert inst.claustrum_process_id in store.load()
 
 
 async def test_manager_reattach_daemon_error_is_recorded(fake_claustrum, tmp_path):
