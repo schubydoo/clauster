@@ -671,6 +671,10 @@ async def test_manager_public_persist_invokes_store(fake_claustrum, tmp_path):
     async with _manager(fake_claustrum) as (_fake, client, mgr):
         mgr._store = store
         inst = await _spawn(mgr, client)
+        # Isolate the public path: drop the file + the diff-check cache so persist()
+        # can't early-return, then assert the public call itself rewrote the record.
+        (tmp_path / "hosted_state.json").unlink()
+        mgr._last_saved = None
         await mgr.persist()  # public entry (the dashboard-poll path)
         assert inst.claustrum_process_id in store.load()
 
