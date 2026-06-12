@@ -678,6 +678,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_instances() -> list[RemoteControlInstance]:
         return runner.list_instances()
 
+    @app.get("/api/hosted")
+    async def api_hosted() -> list[RemoteControlInstance]:
+        """Hosted (claustrum stream-json) sessions, each status-synced to its live session.
+
+        Kept separate from ``/api/instances`` (project-keyed bridges): hosted
+        sessions live in their own ``HostedManager`` registry, are keyed by a
+        client-chosen id, and there may be several per project. The dashboard's
+        hosted panel polls this; empty list when the channel is unused. Auth-gated
+        by the guard middleware like every other ``/api/*`` route.
+        """
+        return app.state.hosted.list_instances()
+
     @app.get("/api/widget")
     async def api_widget() -> dict:
         """Compact dashboard-widget summary (e.g. Homepage/Homarr custom API widgets).
@@ -1145,6 +1157,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "metrics_enabled": config.metrics.enabled,
                 "metrics_show_disk": config.metrics.show_disk,
                 "metrics_poll_ms": int(config.metrics.poll_seconds * 1000),
+                # Hosted channel (CL-4c): the live-view panel only renders when the
+                # claustrum daemon is configured; otherwise there's nothing to host.
+                "claustrum_enabled": config.claustrum.enabled,
             },
         )
 
