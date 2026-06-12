@@ -163,6 +163,64 @@ def test_spawn_unknown_channel_is_422(write_config, projects_root):
     assert r.status_code == 422
 
 
+# -- list (GET /api/hosted) ------------------------------------------------
+
+
+def test_api_hosted_lists_sessions(write_config, projects_root):
+    manager = _StubManager()
+    manager.seed()
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.get("/api/hosted")
+    assert r.status_code == 200
+    body = r.json()
+    assert [h["claustrum_process_id"] for h in body] == [_HID]
+    assert body[0]["channel"] == "hosted" and body[0]["project"] == "alpha"
+
+
+def test_api_hosted_empty_when_no_sessions(write_config, projects_root):
+    app = _app(write_config)  # fresh _StubManager, nothing seeded
+    with TestClient(app) as client:
+        r = client.get("/api/hosted")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+# -- dashboard panel gating (claustrum.enabled) ----------------------------
+
+
+class _NoopDaemon:
+    """Stand-in for ClaustrumDaemon so the enabled-config lifespan spawns nothing."""
+
+    def __init__(self, _config: object) -> None:
+        self.client = object()
+
+    async def ensure(self) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        pass
+
+
+def test_dashboard_hides_hosted_panel_when_disabled(write_config, projects_root):
+    app = _app(write_config)  # claustrum disabled by default
+    with TestClient(app) as client:
+        body = client.get("/").text
+    assert "New hosted session" not in body  # the gated panel's launcher button
+    assert "const CLAUSTRUM_ENABLED = false" in body
+
+
+def test_dashboard_shows_hosted_panel_when_enabled(write_config, projects_root, monkeypatch):
+    monkeypatch.setattr(app_module, "ClaustrumDaemon", _NoopDaemon)
+    config = load_config(write_config("claustrum:\n  enabled: true\n"))
+    app = create_app(config)
+    app.state.hosted = _StubManager()
+    with TestClient(app) as client:
+        body = client.get("/").text
+    assert "New hosted session" in body  # the gated panel's launcher button
+    assert "const CLAUSTRUM_ENABLED = true" in body
+
+
 # -- message ---------------------------------------------------------------
 
 

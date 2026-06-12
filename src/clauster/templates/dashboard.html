@@ -267,6 +267,129 @@
         </button>
       </div>
 
+      {% if claustrum_enabled %}
+      <!-- ===== Hosted live-view sessions (claustrum stream-json channel, CL-4c) ===== -->
+      <div class="mb-3" x-show="hosted.length > 0 || hostedDispatchOpen" x-cloak>
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">Hosted sessions</h3>
+            <span class="card-subtitle">headless <code>claude</code> sessions you watch &amp; drive live</span>
+          </div>
+          <!-- start form (opened via the launcher button below) -->
+          <div class="card-body border-bottom" x-show="hostedDispatchOpen" x-cloak>
+            <div class="row g-2 align-items-end">
+              <div class="col-auto">
+                <label for="hosted-project" class="form-label small mb-1">Project</label>
+                <select id="hosted-project" class="form-select" x-model="hostedForm.project">
+                  <option value="">Choose…</option>
+                  <template x-for="n in PROJECT_NAMES" :key="n">
+                    <option :value="n" x-text="n"></option>
+                  </template>
+                </select>
+              </div>
+              <div class="col-auto">
+                <label for="hosted-perm" class="form-label small mb-1">Permission mode</label>
+                <select id="hosted-perm" class="form-select" x-model="hostedForm.permission_mode">
+                  <template x-for="m in PERMISSION_MODES" :key="m">
+                    <option :value="m" x-text="m"></option>
+                  </template>
+                </select>
+              </div>
+              <div class="col-auto">
+                <button class="btn btn-primary" :disabled="!hostedForm.project || hostedForm.busy" @click="startHosted()">
+                  <span x-text="hostedForm.busy ? 'Starting…' : 'Start'">Start</span>
+                </button>
+              </div>
+            </div>
+            <div class="small text-secondary mt-1">
+              Spawns a headless stream-json session through the claustrum daemon. Type a prompt, watch
+              Claude work live, send follow-ups — reload mid-run and the stream catches up. Until the
+              permissions UI lands, tool prompts park (shown below) and wait.
+            </div>
+          </div>
+          <div class="list-group list-group-flush">
+            <template x-for="h in hosted" :key="h.claustrum_process_id">
+              <div class="list-group-item">
+                <div class="d-flex align-items-center flex-wrap gap-1">
+                  <span class="badge me-1" :class="hostedStatusBadge(h.status)" x-text="h.status"></span>
+                  <span class="fw-medium me-1" x-text="h.project"></span>
+                  <span class="text-secondary small me-1" x-text="h.permission_mode"></span>
+                  <button class="btn btn-sm btn-ghost-secondary ms-auto me-1" @click="toggleHosted(h.claustrum_process_id)"
+                          x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
+                  <button class="btn btn-sm btn-ghost-danger" :disabled="hostedStopping[h.claustrum_process_id]"
+                          @click="stopHosted(h)">
+                    <span x-text="hostedStopping[h.claustrum_process_id] ? 'Stopping…' : 'Stop'">Stop</span>
+                  </button>
+                </div>
+                <!-- live conversation view (opened on demand; reconnects via ?after=) -->
+                <template x-if="hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open">
+                  <div class="mt-2">
+                    <div class="alert alert-warning py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].connLost" x-cloak>
+                      Live link dropped — reconnecting…
+                    </div>
+                    <div class="border rounded p-2" :id="'hosted-stream-' + h.claustrum_process_id"
+                         style="max-height: 360px; overflow-y: auto; font-size: 0.875rem;">
+                      <template x-for="(it, idx) in hostedView[h.claustrum_process_id].events" :key="idx">
+                        <div class="mb-1">
+                          <template x-if="it.kind === 'msg'">
+                            <div :class="it.role === 'assistant' ? 'text-body' : 'text-secondary'">
+                              <span class="badge me-1" :class="it.role === 'assistant' ? 'bg-azure-lt' : 'bg-secondary-lt'" x-text="it.role"></span>
+                              <span style="white-space: pre-wrap;" x-text="it.text"></span>
+                            </div>
+                          </template>
+                          <template x-if="it.kind === 'tool'">
+                            <div><span class="badge bg-purple-lt me-1">🔧 <span x-text="it.name"></span></span><code class="small text-secondary" x-text="it.input"></code></div>
+                          </template>
+                          <template x-if="it.kind === 'toolresult'">
+                            <div class="text-secondary small ps-2" style="white-space: pre-wrap;" x-text="it.text"></div>
+                          </template>
+                          <template x-if="it.kind === 'result'">
+                            <div class="text-success small" x-text="it.text"></div>
+                          </template>
+                          <template x-if="it.kind === 'marker'">
+                            <div class="text-secondary small text-center" x-text="it.text"></div>
+                          </template>
+                          <template x-if="it.kind === 'permission'">
+                            <div class="text-warning small">⏸ <span x-text="it.text"></span></div>
+                          </template>
+                          <template x-if="it.kind === 'gap'">
+                            <div class="text-warning small text-center" x-text="it.text"></div>
+                          </template>
+                          <template x-if="it.kind === 'stderr'">
+                            <div class="text-danger small" style="white-space: pre-wrap;" x-text="it.text"></div>
+                          </template>
+                          <template x-if="it.kind === 'error'">
+                            <div class="text-danger small" x-text="it.text"></div>
+                          </template>
+                        </div>
+                      </template>
+                    </div>
+                    <div class="input-group mt-2">
+                      <input type="text" class="form-control" placeholder="Send a message…"
+                             x-model="hostedView[h.claustrum_process_id].input"
+                             @keydown.enter="sendHosted(h.claustrum_process_id)"
+                             :disabled="hostedView[h.claustrum_process_id].sending">
+                      <button class="btn btn-primary" @click="sendHosted(h.claustrum_process_id)"
+                              :disabled="hostedView[h.claustrum_process_id].sending || !(hostedView[h.claustrum_process_id].input || '').trim()">
+                        <span x-text="hostedView[h.claustrum_process_id].sending ? 'Sending…' : 'Send'">Send</span>
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+      <!-- launcher: always available so the first hosted session can be started while
+           the panel above is hidden (zero sessions). -->
+      <div class="mb-3">
+        <button class="btn btn-ghost-secondary" @click="hostedDispatchOpen = !hostedDispatchOpen">
+          <span x-text="hostedDispatchOpen ? '× Close hosted session' : '🛰️ New hosted session'">🛰️ New hosted session</span>
+        </button>
+      </div>
+      {% endif %}
+
       {% if reaper_ui_enabled %}
       <!-- ===== Ghost-environment reaper ===== -->
       <div class="mb-3" x-data="reaper()">
@@ -420,6 +543,8 @@
   const METRICS_ENABLED = {{ metrics_enabled | tojson }};  // metrics.enabled — live CPU/mem/disk line
   const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
   const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
+  const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
+  const PERMISSION_MODES = ["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"];
 
   // Humanize a token count for the compact badge (1.2M / 3.4k); the exact value
   // lives in the tooltip (usageTitle).
@@ -456,6 +581,12 @@
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
       agentStopping: {},   // job id -> true while a stop request is in flight
+      // --- hosted live-view sessions (claustrum stream-json channel, CL-4c) ---
+      hosted: [],                 // GET /api/hosted snapshot (channel="hosted" instances)
+      hostedDispatchOpen: false,
+      hostedForm: { project: "", permission_mode: DEFAULT_PERMISSION_MODE, busy: false },
+      hostedStopping: {},         // hosted id -> true while a stop is in flight
+      hostedView: {},             // hosted id -> { open, ws, lastSeq, events[], input, sending, connLost }
       errors: {},
       qrOpen: {},
       qrNonce: {},
@@ -558,6 +689,14 @@
           else { ok = false; }
           if (aRes.ok) this.agents = await aRes.json();
           else { ok = false; }
+          // Hosted sessions live in a separate registry (HostedManager); only poll
+          // them when the claustrum channel is configured.
+          if (CLAUSTRUM_ENABLED) {
+            const hRes = await fetch(ROOT + "/api/hosted");
+            if (hRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
+            if (hRes.ok) this.hosted = await hRes.json();
+            else { ok = false; }
+          }
         } catch (e) { ok = false; }
         // A single blip is normal; only surface a *persistent* outage so the user
         // knows the data is stale and we're retrying — never fail silently.
@@ -1106,6 +1245,161 @@
           }
         } catch (e) { this.errors[name] = String(e); this.toast(name + ": trust failed", "error"); }
         this.trusting[name] = false;
+      },
+      // --- hosted live-view sessions (claustrum stream-json channel) ---
+      hostedStatusBadge(status) {
+        const map = { running: "bg-green-lt", starting: "bg-blue-lt", stopping: "bg-yellow-lt",
+                      stopped: "bg-secondary-lt", crashed: "bg-red-lt", error: "bg-red-lt" };
+        return Object.hasOwn(map, status) ? map[status] : "bg-secondary-lt";
+      },
+      async startHosted() {
+        const f = this.hostedForm;
+        if (!f.project || f.busy) return;
+        f.busy = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ channel: "hosted", project: f.project, permission_mode: f.permission_mode }),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) {
+            this.toast("hosted session started", "success");
+            await this.refresh();
+            if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);  // watch it immediately
+          } else {
+            this.toast("hosted start failed — " + (b.detail || res.status), "error");
+          }
+        } catch (e) { this.toast("hosted start failed", "error"); }
+        f.busy = false;
+      },
+      async stopHosted(h) {
+        const id = h.claustrum_process_id;
+        if (!window.confirm("Stop hosted session \"" + (h.label || id) + "\"?")) return;
+        this.hostedStopping[id] = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) this.toast("hosted session stopped", "success");
+          else { const b = await res.json().catch(() => ({})); this.toast("stop failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("stop failed", "error"); }
+        this.hostedStopping[id] = false;
+        this.closeHosted(id);
+        await this.refresh();
+      },
+      toggleHosted(id) {
+        const v = this.hostedView[id];
+        if (v && v.open) this.closeHosted(id); else this.openHosted(id);
+      },
+      // Open (or reconnect) the live stream, resuming from the last event we rendered
+      // so a reload / dropped link catches up via ?after= without re-dumping the ring.
+      openHosted(id) {
+        const prev = this.hostedView[id];
+        const after = prev ? prev.lastSeq : 0;
+        const view = { open: true, ws: null, lastSeq: after, events: prev ? prev.events : [],
+                       input: prev ? prev.input : "", sending: false, connLost: false };
+        this.hostedView[id] = view;
+        const self = this;
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const url = proto + "://" + location.host + ROOT + "/ws/hosted/" +
+                    encodeURIComponent(id) + "?after=" + after;
+        const ws = new WebSocket(url);
+        ws.onmessage = (ev) => {
+          const v = self.hostedView[id];
+          if (!v || !v.open) return;
+          let e; try { e = JSON.parse(ev.data); } catch (_) { return; }
+          self._renderHostedEvent(id, e);
+        };
+        ws.onclose = () => {
+          const v = self.hostedView[id];
+          if (!v || !v.open) return;     // a deliberate close() — don't reconnect
+          v.connLost = true;             // honest: the live link dropped
+          setTimeout(() => { const w = self.hostedView[id]; if (w && w.open) self.openHosted(id); }, 1500);
+        };
+        view.ws = ws;
+      },
+      closeHosted(id) {
+        const v = this.hostedView[id];
+        if (v && v.ws) { try { v.ws.close(); } catch (e) {} }
+        if (v) v.open = false;
+      },
+      _renderHostedEvent(id, e) {
+        const v = this.hostedView[id];
+        if (!v) return;
+        if (typeof e.event_seq === "number") { v.lastSeq = e.event_seq; v.connLost = false; }
+        for (const it of this._hostedEventToItems(e)) v.events.push(it);
+        if (v.events.length > MAX_LOG_LINES) v.events.splice(0, v.events.length - MAX_LOG_LINES);
+        this.$nextTick(() => this.scrollHosted(id));
+      },
+      // Translate one fanned event into renderable conversation items (per the design
+      // doc's frame table: gap → "output lost (N frames)", lost → error, etc.).
+      _hostedEventToItems(e) {
+        switch (e.type) {
+          case "frame": return this._hostedFrameToItems(e.frame || {});
+          case "control_request":
+            return [{ kind: "permission", text: "Awaiting permission" + (e.subtype ? " (" + e.subtype + ")" : "") }];
+          case "control_ack": return [];  // MCP handshake; nothing user-facing
+          case "stderr": case "text": return [{ kind: "stderr", text: e.text || "" }];
+          case "exit":
+            return [{ kind: "marker", text: "session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")" : "") }];
+          case "lost": return [{ kind: "error", text: "stream lost: " + (e.reason || "daemon connection dropped") }];
+          case "gap": {
+            const n = e.dropped != null ? e.dropped
+                    : (e.to_seq != null && e.from_seq != null ? e.to_seq - e.from_seq - 1 : null);
+            return [{ kind: "gap", text: "output lost" + (n != null ? " (" + n + " frames)" : "") }];
+          }
+          default: return [];
+        }
+      },
+      _hostedFrameToItems(frame) {
+        const t = frame.type;
+        if (t === "system") return [{ kind: "marker", text: "· " + (frame.subtype || "system") + " ·" }];
+        if (t === "result") {
+          const txt = (typeof frame.result === "string" && frame.result) ? frame.result : "(turn complete)";
+          return [{ kind: "result", text: txt }];
+        }
+        if (t === "assistant" || t === "user") {
+          const content = (frame.message || {}).content;
+          const items = [];
+          if (typeof content === "string") {
+            if (content.trim()) items.push({ kind: "msg", role: t, text: content });
+          } else if (Array.isArray(content)) {
+            for (const block of content) {
+              if (!block || typeof block !== "object") continue;
+              if (block.type === "text" && block.text) items.push({ kind: "msg", role: t, text: block.text });
+              else if (block.type === "tool_use")
+                items.push({ kind: "tool", name: block.name || "tool", input: block.input != null ? JSON.stringify(block.input) : "" });
+              else if (block.type === "tool_result") {
+                let txt = block.content;
+                if (Array.isArray(txt)) txt = txt.map((b) => (b && b.text) ? b.text : "").join("");
+                if (typeof txt !== "string") txt = "";
+                items.push({ kind: "toolresult", text: txt });
+              }
+            }
+          }
+          return items;
+        }
+        return [];  // unknown frame type — ignore rather than dump raw
+      },
+      scrollHosted(id) {
+        const el = document.getElementById("hosted-stream-" + id);
+        if (el) el.scrollTop = el.scrollHeight;
+      },
+      async sendHosted(id) {
+        const v = this.hostedView[id];
+        if (!v || v.sending) return;
+        const text = (v.input || "").trim();
+        if (!text) return;
+        v.sending = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/message", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) { v.input = ""; }
+          else { const b = await res.json().catch(() => ({})); this.toast("send failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("send failed", "error"); }
+        v.sending = false;
       },
       // --- log streaming ---
       toggleLogs(name) {
