@@ -301,8 +301,28 @@ class HostedSession:
             raise HostedSessionError(f"cannot respond on a {self.status} hosted session")
         if request_id not in self._pending:
             raise HostedSessionError(f"no parked control request {request_id!r}")
-        del self._pending[request_id]
-        await self._send_control_response(request_id, response)
+        # Claim the request atomically (no await between the check and the pop, so
+        # under asyncio's cooperative model this is exclusive): a concurrent
+        # responder would now fail the existence check rather than racing us past
+        # it and writing a second control_response for the same request_id.
+        parked = self._pending.pop(request_id)
+        if response.get("behavior") == "allow" and "updatedInput" not in response:
+            # The CLI's can_use_tool response schema requires updatedInput on every
+            # allow (a bare {"behavior": "allow"} fails its union validation and the
+            # tool call errors out as if denied). Default it to the parked request's
+            # original input — "allow unchanged".
+            tool_input = parked.request.get("input")
+            response = {
+                **response,
+                "updatedInput": tool_input if isinstance(tool_input, dict) else {},
+            }
+        try:
+            await self._send_control_response(request_id, response)
+        except ClaustrumError:
+            # Restore the claim if the transport write fails: the request must stay
+            # parked and retryable, never silently lost with the agent unanswered.
+            self._pending.setdefault(request_id, parked)
+            raise
         self._emit(
             {
                 "type": "control_resolved",
@@ -327,11 +347,29 @@ class HostedSession:
                     await asyncio.wait_for(self._stream.exited.wait(), timeout=self._stop_grace)
                 except TimeoutError:
                     await self._client.kill(self._process_id, signal="KILL")
+                    try:
+                        # Give the daemon's exit frame for the KILL a chance to land,
+                        # so the terminal latch below has an exit code to work with.
+                        await asyncio.wait_for(
+                            self._stream.exited.wait(), timeout=self._stop_grace
+                        )
+                    except TimeoutError:  # pragma: no cover - daemon never reported exit
+                        pass
         except ClaustrumError as exc:  # pragma: no cover - daemon loss during stop (CL-4b)
             self.status = "error"
             self._emit({"type": "lost", "reason": f"stop failed: {exc}"})
         finally:
             await self._teardown()
+            if (
+                self.status == "running"
+                and self._stream is not None
+                and self._stream.exited.is_set()
+            ):
+                # The stream latches `exited` before the exit event reaches the pump's
+                # queue, and the teardown above cancels the pump — live, stop() wins
+                # that race and the row would stay "running" forever (blocking resume).
+                # Latch the terminal status here from the stream's recorded exit code.
+                self._on_exit(self._stream.exit_code)
 
     def subscribe(self, after_seq: int = 0) -> asyncio.Queue[dict[str, Any]]:
         """Register a browser watcher, replaying ring events past ``after_seq``.
