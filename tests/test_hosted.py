@@ -280,6 +280,27 @@ async def test_respond_to_unknown_request_raises(fake_claustrum):
             await session.respond_control("nope", {})
 
 
+async def test_respond_after_exit_raises_not_claustrum_error(fake_claustrum):
+    # A request parked while running, then the session exits before the operator
+    # answers: respond must raise HostedSessionError (API → 409), not let the stdin
+    # write throw a bare ClaustrumError (API → 500) with the request consumed.
+    async with _session(fake_claustrum) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+        await fake.emit_exit(_PID, 3)  # session crashes while the request is parked
+        await asyncio.sleep(0.05)
+        assert session.status == "crashed"
+        with pytest.raises(HostedSessionError):
+            await session.respond_control("perm-1", {"behavior": "allow"})
+        # Request not consumed — still parked, just unanswerable on a dead session.
+        assert [r.request_id for r in session.pending_requests] == ["perm-1"]
+
+
 # -- input + lifecycle -----------------------------------------------------
 
 

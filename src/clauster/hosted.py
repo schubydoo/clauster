@@ -253,6 +253,11 @@ class HostedSession:
         request is answered, not still actionable. CL-5 supplies the permission
         allow/deny ``response`` payload (``{"behavior": ...}``); this owns transport.
         """
+        if self.status != "running":
+            # Guard before consuming the parked request: a crashed/stopped session
+            # would make the stdin write raise ClaustrumError (which the API doesn't
+            # map), and the request would be consumed with no control_response sent.
+            raise HostedSessionError(f"cannot respond on a {self.status} hosted session")
         if request_id not in self._pending:
             raise HostedSessionError(f"no parked control request {request_id!r}")
         del self._pending[request_id]

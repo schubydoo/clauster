@@ -356,8 +356,8 @@
                                 <code class="small text-secondary" x-show="it.input" x-text="it.input"></code>
                                 <template x-if="!it.resolved">
                                   <span class="ms-auto">
-                                    <button class="btn btn-sm btn-success me-1" @click="respondHosted(h.claustrum_process_id, it.request_id, 'allow')">Allow</button>
-                                    <button class="btn btn-sm btn-ghost-danger" @click="respondHosted(h.claustrum_process_id, it.request_id, 'deny')">Deny</button>
+                                    <button type="button" class="btn btn-sm btn-success me-1" @click="respondHosted(h.claustrum_process_id, it.request_id, 'allow')">Allow</button>
+                                    <button type="button" class="btn btn-sm btn-ghost-danger" @click="respondHosted(h.claustrum_process_id, it.request_id, 'deny')">Deny</button>
                                   </span>
                                 </template>
                                 <template x-if="it.resolved">
