@@ -18,6 +18,7 @@ degrades gracefully on other platforms.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 
 import psutil
 
@@ -63,6 +64,19 @@ def is_bridge_cmdline(cmdline: list[str]) -> bool:
     return all(tok in cmdline or tok in joined for tok in _BRIDGE_CMDLINE)
 
 
+def is_hosted_cmdline(cmdline: list[str]) -> bool:
+    """Whether a command line is a headless ``claude … stream-json`` hosted agent.
+
+    The hosted channel spawns ``claude --output-format stream-json …`` (no
+    ``remote-control``), so it needs its own cmdline gate — distinct from a bridge —
+    to confirm a CT-1-reported PID is a hosted agent before trusting or killing it.
+    """
+    if not cmdline:
+        return False
+    joined = " ".join(cmdline)
+    return _BRIDGE_BINARY_HINT in joined and "stream-json" in joined
+
+
 def proc_create_time(pid: int) -> float | None:
     """Epoch create-time of a live, non-zombie PID, else None."""
     try:
@@ -74,18 +88,22 @@ def proc_create_time(pid: int) -> float | None:
         return None
 
 
-def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float = 2.0) -> bool:
-    """Whether ``pid`` is a trustworthy, currently-running managed bridge.
+def is_live_process(
+    pid: int,
+    proc_start: str | float | None,
+    *,
+    tolerance: float = 2.0,
+    require_cmdline: Callable[[list[str]], bool] | None = None,
+) -> bool:
+    """Whether ``pid`` is alive, non-zombie, and its start-time matches ``proc_start``.
 
-    ``proc_start`` may be a pointer's jiffies string, our own stored psutil
-    create-time (float/epoch), or None to skip the start-time match.
-
-    The start-time bound depends on the source: a float we measured ourselves
-    matches the same process near-exactly, so it uses the tight
-    ``_EXACT_PROC_START_TOLERANCE`` (closing the PID-reuse window where a recycled
-    PID with the generic ``claude remote-control`` cmdline could be signalled for
-    the wrong project); a jiffies string is derived independently and keeps the
-    looser ``tolerance``.
+    The generic liveness+PID-reuse core. ``require_cmdline`` adds an optional cmdline
+    gate (``is_live_bridge`` passes :func:`is_bridge_cmdline`; the hosted channel
+    passes :func:`is_hosted_cmdline`). ``proc_start`` may be a pointer's jiffies
+    string, our own stored psutil create-time (float/epoch), or None to skip the
+    start-time match. A float we measured ourselves matches the same process
+    near-exactly, so it uses the tight ``_EXACT_PROC_START_TOLERANCE`` (closing the
+    PID-reuse window); a jiffies string keeps the looser ``tolerance``.
     """
     try:
         proc = psutil.Process(pid)
@@ -96,7 +114,7 @@ def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
 
-    if not is_bridge_cmdline(cmdline):
+    if require_cmdline is not None and not require_cmdline(cmdline):
         return False
 
     expected = _expected_epoch(proc_start)
@@ -108,6 +126,28 @@ def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float
     exact = isinstance(proc_start, (int, float)) and not isinstance(proc_start, bool)
     bound = _EXACT_PROC_START_TOLERANCE if exact else tolerance
     return abs(create_time - expected) <= bound
+
+
+def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float = 2.0) -> bool:
+    """Whether ``pid`` is a trustworthy, currently-running managed *bridge*.
+
+    Thin wrapper over :func:`is_live_process` with the bridge cmdline gate — alive,
+    non-zombie, start-time matches, AND a ``claude … remote-control`` cmdline.
+    """
+    return is_live_process(pid, proc_start, tolerance=tolerance, require_cmdline=is_bridge_cmdline)
+
+
+def kill_if_match(pid: int, proc_start: str | float | None) -> bool:
+    """Hard-kill a hosted agent ``pid`` (and its tree) only if it's still that process.
+
+    Gated on :func:`is_live_process` with the hosted cmdline + exact create-time match,
+    so a reused/unrelated PID is never killed. Returns whether a kill was issued. Used
+    by hosted orphan cleanup (CL-8).
+    """
+    if not is_live_process(pid, proc_start, require_cmdline=is_hosted_cmdline):
+        return False
+    force_kill_tree(pid)
+    return True
 
 
 def _expected_epoch(proc_start: str | float | None) -> float | None:

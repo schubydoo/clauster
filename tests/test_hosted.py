@@ -23,7 +23,7 @@ from clauster.hosted import (
     build_hosted_argv,
 )
 from clauster.hosted_state import HostedStateStore
-from clauster.models import InstanceStatus
+from clauster.models import InstanceStatus, RemoteControlInstance
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="claustrum hosted channel is POSIX-only (AF_UNIX)"
@@ -850,4 +850,112 @@ async def test_manager_aclose_detaches_without_killing(fake_claustrum, tmp_path)
         mgr = HostedManager(store)
         await mgr.reattach_all(client)
         assert mgr.get_instance(pid).status is InstanceStatus.RUNNING
+        await mgr.aclose()
+
+
+# -- orphan detection + recovery (CL-8) ------------------------------------
+
+
+def _orphan_instance(pid=4242, uuid="11111111-2222-4333-8444-555555555555"):
+    """A crashed hosted row that survived a daemon restart (live pid, no session)."""
+    return RemoteControlInstance(
+        project="proj",
+        label="hosted:proj",
+        channel="hosted",
+        claustrum_process_id="01ORPHAN0000000000000000",
+        agent_pid=pid,
+        agent_proc_start=1000.0,
+        claude_session_uuid=uuid,
+        status=InstanceStatus.CRASHED,
+        is_orphan=True,
+    )
+
+
+async def test_manager_reattach_marks_live_survivor_as_orphan(
+    fake_claustrum, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("clauster.procutil.is_live_process", lambda *a, **k: True)
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = "01GONEPROCESS00000000000"
+    store.save(
+        {
+            pid: {
+                "project": "proj",
+                "label": "hosted:proj",
+                "agent_pid": 4242,
+                "agent_proc_start": 1000.0,
+                "claude_session_uuid": "u-1",
+            }
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)  # daemon doesn't know it → not-found
+        inst = mgr.get_instance(pid)
+        assert inst.status is InstanceStatus.CRASHED
+        assert inst.is_orphan is True
+        assert "survived a daemon restart" in (inst.error_detail or "")
+
+
+async def test_manager_reattach_lost_when_no_survivor(fake_claustrum, tmp_path, monkeypatch):
+    monkeypatch.setattr("clauster.procutil.is_live_process", lambda *a, **k: False)
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = "01GONEPROCESS00000000000"
+    store.save(
+        {
+            pid: {
+                "project": "proj",
+                "label": "hosted:proj",
+                "agent_pid": 4242,
+                "agent_proc_start": 1000.0,
+            }
+        }
+    )
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        inst = mgr.get_instance(pid)
+        assert inst.status is InstanceStatus.CRASHED
+        assert inst.is_orphan is False
+        assert "session lost" in (inst.error_detail or "")
+
+
+async def test_manager_kill_orphan_terminates_and_stops(monkeypatch):
+    killed: list[tuple] = []
+    monkeypatch.setattr(
+        "clauster.procutil.kill_if_match", lambda pid, ps: killed.append((pid, ps))
+    )
+    mgr = HostedManager()
+    inst = _orphan_instance()
+    mgr._instances[inst.claustrum_process_id] = inst
+    result = await mgr.kill_orphan(inst.claustrum_process_id)
+    assert killed == [(4242, 1000.0)]  # match-gated kill issued for the survivor
+    assert result.status is InstanceStatus.STOPPED
+    assert result.intentional_stop is True
+    assert result.is_orphan is False
+
+
+async def test_manager_kill_orphan_unknown_raises():
+    mgr = HostedManager()
+    with pytest.raises(HostedSessionError):
+        await mgr.kill_orphan("nope")
+
+
+async def test_manager_resume_kills_orphan_survivor(fake_claustrum, monkeypatch):
+    killed: list[tuple] = []
+    monkeypatch.setattr(
+        "clauster.procutil.kill_if_match", lambda pid, ps: killed.append((pid, ps))
+    )
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = _orphan_instance()
+        mgr._instances[inst.claustrum_process_id] = inst  # orphan: no live session
+        resumed = await mgr.resume(
+            client, inst.claustrum_process_id, cwd="/tmp/proj", claude_binary=_BIN
+        )
+        assert killed == [(4242, 1000.0)]  # survivor killed as part of the resume
+        assert resumed.status is InstanceStatus.RUNNING
+        assert resumed.claude_session_uuid == inst.claude_session_uuid
+        assert mgr.get_instance("01ORPHAN0000000000000000") is None  # dead row retired
         await mgr.aclose()

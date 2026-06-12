@@ -1009,7 +1009,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.delete("/api/instances/{instance_id}")
     async def api_stop(instance_id: str) -> RemoteControlInstance:
         if app.state.hosted.get_instance(instance_id) is not None:
-            return await app.state.hosted.stop(instance_id)
+            # A live hosted session stops cleanly; one with no live session (an orphan
+            # that survived a daemon restart, or an already-dead row) is killed/cleaned
+            # up by id — kill_orphan, not stop, since stop requires a live session.
+            if app.state.hosted.session(instance_id) is not None:
+                return await app.state.hosted.stop(instance_id)
+            return await app.state.hosted.kill_orphan(instance_id)
         try:
             return await runner.stop(instance_id)
         except UnknownProject as exc:

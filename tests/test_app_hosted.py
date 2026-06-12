@@ -53,6 +53,7 @@ class _StubManager:
         self.sent: list[tuple[str, str]] = []
         self.responded: list[tuple[str, str, dict]] = []
         self.stopped: list[str] = []
+        self.killed_orphans: list[str] = []
         self.resumed: list[dict] = []
         self.spawn_error: Exception | None = None
         self.send_error: Exception | None = None
@@ -114,6 +115,13 @@ class _StubManager:
         self.stopped.append(hosted_id)
         inst = self.instances[hosted_id]
         inst.status = InstanceStatus.STOPPED
+        return inst
+
+    async def kill_orphan(self, hosted_id: str) -> RemoteControlInstance:
+        self.killed_orphans.append(hosted_id)
+        inst = self.instances[hosted_id]
+        inst.status = InstanceStatus.STOPPED
+        inst.is_orphan = False
         return inst
 
     async def resume(self, client, hosted_id, *, cwd, claude_binary):
@@ -410,6 +418,20 @@ def test_delete_routes_hosted_to_manager(write_config, projects_root):
     assert r.status_code == 200
     assert manager.stopped == [_HID]
     assert r.json()["status"] == "stopped"
+
+
+def test_delete_orphan_routes_to_kill(write_config, projects_root):
+    # No live session (an orphan that survived a daemon restart) → DELETE kills it
+    # via kill_orphan, not stop (which would require a session).
+    manager = _StubManager()
+    manager.seed()
+    del manager.sessions[_HID]  # orphan: instance row present, no live session
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.delete(f"/api/instances/{_HID}")
+    assert r.status_code == 200
+    assert manager.killed_orphans == [_HID]
+    assert manager.stopped == []  # took the kill path, not stop
 
 
 # -- websocket -------------------------------------------------------------

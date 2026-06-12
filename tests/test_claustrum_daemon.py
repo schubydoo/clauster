@@ -253,3 +253,31 @@ async def test_concurrent_ensure_spawns_once(make_daemon):
     results = await asyncio.gather(*[daemon.ensure() for _ in range(5)])
     assert all(client is results[0] for client in results)
     assert (await results[0].ping())["pong"] is True
+
+
+# -- -keep-children flag (CL-8) --------------------------------------------
+
+
+async def _capture_spawn_argv(make_daemon, monkeypatch, **kwargs) -> tuple:
+    """Run ensure() with create_subprocess_exec stubbed to capture the spawn argv."""
+    captured: dict[str, tuple] = {}
+
+    async def fake_exec(*args, **_kw):
+        captured["argv"] = args
+        raise OSError("short-circuit after capturing argv")  # → DaemonSpawnError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    daemon = make_daemon(**kwargs)
+    with pytest.raises(DaemonSpawnError):
+        await daemon.ensure()
+    return captured["argv"]
+
+
+async def test_spawn_includes_keep_children_by_default(make_daemon, monkeypatch):
+    argv = await _capture_spawn_argv(make_daemon, monkeypatch)  # keep_children defaults True
+    assert "-keep-children" in argv
+
+
+async def test_spawn_omits_keep_children_when_disabled(make_daemon, monkeypatch):
+    argv = await _capture_spawn_argv(make_daemon, monkeypatch, keep_children=False)
+    assert "-keep-children" not in argv
