@@ -252,16 +252,17 @@ class ClaustrumDaemon:
         so the detached, long-lived child never blocks on a pipe we'd drain.
         """
         binary = self._resolve_binary()
+        # -keep-children (CL-8): a daemon restart/upgrade then leaves hosted child
+        # sessions running for Clauster to reattach/recover. POSIX-only — the daemon
+        # ignores it with a warning on Windows.
+        argv = [binary, "-serve", "-socket", str(self._socket), "-token-fd", "0"]
+        if self._cfg.keep_children:
+            argv.append("-keep-children")
         # Append-mode log: the detached daemon keeps writing here after we return.
         log_file = open(self._log_path, "ab")  # noqa: SIM115 - handed to the child; closed below
         try:
             proc = await asyncio.create_subprocess_exec(
-                binary,
-                "-serve",
-                "-socket",
-                str(self._socket),
-                "-token-fd",
-                "0",
+                *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=log_file,
                 stderr=log_file,

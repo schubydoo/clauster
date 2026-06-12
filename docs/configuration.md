@@ -273,6 +273,7 @@ features land in later releases.
 | `binary` | str | `claustrum` | The `claustrum` binary name or path (resolved to an absolute path before spawning). |
 | `socket_path` | str \| null | `null` | Path to the daemon's AF_UNIX socket. Defaults to `<state_dir>/claustrum/daemon.sock`. |
 | `spawn_timeout_seconds` | float | `10.0` | How long (>0) to wait for a freshly spawned daemon to detach and accept its first connection before giving up. |
+| `keep_children` | bool | `true` | Spawn the daemon with -keep-children so a daemon restart/upgrade leaves hosted sessions running (Clauster reattaches or offers recovery on reconnect). Set false for clean-slate-on-restart. POSIX-only (the daemon ignores it with a warning on Windows). |
 | `request_timeout_seconds` | float | `30.0` | Per-request timeout (>0) for RPCs on the daemon connection. |
 <!-- END GEN: claustrum -->
 

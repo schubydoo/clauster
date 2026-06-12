@@ -312,14 +312,24 @@
               <div class="list-group-item">
                 <div class="d-flex align-items-center flex-wrap gap-1">
                   <span class="badge me-1" :class="hostedStatusBadge(h.status)" x-text="h.status"></span>
+                  <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
+                        title="Survived a daemon restart — Resume to recover or Kill to clean up">orphan</span>
                   <span class="fw-medium me-1" x-text="h.project"></span>
                   <span class="text-secondary small me-1" x-text="h.permission_mode"></span>
                   <span class="ms-auto d-flex gap-1">
-                    <!-- Resume a lost session (crashed/stopped/error) from its captured uuid (CL-7). -->
+                    <!-- Resume a lost session (crashed/stopped/error) from its captured uuid (CL-7);
+                         for an orphan this also kills the survivor first (CL-8). -->
                     <template x-if="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid">
                       <button type="button" class="btn btn-sm btn-success"
                               :disabled="hostedResuming[h.claustrum_process_id]" @click="resumeHosted(h)">
                         <span x-text="hostedResuming[h.claustrum_process_id] ? 'Resuming…' : 'Resume'">Resume</span>
+                      </button>
+                    </template>
+                    <!-- Kill an orphaned survivor (CL-8): terminate the live agent + clear the row. -->
+                    <template x-if="h.is_orphan">
+                      <button type="button" class="btn btn-sm btn-ghost-danger"
+                              :disabled="hostedStopping[h.claustrum_process_id]" @click="killHosted(h)">
+                        <span x-text="hostedStopping[h.claustrum_process_id] ? 'Killing…' : 'Kill'">Kill</span>
                       </button>
                     </template>
                     <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleHosted(h.claustrum_process_id)"
@@ -1310,6 +1320,26 @@
         } catch (e) { this.toast("stop failed", "error"); }
         this.hostedStopping[id] = false;
         this.closeHosted(id);
+        await this.refresh();
+      },
+      // Kill an orphaned survivor (CL-8): terminate the live agent + clear the row.
+      // Same DELETE endpoint as stop; the server kills the survivor pid when there's
+      // no live session rather than refusing.
+      async killHosted(h) {
+        const id = h.claustrum_process_id;
+        if (!window.confirm("Kill the orphaned session \"" + (h.label || id) + "\"? This terminates the surviving agent.")) return;
+        this.hostedStopping[id] = true;
+        let killed = false;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) { killed = true; this.toast("orphaned session killed", "success"); }
+          else { const b = await res.json().catch(() => ({})); this.toast("kill failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("kill failed", "error"); }
+        this.hostedStopping[id] = false;
+        // Only tear down the view on a successful kill; a failed kill leaves the orphan
+        // actionable (refresh re-fetches its row so it stays in the list).
+        if (killed) this.closeHosted(id);
         await this.refresh();
       },
       async resumeHosted(h) {

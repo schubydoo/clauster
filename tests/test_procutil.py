@@ -189,3 +189,79 @@ def test_force_kill_tree_swallows_kill_race(monkeypatch):
 
     monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
     procutil.force_kill_tree(1234)  # both children and parent race -> no raise
+
+
+# -- hosted cmdline + generic liveness + match-gated kill (CL-8) -------------
+
+
+def test_is_hosted_cmdline_matches_stream_json_agent():
+    assert procutil.is_hosted_cmdline(["claude", "--output-format", "stream-json"]) is True
+
+
+def test_is_hosted_cmdline_rejects_bridge_and_empty():
+    assert procutil.is_hosted_cmdline(["claude", "remote-control"]) is False
+    assert procutil.is_hosted_cmdline([]) is False
+
+
+def test_is_live_process_no_cmdline_gate(monkeypatch):
+    # Without a cmdline predicate, alive + matching create_time is enough.
+    monkeypatch.setattr(procutil.psutil, "Process", _fake_proc(cmdline=("anything",), ct=1000.0))
+    assert procutil.is_live_process(1234, 1000.0) is True
+    assert procutil.is_live_process(1234, 5000.0) is False  # create_time mismatch → reuse
+
+
+def test_is_live_process_hosted_cmdline_gate(monkeypatch):
+    monkeypatch.setattr(
+        procutil.psutil, "Process", _fake_proc(cmdline=("claude", "stream-json"), ct=1000.0)
+    )
+    assert (
+        procutil.is_live_process(1234, 1000.0, require_cmdline=procutil.is_hosted_cmdline) is True
+    )
+    # A bridge cmdline fails the hosted gate even though the process is alive + matches.
+    monkeypatch.setattr(
+        procutil.psutil, "Process", _fake_proc(cmdline=("claude", "remote-control"), ct=1000.0)
+    )
+    assert (
+        procutil.is_live_process(1234, 1000.0, require_cmdline=procutil.is_hosted_cmdline) is False
+    )
+
+
+def test_is_live_bridge_still_gated_on_bridge_cmdline(monkeypatch):
+    # Regression: the wrapper keeps the bridge cmdline gate after the extraction.
+    monkeypatch.setattr(
+        procutil.psutil, "Process", _fake_proc(cmdline=("claude", "stream-json"), ct=1000.0)
+    )
+    assert procutil.is_live_bridge(1234, 1000.0) is False  # hosted cmdline ≠ bridge
+
+
+def test_kill_if_match_kills_only_on_match(monkeypatch):
+    killed: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: killed.append(pid))
+    monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
+    assert procutil.kill_if_match(1234, 1000.0) is True
+    assert killed == [1234]
+    killed.clear()
+    monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
+    assert procutil.kill_if_match(1234, 1000.0) is False
+    assert killed == []  # never killed when the match fails
+
+
+def test_kill_if_match_fails_closed_without_comparable_start(monkeypatch):
+    # Even if liveness would pass, a missing/uncomparable proc_start must NOT kill:
+    # without a create-time match this destructive path could hit a reused PID.
+    killed: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: killed.append(pid))
+    monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
+    assert procutil.kill_if_match(1234, None) is False
+    assert procutil.kill_if_match(1234, "garbage") is False
+    assert killed == []
+
+
+def test_is_killable_hosted_requires_comparable_start(monkeypatch):
+    # The shared orphan-classification/kill predicate: alive + comparable create-time.
+    monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: True)
+    assert procutil.is_killable_hosted(1234, 1000.0) is True  # comparable + alive
+    assert procutil.is_killable_hosted(1234, None) is False  # no create-time evidence
+    assert procutil.is_killable_hosted(1234, "garbage") is False  # uncomparable
+    monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
+    assert procutil.is_killable_hosted(1234, 1000.0) is False  # comparable but dead

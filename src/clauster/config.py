@@ -495,6 +495,13 @@ class ClaustrumConfig(BaseModel):
         description="How long (>0) to wait for a freshly spawned daemon to detach "
         "and accept its first connection before giving up.",
     )
+    keep_children: bool = Field(
+        default=True,
+        description="Spawn the daemon with -keep-children so a daemon restart/upgrade "
+        "leaves hosted sessions running (Clauster reattaches or offers recovery on "
+        "reconnect). Set false for clean-slate-on-restart. POSIX-only (the daemon "
+        "ignores it with a warning on Windows).",
+    )
     request_timeout_seconds: float = Field(
         default=30.0,
         gt=0,
