@@ -120,6 +120,8 @@ class _StubManager:
         if self.resume_error is not None:
             raise self.resume_error
         self.resumed.append({"id": hosted_id, "cwd": cwd, "binary": claude_binary})
+        # Mirror the production contract: the dead row is retired, a fresh one is live.
+        self.instances.pop(hosted_id, None)
         new = RemoteControlInstance(
             project="alpha",
             label="hosted:alpha",
@@ -359,6 +361,7 @@ def test_resume_routes_hosted_to_manager(write_config, projects_root, monkeypatc
     assert manager.resumed[0]["id"] == _HID
     assert manager.resumed[0]["binary"] == "/usr/bin/claude"
     assert r.json()["claustrum_process_id"] == "hid-2"  # the fresh resumed instance
+    assert _HID not in manager.instances  # dead row retired, not left as a duplicate
 
 
 def test_resume_hosted_without_daemon_is_503(write_config, projects_root):

@@ -1323,7 +1323,9 @@
           if (res.ok) {
             this.toast("hosted session resumed", "success");
             await this.refresh();
-            // Resume spawns a fresh process id; watch the resumed session.
+            // Resume spawns a fresh process id under a new card; tear down the dead
+            // session's view/WS, then watch the resumed session.
+            this.closeHosted(id);
             if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);
           } else {
             this.toast("resume failed — " + (b.detail || res.status), "error");
