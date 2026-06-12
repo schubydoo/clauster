@@ -20,11 +20,14 @@ Frame routing splits the stdout stream two ways (per
   monotonic ``event_seq``, and fanned out to browser subscribers. The ``system``
   init frame yields :attr:`HostedSession.claude_session_uuid` (drives ``--resume``).
 
-What this slice (CL-4a) deliberately leaves to CL-4b: the
-``/api/instances/{id}/message`` endpoint, the ``/ws/hosted/{id}`` WebSocket, the
-``channel`` dispatch in ``SessionRunner.spawn``, ``state.json`` persistence, and
-the input/live-view UI. This module is a pure, daemon-driven library — the same
-posture CL-1 took for :mod:`clauster.claustrum_client`.
+CL-4b (#231) wired this engine to the app: the app-layer ``channel`` dispatch in
+``app.api_spawn`` routes ``channel="hosted"`` requests to :class:`HostedManager`
+(a registry kept separate from the project-keyed bridge runner), plus the
+``/api/instances/{id}/message`` endpoint and the ``/ws/hosted/{id}`` WebSocket.
+Still ahead: the input/live-view UI (CL-4c), the permission approve/deny UI
+(CL-5), and ``state.json`` persistence + reattach for clauster-restart resilience
+(CL-6). This module stays a pure, daemon-driven library — the same posture CL-1
+took for :mod:`clauster.claustrum_client`.
 """
 
 from __future__ import annotations
