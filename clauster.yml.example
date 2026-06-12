@@ -84,8 +84,49 @@ reaper:
 
 # Per-project cost/token badge. The dollar figure is an APPROXIMATE estimate —
 # token totals from the session transcript x a hand-maintained USD price table
-# (usage.py, "as of 2026-05"); unpriced models contribute 0. Set show_cost: false
-# to hide the badge entirely (privacy when screen-sharing / recording a demo);
-# the dashboard then also skips the per-project usage fetch.
+# (usage.py, "as of 2026-05"); unpriced models contribute 0. mode: off hides the
+# badge entirely (privacy when screen-sharing / recording a demo); the dashboard
+# then also skips the per-project usage fetch. (show_cost: false is the
+# deprecated alias for mode: off.)
 usage:
-  show_cost: true
+  mode: cost                       # cost | tokens (count only) | off
+  # currency: USD                  # code shown in the tooltip
+  # currency_symbol: null          # cost-mode prefix; defaults to $ for USD
+  # fx_rate: 1.0                   # STATIC multiplier on the USD figure (no live FX)
+  # token_total_includes_cache: true  # count cache tokens in the displayed total
+
+# Live per-bridge resource metrics (CPU / memory / disk) on a running card.
+# On by default; enabled: false hides the line and skips the sampling.
+# metrics:
+#   enabled: true
+#   normalize_cpu: false           # divide CPU% by host cores (0-100% of machine)
+#   show_disk: true                # disk read/write rate portion
+#   sample_interval_seconds: 0.15  # two-snapshot window (<=2.0; blocks a worker)
+#   poll_seconds: 4.0              # dashboard refresh cadence
+
+# Read-only Prometheus /metrics exposition (build info, bridge counts by status,
+# project count). Off by default; when enabled it stays BEHIND the auth guard.
+# observability:
+#   prometheus_enabled: false
+
+# Outbound bridge-lifecycle notifications via Apprise. Requires the optional
+# extra: pip install 'clauster[notify]'. Best-effort + fail-closed — a notify
+# failure never affects the bridge lifecycle.
+# notifications:
+#   enabled: false
+#   urls: []                       # Apprise URLs, e.g. ["discord://...", "tgram://..."]
+#   notify_on_crash: true          # alert when a bridge exits NOT via Stop
+
+# Claustrum hosted live-view channel (EXPERIMENTAL). When enabled, Clauster
+# connect-or-spawns one claustrum daemon per deployment and hosts headless
+# stream-json sessions on it — dashboard panel with live stream, send, tool-
+# permission approve/deny, resume, and orphan recovery after a daemon restart.
+# Fail-closed: daemon trouble surfaces in /healthz, never touches bridges.
+# claustrum:
+#   enabled: false
+#   binary: claustrum              # name on PATH or absolute path
+#   socket_path: null              # default: <state_dir>/claustrum/daemon.sock
+#   spawn_timeout_seconds: 10.0
+#   keep_children: true            # daemon restart/upgrade leaves hosted sessions
+#                                  # running (reattach/recover on reconnect); POSIX only
+#   request_timeout_seconds: 30.0
