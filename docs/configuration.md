@@ -263,8 +263,9 @@ Clauster simply reconnects. Fail-closed: an unreachable daemon or a rejected aut
 token is reported in health and never affects the bridge lifecycle.
 
 The socket and a `0600` auth token live under `<state_dir>/claustrum/` (`0700`).
-This is the foundation for the hosted-session channel; user-facing session
-features land in later releases.
+Hosted sessions get their own dashboard panel — start a session, watch it stream
+live, drive it, approve/deny tool prompts, and resume or recover it after a
+restart (see [Architecture](architecture.md)).
 
 <!-- BEGIN GEN: claustrum -->
 | Key | Type | Default | Description |

@@ -21,12 +21,15 @@ Key modules under `src/clauster/`:
 | `logstream.py` | Tail the bridge debug log for the WebSocket stream. |
 | `redact.py` | ANSI-strip + ID/secret redaction for the WS stream. |
 | `inspector.py` | `claude agents --json` cross-check — the liveness source. |
+| `procutil.py` | `psutil`-based process introspection: liveness with PID-reuse defense (create-time + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery. |
 | `auth.py` | Auth foundation (fail-closed; pure functions, no FastAPI import). |
 | `config.py` | Config load, env-override, and validation (`ClausterConfig`). |
 | `state.py` | `state.json` persistence. |
 | `models.py` | Domain models. |
 | `metrics.py` | Per-bridge resource sampling (CPU / memory / disk). |
 | `usage.py` | Token + approximate-cost rollup from session transcripts. |
+| `notify.py` | Outbound lifecycle notifications via Apprise (optional `notify` extra). |
+| `prometheus.py` | Text exposition for the opt-in read-only `/metrics` endpoint. |
 | `environments.py` | Server-side bridge-environment listing + reaper logic. |
 | `supervisor.py` | Read / dispatch / stop Claude Code agent-view background sessions (`claude --bg`); backs the background-agents panel + `/api/agents`. |
 | `claustrum_client.py` | Async unix-socket NDJSON JSON-RPC client for the claustrum daemon (hosted live-view channel; experimental). |
@@ -47,6 +50,15 @@ not unified.
 > model, not a third bridge mode. It has its own dashboard panel — start a
 > session, watch it stream live, drive it, approve/deny tool prompts, and resume
 > it after a restart — backed by `WS /ws/hosted/{id}` and `GET /api/hosted`.
+>
+> With `claustrum.keep_children` (default on) the daemon is spawned with
+> `-keep-children`, so a daemon restart or upgrade leaves hosted agents running:
+> on reconnect Clauster reattaches the sessions it can, and marks survivors it
+> can no longer drive as recoverable **orphans** (Kill / Resume from the
+> dashboard). A survivor is hard-killed only when it is provably still the same
+> process — alive, recorded create-time match, hosted cmdline
+> (`procutil.is_killable_hosted`); without that evidence it is reported lost,
+> never killed.
 
 ### standard (`claude remote-control`)
 

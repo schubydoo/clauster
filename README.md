@@ -280,9 +280,6 @@ clauster usage <transcript>   # token + approximate cost for a session transcrip
 Planned work, roughly in priority order — the public-facing companion to the in-repo
 `scratch/TODO.md`.
 
-- **PTY mode — finish the slice** — the backend for native true-resume ships today
-  (`claude.resume_mode: pty`); next is the dashboard mode indicator and cross-restart
-  UI rediscovery of PTY bridges (the keeper process already survives a restart).
 - **Public API** — promote the existing `/api/*` routes to a documented, versioned,
   auth-gated contract (OpenAPI surface, API tokens distinct from the session cookie)
   so third parties can build their own dashboards.
@@ -291,10 +288,11 @@ Planned work, roughly in priority order — the public-facing companion to the i
 - **v0.3 — multi-user** — per-user accounts (OIDC via Authentik / Pocket-ID /
   Keycloak / Zitadel), a real persistence layer (SQLAlchemy + Alembic), and GDPR
   controller tooling (`clauster user export` / `delete`).
-- **v0.3 — operability** — crash notifications (Apprise / webhooks), a `/metrics`
-  Prometheus endpoint, a homepage-dashboard widget endpoint, and i18n string extraction.
-- **Wiki** — a proper docs site (setup, deployment recipes, config reference, security
-  model) beyond this README.
+- **v0.3 — operability** — a homepage-dashboard widget endpoint and i18n string
+  extraction (crash notifications and the `/metrics` Prometheus endpoint already
+  shipped).
+- **Docs site** — publish the in-repo [`docs/`](docs/index.md) pages (setup,
+  networking, config reference, security model) as a proper docs site.
 
 ## Stack
 
