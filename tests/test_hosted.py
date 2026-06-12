@@ -729,6 +729,116 @@ async def test_manager_persist_tolerates_write_failure(fake_claustrum, caplog):
         assert mgr._last_saved is None  # not marked saved → retried next time
 
 
+# -- resume (CL-7) ---------------------------------------------------------
+
+
+async def _crash_with_uuid(fake, mgr, client, uuid):
+    """Spawn a session, capture a session uuid, then crash it — returns its id."""
+    inst = await _spawn(mgr, client)
+    pid = inst.claustrum_process_id
+    await fake.emit(
+        pid, "stdout", (json.dumps({"type": "system", "session_id": uuid}) + "\n").encode()
+    )
+    await fake.emit_exit(pid, 1)  # nonzero → crashed
+    await asyncio.sleep(0.05)
+    return pid
+
+
+async def test_manager_resume_respawns_with_uuid(fake_claustrum):
+    uuid = "11111111-2222-4333-8444-555555555555"
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        old_id = await _crash_with_uuid(fake, mgr, client, uuid)
+        assert mgr.get_instance(old_id).status is InstanceStatus.CRASHED
+        assert mgr.get_instance(old_id).claude_session_uuid == uuid
+
+        resumed = await mgr.resume(client, old_id, cwd="/tmp/proj", claude_binary=_BIN)
+        assert resumed.status is InstanceStatus.RUNNING
+        assert resumed.claustrum_process_id != old_id  # fresh daemon process
+        assert resumed.claude_session_uuid == uuid
+        assert mgr.get_instance(old_id) is None  # dead row retired
+        # The fresh spawn carried --resume <uuid>.
+        args = fake.spawned[-1]["args"]
+        assert args[args.index("--resume") + 1] == uuid
+        await mgr.aclose()
+
+
+async def test_manager_resume_persists_only_resumed_row(fake_claustrum, tmp_path):
+    # The retire-then-persist contract: after a resume, hosted_state.json holds ONLY
+    # the resumed row (never both → no duplicate card if a restart reattaches).
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    uuid = "11111111-2222-4333-8444-555555555555"
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        inst = await mgr.spawn(
+            client,
+            project="proj",
+            label="hosted:proj",
+            cwd=str(tmp_path),
+            claude_binary=_BIN,
+            permission_mode="acceptEdits",
+        )
+        old_id = inst.claustrum_process_id
+        await fake.emit(
+            old_id, "stdout", (json.dumps({"type": "system", "session_id": uuid}) + "\n").encode()
+        )
+        await fake.emit_exit(old_id, 1)
+        await asyncio.sleep(0.05)
+        resumed = await mgr.resume(client, old_id, cwd=str(tmp_path), claude_binary=_BIN)
+        new_id = resumed.claustrum_process_id
+
+        persisted = store.load()
+        assert new_id in persisted and old_id not in persisted  # only the resumed row
+        assert persisted[new_id]["claude_session_uuid"] == uuid
+        await mgr.aclose()
+
+
+async def test_manager_resume_after_reattach_loss(fake_claustrum, tmp_path):
+    # An instance restored as CRASHED on startup (daemon lost it → no live session)
+    # is still resumable from its persisted uuid — exercises the no-old-session path.
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    uuid = "11111111-2222-4333-8444-555555555555"
+    old_id = "01GONEPROCESS00000000000"
+    store.save({old_id: {"project": "proj", "label": "hosted:proj", "claude_session_uuid": uuid}})
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)  # not-found → CRASHED row, no session
+        assert mgr.get_instance(old_id).status is InstanceStatus.CRASHED
+        assert mgr.session(old_id) is None
+
+        resumed = await mgr.resume(client, old_id, cwd=str(tmp_path), claude_binary=_BIN)
+        assert resumed.status is InstanceStatus.RUNNING
+        assert resumed.claude_session_uuid == uuid
+        assert mgr.get_instance(old_id) is None  # dead row retired
+        await mgr.aclose()
+
+
+async def test_manager_resume_unknown_raises(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        with pytest.raises(HostedSessionError):
+            await mgr.resume(client, "nope", cwd="/tmp/x", claude_binary=_BIN)
+
+
+async def test_manager_resume_running_raises(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        with pytest.raises(HostedSessionError):  # still live → not resumable
+            await mgr.resume(
+                client, inst.claustrum_process_id, cwd="/tmp/proj", claude_binary=_BIN
+            )
+
+
+async def test_manager_resume_without_uuid_raises(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit_exit(pid, 1)  # crashed, but no session_id was ever seen
+        await asyncio.sleep(0.05)
+        with pytest.raises(HostedSessionError):
+            await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+
+
 async def test_manager_aclose_detaches_without_killing(fake_claustrum, tmp_path):
     # aclose must leave sessions running for reattach (detach, not kill) — so a fresh
     # generation can reattach the same process afterward.

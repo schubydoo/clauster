@@ -542,6 +542,36 @@ class HostedManager:
         spawn RPC fails — the caller maps it to an HTTP error and nothing is
         registered.
         """
+        instance = await self._spawn_session(
+            client,
+            project=project,
+            label=label,
+            cwd=cwd,
+            claude_binary=claude_binary,
+            permission_mode=permission_mode,
+            resume_uuid=resume_uuid,
+        )
+        await self._persist()  # record the new session so a restart can reattach it
+        return self._synced(instance)
+
+    async def _spawn_session(
+        self,
+        client: ClaustrumClient,
+        *,
+        project: str,
+        label: str,
+        cwd: str,
+        claude_binary: str,
+        permission_mode: str,
+        resume_uuid: str | None = None,
+    ) -> RemoteControlInstance:
+        """Spawn + register a hosted session WITHOUT persisting (caller persists).
+
+        Split out so :meth:`resume` can spawn the fresh process first, then retire
+        the dead row and persist *once* — the first on-disk write after a resume
+        contains only the resumed row, never both (no duplicate-card window on a
+        crash mid-resume). A spawn failure here registers nothing.
+        """
         process_id = uuid.uuid4().hex
         session = HostedSession(client, process_id, claude_binary)
         await session.start(
@@ -560,8 +590,7 @@ class HostedManager:
         )
         self._sessions[process_id] = session
         self._instances[process_id] = instance
-        await self._persist()  # record the new session so a restart can reattach it
-        return self._synced(instance)
+        return instance
 
     async def send(self, hosted_id: str, text: str) -> None:
         """Route a user turn to a hosted session (404/409 mapping is the caller's)."""
@@ -578,6 +607,59 @@ class HostedManager:
         self._instances[hosted_id].intentional_stop = True
         await self._persist()
         return self._synced(self._instances[hosted_id])
+
+    async def resume(
+        self,
+        client: ClaustrumClient,
+        hosted_id: str,
+        *,
+        cwd: str,
+        claude_binary: str,
+    ) -> RemoteControlInstance:
+        """Respawn a lost/ended hosted session from its captured ``claude_session_uuid``.
+
+        The original daemon process is gone (stopped/crashed/error/daemon-restart), so
+        this starts a *fresh* process with ``--resume <uuid>`` to reload the
+        conversation — keyed by a new ``claustrum_process_id``; the dead row is retired
+        once the resumed one is live. Raises :class:`HostedSessionError` if the session
+        is unknown, still running, or has no captured uuid to resume from. A
+        :class:`ClaustrumError` from the spawn propagates (the caller maps it).
+        """
+        old = self._instances.get(hosted_id)
+        if old is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        # Sync first so the captured uuid lands on the row regardless of whether a
+        # poll/get_instance happened since the init frame (don't depend on the caller).
+        old = self._synced(old)
+        old_session = self._sessions.get(hosted_id)
+        if old_session is not None and old_session.status in ("running", "starting"):
+            raise HostedSessionError(f"hosted session {hosted_id} is still running")
+        resume_uuid = old.claude_session_uuid
+        if not resume_uuid:
+            raise HostedSessionError("no captured session uuid to resume from")
+        # Spawn the fresh process FIRST, without persisting — a spawn failure then
+        # leaves the dead row untouched and retryable.
+        instance = await self._spawn_session(
+            client,
+            project=old.project,
+            label=old.label,
+            cwd=cwd,
+            claude_binary=claude_binary,
+            permission_mode=old.permission_mode,
+            resume_uuid=resume_uuid,
+        )
+        # Carry the uuid forward so the resumed row is itself re-resumable before its
+        # first frame re-captures it.
+        instance.claude_session_uuid = resume_uuid
+        # Atomically retire the dead row (detach a same-runtime dead session), THEN
+        # persist once — so the first on-disk write holds only the resumed row and a
+        # crash mid-resume can't restore both as duplicate cards.
+        if old_session is not None:
+            await old_session.detach()
+            self._sessions.pop(hosted_id, None)
+        self._instances.pop(hosted_id, None)
+        await self._persist()
+        return self._synced(instance)
 
     async def aclose(self) -> None:
         """Detach every live hosted session at app shutdown — leave them running.

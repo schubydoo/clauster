@@ -314,12 +314,21 @@
                   <span class="badge me-1" :class="hostedStatusBadge(h.status)" x-text="h.status"></span>
                   <span class="fw-medium me-1" x-text="h.project"></span>
                   <span class="text-secondary small me-1" x-text="h.permission_mode"></span>
-                  <button class="btn btn-sm btn-ghost-secondary ms-auto me-1" @click="toggleHosted(h.claustrum_process_id)"
-                          x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
-                  <button class="btn btn-sm btn-ghost-danger" :disabled="hostedStopping[h.claustrum_process_id]"
-                          @click="stopHosted(h)">
-                    <span x-text="hostedStopping[h.claustrum_process_id] ? 'Stopping…' : 'Stop'">Stop</span>
-                  </button>
+                  <span class="ms-auto d-flex gap-1">
+                    <!-- Resume a lost session (crashed/stopped/error) from its captured uuid (CL-7). -->
+                    <template x-if="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid">
+                      <button type="button" class="btn btn-sm btn-success"
+                              :disabled="hostedResuming[h.claustrum_process_id]" @click="resumeHosted(h)">
+                        <span x-text="hostedResuming[h.claustrum_process_id] ? 'Resuming…' : 'Resume'">Resume</span>
+                      </button>
+                    </template>
+                    <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleHosted(h.claustrum_process_id)"
+                            x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
+                    <button type="button" class="btn btn-sm btn-ghost-danger" x-show="['running', 'starting'].includes(h.status)"
+                            :disabled="hostedStopping[h.claustrum_process_id]" @click="stopHosted(h)">
+                      <span x-text="hostedStopping[h.claustrum_process_id] ? 'Stopping…' : 'Stop'">Stop</span>
+                    </button>
+                  </span>
                 </div>
                 <!-- live conversation view (opened on demand; reconnects via ?after=) -->
                 <template x-if="hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open">
@@ -601,6 +610,7 @@
       hostedDispatchOpen: false,
       hostedForm: { project: "", permission_mode: DEFAULT_PERMISSION_MODE, busy: false },
       hostedStopping: {},         // hosted id -> true while a stop is in flight
+      hostedResuming: {},         // hosted id -> true while a resume is in flight
       hostedView: {},             // hosted id -> { open, ws, lastSeq, events[], input, sending, connLost }
       errors: {},
       qrOpen: {},
@@ -1301,6 +1311,27 @@
         this.hostedStopping[id] = false;
         this.closeHosted(id);
         await this.refresh();
+      },
+      async resumeHosted(h) {
+        const id = h.claustrum_process_id;
+        this.hostedResuming[id] = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/resume",
+                                  { method: "POST" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) {
+            this.toast("hosted session resumed", "success");
+            await this.refresh();
+            // Resume spawns a fresh process id under a new card; tear down the dead
+            // session's view/WS, then watch the resumed session.
+            this.closeHosted(id);
+            if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);
+          } else {
+            this.toast("resume failed — " + (b.detail || res.status), "error");
+          }
+        } catch (e) { this.toast("resume failed", "error"); }
+        this.hostedResuming[id] = false;
       },
       toggleHosted(id) {
         const v = this.hostedView[id];
