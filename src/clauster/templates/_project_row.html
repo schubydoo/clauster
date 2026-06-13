@@ -6,8 +6,11 @@
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
                x-data="{ lopen: false, lmode: 'browser', lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', ladv: false }">
             <div class="d-flex align-items-center flex-wrap gap-2">
-              <svg class="ico text-success" style="flex:none" x-cloak
+              <svg class="ico text-success" style="flex:none" role="img" aria-label="Directory trusted" x-cloak
                    x-show="trustState['{{ p.name }}'] === 'trusted'" title="Directory trusted"><use href="#ic-trust"/></svg>
+              <svg class="ico text-secondary" style="flex:none" role="img" aria-label="Directory not yet trusted" x-cloak
+                   x-show="trustState['{{ p.name }}'] !== 'trusted'"
+                   title="Not yet trusted — you'll confirm trust when you launch a session here"><use href="#ic-trust"/></svg>
               <span class="fw-bold text-truncate" style="font-size:1.02rem; max-width:16rem">{{ p.name }}</span>
               <!-- inline meta -->
               <span class="text-secondary small project-meta">
@@ -148,7 +151,8 @@
                 <input type="text" class="form-control" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
                        aria-label="Type the project name to confirm bypassPermissions"
                        @keyup.enter="confirmBypassStart('{{ p.name }}')">
-                <button type="button" class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')">Start with bypass</button>
+                <button type="button" class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')"
+                        :disabled="(bypassTyped['{{ p.name }}'] || '') !== '{{ p.name }}'">Start with bypass</button>
                 <button type="button" class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
               </div>
             </div>

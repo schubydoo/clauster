@@ -80,7 +80,7 @@
             <div class="list-group-item sess-row" :class="hostedRailClass(h)" x-show="activeFilter === 'all' || activeFilter === 'browser'">
               <div class="d-flex align-items-center flex-wrap gap-1">
                 <span class="badge bg-azure-lt mode-badge me-1">browser</span>
-                <span class="badge me-1" :class="hostedStatusBadge(h.status)" x-text="h.status"></span>
+                <span class="badge me-1" :class="hostedStatusBadge(h.status)"><span class="status-dot" :class="hostedStatusDot(h.status)"></span><span class="text-capitalize" x-text="h.status"></span></span>
                 <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
                       title="Survived a daemon restart — Resume to recover or Kill to clean up">orphan</span>
                 <span class="fw-medium me-1" x-text="h.project"></span>
@@ -187,7 +187,7 @@
             <div class="list-group-item sess-row" :class="agentRailClass(j)" x-show="activeFilter === 'all' || activeFilter === 'detached'">
               <div class="d-flex align-items-center flex-wrap gap-1">
                 <span class="badge bg-purple-lt mode-badge me-1">detached</span>
-                <span class="badge me-1" :class="agentBadgeClass(j.state)" x-text="j.state || '—'"></span>
+                <span class="badge me-1 text-capitalize" :class="agentBadgeClass(j.state)" x-text="j.state || '—'"></span>
                 <span class="fw-medium me-1" x-text="j.name || j.intent || j.id"></span>
                 <span class="badge bg-azure-lt me-1" x-show="j.bridge_session_id" x-cloak
                       title="Registered with claude.ai">claude.ai</span>

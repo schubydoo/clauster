@@ -887,6 +887,14 @@
                       stopped: "bg-secondary-lt", crashed: "bg-red-lt", error: "bg-red-lt" };
         return Object.hasOwn(map, status) ? map[status] : "bg-secondary-lt";
       },
+      // Status-dot colour for a hosted row — mirrors STATUS_DOT so browser/desktop/detached
+      // rows present status the same way (dot + capitalized text), not a dotless lowercase pill.
+      hostedStatusDot(status) {
+        const map = { running: "bg-green", starting: "bg-azure status-dot-animated",
+                      stopping: "bg-orange status-dot-animated", stopped: "bg-secondary",
+                      crashed: "bg-yellow", error: "bg-red" };
+        return Object.hasOwn(map, status) ? map[status] : "bg-secondary";
+      },
       async startHosted() {
         const f = this.hostedForm;
         if (!f.project || f.busy) return;

@@ -271,6 +271,7 @@ def test_dashboard_shows_hosted_panel_when_enabled(write_config, projects_root, 
     assert "Here in the browser" in body  # the browser launch mode
     assert "_launchHosted" in body and "startHosted" in body  # hosted launch JS
     assert "respondHosted(h.claustrum_process_id" in body  # gated hosted-row controls
+    assert ':class="hostedStatusDot(h.status)"' in body  # the hosted row wires the status-dot
 
 
 # -- message ---------------------------------------------------------------
