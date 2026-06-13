@@ -16,7 +16,7 @@ bridge debug log:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 _RE_BRIDGE_ID = re.compile(r"\[bridge:init\][^\n]*\bbridgeId=([0-9a-fA-F-]{8,})")
 _RE_ENV_ID = re.compile(r"\benvironment_id=(env_[A-Za-z0-9]+)")
@@ -29,7 +29,6 @@ _RE_STARTER = re.compile(r"Created initial session\s+(session_[A-Za-z0-9]+)")
 _RE_RESUME_SESSION = re.compile(r"\[remote-bridge\][^\n]*\bUnarchive\s+(session_[A-Za-z0-9]+)")
 _RE_POLL_LOOP = re.compile(r"\[bridge:work\][^\n]*Starting poll loop")
 _RE_SPAWN_MODE = re.compile(r"\bspawnMode=([A-Za-z0-9-]+)")
-_RE_SESSION_PID = re.compile(r"\[bridge:session\][^\n]*\bpid=(\d+)")
 _RE_SHUTDOWN = re.compile(r"\[bridge:shutdown\][^\n]*(?:SIGINT|SIGTERM|shutting down)")
 _RE_TRUST_ERROR = re.compile(r"Workspace not trusted", re.IGNORECASE)
 
@@ -42,7 +41,6 @@ class BridgeMarkers:
     environment_id: str | None = None
     starter_session_id: str | None = None
     spawn_mode: str | None = None
-    session_pids: list[int] = field(default_factory=list)
     poll_loop_started: bool = False  # the RUNNING signal
     clean_shutdown: bool = False
     trust_error: bool = False
@@ -76,12 +74,5 @@ def parse_bridge_markers(text: str) -> BridgeMarkers:
     m.poll_loop_started = _RE_POLL_LOOP.search(text) is not None
     m.clean_shutdown = _RE_SHUTDOWN.search(text) is not None
     m.trust_error = _RE_TRUST_ERROR.search(text) is not None
-
-    seen: set[int] = set()
-    for hit in _RE_SESSION_PID.finditer(text):
-        pid = int(hit.group(1))
-        if pid not in seen:
-            seen.add(pid)
-            m.session_pids.append(pid)
 
     return m

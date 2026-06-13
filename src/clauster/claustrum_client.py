@@ -409,7 +409,16 @@ class ClaustrumClient:
                 raw = await reader.readline()
                 if not raw:
                     break
-                self._dispatch(raw)
+                # Fault-isolate per-frame dispatch: one malformed frame (or a bug in stream
+                # feed / response resolution) must never kill the reader task — that would
+                # silently stall every pending call and stop all hosted stream fan-out, with
+                # no restart. CancelledError is a BaseException, so it still propagates past
+                # `except Exception`; a genuine connection error from readline() above does
+                # too (and tears down via _fail_pending).
+                try:
+                    self._dispatch(raw)
+                except Exception:
+                    logger.warning("claustrum: error dispatching frame; skipping", exc_info=True)
         except (asyncio.CancelledError, OSError):
             raise
         finally:

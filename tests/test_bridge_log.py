@@ -12,7 +12,6 @@ def test_parses_full_happy_log(fixtures_dir: Path):
     assert m.environment_id == "env_01RHE7cHW3DawXjGRp5Ae3va"
     assert m.starter_session_id == "session_01LG15p2JVjwBamscENjuBLi"
     assert m.spawn_mode == "same-dir"
-    assert m.session_pids == [81805]
     assert m.poll_loop_started is True
     assert m.clean_shutdown is True
     assert m.is_ready is True
