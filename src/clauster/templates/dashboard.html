@@ -1073,8 +1073,9 @@
         if (!this.np.open) this.resetNewProject();
       },
       resetNewProject() {
-        // Abandon any in-flight clone watch first: a canceled attempt must stop driving
-        // the dialog so its late WS frames can't clobber a newer attempt (root of the race).
+        // Bump the op id so any in-flight attempt's captured token goes stale (it can no
+        // longer mutate the dialog), and abandon its clone watch so the stream stops.
+        this._nextNpOp();
         if (this._abortClone) { this._abortClone(); this._abortClone = null; }
         const np = this.np;
         np.name = ""; np.url = ""; np.submittedName = "";
@@ -1082,31 +1083,34 @@
         np.busy = false; np.cloning = false;
         np.progress = { percent: null, phase: "" };
       },
-      // True while `name` is still the dialog's active attempt: a canceled (reset) or
-      // superseded (newer submit) attempt completing late must not mutate shared np.
-      _npOwns(name) { return this.np.submittedName === name; },
+      // Per-submit operation id. Each submit claims a fresh one; reset/supersede bumps the
+      // counter so an older attempt's captured op stops matching. A safe ownership token
+      // where the project name is NOT — two attempts (cancel + resubmit) can share a name.
+      _nextNpOp() { return (this._npOp = (this._npOp || 0) + 1); },
+      _npOwns(op) { return this._npOp === op; },
       async submitNew() {
         const np = this.np;
         if (!np.name || np.busy) return;
-        // Freeze the submitted name in a local: the create POST awaits, and a Cancel
-        // mid-request runs resetNewProject() which clears np.submittedName — so the
-        // completion path must use this snapshot, not reactive state (same as clone).
+        // Freeze the name + claim a fresh op id for THIS attempt: the POST awaits, and a
+        // Cancel mid-request bumps the op (and clears np), so every shared-state write on
+        // the completion path is gated on `op` — the name alone can't tell two attempts apart.
         const submittedName = np.name;
+        const op = this._nextNpOp();
         np.busy = true; np.error = null; np.warn = null;
         np.submittedName = submittedName;
-        if (np.mode === "clone") { await this.startClone(np); return; }  // async, watched over WS
+        if (np.mode === "clone") { await this.startClone(np, op); return; }  // async, watched over WS
         try {
           const res = await fetch(ROOT + "/api/projects", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name: submittedName, git_init: np.gitInit }) });
           const body = await res.json();
-          if (!res.ok) { if (this._npOwns(submittedName)) np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
-          else { await this.afterProvision(submittedName, np, body); }
-        } catch (e) { if (this._npOwns(submittedName)) np.error = String(e); }
-        if (this._npOwns(submittedName)) np.busy = false;
+          if (!res.ok) { if (this._npOwns(op)) np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
+          else { await this.afterProvision(submittedName, np, body, op); }
+        } catch (e) { if (this._npOwns(op)) np.error = String(e); }
+        if (this._npOwns(op)) np.busy = false;
       },
       // Kick off the clone job, then watch its progress WS until it ends.
-      async startClone(np) {
+      async startClone(np, op) {
         const name = np.submittedName, url = np.url, shallow = np.shallow;  // snapshot
         np.cloning = true; np.progress = { percent: null, phase: "Starting…" };
         try {
@@ -1116,13 +1120,16 @@
           const body = await res.json();
           if (!res.ok) {
             this.toast("Clone failed", "error");
-            if (this._npOwns(name)) { np.error = body.detail || "clone failed"; np.busy = false; np.cloning = false; }
+            if (this._npOwns(op)) { np.error = body.detail || "clone failed"; np.busy = false; np.cloning = false; }
             return;
           }
-          this.watchClone(np, body.job_id, name);
-        } catch (e) { if (this._npOwns(name)) { np.error = String(e); np.busy = false; np.cloning = false; } }
+          this.watchClone(np, body.job_id, name, op);
+        } catch (e) { if (this._npOwns(op)) { np.error = String(e); np.busy = false; np.cloning = false; } }
       },
-      watchClone(np, jobId, name) {
+      watchClone(np, jobId, name, op) {
+        // A Cancel before the clone POST returned already bumped the op — don't even install
+        // a watch for a superseded attempt, or its frames would drive a newer dialog.
+        if (!this._npOwns(op)) return;
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const ws = new WebSocket(proto + "://" + location.host + ROOT +
                                  "/ws/clone-progress/" + encodeURIComponent(jobId));
@@ -1130,15 +1137,17 @@
         const lost = () => {
           if (settled) return;
           settled = true;
+          if (!this._npOwns(op)) return;  // superseded mid-flight — leave the newer dialog alone
           np.cloning = false; np.busy = false;
           np.error = "lost the progress connection — the clone may still be running; refresh to check.";
         };
-        // Cancel/reset abandons this watch: flip `settled` so every handler below no-ops,
-        // then close the socket. resetNewProject() calls this, so a canceled clone's late
-        // frames can never mutate a newer attempt's dialog (root fix for the resubmit race).
+        // Cancel/reset abandons this watch: flip `settled` so handlers no-op, then close the
+        // socket so the server stops streaming. (The op gate is the correctness mechanism;
+        // this just stops the stream promptly.)
         this._abortClone = () => { settled = true; try { ws.close(); } catch (e) { /* closing */ } };
         ws.onmessage = async (ev) => {
           if (settled) return;  // aborted, or already terminal — ignore late frames
+          if (!this._npOwns(op)) { settled = true; try { ws.close(); } catch (e) { /* closing */ } return; }
           let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
           if (m.type === "progress") {
             np.progress = { percent: m.percent, phase: m.phase || np.progress.phase };
@@ -1151,7 +1160,7 @@
               np.error = m.error || "clone failed"; np.busy = false;
               this.toast(name + ": clone failed", "error");
             } else {
-              await this.afterClone(np, name);
+              await this.afterClone(np, name, op);
             }
           }
         };
@@ -1160,31 +1169,31 @@
       },
       // Cloned code is RCE-sensitive: fetch the landed project so afterProvision
       // can surface the CLAUDE.md/.claude warning before any bridge runs it.
-      async afterClone(np, name) {
+      async afterClone(np, name, op) {
         try {
           const list = await (await fetch(ROOT + "/api/projects")).json();
-          await this.afterProvision(name, np, list.find((p) => p.name === name) || {});
+          await this.afterProvision(name, np, list.find((p) => p.name === name) || {}, op);
         } catch (e) {
           // The clone itself succeeded; reveal the card (its untrusted + CLAUDE.md
           // badges still surface the inspection, and code only runs once trusted)
           // rather than stranding a successful clone behind a transient list error.
+          // Only the owning attempt may reload — a stale one must not yank a newer dialog.
           console.warn("clone: project-list refresh failed", e);
-          this.reloadToProject();
+          if (this._npOwns(op)) this.reloadToProject();
         }
       },
       // `name` is the caller's frozen snapshot, NOT `np.submittedName`: an async clone
       // can complete after the user clicked Cancel, which `resetNewProject()` clears —
       // re-reading reactive state here would insert a card for "" and force a reload.
-      async afterProvision(name, np, proj) {
+      async afterProvision(name, np, proj, op) {
+        // A canceled or superseded attempt (op no longer current) must not insert a card,
+        // reload the grid, or reset a newer attempt's dialog. The project still exists
+        // server-side and shows on the next refresh, so bail before touching anything.
+        if (!this._npOwns(op)) return;
         const ships = [];
         if (proj.has_claude_md) ships.push("CLAUDE.md");
         if (proj.has_claude_dir) ships.push(".claude/");
         await this.insertCard(name, proj);  // reveal the new card in place — no reload
-        // Only touch shared dialog state if THIS attempt still owns it. A canceled or
-        // superseded attempt completing late (np.submittedName cleared by reset, or
-        // overwritten by a newer submit) must not close/reset a newer attempt's dialog —
-        // its card is already revealed above, so just return.
-        if (!this._npOwns(name)) return;
         np.busy = false;
         if (ships.length) {
           // Keep the RCE-review warning up; the inserted card is untrusted, so its
