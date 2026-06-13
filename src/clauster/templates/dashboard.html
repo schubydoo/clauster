@@ -124,7 +124,7 @@
 
       <!-- ===== New project ===== -->
       <div class="mb-3">
-        <button class="btn btn-primary" @click="toggleNewProject()">
+        <button type="button" class="btn btn-primary" @click="toggleNewProject()">
           <span x-text="np.open ? '× Cancel' : '+ New project'">+ New project</span>
         </button>
         <div class="card mt-2" x-show="np.open" x-cloak>
@@ -1089,7 +1089,7 @@
             body: JSON.stringify({ name: np.submittedName, git_init: np.gitInit }) });
           const body = await res.json();
           if (!res.ok) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
-          else { await this.afterProvision(np, body); }
+          else { await this.afterProvision(np.submittedName, np, body); }
         } catch (e) { np.error = String(e); }
         np.busy = false;
       },
@@ -1144,7 +1144,7 @@
       async afterClone(np, name) {
         try {
           const list = await (await fetch(ROOT + "/api/projects")).json();
-          await this.afterProvision(np, list.find((p) => p.name === name) || {});
+          await this.afterProvision(name, np, list.find((p) => p.name === name) || {});
         } catch (e) {
           // The clone itself succeeded; reveal the card (its untrusted + CLAUDE.md
           // badges still surface the inspection, and code only runs once trusted)
@@ -1153,19 +1153,22 @@
           this.reloadToProject();
         }
       },
-      async afterProvision(np, proj) {
+      // `name` is the caller's frozen snapshot, NOT `np.submittedName`: an async clone
+      // can complete after the user clicked Cancel, which `resetNewProject()` clears —
+      // re-reading reactive state here would insert a card for "" and force a reload.
+      async afterProvision(name, np, proj) {
         const ships = [];
         if (proj.has_claude_md) ships.push("CLAUDE.md");
         if (proj.has_claude_dir) ships.push(".claude/");
-        await this.insertCard(np.submittedName, proj);  // reveal the new card in place — no reload
+        await this.insertCard(name, proj);  // reveal the new card in place — no reload
         np.busy = false;
         if (ships.length) {
           // Keep the RCE-review warning up; the inserted card is untrusted, so its
           // code can't run until the user explicitly Trusts + Starts a bridge.
           np.warn = ships.join(" + ");
-          this.toast(np.submittedName + ": added — review before starting", "warning");
+          this.toast(name + ": added — review before starting", "warning");
         } else {
-          this.toast(np.submittedName + ": ready", "success");
+          this.toast(name + ": ready", "success");
           np.open = false; this.resetNewProject();  // close + wipe the form on a clean add
         }
       },
