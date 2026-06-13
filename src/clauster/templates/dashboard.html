@@ -1082,18 +1082,20 @@
       async submitNew() {
         const np = this.np;
         if (!np.name || np.busy) return;
+        // Freeze the submitted name in a local: the create POST awaits, and a Cancel
+        // mid-request runs resetNewProject() which clears np.submittedName — so the
+        // completion path must use this snapshot, not reactive state (same as clone).
+        const submittedName = np.name;
         np.busy = true; np.error = null; np.warn = null;
-        // Freeze the submitted name: the field stays editable while busy, and the
-        // async clone's completion path must match the project we actually created.
-        np.submittedName = np.name;
+        np.submittedName = submittedName;
         if (np.mode === "clone") { await this.startClone(np); return; }  // async, watched over WS
         try {
           const res = await fetch(ROOT + "/api/projects", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: np.submittedName, git_init: np.gitInit }) });
+            body: JSON.stringify({ name: submittedName, git_init: np.gitInit }) });
           const body = await res.json();
           if (!res.ok) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
-          else { await this.afterProvision(np.submittedName, np, body); }
+          else { await this.afterProvision(submittedName, np, body); }
         } catch (e) { np.error = String(e); }
         np.busy = false;
       },
