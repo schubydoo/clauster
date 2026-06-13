@@ -1167,6 +1167,11 @@
         if (proj.has_claude_md) ships.push("CLAUDE.md");
         if (proj.has_claude_dir) ships.push(".claude/");
         await this.insertCard(name, proj);  // reveal the new card in place — no reload
+        // Only touch shared dialog state if THIS attempt still owns it. A canceled or
+        // superseded attempt completing late (np.submittedName cleared by reset, or
+        // overwritten by a newer submit) must not close/reset a newer attempt's dialog —
+        // its card is already revealed above, so just return.
+        if (np.submittedName !== name) return;
         np.busy = false;
         if (ships.length) {
           // Keep the RCE-review warning up; the inserted card is untrusted, so its
