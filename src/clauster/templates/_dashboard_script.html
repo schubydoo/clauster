@@ -1,0 +1,1254 @@
+<script>
+  const STATUS_LABELS = {
+    starting: "Starting", running: "Running", stopping: "Stopping", stopped: "Stopped",
+    interrupted: "Interrupted", crashed: "Crashed", error: "Failed to start",
+  };
+  // Amber = recoverable, you didn't end it (interrupted/crashed -> Resume). Red = you
+  // must intervene (error: never started -> fix config). Grey = you stopped it.
+  const STATUS_BADGE = {
+    running: "bg-green-lt", starting: "bg-azure-lt", stopping: "bg-orange-lt",
+    interrupted: "bg-yellow-lt", crashed: "bg-yellow-lt", error: "bg-red-lt",
+    // Resting state: no fill. A filled pill is reserved for states that need
+    // attention (running/error/interrupted) so a wall of grey pills doesn't read
+    // as "everything is flagged"; stopped is just quiet text + its dot.
+    stopped: "bg-transparent text-secondary px-1",
+  };
+  const STATUS_DOT = {
+    running: "bg-green", starting: "bg-azure status-dot-animated", stopping: "bg-orange status-dot-animated",
+    interrupted: "bg-yellow", crashed: "bg-yellow", error: "bg-red", stopped: "bg-secondary",
+  };
+  const ROOT = "{{ request.scope.root_path }}";
+  const MAX_LOG_LINES = 1000;
+  const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
+  const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
+  const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
+  const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
+  const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
+  const DEFAULT_RESUME_MODE = {{ default_resume_mode | tojson }};
+  const USAGE_MODE = {{ usage_mode | tojson }};  // usage.mode — "cost" | "tokens" | "off"
+  const CURRENCY = {{ currency | tojson }};  // usage.currency — code, shown in the tooltip
+  const CURRENCY_SYMBOL = {{ currency_symbol | tojson }};  // resolved symbol for cost mode
+  const FX_RATE = {{ fx_rate | tojson }};  // usage.fx_rate — static USD->display multiplier
+  const TOKENS_INCLUDE_CACHE = {{ token_total_includes_cache | tojson }};  // count cache in the total?
+  const METRICS_ENABLED = {{ metrics_enabled | tojson }};  // metrics.enabled — live CPU/mem/disk line
+  const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
+  const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
+  const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
+
+  // Humanize a token count for the compact badge (1.2M / 3.4k); the exact value
+  // lives in the tooltip (usageTitle).
+  function fmtTokens(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    return String(n);
+  }
+
+  // Theme toggle (navbar) — persisted, mirrors the no-flash init above.
+  document.addEventListener("DOMContentLoaded", function () {
+    var btn = document.getElementById("theme-toggle");
+    if (!btn) return;
+    function sync() {
+      var dark = document.documentElement.getAttribute("data-bs-theme") === "dark";
+      btn.querySelector(".icon-sun").style.display = dark ? "none" : "inline-block";
+      btn.querySelector(".icon-moon").style.display = dark ? "inline-block" : "none";
+    }
+    btn.addEventListener("click", function () {
+      var next = document.documentElement.getAttribute("data-bs-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-bs-theme", next);
+      localStorage.setItem("clauster-theme", next);
+      sync();
+    });
+    sync();
+  });
+
+  function dashboard() {
+    return {
+      instances: {},
+      externalSessions: {},
+      agents: [],
+      agentDispatchOpen: false,
+      agentForm: { project: "", prompt: "", cloud: false, busy: false },
+      agentStopping: {},   // job id -> true while a stop request is in flight
+      // --- hosted live-view sessions (claustrum stream-json channel, CL-4c) ---
+      hosted: [],                 // GET /api/hosted snapshot (channel="hosted" instances)
+      hostedDispatchOpen: false,
+      hostedForm: { project: "", permission_mode: DEFAULT_PERMISSION_MODE, busy: false },
+      hostedStopping: {},         // hosted id -> true while a stop is in flight
+      hostedResuming: {},         // hosted id -> true while a resume is in flight
+      hostedView: {},             // hosted id -> { open, ws, lastSeq, events[], input, sending, connLost }
+      errors: {},
+      qrOpen: {},
+      qrNonce: {},
+      logs: {},
+      spawnMode: {},
+      permMode: {},
+      resumeMode: {},
+      confirmBypass: {},
+      bypassTyped: {},
+      confirmTrust: {},
+      trustConfirmed: {},   // the "I trust…" checkbox in the trust-on-start dialog
+      confirmNew: {},
+      cmd: {},
+      usage: {},
+      metrics: {},        // project name -> live CPU/mem/disk sample (null when not running)
+      trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
+      trusting: {},       // project name -> bool (trust request in flight)
+      toasts: [],
+      _toastSeq: 0,
+      connLost: false,    // polling has failed repeatedly -> data is stale
+      _refreshFails: 0,
+      np: { open: false, name: "", submittedName: "", mode: "create", url: "", shallow: false,
+            gitInit: false, busy: false, error: null, warn: null,
+            cloning: false, progress: { percent: null, phase: "" } },
+      // System-readiness (preflight) — the `clauster doctor` checks surfaced in the
+      // browser so a precondition (claude not logged in, dir untrusted, …) is visible
+      // up front instead of failing silently when you click Start. loaded stays false
+      // until /api/doctor answers, so the panel never flashes empty.
+      readiness: { loaded: false, ok: true, checks: [], showAll: false, showPanel: false },
+      activeFilter: "all",   // Zone 2 unified-list filter: all | browser | desktop | detached
+      projectFilter: "",     // Zone 1 search box
+      showAllProjects: false, // Zone 1: reveal projects beyond the cap
+      async init() {
+        for (const n of PROJECT_NAMES) {
+          this.spawnMode[n] = DEFAULT_SPAWN_MODE;
+          this.permMode[n] = DEFAULT_PERMISSION_MODE;
+          this.resumeMode[n] = DEFAULT_RESUME_MODE;
+        }
+        this.trustState = { ...INITIAL_TRUST };
+        await this.refresh();
+        for (const n of PROJECT_NAMES) this.loadUsage(n);
+        this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
+        setInterval(() => this.refresh(), 4000);
+        // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
+        if (METRICS_ENABLED) { this.refreshMetrics(); setInterval(() => this.refreshMetrics(), METRICS_POLL_MS); }
+      },
+      // --- system readiness (preflight panel) ---
+      async loadReadiness() {
+        try {
+          const r = await fetch(ROOT + "/api/doctor");
+          if (r.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!r.ok) return;
+          const d = await r.json();
+          this.readiness.ok = !!d.ok;
+          this.readiness.checks = Array.isArray(d.checks) ? d.checks : [];
+          this.readiness.loaded = true;
+        } catch (e) { /* fetch failed -> leave loaded=false so the panel stays hidden */ }
+      },
+      readinessIssues() { return this.readiness.checks.filter((c) => c.status !== "ok"); },
+      // A "warn" lets a session still start; anything else (error/fail) is a hard blocker.
+      // The pill's severity + wording follow this so it doesn't cry wolf over warnings.
+      readinessBlockers() { return this.readiness.checks.filter((c) => c.status !== "ok" && c.status !== "warn"); },
+      readinessWarnings() { return this.readiness.checks.filter((c) => c.status === "warn"); },
+      checkGlyph(s) { return s === "ok" ? "✓" : s === "warn" ? "⚠" : "✗"; },
+      checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
+      // --- launch popover + unified active list ---
+      // Outcome-language launch choices — jargon (hosted/bridge/background) mapped to
+      // the plain result the user gets. The "cloud" checkbox folds into Fire-and-forget.
+      launchModes() {
+        return [
+          { id: "browser", label: "Here in the browser", sub: "watch it work live, approve tools inline" },
+          { id: "desktop", label: "In claude.ai / Desktop", sub: "connect from your phone or the Claude app" },
+          { id: "detached", label: "Fire-and-forget", sub: "runs detached — check back later" },
+        ];
+      },
+      // Route a launch by chosen mode: browser=hosted, desktop=bridge, detached=background.
+      async launchRun(name, mode, perm, cloud, prompt) {
+        if (mode === "browser") { await this._launchHosted(name, perm); }
+        else if (mode === "detached") { await this._launchDetached(name, prompt, cloud, perm); }
+        // bridge: route through start() so the trust + bypassPermissions gates still apply.
+        else { if (perm) this.permMode[name] = perm; this.start(name); }
+      },
+      async _launchHosted(name, perm) {
+        try {
+          const res = await fetch(ROOT + "/api/instances", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ channel: "hosted", project: name, permission_mode: perm || DEFAULT_PERMISSION_MODE }),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) {
+            this.toast(name + ": running in the browser", "success");
+            await this.refresh();
+            if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);  // watch it immediately
+          } else { this.toast("start failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("start failed", "error"); }
+      },
+      async _launchDetached(name, prompt, cloud, perm) {
+        try {
+          const body = { project: name };
+          if (prompt && prompt.trim()) body.prompt = prompt.trim();
+          if (cloud) body.rc_name = name;  // "also register on claude.ai"
+          if (perm) body.permission_mode = perm;  // fire-and-forget runs unattended — honor the choice
+          const res = await fetch(ROOT + "/api/agents", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) { this.toast(name + ": started (fire-and-forget)", "success"); await this.refresh(); }
+          else { this.toast("start failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("start failed", "error"); }
+      },
+      // Per-project rollup of live sessions (bridge + hosted; background approximated out
+      // for now — bg jobs are keyed by cwd, not project name).
+      runningCountFor(name) {
+        let n = 0;
+        const i = this.instances[name];
+        if (i && ["running", "starting", "stopping"].includes(i.status)) n++;
+        n += this.hosted.filter((h) => h.project === name && ["running", "starting"].includes(h.status)).length;
+        return n;
+      },
+      // Bridges currently alive (the instances map is project-keyed -> values array).
+      activeBridges() {
+        return Object.values(this.instances).filter((i) => ["running", "starting", "stopping"].includes(i.status));
+      },
+      // --- Zone 2 split: a live-only main list + a collapsed "Recent / resumable" group ---
+      // so the Active zone (fixed at the top) only ever shows what's genuinely running.
+      liveHosted() { return this.hosted.filter((h) => ["running", "starting", "stopping"].includes(h.status)); },
+      endedHosted() { return this.hosted.filter((h) => ["stopped", "crashed", "error"].includes(h.status)); },
+      liveAgents() { return this.agents.filter((j) => j.worker_alive || ["working", "blocked"].includes(j.state)); },
+      endedAgents() { return this.agents.filter((j) => !(j.worker_alive || ["working", "blocked"].includes(j.state))); },
+      // Stopped/crashed bridges that can be reconnected (Resume) — surfaced in Recent.
+      endedBridges() { return Object.values(this.instances).filter((i) => this.isResumable(i.project)); },
+      hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length > 0; },
+      hasRecent() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length > 0; },
+      recentCount() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length; },
+      // Status -> left-rail colour: the rail encodes liveness/attention, NOT mode (mode is
+      // already the badge). live=green · starting=azure · attention=yellow · ended=grey.
+      hostedRailClass(h) {
+        if (h.status === "running") return "sess-live";
+        if (h.status === "starting") return "sess-starting";
+        if (h.status === "stopping") return "sess-warn";
+        return "sess-dead";
+      },
+      agentRailClass(j) {
+        if (j.state === "blocked") return "sess-warn";
+        if (j.worker_alive || j.state === "working") return "sess-live";
+        return "sess-dead";
+      },
+      bridgeRailClass(name) {
+        const s = this.displayStatus(name);
+        if (s === "running") return "sess-live";
+        if (s === "starting") return "sess-starting";
+        if (s === "interrupted" || s === "crashed" || s === "stopping") return "sess-warn";
+        return "sess-dead";
+      },
+      // Zone 1 search + cap: keep a long project list from burying Active sessions.
+      matchesProject(name) {
+        const q = (this.projectFilter || "").trim().toLowerCase();
+        return !q || name.toLowerCase().includes(q);
+      },
+      // A row shows if it matches the search; with no search, only the first 6 show
+      // until "Show all" is toggled — but a project with a live session is NEVER hidden by
+      // the cap (you should always see what you're running in). We don't *reorder* the list
+      // on launch, though — that's the same "don't move things under the user" rule that
+      // pinned the Active zone; the row stays put, the "● N running" badge marks it.
+      projectVisible(name, idx) {
+        if ((this.projectFilter || "").trim()) return this.matchesProject(name);
+        if (this.runningCountFor(name) > 0) return true;
+        return this.showAllProjects || idx < 6;
+      },
+      // --- toasts ---
+      toast(msg, type = "info") {
+        const id = ++this._toastSeq;
+        this.toasts.push({ id, msg, type });
+        setTimeout(() => this.dismissToast(id), 4500);
+      },
+      dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
+      async refresh() {
+        let ok = true;
+        try {
+          const [iRes, sRes, aRes] = await Promise.all([
+            fetch(ROOT + "/api/instances"),
+            fetch(ROOT + "/api/sessions"),
+            fetch(ROOT + "/api/agents"),
+          ]);
+          // Session expired mid-use -> bounce to login instead of silently showing stale data.
+          if (iRes.status === 401 || sRes.status === 401 || aRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (iRes.ok) {
+            const list = await iRes.json();
+            const next = {};
+            for (const i of list) next[i.project] = i;
+            // Preserve a local optimistic "stopping" until the server confirms it's gone.
+            for (const n of Object.keys(this.instances)) {
+              if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
+            }
+            this.instances = next;
+          } else { ok = false; }
+          if (sRes.ok) this.externalSessions = await sRes.json();
+          else { ok = false; }
+          if (aRes.ok) this.agents = await aRes.json();
+          else { ok = false; }
+          // Hosted sessions live in a separate registry (HostedManager); only poll
+          // them when the claustrum channel is configured.
+          if (CLAUSTRUM_ENABLED) {
+            const hRes = await fetch(ROOT + "/api/hosted");
+            if (hRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
+            if (hRes.ok) this.hosted = await hRes.json();
+            else { ok = false; }
+          }
+        } catch (e) { ok = false; }
+        // A single blip is normal; only surface a *persistent* outage so the user
+        // knows the data is stale and we're retrying — never fail silently.
+        if (ok) { this._refreshFails = 0; this.connLost = false; }
+        else if (++this._refreshFails >= 2) this.connLost = true;
+      },
+      // --- background agents (agent view) ---
+      agentBadgeClass(state) {
+        const map = {
+          working: "bg-blue-lt", blocked: "bg-orange-lt", done: "bg-green-lt",
+          failed: "bg-red-lt", stopped: "bg-secondary-lt",
+        };
+        // Object.hasOwn so a state like "constructor" can't resolve up the
+        // prototype chain to a function instead of the fallback class.
+        return Object.hasOwn(map, state) ? map[state] : "bg-secondary-lt";
+      },
+      agentWhen(j) {
+        if (!j.updated_at) return "";
+        const d = new Date(j.updated_at);
+        return isNaN(d.getTime()) ? "" : d.toLocaleString();
+      },
+      async dispatchAgent() {
+        const f = this.agentForm;
+        if (!f.project || f.busy) return;
+        f.busy = true;
+        try {
+          const body = { project: f.project };
+          if (f.prompt.trim()) body.prompt = f.prompt.trim();
+          // "cloud" opens a Remote Control session named after the project.
+          if (f.cloud) body.rc_name = f.project;
+          const res = await fetch(ROOT + "/api/agents", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) {
+            this.toast("background agent dispatched", "success");
+            f.prompt = "";  // keep project + cloud for a quick repeat dispatch
+          } else {
+            this.toast("dispatch failed — " + (b.detail || res.status), "error");
+          }
+        } catch (e) { this.toast("dispatch failed", "error"); }
+        f.busy = false;
+        await this.refresh();
+      },
+      async stopAgent(j) {
+        const label = j.name || j.id;
+        const msg = j.bridge_session_id
+          ? "Stop \"" + label + "\"? This deregisters its cloud session."
+          : "Stop and remove \"" + label + "\"?";
+        if (!window.confirm(msg)) return;
+        this.agentStopping[j.id] = true;
+        try {
+          const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id), { method: "DELETE" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok && b.removed) this.toast(label + ": stopped", "success");
+          else if (res.ok) this.toast(label + ": stopped (cleanup pending — " + (b.detail || "supervisor restarting") + ")", "warning");
+          else this.toast(label + ": stop failed — " + (b.detail || res.status), "error");
+        } catch (e) { this.toast(label + ": stop failed", "error"); }
+        this.agentStopping[j.id] = false;
+        await this.refresh();
+      },
+      statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
+      // Display status: an "interrupted" bridge is one that stopped WITHOUT a
+      // deliberate Stop (host restart / external kill). It's the same backend status
+      // as "stopped" (intentional_stop tells them apart), but reads + acts differently:
+      // amber + Resume-forward, vs a neutral "you stopped this" -> Start.
+      displayStatus(name) {
+        const i = this.instances[name] || {};
+        const s = i.status || "stopped";
+        return (s === "stopped" && i.intentional_stop === false) ? "interrupted" : s;
+      },
+      statusLabel(name) { return STATUS_LABELS[this.displayStatus(name)] || "Stopped"; },
+      statusBadgeClass(name) { return STATUS_BADGE[this.displayStatus(name)] || "bg-secondary-lt"; },
+      statusDotClass(name) { return STATUS_DOT[this.displayStatus(name)] || "bg-secondary"; },
+      // A one-line "why" + nudge for the two recoverable, you-didn't-end-it states.
+      statusNote(name) {
+        const s = this.displayStatus(name);
+        if (s === "interrupted") return "Ended without a Stop (host restart or external exit) — Resume to continue.";
+        if (s === "crashed") return "The bridge exited unexpectedly — Resume to continue.";
+        return null;
+      },
+      // Hover hint on the status badge — what each state means (the recoverable
+      // states reuse statusNote so the wording stays in one place).
+      statusTitle(name) {
+        const s = this.displayStatus(name);
+        return {
+          running: "The bridge is live and managing sessions.",
+          starting: "The bridge is launching…",
+          stopping: "The bridge is shutting down…",
+          stopped: "Stopped — Resume the prior session or start a new one.",
+          interrupted: this.statusNote(name),
+          crashed: this.statusNote(name),
+          error: "The bridge failed to start — see the detail below.",
+        }[s] || null;
+      },
+      isRunning(name) { return this.statusOf(name) === "running"; },
+      isBusy(name) { return this.statusOf(name) === "starting"; },
+      isStopping(name) { return this.statusOf(name) === "stopping"; },
+      sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
+      envUrlOf(name) { return (this.instances[name] || {}).url || null; },
+      errorOf(name) { return this.errors[name] || null; },
+      // A stopped/crashed bridge that still has an environment can reconnect to it —
+      // show "Resume" instead of "Start" and reuse its stored permission mode.
+      isResumable(name) {
+        const i = this.instances[name] || {};
+        // A pty (flag-form) bridge has no environment_id — true-resume works via
+        // `claude --continue`, not an environment reconnect — so treat a stopped pty
+        // instance as resumable too, else the Resume button (the only path to
+        // /resume → --continue) never renders and true-resume is unreachable.
+        return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
+      },
+      resumeModeOf(name) { return (this.instances[name] || {}).resume_mode || ""; },
+      detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
+      externalCount(name) {
+        const s = this.externalSessions[name];
+        return Array.isArray(s) ? s.length : 0;
+      },
+      hasExternal(name) { return this.externalCount(name) > 0; },
+      async loadUsage(name) {
+        if (USAGE_MODE === "off") return;  // badge disabled — don't even fetch usage
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/usage");
+          if (res.ok) this.usage[name] = await res.json();
+        } catch (e) { /* badge stays hidden */ }
+      },
+      // Tokens counted toward the displayed total: all categories, or input+output
+      // only when usage.token_total_includes_cache is false (cache usually dominates).
+      displayTokens(u) {
+        if (TOKENS_INCLUDE_CACHE) return u.total_tokens || 0;
+        const b = u.token_breakdown || {};
+        return (b.input || 0) + (b.output || 0);
+      },
+      usageLabel(name) {
+        if (USAGE_MODE === "off") return null;  // x-show hides the badge when off
+        const u = this.usage[name];
+        if (!u || !u.transcripts) return null;
+        if (USAGE_MODE === "tokens") return fmtTokens(this.displayTokens(u)) + " tok";
+        // cost mode: convert the USD figure with the static fx_rate, prefix the symbol.
+        return "≈" + CURRENCY_SYMBOL + ((u.cost_usd || 0) * FX_RATE).toFixed(2);
+      },
+      usageTitle(name) {
+        const u = this.usage[name];
+        if (!u) return "";
+        const b = u.token_breakdown || {};
+        const exact = (u.total_tokens || 0).toLocaleString();
+        const sessions = u.transcripts + (u.transcripts === 1 ? " session" : " sessions");
+        const split = "in " + (b.input || 0).toLocaleString() +
+          " · out " + (b.output || 0).toLocaleString() +
+          " · cache-write " + (b.cache_creation || 0).toLocaleString() +
+          " · cache-read " + (b.cache_read || 0).toLocaleString();
+        if (USAGE_MODE === "tokens") {
+          let s = exact + " tokens across " + sessions + " (" + split + ")";
+          if (!TOKENS_INCLUDE_CACHE) s += "; badge total excludes cache";
+          return s;
+        }
+        // cost mode
+        let s = exact + " tokens across " + sessions + " · approximate cost";
+        if (FX_RATE !== 1) s += " (USD × " + FX_RATE + " → " + CURRENCY + ")";
+        else if (CURRENCY !== "USD") s += " (label only — usage.fx_rate not set, figure is USD)";
+        else s += " in USD";
+        if (u.unpriced_models && u.unpriced_models.length) {
+          s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
+        }
+        return s;
+      },
+      async loadMetrics(name) {
+        if (!METRICS_ENABLED) return;
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/metrics");
+          if (res.ok) { const m = await res.json(); this.metrics[name] = m.running ? m : null; }
+        } catch (e) { /* keep the last sample; a blip is fine */ }
+      },
+      refreshMetrics() {
+        // Own cadence (metrics.poll_seconds), decoupled from the status poll. Iterate
+        // the *current* instances (not the static PROJECT_NAMES) so projects added
+        // after load are polled too; drop stale samples for anything not running.
+        if (!METRICS_ENABLED) return;
+        for (const n of Object.keys(this.instances)) {
+          if ((this.instances[n] || {}).status === "running") this.loadMetrics(n);
+        }
+        for (const n of Object.keys(this.metrics)) {
+          if ((this.instances[n] || {}).status !== "running") this.metrics[n] = null;
+        }
+      },
+      metricsLabel(name) {
+        if (!METRICS_ENABLED) return null;
+        if (this.statusOf(name) !== "running") return null;  // race: a stopped card must not flash stale metrics
+        const m = this.metrics[name];
+        if (!m || !m.running) return null;  // x-show hides the line when not running
+        const rate = (bps) => bps >= 1048576 ? (bps / 1048576).toFixed(1) + " MB/s" : Math.round(bps / 1024) + " KB/s";
+        let s = Math.round(m.cpu_percent) + "% CPU · " + Math.round(m.rss_bytes / 1048576) + " MB";
+        if (METRICS_SHOW_DISK && m.disk_read_bps != null) s += " · ⬇" + rate(m.disk_read_bps) + " ⬆" + rate(m.disk_write_bps);
+        return s;
+      },
+      metricsTitle(name) {
+        const m = this.metrics[name];
+        if (!m || !m.running) return "";
+        const cpuNote = m.cpu_normalized
+          ? "CPU% is the share of total host capacity (all cores)"
+          : "CPU% is summed across cores (can exceed 100%)";
+        let s = "Live usage of the bridge process tree (" + m.procs + " process" + (m.procs === 1 ? "" : "es") +
+                "): " + cpuNote + "; memory is summed RSS";
+        if (METRICS_SHOW_DISK && m.disk_read_bps == null) s += "; disk I/O isn't available on this platform";
+        return s + ".";
+      },
+      qrSrc(name) {
+        return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);
+      },
+      toggleQr(name) {
+        const opening = !this.qrOpen[name];
+        if (opening) this.qrNonce[name] = Date.now();
+        this.qrOpen[name] = opening;
+      },
+      async copy(text) {
+        if (window.isSecureContext && navigator.clipboard) {
+          try { await navigator.clipboard.writeText(text); this.toast("Link copied", "success"); return; } catch (e) { /* fall through */ }
+        }
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.setAttribute("readonly", "");
+        ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        // execCommand returns false on failure (doesn't throw); the try/catch is a
+        // defensive guard for the browsers that do throw. Either way: never silently
+        // report success.
+        let copied = false;
+        try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+        document.body.removeChild(ta);
+        this.toast(copied ? "Link copied" : "Couldn't copy — copy it manually",
+                   copied ? "success" : "error");
+      },
+      async start(name) {
+        // Trust gate — like Claude Code's "Do you trust the files in this folder?":
+        // an untrusted dir prompts on Start (rather than a standalone Trust button),
+        // then trusts + starts. Checked before bypass so the order is trust → bypass.
+        if (this.trustState[name] !== "trusted") {
+          this.errors[name] = null;
+          this.trustConfirmed[name] = false;   // require a fresh, deliberate tick each time
+          this.confirmTrust[name] = true;
+          return;
+        }
+        if (this.permMode[name] === "bypassPermissions") {
+          this.errors[name] = null;
+          this.confirmBypass[name] = true;
+          return;
+        }
+        await this._spawn(name);
+      },
+      async confirmTrustStart(name) {
+        await this.trust(name);            // trusts; sets the inline error on failure
+        this.confirmTrust[name] = false;   // close the dialog either way
+        if (this.trustState[name] === "trusted") this.start(name);  // now-trusted → spawn
+      },
+      cancelTrust(name) {
+        this.confirmTrust[name] = false;
+        this.trustConfirmed[name] = false;
+      },
+      // "Start new session" on a resumable bridge: a fresh start (resume=false)
+      // is deliberately distinct from Resume, so warn first — a new session won't
+      // restore the prior one and Resume may no longer reach it (pty Resume
+      // continues the most-recent transcript, which a fresh session displaces).
+      startNew(name) {
+        this.errors[name] = null;
+        this.confirmNew[name] = true;
+      },
+      confirmNewStart(name) {
+        this.confirmNew[name] = false;
+        // Route back through start() so the bypassPermissions gate still applies.
+        this.start(name);
+      },
+      cancelNew(name) {
+        this.confirmNew[name] = false;
+      },
+      confirmBypassStart(name) {
+        if ((this.bypassTyped[name] || "") !== name) {
+          this.errors[name] = "Type the project name exactly to confirm bypass.";
+          return;
+        }
+        this.confirmBypass[name] = false;
+        this.bypassTyped[name] = "";
+        this._spawn(name);
+      },
+      cancelBypass(name) {
+        this.confirmBypass[name] = false;
+        this.bypassTyped[name] = "";
+      },
+      cmdUrl(name) { return ROOT + "/api/projects/" + encodeURIComponent(name) + "/claude-md"; },
+      cmdBytes(name) {
+        const c = this.cmd[name];
+        return c ? new TextEncoder().encode(c.content || "").length : 0;
+      },
+      async toggleClaudeMd(name) {
+        if (this.cmd[name] && this.cmd[name].open) { this.closeClaudeMd(name); return; }
+        this.cmd[name] = { open: true, loading: true, saving: false, content: "",
+                           sha: null, exists: false, bridge_running: false, error: null, savedAt: null };
+        try {
+          const res = await fetch(this.cmdUrl(name));
+          const body = await res.json();
+          if (!res.ok) { this.cmd[name].error = body.detail || "failed to load"; }
+          else {
+            Object.assign(this.cmd[name], {
+              content: body.content, sha: body.sha256,
+              exists: body.exists, bridge_running: body.bridge_running,
+            });
+          }
+        } catch (e) { this.cmd[name].error = String(e); }
+        this.cmd[name].loading = false;
+      },
+      async saveClaudeMd(name) {
+        const c = this.cmd[name];
+        if (!c) return;
+        c.saving = true; c.error = null; c.savedAt = null;
+        const payload = { content: c.content };
+        if (c.exists && c.sha) payload.base_sha256 = c.sha;
+        try {
+          const res = await fetch(this.cmdUrl(name), {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const body = await res.json();
+          if (!res.ok) { c.error = body.detail || "failed to save"; this.toast("CLAUDE.md save failed", "error"); }
+          else { Object.assign(c, { sha: body.sha256, exists: true,
+                   bridge_running: body.bridge_running, savedAt: Date.now() }); this.toast("CLAUDE.md saved", "success"); }
+        } catch (e) { c.error = String(e); }
+        c.saving = false;
+      },
+      closeClaudeMd(name) { if (this.cmd[name]) this.cmd[name].open = false; },
+      // Toggle the New-project dialog; closing wipes it so reopening never shows a
+      // prior attempt's name/URL or a stale error/warning (which read as a stuck form).
+      toggleNewProject() {
+        this.np.open = !this.np.open;
+        if (!this.np.open) this.resetNewProject();
+      },
+      resetNewProject() {
+        // Bump the op id so any in-flight attempt's captured token goes stale (it can no
+        // longer mutate the dialog), and abandon its clone watch so the stream stops.
+        this._nextNpOp();
+        if (this._abortClone) { this._abortClone(); this._abortClone = null; }
+        const np = this.np;
+        np.name = ""; np.url = ""; np.submittedName = "";
+        np.error = null; np.warn = null;
+        np.busy = false; np.cloning = false;
+        np.progress = { percent: null, phase: "" };
+      },
+      // Per-submit operation id. Each submit claims a fresh one; reset/supersede bumps the
+      // counter so an older attempt's captured op stops matching. A safe ownership token
+      // where the project name is NOT — two attempts (cancel + resubmit) can share a name.
+      _nextNpOp() { return (this._npOp = (this._npOp || 0) + 1); },
+      _npOwns(op) { return this._npOp === op; },
+      async submitNew() {
+        const np = this.np;
+        if (!np.name || np.busy) return;
+        // Freeze the name + claim a fresh op id for THIS attempt: the POST awaits, and a
+        // Cancel mid-request bumps the op (and clears np), so every shared-state write on
+        // the completion path is gated on `op` — the name alone can't tell two attempts apart.
+        const submittedName = np.name;
+        const op = this._nextNpOp();
+        np.busy = true; np.error = null; np.warn = null;
+        np.submittedName = submittedName;
+        if (np.mode === "clone") { await this.startClone(np, op); return; }  // async, watched over WS
+        try {
+          const res = await fetch(ROOT + "/api/projects", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: submittedName, git_init: np.gitInit }) });
+          const body = await res.json();
+          if (!res.ok) { if (this._npOwns(op)) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); } }
+          else { await this.afterProvision(submittedName, np, body, op); }
+        } catch (e) { if (this._npOwns(op)) np.error = String(e); }
+        if (this._npOwns(op)) np.busy = false;
+      },
+      // Kick off the clone job, then watch its progress WS until it ends.
+      async startClone(np, op) {
+        const name = np.submittedName, url = np.url, shallow = np.shallow;  // snapshot
+        np.cloning = true; np.progress = { percent: null, phase: "Starting…" };
+        try {
+          const res = await fetch(ROOT + "/api/projects/clone", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, url, shallow }) });
+          const body = await res.json();
+          if (!res.ok) {
+            if (this._npOwns(op)) { np.error = body.detail || "clone failed"; np.busy = false; np.cloning = false; this.toast("Clone failed", "error"); }
+            return;
+          }
+          this.watchClone(np, body.job_id, name, op);
+        } catch (e) { if (this._npOwns(op)) { np.error = String(e); np.busy = false; np.cloning = false; } }
+      },
+      watchClone(np, jobId, name, op) {
+        // A Cancel before the clone POST returned already bumped the op — don't even install
+        // a watch for a superseded attempt, or its frames would drive a newer dialog.
+        if (!this._npOwns(op)) return;
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(proto + "://" + location.host + ROOT +
+                                 "/ws/clone-progress/" + encodeURIComponent(jobId));
+        let settled = false;  // exactly one terminal handling across done/error/close/abort
+        const lost = () => {
+          if (settled) return;
+          settled = true;
+          if (!this._npOwns(op)) return;  // superseded mid-flight — leave the newer dialog alone
+          np.cloning = false; np.busy = false;
+          np.error = "lost the progress connection — the clone may still be running; refresh to check.";
+        };
+        // Cancel/reset abandons this watch: flip `settled` so handlers no-op, then close the
+        // socket so the server stops streaming. (The op gate is the correctness mechanism;
+        // this just stops the stream promptly.)
+        this._abortClone = () => { settled = true; try { ws.close(); } catch (e) { /* closing */ } };
+        ws.onmessage = async (ev) => {
+          if (settled) return;  // aborted, or already terminal — ignore late frames
+          if (!this._npOwns(op)) { settled = true; try { ws.close(); } catch (e) { /* closing */ } return; }
+          let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+          if (m.type === "progress") {
+            np.progress = { percent: m.percent, phase: m.phase || np.progress.phase };
+          } else if (m.type === "done") {
+            settled = true;  // before close(), so onclose below no-ops
+            try { ws.close(); } catch (e) { /* already closing */ }
+            this._abortClone = null;  // this watch reached its terminal state
+            np.cloning = false;
+            if (m.status === "error") {
+              np.error = m.error || "clone failed"; np.busy = false;
+              this.toast(name + ": clone failed", "error");
+            } else {
+              await this.afterClone(np, name, op);
+            }
+          }
+        };
+        ws.onerror = lost;
+        ws.onclose = lost;  // a silent drop that never raised onerror still settles the UI
+      },
+      // Cloned code is RCE-sensitive: fetch the landed project so afterProvision
+      // can surface the CLAUDE.md/.claude warning before any bridge runs it.
+      async afterClone(np, name, op) {
+        try {
+          const list = await (await fetch(ROOT + "/api/projects")).json();
+          await this.afterProvision(name, np, list.find((p) => p.name === name) || {}, op);
+        } catch (e) {
+          // The clone itself succeeded; reveal the card (its untrusted + CLAUDE.md
+          // badges still surface the inspection, and code only runs once trusted)
+          // rather than stranding a successful clone behind a transient list error.
+          // Only the owning attempt may reload — a stale one must not yank a newer dialog.
+          console.warn("clone: project-list refresh failed", e);
+          if (this._npOwns(op)) this.reloadToProject();
+        }
+      },
+      // `name` is the caller's frozen snapshot, NOT `np.submittedName`: an async clone
+      // can complete after the user clicked Cancel, which `resetNewProject()` clears —
+      // re-reading reactive state here would insert a card for "" and force a reload.
+      async afterProvision(name, np, proj, op) {
+        const ships = [];
+        if (proj.has_claude_md) ships.push("CLAUDE.md");
+        if (proj.has_claude_dir) ships.push(".claude/");
+        // Always reveal the landed card, even for a canceled/superseded attempt: the
+        // project really was created, and refresh() never re-lists /api/projects — so
+        // skipping insertCard would leave it invisible until a manual reload.
+        await this.insertCard(name, proj);  // reveal the new card in place — no reload
+        // Dialog-state mutations, though, only happen for the attempt that still owns it.
+        if (!this._npOwns(op)) return;
+        np.busy = false;
+        if (ships.length) {
+          // Keep the RCE-review warning up; the inserted card is untrusted, so its
+          // code can't run until the user explicitly Trusts + Starts a bridge.
+          np.warn = ships.join(" + ");
+          this.toast(name + ": added — review before starting", "warning");
+        } else {
+          this.toast(name + ": ready", "success");
+          np.open = false; this.resetNewProject();  // close + wipe the form on a clean add
+        }
+      },
+      // Insert a freshly created/cloned project's card without a full reload:
+      // seed its reactive state, fetch the server-rendered fragment, inject it,
+      // and hydrate it under the existing dashboard() scope. Falls back to a full
+      // reload if anything goes wrong, so a successful provision is never lost.
+      async insertCard(name, proj) {
+        // Seed per-card state BEFORE injecting so bindings resolve on first paint
+        // (init() does the same for the server-rendered rows).
+        if (!(name in this.spawnMode)) this.spawnMode[name] = DEFAULT_SPAWN_MODE;
+        if (!(name in this.permMode)) this.permMode[name] = DEFAULT_PERMISSION_MODE;
+        if (!(name in this.resumeMode)) this.resumeMode[name] = DEFAULT_RESUME_MODE;
+        if (proj && proj.trust_state) this.trustState[name] = proj.trust_state;
+        // The rows list only exists once there is ≥1 project; the very first project has no
+        // #project-grid yet (the empty-state renders instead), so reload to render it.
+        const grid = document.getElementById("project-grid");
+        const list = grid ? grid.querySelector(".list-group") : null;
+        if (!list) { this.reloadToProject(); return; }
+        const sel = '[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]';
+        if (!list.querySelector(sel)) {  // skip if a refresh race already rendered it
+          let html;
+          try {
+            const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/row");
+            if (!res.ok) throw new Error("row " + res.status);
+            html = await res.text();
+          } catch (e) {
+            console.warn("insertCard: row fragment fetch failed, reloading", e);
+            this.reloadToProject();
+            return;
+          }
+          const tpl = document.createElement("template");
+          tpl.innerHTML = html.trim();
+          const node = tpl.content.firstElementChild;
+          if (!node) { this.reloadToProject(); return; }
+          list.appendChild(node);
+          window.Alpine.initTree(node);  // hydrate the injected row under dashboard()
+        }
+        this.loadUsage(name);
+      },
+      // The card is now inserted reactively; "Show it" scrolls to it and moves
+      // DOM focus there too (keyboard/screen-reader users land on the new card).
+      revealProject(name) {
+        this.np.warn = null;
+        const el = document.querySelector('[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]');
+        if (!el) return;
+        el.setAttribute("tabindex", "-1");
+        el.focus({ preventScroll: true });
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      },
+      reloadToProject() { window.location.reload(); },
+      async _spawn(name) {
+        this.errors[name] = null;
+        // Pick the launch mode BEFORE the optimistic overwrite below. A resumable
+        // card hides the Mode picker, so on "Start new session" we keep the stopped
+        // bridge's own recorded mode rather than silently dropping to the global
+        // default; a brand-new card (no instance) uses the visible picker.
+        const existing = this.instances[name];
+        const mode = (existing && existing.resume_mode) || this.resumeMode[name];
+        this.instances[name] = { project: name, status: "starting" };
+        try {
+          const res = await fetch(ROOT + "/api/instances", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              project: name,
+              spawn_mode: this.spawnMode[name],
+              permission_mode: this.permMode[name],
+              resume_mode: mode,
+            }),
+          });
+          const body = await res.json();
+          if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; this.toast(name + ": start failed", "error"); }
+          else { this.instances[name] = body; if (body.status === "running") this.toast(name + ": running", "success"); }
+        } catch (e) { this.errors[name] = String(e); delete this.instances[name]; this.toast(name + ": start failed", "error"); }
+        await this.refresh();
+      },
+      async resume(name) {
+        this.errors[name] = null;
+        const prev = this.instances[name];
+        this.instances[name] = { project: name, status: "starting" };  // optimistic
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name) + "/resume",
+                                  { method: "POST" });
+          const body = await res.json();
+          if (!res.ok) {
+            this.errors[name] = body.detail || "failed to resume";
+            if (prev) this.instances[name] = prev; else delete this.instances[name];
+            this.toast(name + ": restart failed", "error");
+          } else {
+            this.instances[name] = body;
+            if (body.status === "running") this.toast(name + ": running", "success");
+          }
+        } catch (e) {
+          this.errors[name] = String(e);
+          if (prev) this.instances[name] = prev; else delete this.instances[name];
+        }
+        await this.refresh();
+      },
+      async stop(name) {
+        this.closeLogs(name);
+        this.errors[name] = null;  // clear any stale inline error from a prior failed action
+        const prev = this.instances[name];
+        this.instances[name] = { ...(prev || { project: name }), status: "stopping" };  // optimistic
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
+          if (res.ok) { this.instances[name] = await res.json(); this.toast(name + ": stopped", "success"); }
+          else {
+            const b = await res.json().catch(() => ({}));
+            this.errors[name] = b.detail || "stop failed";  // inline, not just a 4.5s toast
+            this.toast(name + ": stop failed", "error");
+          }
+        } catch (e) { this.errors[name] = String(e); this.toast(name + ": stop failed", "error"); }
+        await this.refresh();
+        this.loadUsage(name);
+      },
+      async trust(name) {
+        this.errors[name] = null;  // clear any stale inline error from a prior failed action
+        this.trusting[name] = true;
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" });
+          if (res.ok) { this.trustState[name] = "trusted"; this.toast(name + ": trusted", "success"); }
+          else {
+            const b = await res.json().catch(() => ({}));
+            this.errors[name] = b.detail || "trust failed";  // inline, not just a 4.5s toast
+            this.toast(name + ": trust failed", "error");
+          }
+        } catch (e) { this.errors[name] = String(e); this.toast(name + ": trust failed", "error"); }
+        this.trusting[name] = false;
+      },
+      // --- hosted live-view sessions (claustrum stream-json channel) ---
+      hostedStatusBadge(status) {
+        const map = { running: "bg-green-lt", starting: "bg-blue-lt", stopping: "bg-yellow-lt",
+                      stopped: "bg-secondary-lt", crashed: "bg-red-lt", error: "bg-red-lt" };
+        return Object.hasOwn(map, status) ? map[status] : "bg-secondary-lt";
+      },
+      async startHosted() {
+        const f = this.hostedForm;
+        if (!f.project || f.busy) return;
+        f.busy = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ channel: "hosted", project: f.project, permission_mode: f.permission_mode }),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) {
+            this.toast("hosted session started", "success");
+            await this.refresh();
+            if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);  // watch it immediately
+          } else {
+            this.toast("hosted start failed — " + (b.detail || res.status), "error");
+          }
+        } catch (e) { this.toast("hosted start failed", "error"); }
+        f.busy = false;
+      },
+      async stopHosted(h) {
+        const id = h.claustrum_process_id;
+        if (!window.confirm("Stop hosted session \"" + (h.label || id) + "\"?")) return;
+        this.hostedStopping[id] = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) this.toast("hosted session stopped", "success");
+          else { const b = await res.json().catch(() => ({})); this.toast("stop failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("stop failed", "error"); }
+        this.hostedStopping[id] = false;
+        this.closeHosted(id);
+        await this.refresh();
+      },
+      // Kill an orphaned survivor (CL-8): terminate the live agent + clear the row.
+      // Same DELETE endpoint as stop; the server kills the survivor pid when there's
+      // no live session rather than refusing.
+      async killHosted(h) {
+        const id = h.claustrum_process_id;
+        if (!window.confirm("Kill the orphaned session \"" + (h.label || id) + "\"? This terminates the surviving agent.")) return;
+        this.hostedStopping[id] = true;
+        let killed = false;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) { killed = true; this.toast("orphaned session killed", "success"); }
+          else { const b = await res.json().catch(() => ({})); this.toast("kill failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("kill failed", "error"); }
+        this.hostedStopping[id] = false;
+        // Only tear down the view on a successful kill; a failed kill leaves the orphan
+        // actionable (refresh re-fetches its row so it stays in the list).
+        if (killed) this.closeHosted(id);
+        await this.refresh();
+      },
+      async resumeHosted(h) {
+        const id = h.claustrum_process_id;
+        this.hostedResuming[id] = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/resume",
+                                  { method: "POST" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) {
+            this.toast("hosted session resumed", "success");
+            await this.refresh();
+            // Resume spawns a fresh process id under a new card; tear down the dead
+            // session's view/WS, then watch the resumed session.
+            this.closeHosted(id);
+            if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);
+          } else {
+            this.toast("resume failed — " + (b.detail || res.status), "error");
+          }
+        } catch (e) { this.toast("resume failed", "error"); }
+        this.hostedResuming[id] = false;
+      },
+      toggleHosted(id) {
+        const v = this.hostedView[id];
+        if (v && v.open) this.closeHosted(id); else this.openHosted(id);
+      },
+      // Open (or reconnect) the live stream, resuming from the last event we rendered
+      // so a reload / dropped link catches up via ?after= without re-dumping the ring.
+      openHosted(id) {
+        const prev = this.hostedView[id];
+        const after = prev ? prev.lastSeq : 0;
+        const view = { open: true, ws: null, lastSeq: after, events: prev ? prev.events : [],
+                       input: prev ? prev.input : "", sending: false, connLost: false,
+                       ended: false, endedReason: "" };
+        this.hostedView[id] = view;
+        const self = this;
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const url = proto + "://" + location.host + ROOT + "/ws/hosted/" +
+                    encodeURIComponent(id) + "?after=" + after;
+        const ws = new WebSocket(url);
+        ws.onmessage = (ev) => {
+          const v = self.hostedView[id];
+          if (!v || !v.open) return;
+          let e; try { e = JSON.parse(ev.data); } catch (_) { return; }
+          self._renderHostedEvent(id, e);
+        };
+        ws.onclose = () => {
+          const v = self.hostedView[id];
+          if (!v || !v.open) return;     // a deliberate close() — don't reconnect
+          if (v.ended) return;           // a terminal frame already settled the view
+          // Only reconnect a session the snapshot still reports as live. A stopped /
+          // crashed / gone session closes the socket immediately (server 1008); blindly
+          // reconnecting it loops forever and mislabels a dead session "reconnecting…".
+          // The 4s /api/hosted poll keeps `hosted` fresh, so this converges.
+          const h = self.hosted.find((x) => x.claustrum_process_id === id);
+          if (!h || !["running", "starting"].includes(h.status)) {
+            self._markHostedEnded(id, h);
+            return;
+          }
+          v.connLost = true;             // genuinely live — honest: the link dropped
+          setTimeout(() => { const w = self.hostedView[id]; if (w && w.open) self.openHosted(id); }, 1500);
+        };
+        view.ws = ws;
+      },
+      closeHosted(id) {
+        const v = this.hostedView[id];
+        if (v && v.ws) { try { v.ws.close(); } catch (e) {} }
+        if (v) v.open = false;
+      },
+      // Surface a terminal hosted session in the live view: explain why it ended (with the
+      // server's error_detail when present) and stop the reconnect loop. Resume (when the
+      // session kept its uuid) stays the recovery path, shown on the row above.
+      _markHostedEnded(id, h, fallback) {
+        const v = this.hostedView[id];
+        if (!v) return;
+        v.ended = true;
+        v.connLost = false;
+        if (!v.endedReason) v.endedReason = this._hostedEndedReason(h, fallback);
+      },
+      // Lead with whatever best explains the end: the snapshot's status phrasing, else a
+      // streamed exit/lost frame's text (`fallback`), else a generic line. Either way we
+      // still append the snapshot's error_detail + Resume hint — so a terminal frame that
+      // beats the 4s poll doesn't lose the richer reason the snapshot already carries.
+      _hostedEndedReason(h, fallback) {
+        const phrasing = {
+          stopped: "Session stopped.",
+          crashed: "The session crashed.",
+          error: "The session ended with an error.",
+          interrupted: "Session interrupted.",
+          exited: "Session ended.",
+        };
+        const base = (h && phrasing[h.status]) || fallback ||
+          (h ? "This session is no longer live." : "This session is no longer available.");
+        const detail = h && h.error_detail ? " " + h.error_detail : "";
+        const resume = h && h.claude_session_uuid ? " Use Resume above to continue it." : "";
+        return base + detail + resume;
+      },
+      _renderHostedEvent(id, e) {
+        const v = this.hostedView[id];
+        if (!v) return;
+        if (typeof e.event_seq === "number") { v.lastSeq = e.event_seq; v.connLost = false; }
+        // A terminal frame means the session is over: gate the composer and stop the
+        // reconnect loop (its renderable marker/error item still gets pushed below).
+        // Route through _markHostedEnded with the snapshot row so error_detail + the
+        // Resume hint survive a frame that beats the poll; the frame text is the fallback.
+        if (e.type === "exit" || e.type === "lost") {
+          const fallback = e.type === "lost"
+            ? "Stream lost — " + (e.reason || "the daemon connection dropped.")
+            : "Session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")." : ".");
+          this._markHostedEnded(id, this.hosted.find((x) => x.claustrum_process_id === id), fallback);
+        }
+        // A resolution flips the matching parked-permission item; it adds no new line.
+        if (e.type === "control_resolved") {
+          this._resolveHostedPermission(id, e.request_id, e.behavior);
+          this.$nextTick(() => this.scrollHosted(id));
+          return;
+        }
+        for (const it of this._hostedEventToItems(e)) v.events.push(it);
+        if (v.events.length > MAX_LOG_LINES) v.events.splice(0, v.events.length - MAX_LOG_LINES);
+        this.$nextTick(() => this.scrollHosted(id));
+      },
+      _resolveHostedPermission(id, requestId, behavior) {
+        const v = this.hostedView[id];
+        if (!v) return;
+        for (const it of v.events) {
+          if (it.kind === "permission" && it.request_id === requestId) {
+            it.resolved = true;
+            it.decision = (behavior === "allow" || behavior === "deny") ? behavior : "answered";
+          }
+        }
+      },
+      // Translate one fanned event into renderable conversation items (per the design
+      // doc's frame table: gap → "output lost (N frames)", lost → error, etc.).
+      _hostedEventToItems(e) {
+        switch (e.type) {
+          case "frame": return this._hostedFrameToItems(e.frame || {});
+          case "control_request": {
+            const req = e.request || {};
+            let input = "";
+            if (req.input != null) { try { input = JSON.stringify(req.input); } catch (_) { input = ""; } }
+            return [{ kind: "permission", request_id: e.request_id, subtype: e.subtype || "",
+                      tool: req.tool_name || "", input, resolved: false, decision: null }];
+          }
+          case "control_ack": return [];  // MCP handshake; nothing user-facing
+          case "stderr": case "text": return [{ kind: "stderr", text: e.text || "" }];
+          case "exit":
+            return [{ kind: "marker", text: "session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")" : "") }];
+          case "lost": return [{ kind: "error", text: "stream lost: " + (e.reason || "daemon connection dropped") }];
+          case "gap": {
+            const n = e.dropped != null ? e.dropped
+                    : (e.to_seq != null && e.from_seq != null ? e.to_seq - e.from_seq - 1 : null);
+            return [{ kind: "gap", text: "output lost" + (n != null ? " (" + n + " frames)" : "") }];
+          }
+          default: return [];
+        }
+      },
+      _hostedFrameToItems(frame) {
+        const t = frame.type;
+        if (t === "system") return [{ kind: "marker", text: "· " + (frame.subtype || "system") + " ·" }];
+        if (t === "result") {
+          const txt = (typeof frame.result === "string" && frame.result) ? frame.result : "(turn complete)";
+          return [{ kind: "result", text: txt }];
+        }
+        if (t === "assistant" || t === "user") {
+          const content = (frame.message || {}).content;
+          const items = [];
+          if (typeof content === "string") {
+            if (content.trim()) items.push({ kind: "msg", role: t, text: content });
+          } else if (Array.isArray(content)) {
+            for (const block of content) {
+              if (!block || typeof block !== "object") continue;
+              if (block.type === "text" && block.text) items.push({ kind: "msg", role: t, text: block.text });
+              else if (block.type === "tool_use")
+                items.push({ kind: "tool", name: block.name || "tool", input: block.input != null ? JSON.stringify(block.input) : "" });
+              else if (block.type === "tool_result") {
+                let txt = block.content;
+                if (Array.isArray(txt)) txt = txt.map((b) => (b && b.text) ? b.text : "").join("");
+                if (typeof txt !== "string") txt = "";
+                items.push({ kind: "toolresult", text: txt });
+              }
+            }
+          }
+          return items;
+        }
+        return [];  // unknown frame type — ignore rather than dump raw
+      },
+      scrollHosted(id) {
+        const el = document.getElementById("hosted-stream-" + id);
+        if (el) el.scrollTop = el.scrollHeight;
+      },
+      async sendHosted(id) {
+        const v = this.hostedView[id];
+        if (!v || v.sending) return;
+        const text = (v.input || "").trim();
+        if (!text) return;
+        v.sending = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/message", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) { v.input = ""; }
+          else { const b = await res.json().catch(() => ({})); this.toast("send failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("send failed", "error"); }
+        v.sending = false;
+      },
+      // Answer a parked tool-permission request (CL-5). Optimistically flips the item
+      // on success; the control_resolved event confirms it (idempotent).
+      async respondHosted(id, requestId, decision) {
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) +
+                                  "/permissions/" + encodeURIComponent(requestId), {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ decision }),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) { this._resolveHostedPermission(id, requestId, decision); }
+          else { const b = await res.json().catch(() => ({})); this.toast("permission " + decision + " failed — " + (b.detail || res.status), "error"); }
+        } catch (e) { this.toast("permission " + decision + " failed", "error"); }
+      },
+      // --- log streaming ---
+      toggleLogs(name) {
+        const s = this.logs[name];
+        if (s && s.open) { this.closeLogs(name); } else { this.openLogs(name); }
+      },
+      openLogs(name) {
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
+        this.logs[name] = { open: true, ws: null, lines: [], pending: [], paused: false };
+        const self = this;
+        const ws = new WebSocket(url);
+        ws.onmessage = (ev) => {
+          const s = self.logs[name];
+          if (!s || !s.open) return;
+          if (s.paused) {
+            s.pending.push(ev.data);
+            if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
+            return;
+          }
+          s.lines.push(ev.data);
+          if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
+          self.$nextTick(() => self.scrollLog(name));
+        };
+        this.logs[name].ws = ws;
+      },
+      closeLogs(name) {
+        const s = this.logs[name];
+        if (s && s.ws) { try { s.ws.close(); } catch (e) {} }
+        if (s) s.open = false;
+      },
+      pauseLogs(name) { if (this.logs[name]) this.logs[name].paused = true; },
+      resumeLogs(name) {
+        const s = this.logs[name];
+        if (!s) return;
+        s.lines.push(...s.pending); s.pending = [];
+        if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
+        s.paused = false;
+        this.$nextTick(() => this.scrollLog(name));
+      },
+      scrollLog(name) {
+        const el = document.getElementById("log-" + name);
+        if (el) el.scrollTop = el.scrollHeight;
+      },
+      jumpToLatest(name) { this.scrollLog(name); },
+    };
+  }
+
+  function reaper() {
+    return {
+      open: false, loading: false, loaded: false, error: null,
+      ghosts: [], total: 0, liveDirs: 0, busy: false, result: null, deleteTyped: "",
+      toggle() { this.open = !this.open; if (this.open && !this.loaded) this.load(); },
+      summary() {
+        if (!this.ghosts.length) return "No ghost environments — nothing to reap.";
+        return this.ghosts.length + " ghost(s) · " + this.liveDirs +
+          " live dir(s) kept · cloud Default never touched";
+      },
+      async load() {
+        this.loading = true; this.error = null; this.result = null;
+        try {
+          const res = await fetch(ROOT + "/api/environments/ghosts");
+          const body = await res.json();
+          if (!res.ok) { this.error = body.detail || "failed to scan"; }
+          else { this.ghosts = body.ghosts || []; this.total = body.total; this.liveDirs = body.live_dirs; }
+        } catch (e) { this.error = String(e); }
+        finally { this.loaded = true; this.loading = false; }
+      },
+      async _reap(action, confirm) {
+        this.busy = true; this.error = null; this.result = null;
+        try {
+          const res = await fetch(ROOT + "/api/environments/reap", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, confirm, ids: this.ghosts.map((g) => g.id) }),
+          });
+          const body = await res.json();
+          if (!res.ok) { this.error = body.detail || "reap failed"; return; }
+          const errs = Object.keys(body.errors || {}).length;
+          const msg = "✓ " + action + "d " + body.reaped.length + " environment(s)" +
+            (body.skipped.length ? " · skipped " + body.skipped.length : "") +
+            (errs ? " · " + errs + " error(s)" : "");
+          this.deleteTyped = "";
+          await this.load();
+          this.result = msg;
+        } catch (e) { this.error = String(e); }
+        finally { this.busy = false; }
+      },
+      archive() { this._reap("archive", "archive"); },
+      del() { if (this.deleteTyped === "DELETE") this._reap("delete", "DELETE"); },
+    };
+  }
+</script>

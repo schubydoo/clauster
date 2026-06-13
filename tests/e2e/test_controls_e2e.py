@@ -14,6 +14,13 @@ See ``tests/E2E_CHECKLIST.md`` for the full manual list; the rows covered here
 are marked ``[auto]``.
 """
 
+# TODO(redesign): the two-zone dashboard removed the old project card and its
+# "Start bridge" button — launching is now the per-project "Run Claude here"
+# popover, and the ··· overflow menu now lives on the project row. The Playwright
+# selectors below (.card lookups, "Start bridge") need re-targeting to the new
+# row + launch-popover markup. Out of scope for the unit-suite green-up; this
+# opt-in suite is excluded from the default/CI run.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

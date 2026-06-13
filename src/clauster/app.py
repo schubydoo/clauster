@@ -483,23 +483,23 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
         }
 
-    @app.get("/api/projects/{name}/card", response_class=HTMLResponse)
-    async def api_project_card(request: Request, name: str) -> Response:
-        """Render one project's card for reactive insertion (no full-page reload).
+    @app.get("/api/projects/{name}/row", response_class=HTMLResponse)
+    async def api_project_row(request: Request, name: str) -> Response:
+        """Render one project's row for reactive insertion (no full-page reload).
 
         Same Jinja partial the dashboard grid loops over — one source of truth.
+        ``idx=0`` so a freshly created project is never hidden by the Projects
+        search/cap (it renders within the first page).
         """
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
         proj = next((p for p in await list_projects() if p.name == name), None)
         if proj is None:
             raise HTTPException(status_code=404, detail=f"project {name!r} not found")
-        # pty_supported gates the resume-mode <option>; the fragment render must
-        # pass it too (same partial as the grid loop) or the picker vanishes.
         return templates.TemplateResponse(
             request,
-            "_project_card.html",
-            {"p": proj, "pty_supported": sys.platform != "win32"},
+            "_project_row.html",
+            {"p": proj, "idx": 0, "pty_supported": sys.platform != "win32"},
         )
 
     @app.get("/api/projects/{name}/usage")
@@ -1292,40 +1292,40 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         finally:
             job.unsubscribe(queue)
 
+    async def _dashboard_context() -> dict:
+        """Build the shared template context for the dashboard."""
+        projects = await list_projects()
+        return {
+            "projects": projects,
+            "version": __version__,
+            "projects_root": str(config.projects_root),
+            "auth_enabled": config.auth.enabled,
+            "reaper_ui_enabled": config.reaper.ui_enabled,
+            "default_spawn_mode": config.instance_defaults.spawn_mode,
+            "default_permission_mode": config.instance_defaults.permission_mode,
+            "default_resume_mode": config.claude.resume_mode,
+            # pty (true-resume) is POSIX-only; hide the option on Windows hosts.
+            "pty_supported": sys.platform != "win32",
+            # Usage badge: mode ("cost"|"tokens"|"off"), the currency code + its
+            # resolved symbol, the static USD->display multiplier, and whether
+            # cache tokens count toward the displayed token total. mode "off"
+            # hides the badge and skips the per-project /usage fetch.
+            "usage_mode": config.usage.mode,
+            "currency": config.usage.currency,
+            "currency_symbol": config.usage.effective_symbol,
+            "fx_rate": config.usage.fx_rate,
+            "token_total_includes_cache": config.usage.token_total_includes_cache,
+            # Live per-bridge metrics: master toggle, disk-part toggle, poll cadence.
+            "metrics_enabled": config.metrics.enabled,
+            "metrics_show_disk": config.metrics.show_disk,
+            "metrics_poll_ms": int(config.metrics.poll_seconds * 1000),
+            # Hosted channel (CL-4c): the live-view panel only renders when the
+            # claustrum daemon is configured; otherwise there's nothing to host.
+            "claustrum_enabled": config.claustrum.enabled,
+        }
+
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> Response:
-        projects = await list_projects()
-        return templates.TemplateResponse(
-            request,
-            "dashboard.html",
-            {
-                "projects": projects,
-                "version": __version__,
-                "projects_root": str(config.projects_root),
-                "auth_enabled": config.auth.enabled,
-                "reaper_ui_enabled": config.reaper.ui_enabled,
-                "default_spawn_mode": config.instance_defaults.spawn_mode,
-                "default_permission_mode": config.instance_defaults.permission_mode,
-                "default_resume_mode": config.claude.resume_mode,
-                # pty (true-resume) is POSIX-only; hide the option on Windows hosts.
-                "pty_supported": sys.platform != "win32",
-                # Usage badge: mode ("cost"|"tokens"|"off"), the currency code + its
-                # resolved symbol, the static USD->display multiplier, and whether
-                # cache tokens count toward the displayed token total. mode "off"
-                # hides the badge and skips the per-project /usage fetch.
-                "usage_mode": config.usage.mode,
-                "currency": config.usage.currency,
-                "currency_symbol": config.usage.effective_symbol,
-                "fx_rate": config.usage.fx_rate,
-                "token_total_includes_cache": config.usage.token_total_includes_cache,
-                # Live per-bridge metrics: master toggle, disk-part toggle, poll cadence.
-                "metrics_enabled": config.metrics.enabled,
-                "metrics_show_disk": config.metrics.show_disk,
-                "metrics_poll_ms": int(config.metrics.poll_seconds * 1000),
-                # Hosted channel (CL-4c): the live-view panel only renders when the
-                # claustrum daemon is configured; otherwise there's nothing to host.
-                "claustrum_enabled": config.claustrum.enabled,
-            },
-        )
+        return templates.TemplateResponse(request, "dashboard.html", await _dashboard_context())
 
     return app

@@ -13,6 +13,13 @@ pty Resume *content* check — that the prior conversation is actually restored 
 stays manual, since the fake bridge has no conversation to restore.
 """
 
+# TODO(redesign): the two-zone dashboard removed the old project card and its
+# "Start bridge" button — launching is now the per-project "Run Claude here"
+# popover (mode "In claude.ai / Desktop" routes to the bridge spawn). The
+# Playwright selectors below (get_by_role("button", name="Start bridge"), .card
+# lookups) need re-targeting to the new row + launch-popover markup. Out of scope
+# for the unit-suite green-up; this opt-in suite is excluded from the default/CI run.
+
 from __future__ import annotations
 
 import json

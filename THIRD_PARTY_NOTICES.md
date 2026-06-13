@@ -77,20 +77,20 @@ SOFTWARE.
 
 ---
 
-## Iconoir
+## Tabler Icons
 
-- Project: <https://iconoir.com>
-- Source: <https://github.com/iconoir-icons/iconoir>
-- Version: 7.11.0
-- Files: a subset of `icons/regular/*.svg` assembled into an inline SVG sprite at
-  `src/clauster/templates/_iconoir_sprite.html` (provenance + notice retained at
-  `src/clauster/static/vendor/iconoir/`)
+- Project: <https://tabler.io/icons>
+- Source: <https://github.com/tabler/tabler-icons>
+- Version: 3.44.0
+- Files: a subset of `icons/outline/*.svg` assembled into an inline SVG sprite at
+  `src/clauster/templates/_tabler_sprite.html` (provenance + notice retained at
+  `src/clauster/static/vendor/tabler-icons/`)
 - License: MIT
 
 ```text
 MIT License
 
-Copyright (c) 2021 Luca Burgio
+Copyright (c) 2020-2026 Paweł Kuna
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

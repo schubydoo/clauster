@@ -250,19 +250,27 @@ def test_dashboard_hides_hosted_panel_when_disabled(write_config, projects_root)
     app = _app(write_config)  # claustrum disabled by default
     with TestClient(app) as client:
         body = client.get("/").text
-    assert "New hosted session" not in body  # the gated panel's launcher button
     assert "const CLAUSTRUM_ENABLED = false" in body
+    # The claustrum-gated hosted-session row (and its inline permission controls)
+    # is never rendered when the channel is off; the row macro is only expanded
+    # inside the `{% if claustrum_enabled %}` blocks of the unified Active list.
+    assert "respondHosted(h.claustrum_process_id" not in body
 
 
 def test_dashboard_shows_hosted_panel_when_enabled(write_config, projects_root, monkeypatch):
+    # Redesign: hosted is the "Here in the browser" launch option plus a row in the
+    # unified Active list (with inline permission Allow/Deny). When claustrum is
+    # enabled, the hosted JS + browser launch mode + the gated row markup all ship.
     monkeypatch.setattr(app_module, "ClaustrumDaemon", _NoopDaemon)
     config = load_config(write_config("claustrum:\n  enabled: true\n"))
     app = create_app(config)
     app.state.hosted = _StubManager()
     with TestClient(app) as client:
         body = client.get("/").text
-    assert "New hosted session" in body  # the gated panel's launcher button
     assert "const CLAUSTRUM_ENABLED = true" in body
+    assert "Here in the browser" in body  # the browser launch mode
+    assert "_launchHosted" in body and "startHosted" in body  # hosted launch JS
+    assert "respondHosted(h.claustrum_process_id" in body  # gated hosted-row controls
 
 
 # -- message ---------------------------------------------------------------

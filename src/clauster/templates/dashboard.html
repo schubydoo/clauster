@@ -25,52 +25,220 @@
                    padding: .4rem .6rem; border-radius: 6px; max-height: 8rem; overflow: auto;
                    white-space: pre-wrap; overflow-wrap: break-word;
                    background: var(--tblr-bg-surface-secondary); color: var(--tblr-secondary); }
-    /* Inline Iconoir icons (sprite at templates/_iconoir_sprite.html): em-sized to
-       scale with the button text, currentColor for theming. */
     .ico { width: 1.05em; height: 1.05em; vertical-align: -.15em; flex: none; stroke-width: 1.5; }
-    /* Quiet attribute meta-row (Tier 2): dot-separated, color reserved for status. */
     .project-meta { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem 0; }
-    /* Separator: the bullet owns the horizontal spacing (no column-gap, so it isn't
-       double-spaced); body color + explicit so it stays visible and doesn't inherit
-       the colored span it precedes (the bullet before "untrusted" was taking amber). */
     .project-meta > span:not(:first-child)::before { content: "•"; margin: 0 .4rem; font-size: .8em; vertical-align: middle; color: var(--tblr-body-color); }
-    /* Card-header overflow menu (Alpine-driven; Tabler's dropdown positions via
-       Bootstrap JS/Popper, which we don't load — so place + show it ourselves). */
     .card-menu { position: relative; }
     .card-menu > .dropdown-menu { position: absolute; top: 100%; right: 0; left: auto; display: block; margin-top: .25rem; }
-    /* Compact "rows" layout (the cards⇄rows toggle). The SAME cards are restyled into
-       full-width stacked rows with the body collapsed behind a per-row caret (accordion);
-       no second template, so the grid loop and /card reactive insertion are reused verbatim.
-       The card-body's x-show="rowOpen(name)" does the collapsing; this just lays them out. */
-    #project-grid.layout-rows { --tblr-gutter-y: 0; }
-    #project-grid.layout-rows > [data-project] { flex: 0 0 100%; max-width: 100%; }
-    #project-grid.layout-rows .card { margin-bottom: 0; border-radius: 0; }
-    #project-grid.layout-rows > [data-project] + [data-project] .card { border-top: 0; }
-    #project-grid.layout-rows > [data-project]:first-child .card {
-      border-top-left-radius: var(--tblr-card-border-radius); border-top-right-radius: var(--tblr-card-border-radius); }
-    #project-grid.layout-rows > [data-project]:last-child .card {
-      border-bottom-left-radius: var(--tblr-card-border-radius); border-bottom-right-radius: var(--tblr-card-border-radius); }
-    #project-grid.layout-rows .card-header { padding-top: .5rem; padding-bottom: .5rem; }
-    .row-caret { background: none; border: 0; padding: 0 .35rem 0 0; line-height: 1; cursor: pointer;
-                 color: var(--tblr-secondary); font-size: .8rem; flex: none; }
     [x-cloak] { display: none !important; }
+
+    /* ===== two-zone layout ===== */
+    /* A zone is a labelled band: a heading + one-line "what this is for", then content. */
+    .zone-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: .25rem .6rem; margin: 0 0 .85rem; }
+    .zone-head h2 { font-size: 1.15rem; font-weight: 700; margin: 0; }
+    .zone-head .zone-sub { color: var(--tblr-secondary); font-size: .85rem; }
+    .zone-head .zone-actions { margin-left: auto; display: flex; align-items: center; gap: .4rem; }
+    .proj-search { max-width: 13rem; }
+    /* Two reorderable zones in a flex column: when sessions are live, the Active section
+       sorts above Projects (order:-1) so running work is never buried by a long list. */
+    .zones { display: flex; flex-direction: column; }
+    .zones > section { padding-top: 1.25rem; }
+
+    /* "Run Claude here" launch popover — drops below-right of the row's Run button. */
+    .launch-anchor { position: relative; display: inline-block; }
+    .launch-pop { position: absolute; z-index: 40; right: 0; left: auto; margin-top: .35rem;
+                  width: min(340px, 86vw); box-shadow: 0 .5rem 1.25rem rgba(0,0,0,.3); }
+    /* The project list is a card; let the popover overflow its bounds instead of clipping. */
+    #project-grid { overflow: visible; }
+    .launch-opt { display: flex; align-items: flex-start; gap: .15rem; width: 100%; margin: 0;
+                  padding: .45rem .55rem; border-radius: 7px; cursor: pointer; line-height: 1.2; }
+    .launch-opt:hover, .launch-opt.is-sel { background: var(--tblr-bg-surface-secondary); }
+    .launch-opt.is-sel { box-shadow: inset 0 0 0 1px var(--tblr-primary); }
+
+    /* Mode badge in the unified Active list. */
+    .mode-badge { font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+
+    /* Left rail encodes STATUS (live / starting / attention / ended), not mode — mode is
+       already the badge, so the most pre-attentive channel signals "what needs me". */
+    .sess-row { border-left: 3px solid transparent; }
+    .sess-row.sess-live { border-left-color: var(--tblr-green); }
+    .sess-row.sess-starting { border-left-color: var(--tblr-azure); }
+    .sess-row.sess-warn { border-left-color: var(--tblr-yellow); }
+    .sess-row.sess-dead { border-left-color: var(--tblr-secondary); }
   </style>
 </head>
 <body>
-{% include "_iconoir_sprite.html" %}
-<div class="page">
+{% include "_tabler_sprite.html" %}
+
+{# Active-session row macros — reused by both the live list and the Recent group so a
+   browser/detached row renders identically wherever it appears (live vs ended). #}
+{% macro hosted_row() %}
+            <div class="list-group-item sess-row" :class="hostedRailClass(h)" x-show="activeFilter === 'all' || activeFilter === 'browser'">
+              <div class="d-flex align-items-center flex-wrap gap-1">
+                <span class="badge bg-azure-lt mode-badge me-1">browser</span>
+                <span class="badge me-1" :class="hostedStatusBadge(h.status)" x-text="h.status"></span>
+                <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
+                      title="Survived a daemon restart — Resume to recover or Kill to clean up">orphan</span>
+                <span class="fw-medium me-1" x-text="h.project"></span>
+                <span class="text-secondary small me-1" x-text="h.permission_mode"></span>
+                <span class="ms-auto d-flex gap-1">
+                  <template x-if="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid">
+                    <button type="button" class="btn btn-sm btn-success"
+                            :disabled="hostedResuming[h.claustrum_process_id]" @click="resumeHosted(h)">
+                      <span x-text="hostedResuming[h.claustrum_process_id] ? 'Resuming…' : 'Resume'">Resume</span>
+                    </button>
+                  </template>
+                  <template x-if="h.is_orphan">
+                    <button type="button" class="btn btn-sm btn-outline-danger"
+                            :disabled="hostedStopping[h.claustrum_process_id]" @click="killHosted(h)">
+                      <span x-text="hostedStopping[h.claustrum_process_id] ? 'Killing…' : 'Kill'">Kill</span>
+                    </button>
+                  </template>
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleHosted(h.claustrum_process_id)"
+                          x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
+                  <button type="button" class="btn btn-sm btn-outline-danger" x-show="['running', 'starting'].includes(h.status)"
+                          :disabled="hostedStopping[h.claustrum_process_id]" @click="stopHosted(h)">
+                    <span x-text="hostedStopping[h.claustrum_process_id] ? 'Stopping…' : 'Stop'">Stop</span>
+                  </button>
+                </span>
+              </div>
+              <!-- live conversation view -->
+              <template x-if="hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open">
+                <div class="mt-2">
+                  <div class="alert alert-warning py-1 px-2 mb-2"
+                       x-show="hostedView[h.claustrum_process_id].connLost && !hostedView[h.claustrum_process_id].ended" x-cloak>
+                    Live link dropped — reconnecting…
+                  </div>
+                  <div class="alert alert-secondary py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].ended" x-cloak
+                       x-text="hostedView[h.claustrum_process_id].endedReason || 'This session has ended — it is no longer live.'"></div>
+                  <div class="border rounded p-2" :id="'hosted-stream-' + h.claustrum_process_id"
+                       style="max-height: 360px; overflow-y: auto; font-size: 0.875rem;">
+                    <template x-for="(it, idx) in hostedView[h.claustrum_process_id].events" :key="idx">
+                      <div class="mb-1">
+                        <template x-if="it.kind === 'msg'">
+                          <div :class="it.role === 'assistant' ? 'text-body' : 'text-secondary'">
+                            <span class="badge me-1" :class="it.role === 'assistant' ? 'bg-azure-lt' : 'bg-secondary-lt'" x-text="it.role"></span>
+                            <span style="white-space: pre-wrap;" x-text="it.text"></span>
+                          </div>
+                        </template>
+                        <template x-if="it.kind === 'tool'">
+                          <div><span class="badge bg-purple-lt me-1">🔧 <span x-text="it.name"></span></span><code class="small text-secondary" x-text="it.input"></code></div>
+                        </template>
+                        <template x-if="it.kind === 'toolresult'">
+                          <div class="text-secondary small ps-2" style="white-space: pre-wrap;" x-text="it.text"></div>
+                        </template>
+                        <template x-if="it.kind === 'result'">
+                          <div class="text-success small" x-text="it.text"></div>
+                        </template>
+                        <template x-if="it.kind === 'marker'">
+                          <div class="text-secondary small text-center" x-text="it.text"></div>
+                        </template>
+                        <template x-if="it.kind === 'permission'">
+                          <div class="alert py-1 px-2 mb-1" :class="it.resolved ? 'alert-secondary' : 'alert-warning'">
+                            <div class="d-flex align-items-center flex-wrap gap-1">
+                              <span class="me-1">⏸ permission<template x-if="it.tool">: <code x-text="it.tool"></code></template></span>
+                              <code class="small text-secondary" x-show="it.input" x-text="it.input"></code>
+                              <template x-if="!it.resolved">
+                                <span class="ms-auto">
+                                  <button type="button" class="btn btn-sm btn-success me-1" @click="respondHosted(h.claustrum_process_id, it.request_id, 'allow')">Allow</button>
+                                  <button type="button" class="btn btn-sm btn-outline-danger" @click="respondHosted(h.claustrum_process_id, it.request_id, 'deny')">Deny</button>
+                                </span>
+                              </template>
+                              <template x-if="it.resolved">
+                                <span class="ms-auto small" :class="it.decision === 'allow' ? 'text-success' : 'text-secondary'"
+                                      x-text="it.decision === 'allow' ? '✓ allowed' : (it.decision === 'deny' ? '✕ denied' : 'answered')"></span>
+                              </template>
+                            </div>
+                          </div>
+                        </template>
+                        <template x-if="it.kind === 'gap'">
+                          <div class="text-warning small text-center" x-text="it.text"></div>
+                        </template>
+                        <template x-if="it.kind === 'stderr'">
+                          <div class="text-danger small" style="white-space: pre-wrap;" x-text="it.text"></div>
+                        </template>
+                        <template x-if="it.kind === 'error'">
+                          <div class="text-danger small" x-text="it.text"></div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                  <div class="input-group mt-2">
+                    <input type="text" class="form-control" aria-label="Session message"
+                           :placeholder="hostedView[h.claustrum_process_id].ended ? 'Session ended — not accepting messages' : 'Send a message…'"
+                           x-model="hostedView[h.claustrum_process_id].input"
+                           @keydown.enter="sendHosted(h.claustrum_process_id)"
+                           :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended">
+                    <button class="btn btn-primary" @click="sendHosted(h.claustrum_process_id)"
+                            :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended || !(hostedView[h.claustrum_process_id].input || '').trim()">
+                      <span x-text="hostedView[h.claustrum_process_id].sending ? 'Sending…' : 'Send'">Send</span>
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </div>
+{% endmacro %}
+
+{% macro detached_row() %}
+            <div class="list-group-item sess-row" :class="agentRailClass(j)" x-show="activeFilter === 'all' || activeFilter === 'detached'">
+              <div class="d-flex align-items-center flex-wrap gap-1">
+                <span class="badge bg-purple-lt mode-badge me-1">detached</span>
+                <span class="badge me-1" :class="agentBadgeClass(j.state)" x-text="j.state || '—'"></span>
+                <span class="fw-medium me-1" x-text="j.name || j.intent || j.id"></span>
+                <span class="badge bg-azure-lt me-1" x-show="j.bridge_session_id" x-cloak
+                      title="Registered with claude.ai">claude.ai</span>
+                <span class="status-dot me-1" :class="j.worker_alive ? 'status-dot-animated bg-green' : 'bg-secondary'"
+                      :title="j.worker_alive ? 'Worker process is live' : 'No live worker process (state kept on disk)'"
+                      aria-hidden="true"></span>
+                <span class="text-secondary small" x-text="j.worker_alive ? ('pid ' + j.worker_pid) : 'no process'"></span>
+                <span class="ms-auto d-flex align-items-center gap-2">
+                  <span class="text-secondary small" x-text="agentWhen(j)"></span>
+                  <button class="btn btn-sm btn-outline-danger" :disabled="agentStopping[j.id]" @click="stopAgent(j)"
+                          :title="j.bridge_session_id ? 'Stop and deregister the claude.ai session' : 'Stop and remove this session'">
+                    <span x-text="agentStopping[j.id] ? 'Stopping…' : 'Stop'">Stop</span>
+                  </button>
+                </span>
+              </div>
+              <!-- detail only while the worker is live: a 'done'/'stopped' job often keeps a
+                   stale 'starting…' detail on disk, which reads as wrong under a done badge. -->
+              <div class="text-secondary small mt-1" x-cloak
+                   x-show="j.detail && (j.worker_alive || ['working', 'blocked'].includes(j.state))"
+                   x-text="j.detail"></div>
+              <!-- de-dupe: only show needs when it differs from detail -->
+              <div class="small mt-1 text-warning" x-show="j.needs && j.needs !== j.detail"
+                   x-text="'waiting on: ' + j.needs"></div>
+              <div class="small mt-1 text-secondary text-truncate" x-show="j.cwd"><code x-text="j.cwd"></code></div>
+            </div>
+{% endmacro %}
+
+<!-- One dashboard() scope spans header + body + footer so the header readiness pill and
+     the zones share a single component (one poll loop, one readiness/state object). -->
+<div class="page" x-data="dashboard()" x-init="init()">
   <header class="navbar navbar-expand-md sticky-top d-print-none">
     <div class="container-xl">
       <span class="navbar-brand fs-2 fw-bold mb-0">Clauster
         <span class="text-secondary fs-5 fw-normal">v{{ version }}</span></span>
       <span class="text-secondary small d-none d-lg-inline ms-2 text-truncate">{{ projects_root }}</span>
       <div class="navbar-nav flex-row ms-auto align-items-center" style="gap:.5rem">
+        <!-- Readiness promoted to a header pill: it gates whether anything will start,
+             so it surfaces at header level (click to expand the checks). -->
+        <!-- Severity-aware: solid red + "blocking" only when a check actually blocks a
+             start; warnings get a quieter outline pill (you can still launch). -->
+        <button type="button" class="btn btn-sm" x-cloak
+                x-show="readiness.loaded && readinessIssues().length > 0"
+                :class="readinessBlockers().length ? 'btn-danger' : 'btn-outline-warning'"
+                @click="readiness.showPanel = !readiness.showPanel"
+                :title="readinessBlockers().length
+                  ? 'A check is blocking — sessions will not start until it is fixed'
+                  : 'Warnings only — sessions can still start; click to review'"
+                x-text="readinessBlockers().length
+                  ? ('⚠ ' + readinessBlockers().length + ' blocking')
+                  : ('⚠ ' + readinessWarnings().length + (readinessWarnings().length === 1 ? ' check' : ' checks'))"></button>
         <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme" title="Toggle dark / light theme">
           <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
           <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
         </button>
         {% if auth_enabled %}
-        <!-- CSRF enforced by the auth guard middleware (Origin/Referer on unsafe methods). -->
         <form method="post" action="{{ request.scope.root_path }}/logout"> <!-- nosemgrep -->
           <button class="btn btn-sm" type="submit">Log out</button>
         </form>
@@ -80,11 +248,9 @@
   </header>
 
   <div class="page-body">
-    <div class="container-xl" x-data="dashboard()" x-init="init()">
+    <div class="container-xl">
 
-      <!-- ===== Connection-lost banner (polling failed repeatedly) ===== -->
-      <!-- x-show drives the wrapper, NOT the .d-flex alert: Tabler's d-flex is
-           display:flex !important and would override x-show's display:none. -->
+      <!-- ===== Connection-lost banner ===== -->
       <div class="mb-3" x-show="connLost" x-cloak>
         <div class="alert alert-warning d-flex align-items-center mb-0" role="status">
           <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>
@@ -92,16 +258,17 @@
         </div>
       </div>
 
-      <!-- ===== System readiness (preflight) — only shown when a check needs attention ===== -->
-      <div class="mb-3" x-show="readiness.loaded && readinessIssues().length > 0" x-cloak>
+      <!-- ===== Readiness detail (collapsed; opened by the header pill) ===== -->
+      <div class="mb-3" x-show="readiness.loaded && readiness.showPanel" x-cloak>
         <div class="card">
           <div class="card-status-start bg-warning"></div>
           <div class="card-header">
-            <h3 class="card-title">Before you start a bridge</h3>
+            <h3 class="card-title">Before you start a session</h3>
             <div class="card-actions btn-list">
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="readiness.showAll = !readiness.showAll"
                       x-text="readiness.showAll ? 'Show only issues' : 'Show all checks'">Show all checks</button>
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()">↻ Re-check</button>
+              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="readiness.showPanel = false">Close</button>
             </div>
           </div>
           <div class="list-group list-group-flush">
@@ -116,18 +283,36 @@
             </template>
           </div>
           <div class="card-footer text-secondary small">
-            These are your <code>clauster doctor</code> checks. ⚠ are warnings — a bridge may still start;
+            These are your <code>clauster doctor</code> checks. ⚠ are warnings — a session may still start;
             ✗ must be fixed before one will.
           </div>
         </div>
       </div>
 
-      <!-- ===== New project ===== -->
-      <div class="mb-3">
-        <button type="button" class="btn btn-primary" @click="toggleNewProject()">
-          <span x-text="np.open ? '× Cancel' : '+ New project'">+ New project</span>
-        </button>
-        <div class="card mt-2" x-show="np.open" x-cloak>
+      <div class="zones">
+      <section class="zone-projects">
+      <!-- ============================================================= -->
+      <!-- ZONE 1 · Projects — where you launch Claude                   -->
+      <!-- ============================================================= -->
+      <div class="zone-head">
+        <h2>Projects</h2>
+        <span class="zone-sub">a folder Claude works in — launch a session from any of them</span>
+        <div class="zone-actions">
+          <input type="search" class="form-control form-control-sm proj-search" placeholder="Search projects…"
+                 x-model="projectFilter" aria-label="Search projects">
+          <button type="button" class="btn btn-sm btn-ghost-secondary" x-cloak
+                  x-show="PROJECT_NAMES.length > 6 && !projectFilter.trim()"
+                  @click="showAllProjects = !showAllProjects"
+                  x-text="showAllProjects ? 'Show fewer' : ('Show all ' + PROJECT_NAMES.length)"></button>
+          <button type="button" class="btn btn-sm btn-primary" @click="toggleNewProject()">
+            <span x-text="np.open ? '× Cancel' : '+ New project'">+ New project</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- New project (create / clone) -->
+      <div class="mb-3" x-show="np.open" x-cloak>
+        <div class="card">
           <div class="card-body">
             <div class="row g-2">
               <div class="col-md-5">
@@ -158,7 +343,7 @@
               <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
                 <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>
               <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts blocked unless enabled in
-                config · cloned code runs only when you Start a bridge.</p>
+                config · cloned code runs only when you launch a session.</p>
             </div>
             <div class="mt-3">
               <button class="btn btn-primary" @click="submitNew()" :disabled="np.busy || !np.name">
@@ -167,7 +352,6 @@
                                       : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</span>
               </button>
             </div>
-            <!-- live clone progress (streamed over /ws/clone-progress) -->
             <div class="mt-3" x-show="np.cloning" x-cloak>
               <div class="d-flex justify-content-between small text-secondary mb-1">
                 <span x-text="np.progress.phase || 'Cloning…'"></span>
@@ -182,265 +366,174 @@
             <div class="alert alert-danger mt-2 mb-0" x-show="np.error" x-cloak x-text="np.error"></div>
             <div class="alert alert-warning mt-2 mb-0" x-show="np.warn" x-cloak>
               ⚠ <strong x-text="np.submittedName || np.name"></strong> ships <strong x-text="np.warn"></strong>
-              — its code runs when you Start a bridge here. Review it before starting.
+              — its code runs when you launch a session here. Review it before starting.
               <button class="btn btn-sm btn-warning ms-2" @click="revealProject(np.submittedName || np.name)">Show it</button>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- ===== Background agents (claude --bg / agent view) ===== -->
-      <!-- Read-only list auto-shows when sessions exist (BG-1); a small launcher
-           opens the dispatch form so the first agent can be started from an
-           otherwise-hidden panel. Stop tears a session down the deregistering way. -->
-      <div class="mb-3" x-show="agents.length > 0 || agentDispatchOpen" x-cloak>
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Background agents</h3>
-            <span class="card-subtitle"><code>claude --bg</code> sessions on this host</span>
-          </div>
-          <!-- dispatch form (opened via the launcher button below) -->
-          <div class="card-body border-bottom" x-show="agentDispatchOpen" x-cloak>
-            <div class="row g-2 align-items-end">
-              <div class="col-auto">
-                <label for="agent-dispatch-project" class="form-label small mb-1">Project</label>
-                <select id="agent-dispatch-project" class="form-select" x-model="agentForm.project">
-                  <option value="">Choose…</option>
-                  <template x-for="n in PROJECT_NAMES" :key="n">
-                    <option :value="n" x-text="n"></option>
-                  </template>
-                </select>
-              </div>
-              <div class="col">
-                <label for="agent-dispatch-prompt" class="form-label small mb-1">Prompt <span class="text-secondary">(optional)</span></label>
-                <input id="agent-dispatch-prompt" class="form-control" x-model="agentForm.prompt"
-                       placeholder="Initial instruction for the session…"
-                       @keydown.enter="dispatchAgent()">
-              </div>
-              <div class="col-auto">
-                <label class="form-check mb-2" title="Open as a Remote Control session — visible on claude.ai">
-                  <input class="form-check-input" type="checkbox" x-model="agentForm.cloud">
-                  <span class="form-check-label">cloud</span>
-                </label>
-              </div>
-              <div class="col-auto">
-                <button class="btn btn-primary" :disabled="!agentForm.project || agentForm.busy"
-                        @click="dispatchAgent()">
-                  <span x-text="agentForm.busy ? 'Dispatching…' : 'Dispatch'">Dispatch</span>
-                </button>
-              </div>
-            </div>
-            <div class="small text-secondary mt-1">
-              Spawns a detached <code>claude --bg</code> session; <strong>cloud</strong> also opens it on claude.ai. Stop it here to tear down cleanly (a forced kill would strand a cloud session).
-            </div>
-          </div>
-          <div class="list-group list-group-flush">
-            <template x-for="j in agents" :key="j.id">
-              <div class="list-group-item">
-                <div class="d-flex align-items-center flex-wrap gap-1">
-                  <span class="badge me-1" :class="agentBadgeClass(j.state)" x-text="j.state || '—'"></span>
-                  <span class="fw-medium me-1" x-text="j.name || j.intent || j.id"></span>
-                  <span class="badge bg-azure-lt me-1" x-show="j.bridge_session_id" x-cloak
-                        title="Registered with Remote Control — visible on claude.ai">cloud</span>
-                  <span class="status-dot me-1" :class="j.worker_alive ? 'status-dot-animated bg-green' : 'bg-secondary'"
-                        :title="j.worker_alive ? 'Worker process is live' : 'No live worker process (state kept on disk)'"
-                        aria-hidden="true"></span>
-                  <span class="text-secondary small" x-text="j.worker_alive ? ('pid ' + j.worker_pid) : 'no process'"></span>
-                  <span class="ms-auto text-secondary small me-2" x-text="agentWhen(j)"></span>
-                  <button class="btn btn-sm btn-ghost-danger" :disabled="agentStopping[j.id]"
-                          @click="stopAgent(j)"
-                          :title="j.bridge_session_id ? 'Stop and deregister the cloud session' : 'Stop and remove this session'">
-                    <span x-text="agentStopping[j.id] ? 'Stopping…' : 'Stop'">Stop</span>
-                  </button>
-                </div>
-                <div class="text-secondary small mt-1" x-show="j.detail" x-text="j.detail"></div>
-                <div class="small mt-1 text-warning" x-show="j.needs" x-text="'needs: ' + j.needs"></div>
-                <div class="small mt-1 text-secondary" x-show="j.cwd"><code x-text="j.cwd"></code></div>
-              </div>
-            </template>
-          </div>
+      <!-- Project list (rows — same layout language as the Active-sessions list below) -->
+      {% if projects %}
+      <div class="card" id="project-grid">
+        <div class="list-group list-group-flush">
+        {% for p in projects %}
+          {% set idx = loop.index0 %}
+          {% include "_project_row.html" %}
+        {% endfor %}
         </div>
       </div>
-      <!-- launcher: always available so the first session can be dispatched even
-           while the panel above is hidden (zero agents). -->
-      <div class="mb-3">
-        <button class="btn btn-ghost-secondary" @click="agentDispatchOpen = !agentDispatchOpen">
-          <span x-text="agentDispatchOpen ? '× Close background-agent dispatch' : '🤖 New background agent'">🤖 New background agent</span>
-        </button>
-      </div>
-
-      {% if claustrum_enabled %}
-      <!-- ===== Hosted live-view sessions (claustrum stream-json channel, CL-4c) ===== -->
-      <div class="mb-3" x-show="hosted.length > 0 || hostedDispatchOpen" x-cloak>
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Hosted sessions</h3>
-            <span class="card-subtitle">headless <code>claude</code> sessions you watch &amp; drive live</span>
-          </div>
-          <!-- start form (opened via the launcher button below) -->
-          <div class="card-body border-bottom" x-show="hostedDispatchOpen" x-cloak>
-            <div class="row g-2 align-items-end">
-              <div class="col-auto">
-                <label for="hosted-project" class="form-label small mb-1">Project</label>
-                <select id="hosted-project" class="form-select" x-model="hostedForm.project">
-                  <option value="">Choose…</option>
-                  <template x-for="n in PROJECT_NAMES" :key="n">
-                    <option :value="n" x-text="n"></option>
-                  </template>
-                </select>
-              </div>
-              <div class="col-auto">
-                <label for="hosted-perm" class="form-label small mb-1">Permission mode</label>
-                <select id="hosted-perm" class="form-select" x-model="hostedForm.permission_mode">
-                  <template x-for="m in PERMISSION_MODES" :key="m">
-                    <option :value="m" x-text="m"></option>
-                  </template>
-                </select>
-              </div>
-              <div class="col-auto">
-                <button class="btn btn-primary" :disabled="!hostedForm.project || hostedForm.busy" @click="startHosted()">
-                  <span x-text="hostedForm.busy ? 'Starting…' : 'Start'">Start</span>
-                </button>
-              </div>
-            </div>
-            <div class="small text-secondary mt-1">
-              Spawns a headless stream-json session through the claustrum daemon. Type a prompt, watch
-              Claude work live, send follow-ups — reload mid-run and the stream catches up. Until the
-              permissions UI lands, tool prompts park (shown below) and wait.
-            </div>
-          </div>
-          <div class="list-group list-group-flush">
-            <template x-for="h in hosted" :key="h.claustrum_process_id">
-              <div class="list-group-item">
-                <div class="d-flex align-items-center flex-wrap gap-1">
-                  <span class="badge me-1" :class="hostedStatusBadge(h.status)" x-text="h.status"></span>
-                  <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
-                        title="Survived a daemon restart — Resume to recover or Kill to clean up">orphan</span>
-                  <span class="fw-medium me-1" x-text="h.project"></span>
-                  <span class="text-secondary small me-1" x-text="h.permission_mode"></span>
-                  <span class="ms-auto d-flex gap-1">
-                    <!-- Resume a lost session (crashed/stopped/error) from its captured uuid (CL-7);
-                         for an orphan this also kills the survivor first (CL-8). -->
-                    <template x-if="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid">
-                      <button type="button" class="btn btn-sm btn-success"
-                              :disabled="hostedResuming[h.claustrum_process_id]" @click="resumeHosted(h)">
-                        <span x-text="hostedResuming[h.claustrum_process_id] ? 'Resuming…' : 'Resume'">Resume</span>
-                      </button>
-                    </template>
-                    <!-- Kill an orphaned survivor (CL-8): terminate the live agent + clear the row. -->
-                    <template x-if="h.is_orphan">
-                      <button type="button" class="btn btn-sm btn-ghost-danger"
-                              :disabled="hostedStopping[h.claustrum_process_id]" @click="killHosted(h)">
-                        <span x-text="hostedStopping[h.claustrum_process_id] ? 'Killing…' : 'Kill'">Kill</span>
-                      </button>
-                    </template>
-                    <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleHosted(h.claustrum_process_id)"
-                            x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
-                    <button type="button" class="btn btn-sm btn-ghost-danger" x-show="['running', 'starting'].includes(h.status)"
-                            :disabled="hostedStopping[h.claustrum_process_id]" @click="stopHosted(h)">
-                      <span x-text="hostedStopping[h.claustrum_process_id] ? 'Stopping…' : 'Stop'">Stop</span>
-                    </button>
-                  </span>
-                </div>
-                <!-- live conversation view (opened on demand; reconnects via ?after=) -->
-                <template x-if="hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open">
-                  <div class="mt-2">
-                    <div class="alert alert-warning py-1 px-2 mb-2"
-                         x-show="hostedView[h.claustrum_process_id].connLost && !hostedView[h.claustrum_process_id].ended" x-cloak>
-                      Live link dropped — reconnecting…
-                    </div>
-                    <div class="alert alert-secondary py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].ended" x-cloak
-                         x-text="hostedView[h.claustrum_process_id].endedReason || 'This session has ended — it is no longer live.'"></div>
-                    <div class="border rounded p-2" :id="'hosted-stream-' + h.claustrum_process_id"
-                         style="max-height: 360px; overflow-y: auto; font-size: 0.875rem;">
-                      <template x-for="(it, idx) in hostedView[h.claustrum_process_id].events" :key="idx">
-                        <div class="mb-1">
-                          <template x-if="it.kind === 'msg'">
-                            <div :class="it.role === 'assistant' ? 'text-body' : 'text-secondary'">
-                              <span class="badge me-1" :class="it.role === 'assistant' ? 'bg-azure-lt' : 'bg-secondary-lt'" x-text="it.role"></span>
-                              <span style="white-space: pre-wrap;" x-text="it.text"></span>
-                            </div>
-                          </template>
-                          <template x-if="it.kind === 'tool'">
-                            <div><span class="badge bg-purple-lt me-1">🔧 <span x-text="it.name"></span></span><code class="small text-secondary" x-text="it.input"></code></div>
-                          </template>
-                          <template x-if="it.kind === 'toolresult'">
-                            <div class="text-secondary small ps-2" style="white-space: pre-wrap;" x-text="it.text"></div>
-                          </template>
-                          <template x-if="it.kind === 'result'">
-                            <div class="text-success small" x-text="it.text"></div>
-                          </template>
-                          <template x-if="it.kind === 'marker'">
-                            <div class="text-secondary small text-center" x-text="it.text"></div>
-                          </template>
-                          <template x-if="it.kind === 'permission'">
-                            <div class="alert py-1 px-2 mb-1" :class="it.resolved ? 'alert-secondary' : 'alert-warning'">
-                              <div class="d-flex align-items-center flex-wrap gap-1">
-                                <span class="me-1">⏸ permission<template x-if="it.tool">: <code x-text="it.tool"></code></template></span>
-                                <code class="small text-secondary" x-show="it.input" x-text="it.input"></code>
-                                <template x-if="!it.resolved">
-                                  <span class="ms-auto">
-                                    <button type="button" class="btn btn-sm btn-success me-1" @click="respondHosted(h.claustrum_process_id, it.request_id, 'allow')">Allow</button>
-                                    <button type="button" class="btn btn-sm btn-ghost-danger" @click="respondHosted(h.claustrum_process_id, it.request_id, 'deny')">Deny</button>
-                                  </span>
-                                </template>
-                                <template x-if="it.resolved">
-                                  <span class="ms-auto small" :class="it.decision === 'allow' ? 'text-success' : 'text-secondary'"
-                                        x-text="it.decision === 'allow' ? '✓ allowed' : (it.decision === 'deny' ? '✕ denied' : 'answered')"></span>
-                                </template>
-                              </div>
-                            </div>
-                          </template>
-                          <template x-if="it.kind === 'gap'">
-                            <div class="text-warning small text-center" x-text="it.text"></div>
-                          </template>
-                          <template x-if="it.kind === 'stderr'">
-                            <div class="text-danger small" style="white-space: pre-wrap;" x-text="it.text"></div>
-                          </template>
-                          <template x-if="it.kind === 'error'">
-                            <div class="text-danger small" x-text="it.text"></div>
-                          </template>
-                        </div>
-                      </template>
-                    </div>
-                    <div class="input-group mt-2">
-                      <input type="text" class="form-control" aria-label="Hosted session message"
-                             :placeholder="hostedView[h.claustrum_process_id].ended ? 'Session ended — not accepting messages' : 'Send a message…'"
-                             x-model="hostedView[h.claustrum_process_id].input"
-                             @keydown.enter="sendHosted(h.claustrum_process_id)"
-                             :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended">
-                      <button class="btn btn-primary" @click="sendHosted(h.claustrum_process_id)"
-                              :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended || !(hostedView[h.claustrum_process_id].input || '').trim()">
-                        <span x-text="hostedView[h.claustrum_process_id].sending ? 'Sending…' : 'Send'">Send</span>
-                      </button>
-                    </div>
-                  </div>
-                </template>
-              </div>
-            </template>
-          </div>
+      {% else %}
+      <div class="empty" id="empty-state">
+        <p class="empty-title">No projects yet</p>
+        <p class="empty-subtitle text-secondary">
+          Clauster runs Claude in a project directory under <code>{{ projects_root }}</code>.
+          Create one or clone a git repo to get started — or drop a directory there and it appears here.
+        </p>
+        <div class="empty-action">
+          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
+          </button>
+          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
+          </button>
         </div>
-      </div>
-      <!-- launcher: always available so the first hosted session can be started while
-           the panel above is hidden (zero sessions). -->
-      <div class="mb-3">
-        <button class="btn btn-ghost-secondary" @click="hostedDispatchOpen = !hostedDispatchOpen">
-          <span x-text="hostedDispatchOpen ? '× Close hosted session' : '🛰️ New hosted session'">🛰️ New hosted session</span>
-        </button>
       </div>
       {% endif %}
+      </section>
+
+      <!-- Active sorts above Projects when anything is live (order:-1) so running work
+           is never buried under a long Projects list. -->
+      <section class="zone-active" style="order: -1">
+      <!-- ============================================================= -->
+      <!-- ZONE 2 · Active sessions — what's running now                 -->
+      <!-- ============================================================= -->
+      <div class="zone-head">
+        <h2>Active sessions</h2>
+        <span class="zone-sub">what Claude is running for you right now</span>
+        <div class="zone-actions" x-show="hasLive()" x-cloak>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Filter sessions by where they run">
+            <template x-for="f in ['all','browser','desktop','detached']" :key="f">
+              <button type="button" class="btn" @click="activeFilter = f" :aria-pressed="activeFilter === f"
+                      :class="activeFilter === f ? 'btn-primary' : 'btn-ghost-secondary'" x-text="f"></button>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" x-show="hasLive()" x-cloak>
+        <div class="list-group list-group-flush">
+
+          <!-- browser (hosted live-view) sessions — live only -->
+          {% if claustrum_enabled %}
+          <template x-for="h in liveHosted()" :key="h.claustrum_process_id">{{ hosted_row() }}</template>
+          {% endif %}
+
+          <!-- desktop (claude.ai / Desktop bridge) sessions -->
+          <template x-for="i in activeBridges()" :key="i.project">
+            <div class="list-group-item sess-row" :class="bridgeRailClass(i.project)" x-show="activeFilter === 'all' || activeFilter === 'desktop'">
+              <div class="d-flex align-items-center flex-wrap gap-1">
+                <span class="badge bg-blue-lt mode-badge me-1">desktop</span>
+                <span class="badge" :class="statusBadgeClass(i.project)">
+                  <span class="status-dot" :class="statusDotClass(i.project)"></span>
+                  <span x-text="statusLabel(i.project)">Running</span>
+                </span>
+                <span class="fw-medium ms-1" x-text="i.project"></span>
+                <span class="text-secondary small ms-1" x-show="metricsLabel(i.project)" x-cloak
+                      :title="metricsTitle(i.project)" x-text="metricsLabel(i.project)"></span>
+                <span class="ms-auto d-flex gap-1">
+                  <a class="btn btn-sm btn-primary" target="_blank" rel="noopener"
+                     x-show="sessionUrlOf(i.project)" x-cloak :href="sessionUrlOf(i.project)"
+                     title="Open this session in the Claude web app"><svg class="ico me-1" aria-hidden="true"><use href="#ic-open"/></svg>Open in Claude</a>
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleQr(i.project)"
+                          x-show="sessionUrlOf(i.project)" x-cloak title="Show a QR code to open on your phone">
+                    <svg class="ico" aria-hidden="true"><use href="#ic-qr"/></svg></button>
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleLogs(i.project)">
+                    <svg class="ico me-1" aria-hidden="true"><use href="#ic-logs"/></svg><span
+                      x-text="logs[i.project] && logs[i.project].open ? 'Hide logs' : 'Logs'">Logs</span></button>
+                  <button type="button" class="btn btn-sm btn-outline-danger" @click="stop(i.project)"
+                          :disabled="isStopping(i.project)">
+                    <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.project)" x-cloak></span>
+                    <span x-text="isStopping(i.project) ? 'Stopping…' : 'Stop'">Stop</span></button>
+                </span>
+              </div>
+              <template x-if="qrOpen[i.project]">
+                <div class="qr-box mt-2"><img :src="qrSrc(i.project)" alt="QR code for the session deep link" width="160" height="160"></div>
+              </template>
+              <template x-if="logs[i.project] && logs[i.project].open">
+                <div class="mt-2">
+                  <div class="btn-list mb-1">
+                    <button type="button" class="btn btn-sm" @click="logs[i.project].paused ? resumeLogs(i.project) : pauseLogs(i.project)"
+                            x-text="logs[i.project].paused ? 'Resume' : 'Pause'"></button>
+                    <button type="button" class="btn btn-sm" @click="jumpToLatest(i.project)">Jump to latest</button>
+                    <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="logs[i.project].paused" x-cloak>paused
+                      (<span x-text="logs[i.project].pending.length"></span> buffered)</span>
+                  </div>
+                  <pre class="log-view bg-dark text-white rounded p-2" :id="'log-' + i.project"
+                       x-text="logs[i.project].lines.join('\n')"></pre>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- detached (fire-and-forget / background) sessions — live only -->
+          <template x-for="j in liveAgents()" :key="j.id">{{ detached_row() }}</template>
+
+        </div>
+      </div>
+
+      <!-- Compact idle strip: Active keeps its fixed top spot, no zone reorder. -->
+      <div class="text-secondary small px-1 py-2" x-show="!hasLive()" x-cloak>
+        Nothing running yet — launch one from a project below.
+      </div>
+
+      <!-- Recent / resumable: terminated sessions, collapsed so they don't pad Active. -->
+      <div class="mt-2" x-show="hasRecent()" x-cloak x-data="{ recentOpen: false }">
+        <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="recentOpen = !recentOpen"
+                :aria-expanded="recentOpen"
+                x-text="(recentOpen ? '▾ ' : '▸ ') + 'Recent / resumable (' + recentCount() + ')'"></button>
+        <div class="card mt-1" x-show="recentOpen" x-cloak>
+          <div class="list-group list-group-flush">
+            {% if claustrum_enabled %}
+            <template x-for="h in endedHosted()" :key="h.claustrum_process_id">{{ hosted_row() }}</template>
+            {% endif %}
+            <template x-for="i in endedBridges()" :key="i.project">
+              <div class="list-group-item sess-row" :class="bridgeRailClass(i.project)" x-show="activeFilter === 'all' || activeFilter === 'desktop'">
+                <div class="d-flex align-items-center flex-wrap gap-1">
+                  <span class="badge bg-blue-lt mode-badge me-1">desktop</span>
+                  <span class="badge" :class="statusBadgeClass(i.project)">
+                    <span class="status-dot" :class="statusDotClass(i.project)"></span>
+                    <span x-text="statusLabel(i.project)">Stopped</span>
+                  </span>
+                  <span class="fw-medium ms-1" x-text="i.project"></span>
+                  <span class="text-secondary small ms-1" x-show="statusNote(i.project)" x-cloak x-text="statusNote(i.project)"></span>
+                  <span class="ms-auto d-flex gap-1">
+                    <button type="button" class="btn btn-sm btn-success" @click="resume(i.project)"
+                            :title="'Resume — reconnects the prior session (keeps ' + (resumeModeOf(i.project) || 'standard') + ' mode).'">
+                      <svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Resume</button>
+                  </span>
+                </div>
+              </div>
+            </template>
+            <template x-for="j in endedAgents()" :key="j.id">{{ detached_row() }}</template>
+          </div>
+        </div>
+      </div>
+      </section>
+      </div>  <!-- /.zones -->
 
       {% if reaper_ui_enabled %}
-      <!-- ===== Ghost-environment reaper ===== -->
-      <div class="mb-3" x-data="reaper()">
-        <button class="btn btn-ghost-secondary" @click="toggle()">
-          <span x-text="open ? '× Close ghost reaper' : '👻 Reap ghost environments'">👻 Reap ghost environments</span>
+      <!-- ===== Maintenance (collapsed; operator upkeep, not daily) ===== -->
+      <div class="mt-4" x-data="reaper()">
+        <button class="btn btn-sm btn-ghost-secondary" @click="toggle()">
+          <span x-text="open ? '× Close maintenance' : '🛠 Maintenance'">🛠 Maintenance</span>
         </button>
         <div class="card mt-2" x-show="open" x-cloak>
           <div class="card-body">
-            <p class="text-secondary small">Server-side bridge environments with no live bridge clutter the
+            <h3 class="card-title">Reap ghost environments</h3>
+            <p class="text-secondary small">Server-side session environments with no live session clutter the
               claude.ai/code "New session" selector. The cloud <code>Default</code> and any environment backing a
-              live bridge are never reaped.</p>
+              live session are never reaped.</p>
             <p class="text-secondary" x-show="loading" x-cloak>Scanning…</p>
             <div class="alert alert-danger" x-show="error" x-cloak x-text="error"></div>
             <template x-if="!loading && loaded && !error">
@@ -475,44 +568,6 @@
       </div>
       {% endif %}
 
-      <!-- ===== Project grid ===== -->
-      {% if projects %}
-      <!-- View toggle: cards grid ⇄ compact rows, persisted in localStorage (like the theme). -->
-      <div class="d-flex align-items-center mb-2">
-        <div class="btn-group btn-group-sm ms-auto" role="group" aria-label="Project layout">
-          <button type="button" class="btn" @click="setLayout('cards')" :aria-pressed="layout === 'cards'"
-                  :class="layout === 'cards' ? 'btn-primary' : 'btn-ghost-secondary'" title="Card grid">Cards</button>
-          <button type="button" class="btn" @click="setLayout('rows')" :aria-pressed="layout === 'rows'"
-                  :class="layout === 'rows' ? 'btn-primary' : 'btn-ghost-secondary'" title="Compact rows">Rows</button>
-        </div>
-      </div>
-      {% endif %}
-      <!-- align-items-start: cards size to their own content. Without it the row
-           stretches every card to the tallest one, so expanding one card's CLAUDE.md
-           editor / logs blows up its siblings into giant empty boxes. -->
-      <div class="row row-cards align-items-start" id="project-grid"
-           :class="layout === 'rows' ? 'layout-rows' : 'layout-cards'">
-        {% for p in projects %}{% include "_project_card.html" %}{% endfor %}
-      </div>
-      <div class="empty" id="empty-state"{% if projects %} style="display: none"{% endif %}>
-        <p class="empty-title">No projects yet</p>
-        <p class="empty-subtitle text-secondary">
-          Clauster spawns a Claude bridge per project directory under
-          <code>{{ projects_root }}</code>. Create one or clone a git repo to get started —
-          or drop a directory there and it appears here.
-        </p>
-        <div class="empty-action">
-          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'"
-                  title="Create an empty project directory under projects_root.">
-            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
-          </button>
-          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'"
-                  title="Clone a git repository into a new project directory.">
-            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
-          </button>
-        </div>
-      </div>
-
       <!-- ===== Toasts ===== -->
       <div class="toast-stack">
         <template x-for="t in toasts" :key="t.id">
@@ -534,7 +589,7 @@
       <div class="text-center text-secondary small pt-2">
         <a href="https://github.com/schubydoo/clauster" target="_blank" rel="noopener noreferrer"
            class="link-secondary">Clauster</a>
-        — self-hosted <code>claude</code> bridges
+        — self-hosted <code>claude</code> sessions
       </div>
       <div class="text-center text-secondary small pb-2">
         Built with
@@ -548,1159 +603,6 @@
   </footer>
 </div>
 
-<script>
-  const STATUS_LABELS = {
-    starting: "Starting", running: "Running", stopping: "Stopping", stopped: "Stopped",
-    interrupted: "Interrupted", crashed: "Crashed", error: "Failed to start",
-  };
-  // Amber = recoverable, you didn't end it (interrupted/crashed -> Resume). Red = you
-  // must intervene (error: never started -> fix config). Grey = you stopped it.
-  const STATUS_BADGE = {
-    running: "bg-green-lt", starting: "bg-azure-lt", stopping: "bg-orange-lt",
-    interrupted: "bg-yellow-lt", crashed: "bg-yellow-lt", error: "bg-red-lt",
-    // Resting state: no fill. A filled pill is reserved for states that need
-    // attention (running/error/interrupted) so a wall of grey pills doesn't read
-    // as "everything is flagged"; stopped is just quiet text + its dot.
-    stopped: "bg-transparent text-secondary px-1",
-  };
-  const STATUS_DOT = {
-    running: "bg-green", starting: "bg-azure status-dot-animated", stopping: "bg-orange status-dot-animated",
-    interrupted: "bg-yellow", crashed: "bg-yellow", error: "bg-red", stopped: "bg-secondary",
-  };
-  const ROOT = "{{ request.scope.root_path }}";
-  const MAX_LOG_LINES = 1000;
-  const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
-  const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
-  const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
-  const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
-  const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
-  const DEFAULT_RESUME_MODE = {{ default_resume_mode | tojson }};
-  const USAGE_MODE = {{ usage_mode | tojson }};  // usage.mode — "cost" | "tokens" | "off"
-  const CURRENCY = {{ currency | tojson }};  // usage.currency — code, shown in the tooltip
-  const CURRENCY_SYMBOL = {{ currency_symbol | tojson }};  // resolved symbol for cost mode
-  const FX_RATE = {{ fx_rate | tojson }};  // usage.fx_rate — static USD->display multiplier
-  const TOKENS_INCLUDE_CACHE = {{ token_total_includes_cache | tojson }};  // count cache in the total?
-  const METRICS_ENABLED = {{ metrics_enabled | tojson }};  // metrics.enabled — live CPU/mem/disk line
-  const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
-  const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
-  const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
-  const PERMISSION_MODES = ["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"];
-
-  // Humanize a token count for the compact badge (1.2M / 3.4k); the exact value
-  // lives in the tooltip (usageTitle).
-  function fmtTokens(n) {
-    if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
-    return String(n);
-  }
-
-  // Theme toggle (navbar) — persisted, mirrors the no-flash init above.
-  document.addEventListener("DOMContentLoaded", function () {
-    var btn = document.getElementById("theme-toggle");
-    if (!btn) return;
-    function sync() {
-      var dark = document.documentElement.getAttribute("data-bs-theme") === "dark";
-      btn.querySelector(".icon-sun").style.display = dark ? "none" : "inline-block";
-      btn.querySelector(".icon-moon").style.display = dark ? "inline-block" : "none";
-    }
-    btn.addEventListener("click", function () {
-      var next = document.documentElement.getAttribute("data-bs-theme") === "dark" ? "light" : "dark";
-      document.documentElement.setAttribute("data-bs-theme", next);
-      localStorage.setItem("clauster-theme", next);
-      sync();
-    });
-    sync();
-  });
-
-  function dashboard() {
-    return {
-      instances: {},
-      externalSessions: {},
-      agents: [],
-      agentDispatchOpen: false,
-      agentForm: { project: "", prompt: "", cloud: false, busy: false },
-      agentStopping: {},   // job id -> true while a stop request is in flight
-      // --- hosted live-view sessions (claustrum stream-json channel, CL-4c) ---
-      hosted: [],                 // GET /api/hosted snapshot (channel="hosted" instances)
-      hostedDispatchOpen: false,
-      hostedForm: { project: "", permission_mode: DEFAULT_PERMISSION_MODE, busy: false },
-      hostedStopping: {},         // hosted id -> true while a stop is in flight
-      hostedResuming: {},         // hosted id -> true while a resume is in flight
-      hostedView: {},             // hosted id -> { open, ws, lastSeq, events[], input, sending, connLost }
-      errors: {},
-      qrOpen: {},
-      qrNonce: {},
-      logs: {},
-      spawnMode: {},
-      permMode: {},
-      resumeMode: {},
-      confirmBypass: {},
-      bypassTyped: {},
-      confirmTrust: {},
-      trustConfirmed: {},   // the "I trust…" checkbox in the trust-on-start dialog
-      confirmNew: {},
-      cmd: {},
-      usage: {},
-      metrics: {},        // project name -> live CPU/mem/disk sample (null when not running)
-      trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
-      trusting: {},       // project name -> bool (trust request in flight)
-      toasts: [],
-      _toastSeq: 0,
-      connLost: false,    // polling has failed repeatedly -> data is stale
-      _refreshFails: 0,
-      np: { open: false, name: "", submittedName: "", mode: "create", url: "", shallow: false,
-            gitInit: false, busy: false, error: null, warn: null,
-            cloning: false, progress: { percent: null, phase: "" } },
-      // System-readiness (preflight) — the `clauster doctor` checks surfaced in the
-      // browser so a precondition (claude not logged in, dir untrusted, …) is visible
-      // up front instead of failing silently when you click Start. loaded stays false
-      // until /api/doctor answers, so the panel never flashes empty.
-      readiness: { loaded: false, ok: true, checks: [], showAll: false },
-      // Dashboard layout: "cards" grid (default) or compact "rows" list, persisted in
-      // localStorage like the theme. rowExpanded tracks per-project accordion state in
-      // rows mode; in cards mode rowOpen() is always true so the body always shows.
-      layout: (localStorage.getItem("clauster-layout") === "rows") ? "rows" : "cards",
-      rowExpanded: {},
-      async init() {
-        for (const n of PROJECT_NAMES) {
-          this.spawnMode[n] = DEFAULT_SPAWN_MODE;
-          this.permMode[n] = DEFAULT_PERMISSION_MODE;
-          this.resumeMode[n] = DEFAULT_RESUME_MODE;
-        }
-        this.trustState = { ...INITIAL_TRUST };
-        await this.refresh();
-        for (const n of PROJECT_NAMES) this.loadUsage(n);
-        this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
-        setInterval(() => this.refresh(), 4000);
-        // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
-        if (METRICS_ENABLED) { this.refreshMetrics(); setInterval(() => this.refreshMetrics(), METRICS_POLL_MS); }
-      },
-      // --- system readiness (preflight panel) ---
-      async loadReadiness() {
-        try {
-          const r = await fetch(ROOT + "/api/doctor");
-          if (r.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (!r.ok) return;
-          const d = await r.json();
-          this.readiness.ok = !!d.ok;
-          this.readiness.checks = Array.isArray(d.checks) ? d.checks : [];
-          this.readiness.loaded = true;
-        } catch (e) { /* fetch failed -> leave loaded=false so the panel stays hidden */ }
-      },
-      readinessIssues() { return this.readiness.checks.filter((c) => c.status !== "ok"); },
-      checkGlyph(s) { return s === "ok" ? "✓" : s === "warn" ? "⚠" : "✗"; },
-      checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
-      // --- layout (cards ⇄ rows) ---
-      setLayout(v) {
-        this.layout = (v === "rows") ? "rows" : "cards";
-        localStorage.setItem("clauster-layout", this.layout);
-      },
-      toggleRow(name) { this.rowExpanded[name] = !this.rowExpanded[name]; },
-      // Body is shown when in cards mode, or in rows mode once the row is expanded.
-      rowOpen(name) { return this.layout === "cards" || !!this.rowExpanded[name]; },
-      // --- toasts ---
-      toast(msg, type = "info") {
-        const id = ++this._toastSeq;
-        this.toasts.push({ id, msg, type });
-        setTimeout(() => this.dismissToast(id), 4500);
-      },
-      dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
-      async refresh() {
-        let ok = true;
-        try {
-          const [iRes, sRes, aRes] = await Promise.all([
-            fetch(ROOT + "/api/instances"),
-            fetch(ROOT + "/api/sessions"),
-            fetch(ROOT + "/api/agents"),
-          ]);
-          // Session expired mid-use -> bounce to login instead of silently showing stale data.
-          if (iRes.status === 401 || sRes.status === 401 || aRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (iRes.ok) {
-            const list = await iRes.json();
-            const next = {};
-            for (const i of list) next[i.project] = i;
-            // Preserve a local optimistic "stopping" until the server confirms it's gone.
-            for (const n of Object.keys(this.instances)) {
-              if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
-            }
-            this.instances = next;
-          } else { ok = false; }
-          if (sRes.ok) this.externalSessions = await sRes.json();
-          else { ok = false; }
-          if (aRes.ok) this.agents = await aRes.json();
-          else { ok = false; }
-          // Hosted sessions live in a separate registry (HostedManager); only poll
-          // them when the claustrum channel is configured.
-          if (CLAUSTRUM_ENABLED) {
-            const hRes = await fetch(ROOT + "/api/hosted");
-            if (hRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
-            if (hRes.ok) this.hosted = await hRes.json();
-            else { ok = false; }
-          }
-        } catch (e) { ok = false; }
-        // A single blip is normal; only surface a *persistent* outage so the user
-        // knows the data is stale and we're retrying — never fail silently.
-        if (ok) { this._refreshFails = 0; this.connLost = false; }
-        else if (++this._refreshFails >= 2) this.connLost = true;
-      },
-      // --- background agents (agent view) ---
-      agentBadgeClass(state) {
-        const map = {
-          working: "bg-blue-lt", blocked: "bg-orange-lt", done: "bg-green-lt",
-          failed: "bg-red-lt", stopped: "bg-secondary-lt",
-        };
-        // Object.hasOwn so a state like "constructor" can't resolve up the
-        // prototype chain to a function instead of the fallback class.
-        return Object.hasOwn(map, state) ? map[state] : "bg-secondary-lt";
-      },
-      agentWhen(j) {
-        if (!j.updated_at) return "";
-        const d = new Date(j.updated_at);
-        return isNaN(d.getTime()) ? "" : d.toLocaleString();
-      },
-      async dispatchAgent() {
-        const f = this.agentForm;
-        if (!f.project || f.busy) return;
-        f.busy = true;
-        try {
-          const body = { project: f.project };
-          if (f.prompt.trim()) body.prompt = f.prompt.trim();
-          // "cloud" opens a Remote Control session named after the project.
-          if (f.cloud) body.rc_name = f.project;
-          const res = await fetch(ROOT + "/api/agents", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-          });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          const b = await res.json().catch(() => ({}));
-          if (res.ok) {
-            this.toast("background agent dispatched", "success");
-            f.prompt = "";  // keep project + cloud for a quick repeat dispatch
-          } else {
-            this.toast("dispatch failed — " + (b.detail || res.status), "error");
-          }
-        } catch (e) { this.toast("dispatch failed", "error"); }
-        f.busy = false;
-        await this.refresh();
-      },
-      async stopAgent(j) {
-        const label = j.name || j.id;
-        const msg = j.bridge_session_id
-          ? "Stop \"" + label + "\"? This deregisters its cloud session."
-          : "Stop and remove \"" + label + "\"?";
-        if (!window.confirm(msg)) return;
-        this.agentStopping[j.id] = true;
-        try {
-          const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id), { method: "DELETE" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          const b = await res.json().catch(() => ({}));
-          if (res.ok && b.removed) this.toast(label + ": stopped", "success");
-          else if (res.ok) this.toast(label + ": stopped (cleanup pending — " + (b.detail || "supervisor restarting") + ")", "warning");
-          else this.toast(label + ": stop failed — " + (b.detail || res.status), "error");
-        } catch (e) { this.toast(label + ": stop failed", "error"); }
-        this.agentStopping[j.id] = false;
-        await this.refresh();
-      },
-      statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
-      // Display status: an "interrupted" bridge is one that stopped WITHOUT a
-      // deliberate Stop (host restart / external kill). It's the same backend status
-      // as "stopped" (intentional_stop tells them apart), but reads + acts differently:
-      // amber + Resume-forward, vs a neutral "you stopped this" -> Start.
-      displayStatus(name) {
-        const i = this.instances[name] || {};
-        const s = i.status || "stopped";
-        return (s === "stopped" && i.intentional_stop === false) ? "interrupted" : s;
-      },
-      statusLabel(name) { return STATUS_LABELS[this.displayStatus(name)] || "Stopped"; },
-      statusBadgeClass(name) { return STATUS_BADGE[this.displayStatus(name)] || "bg-secondary-lt"; },
-      statusDotClass(name) { return STATUS_DOT[this.displayStatus(name)] || "bg-secondary"; },
-      // A one-line "why" + nudge for the two recoverable, you-didn't-end-it states.
-      statusNote(name) {
-        const s = this.displayStatus(name);
-        if (s === "interrupted") return "Ended without a Stop (host restart or external exit) — Resume to continue.";
-        if (s === "crashed") return "The bridge exited unexpectedly — Resume to continue.";
-        return null;
-      },
-      // Hover hint on the status badge — what each state means (the recoverable
-      // states reuse statusNote so the wording stays in one place).
-      statusTitle(name) {
-        const s = this.displayStatus(name);
-        return {
-          running: "The bridge is live and managing sessions.",
-          starting: "The bridge is launching…",
-          stopping: "The bridge is shutting down…",
-          stopped: "Stopped — Resume the prior session or start a new one.",
-          interrupted: this.statusNote(name),
-          crashed: this.statusNote(name),
-          error: "The bridge failed to start — see the detail below.",
-        }[s] || null;
-      },
-      isRunning(name) { return this.statusOf(name) === "running"; },
-      isBusy(name) { return this.statusOf(name) === "starting"; },
-      isStopping(name) { return this.statusOf(name) === "stopping"; },
-      sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
-      envUrlOf(name) { return (this.instances[name] || {}).url || null; },
-      errorOf(name) { return this.errors[name] || null; },
-      // A stopped/crashed bridge that still has an environment can reconnect to it —
-      // show "Resume" instead of "Start" and reuse its stored permission mode.
-      isResumable(name) {
-        const i = this.instances[name] || {};
-        // A pty (flag-form) bridge has no environment_id — true-resume works via
-        // `claude --continue`, not an environment reconnect — so treat a stopped pty
-        // instance as resumable too, else the Resume button (the only path to
-        // /resume → --continue) never renders and true-resume is unreachable.
-        return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
-      },
-      resumeModeOf(name) { return (this.instances[name] || {}).resume_mode || ""; },
-      detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
-      externalCount(name) {
-        const s = this.externalSessions[name];
-        return Array.isArray(s) ? s.length : 0;
-      },
-      hasExternal(name) { return this.externalCount(name) > 0; },
-      async loadUsage(name) {
-        if (USAGE_MODE === "off") return;  // badge disabled — don't even fetch usage
-        try {
-          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/usage");
-          if (res.ok) this.usage[name] = await res.json();
-        } catch (e) { /* badge stays hidden */ }
-      },
-      // Tokens counted toward the displayed total: all categories, or input+output
-      // only when usage.token_total_includes_cache is false (cache usually dominates).
-      displayTokens(u) {
-        if (TOKENS_INCLUDE_CACHE) return u.total_tokens || 0;
-        const b = u.token_breakdown || {};
-        return (b.input || 0) + (b.output || 0);
-      },
-      usageLabel(name) {
-        if (USAGE_MODE === "off") return null;  // x-show hides the badge when off
-        const u = this.usage[name];
-        if (!u || !u.transcripts) return null;
-        if (USAGE_MODE === "tokens") return fmtTokens(this.displayTokens(u)) + " tok";
-        // cost mode: convert the USD figure with the static fx_rate, prefix the symbol.
-        return "≈" + CURRENCY_SYMBOL + ((u.cost_usd || 0) * FX_RATE).toFixed(2);
-      },
-      usageTitle(name) {
-        const u = this.usage[name];
-        if (!u) return "";
-        const b = u.token_breakdown || {};
-        const exact = (u.total_tokens || 0).toLocaleString();
-        const sessions = u.transcripts + (u.transcripts === 1 ? " session" : " sessions");
-        const split = "in " + (b.input || 0).toLocaleString() +
-          " · out " + (b.output || 0).toLocaleString() +
-          " · cache-write " + (b.cache_creation || 0).toLocaleString() +
-          " · cache-read " + (b.cache_read || 0).toLocaleString();
-        if (USAGE_MODE === "tokens") {
-          let s = exact + " tokens across " + sessions + " (" + split + ")";
-          if (!TOKENS_INCLUDE_CACHE) s += "; badge total excludes cache";
-          return s;
-        }
-        // cost mode
-        let s = exact + " tokens across " + sessions + " · approximate cost";
-        if (FX_RATE !== 1) s += " (USD × " + FX_RATE + " → " + CURRENCY + ")";
-        else if (CURRENCY !== "USD") s += " (label only — usage.fx_rate not set, figure is USD)";
-        else s += " in USD";
-        if (u.unpriced_models && u.unpriced_models.length) {
-          s += " (excludes unpriced: " + u.unpriced_models.join(", ") + ")";
-        }
-        return s;
-      },
-      async loadMetrics(name) {
-        if (!METRICS_ENABLED) return;
-        try {
-          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/metrics");
-          if (res.ok) { const m = await res.json(); this.metrics[name] = m.running ? m : null; }
-        } catch (e) { /* keep the last sample; a blip is fine */ }
-      },
-      refreshMetrics() {
-        // Own cadence (metrics.poll_seconds), decoupled from the status poll. Iterate
-        // the *current* instances (not the static PROJECT_NAMES) so projects added
-        // after load are polled too; drop stale samples for anything not running.
-        if (!METRICS_ENABLED) return;
-        for (const n of Object.keys(this.instances)) {
-          if ((this.instances[n] || {}).status === "running") this.loadMetrics(n);
-        }
-        for (const n of Object.keys(this.metrics)) {
-          if ((this.instances[n] || {}).status !== "running") this.metrics[n] = null;
-        }
-      },
-      metricsLabel(name) {
-        if (!METRICS_ENABLED) return null;
-        if (this.statusOf(name) !== "running") return null;  // race: a stopped card must not flash stale metrics
-        const m = this.metrics[name];
-        if (!m || !m.running) return null;  // x-show hides the line when not running
-        const rate = (bps) => bps >= 1048576 ? (bps / 1048576).toFixed(1) + " MB/s" : Math.round(bps / 1024) + " KB/s";
-        let s = Math.round(m.cpu_percent) + "% CPU · " + Math.round(m.rss_bytes / 1048576) + " MB";
-        if (METRICS_SHOW_DISK && m.disk_read_bps != null) s += " · ⬇" + rate(m.disk_read_bps) + " ⬆" + rate(m.disk_write_bps);
-        return s;
-      },
-      metricsTitle(name) {
-        const m = this.metrics[name];
-        if (!m || !m.running) return "";
-        const cpuNote = m.cpu_normalized
-          ? "CPU% is the share of total host capacity (all cores)"
-          : "CPU% is summed across cores (can exceed 100%)";
-        let s = "Live usage of the bridge process tree (" + m.procs + " process" + (m.procs === 1 ? "" : "es") +
-                "): " + cpuNote + "; memory is summed RSS";
-        if (METRICS_SHOW_DISK && m.disk_read_bps == null) s += "; disk I/O isn't available on this platform";
-        return s + ".";
-      },
-      qrSrc(name) {
-        return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);
-      },
-      toggleQr(name) {
-        const opening = !this.qrOpen[name];
-        if (opening) this.qrNonce[name] = Date.now();
-        this.qrOpen[name] = opening;
-      },
-      async copy(text) {
-        if (window.isSecureContext && navigator.clipboard) {
-          try { await navigator.clipboard.writeText(text); this.toast("Link copied", "success"); return; } catch (e) { /* fall through */ }
-        }
-        const ta = document.createElement("textarea");
-        ta.value = text; ta.setAttribute("readonly", "");
-        ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
-        document.body.appendChild(ta); ta.select();
-        // execCommand returns false on failure (doesn't throw); the try/catch is a
-        // defensive guard for the browsers that do throw. Either way: never silently
-        // report success.
-        let copied = false;
-        try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
-        document.body.removeChild(ta);
-        this.toast(copied ? "Link copied" : "Couldn't copy — copy it manually",
-                   copied ? "success" : "error");
-      },
-      async start(name) {
-        // Trust gate — like Claude Code's "Do you trust the files in this folder?":
-        // an untrusted dir prompts on Start (rather than a standalone Trust button),
-        // then trusts + starts. Checked before bypass so the order is trust → bypass.
-        if (this.trustState[name] !== "trusted") {
-          this.errors[name] = null;
-          this.trustConfirmed[name] = false;   // require a fresh, deliberate tick each time
-          this.confirmTrust[name] = true;
-          return;
-        }
-        if (this.permMode[name] === "bypassPermissions") {
-          this.errors[name] = null;
-          this.confirmBypass[name] = true;
-          return;
-        }
-        await this._spawn(name);
-      },
-      async confirmTrustStart(name) {
-        await this.trust(name);            // trusts; sets the inline error on failure
-        this.confirmTrust[name] = false;   // close the dialog either way
-        if (this.trustState[name] === "trusted") this.start(name);  // now-trusted → spawn
-      },
-      cancelTrust(name) {
-        this.confirmTrust[name] = false;
-        this.trustConfirmed[name] = false;
-      },
-      // "Start new session" on a resumable bridge: a fresh start (resume=false)
-      // is deliberately distinct from Resume, so warn first — a new session won't
-      // restore the prior one and Resume may no longer reach it (pty Resume
-      // continues the most-recent transcript, which a fresh session displaces).
-      startNew(name) {
-        this.errors[name] = null;
-        this.confirmNew[name] = true;
-      },
-      confirmNewStart(name) {
-        this.confirmNew[name] = false;
-        // Route back through start() so the bypassPermissions gate still applies.
-        this.start(name);
-      },
-      cancelNew(name) {
-        this.confirmNew[name] = false;
-      },
-      confirmBypassStart(name) {
-        if ((this.bypassTyped[name] || "") !== name) {
-          this.errors[name] = "Type the project name exactly to confirm bypass.";
-          return;
-        }
-        this.confirmBypass[name] = false;
-        this.bypassTyped[name] = "";
-        this._spawn(name);
-      },
-      cancelBypass(name) {
-        this.confirmBypass[name] = false;
-        this.bypassTyped[name] = "";
-      },
-      cmdUrl(name) { return ROOT + "/api/projects/" + encodeURIComponent(name) + "/claude-md"; },
-      cmdBytes(name) {
-        const c = this.cmd[name];
-        return c ? new TextEncoder().encode(c.content || "").length : 0;
-      },
-      async toggleClaudeMd(name) {
-        if (this.cmd[name] && this.cmd[name].open) { this.closeClaudeMd(name); return; }
-        this.cmd[name] = { open: true, loading: true, saving: false, content: "",
-                           sha: null, exists: false, bridge_running: false, error: null, savedAt: null };
-        try {
-          const res = await fetch(this.cmdUrl(name));
-          const body = await res.json();
-          if (!res.ok) { this.cmd[name].error = body.detail || "failed to load"; }
-          else {
-            Object.assign(this.cmd[name], {
-              content: body.content, sha: body.sha256,
-              exists: body.exists, bridge_running: body.bridge_running,
-            });
-          }
-        } catch (e) { this.cmd[name].error = String(e); }
-        this.cmd[name].loading = false;
-      },
-      async saveClaudeMd(name) {
-        const c = this.cmd[name];
-        if (!c) return;
-        c.saving = true; c.error = null; c.savedAt = null;
-        const payload = { content: c.content };
-        if (c.exists && c.sha) payload.base_sha256 = c.sha;
-        try {
-          const res = await fetch(this.cmdUrl(name), {
-            method: "PUT", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-          const body = await res.json();
-          if (!res.ok) { c.error = body.detail || "failed to save"; this.toast("CLAUDE.md save failed", "error"); }
-          else { Object.assign(c, { sha: body.sha256, exists: true,
-                   bridge_running: body.bridge_running, savedAt: Date.now() }); this.toast("CLAUDE.md saved", "success"); }
-        } catch (e) { c.error = String(e); }
-        c.saving = false;
-      },
-      closeClaudeMd(name) { if (this.cmd[name]) this.cmd[name].open = false; },
-      // Toggle the New-project dialog; closing wipes it so reopening never shows a
-      // prior attempt's name/URL or a stale error/warning (which read as a stuck form).
-      toggleNewProject() {
-        this.np.open = !this.np.open;
-        if (!this.np.open) this.resetNewProject();
-      },
-      resetNewProject() {
-        // Bump the op id so any in-flight attempt's captured token goes stale (it can no
-        // longer mutate the dialog), and abandon its clone watch so the stream stops.
-        this._nextNpOp();
-        if (this._abortClone) { this._abortClone(); this._abortClone = null; }
-        const np = this.np;
-        np.name = ""; np.url = ""; np.submittedName = "";
-        np.error = null; np.warn = null;
-        np.busy = false; np.cloning = false;
-        np.progress = { percent: null, phase: "" };
-      },
-      // Per-submit operation id. Each submit claims a fresh one; reset/supersede bumps the
-      // counter so an older attempt's captured op stops matching. A safe ownership token
-      // where the project name is NOT — two attempts (cancel + resubmit) can share a name.
-      _nextNpOp() { return (this._npOp = (this._npOp || 0) + 1); },
-      _npOwns(op) { return this._npOp === op; },
-      async submitNew() {
-        const np = this.np;
-        if (!np.name || np.busy) return;
-        // Freeze the name + claim a fresh op id for THIS attempt: the POST awaits, and a
-        // Cancel mid-request bumps the op (and clears np), so every shared-state write on
-        // the completion path is gated on `op` — the name alone can't tell two attempts apart.
-        const submittedName = np.name;
-        const op = this._nextNpOp();
-        np.busy = true; np.error = null; np.warn = null;
-        np.submittedName = submittedName;
-        if (np.mode === "clone") { await this.startClone(np, op); return; }  // async, watched over WS
-        try {
-          const res = await fetch(ROOT + "/api/projects", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: submittedName, git_init: np.gitInit }) });
-          const body = await res.json();
-          if (!res.ok) { if (this._npOwns(op)) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); } }
-          else { await this.afterProvision(submittedName, np, body, op); }
-        } catch (e) { if (this._npOwns(op)) np.error = String(e); }
-        if (this._npOwns(op)) np.busy = false;
-      },
-      // Kick off the clone job, then watch its progress WS until it ends.
-      async startClone(np, op) {
-        const name = np.submittedName, url = np.url, shallow = np.shallow;  // snapshot
-        np.cloning = true; np.progress = { percent: null, phase: "Starting…" };
-        try {
-          const res = await fetch(ROOT + "/api/projects/clone", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name, url, shallow }) });
-          const body = await res.json();
-          if (!res.ok) {
-            if (this._npOwns(op)) { np.error = body.detail || "clone failed"; np.busy = false; np.cloning = false; this.toast("Clone failed", "error"); }
-            return;
-          }
-          this.watchClone(np, body.job_id, name, op);
-        } catch (e) { if (this._npOwns(op)) { np.error = String(e); np.busy = false; np.cloning = false; } }
-      },
-      watchClone(np, jobId, name, op) {
-        // A Cancel before the clone POST returned already bumped the op — don't even install
-        // a watch for a superseded attempt, or its frames would drive a newer dialog.
-        if (!this._npOwns(op)) return;
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        const ws = new WebSocket(proto + "://" + location.host + ROOT +
-                                 "/ws/clone-progress/" + encodeURIComponent(jobId));
-        let settled = false;  // exactly one terminal handling across done/error/close/abort
-        const lost = () => {
-          if (settled) return;
-          settled = true;
-          if (!this._npOwns(op)) return;  // superseded mid-flight — leave the newer dialog alone
-          np.cloning = false; np.busy = false;
-          np.error = "lost the progress connection — the clone may still be running; refresh to check.";
-        };
-        // Cancel/reset abandons this watch: flip `settled` so handlers no-op, then close the
-        // socket so the server stops streaming. (The op gate is the correctness mechanism;
-        // this just stops the stream promptly.)
-        this._abortClone = () => { settled = true; try { ws.close(); } catch (e) { /* closing */ } };
-        ws.onmessage = async (ev) => {
-          if (settled) return;  // aborted, or already terminal — ignore late frames
-          if (!this._npOwns(op)) { settled = true; try { ws.close(); } catch (e) { /* closing */ } return; }
-          let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-          if (m.type === "progress") {
-            np.progress = { percent: m.percent, phase: m.phase || np.progress.phase };
-          } else if (m.type === "done") {
-            settled = true;  // before close(), so onclose below no-ops
-            try { ws.close(); } catch (e) { /* already closing */ }
-            this._abortClone = null;  // this watch reached its terminal state
-            np.cloning = false;
-            if (m.status === "error") {
-              np.error = m.error || "clone failed"; np.busy = false;
-              this.toast(name + ": clone failed", "error");
-            } else {
-              await this.afterClone(np, name, op);
-            }
-          }
-        };
-        ws.onerror = lost;
-        ws.onclose = lost;  // a silent drop that never raised onerror still settles the UI
-      },
-      // Cloned code is RCE-sensitive: fetch the landed project so afterProvision
-      // can surface the CLAUDE.md/.claude warning before any bridge runs it.
-      async afterClone(np, name, op) {
-        try {
-          const list = await (await fetch(ROOT + "/api/projects")).json();
-          await this.afterProvision(name, np, list.find((p) => p.name === name) || {}, op);
-        } catch (e) {
-          // The clone itself succeeded; reveal the card (its untrusted + CLAUDE.md
-          // badges still surface the inspection, and code only runs once trusted)
-          // rather than stranding a successful clone behind a transient list error.
-          // Only the owning attempt may reload — a stale one must not yank a newer dialog.
-          console.warn("clone: project-list refresh failed", e);
-          if (this._npOwns(op)) this.reloadToProject();
-        }
-      },
-      // `name` is the caller's frozen snapshot, NOT `np.submittedName`: an async clone
-      // can complete after the user clicked Cancel, which `resetNewProject()` clears —
-      // re-reading reactive state here would insert a card for "" and force a reload.
-      async afterProvision(name, np, proj, op) {
-        const ships = [];
-        if (proj.has_claude_md) ships.push("CLAUDE.md");
-        if (proj.has_claude_dir) ships.push(".claude/");
-        // Always reveal the landed card, even for a canceled/superseded attempt: the
-        // project really was created, and refresh() never re-lists /api/projects — so
-        // skipping insertCard would leave it invisible until a manual reload.
-        await this.insertCard(name, proj);  // reveal the new card in place — no reload
-        // Dialog-state mutations, though, only happen for the attempt that still owns it.
-        if (!this._npOwns(op)) return;
-        np.busy = false;
-        if (ships.length) {
-          // Keep the RCE-review warning up; the inserted card is untrusted, so its
-          // code can't run until the user explicitly Trusts + Starts a bridge.
-          np.warn = ships.join(" + ");
-          this.toast(name + ": added — review before starting", "warning");
-        } else {
-          this.toast(name + ": ready", "success");
-          np.open = false; this.resetNewProject();  // close + wipe the form on a clean add
-        }
-      },
-      // Insert a freshly created/cloned project's card without a full reload:
-      // seed its reactive state, fetch the server-rendered fragment, inject it,
-      // and hydrate it under the existing dashboard() scope. Falls back to a full
-      // reload if anything goes wrong, so a successful provision is never lost.
-      async insertCard(name, proj) {
-        // Seed per-card state BEFORE injecting so bindings resolve on first paint
-        // (init() does the same for the server-rendered cards).
-        if (!(name in this.spawnMode)) this.spawnMode[name] = DEFAULT_SPAWN_MODE;
-        if (!(name in this.permMode)) this.permMode[name] = DEFAULT_PERMISSION_MODE;
-        if (!(name in this.resumeMode)) this.resumeMode[name] = DEFAULT_RESUME_MODE;
-        if (proj && proj.trust_state) this.trustState[name] = proj.trust_state;
-        const grid = document.getElementById("project-grid");
-        if (!grid) { this.reloadToProject(); return; }
-        const sel = '[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]';
-        if (!grid.querySelector(sel)) {  // skip if a refresh race already rendered it
-          let html;
-          try {
-            const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/card");
-            if (!res.ok) throw new Error("card " + res.status);
-            html = await res.text();
-          } catch (e) {
-            console.warn("insertCard: fragment fetch failed, reloading", e);
-            this.reloadToProject();
-            return;
-          }
-          const tpl = document.createElement("template");
-          tpl.innerHTML = html.trim();
-          const node = tpl.content.firstElementChild;
-          if (!node) { this.reloadToProject(); return; }
-          grid.appendChild(node);
-          window.Alpine.initTree(node);  // hydrate the injected card under dashboard()
-        }
-        const empty = document.getElementById("empty-state");
-        if (empty) empty.style.display = "none";
-        this.loadUsage(name);
-      },
-      // The card is now inserted reactively; "Show it" scrolls to it and moves
-      // DOM focus there too (keyboard/screen-reader users land on the new card).
-      revealProject(name) {
-        this.np.warn = null;
-        const el = document.querySelector('[data-project="' + (window.CSS ? CSS.escape(name) : name) + '"]');
-        if (!el) return;
-        el.setAttribute("tabindex", "-1");
-        el.focus({ preventScroll: true });
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-      },
-      reloadToProject() { window.location.reload(); },
-      async _spawn(name) {
-        this.errors[name] = null;
-        // Pick the launch mode BEFORE the optimistic overwrite below. A resumable
-        // card hides the Mode picker, so on "Start new session" we keep the stopped
-        // bridge's own recorded mode rather than silently dropping to the global
-        // default; a brand-new card (no instance) uses the visible picker.
-        const existing = this.instances[name];
-        const mode = (existing && existing.resume_mode) || this.resumeMode[name];
-        this.instances[name] = { project: name, status: "starting" };
-        try {
-          const res = await fetch(ROOT + "/api/instances", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              project: name,
-              spawn_mode: this.spawnMode[name],
-              permission_mode: this.permMode[name],
-              resume_mode: mode,
-            }),
-          });
-          const body = await res.json();
-          if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; this.toast(name + ": start failed", "error"); }
-          else { this.instances[name] = body; if (body.status === "running") this.toast(name + ": running", "success"); }
-        } catch (e) { this.errors[name] = String(e); delete this.instances[name]; this.toast(name + ": start failed", "error"); }
-        await this.refresh();
-      },
-      async resume(name) {
-        this.errors[name] = null;
-        const prev = this.instances[name];
-        this.instances[name] = { project: name, status: "starting" };  // optimistic
-        try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name) + "/resume",
-                                  { method: "POST" });
-          const body = await res.json();
-          if (!res.ok) {
-            this.errors[name] = body.detail || "failed to resume";
-            if (prev) this.instances[name] = prev; else delete this.instances[name];
-            this.toast(name + ": restart failed", "error");
-          } else {
-            this.instances[name] = body;
-            if (body.status === "running") this.toast(name + ": running", "success");
-          }
-        } catch (e) {
-          this.errors[name] = String(e);
-          if (prev) this.instances[name] = prev; else delete this.instances[name];
-        }
-        await this.refresh();
-      },
-      async stop(name) {
-        this.closeLogs(name);
-        this.errors[name] = null;  // clear any stale inline error from a prior failed action
-        const prev = this.instances[name];
-        this.instances[name] = { ...(prev || { project: name }), status: "stopping" };  // optimistic
-        try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
-          if (res.ok) { this.instances[name] = await res.json(); this.toast(name + ": stopped", "success"); }
-          else {
-            const b = await res.json().catch(() => ({}));
-            this.errors[name] = b.detail || "stop failed";  // inline, not just a 4.5s toast
-            this.toast(name + ": stop failed", "error");
-          }
-        } catch (e) { this.errors[name] = String(e); this.toast(name + ": stop failed", "error"); }
-        await this.refresh();
-        this.loadUsage(name);
-      },
-      async trust(name) {
-        this.errors[name] = null;  // clear any stale inline error from a prior failed action
-        this.trusting[name] = true;
-        try {
-          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" });
-          if (res.ok) { this.trustState[name] = "trusted"; this.toast(name + ": trusted", "success"); }
-          else {
-            const b = await res.json().catch(() => ({}));
-            this.errors[name] = b.detail || "trust failed";  // inline, not just a 4.5s toast
-            this.toast(name + ": trust failed", "error");
-          }
-        } catch (e) { this.errors[name] = String(e); this.toast(name + ": trust failed", "error"); }
-        this.trusting[name] = false;
-      },
-      // --- hosted live-view sessions (claustrum stream-json channel) ---
-      hostedStatusBadge(status) {
-        const map = { running: "bg-green-lt", starting: "bg-blue-lt", stopping: "bg-yellow-lt",
-                      stopped: "bg-secondary-lt", crashed: "bg-red-lt", error: "bg-red-lt" };
-        return Object.hasOwn(map, status) ? map[status] : "bg-secondary-lt";
-      },
-      async startHosted() {
-        const f = this.hostedForm;
-        if (!f.project || f.busy) return;
-        f.busy = true;
-        try {
-          const res = await fetch(ROOT + "/api/instances", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ channel: "hosted", project: f.project, permission_mode: f.permission_mode }),
-          });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          const b = await res.json().catch(() => ({}));
-          if (res.ok) {
-            this.toast("hosted session started", "success");
-            await this.refresh();
-            if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);  // watch it immediately
-          } else {
-            this.toast("hosted start failed — " + (b.detail || res.status), "error");
-          }
-        } catch (e) { this.toast("hosted start failed", "error"); }
-        f.busy = false;
-      },
-      async stopHosted(h) {
-        const id = h.claustrum_process_id;
-        if (!window.confirm("Stop hosted session \"" + (h.label || id) + "\"?")) return;
-        this.hostedStopping[id] = true;
-        try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (res.ok) this.toast("hosted session stopped", "success");
-          else { const b = await res.json().catch(() => ({})); this.toast("stop failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("stop failed", "error"); }
-        this.hostedStopping[id] = false;
-        this.closeHosted(id);
-        await this.refresh();
-      },
-      // Kill an orphaned survivor (CL-8): terminate the live agent + clear the row.
-      // Same DELETE endpoint as stop; the server kills the survivor pid when there's
-      // no live session rather than refusing.
-      async killHosted(h) {
-        const id = h.claustrum_process_id;
-        if (!window.confirm("Kill the orphaned session \"" + (h.label || id) + "\"? This terminates the surviving agent.")) return;
-        this.hostedStopping[id] = true;
-        let killed = false;
-        try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (res.ok) { killed = true; this.toast("orphaned session killed", "success"); }
-          else { const b = await res.json().catch(() => ({})); this.toast("kill failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("kill failed", "error"); }
-        this.hostedStopping[id] = false;
-        // Only tear down the view on a successful kill; a failed kill leaves the orphan
-        // actionable (refresh re-fetches its row so it stays in the list).
-        if (killed) this.closeHosted(id);
-        await this.refresh();
-      },
-      async resumeHosted(h) {
-        const id = h.claustrum_process_id;
-        this.hostedResuming[id] = true;
-        try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/resume",
-                                  { method: "POST" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          const b = await res.json().catch(() => ({}));
-          if (res.ok) {
-            this.toast("hosted session resumed", "success");
-            await this.refresh();
-            // Resume spawns a fresh process id under a new card; tear down the dead
-            // session's view/WS, then watch the resumed session.
-            this.closeHosted(id);
-            if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);
-          } else {
-            this.toast("resume failed — " + (b.detail || res.status), "error");
-          }
-        } catch (e) { this.toast("resume failed", "error"); }
-        this.hostedResuming[id] = false;
-      },
-      toggleHosted(id) {
-        const v = this.hostedView[id];
-        if (v && v.open) this.closeHosted(id); else this.openHosted(id);
-      },
-      // Open (or reconnect) the live stream, resuming from the last event we rendered
-      // so a reload / dropped link catches up via ?after= without re-dumping the ring.
-      openHosted(id) {
-        const prev = this.hostedView[id];
-        const after = prev ? prev.lastSeq : 0;
-        const view = { open: true, ws: null, lastSeq: after, events: prev ? prev.events : [],
-                       input: prev ? prev.input : "", sending: false, connLost: false,
-                       ended: false, endedReason: "" };
-        this.hostedView[id] = view;
-        const self = this;
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        const url = proto + "://" + location.host + ROOT + "/ws/hosted/" +
-                    encodeURIComponent(id) + "?after=" + after;
-        const ws = new WebSocket(url);
-        ws.onmessage = (ev) => {
-          const v = self.hostedView[id];
-          if (!v || !v.open) return;
-          let e; try { e = JSON.parse(ev.data); } catch (_) { return; }
-          self._renderHostedEvent(id, e);
-        };
-        ws.onclose = () => {
-          const v = self.hostedView[id];
-          if (!v || !v.open) return;     // a deliberate close() — don't reconnect
-          if (v.ended) return;           // a terminal frame already settled the view
-          // Only reconnect a session the snapshot still reports as live. A stopped /
-          // crashed / gone session closes the socket immediately (server 1008); blindly
-          // reconnecting it loops forever and mislabels a dead session "reconnecting…".
-          // The 4s /api/hosted poll keeps `hosted` fresh, so this converges.
-          const h = self.hosted.find((x) => x.claustrum_process_id === id);
-          if (!h || !["running", "starting"].includes(h.status)) {
-            self._markHostedEnded(id, h);
-            return;
-          }
-          v.connLost = true;             // genuinely live — honest: the link dropped
-          setTimeout(() => { const w = self.hostedView[id]; if (w && w.open) self.openHosted(id); }, 1500);
-        };
-        view.ws = ws;
-      },
-      closeHosted(id) {
-        const v = this.hostedView[id];
-        if (v && v.ws) { try { v.ws.close(); } catch (e) {} }
-        if (v) v.open = false;
-      },
-      // Surface a terminal hosted session in the live view: explain why it ended (with the
-      // server's error_detail when present) and stop the reconnect loop. Resume (when the
-      // session kept its uuid) stays the recovery path, shown on the row above.
-      _markHostedEnded(id, h, fallback) {
-        const v = this.hostedView[id];
-        if (!v) return;
-        v.ended = true;
-        v.connLost = false;
-        if (!v.endedReason) v.endedReason = this._hostedEndedReason(h, fallback);
-      },
-      // Lead with whatever best explains the end: the snapshot's status phrasing, else a
-      // streamed exit/lost frame's text (`fallback`), else a generic line. Either way we
-      // still append the snapshot's error_detail + Resume hint — so a terminal frame that
-      // beats the 4s poll doesn't lose the richer reason the snapshot already carries.
-      _hostedEndedReason(h, fallback) {
-        const phrasing = {
-          stopped: "Session stopped.",
-          crashed: "The session crashed.",
-          error: "The session ended with an error.",
-          interrupted: "Session interrupted.",
-          exited: "Session ended.",
-        };
-        const base = (h && phrasing[h.status]) || fallback ||
-          (h ? "This session is no longer live." : "This session is no longer available.");
-        const detail = h && h.error_detail ? " " + h.error_detail : "";
-        const resume = h && h.claude_session_uuid ? " Use Resume above to continue it." : "";
-        return base + detail + resume;
-      },
-      _renderHostedEvent(id, e) {
-        const v = this.hostedView[id];
-        if (!v) return;
-        if (typeof e.event_seq === "number") { v.lastSeq = e.event_seq; v.connLost = false; }
-        // A terminal frame means the session is over: gate the composer and stop the
-        // reconnect loop (its renderable marker/error item still gets pushed below).
-        // Route through _markHostedEnded with the snapshot row so error_detail + the
-        // Resume hint survive a frame that beats the poll; the frame text is the fallback.
-        if (e.type === "exit" || e.type === "lost") {
-          const fallback = e.type === "lost"
-            ? "Stream lost — " + (e.reason || "the daemon connection dropped.")
-            : "Session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")." : ".");
-          this._markHostedEnded(id, this.hosted.find((x) => x.claustrum_process_id === id), fallback);
-        }
-        // A resolution flips the matching parked-permission item; it adds no new line.
-        if (e.type === "control_resolved") {
-          this._resolveHostedPermission(id, e.request_id, e.behavior);
-          this.$nextTick(() => this.scrollHosted(id));
-          return;
-        }
-        for (const it of this._hostedEventToItems(e)) v.events.push(it);
-        if (v.events.length > MAX_LOG_LINES) v.events.splice(0, v.events.length - MAX_LOG_LINES);
-        this.$nextTick(() => this.scrollHosted(id));
-      },
-      _resolveHostedPermission(id, requestId, behavior) {
-        const v = this.hostedView[id];
-        if (!v) return;
-        for (const it of v.events) {
-          if (it.kind === "permission" && it.request_id === requestId) {
-            it.resolved = true;
-            it.decision = (behavior === "allow" || behavior === "deny") ? behavior : "answered";
-          }
-        }
-      },
-      // Translate one fanned event into renderable conversation items (per the design
-      // doc's frame table: gap → "output lost (N frames)", lost → error, etc.).
-      _hostedEventToItems(e) {
-        switch (e.type) {
-          case "frame": return this._hostedFrameToItems(e.frame || {});
-          case "control_request": {
-            const req = e.request || {};
-            let input = "";
-            if (req.input != null) { try { input = JSON.stringify(req.input); } catch (_) { input = ""; } }
-            return [{ kind: "permission", request_id: e.request_id, subtype: e.subtype || "",
-                      tool: req.tool_name || "", input, resolved: false, decision: null }];
-          }
-          case "control_ack": return [];  // MCP handshake; nothing user-facing
-          case "stderr": case "text": return [{ kind: "stderr", text: e.text || "" }];
-          case "exit":
-            return [{ kind: "marker", text: "session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")" : "") }];
-          case "lost": return [{ kind: "error", text: "stream lost: " + (e.reason || "daemon connection dropped") }];
-          case "gap": {
-            const n = e.dropped != null ? e.dropped
-                    : (e.to_seq != null && e.from_seq != null ? e.to_seq - e.from_seq - 1 : null);
-            return [{ kind: "gap", text: "output lost" + (n != null ? " (" + n + " frames)" : "") }];
-          }
-          default: return [];
-        }
-      },
-      _hostedFrameToItems(frame) {
-        const t = frame.type;
-        if (t === "system") return [{ kind: "marker", text: "· " + (frame.subtype || "system") + " ·" }];
-        if (t === "result") {
-          const txt = (typeof frame.result === "string" && frame.result) ? frame.result : "(turn complete)";
-          return [{ kind: "result", text: txt }];
-        }
-        if (t === "assistant" || t === "user") {
-          const content = (frame.message || {}).content;
-          const items = [];
-          if (typeof content === "string") {
-            if (content.trim()) items.push({ kind: "msg", role: t, text: content });
-          } else if (Array.isArray(content)) {
-            for (const block of content) {
-              if (!block || typeof block !== "object") continue;
-              if (block.type === "text" && block.text) items.push({ kind: "msg", role: t, text: block.text });
-              else if (block.type === "tool_use")
-                items.push({ kind: "tool", name: block.name || "tool", input: block.input != null ? JSON.stringify(block.input) : "" });
-              else if (block.type === "tool_result") {
-                let txt = block.content;
-                if (Array.isArray(txt)) txt = txt.map((b) => (b && b.text) ? b.text : "").join("");
-                if (typeof txt !== "string") txt = "";
-                items.push({ kind: "toolresult", text: txt });
-              }
-            }
-          }
-          return items;
-        }
-        return [];  // unknown frame type — ignore rather than dump raw
-      },
-      scrollHosted(id) {
-        const el = document.getElementById("hosted-stream-" + id);
-        if (el) el.scrollTop = el.scrollHeight;
-      },
-      async sendHosted(id) {
-        const v = this.hostedView[id];
-        if (!v || v.sending) return;
-        const text = (v.input || "").trim();
-        if (!text) return;
-        v.sending = true;
-        try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/message", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
-          });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (res.ok) { v.input = ""; }
-          else { const b = await res.json().catch(() => ({})); this.toast("send failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("send failed", "error"); }
-        v.sending = false;
-      },
-      // Answer a parked tool-permission request (CL-5). Optimistically flips the item
-      // on success; the control_resolved event confirms it (idempotent).
-      async respondHosted(id, requestId, decision) {
-        try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) +
-                                  "/permissions/" + encodeURIComponent(requestId), {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ decision }),
-          });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (res.ok) { this._resolveHostedPermission(id, requestId, decision); }
-          else { const b = await res.json().catch(() => ({})); this.toast("permission " + decision + " failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("permission " + decision + " failed", "error"); }
-      },
-      // --- log streaming ---
-      toggleLogs(name) {
-        const s = this.logs[name];
-        if (s && s.open) { this.closeLogs(name); } else { this.openLogs(name); }
-      },
-      openLogs(name) {
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
-        this.logs[name] = { open: true, ws: null, lines: [], pending: [], paused: false };
-        const self = this;
-        const ws = new WebSocket(url);
-        ws.onmessage = (ev) => {
-          const s = self.logs[name];
-          if (!s || !s.open) return;
-          if (s.paused) {
-            s.pending.push(ev.data);
-            if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
-            return;
-          }
-          s.lines.push(ev.data);
-          if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
-          self.$nextTick(() => self.scrollLog(name));
-        };
-        this.logs[name].ws = ws;
-      },
-      closeLogs(name) {
-        const s = this.logs[name];
-        if (s && s.ws) { try { s.ws.close(); } catch (e) {} }
-        if (s) s.open = false;
-      },
-      pauseLogs(name) { if (this.logs[name]) this.logs[name].paused = true; },
-      resumeLogs(name) {
-        const s = this.logs[name];
-        if (!s) return;
-        s.lines.push(...s.pending); s.pending = [];
-        if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
-        s.paused = false;
-        this.$nextTick(() => this.scrollLog(name));
-      },
-      scrollLog(name) {
-        const el = document.getElementById("log-" + name);
-        if (el) el.scrollTop = el.scrollHeight;
-      },
-      jumpToLatest(name) { this.scrollLog(name); },
-    };
-  }
-
-  function reaper() {
-    return {
-      open: false, loading: false, loaded: false, error: null,
-      ghosts: [], total: 0, liveDirs: 0, busy: false, result: null, deleteTyped: "",
-      toggle() { this.open = !this.open; if (this.open && !this.loaded) this.load(); },
-      summary() {
-        if (!this.ghosts.length) return "No ghost environments — nothing to reap.";
-        return this.ghosts.length + " ghost(s) · " + this.liveDirs +
-          " live dir(s) kept · cloud Default never touched";
-      },
-      async load() {
-        this.loading = true; this.error = null; this.result = null;
-        try {
-          const res = await fetch(ROOT + "/api/environments/ghosts");
-          const body = await res.json();
-          if (!res.ok) { this.error = body.detail || "failed to scan"; }
-          else { this.ghosts = body.ghosts || []; this.total = body.total; this.liveDirs = body.live_dirs; }
-        } catch (e) { this.error = String(e); }
-        finally { this.loaded = true; this.loading = false; }
-      },
-      async _reap(action, confirm) {
-        this.busy = true; this.error = null; this.result = null;
-        try {
-          const res = await fetch(ROOT + "/api/environments/reap", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action, confirm, ids: this.ghosts.map((g) => g.id) }),
-          });
-          const body = await res.json();
-          if (!res.ok) { this.error = body.detail || "reap failed"; return; }
-          const errs = Object.keys(body.errors || {}).length;
-          const msg = "✓ " + action + "d " + body.reaped.length + " environment(s)" +
-            (body.skipped.length ? " · skipped " + body.skipped.length : "") +
-            (errs ? " · " + errs + " error(s)" : "");
-          this.deleteTyped = "";
-          await this.load();
-          this.result = msg;
-        } catch (e) { this.error = String(e); }
-        finally { this.busy = false; }
-      },
-      archive() { this._reap("archive", "archive"); },
-      del() { if (this.deleteTyped === "DELETE") this._reap("delete", "DELETE"); },
-    };
-  }
-</script>
+{% include "_dashboard_script.html" %}
 </body>
 </html>

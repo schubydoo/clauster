@@ -1,0 +1,192 @@
+{# One project row. Rendered by the dashboard grid loop AND by
+   GET /api/projects/{name}/row for reactive insertion (no full-page reload). `idx` is
+   the row's position for the search/cap visibility gate (0 from the fragment route, so a
+   freshly created project is always shown). #}
+          <div class="list-group-item" data-project="{{ p.name }}"
+               x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
+               x-data="{ lopen: false, lmode: 'browser', lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', ladv: false }">
+            <div class="d-flex align-items-center flex-wrap gap-2">
+              <svg class="ico text-success" style="flex:none" x-cloak
+                   x-show="trustState['{{ p.name }}'] === 'trusted'" title="Directory trusted"><use href="#ic-trust"/></svg>
+              <span class="fw-bold text-truncate" style="font-size:1.02rem; max-width:16rem">{{ p.name }}</span>
+              <!-- inline meta -->
+              <span class="text-secondary small project-meta">
+                {% if p.is_git_repo %}<span title="This directory is a git repository"><svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Git</span>{% endif %}
+                {% if p.has_claude_md %}<span title="A CLAUDE.md file is present"><svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>CLAUDE.md</span>{% endif %}
+                <span x-show="usageLabel('{{ p.name }}')" x-cloak
+                      :title="usageTitle('{{ p.name }}')" x-text="usageLabel('{{ p.name }}')"></span>
+              </span>
+              <!-- live-session rollup -->
+              <span class="badge bg-green-lt" x-show="runningCountFor('{{ p.name }}') > 0" x-cloak
+                    :title="runningCountFor('{{ p.name }}') + ' live session(s) — see Active sessions below'"
+                    x-text="'● ' + runningCountFor('{{ p.name }}') + ' running'"></span>
+
+              <!-- right cluster: Run Claude here + overflow -->
+              <span class="ms-auto d-flex align-items-center gap-1">
+                <span class="launch-anchor">
+                  <button type="button" class="btn btn-primary" @click="lopen = !lopen" :aria-expanded="lopen">
+                    <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run Claude here
+                    <span class="ms-1" x-text="lopen ? '▴' : '▾'">▾</span>
+                  </button>
+                  <div class="card launch-pop" x-show="lopen" x-cloak @click.outside="lopen = false"
+                       @keydown.escape.window="lopen = false">
+                    <div class="card-body p-2">
+                      <div class="form-label small mb-1">How do you want to drive it?</div>
+                      <template x-for="m in launchModes()" :key="m.id">
+                        <label class="launch-opt" :class="lmode === m.id ? 'is-sel' : ''">
+                          <input type="radio" class="form-check-input mt-1 me-2" :name="'lm-{{ p.name }}'" :value="m.id" x-model="lmode"
+                                 @change="if (lmode !== 'desktop' && lperm === 'bypassPermissions') lperm = DEFAULT_PERMISSION_MODE">
+                          <span>
+                            <span class="fw-medium d-block" x-text="m.label"></span>
+                            <span class="text-secondary small" x-text="m.sub"></span>
+                          </span>
+                        </label>
+                      </template>
+                      <!-- cloud option folds into Fire-and-forget -->
+                      <label class="form-check small mt-1 ms-1" x-show="lmode === 'detached'" x-cloak>
+                        <input type="checkbox" class="form-check-input" x-model="lcloud">
+                        <span class="form-check-label">also register on claude.ai</span>
+                      </label>
+                      <!-- optional first prompt for Fire-and-forget -->
+                      <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
+                        <label class="form-label small mb-1">First prompt <span class="text-secondary">(optional)</span></label>
+                        <input class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…" aria-label="First prompt for the session">
+                      </div>
+                      <!-- permissions — shown for EVERY mode; the key safety choice, and it
+                           matters most for Fire-and-forget, which runs unattended. bypassPermissions
+                           is offered only where the per-project config ceiling allows it. -->
+                      <div class="mt-2">
+                        <label class="form-label small mb-1">Permissions</label>
+                        <select class="form-select form-select-sm" x-model="lperm"
+                                title="What the agent may do without asking: default = prompts each time · plan = read-only planning · acceptEdits = auto-accepts file edits · auto = model auto-approves what it judges safe · dontAsk = never prompts, denies anything not pre-approved{% if p.allow_bypass_permissions %} · bypassPermissions = skips all checks (gated ⚠){% endif %}.">
+                          <option value="default">default</option>
+                          <option value="plan">plan</option>
+                          <option value="acceptEdits">acceptEdits</option>
+                          <option value="auto">auto</option>
+                          <option value="dontAsk">dontAsk</option>
+                          {# bypassPermissions only for the Desktop/bridge launch, which carries the
+                             typed-confirm footgun guard; reset away from it on other modes (above). #}
+                          {% if p.allow_bypass_permissions %}<option value="bypassPermissions" :disabled="lmode !== 'desktop'">bypassPermissions ⚠ (Desktop only)</option>{% endif %}
+                        </select>
+                      </div>
+                      <!-- advanced (Desktop / bridge launch only): spawn dir + true-resume mode -->
+                      <div class="mt-2" x-show="lmode === 'desktop'" x-cloak>
+                        <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="ladv = !ladv"
+                                :aria-expanded="ladv" x-text="ladv ? 'Hide advanced ⌃' : 'Advanced ⌄'">Advanced ⌄</button>
+                        <div class="row g-2 mt-1" x-show="ladv" x-cloak>
+                          <div class="col-6">
+                            <label class="form-label small mb-1">Spawn</label>
+                            <select class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']"
+                                    title="Where the session runs: same-dir = the project directory · worktree = an isolated git worktree (git repos only) · session = a fresh sandboxed session.">
+                              <option value="same-dir">same-dir</option>
+                              {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
+                              <option value="session">session</option>
+                            </select>
+                          </div>
+                          {% if pty_supported %}
+                          <div class="col-6">
+                            <label class="form-label small mb-1">Mode</label>
+                            <select class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
+                                    title="standard = multi-session server. pty = single-session true-resume (restores prior conversation on Resume).">
+                              <option value="standard">standard</option>
+                              <option value="pty">pty (true-resume)</option>
+                            </select>
+                          </div>
+                          {% endif %}
+                        </div>
+                      </div>
+                      <button type="button" class="btn btn-primary w-100 mt-2"
+                              @click="launchRun('{{ p.name }}', lmode, lperm, lcloud, lprompt); lopen = false">
+                        <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="lperm"></span>
+                      </button>
+                    </div>
+                  </div>
+                </span>
+                <div class="card-menu" x-data="{ menu: false }" @click.outside="menu = false"
+                     @keydown.escape.window="menu = false">
+                  <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="menu = !menu"
+                          :aria-expanded="menu" aria-haspopup="true" aria-label="More actions" title="More actions">
+                    <svg class="ico" aria-hidden="true"><use href="#ic-more"/></svg>
+                  </button>
+                  <div class="dropdown-menu" x-show="menu" x-cloak>
+                    <button type="button" class="dropdown-item" @click="toggleClaudeMd('{{ p.name }}'); menu = false">
+                      <svg class="ico me-2" aria-hidden="true"><use href="#ic-edit"/></svg><span
+                        x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</span>
+                    </button>
+                  </div>
+                </div>
+              </span>
+            </div>
+
+            <!-- expandables (below the row, full width) -->
+            <!-- trust-on-start confirm (bridge / Desktop launch path) -->
+            <div class="alert alert-warning mt-2" x-show="confirmTrust['{{ p.name }}']" x-cloak>
+              <div>
+                <p class="mb-2">⚠ Trust the files in <code>{{ p.name }}</code>? Launching a session here
+                  lets it run tools and execute any code in <code>CLAUDE.md</code> /
+                  <code>.claude</code> in this directory.</p>
+                <label class="form-check mb-2">
+                  <input class="form-check-input" type="checkbox" x-model="trustConfirmed['{{ p.name }}']">
+                  <span class="form-check-label">I trust the files in this directory</span>
+                </label>
+                <div class="btn-list">
+                  <button type="button" class="btn btn-sm btn-warning" @click="confirmTrustStart('{{ p.name }}')"
+                          :disabled="!trustConfirmed['{{ p.name }}'] || trusting['{{ p.name }}']">
+                    <span class="spinner-border spinner-border-sm me-1" x-show="trusting['{{ p.name }}']" x-cloak></span>
+                    Trust &amp; start
+                  </button>
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="cancelTrust('{{ p.name }}')">Cancel</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- bypassPermissions typed-confirm -->
+            <div class="alert alert-danger mt-2" x-show="confirmBypass['{{ p.name }}']" x-cloak>
+              <p class="mb-2">⚠ <strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
+                run tools without asking. Type the project name to confirm.</p>
+              <div class="input-group">
+                <input type="text" class="form-control" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
+                       aria-label="Type the project name to confirm bypassPermissions"
+                       @keyup.enter="confirmBypassStart('{{ p.name }}')">
+                <button type="button" class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')">Start with bypass</button>
+                <button type="button" class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
+              </div>
+            </div>
+
+            <div class="alert alert-danger mt-2 mb-0" x-show="errorOf('{{ p.name }}')" x-cloak x-text="errorOf('{{ p.name }}')"></div>
+
+            <!-- CLAUDE.md editor (overflow-menu action) -->
+            <template x-if="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open">
+              <div class="mt-2 border rounded p-2">
+                <div class="d-flex align-items-center mb-1">
+                  <strong class="me-2">CLAUDE.md</strong>
+                  <span class="badge bg-blue-lt me-2" x-show="!cmd['{{ p.name }}'].loading && !cmd['{{ p.name }}'].exists" x-cloak>new file</span>
+                  <span class="small ms-auto" :class="{ 'text-danger': cmdBytes('{{ p.name }}') > 65536 }"
+                        x-text="cmdBytes('{{ p.name }}') + ' / 65536 bytes'"></span>
+                </div>
+                <div class="alert alert-warning py-1" x-show="cmd['{{ p.name }}'].bridge_running" x-cloak>
+                  ⚠ A session is running — saved changes apply to <strong>new</strong> sessions, not the attached one.</div>
+                <div class="alert alert-danger py-1" x-show="cmd['{{ p.name }}'].error" x-cloak x-text="cmd['{{ p.name }}'].error"></div>
+                <textarea class="form-control cmd-text" x-model="cmd['{{ p.name }}'].content" rows="12"
+                          spellcheck="false" autocomplete="off"
+                          :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving"></textarea>
+                <div class="btn-list mt-2">
+                  <button type="button" class="btn btn-sm btn-primary" @click="saveClaudeMd('{{ p.name }}')"
+                          :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving || cmdBytes('{{ p.name }}') > 65536"
+                          x-text="cmd['{{ p.name }}'].saving ? 'Saving…' : 'Save'">Save</button>
+                  <button type="button" class="btn btn-sm" @click="closeClaudeMd('{{ p.name }}')">Cancel</button>
+                  <span class="text-green" x-show="cmd['{{ p.name }}'].savedAt && !cmd['{{ p.name }}'].error" x-cloak>✓ saved</span>
+                </div>
+              </div>
+            </template>
+
+            <!-- external (unmanaged) session note -->
+            <div class="mt-2 text-secondary small" x-show="hasExternal('{{ p.name }}')" x-cloak
+                 title="A claude session is running in this directory that Clauster didn't start.">
+              <span class="status-dot status-dot-animated bg-yellow me-1"></span>
+              <span x-text="externalCount('{{ p.name }}') > 1
+                ? externalCount('{{ p.name }}') + ' external sessions active'
+                : 'External session active'"></span>
+              <span class="text-muted">— not managed by Clauster</span>
+            </div>
+          </div>
