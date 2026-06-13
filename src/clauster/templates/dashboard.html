@@ -39,8 +39,9 @@
     .zone-head .zone-sub { color: var(--tblr-secondary); font-size: .85rem; }
     .zone-head .zone-actions { margin-left: auto; display: flex; align-items: center; gap: .4rem; }
     .proj-search { max-width: 13rem; }
-    /* Two reorderable zones in a flex column: when sessions are live, the Active section
-       sorts above Projects (order:-1) so running work is never buried by a long list. */
+    /* Two zones stacked in a flex column. Active is FIRST in the DOM (not pulled up with
+       CSS `order`) so it sits above Projects AND keyboard/screen-reader focus order matches
+       the visual order — running work is never buried, and the two orders never disagree. */
     .zones { display: flex; flex-direction: column; }
     .zones > section { padding-top: 1.25rem; }
 
@@ -59,12 +60,15 @@
     .mode-badge { font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
 
     /* Left rail encodes STATUS (live / starting / attention / ended), not mode — mode is
-       already the badge, so the most pre-attentive channel signals "what needs me". */
-    .sess-row { border-left: 3px solid transparent; }
-    .sess-row.sess-live { border-left-color: var(--tblr-green); }
-    .sess-row.sess-starting { border-left-color: var(--tblr-azure); }
-    .sess-row.sess-warn { border-left-color: var(--tblr-yellow); }
-    .sess-row.sess-dead { border-left-color: var(--tblr-secondary); }
+       already the badge, so the most pre-attentive channel signals "what needs me".
+       Scoped under .zone-active so the 3px width out-specifies Tabler's .list-group-item
+       border shorthand (equal specificity otherwise → width collapses to 0 and the rail
+       vanishes). */
+    .zone-active .sess-row { border-left: 3px solid transparent; }
+    .zone-active .sess-row.sess-live { border-left-color: var(--tblr-green); }
+    .zone-active .sess-row.sess-starting { border-left-color: var(--tblr-azure); }
+    .zone-active .sess-row.sess-warn { border-left-color: var(--tblr-yellow); }
+    .zone-active .sess-row.sess-dead { border-left-color: var(--tblr-secondary); }
   </style>
 </head>
 <body>
@@ -290,121 +294,9 @@
       </div>
 
       <div class="zones">
-      <section class="zone-projects">
-      <!-- ============================================================= -->
-      <!-- ZONE 1 · Projects — where you launch Claude                   -->
-      <!-- ============================================================= -->
-      <div class="zone-head">
-        <h2>Projects</h2>
-        <span class="zone-sub">a folder Claude works in — launch a session from any of them</span>
-        <div class="zone-actions">
-          <input type="search" class="form-control form-control-sm proj-search" placeholder="Search projects…"
-                 x-model="projectFilter" aria-label="Search projects">
-          <button type="button" class="btn btn-sm btn-ghost-secondary" x-cloak
-                  x-show="PROJECT_NAMES.length > 6 && !projectFilter.trim()"
-                  @click="showAllProjects = !showAllProjects"
-                  x-text="showAllProjects ? 'Show fewer' : ('Show all ' + PROJECT_NAMES.length)"></button>
-          <button type="button" class="btn btn-sm btn-primary" @click="toggleNewProject()">
-            <span x-text="np.open ? '× Cancel' : '+ New project'">+ New project</span>
-          </button>
-        </div>
-      </div>
-
-      <!-- New project (create / clone) -->
-      <div class="mb-3" x-show="np.open" x-cloak>
-        <div class="card">
-          <div class="card-body">
-            <div class="row g-2">
-              <div class="col-md-5">
-                <label class="form-label">Name</label>
-                <input type="text" class="form-control" x-model="np.name" placeholder="my-project"
-                       pattern="[a-zA-Z0-9_-]+" @input="np.error = null; np.warn = null" @keyup.enter="submitNew()">
-              </div>
-              <div class="col-md-7">
-                <label class="form-label">Type</label>
-                <div class="btn-group w-100" role="group">
-                  <input type="radio" class="btn-check" id="np-create" value="create" x-model="np.mode"
-                         @change="np.error = null; np.warn = null">
-                  <label class="btn" for="np-create">Create empty</label>
-                  <input type="radio" class="btn-check" id="np-clone" value="clone" x-model="np.mode"
-                         @change="np.error = null; np.warn = null">
-                  <label class="btn" for="np-clone">Clone from git URL</label>
-                </div>
-              </div>
-            </div>
-            <div class="mt-2" x-show="np.mode === 'create'">
-              <label class="form-check"><input type="checkbox" class="form-check-input" x-model="np.gitInit">
-                <span class="form-check-label">run <code>git init</code></span></label>
-            </div>
-            <div class="mt-2" x-show="np.mode === 'clone'">
-              <label class="form-label">Git URL</label>
-              <input type="text" class="form-control" x-model="np.url" autocomplete="off" spellcheck="false"
-                     placeholder="https://github.com/owner/repo.git" @input="np.error = null" @keyup.enter="submitNew()">
-              <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
-                <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>
-              <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts blocked unless enabled in
-                config · cloned code runs only when you launch a session.</p>
-            </div>
-            <div class="mt-3">
-              <button class="btn btn-primary" @click="submitNew()" :disabled="np.busy || !np.name">
-                <span class="spinner-border spinner-border-sm me-1" x-show="np.busy" x-cloak></span>
-                <span x-text="np.busy ? (np.mode === 'clone' ? 'Cloning…' : 'Creating…')
-                                      : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</span>
-              </button>
-            </div>
-            <div class="mt-3" x-show="np.cloning" x-cloak>
-              <div class="d-flex justify-content-between small text-secondary mb-1">
-                <span x-text="np.progress.phase || 'Cloning…'"></span>
-                <span x-show="np.progress.percent !== null" x-text="np.progress.percent + '%'"></span>
-              </div>
-              <div class="progress">
-                <div class="progress-bar" role="progressbar"
-                     :class="np.progress.percent === null ? 'progress-bar-indeterminate' : ''"
-                     :style="np.progress.percent !== null ? ('width: ' + np.progress.percent + '%') : ''"></div>
-              </div>
-            </div>
-            <div class="alert alert-danger mt-2 mb-0" x-show="np.error" x-cloak x-text="np.error"></div>
-            <div class="alert alert-warning mt-2 mb-0" x-show="np.warn" x-cloak>
-              ⚠ <strong x-text="np.submittedName || np.name"></strong> ships <strong x-text="np.warn"></strong>
-              — its code runs when you launch a session here. Review it before starting.
-              <button class="btn btn-sm btn-warning ms-2" @click="revealProject(np.submittedName || np.name)">Show it</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Project list (rows — same layout language as the Active-sessions list below) -->
-      {% if projects %}
-      <div class="card" id="project-grid">
-        <div class="list-group list-group-flush">
-        {% for p in projects %}
-          {% set idx = loop.index0 %}
-          {% include "_project_row.html" %}
-        {% endfor %}
-        </div>
-      </div>
-      {% else %}
-      <div class="empty" id="empty-state">
-        <p class="empty-title">No projects yet</p>
-        <p class="empty-subtitle text-secondary">
-          Clauster runs Claude in a project directory under <code>{{ projects_root }}</code>.
-          Create one or clone a git repo to get started — or drop a directory there and it appears here.
-        </p>
-        <div class="empty-action">
-          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'">
-            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
-          </button>
-          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'">
-            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
-          </button>
-        </div>
-      </div>
-      {% endif %}
-      </section>
-
-      <!-- Active sorts above Projects when anything is live (order:-1) so running work
-           is never buried under a long Projects list. -->
-      <section class="zone-active" style="order: -1">
+      <!-- Active is pinned above Projects. DOM order = visual order (no CSS `order`)
+           so keyboard / screen-reader focus order matches what is shown (WCAG 2.4.3). -->
+      <section class="zone-active">
       <!-- ============================================================= -->
       <!-- ZONE 2 · Active sessions — what's running now                 -->
       <!-- ============================================================= -->
@@ -520,6 +412,118 @@
         </div>
       </div>
       </section>
+      <section class="zone-projects">
+      <!-- ============================================================= -->
+      <!-- ZONE 1 · Projects — where you launch Claude                   -->
+      <!-- ============================================================= -->
+      <div class="zone-head">
+        <h2>Projects</h2>
+        <span class="zone-sub">a folder Claude works in — launch a session from any of them</span>
+        <div class="zone-actions">
+          <input type="search" class="form-control form-control-sm proj-search" placeholder="Search projects…"
+                 x-model="projectFilter" aria-label="Search projects">
+          <button type="button" class="btn btn-sm btn-ghost-secondary" x-cloak
+                  x-show="PROJECT_NAMES.length > 6 && !projectFilter.trim()"
+                  @click="showAllProjects = !showAllProjects"
+                  x-text="showAllProjects ? 'Show fewer' : ('Show all ' + PROJECT_NAMES.length)"></button>
+          <button type="button" class="btn btn-sm btn-primary" @click="toggleNewProject()">
+            <span x-text="np.open ? '× Cancel' : '+ New project'">+ New project</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- New project (create / clone) -->
+      <div class="mb-3" x-show="np.open" x-cloak>
+        <div class="card">
+          <div class="card-body">
+            <div class="row g-2">
+              <div class="col-md-5">
+                <label class="form-label">Name</label>
+                <input type="text" class="form-control" x-model="np.name" placeholder="my-project"
+                       pattern="[a-zA-Z0-9_-]+" @input="np.error = null; np.warn = null" @keyup.enter="submitNew()">
+              </div>
+              <div class="col-md-7">
+                <label class="form-label">Type</label>
+                <div class="btn-group w-100" role="group">
+                  <input type="radio" class="btn-check" id="np-create" value="create" x-model="np.mode"
+                         @change="np.error = null; np.warn = null">
+                  <label class="btn" for="np-create">Create empty</label>
+                  <input type="radio" class="btn-check" id="np-clone" value="clone" x-model="np.mode"
+                         @change="np.error = null; np.warn = null">
+                  <label class="btn" for="np-clone">Clone from git URL</label>
+                </div>
+              </div>
+            </div>
+            <div class="mt-2" x-show="np.mode === 'create'">
+              <label class="form-check"><input type="checkbox" class="form-check-input" x-model="np.gitInit">
+                <span class="form-check-label">run <code>git init</code></span></label>
+            </div>
+            <div class="mt-2" x-show="np.mode === 'clone'">
+              <label class="form-label">Git URL</label>
+              <input type="text" class="form-control" x-model="np.url" autocomplete="off" spellcheck="false"
+                     placeholder="https://github.com/owner/repo.git" @input="np.error = null" @keyup.enter="submitNew()">
+              <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
+                <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>
+              <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts blocked unless enabled in
+                config · cloned code runs only when you launch a session.</p>
+            </div>
+            <div class="mt-3">
+              <button class="btn btn-primary" @click="submitNew()" :disabled="np.busy || !np.name">
+                <span class="spinner-border spinner-border-sm me-1" x-show="np.busy" x-cloak></span>
+                <span x-text="np.busy ? (np.mode === 'clone' ? 'Cloning…' : 'Creating…')
+                                      : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</span>
+              </button>
+            </div>
+            <div class="mt-3" x-show="np.cloning" x-cloak>
+              <div class="d-flex justify-content-between small text-secondary mb-1">
+                <span x-text="np.progress.phase || 'Cloning…'"></span>
+                <span x-show="np.progress.percent !== null" x-text="np.progress.percent + '%'"></span>
+              </div>
+              <div class="progress">
+                <div class="progress-bar" role="progressbar"
+                     :class="np.progress.percent === null ? 'progress-bar-indeterminate' : ''"
+                     :style="np.progress.percent !== null ? ('width: ' + np.progress.percent + '%') : ''"></div>
+              </div>
+            </div>
+            <div class="alert alert-danger mt-2 mb-0" x-show="np.error" x-cloak x-text="np.error"></div>
+            <div class="alert alert-warning mt-2 mb-0" x-show="np.warn" x-cloak>
+              ⚠ <strong x-text="np.submittedName || np.name"></strong> ships <strong x-text="np.warn"></strong>
+              — its code runs when you launch a session here. Review it before starting.
+              <button class="btn btn-sm btn-warning ms-2" @click="revealProject(np.submittedName || np.name)">Show it</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Project list (rows — same layout language as the Active-sessions list below) -->
+      {% if projects %}
+      <div class="card" id="project-grid">
+        <div class="list-group list-group-flush">
+        {% for p in projects %}
+          {% set idx = loop.index0 %}
+          {% include "_project_row.html" %}
+        {% endfor %}
+        </div>
+      </div>
+      {% else %}
+      <div class="empty" id="empty-state">
+        <p class="empty-title">No projects yet</p>
+        <p class="empty-subtitle text-secondary">
+          Clauster runs Claude in a project directory under <code>{{ projects_root }}</code>.
+          Create one or clone a git repo to get started — or drop a directory there and it appears here.
+        </p>
+        <div class="empty-action">
+          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
+          </button>
+          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
+          </button>
+        </div>
+      </div>
+      {% endif %}
+      </section>
+
       </div>  <!-- /.zones -->
 
       {% if reaper_ui_enabled %}

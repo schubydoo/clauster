@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 
 from fastapi.testclient import TestClient
@@ -36,6 +37,22 @@ def test_dashboard_renders(write_config):
     assert resp.status_code == 200
     assert "Clauster" in resp.text
     assert "alpha" in resp.text
+
+
+def test_dashboard_active_zone_precedes_projects_in_dom(write_config):
+    # The Active-sessions zone is pinned above Projects, but it must achieve that by DOM
+    # source order — NOT a CSS `order` hack — so keyboard / screen-reader focus order matches
+    # the visual order (WCAG 2.4.3). Regression guard: a redesign once used `order: -1`, which
+    # inverted the tab sequence (Projects' ~25 controls came first). Assert the source order
+    # and that no `order:-1` inversion is reintroduced.
+    page = _client(write_config).get("/").text
+    # Match the class TOKEN, not an exact class string, so adding another class to either
+    # section can't break the order check (CodeRabbit hardening).
+    active = re.search(r'class="[^"]*\bzone-active\b[^"]*"', page)
+    projects = re.search(r'class="[^"]*\bzone-projects\b[^"]*"', page)
+    assert active is not None and projects is not None
+    assert active.start() < projects.start()
+    assert "order: -1" not in page and "order:-1" not in page
 
 
 def test_dashboard_footer_credits_vendored_assets(write_config):
