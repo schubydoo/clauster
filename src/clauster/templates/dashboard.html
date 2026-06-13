@@ -402,7 +402,7 @@
                       </template>
                     </div>
                     <div class="input-group mt-2">
-                      <input type="text" class="form-control"
+                      <input type="text" class="form-control" aria-label="Hosted session message"
                              :placeholder="hostedView[h.claustrum_process_id].ended ? 'Session ended — not accepting messages' : 'Send a message…'"
                              x-model="hostedView[h.claustrum_process_id].input"
                              @keydown.enter="sendHosted(h.claustrum_process_id)"
@@ -1417,24 +1417,29 @@
       // Surface a terminal hosted session in the live view: explain why it ended (with the
       // server's error_detail when present) and stop the reconnect loop. Resume (when the
       // session kept its uuid) stays the recovery path, shown on the row above.
-      _markHostedEnded(id, h) {
+      _markHostedEnded(id, h, fallback) {
         const v = this.hostedView[id];
         if (!v) return;
         v.ended = true;
         v.connLost = false;
-        if (!v.endedReason) v.endedReason = this._hostedEndedReason(h);
+        if (!v.endedReason) v.endedReason = this._hostedEndedReason(h, fallback);
       },
-      _hostedEndedReason(h) {
-        if (!h) return "This session is no longer available.";
-        const base = ({
+      // Lead with whatever best explains the end: the snapshot's status phrasing, else a
+      // streamed exit/lost frame's text (`fallback`), else a generic line. Either way we
+      // still append the snapshot's error_detail + Resume hint — so a terminal frame that
+      // beats the 4s poll doesn't lose the richer reason the snapshot already carries.
+      _hostedEndedReason(h, fallback) {
+        const phrasing = {
           stopped: "Session stopped.",
           crashed: "The session crashed.",
           error: "The session ended with an error.",
           interrupted: "Session interrupted.",
           exited: "Session ended.",
-        })[h.status] || "This session is no longer live.";
-        const detail = h.error_detail ? " " + h.error_detail : "";
-        const resume = h.claude_session_uuid ? " Use Resume above to continue it." : "";
+        };
+        const base = (h && phrasing[h.status]) || fallback ||
+          (h ? "This session is no longer live." : "This session is no longer available.");
+        const detail = h && h.error_detail ? " " + h.error_detail : "";
+        const resume = h && h.claude_session_uuid ? " Use Resume above to continue it." : "";
         return base + detail + resume;
       },
       _renderHostedEvent(id, e) {
@@ -1443,14 +1448,13 @@
         if (typeof e.event_seq === "number") { v.lastSeq = e.event_seq; v.connLost = false; }
         // A terminal frame means the session is over: gate the composer and stop the
         // reconnect loop (its renderable marker/error item still gets pushed below).
+        // Route through _markHostedEnded with the snapshot row so error_detail + the
+        // Resume hint survive a frame that beats the poll; the frame text is the fallback.
         if (e.type === "exit" || e.type === "lost") {
-          v.ended = true;
-          v.connLost = false;
-          if (!v.endedReason) {
-            v.endedReason = e.type === "lost"
-              ? "Stream lost — " + (e.reason || "the daemon connection dropped.")
-              : "Session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")." : ".");
-          }
+          const fallback = e.type === "lost"
+            ? "Stream lost — " + (e.reason || "the daemon connection dropped.")
+            : "Session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")." : ".");
+          this._markHostedEnded(id, this.hosted.find((x) => x.claustrum_process_id === id), fallback);
         }
         // A resolution flips the matching parked-permission item; it adds no new line.
         if (e.type === "control_resolved") {
