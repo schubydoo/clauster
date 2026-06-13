@@ -177,6 +177,47 @@ def test_claude_md_invalid_name_404(write_config, tmp_path):
     )
 
 
+# ----- not-found handling (friendly page vs JSON) -----------------------
+
+
+def test_unknown_page_returns_friendly_html_404(write_config, tmp_path):
+    # A browser (Accept: text/html) hitting a stale/mistyped non-API URL gets a
+    # styled page with a way back, not a bare {"detail": "Not Found"} body.
+    r = _client(write_config, tmp_path).get("/totally/bogus", headers={"accept": "text/html"})
+    assert r.status_code == 404
+    assert "text/html" in r.headers["content-type"]
+    assert "does not exist" in r.text
+    assert "Back to the dashboard" in r.text
+
+
+def test_unknown_api_route_stays_json_404(write_config, tmp_path):
+    # An /api path keeps the machine-readable error even for an HTML client.
+    r = _client(write_config, tmp_path).get("/api/nope", headers={"accept": "text/html"})
+    assert r.status_code == 404
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["detail"]
+
+
+def test_unknown_page_json_client_gets_json_404(write_config, tmp_path):
+    # A non-HTML client gets JSON, never the page.
+    r = _client(write_config, tmp_path).get(
+        "/totally/bogus", headers={"accept": "application/json"}
+    )
+    assert r.status_code == 404
+    assert r.headers["content-type"].startswith("application/json")
+
+
+def test_unknown_project_404_wording_is_consistent(write_config, tmp_path):
+    # card / claude-md / preflight all phrase the missing-project 404 identically.
+    c = _client(write_config, tmp_path)
+    details = {
+        c.get("/api/projects/ghostproj/card").json()["detail"],
+        c.get("/api/projects/ghostproj/claude-md").json()["detail"],
+        c.get("/api/projects/ghostproj/preflight").json()["detail"],
+    }
+    assert details == {"project 'ghostproj' not found"}
+
+
 def test_claude_md_put_path_escape_422(write_config, projects_root, tmp_path):
     # CLAUDE.md is a symlink out of the project -> ClaudeMdPathError (a ClaudeMdError) -> 422.
     os.symlink("/etc/passwd", projects_root / "gamma" / "CLAUDE.md")

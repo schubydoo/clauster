@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clauster — Not found</title>
+  <!-- Set the theme before first paint to avoid a flash. Defaults to dark. -->
+  <script>
+    (function () {
+      var t = localStorage.getItem("clauster-theme") || "dark";
+      document.documentElement.setAttribute("data-bs-theme", t);
+    })();
+  </script>
+  <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css">
+</head>
+<body class="d-flex flex-column">
+  <div class="page page-center">
+    <div class="container container-tight py-4">
+      <div class="text-center mb-4">
+        <span class="navbar-brand navbar-brand-autodark fs-1 fw-bold">Clauster</span>
+      </div>
+      <div class="empty">
+        <p class="empty-title display-4 fw-bold mb-2">404</p>
+        <p class="empty-title">This page does not exist</p>
+        <p class="empty-subtitle text-secondary">
+          The link may be stale or mistyped — Clauster serves the dashboard and its API.
+        </p>
+        <div class="empty-action">
+          <a href="{{ request.scope.root_path }}/" class="btn btn-primary">Back to the dashboard</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
