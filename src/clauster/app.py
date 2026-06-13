@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import (
     __version__,
@@ -208,6 +209,28 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     _clone_tasks: set[asyncio.Task] = set()
     templates = Jinja2Blocks(directory=str(_TEMPLATES_DIR))
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exception(request: Request, exc: StarletteHTTPException) -> Response:
+        """Render a friendly HTML 404 for browser navigation; keep JSON for the API.
+
+        An unmatched route otherwise dead-ends a stale/mistyped URL on a bare
+        ``{"detail": "Not Found"}`` body with no way back. Only browser GETs to
+        non-API paths get the page; ``/api`` + ``/ws`` and JSON clients keep the
+        machine-readable error, so the API contract (and its tests) stay intact.
+        """
+        wants_html = "text/html" in request.headers.get("accept", "")
+        # Classify against the app-local ASGI path (root_path stripped) — the same path
+        # FastAPI routes on — so a prefix-mounted deployment still treats /api + /ws as
+        # machine-readable. Match the bare prefix too: exactly /api or /ws (no trailing
+        # slash) is still an API/transport path and must stay JSON, not the HTML page.
+        path = request.scope["path"]
+        is_api = path in ("/api", "/ws") or path.startswith(("/api/", "/ws/"))
+        if exc.status_code == 404 and wants_html and not is_api:
+            return templates.TemplateResponse(request, "404.html", {}, status_code=404)
+        return JSONResponse(
+            {"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers
+        )
 
     # ----- auth context (v0.2 foundation, D12/D13) ------------------------
     _root = config.root_path
@@ -1095,11 +1118,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def _resolve_project_path(name: str) -> Path:
         """Map a project name to its path, refusing unknown/unsafe names (traversal)."""
         if not is_valid_project_name(name):
-            raise HTTPException(status_code=404, detail=f"no such project: {name!r}")
+            raise HTTPException(status_code=404, detail=f"project {name!r} not found")
         for proj in await list_projects():
             if proj.name == name:
                 return proj.path
-        raise HTTPException(status_code=404, detail=f"no such project: {name!r}")
+        raise HTTPException(status_code=404, detail=f"project {name!r} not found")
 
     def _bridge_running(name: str) -> bool:
         inst = runner.get_instance(name)
