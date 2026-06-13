@@ -19,6 +19,13 @@ The OFF cases ride the shared, read-only ``open_server``; the ON cases use the
 confirm trusts ``gamma``, a mutation that must not leak between tests).
 """
 
+# TODO(redesign): the two-zone dashboard removed the old project card and its
+# "Start bridge" button — launching is now the per-project "Run Claude here"
+# popover, and the bypassPermissions <option> lives in that popover's permission
+# select. The Playwright selectors below need re-targeting to the new row +
+# launch-popover markup. Out of scope for the unit-suite green-up; this opt-in
+# suite is excluded from the default/CI run.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

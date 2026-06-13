@@ -213,21 +213,26 @@ def test_api_spawn_non_string_mode_is_422(write_config):
 
 
 def test_dashboard_renders_pickers(write_config):
-    # Assert on the binding/option markup, not on user-facing label text (which a
-    # copy change could break without a behaviour regression).
+    # Redesign: the spawn / permission / mode pickers moved into the per-project
+    # launch popover (_project_row.html). Assert on the binding/option markup, not
+    # on user-facing label text (a copy change could break that without a
+    # behaviour regression). The permission picker is now Jinja-rendered <option>s
+    # bound to the popover-local `lperm`.
     client = _client(write_config)
     html = client.get("/").text
-    assert "x-model=\"spawnMode['alpha']\"" in html
-    assert "x-model=\"permMode['alpha']\"" in html
+    assert "x-model=\"spawnMode['alpha']\"" in html  # Spawn picker
+    assert 'x-model="lperm"' in html  # Permissions picker (popover-local)
+    assert '<option value="default">default</option>' in html  # a Jinja-rendered perm option
     assert '<option value="worktree">worktree</option>' in html  # alpha is a git repo
 
 
-_BYPASS_OPTION = '<option value="bypassPermissions">'
+# The picker <option> gained a `:disabled` binding restricting bypass to the Desktop
+# launch (where the typed-confirm guard lives), so match the tag prefix, not the full tag.
+# The confirm panel always *mentions* bypassPermissions; only the picker <option> is gated.
+_BYPASS_OPTION = '<option value="bypassPermissions"'
 
 
 def test_bypass_option_hidden_without_ceiling(write_config):
-    # The confirm panel always *mentions* bypassPermissions; only the picker
-    # <option> is gated. Assert on the option tag, not the bare word.
     client = _client(write_config)
     assert _BYPASS_OPTION not in client.get("/").text
 
@@ -235,4 +240,8 @@ def test_bypass_option_hidden_without_ceiling(write_config):
 def test_bypass_option_shown_with_ceiling(write_config):
     extra = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
     client = _client(write_config, extra)
-    assert _BYPASS_OPTION in client.get("/").text
+    html = client.get("/").text
+    assert _BYPASS_OPTION in html
+    # bypassPermissions is offered only for the Desktop/bridge mode, which carries the
+    # typed-confirm footgun guard (browser/detached launches skip that confirm).
+    assert '<option value="bypassPermissions" :disabled="lmode !== \'desktop\'">' in html

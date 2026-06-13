@@ -98,36 +98,39 @@ def test_project_preflight_shape_and_checks(write_config, tmp_path):
         assert c["status"] in {"ok", "warn", "fail"}
 
 
-# ----- single-card fragment (reactive insertion, no full reload) --------
+# ----- single-row fragment (reactive insertion, no full reload) ---------
 
 
 def test_card_renders_known_project(write_config, tmp_path):
-    # The fragment route returns the same card markup the grid loop renders.
-    r = _client(write_config, tmp_path).get("/api/projects/alpha/card")
+    # The fragment route returns the same row markup the grid loop renders.
+    r = _client(write_config, tmp_path).get("/api/projects/alpha/row")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     assert 'data-project="alpha"' in r.text
-    assert "Start bridge" in r.text  # it's a real card, not an empty stub
+    assert "Run Claude here" in r.text  # it's a real row, not an empty stub
 
 
 def test_card_reflects_project_shape(write_config, tmp_path):
-    # Per-project Jinja conditionals render: the CLAUDE.md meta-row indicator (the
-    # ic-page icon) only appears where a CLAUDE.md is present.
+    # Per-project Jinja conditionals render: the CLAUDE.md meta indicator (the
+    # ic-page icon) only appears where a CLAUDE.md is present; the Git meta
+    # indicator only appears for a git repo. Fixtures: alpha=git, beta=CLAUDE.md,
+    # gamma=plain.
     client = _client(write_config, tmp_path)
-    assert (
-        '<use href="#ic-page"' in client.get("/api/projects/beta/card").text
-    )  # beta ships CLAUDE.md
-    assert (
-        '<use href="#ic-page"' not in client.get("/api/projects/gamma/card").text
-    )  # gamma doesn't
+    alpha = client.get("/api/projects/alpha/row").text
+    beta = client.get("/api/projects/beta/row").text
+    gamma = client.get("/api/projects/gamma/row").text
+    assert '<use href="#ic-page"' in beta  # beta ships CLAUDE.md
+    assert '<use href="#ic-page"' not in gamma  # gamma doesn't
+    assert '<use href="#ic-git"' in alpha  # alpha is a git repo
+    assert '<use href="#ic-git"' not in gamma  # gamma isn't
 
 
 def test_card_unknown_project_404(write_config, tmp_path):
-    assert _client(write_config, tmp_path).get("/api/projects/ghostproj/card").status_code == 404
+    assert _client(write_config, tmp_path).get("/api/projects/ghostproj/row").status_code == 404
 
 
 def test_card_invalid_name_422(write_config, tmp_path):
-    assert _client(write_config, tmp_path).get("/api/projects/ghost.proj/card").status_code == 422
+    assert _client(write_config, tmp_path).get("/api/projects/ghost.proj/row").status_code == 422
 
 
 # ----- instance stop / trust not-found ----------------------------------
@@ -211,10 +214,10 @@ def test_unknown_page_json_client_gets_json_404(write_config, tmp_path):
 
 
 def test_unknown_project_404_wording_is_consistent(write_config, tmp_path):
-    # card / claude-md / preflight all phrase the missing-project 404 identically.
+    # row / claude-md / preflight all phrase the missing-project 404 identically.
     c = _client(write_config, tmp_path)
     details = {
-        c.get("/api/projects/ghostproj/card").json()["detail"],
+        c.get("/api/projects/ghostproj/row").json()["detail"],
         c.get("/api/projects/ghostproj/claude-md").json()["detail"],
         c.get("/api/projects/ghostproj/preflight").json()["detail"],
     }
@@ -596,41 +599,6 @@ def test_dashboard_injects_tokens_exclude_cache_when_set(write_config, tmp_path)
         .text
     )
     assert "const TOKENS_INCLUDE_CACHE = false;" in html
-
-
-# ----- cards ⇄ rows layout toggle ----------------------------------------
-
-
-def test_dashboard_has_cards_rows_layout_toggle(write_config, tmp_path):
-    # The cards⇄rows view toggle + its Alpine wiring render on the dashboard, and
-    # the choice persists in localStorage the same way the theme does.
-    html = _client(write_config, tmp_path).get("/").text
-    assert 'aria-label="Project layout"' in html  # the toggle button group
-    assert "setLayout('cards')" in html and "setLayout('rows')" in html
-    assert "layout === 'rows' ? 'layout-rows' : 'layout-cards'" in html  # grid class binding
-    assert 'localStorage.getItem("clauster-layout")' in html  # persisted like the theme
-
-
-def test_card_has_rows_accordion_scaffold(write_config, tmp_path):
-    # The reused card carries the rows-layout caret + body accordion gate, so the
-    # /card reactive insertion respects the active layout too (no second template).
-    html = _client(write_config, tmp_path).get("/api/projects/alpha/card").text
-    assert "toggleRow('alpha')" in html  # expand/collapse caret
-    assert "rowOpen('alpha')" in html  # body shown in cards mode / when expanded
-
-
-def test_card_metrics_line_not_duplicated_across_layouts(write_config, tmp_path):
-    # Regression: the live metrics line must render in exactly one place per layout —
-    # the collapsed-row header inline (rows) OR the body (cards), never both. An
-    # expanded row showed it twice when the body line lacked its `layout === 'cards'`
-    # guard. The header inline is rows-gated; the body is cards-gated; the old
-    # unguarded `x-show="metricsLabel(...)"` body form must not reappear.
-    html = _client(write_config, tmp_path).get("/api/projects/alpha/card").text
-    # count == 1 (not just presence): catches a re-introduced duplicate of the *same*
-    # guarded line, which `in html` would miss — that's the duplication class guarded here.
-    assert html.count("layout === 'rows' && metricsLabel('alpha')") == 1  # header inline (rows)
-    assert html.count("layout === 'cards' && metricsLabel('alpha')") == 1  # body line (cards)
-    assert "x-show=\"metricsLabel('alpha')\"" not in html  # the unguarded form = the bug
 
 
 # ----- /api/projects/{name}/metrics (live per-bridge resource sample) ----

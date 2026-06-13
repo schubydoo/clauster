@@ -15,6 +15,13 @@ in one test never leaks into the next; the read-only validation checks ride the
 module-scoped ``open_server``.
 """
 
+# TODO(redesign): the two-zone dashboard removed the old project card and its
+# "Start bridge" button — launching is now the per-project "Run Claude here"
+# popover. The Playwright selectors below (get_by_role("button", name="Start
+# bridge"), .card lookups) need re-targeting to the new row + launch-popover
+# markup. Out of scope for the unit-suite green-up; this opt-in suite is excluded
+# from the default/CI run.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

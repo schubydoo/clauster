@@ -55,21 +55,29 @@ def test_dashboard_footer_credits_vendored_assets(write_config):
 
 
 def test_dashboard_has_readiness_panel(write_config):
-    # The preflight panel + its /api/doctor wiring are present in the page (Alpine
-    # x-show hides it until a check needs attention, but the markup/JS must ship).
+    # Readiness is now a header pill (severity-aware: "blocking" vs "check(s)") that
+    # opens a collapsible panel titled "Before you start a session". The pill logic
+    # + the /api/doctor wiring must ship (Alpine x-show hides it until a check needs
+    # attention).
     resp = _client(write_config).get("/")
-    assert "Before you start a bridge" in resp.text
+    assert "Before you start a session" in resp.text  # the collapsible panel title
+    assert "readinessBlockers()" in resp.text  # severity split: blocking vs warning
+    assert "readinessWarnings()" in resp.text
+    assert "blocking" in resp.text  # the solid-red pill copy
     assert "loadReadiness" in resp.text
     assert "/api/doctor" in resp.text
 
 
 def test_dashboard_has_bg_agent_dispatch_and_stop_controls(write_config):
-    # BG-4: the background-agents panel ships a dispatch form (POST /api/agents) and
-    # a per-row Stop button (DELETE /api/agents/{id}), plus the launcher + handlers.
+    # BG-4 (redesign): background agents are now launched as the "Fire-and-forget"
+    # outcome in the per-project launch popover (_launchDetached -> POST /api/agents,
+    # with an optional "also register on claude.ai"), and stopped via the per-row
+    # Stop button (stopAgent -> DELETE /api/agents/{id}) in the unified Active list.
     page = _client(write_config).get("/").text
-    assert "New background agent" in page  # the always-visible launcher
-    assert "dispatchAgent" in page and "stopAgent" in page
-    assert "agentDispatchOpen" in page and "agentForm" in page and "agentStopping" in page
+    assert "Fire-and-forget" in page  # the launch-mode label
+    assert "_launchDetached" in page  # routes the fire-and-forget launch
+    assert "also register on claude.ai" in page  # the claude.ai opt-in checkbox
+    assert "stopAgent" in page and "agentStopping" in page  # per-row stop control
     assert "/api/agents" in page
 
 
@@ -95,14 +103,16 @@ def test_dashboard_pty_bridge_is_resumable(write_config):
     assert 'i.resume_mode === "pty"' in resp.text
 
 
-def test_dashboard_resume_and_start_new_controls_render(write_config):
-    # PR2: a resumable bridge offers a primary "Resume" plus a distinct
-    # "Start new session" that goes through a warning before a fresh spawn.
+def test_dashboard_resume_controls_render(write_config):
+    # Redesign: "Start new session" is gone (launching is now "Run Claude here").
+    # The Recent / resumable group still offers Resume for a terminated bridge
+    # (resume(i.project) -> POST /resume). The hosted resume affordance
+    # (resumeHosted) is claustrum-gated and asserted in test_app_hosted.py.
     resp = _client(write_config).get("/")
     assert resp.status_code == 200
     assert ">Resume</button>" in resp.text
-    assert "startNew(" in resp.text and ">Start new session</button>" in resp.text
-    assert "confirmNewStart(" in resp.text  # the warned confirm path
+    assert "resume(i.project)" in resp.text  # bridge resume affordance
+    assert ">Start new session</button>" not in resp.text  # the start-new button is gone
 
 
 def test_trust_on_start_replaces_trust_button(write_config):
@@ -118,26 +128,29 @@ def test_trust_on_start_replaces_trust_button(write_config):
 
 
 def test_trust_on_start_guards(write_config):
-    # Guards: "Trust & start" is disabled until the checkbox is ticked; the Start
-    # button is greyed while a trust/bypass confirm is open (so a re-click can't reset
-    # the checkbox); a trusted dir shows a green shield by its name (no prompt needed).
+    # Guards (now in the per-project row, rendered by the dashboard loop): the
+    # trust-on-start confirm opens on confirmTrust; "Trust & start" stays disabled
+    # until the "I trust…" checkbox is ticked; a trusted dir shows a green shield by
+    # its name (no prompt needed).
     txt = _client(write_config).get("/").text
+    assert "x-show=\"confirmTrust['alpha']\"" in txt  # the trust-on-start confirm
     assert ':disabled="!trustConfirmed[' in txt  # checkbox gates Trust & start
-    assert ':disabled="confirmTrust[' in txt  # Start greyed while deciding
+    assert "Trust &amp; start" in txt  # the confirm button copy
     assert "Directory trusted" in txt  # the trusted-shield tooltip
 
 
 def test_dashboard_renders_resume_mode_picker(write_config):
-    # PR3: the per-launch Mode picker is wired (DEFAULT_RESUME_MODE seed + the
-    # resume_mode posted in the spawn body are platform-independent); the <select>
-    # itself is gated on pty_supported (POSIX only).
+    # Redesign: the Mode picker now lives in the launch popover's "Advanced"
+    # disclosure (Desktop launch). Its JS wiring is platform-independent
+    # (DEFAULT_RESUME_MODE seed + the resume_mode posted in the spawn body); the
+    # <select> itself is gated on pty_supported (POSIX only).
     resp = _client(write_config).get("/")
     assert resp.status_code == 200
     assert "DEFAULT_RESUME_MODE" in resp.text
     assert "resume_mode:" in resp.text  # posted in the /api/instances body
-    # Start-new-session on a resumable card (Mode picker hidden) must keep the
+    # A fresh start on a resumable bridge (Mode picker hidden) must keep the
     # bridge's recorded mode, not silently post the global default.
     assert "existing.resume_mode" in resp.text
     if sys.platform != "win32":
-        assert "resumeMode['" in resp.text  # the picker <select> x-model (POSIX)
+        assert "x-model=\"resumeMode['alpha']\"" in resp.text  # popover Advanced picker
         assert "pty (true-resume)" in resp.text

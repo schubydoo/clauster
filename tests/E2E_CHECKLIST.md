@@ -95,9 +95,9 @@ restarts — the dashboard JS/CSS are cached static assets.
 - [ ] **Login / logout** (when `auth.password_required`): login, then logout
       revokes everywhere (old cookie rejected). **`[auto]`** for login (wrong
       password gated, correct reaches the dashboard); logout-revocation still manual.
-- [ ] **Theme toggle** (dark/light) persists across reload — sun/moon Iconoir
+- [ ] **Theme toggle** (dark/light) persists across reload — sun/moon Tabler
       icons render (no broken `<use>` refs). **`[auto]`** (persistence across reload).
-- [ ] **Action-button icons** (Iconoir) render on Start/Stop/Resume/Trust/Edit/
+- [ ] **Action-button icons** (Tabler) render on Start/Stop/Resume/Trust/Edit/
       logs/QR/copy/Open and follow the button text color in both themes.
 - [ ] **Connection-lost banner** — stop the server (or block `/api/instances`);
       after ~2 failed polls a "Lost connection … retrying" banner appears; it
