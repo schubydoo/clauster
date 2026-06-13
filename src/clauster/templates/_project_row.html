@@ -50,7 +50,7 @@
                       <!-- optional first prompt for Fire-and-forget -->
                       <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
                         <label class="form-label small mb-1">First prompt <span class="text-secondary">(optional)</span></label>
-                        <input class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…">
+                        <input class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…" aria-label="First prompt for the session">
                       </div>
                       <!-- permissions — shown for EVERY mode; the key safety choice, and it
                            matters most for Fire-and-forget, which runs unattended. bypassPermissions
@@ -146,6 +146,7 @@
                 run tools without asking. Type the project name to confirm.</p>
               <div class="input-group">
                 <input type="text" class="form-control" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
+                       aria-label="Type the project name to confirm bypassPermissions"
                        @keyup.enter="confirmBypassStart('{{ p.name }}')">
                 <button type="button" class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')">Start with bypass</button>
                 <button type="button" class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
