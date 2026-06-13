@@ -71,6 +71,22 @@ def test_dashboard_footer_credits_vendored_assets(write_config):
     assert "THIRD_PARTY_NOTICES.md" in page
 
 
+def test_dashboard_ux_polish_followups(write_config):
+    # Follow-up UX polish from the multi-agent review: (P2-12) untrusted projects get an
+    # explicit muted shield with an aria-label — not just the absence of the trusted one, so
+    # screen readers can tell "untrusted" from "no data"; (P2-7) the bypass typed-confirm's
+    # "Start with bypass" stays disabled until the typed name matches the project; (P2-6)
+    # hosted status badges gain a dot helper so browser/desktop/detached present status the
+    # same way (dot + capitalized) instead of a dotless lowercase pill.
+    page = _client(write_config).get("/").text
+    assert 'aria-label="Directory not yet trusted"' in page  # explicit untrusted signal
+    # Assert the actual binding, not a loose token (CodeRabbit): the Start-with-bypass button
+    # is gated on the typed name matching, and the hosted status-dot helper ships. Its USE in
+    # the (claustrum-gated) hosted row is asserted in test_app_hosted's enabled render.
+    assert ":disabled=\"(bypassTyped['alpha'] || '') !== 'alpha'\"" in page
+    assert "hostedStatusDot(status) {" in page  # the helper is defined and shipped
+
+
 def test_dashboard_has_readiness_panel(write_config):
     # Readiness is now a header pill (severity-aware: "blocking" vs "check(s)") that
     # opens a collapsible panel titled "Before you start a session". The pill logic
