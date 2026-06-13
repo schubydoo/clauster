@@ -220,9 +220,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         machine-readable error, so the API contract (and its tests) stay intact.
         """
         wants_html = "text/html" in request.headers.get("accept", "")
-        path = request.url.path
-        # Match the bare prefix too: a 404 at exactly /api or /ws (no trailing slash)
-        # is still an API/transport path and must stay JSON, not the HTML page.
+        # Classify against the app-local ASGI path (root_path stripped) — the same path
+        # FastAPI routes on — so a prefix-mounted deployment still treats /api + /ws as
+        # machine-readable. Match the bare prefix too: exactly /api or /ws (no trailing
+        # slash) is still an API/transport path and must stay JSON, not the HTML page.
+        path = request.scope["path"]
         is_api = path in ("/api", "/ws") or path.startswith(("/api/", "/ws/"))
         if exc.status_code == 404 and wants_html and not is_api:
             return templates.TemplateResponse(request, "404.html", {}, status_code=404)
