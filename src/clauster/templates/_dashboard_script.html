@@ -98,6 +98,8 @@
       _toastSeq: 0,
       connLost: false,    // polling has failed repeatedly -> data is stale
       _refreshFails: 0,
+      _refreshing: false,    // single-flight guard for refresh()
+      _refreshQueued: false,  // a refresh requested while one was in flight -> run one trailing
       np: { open: false, name: "", submittedName: "", mode: "create", url: "", shallow: false,
             gitInit: false, busy: false, error: null, warn: null,
             cloning: false, progress: { percent: null, phase: "" } },
@@ -256,6 +258,13 @@
       },
       dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
       async refresh() {
+        // Single-flight: setInterval can fire a new tick while a slow refresh is still
+        // awaiting. Without this, an older refresh can resolve AFTER a newer one and clobber
+        // this.instances / this.hosted with stale data. But action flows (`await refresh()`
+        // after start/stop) must NOT be silently dropped — queue ONE trailing refresh so the
+        // latest state lands right after the in-flight one completes.
+        if (this._refreshing) { this._refreshQueued = true; return; }
+        this._refreshing = true;
         let ok = true;
         try {
           const [iRes, sRes, aRes] = await Promise.all([
@@ -288,6 +297,12 @@
             else { ok = false; }
           }
         } catch (e) { ok = false; }
+        finally {
+          this._refreshing = false;
+          // A refresh arrived mid-flight (e.g. from a start/stop action) — run it now so the
+          // UI reflects the latest state without waiting for the next timer tick.
+          if (this._refreshQueued) { this._refreshQueued = false; this.refresh(); }
+        }
         // A single blip is normal; only surface a *persistent* outage so the user
         // knows the data is stale and we're retrying — never fail silently.
         if (ok) { this._refreshFails = 0; this.connLost = false; }
@@ -1175,29 +1190,48 @@
         if (s && s.open) { this.closeLogs(name); } else { this.openLogs(name); }
       },
       openLogs(name) {
+        // Idempotent + state-bound: retire any prior state first, then bind THIS socket's
+        // handlers to its own `state` object (identity-checked against the live this.logs[name]).
+        // So a reconnect (the Reconnect button re-calls this) can't leave two tails streaming
+        // into one view, and a retired socket's late onmessage/onclose can't append to — or flip
+        // `lost` on — the fresh panel.
+        const prev = this.logs[name];
+        if (prev) {
+          prev.open = false;
+          if (prev.ws) { try { prev.ws.close(); } catch (e) {} }
+        }
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
-        this.logs[name] = { open: true, ws: null, lines: [], pending: [], paused: false };
+        const state = { open: true, ws: null, lines: [], pending: [], paused: false, lost: false };
+        this.logs[name] = state;
         const self = this;
         const ws = new WebSocket(url);
         ws.onmessage = (ev) => {
-          const s = self.logs[name];
-          if (!s || !s.open) return;
-          if (s.paused) {
-            s.pending.push(ev.data);
-            if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
+          if (!state.open || self.logs[name] !== state) return;  // a retired socket → ignore
+          state.lost = false;  // a frame arrived → the tail is live again
+          if (state.paused) {
+            state.pending.push(ev.data);
+            if (state.pending.length > MAX_PENDING) state.pending.splice(0, state.pending.length - MAX_PENDING);
             return;
           }
-          s.lines.push(ev.data);
-          if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
+          state.lines.push(ev.data);
+          if (state.lines.length > MAX_LOG_LINES) state.lines.splice(0, state.lines.length - MAX_LOG_LINES);
           self.$nextTick(() => self.scrollLog(name));
         };
-        this.logs[name].ws = ws;
+        // A dropped socket (bridge stopped/died, server 1008 close, network blip) leaves the
+        // panel showing a frozen tail; mark it lost so the panel surfaces the disconnect. Bound
+        // to `state` + identity-checked, so a retired socket can't flip the fresh panel, and
+        // closeLogs() clears `open` first so an intentional close never trips this.
+        const lost = () => { if (state.open && self.logs[name] === state) state.lost = true; };
+        ws.onerror = lost;
+        ws.onclose = lost;
+        state.ws = ws;
       },
       closeLogs(name) {
         const s = this.logs[name];
-        if (s && s.ws) { try { s.ws.close(); } catch (e) {} }
-        if (s) s.open = false;
+        if (!s) return;
+        s.open = false;  // before close(), so the onclose `lost` handler sees it as intentional
+        if (s.ws) { try { s.ws.close(); } catch (e) {} }
       },
       pauseLogs(name) { if (this.logs[name]) this.logs[name].paused = true; },
       resumeLogs(name) {

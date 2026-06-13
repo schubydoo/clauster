@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import logging
 import sys
 
 import pytest
@@ -359,3 +361,39 @@ async def test_fail_pending_sets_exception():
     with pytest.raises(DaemonUnreachable):
         await future
     assert already_done.result() == {}
+
+
+async def test_read_loop_isolates_a_bad_frame(caplog):
+    # A frame whose dispatch raises a NON-OSError (here: a stream feed raising ValueError)
+    # must be logged and skipped, not kill the reader task. Otherwise the loop dies, no one
+    # restarts it, and every subsequent call() hangs to its timeout while stream fan-out
+    # stops silently. Assert the loop survives: a later response frame still resolves its
+    # pending future, and the bad frame is logged.
+    client = ClaustrumClient("/unused.sock", "tok")
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    client._pending[7] = fut
+
+    class _RaisingStream:
+        def feed(self, frame):
+            raise ValueError("boom")
+
+    client.stream = lambda pid: _RaisingStream()  # type: ignore[assignment]
+
+    class _FakeReader:
+        def __init__(self, frames):
+            self._frames = list(frames)
+
+        async def readline(self):
+            return self._frames.pop(0) if self._frames else b""
+
+    bad = json.dumps({"type": "stream", "processId": "p1", "seq": 1}).encode() + b"\n"
+    good = json.dumps({"id": 7, "result": {"ok": True}}).encode() + b"\n"
+    client._reader = _FakeReader([bad, good])  # type: ignore[assignment]
+    client._closed = False
+
+    with caplog.at_level(logging.WARNING):
+        await client._read_loop()
+
+    assert fut.done() and fut.result() == {"ok": True}  # loop survived the bad frame
+    assert any("dispatching frame" in r.getMessage() for r in caplog.records)

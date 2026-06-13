@@ -361,6 +361,11 @@
                     <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="logs[i.project].paused" x-cloak>paused
                       (<span x-text="logs[i.project].pending.length"></span> buffered)</span>
                   </div>
+                  <div class="alert alert-warning py-1 px-2 mb-1 d-flex align-items-center"
+                       x-show="logs[i.project].lost" x-cloak>
+                    <span class="me-2">⚠ Live tail disconnected — the bridge may have stopped.</span>
+                    <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project)">Reconnect</button>
+                  </div>
                   <pre class="log-view bg-dark text-white rounded p-2" :id="'log-' + i.project"
                        x-text="logs[i.project].lines.join('\n')"></pre>
                 </div>
@@ -438,8 +443,8 @@
           <div class="card-body">
             <div class="row g-2">
               <div class="col-md-5">
-                <label class="form-label">Name</label>
-                <input type="text" class="form-control" x-model="np.name" placeholder="my-project"
+                <label class="form-label" for="np-name">Name</label>
+                <input id="np-name" type="text" class="form-control" x-model="np.name" placeholder="my-project"
                        pattern="[a-zA-Z0-9_-]+" @input="np.error = null; np.warn = null" @keyup.enter="submitNew()">
               </div>
               <div class="col-md-7">
@@ -459,8 +464,8 @@
                 <span class="form-check-label">run <code>git init</code></span></label>
             </div>
             <div class="mt-2" x-show="np.mode === 'clone'">
-              <label class="form-label">Git URL</label>
-              <input type="text" class="form-control" x-model="np.url" autocomplete="off" spellcheck="false"
+              <label class="form-label" for="np-url">Git URL</label>
+              <input id="np-url" type="text" class="form-control" x-model="np.url" autocomplete="off" spellcheck="false"
                      placeholder="https://github.com/owner/repo.git" @input="np.error = null" @keyup.enter="submitNew()">
               <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
                 <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>

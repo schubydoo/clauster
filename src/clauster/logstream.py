@@ -12,6 +12,52 @@ from pathlib import Path
 DEFAULT_TAIL_BYTES = 64 * 1024
 
 
+def _incomplete_tail_len(data: bytes) -> int:
+    """Return how many trailing bytes form a truncated (incomplete) UTF-8 sequence.
+
+    A multibyte character can be split across a read boundary when the writer flushes
+    mid-character. Decoding the partial bytes with ``errors="replace"`` would corrupt
+    them into ``�`` on both sides, so the caller withholds these bytes and re-reads them
+    once the rest arrives. Returns 0 when ``data`` ends on a complete code-point boundary,
+    or when the trailing bytes are *invalid* rather than merely incomplete (those decode
+    to the replacement char so the offset advances instead of stalling forever). At most 3
+    bytes are ever withheld — the longest possible truncation of a 4-byte sequence.
+    """
+    n = len(data)
+    # Walk back over up to 3 continuation bytes (10xxxxxx) to reach the lead byte.
+    i = n - 1
+    while i >= 0 and (n - 1 - i) < 3 and (data[i] & 0xC0) == 0x80:
+        i -= 1
+    if i < 0:
+        return 0  # empty, or only continuation bytes in reach → nothing valid to withhold
+    lead = data[i]
+    if lead < 0x80:
+        expected = 1
+    elif 0xC2 <= lead <= 0xDF:  # 0xC0/0xC1 are overlong → invalid leads, never incomplete
+        expected = 2
+    elif 0xE0 <= lead <= 0xEF:
+        expected = 3
+    elif 0xF0 <= lead <= 0xF4:  # 0xF5–0xF7 encode > U+10FFFF → invalid leads
+        expected = 4
+    else:
+        return 0  # stray continuation / invalid lead → not incomplete, just bad
+    have = n - i
+    if have >= 2:
+        # Certain leads have a constrained second byte; an out-of-range one makes the prefix
+        # already-invalid (overlong / surrogate / > U+10FFFF), never merely incomplete — so it
+        # must be replaced + the offset advanced, not withheld (which would wedge at EOF).
+        second = data[i + 1]
+        if lead == 0xE0 and not (0xA0 <= second <= 0xBF):
+            return 0  # overlong 3-byte
+        if lead == 0xED and not (0x80 <= second <= 0x9F):
+            return 0  # UTF-16 surrogate (U+D800–DFFF)
+        if lead == 0xF0 and not (0x90 <= second <= 0xBF):
+            return 0  # overlong 4-byte
+        if lead == 0xF4 and not (0x80 <= second <= 0x8F):
+            return 0  # > U+10FFFF
+    return have if have < expected else 0
+
+
 def initial_offset(path: Path, tail_bytes: int = DEFAULT_TAIL_BYTES) -> int:
     """Start near the end so we don't replay an entire large log on connect."""
     try:
@@ -41,4 +87,9 @@ def read_new(path: Path, offset: int) -> tuple[int, str]:
             data = fh.read()
     except OSError:
         return offset, ""
+    # Withhold a trailing byte sequence truncated mid-character; advance the offset only
+    # by the bytes actually decoded so the tail is re-read and completed next call.
+    hold = _incomplete_tail_len(data)
+    if hold:
+        data = data[: len(data) - hold]
     return offset + len(data), data.decode("utf-8", "replace")

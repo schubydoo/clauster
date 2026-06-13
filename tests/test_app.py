@@ -52,7 +52,28 @@ def test_dashboard_active_zone_precedes_projects_in_dom(write_config):
     projects = re.search(r'class="[^"]*\bzone-projects\b[^"]*"', page)
     assert active is not None and projects is not None
     assert active.start() < projects.start()
-    assert "order: -1" not in page and "order:-1" not in page
+    # Whitespace-tolerant: `order : -1` would also reintroduce the inversion (CodeRabbit).
+    assert re.search(r"\border\s*:\s*-1\b", page) is None
+
+
+def test_dashboard_log_ws_and_refresh_robustness(write_config):
+    # Audit fixes (frontend, no JS unit harness — guard the wiring by presence):
+    #  FIX 3 — the bridge-log WebSocket sets onclose/onerror so a dropped socket flips a
+    #          `lost` flag and the panel surfaces the disconnect instead of a frozen tail.
+    #  FIX 4 — the 4s refresh poll has an in-flight guard so a slow tick can't resolve after
+    #          a newer one and clobber this.instances / this.hosted with stale data.
+    page = _client(write_config).get("/").text
+    assert "ws.onclose = lost" in page and "ws.onerror = lost" in page  # FIX 3 handlers
+    assert "Live tail disconnected" in page  # FIX 3 UI surface
+    # openLogs is idempotent + state-bound: a reconnect retires the prior state and binds the
+    # new socket's handlers to its own `state`, identity-checked against the live logs[name],
+    # so two tails can't stream into one view and a retired socket can't flip the fresh panel.
+    assert "self.logs[name] !== state" in page
+    # Single-flight guard that QUEUES a trailing refresh (so action-flow refreshes aren't
+    # dropped), plus the reset + trailing run — assert all three so a regression fails.
+    assert "if (this._refreshing) { this._refreshQueued = true; return; }" in page
+    assert "this._refreshing = false;" in page
+    assert "this._refreshQueued = false; this.refresh();" in page
 
 
 def test_dashboard_footer_credits_vendored_assets(write_config):

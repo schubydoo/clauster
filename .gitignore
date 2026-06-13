@@ -31,6 +31,9 @@ scratch/
 # Stray root-level images (design/QA screenshots belong in scratch/ or, if curated
 # for the docs, docs/screenshots/) — guards against accidentally committing them.
 /*.png
+# Botched browser-screenshot artifact: `agent-browser screenshot --full-page` with no
+# output path writes a root file literally named `--full-page` (the flag, no extension).
+/--full-page
 
 # mkdocs-material build output (`mkdocs build`) — generated, never committed.
 /site/
