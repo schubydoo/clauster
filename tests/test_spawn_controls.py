@@ -203,6 +203,137 @@ def test_api_spawn_bypass_without_ceiling_is_403(write_config):
     assert resp.status_code == 403
 
 
+# The hosted (claustrum stream-json) and background-agent (`claude --bg`) channels
+# spawn outside the runner, so they must mirror its bypass-ceiling 403 — else a crafted
+# request runs a session in a mode the project's ceiling forbids. The reject paths
+# short-circuit before any daemon/spawn; the allow paths prove the ceiling gate is the
+# only thing rejecting (hosted then 503s on the absent unit-test daemon; bg dispatch is
+# stubbed so nothing real is trusted or spawned).
+_BYPASS_CEILING = "projects:\n  alpha:\n    allow_bypass_permissions: true\n"
+
+
+def test_api_spawn_hosted_bypass_without_ceiling_is_403(write_config):
+    client = _client(write_config)
+    resp = client.post(
+        "/api/instances",
+        json={"channel": "hosted", "project": "alpha", "permission_mode": "bypassPermissions"},
+    )
+    assert resp.status_code == 403
+
+
+def test_api_spawn_hosted_bypass_with_ceiling_clears_gate(write_config):
+    client = _client(write_config, _BYPASS_CEILING)
+    resp = client.post(
+        "/api/instances",
+        json={"channel": "hosted", "project": "alpha", "permission_mode": "bypassPermissions"},
+    )
+    # Past the ceiling gate: the only remaining block is the absent claustrum daemon
+    # (503), not a 403 — proving the ceiling no longer rejects bypass for this project.
+    # Assert the specific detail so this keeps proving it reached the daemon-missing branch
+    # of _hosted_prereqs (past the ceiling), not some other 503.
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "hosted channel unavailable: claustrum daemon not connected"}
+
+
+def test_api_dispatch_agent_bypass_without_ceiling_is_403(write_config):
+    # Background-task route: wrap in `with` so the app lifespan/startup runs (testing.md).
+    with _client(write_config) as client:
+        resp = client.post(
+            "/api/agents",
+            json={"project": "alpha", "permission_mode": "bypassPermissions"},
+        )
+        assert resp.status_code == 403
+
+
+def test_api_dispatch_agent_bypass_with_ceiling_dispatches(write_config, monkeypatch):
+    seen: dict = {}
+
+    def _fake_dispatch(cwd, **kwargs):
+        seen.update(kwargs)
+        return "abcd1234"
+
+    # Stub the dispatcher so nothing real is trusted or spawned; assert only that the
+    # ceiling gate let the bypass request through to dispatch with the mode intact.
+    monkeypatch.setattr("clauster.supervisor.dispatch_background_job", _fake_dispatch)
+    with _client(write_config, _BYPASS_CEILING) as client:
+        resp = client.post(
+            "/api/agents",
+            json={"project": "alpha", "permission_mode": "bypassPermissions"},
+        )
+        assert resp.status_code == 201
+        assert resp.json() == {"id": "abcd1234"}
+        assert seen["permission_mode"] == "bypassPermissions"
+
+
+# Omitting permission_mode must NOT slip past the ceiling when the configured default is
+# bypass: both channels gate the *effective* mode (request override, else instance_defaults),
+# not just the raw request, so a project whose ceiling forbids bypass is still 403'd.
+_DEFAULT_BYPASS = "instance_defaults:\n  permission_mode: bypassPermissions\n"
+
+
+def test_api_spawn_hosted_default_bypass_without_ceiling_is_403(write_config):
+    client = _client(write_config, _DEFAULT_BYPASS)
+    resp = client.post("/api/instances", json={"channel": "hosted", "project": "alpha"})
+    assert resp.status_code == 403
+
+
+def test_api_dispatch_agent_default_bypass_without_ceiling_is_403(write_config):
+    with _client(write_config, _DEFAULT_BYPASS) as client:
+        resp = client.post("/api/agents", json={"project": "alpha"})
+        assert resp.status_code == 403
+
+
+# Symmetric allow path: when the ceiling DOES permit bypass and the request omits
+# permission_mode (so it resolves from the bypass default), the *resolved* mode — not the
+# raw None — must be what clears the gate and reaches spawn/dispatch. This locks the
+# resolve-then-forward contract so a future "check resolved, forward raw" regression fails.
+def test_api_spawn_hosted_default_bypass_with_ceiling_clears_gate(write_config):
+    client = _client(write_config, _DEFAULT_BYPASS + _BYPASS_CEILING)
+    resp = client.post("/api/instances", json={"channel": "hosted", "project": "alpha"})
+    # Past the ceiling (resolved default is bypass, which the ceiling now allows): the only
+    # remaining block is the absent daemon, so the specific 503 proves the resolved mode
+    # cleared the gate rather than a raw-None slip.
+    assert resp.status_code == 503
+    assert resp.json() == {"detail": "hosted channel unavailable: claustrum daemon not connected"}
+
+
+def test_api_dispatch_agent_default_bypass_with_ceiling_dispatches(write_config, monkeypatch):
+    seen: dict = {}
+
+    def _fake_dispatch(cwd, **kwargs):
+        seen.update(kwargs)
+        return "abcd1234"
+
+    monkeypatch.setattr("clauster.supervisor.dispatch_background_job", _fake_dispatch)
+    with _client(write_config, _DEFAULT_BYPASS + _BYPASS_CEILING) as client:
+        resp = client.post("/api/agents", json={"project": "alpha"})
+        assert resp.status_code == 201
+        assert resp.json() == {"id": "abcd1234"}
+        # The resolved default ("bypassPermissions"), not the omitted raw field, is forwarded.
+        assert seen["permission_mode"] == "bypassPermissions"
+
+
+# Pin the ordering fix: a missing project requested in bypass mode must 404 (existence
+# check) before the ceiling runs — never leak a 403 for a project that doesn't exist. These
+# fail immediately if either call site is reordered back to ceiling-before-existence.
+def test_api_spawn_hosted_missing_project_bypass_still_404(write_config):
+    client = _client(write_config)
+    resp = client.post(
+        "/api/instances",
+        json={"channel": "hosted", "project": "missing", "permission_mode": "bypassPermissions"},
+    )
+    assert resp.status_code == 404
+
+
+def test_api_dispatch_agent_missing_project_bypass_still_404(write_config):
+    with _client(write_config) as client:
+        resp = client.post(
+            "/api/agents",
+            json={"project": "missing", "permission_mode": "bypassPermissions"},
+        )
+        assert resp.status_code == 404
+
+
 def test_api_spawn_non_string_mode_is_422(write_config):
     client = _client(write_config)
     resp = client.post("/api/instances", json={"project": "alpha", "spawn_mode": 5})
@@ -243,5 +374,7 @@ def test_bypass_option_shown_with_ceiling(write_config):
     html = client.get("/").text
     assert _BYPASS_OPTION in html
     # bypassPermissions is offered only for the Desktop/bridge mode, which carries the
-    # typed-confirm footgun guard (browser/detached launches skip that confirm).
-    assert '<option value="bypassPermissions" :disabled="lmode !== \'desktop\'">' in html
+    # typed-confirm footgun guard (browser/detached launches skip that confirm). Assert the
+    # critical fragments separately so harmless attribute reordering/spacing can't break it.
+    assert '<option value="bypassPermissions"' in html
+    assert ":disabled=\"lmode !== 'desktop'\"" in html

@@ -869,6 +869,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         cwd = config.projects_root / name
         if not await asyncio.to_thread(cwd.is_dir):
             raise HTTPException(status_code=404, detail=f"project {name!r} not found")
+        # Resolve the effective mode (request override, else the configured default) and gate
+        # it AFTER the existence check (so a missing project still 404s, not a 403 leaked by
+        # the ceiling) but BEFORE dispatch — mirrors the hosted/bridge channels so the bypass
+        # ceiling can't be sidestepped by omitting permission_mode when the default is
+        # bypassPermissions. (Also makes bg honor instance_defaults, like the other channels.)
+        pm = permission_mode or config.instance_defaults.permission_mode
+        _enforce_bypass_ceiling(name, pm)
         try:
             job_id = await asyncio.to_thread(
                 supervisor.dispatch_background_job,
@@ -876,7 +883,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 prompt=prompt,
                 rc_name=rc_name,
                 model=model,
-                permission_mode=permission_mode,
+                permission_mode=pm,
                 binary=config.claude.binary,
                 claude_json=runner.claude_json,
             )
@@ -910,6 +917,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except supervisor.StopError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _enforce_bypass_ceiling(project: str, permission_mode: str | None) -> None:
+        """Reject ``bypassPermissions`` when a project's config ceiling forbids it.
+
+        The runner enforces this hard ceiling for the bridge channel
+        (:class:`PermissionModeNotAllowed`, mapped to 403 below). The hosted and
+        background-agent channels spawn outside the runner, so they must mirror the
+        gate here or a crafted request could run a session in bypass mode that the
+        project's ``allow_bypass_permissions`` ceiling explicitly forbids. Fail
+        closed with the same 403 + wording the bridge path uses.
+        """
+        if permission_mode == "bypassPermissions" and not config.allows_bypass(project):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"bypassPermissions is not enabled for project {project!r}. Set "
+                    "projects.<name>.allow_bypass_permissions: true in clauster.yml first."
+                ),
+            )
 
     async def _spawn_or_http(coro: Awaitable[RemoteControlInstance]) -> RemoteControlInstance:
         """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.
@@ -984,8 +1010,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     async def _spawn_hosted(project: str, permission_mode: str | None) -> RemoteControlInstance:
         """Start a hosted (claustrum stream-json) session for ``project``."""
-        client, path, binary = await _hosted_prereqs(project)
+        # Confirm the project exists first so a missing name 404s instead of leaking a 403
+        # from the ceiling, then gate the effective mode before any daemon/trust/spawn work.
+        await _resolve_project_path(project)
         pm = permission_mode or config.instance_defaults.permission_mode
+        _enforce_bypass_ceiling(project, pm)
+        client, path, binary = await _hosted_prereqs(project)
         try:
             return await app.state.hosted.spawn(
                 client,
