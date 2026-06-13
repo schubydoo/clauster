@@ -124,7 +124,7 @@
 
       <!-- ===== New project ===== -->
       <div class="mb-3">
-        <button class="btn btn-primary" @click="np.open = !np.open">
+        <button class="btn btn-primary" @click="toggleNewProject()">
           <span x-text="np.open ? '× Cancel' : '+ New project'">+ New project</span>
         </button>
         <div class="card mt-2" x-show="np.open" x-cloak>
@@ -133,14 +133,16 @@
               <div class="col-md-5">
                 <label class="form-label">Name</label>
                 <input type="text" class="form-control" x-model="np.name" placeholder="my-project"
-                       pattern="[a-zA-Z0-9_-]+" @keyup.enter="submitNew()">
+                       pattern="[a-zA-Z0-9_-]+" @input="np.error = null; np.warn = null" @keyup.enter="submitNew()">
               </div>
               <div class="col-md-7">
                 <label class="form-label">Type</label>
                 <div class="btn-group w-100" role="group">
-                  <input type="radio" class="btn-check" id="np-create" value="create" x-model="np.mode">
+                  <input type="radio" class="btn-check" id="np-create" value="create" x-model="np.mode"
+                         @change="np.error = null; np.warn = null">
                   <label class="btn" for="np-create">Create empty</label>
-                  <input type="radio" class="btn-check" id="np-clone" value="clone" x-model="np.mode">
+                  <input type="radio" class="btn-check" id="np-clone" value="clone" x-model="np.mode"
+                         @change="np.error = null; np.warn = null">
                   <label class="btn" for="np-clone">Clone from git URL</label>
                 </div>
               </div>
@@ -152,7 +154,7 @@
             <div class="mt-2" x-show="np.mode === 'clone'">
               <label class="form-label">Git URL</label>
               <input type="text" class="form-control" x-model="np.url" autocomplete="off" spellcheck="false"
-                     placeholder="https://github.com/owner/repo.git" @keyup.enter="submitNew()">
+                     placeholder="https://github.com/owner/repo.git" @input="np.error = null" @keyup.enter="submitNew()">
               <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
                 <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>
               <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts blocked unless enabled in
@@ -1060,6 +1062,19 @@
         c.saving = false;
       },
       closeClaudeMd(name) { if (this.cmd[name]) this.cmd[name].open = false; },
+      // Toggle the New-project dialog; closing wipes it so reopening never shows a
+      // prior attempt's name/URL or a stale error/warning (which read as a stuck form).
+      toggleNewProject() {
+        this.np.open = !this.np.open;
+        if (!this.np.open) this.resetNewProject();
+      },
+      resetNewProject() {
+        const np = this.np;
+        np.name = ""; np.url = ""; np.submittedName = "";
+        np.error = null; np.warn = null;
+        np.busy = false; np.cloning = false;
+        np.progress = { percent: null, phase: "" };
+      },
       async submitNew() {
         const np = this.np;
         if (!np.name || np.busy) return;
@@ -1150,9 +1165,8 @@
           np.warn = ships.join(" + ");
           this.toast(np.submittedName + ": added — review before starting", "warning");
         } else {
-          np.warn = null;
           this.toast(np.submittedName + ": ready", "success");
-          np.open = false; np.name = ""; np.url = "";  // close the form on a clean add
+          np.open = false; this.resetNewProject();  // close + wipe the form on a clean add
         }
       },
       // Insert a freshly created/cloned project's card without a full reload:
