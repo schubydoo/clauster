@@ -343,9 +343,12 @@
                 <!-- live conversation view (opened on demand; reconnects via ?after=) -->
                 <template x-if="hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open">
                   <div class="mt-2">
-                    <div class="alert alert-warning py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].connLost" x-cloak>
+                    <div class="alert alert-warning py-1 px-2 mb-2"
+                         x-show="hostedView[h.claustrum_process_id].connLost && !hostedView[h.claustrum_process_id].ended" x-cloak>
                       Live link dropped — reconnecting…
                     </div>
+                    <div class="alert alert-secondary py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].ended" x-cloak
+                         x-text="hostedView[h.claustrum_process_id].endedReason || 'This session has ended — it is no longer live.'"></div>
                     <div class="border rounded p-2" :id="'hosted-stream-' + h.claustrum_process_id"
                          style="max-height: 360px; overflow-y: auto; font-size: 0.875rem;">
                       <template x-for="(it, idx) in hostedView[h.claustrum_process_id].events" :key="idx">
@@ -399,12 +402,13 @@
                       </template>
                     </div>
                     <div class="input-group mt-2">
-                      <input type="text" class="form-control" placeholder="Send a message…"
+                      <input type="text" class="form-control"
+                             :placeholder="hostedView[h.claustrum_process_id].ended ? 'Session ended — not accepting messages' : 'Send a message…'"
                              x-model="hostedView[h.claustrum_process_id].input"
                              @keydown.enter="sendHosted(h.claustrum_process_id)"
-                             :disabled="hostedView[h.claustrum_process_id].sending">
+                             :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended">
                       <button class="btn btn-primary" @click="sendHosted(h.claustrum_process_id)"
-                              :disabled="hostedView[h.claustrum_process_id].sending || !(hostedView[h.claustrum_process_id].input || '').trim()">
+                              :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended || !(hostedView[h.claustrum_process_id].input || '').trim()">
                         <span x-text="hostedView[h.claustrum_process_id].sending ? 'Sending…' : 'Send'">Send</span>
                       </button>
                     </div>
@@ -1373,7 +1377,8 @@
         const prev = this.hostedView[id];
         const after = prev ? prev.lastSeq : 0;
         const view = { open: true, ws: null, lastSeq: after, events: prev ? prev.events : [],
-                       input: prev ? prev.input : "", sending: false, connLost: false };
+                       input: prev ? prev.input : "", sending: false, connLost: false,
+                       ended: false, endedReason: "" };
         this.hostedView[id] = view;
         const self = this;
         const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -1389,7 +1394,17 @@
         ws.onclose = () => {
           const v = self.hostedView[id];
           if (!v || !v.open) return;     // a deliberate close() — don't reconnect
-          v.connLost = true;             // honest: the live link dropped
+          if (v.ended) return;           // a terminal frame already settled the view
+          // Only reconnect a session the snapshot still reports as live. A stopped /
+          // crashed / gone session closes the socket immediately (server 1008); blindly
+          // reconnecting it loops forever and mislabels a dead session "reconnecting…".
+          // The 4s /api/hosted poll keeps `hosted` fresh, so this converges.
+          const h = self.hosted.find((x) => x.claustrum_process_id === id);
+          if (!h || !["running", "starting"].includes(h.status)) {
+            self._markHostedEnded(id, h);
+            return;
+          }
+          v.connLost = true;             // genuinely live — honest: the link dropped
           setTimeout(() => { const w = self.hostedView[id]; if (w && w.open) self.openHosted(id); }, 1500);
         };
         view.ws = ws;
@@ -1399,10 +1414,44 @@
         if (v && v.ws) { try { v.ws.close(); } catch (e) {} }
         if (v) v.open = false;
       },
+      // Surface a terminal hosted session in the live view: explain why it ended (with the
+      // server's error_detail when present) and stop the reconnect loop. Resume (when the
+      // session kept its uuid) stays the recovery path, shown on the row above.
+      _markHostedEnded(id, h) {
+        const v = this.hostedView[id];
+        if (!v) return;
+        v.ended = true;
+        v.connLost = false;
+        if (!v.endedReason) v.endedReason = this._hostedEndedReason(h);
+      },
+      _hostedEndedReason(h) {
+        if (!h) return "This session is no longer available.";
+        const base = ({
+          stopped: "Session stopped.",
+          crashed: "The session crashed.",
+          error: "The session ended with an error.",
+          interrupted: "Session interrupted.",
+          exited: "Session ended.",
+        })[h.status] || "This session is no longer live.";
+        const detail = h.error_detail ? " " + h.error_detail : "";
+        const resume = h.claude_session_uuid ? " Use Resume above to continue it." : "";
+        return base + detail + resume;
+      },
       _renderHostedEvent(id, e) {
         const v = this.hostedView[id];
         if (!v) return;
         if (typeof e.event_seq === "number") { v.lastSeq = e.event_seq; v.connLost = false; }
+        // A terminal frame means the session is over: gate the composer and stop the
+        // reconnect loop (its renderable marker/error item still gets pushed below).
+        if (e.type === "exit" || e.type === "lost") {
+          v.ended = true;
+          v.connLost = false;
+          if (!v.endedReason) {
+            v.endedReason = e.type === "lost"
+              ? "Stream lost — " + (e.reason || "the daemon connection dropped.")
+              : "Session ended" + (e.exit_code != null ? " (exit " + e.exit_code + ")." : ".");
+          }
+        }
         // A resolution flips the matching parked-permission item; it adds no new line.
         if (e.type === "control_resolved") {
           this._resolveHostedPermission(id, e.request_id, e.behavior);
