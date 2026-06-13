@@ -191,11 +191,14 @@ def test_unknown_page_returns_friendly_html_404(write_config, tmp_path):
 
 
 def test_unknown_api_route_stays_json_404(write_config, tmp_path):
-    # An /api path keeps the machine-readable error even for an HTML client.
-    r = _client(write_config, tmp_path).get("/api/nope", headers={"accept": "text/html"})
-    assert r.status_code == 404
-    assert r.headers["content-type"].startswith("application/json")
-    assert r.json()["detail"]
+    # An /api path keeps the machine-readable error even for an HTML client — including
+    # the bare prefix with no trailing slash (/api, /ws), not just /api/...
+    c = _client(write_config, tmp_path)
+    for path in ("/api/nope", "/api", "/ws"):
+        r = c.get(path, headers={"accept": "text/html"})
+        assert r.status_code == 404, path
+        assert r.headers["content-type"].startswith("application/json"), path
+        assert r.json()["detail"], path
 
 
 def test_unknown_page_json_client_gets_json_404(write_config, tmp_path):
