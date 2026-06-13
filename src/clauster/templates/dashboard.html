@@ -1104,7 +1104,7 @@
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name: submittedName, git_init: np.gitInit }) });
           const body = await res.json();
-          if (!res.ok) { if (this._npOwns(op)) np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
+          if (!res.ok) { if (this._npOwns(op)) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); } }
           else { await this.afterProvision(submittedName, np, body, op); }
         } catch (e) { if (this._npOwns(op)) np.error = String(e); }
         if (this._npOwns(op)) np.busy = false;
@@ -1119,8 +1119,7 @@
             body: JSON.stringify({ name, url, shallow }) });
           const body = await res.json();
           if (!res.ok) {
-            this.toast("Clone failed", "error");
-            if (this._npOwns(op)) { np.error = body.detail || "clone failed"; np.busy = false; np.cloning = false; }
+            if (this._npOwns(op)) { np.error = body.detail || "clone failed"; np.busy = false; np.cloning = false; this.toast("Clone failed", "error"); }
             return;
           }
           this.watchClone(np, body.job_id, name, op);
@@ -1186,14 +1185,15 @@
       // can complete after the user clicked Cancel, which `resetNewProject()` clears —
       // re-reading reactive state here would insert a card for "" and force a reload.
       async afterProvision(name, np, proj, op) {
-        // A canceled or superseded attempt (op no longer current) must not insert a card,
-        // reload the grid, or reset a newer attempt's dialog. The project still exists
-        // server-side and shows on the next refresh, so bail before touching anything.
-        if (!this._npOwns(op)) return;
         const ships = [];
         if (proj.has_claude_md) ships.push("CLAUDE.md");
         if (proj.has_claude_dir) ships.push(".claude/");
+        // Always reveal the landed card, even for a canceled/superseded attempt: the
+        // project really was created, and refresh() never re-lists /api/projects — so
+        // skipping insertCard would leave it invisible until a manual reload.
         await this.insertCard(name, proj);  // reveal the new card in place — no reload
+        // Dialog-state mutations, though, only happen for the attempt that still owns it.
+        if (!this._npOwns(op)) return;
         np.busy = false;
         if (ships.length) {
           // Keep the RCE-review warning up; the inserted card is untrusted, so its
