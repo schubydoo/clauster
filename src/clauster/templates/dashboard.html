@@ -1073,12 +1073,18 @@
         if (!this.np.open) this.resetNewProject();
       },
       resetNewProject() {
+        // Abandon any in-flight clone watch first: a canceled attempt must stop driving
+        // the dialog so its late WS frames can't clobber a newer attempt (root of the race).
+        if (this._abortClone) { this._abortClone(); this._abortClone = null; }
         const np = this.np;
         np.name = ""; np.url = ""; np.submittedName = "";
         np.error = null; np.warn = null;
         np.busy = false; np.cloning = false;
         np.progress = { percent: null, phase: "" };
       },
+      // True while `name` is still the dialog's active attempt: a canceled (reset) or
+      // superseded (newer submit) attempt completing late must not mutate shared np.
+      _npOwns(name) { return this.np.submittedName === name; },
       async submitNew() {
         const np = this.np;
         if (!np.name || np.busy) return;
@@ -1094,10 +1100,10 @@
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name: submittedName, git_init: np.gitInit }) });
           const body = await res.json();
-          if (!res.ok) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
+          if (!res.ok) { if (this._npOwns(submittedName)) np.error = body.detail || "failed"; this.toast("Project create failed", "error"); }
           else { await this.afterProvision(submittedName, np, body); }
-        } catch (e) { np.error = String(e); }
-        np.busy = false;
+        } catch (e) { if (this._npOwns(submittedName)) np.error = String(e); }
+        if (this._npOwns(submittedName)) np.busy = false;
       },
       // Kick off the clone job, then watch its progress WS until it ends.
       async startClone(np) {
@@ -1109,30 +1115,37 @@
             body: JSON.stringify({ name, url, shallow }) });
           const body = await res.json();
           if (!res.ok) {
-            np.error = body.detail || "clone failed"; this.toast("Clone failed", "error");
-            np.busy = false; np.cloning = false; return;
+            this.toast("Clone failed", "error");
+            if (this._npOwns(name)) { np.error = body.detail || "clone failed"; np.busy = false; np.cloning = false; }
+            return;
           }
           this.watchClone(np, body.job_id, name);
-        } catch (e) { np.error = String(e); np.busy = false; np.cloning = false; }
+        } catch (e) { if (this._npOwns(name)) { np.error = String(e); np.busy = false; np.cloning = false; } }
       },
       watchClone(np, jobId, name) {
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const ws = new WebSocket(proto + "://" + location.host + ROOT +
                                  "/ws/clone-progress/" + encodeURIComponent(jobId));
-        let settled = false;  // exactly one terminal handling across done/error/close
+        let settled = false;  // exactly one terminal handling across done/error/close/abort
         const lost = () => {
           if (settled) return;
           settled = true;
           np.cloning = false; np.busy = false;
           np.error = "lost the progress connection — the clone may still be running; refresh to check.";
         };
+        // Cancel/reset abandons this watch: flip `settled` so every handler below no-ops,
+        // then close the socket. resetNewProject() calls this, so a canceled clone's late
+        // frames can never mutate a newer attempt's dialog (root fix for the resubmit race).
+        this._abortClone = () => { settled = true; try { ws.close(); } catch (e) { /* closing */ } };
         ws.onmessage = async (ev) => {
+          if (settled) return;  // aborted, or already terminal — ignore late frames
           let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
           if (m.type === "progress") {
             np.progress = { percent: m.percent, phase: m.phase || np.progress.phase };
           } else if (m.type === "done") {
             settled = true;  // before close(), so onclose below no-ops
             try { ws.close(); } catch (e) { /* already closing */ }
+            this._abortClone = null;  // this watch reached its terminal state
             np.cloning = false;
             if (m.status === "error") {
               np.error = m.error || "clone failed"; np.busy = false;
@@ -1171,7 +1184,7 @@
         // superseded attempt completing late (np.submittedName cleared by reset, or
         // overwritten by a newer submit) must not close/reset a newer attempt's dialog —
         // its card is already revealed above, so just return.
-        if (np.submittedName !== name) return;
+        if (!this._npOwns(name)) return;
         np.busy = false;
         if (ships.length) {
           // Keep the RCE-review warning up; the inserted card is untrusted, so its
