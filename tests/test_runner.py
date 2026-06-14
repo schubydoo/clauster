@@ -57,6 +57,22 @@ async def test_forget_drops_stopped_bridge_from_memory_and_disk(runner_config, m
     assert "alpha" not in SessionRunner(config, claude_json=claude_json)._persisted
 
 
+async def test_forget_drops_persisted_only_record(runner_config, monkeypatch):
+    # A record that lives only in the persisted overlay (no in-memory instance) — e.g.
+    # a stopped card not rebuilt as an instance — must still be forgettable: the method
+    # skips the liveness block and just drops it from the overlay + disk.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.spawn("alpha")
+    await runner.stop("alpha")
+    runner._instances.pop("alpha")  # keep only the persisted overlay
+    assert "alpha" in runner._persisted
+
+    await runner.forget("alpha")
+    assert "alpha" not in runner._persisted
+
+
 async def test_forget_refuses_running_bridge(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _make_runner(runner_config)

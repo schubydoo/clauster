@@ -135,6 +135,10 @@ class _StubManager:
     async def forget(self, hosted_id: str) -> None:
         if self.forget_error is not None:
             raise self.forget_error
+        # Mirror the production contract: an unknown id raises (the endpoint maps it
+        # to 404), so the stub can't mask a contract regression by silently no-opping.
+        if hosted_id not in self.instances:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
         self.forgotten.append(hosted_id)
         self.instances.pop(hosted_id, None)
         self.sessions.pop(hosted_id, None)

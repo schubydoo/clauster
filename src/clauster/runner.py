@@ -1083,33 +1083,37 @@ class SessionRunner:
         :class:`InstanceStillLive` — it must be Stopped first; forget never kills a
         process. Raises :class:`UnknownProject` when there's no such record at all.
         """
-        instance = self._instances.get(name)
-        if instance is None and name not in self._persisted:
-            raise UnknownProject(f"no managed instance: {name!r}")
-        if instance is not None:
-            if instance.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING):
-                raise InstanceStillLive(
-                    f"{name!r} is {instance.status.value} — Stop it before forgetting"
-                )
-            # Defense in depth: never drop a record whose process is actually alive even
-            # if the status lags a missed poll — that would orphan a live bridge/keeper.
-            if instance.bridge_pid is not None and await asyncio.to_thread(
-                procutil.is_live_bridge, instance.bridge_pid, instance.bridge_proc_start
-            ):
-                raise InstanceStillLive(f"{name!r} still has a live bridge — Stop it first")
-            if (
-                instance.keeper_pid is not None
-                and await asyncio.to_thread(procutil.proc_create_time, instance.keeper_pid)
-                is not None
-            ):
-                raise InstanceStillLive(f"{name!r} still has a live keeper — Stop it first")
-            self._instances.pop(name, None)
-            self._procs.pop(name, None)
-        # Rebuild as a NEW dict rather than .pop() in place: _persist aliases _persisted
-        # and _last_saved to the same object, so mutating _persisted would also mutate the
-        # dedup baseline and _persist would skip the write (leaving the row on disk).
-        self._persisted = {k: v for k, v in self._persisted.items() if k != name}
-        await self._persist()
+        # Hold the per-project spawn lock so a concurrent spawn()/resume() can't
+        # repopulate _instances/_procs between the liveness check and the pop() —
+        # forgetting must never remove tracking for a just-spawned live process.
+        async with self._spawn_lock_for(name):
+            instance = self._instances.get(name)
+            if instance is None and name not in self._persisted:
+                raise UnknownProject(f"no managed instance: {name!r}")
+            if instance is not None:
+                if instance.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING):
+                    raise InstanceStillLive(
+                        f"{name!r} is {instance.status.value} — Stop it before forgetting"
+                    )
+                # Defense in depth: never drop a record whose process is actually alive even
+                # if the status lags a missed poll — that would orphan a live bridge/keeper.
+                if instance.bridge_pid is not None and await asyncio.to_thread(
+                    procutil.is_live_bridge, instance.bridge_pid, instance.bridge_proc_start
+                ):
+                    raise InstanceStillLive(f"{name!r} still has a live bridge — Stop it first")
+                if (
+                    instance.keeper_pid is not None
+                    and await asyncio.to_thread(procutil.proc_create_time, instance.keeper_pid)
+                    is not None
+                ):
+                    raise InstanceStillLive(f"{name!r} still has a live keeper — Stop it first")
+                self._instances.pop(name, None)
+                self._procs.pop(name, None)
+            # Rebuild as a NEW dict rather than .pop() in place: _persist aliases _persisted
+            # and _last_saved to the same object, so mutating _persisted would also mutate the
+            # dedup baseline and _persist would skip the write (leaving the row on disk).
+            self._persisted = {k: v for k, v in self._persisted.items() if k != name}
+            await self._persist()
 
     @staticmethod
     def _signal_stop(pid: int, *, twice: bool = False) -> None:
