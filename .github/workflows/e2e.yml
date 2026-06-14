@@ -26,8 +26,11 @@ on:
 permissions:
   contents: read
 
+# Key on the PR number (globally unique, so two same-named branches from different
+# forks can't collide and cancel each other's runs); fall back to the ref for the
+# cron + workflow_dispatch triggers, which have no PR context.
 concurrency:
-  group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
