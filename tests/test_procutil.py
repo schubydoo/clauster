@@ -265,3 +265,60 @@ def test_is_killable_hosted_requires_comparable_start(monkeypatch):
     assert procutil.is_killable_hosted(1234, "garbage") is False  # uncomparable
     monkeypatch.setattr(procutil, "is_live_process", lambda *a, **k: False)
     assert procutil.is_killable_hosted(1234, 1000.0) is False  # comparable but dead
+
+
+def test_child_env_strips_clauster_secrets(monkeypatch):
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak-to-a-child")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH", "must-not-leak-the-password-hash")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = procutil.child_env()
+    assert "CLAUSTER_SESSION_SECRET" not in env
+    assert "CLAUSTER_AUTH_PASSWORD_HASH" not in env
+    assert env["PATH"] == "/usr/bin"  # ordinary env preserved
+
+
+def test_child_env_preserves_recap_and_path_pointers(monkeypatch):
+    monkeypatch.setenv("CLAUSTER_RESUME_RECAP", "1")
+    monkeypatch.setenv("CLAUSTER_RESUME_RECAP_MAX_CHARS", "8000")
+    monkeypatch.setenv("CLAUSTER_CONFIG", "/etc/clauster.yml")
+    monkeypatch.setenv("CLAUSTER_HOME", "/home/clauster")
+    env = procutil.child_env()
+    assert env["CLAUSTER_RESUME_RECAP"] == "1"
+    assert env["CLAUSTER_RESUME_RECAP_MAX_CHARS"] == "8000"
+    assert env["CLAUSTER_CONFIG"] == "/etc/clauster.yml"
+    assert env["CLAUSTER_HOME"] == "/home/clauster"
+
+
+def test_child_env_overlays_extra_after_scrub(monkeypatch):
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "leak-me")
+    env = procutil.child_env({"CLAUSTER_RESUME_RECAP": "1"})
+    assert env["CLAUSTER_RESUME_RECAP"] == "1"
+    assert "CLAUSTER_SESSION_SECRET" not in env  # overlay never resurrects a secret
+
+
+def test_child_env_returns_independent_copy(monkeypatch):
+    monkeypatch.setenv("SOME_VAR", "v")
+    env = procutil.child_env()
+    env["MUTATED"] = "x"
+    assert "MUTATED" not in os.environ  # mutating the child env never touches os.environ
+
+
+def test_is_secret_env_name_matches_known_and_shaped():
+    assert procutil.is_secret_env_name("CLAUSTER_SESSION_SECRET") is True
+    assert procutil.is_secret_env_name("CLAUSTER_AUTH_PASSWORD_HASH") is True
+    # a future CLAUSTER_* secret is caught by the token heuristic, no code change
+    assert procutil.is_secret_env_name("CLAUSTER_API_TOKEN") is True
+    assert procutil.is_secret_env_name("CLAUSTER_DB_PASSWD") is True
+
+
+def test_is_secret_env_name_allows_non_secrets():
+    for name in (
+        "CLAUSTER_CONFIG",
+        "CLAUSTER_HOME",
+        "CLAUSTER_RESUME_RECAP",
+        "CLAUSTER_RESUME_RECAP_MAX_CHARS",
+        "PATH",
+        "HOME",
+        "SECRET_SANTA",  # secret-shaped but not CLAUSTER_-prefixed: not ours to scrub
+    ):
+        assert procutil.is_secret_env_name(name) is False

@@ -36,6 +36,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from . import procutil
 from .claustrum_client import (
     AuthRejected,
     ClaustrumClient,
@@ -276,7 +277,9 @@ class ClaustrumDaemon:
         # Defensive: scrub claustrum's daemonize sentinel from the child env (see
         # _DAEMON_SENTINEL_ENV) so an ambient CLAUDE_SSH_DAEMON_CHILD can't make the
         # launcher mistake itself for its own re-exec'd child and skip the token read.
-        env = {k: v for k, v in os.environ.items() if k not in _DAEMON_SENTINEL_ENV}
+        env = procutil.child_env()  # scrub Clauster secrets; the daemon spawns hosted agents
+        for sentinel in _DAEMON_SENTINEL_ENV:
+            env.pop(sentinel, None)
         # Append-mode log: the detached daemon keeps writing here after we return.
         log_file = open(self._log_path, "ab")  # noqa: SIM115 - handed to the child; closed below
         try:

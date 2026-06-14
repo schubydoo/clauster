@@ -39,6 +39,8 @@ import sys
 import time
 from pathlib import Path
 
+from . import procutil
+
 # The flag form prints its connect URL as a session path, NOT the subcommand's
 # `?environment=env_<ULID>` query form (verified, claude 2.1.159).
 _RE_CONNECT_URL = re.compile(rb"https?://claude\.ai/code/(session_[A-Za-z0-9]+)")
@@ -121,6 +123,10 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
             stdin=slave,
             stdout=slave,
             stderr=slave,
+            # Scrub Clauster secrets at the layer that directly spawns the
+            # project-code bridge, so it stays secret-free however the keeper
+            # was launched (the launcher scrubs too — defense in depth).
+            env=procutil.child_env(),
             preexec_fn=_acquire_ctty,
             close_fds=True,
         )

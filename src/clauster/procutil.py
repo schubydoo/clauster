@@ -213,3 +213,50 @@ def reap_if_exited(pid: int) -> None:
         os.waitpid(pid, os.WNOHANG)
     except (ChildProcessError, OSError):
         pass
+
+
+# ----- spawn environment --------------------------------------------------
+
+# Env var names that hold a Clauster secret a spawned child must never inherit.
+# A bridge runs project-controlled code, a clone runs an attacker-controllable
+# repo, and a ``claude --bg`` agent runs project code — any of them could read
+# these from its own ``os.environ`` and forge an auth-session cookie (the signing
+# secret) or exfiltrate the password hash for offline cracking. Stripping them at
+# EVERY spawn makes that leak structurally impossible, not patched at one site.
+_SECRET_ENV_NAMES = frozenset(
+    {
+        "CLAUSTER_SESSION_SECRET",
+        "CLAUSTER_AUTH_PASSWORD_HASH",
+    }
+)
+# Defense in depth for a future ``CLAUSTER_*`` secret added without updating the
+# set above: any Clauster-prefixed name carrying a secret-shaped token is scrubbed
+# too. The path pointers (CLAUSTER_CONFIG/HOME) and the recap flags
+# (CLAUSTER_RESUME_RECAP[_MAX_CHARS]) carry none of these tokens, so they survive.
+_SECRET_ENV_TOKENS = ("SECRET", "PASSWORD", "PASSWD", "TOKEN", "HASH")
+
+
+def is_secret_env_name(name: str) -> bool:
+    """Whether an env var name holds a Clauster secret a child must not inherit."""
+    if name in _SECRET_ENV_NAMES:
+        return True
+    return name.startswith("CLAUSTER_") and any(tok in name for tok in _SECRET_ENV_TOKENS)
+
+
+def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Return a copy of the parent environment safe to hand a spawned child.
+
+    Strips Clauster secrets (:func:`is_secret_env_name`) so project-controlled
+    bridge code, a cloned repo's hooks, or a background agent can never read the
+    session-signing secret or password hash from its own ``os.environ`` and forge
+    an auth cookie. ``extra`` overlays caller keys (e.g. the resume-recap flags)
+    AFTER scrubbing, so a legitimate override is never dropped.
+
+    Scope is deliberately Clauster-only — a spawned ``claude`` legitimately needs
+    e.g. ``ANTHROPIC_API_KEY``, so this is not a general secret firewall; it
+    removes only Clauster's own credentials, which no child has any reason to read.
+    """
+    env = {k: v for k, v in os.environ.items() if not is_secret_env_name(k)}
+    if extra:
+        env.update(extra)
+    return env

@@ -10,6 +10,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 
+from . import procutil
+
 
 class ClaudeNotFound(RuntimeError):
     """Raised when the configured ``claude`` binary cannot be found on PATH."""
@@ -31,6 +33,7 @@ def claude_version(binary: str) -> str:
         capture_output=True,
         text=True,
         timeout=10,
+        env=procutil.child_env(),
         check=True,
     )
     # Output looks like: "2.1.153 (Claude Code)"

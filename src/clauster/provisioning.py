@@ -31,6 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import procutil
 from .config import CloneConfig
 from .discovery import is_valid_project_name
 
@@ -206,7 +207,7 @@ def _git_env() -> dict[str, str]:
     credential-probing vector. Operators who don't need it can set
     clone.allowed_schemes: [https] to drop ssh entirely.
     """
-    env = dict(os.environ)
+    env = procutil.child_env()  # scrubbed base: a clone runs an attacker-controllable repo
     env.update(
         {
             "GIT_ALLOW_PROTOCOL": "https:ssh",
