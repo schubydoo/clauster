@@ -210,13 +210,15 @@ def test_install_service_write_unwritable_returns_1(tmp_path, capsys, monkeypatc
     assert "sudo" in capsys.readouterr().err.lower()
 
 
-def test_install_service_write_without_path_uses_default(tmp_path, monkeypatch):
+def test_install_service_write_without_path_uses_default(tmp_path, monkeypatch, capsys):
     dest = tmp_path / "clauster.service"
     monkeypatch.setattr(cli.ops, "default_service_path", lambda _kind: dest)
     rc = cli.main(["install-service", "systemd", "--write"])
     assert rc == 0
     assert dest.is_file()
     assert "KillMode=process" in dest.read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert str(dest) in err and "daemon-reload" in err
 
 
 # ----- process title (instance_name) ------------------------------------
