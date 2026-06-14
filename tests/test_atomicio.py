@@ -72,3 +72,37 @@ def test_atomic_write_text_cleans_up_temp_on_replace_failure(tmp_path, monkeypat
     with pytest.raises(OSError, match="replace failed"):
         atomic_write_text(target, "data")
     assert list(tmp_path.iterdir()) == []  # the unique temp was removed; no target written
+
+
+def test_fsync_dir_ignores_open_error(tmp_path, monkeypatch):
+    # A directory whose fd can't be opened for fsync (Windows can't open a dir; or a
+    # perm/race) is a no-op — durability of the rename is then the filesystem's to keep.
+    def _boom(*a, **k):
+        raise OSError("no dir fd")
+
+    monkeypatch.setattr(atomicio.os, "open", _boom)
+    atomicio._fsync_dir(tmp_path)  # must not raise
+
+
+def test_fsync_dir_ignores_fsync_error(tmp_path, monkeypatch):
+    # A directory fsync the filesystem rejects (e.g. EINVAL on some FUSE/tmpfs) is
+    # swallowed — best-effort durability, never a hard failure.
+    def _boom(fd):
+        raise OSError("fsync rejected")
+
+    monkeypatch.setattr(atomicio.os, "fsync", _boom)
+    atomicio._fsync_dir(tmp_path)  # must not raise
+
+
+def test_ensure_private_dir_ignores_chmod_failure_on_windows(tmp_path, monkeypatch):
+    # On Windows (os.name == "nt") there are no POSIX mode bits, so a chmod failure is a
+    # no-op that is ignored — only POSIX fails closed (covered by the test above).
+    import pathlib
+
+    def _boom(self, *a, **k):
+        raise OSError("no chmod")
+
+    monkeypatch.setattr(atomicio.os, "name", "nt")
+    monkeypatch.setattr(pathlib.Path, "chmod", _boom)
+    ensure_private_dir(tmp_path / "win")  # simulated Windows: must NOT raise
+    assert (tmp_path / "win").exists()  # the primary behavior (mkdir) still happened
