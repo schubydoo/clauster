@@ -993,7 +993,17 @@
       // Open (or reconnect) the live stream, resuming from the last event we rendered
       // so a reload / dropped link catches up via ?after= without re-dumping the ring.
       openHosted(id) {
+        // Idempotent + identity-bound (the #252 openLogs pattern): retire any prior
+        // socket first, then bind THIS socket's handlers to its own `view`, identity-
+        // checked against the live hostedView[id]. So a Hide→View race or a stale
+        // reconnect can't leave two sockets streaming into one view (duplicating the
+        // transcript), and a retired socket's late onmessage/onclose can't touch the
+        // fresh view. The new view carries the prior events/input/cursor forward.
         const prev = this.hostedView[id];
+        if (prev) {
+          prev.open = false;
+          if (prev.ws) { try { prev.ws.close(); } catch (e) {} }
+        }
         const after = prev ? prev.lastSeq : 0;
         const view = { open: true, ws: null, lastSeq: after, events: prev ? prev.events : [],
                        input: prev ? prev.input : "", sending: false, connLost: false,
@@ -1005,15 +1015,13 @@
                     encodeURIComponent(id) + "?after=" + after;
         const ws = new WebSocket(url);
         ws.onmessage = (ev) => {
-          const v = self.hostedView[id];
-          if (!v || !v.open) return;
+          if (!view.open || self.hostedView[id] !== view) return;  // a retired socket → ignore
           let e; try { e = JSON.parse(ev.data); } catch (_) { return; }
           self._renderHostedEvent(id, e);
         };
         ws.onclose = () => {
-          const v = self.hostedView[id];
-          if (!v || !v.open) return;     // a deliberate close() — don't reconnect
-          if (v.ended) return;           // a terminal frame already settled the view
+          if (!view.open || self.hostedView[id] !== view) return;  // deliberate close / retired → don't reconnect
+          if (view.ended) return;        // a terminal frame already settled the view
           // Only reconnect a session the snapshot still reports as live. A stopped /
           // crashed / gone session closes the socket immediately (server 1008); blindly
           // reconnecting it loops forever and mislabels a dead session "reconnecting…".
@@ -1023,15 +1031,16 @@
             self._markHostedEnded(id, h);
             return;
           }
-          v.connLost = true;             // genuinely live — honest: the link dropped
-          setTimeout(() => { const w = self.hostedView[id]; if (w && w.open) self.openHosted(id); }, 1500);
+          view.connLost = true;          // genuinely live — honest: the link dropped
+          setTimeout(() => { const w = self.hostedView[id]; if (w === view && w.open) self.openHosted(id); }, 1500);
         };
         view.ws = ws;
       },
       closeHosted(id) {
         const v = this.hostedView[id];
-        if (v && v.ws) { try { v.ws.close(); } catch (e) {} }
-        if (v) v.open = false;
+        if (!v) return;
+        v.open = false;  // before close(), so the onclose handler sees it as intentional
+        if (v.ws) { try { v.ws.close(); } catch (e) {} }
       },
       // Surface a terminal hosted session in the live view: explain why it ended (with the
       // server's error_detail when present) and stop the reconnect loop. Resume (when the
@@ -1091,7 +1100,7 @@
         for (const it of v.events) {
           if (it.kind === "permission" && it.request_id === requestId) {
             it.resolved = true;
-            it.decision = (behavior === "allow" || behavior === "deny") ? behavior : "answered";
+            it.decision = ["allow", "deny", "interrupted"].includes(behavior) ? behavior : "answered";
           }
         }
       },

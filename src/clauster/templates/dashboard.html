@@ -150,7 +150,7 @@
                               </template>
                               <template x-if="it.resolved">
                                 <span class="ms-auto small" :class="it.decision === 'allow' ? 'text-success' : 'text-secondary'"
-                                      x-text="it.decision === 'allow' ? '✓ allowed' : (it.decision === 'deny' ? '✕ denied' : 'answered')"></span>
+                                      x-text="it.decision === 'allow' ? '✓ allowed' : (it.decision === 'deny' ? '✕ denied' : (it.decision === 'interrupted' ? '— session ended' : 'answered'))"></span>
                               </template>
                             </div>
                           </div>
