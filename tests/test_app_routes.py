@@ -601,6 +601,28 @@ def test_dashboard_injects_tokens_exclude_cache_when_set(write_config, tmp_path)
     assert "const TOKENS_INCLUDE_CACHE = false;" in html
 
 
+# ----- busy-state :disabled coercion (Alpine 3.15.x missing-key bug) ------
+# The Stop/Kill/Resume buttons live in `x-for` clones and bind `:disabled` to a busy
+# map (agentStopping/hostedStopping/hostedResuming) that has no key for a row until a
+# request is in flight. Alpine 3.15.x renders a bare `:disabled="map[key]"` as DISABLED
+# when that key is absent (an explicit false renders enabled), so the button is stuck
+# un-clickable on first paint. `!!` coercion yields a concrete false for a missing key.
+
+
+def test_dashboard_coerces_detached_stop_disabled_binding(write_config, tmp_path):
+    html = _client(write_config, tmp_path).get("/").text
+    assert ':disabled="!!agentStopping[j.id]"' in html
+    assert ':disabled="agentStopping[j.id]"' not in html  # no bare (buggy) binding
+
+
+def test_dashboard_coerces_hosted_busy_disabled_bindings(write_config, tmp_path):
+    html = _client_with(write_config, tmp_path, "claustrum:\n  enabled: true\n").get("/").text
+    assert ':disabled="!!hostedStopping[h.claustrum_process_id]"' in html
+    assert ':disabled="!!hostedResuming[h.claustrum_process_id]"' in html
+    assert ':disabled="hostedStopping[h.claustrum_process_id]"' not in html
+    assert ':disabled="hostedResuming[h.claustrum_process_id]"' not in html
+
+
 # ----- /api/projects/{name}/metrics (live per-bridge resource sample) ----
 
 
