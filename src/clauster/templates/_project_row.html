@@ -50,6 +50,11 @@
                         <input type="checkbox" class="form-check-input" x-model="lcloud">
                         <span class="form-check-label">also register on claude.ai</span>
                       </label>
+                      <!-- With claude.ai on, "fire-and-forget" undersells it: the session is live
+                           and conversational. Say what you can actually do with it. -->
+                      <p class="form-hint text-secondary small mt-1 ms-1 mb-0" x-show="lmode === 'detached' && lcloud" x-cloak>
+                        Connectable from claude.ai / Desktop — converse with it, and Stop it here when done.
+                      </p>
                       <!-- optional first prompt for Fire-and-forget -->
                       <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
                         <label class="form-label small mb-1">First prompt <span class="text-secondary">(optional)</span></label>

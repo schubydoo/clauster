@@ -196,7 +196,13 @@
           });
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
           const b = await res.json().catch(() => ({}));
-          if (res.ok) { this.toast(name + ": started (fire-and-forget)", "success"); await this.refresh(); }
+          if (res.ok) {
+            // With claude.ai registration this isn't really "fire-and-forget" — it's a live,
+            // conversational session you drive from Desktop and can Stop here; say so.
+            this.toast(cloud ? name + ": started — connect from claude.ai / Desktop"
+                             : name + ": started (fire-and-forget)", "success");
+            await this.refresh();
+          }
           else { this.toast("start failed — " + (b.detail || res.status), "error"); }
         } catch (e) { this.toast("start failed", "error"); }
       },
