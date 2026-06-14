@@ -358,7 +358,8 @@
           const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id), { method: "DELETE" });
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
           const b = await res.json().catch(() => ({}));
-          if (res.ok && b.removed) this.toast(label + ": stopped", "success");
+          if (res.ok && b.settled === false) this.toast(label + ": removed locally, but stop not confirmed — " + (b.detail || "re-check `claude agents` for a cloud orphan"), "warning");
+          else if (res.ok && b.removed) this.toast(label + ": stopped", "success");
           else if (res.ok) this.toast(label + ": stopped (cleanup pending — " + (b.detail || "supervisor restarting") + ")", "warning");
           else this.toast(label + ": stop failed — " + (b.detail || res.status), "error");
         } catch (e) { this.toast(label + ": stop failed", "error"); }

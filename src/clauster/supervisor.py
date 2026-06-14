@@ -408,7 +408,8 @@ def stop_background_job(
 
     1. Resolve the session pid from the roster (``state.json`` carries no pid) and
        validate it with the pid+procStart liveness check — NEVER signal an
-       unvalidated or recycled pid. No live worker ⇒ already stopped; skip to rm.
+       unvalidated or recycled pid. No live worker ⇒ the cloud-deregistering stop
+       can't run or be confirmed: warn, report ``settled=False``, and still rm.
     2. SIGINT twice (idempotent — the second is a no-op once it has exited).
     3. Await the process actually exiting within ``settle_timeout``; raise
        :class:`StopError` if it does not. We do NOT escalate to SIGKILL —
@@ -417,7 +418,10 @@ def stop_background_job(
        idle-exited, making rm soft-fail; that is reported (``removed=False``),
        not raised — the process is already gone.
 
-    Returns ``{"id", "settled": bool, "removed": bool, "detail": str}``.
+    Returns ``{"id", "settled": bool, "removed": bool, "detail": str}``. ``settled``
+    is True ONLY for a confirmed cloud-deregistering double-SIGINT-and-exit; a
+    no-live-worker stop returns ``settled=False`` (the session may already be stopped,
+    or be an orphan whose worker died without deregistering — surfaced in ``detail``).
     """
     if not valid_job_id(job_id):
         raise StopError(f"invalid job id: {job_id!r}")
@@ -425,7 +429,7 @@ def stop_background_job(
     workers = load_roster_workers(roster_json)
     pid = _live_session_pid(job_id, workers)
 
-    settled = True
+    settled = False  # True ONLY once we CONFIRM the cloud-deregistering stop
     if pid is not None:
         proc_start = workers[job_id].get("procStart")
         try:
@@ -448,8 +452,21 @@ def stop_background_job(
                 f"session {job_id} did not settle within {settle_timeout:g}s "
                 "(not force-killing — that would orphan the cloud session)"
             )
+    else:
+        # No validated-live worker to signal: the cloud-deregistering double-SIGINT
+        # never ran, so we CANNOT confirm the cloud session was deregistered. It may
+        # already be stopped, or its worker may have died WITHOUT deregistering (a cloud
+        # orphan). Report settled=False and surface it, never a false clean stop.
+        _log.warning(
+            "stop_background_job: no live worker for %s — cloud deregistration not "
+            "confirmed (already stopped, or a possible cloud orphan; re-check `claude agents`)",
+            job_id,
+        )
 
     removed, detail = _remove_job(resolved, job_id)
+    if not settled:
+        note = "no live worker found — cloud stop not confirmed (re-check `claude agents`)"
+        detail = f"{detail}; {note}" if detail else note
     return {"id": job_id, "settled": settled, "removed": removed, "detail": detail}
 
 

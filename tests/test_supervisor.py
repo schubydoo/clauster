@@ -553,11 +553,17 @@ def test_stop_happy_double_sigint_polls_then_rm(tmp_path, monkeypatch):
     assert res == {"id": _JID, "settled": True, "removed": True, "detail": "removed 2045a6c1"}
 
 
-def test_stop_no_live_worker_skips_signal_but_still_rm(tmp_path, monkeypatch):
+def test_stop_no_live_worker_is_unconfirmed_not_clean(tmp_path, monkeypatch, caplog):
+    # No validated-live worker: the cloud-deregistering double-SIGINT never runs, so we
+    # CANNOT confirm the cloud session was deregistered. settled is False (not a false
+    # clean stop), the job is still rm'd, the fail-open is logged, and detail says so.
     roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[False])
-    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    with caplog.at_level("WARNING", logger="clauster.supervisor"):
+        res = supervisor.stop_background_job(_JID, roster_json=roster)
     assert kills == []  # nothing validated-live to signal
-    assert res["settled"] is True and res["removed"] is True
+    assert res["settled"] is False and res["removed"] is True
+    assert "stop not confirmed" in res["detail"]
+    assert "cloud deregistration not confirmed" in caplog.text
 
 
 def test_stop_job_absent_from_roster_just_rm(tmp_path, monkeypatch):
@@ -565,6 +571,7 @@ def test_stop_job_absent_from_roster_just_rm(tmp_path, monkeypatch):
     res = supervisor.stop_background_job("deadbeef", roster_json=roster)  # not in roster
     assert kills == []
     assert res["removed"] is True
+    assert res["settled"] is False  # never tracked here → unconfirmed, not a clean stop
 
 
 def test_stop_single_sigint_when_settles_during_gap(tmp_path, monkeypatch):
@@ -648,6 +655,24 @@ def test_api_stop_agent_happy(write_config, tmp_path, monkeypatch):
     r = _client(write_config, tmp_path).delete(f"/api/agents/{_JID}")
     assert r.status_code == 200
     assert r.json() == {"id": _JID, "settled": True, "removed": True, "detail": "removed"}
+
+
+def test_api_stop_agent_unconfirmed_is_200(write_config, tmp_path, monkeypatch):
+    # A no-live-worker stop returns settled=False — served as 200 (not coerced to an
+    # error), so the body's caveat reaches the UI instead of masking the fail-open.
+    monkeypatch.setattr(
+        supervisor,
+        "stop_background_job",
+        lambda jid, **k: {
+            "id": jid,
+            "settled": False,
+            "removed": True,
+            "detail": "stop not confirmed",
+        },
+    )
+    r = _client(write_config, tmp_path).delete(f"/api/agents/{_JID}")
+    assert r.status_code == 200
+    assert r.json()["settled"] is False
 
 
 def test_api_stop_agent_invalid_id(write_config, tmp_path):
