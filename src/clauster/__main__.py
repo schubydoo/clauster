@@ -20,6 +20,7 @@ from . import __version__, claude_cli, environments, ops, usage
 from .app import create_app
 from .auth import hash_password, make_hasher
 from .config import ClausterConfig, load_config
+from .recap import RECAP_SUBCOMMAND
 
 # setproctitle is a required dependency (so the retitle works out of the box). The
 # guard is defensive, not optionality: a cosmetic process-rename must never crash
@@ -47,6 +48,11 @@ _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv``, dispatch to the requested subcommand, and return its exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    # Internal frozen-binary entry point, handled BEFORE argparse so it never appears
+    # in --help: a one-file build re-invokes itself to run the SessionStart recap hook
+    # (its bundled resume_recap.py lives in an ephemeral _MEIxxx dir). See clauster.recap.
+    if argv and argv[0] == RECAP_SUBCOMMAND:
+        return _recap_hook()
     parser = argparse.ArgumentParser(prog="clauster", description=__doc__)
     parser.add_argument("--version", action="version", version=f"clauster {__version__}")
     sub = parser.add_subparsers(dest="command")
@@ -126,6 +132,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "usage":
         return _usage(args.transcript)
     return _run(getattr(args, "config", None))
+
+
+def _recap_hook() -> int:
+    """Run the SessionStart recap hook in-process (frozen-binary entry point).
+
+    A one-file binary registers ``<exe> __recap-hook__`` as the bridge's hook
+    command because the bundled ``resume_recap.py`` lives in an ephemeral
+    ``_MEIxxx`` dir. Mirror the script's own guard: a hook must never break the
+    session it serves, so any error is swallowed and we still exit 0.
+    """
+    from .hooks.resume_recap import main as recap_main
+
+    try:
+        recap_main()
+    except Exception:  # noqa: BLE001, S110 — a hook must never break the session it serves
+        pass
+    return 0
 
 
 def _hash_password() -> int:

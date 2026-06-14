@@ -187,6 +187,26 @@ def test_install_service_bad_kind_exits_2():
     assert ei.value.code == 2
 
 
+def test_recap_hook_subcommand_dispatches(monkeypatch):
+    # The hidden frozen-binary entry point dispatches to the recap hook and exits 0
+    # (and isn't rewritten to `run` by the bare-args shim).
+    called = {"ran": False}
+    monkeypatch.setattr(
+        "clauster.hooks.resume_recap.main", lambda: called.__setitem__("ran", True)
+    )
+    assert cli.main(["__recap-hook__"]) == 0
+    assert called["ran"] is True
+
+
+def test_recap_hook_subcommand_swallows_errors(monkeypatch):
+    # A hook must never break the session it serves: an error in the recap still exits 0.
+    def boom():
+        raise RuntimeError("simulated recap failure")
+
+    monkeypatch.setattr("clauster.hooks.resume_recap.main", boom)
+    assert cli.main(["__recap-hook__"]) == 0
+
+
 def test_install_service_write_to_path(tmp_path, capsys):
     dest = tmp_path / "clauster.service"
     rc = cli.main(
