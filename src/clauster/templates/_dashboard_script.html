@@ -70,6 +70,7 @@
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
       agentStopping: {},   // job id -> true while a stop request is in flight
+      launching: {},       // project name -> true while a launch is in flight (double-submit guard)
       // --- hosted live-view sessions (claustrum stream-json channel, CL-4c) ---
       hosted: [],                 // GET /api/hosted snapshot (channel="hosted" instances)
       hostedDispatchOpen: false,
@@ -156,10 +157,16 @@
       },
       // Route a launch by chosen mode: browser=hosted, desktop=bridge, detached=background.
       async launchRun(name, mode, perm, cloud, prompt) {
-        if (mode === "browser") { await this._launchHosted(name, perm); }
-        else if (mode === "detached") { await this._launchDetached(name, prompt, cloud, perm); }
-        // bridge: route through start() so the trust + bypassPermissions gates still apply.
-        else { if (perm) this.permMode[name] = perm; this.start(name); }
+        if (this.launching[name]) return;  // a launch is already in flight — ignore the double-click
+        this.launching[name] = true;
+        try {
+          if (mode === "browser") { await this._launchHosted(name, perm); }
+          else if (mode === "detached") { await this._launchDetached(name, prompt, cloud, perm); }
+          // bridge: route through start() so the trust + bypassPermissions gates still apply.
+          else { if (perm) this.permMode[name] = perm; this.start(name); }
+        } finally {
+          this.launching[name] = false;
+        }
       },
       async _launchHosted(name, perm) {
         try {

@@ -561,9 +561,9 @@
                   <button class="btn btn-warning" @click="archive()" :disabled="busy"
                           x-text="busy ? 'Working…' : ('Archive ' + ghosts.length + ' (reversible)')">Archive</button>
                   <div class="mt-2">
-                    <label class="form-label">force-delete (irreversible) — type <code>DELETE</code>:</label>
+                    <label class="form-label" for="force-delete-confirm">force-delete (irreversible) — type <code>DELETE</code>:</label>
                     <div class="input-group" style="max-width:320px">
-                      <input type="text" class="form-control" x-model="deleteTyped" placeholder="DELETE" autocomplete="off">
+                      <input id="force-delete-confirm" type="text" class="form-control" x-model="deleteTyped" placeholder="DELETE" autocomplete="off">
                       <button class="btn btn-danger" @click="del()" :disabled="busy || deleteTyped !== 'DELETE'">Permanently delete</button>
                     </div>
                   </div>
