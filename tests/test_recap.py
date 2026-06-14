@@ -473,3 +473,14 @@ def test_installer_self_heals_across_pip_to_binary_switch(tmp_path: Path, monkey
     assert cmd == f'"/opt/clauster/clauster" {RECAP_SUBCOMMAND}'
     assert "resume_recap.py" not in cmd
     assert ensure_recap_hook_installed(settings) is False  # idempotent in the new mode
+
+
+def test_hook_command_frozen_quotes_a_windows_exe_path(monkeypatch) -> None:
+    # The frozen command double-quotes sys.executable, so a Windows binary path with
+    # spaces and backslashes stays a single token the shell won't split.
+    from clauster.recap import RECAP_SUBCOMMAND
+
+    exe = r"C:\Program Files\clauster\clauster.exe"
+    monkeypatch.setattr("sys.frozen", True, raising=False)
+    monkeypatch.setattr("sys.executable", exe)
+    assert hook_command() == f'"{exe}" {RECAP_SUBCOMMAND}'
