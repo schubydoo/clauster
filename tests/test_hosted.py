@@ -552,6 +552,12 @@ async def test_parked_control_request_payload_is_redacted(fake_claustrum):
         # The PARKED request keeps the raw input so an "allow unchanged" replays the
         # real tool input back to the agent (redaction is browser-facing only).
         assert [r.request_id for r in session.pending_requests] == ["perm-1"]
+        parked_raw = json.dumps(session.pending_requests[0].request)
+        assert secret in parked_raw  # the unredacted secret survives in the parked copy
+        assert (
+            session.pending_requests[0].request["input"]["command"]
+            == frame["request"]["input"]["command"]
+        )
 
 
 async def test_bare_uuid_in_frame_leaf_is_masked_end_to_end(fake_claustrum):

@@ -626,9 +626,13 @@ class _LiveFakeDaemon:
     async def aclose(self) -> None:
         """Close the client and stop the fake daemon."""
         self.closed = True
-        if self._client is not None:
-            await self._client.close()
-        await self._fake.stop()
+        try:
+            if self._client is not None:
+                await self._client.close()
+        finally:
+            # Always stop the fake daemon even if the client close raises, so a failed
+            # close can't leak the daemon/socket and make later integration tests flaky.
+            await self._fake.stop()
 
 
 class _RaisingDaemon(_LiveFakeDaemon):
