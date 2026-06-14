@@ -163,7 +163,9 @@
           if (mode === "browser") { await this._launchHosted(name, perm); }
           else if (mode === "detached") { await this._launchDetached(name, prompt, cloud, perm); }
           // bridge: route through start() so the trust + bypassPermissions gates still apply.
-          else { if (perm) this.permMode[name] = perm; this.start(name); }
+          // await it (start is async) so launching[name] stays set across the spawn — else
+          // the finally clears the guard immediately and a desktop double-click double-spawns.
+          else { if (perm) this.permMode[name] = perm; await this.start(name); }
         } finally {
           this.launching[name] = false;
         }
