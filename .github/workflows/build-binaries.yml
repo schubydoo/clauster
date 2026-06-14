@@ -77,7 +77,13 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           version="$("dist/$ARTIFACT" --version | awk '{print $NF}')"
-          [ -n "$version" ] || { echo "could not read version from the binary" >&2; exit 1; }
+          # Enforce a semver-ish prefix (matches 0.9.0 and dev builds like 0.10.0.dev7),
+          # so an unexpected --version banner can't yield a wrongly-named asset — which
+          # PR2b's release tooling reuses this step to produce.
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "unexpected --version output; parsed version='$version'" >&2
+            exit 1
+          fi
           ext=""
           case "$ARTIFACT" in *.exe) ext=".exe" ;; esac
           name="clauster-${version}-${TARGET}${ext}"
