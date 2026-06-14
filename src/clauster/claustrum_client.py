@@ -406,7 +406,21 @@ class ClaustrumClient:
             return
         try:
             while True:
-                raw = await reader.readline()
+                try:
+                    raw = await reader.readline()
+                except ValueError:
+                    # A frame larger than the StreamReader's _MAX_LINE_BYTES limit makes
+                    # readline() raise ValueError (it wraps asyncio's LimitOverrunError). A
+                    # conforming daemon never sends one — every line is well under the 1 MiB
+                    # cap — so treat it as a fatal protocol violation and stop the reader
+                    # cleanly here. Otherwise the ValueError escapes this task as a
+                    # never-retrieved exception. The finally below fails pending calls;
+                    # future calls then time out and the daemon health probe reconnects.
+                    logger.warning(
+                        "claustrum: frame exceeded the %d-byte line limit; closing reader",
+                        _MAX_LINE_BYTES,
+                    )
+                    break
                 if not raw:
                     break
                 # Fault-isolate per-frame dispatch: one malformed frame (or a bug in stream

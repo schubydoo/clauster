@@ -80,6 +80,27 @@ async def test_connect_unreachable_raises():
         await client.connect()
 
 
+async def test_read_loop_survives_oversized_frame(caplog):
+    # A frame larger than _MAX_LINE_BYTES makes readline() raise ValueError (wrapping
+    # asyncio's LimitOverrunError). The reader must tear down cleanly via _fail_pending —
+    # not die as a never-retrieved task exception — so pending calls fail and the daemon
+    # health probe can reconnect. (A tiny StreamReader limit exercises the same readline
+    # ValueError path as a real >1 MiB frame, without allocating one.)
+    client = ClaustrumClient("/unused.sock", "tok")
+    reader = asyncio.StreamReader(limit=64)
+    client._reader = reader
+    fut = asyncio.get_running_loop().create_future()
+    client._pending[1] = fut
+    reader.feed_data(b"x" * 1000)  # > limit, no newline → readline raises ValueError
+    reader.feed_eof()
+    with caplog.at_level(logging.WARNING, logger="clauster.claustrum_client"):
+        await client._read_loop()  # returns cleanly; no exception escapes the task
+    assert "exceeded the" in caplog.text
+    assert fut.done()
+    with pytest.raises(DaemonUnreachable):
+        fut.result()
+
+
 async def test_call_before_connect_raises(fake_claustrum):
     client = ClaustrumClient("/unused.sock", "tok")
     with pytest.raises(DaemonUnreachable):
