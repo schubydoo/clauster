@@ -208,3 +208,6 @@ def test_dashboard_renders_resume_mode_picker(write_config):
     if sys.platform != "win32":
         assert "x-model=\"resumeMode['alpha']\"" in resp.text  # popover Advanced picker
         assert "pty (single-session, true-resume)" in resp.text
+        assert "!== 'pty'" in resp.text  # Spawn selector gated off in pty mode
+        assert 'id="resume-hint-alpha"' in resp.text  # hint element rendered
+        assert 'aria-describedby="resume-hint-alpha"' in resp.text  # a11y wiring
