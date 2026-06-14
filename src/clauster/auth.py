@@ -27,6 +27,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
+from .atomicio import atomic_write_text, ensure_private_dir
 from .config import _LOOPBACK_HOSTS, ClausterConfig
 
 _SESSION_SALT = "clauster-session"
@@ -55,7 +56,7 @@ def load_or_create_secret(state_dir: Path) -> bytes:
             )
         return raw
     state_dir = state_dir.expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)  # holds the secret
+    ensure_private_dir(state_dir)  # holds the secret — tighten even a pre-existing dir to 0700
     path = state_dir / "session.secret"
     # O_BINARY (Windows-only; 0 on POSIX) keeps os.write from translating any
     # 0x0A byte in the random secret into 0x0D 0x0A — which would corrupt ~12% of
@@ -180,7 +181,6 @@ def bump_epoch(state_dir: Path, floor: int = 0) -> int:
     as 0; the floor carries the real value.
     """
     state_dir = state_dir.expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = state_dir / "session.epoch"
     try:
         text = path.read_text(encoding="utf-8").strip()
@@ -188,9 +188,7 @@ def bump_epoch(state_dir: Path, floor: int = 0) -> int:
     except (FileNotFoundError, OSError, ValueError):
         disk = 0  # unreadable/corrupt: rely on the floor, never regress
     new_value = max(disk, floor) + 1
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(str(new_value), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, str(new_value))  # ensures the dir is 0700, fsync-before-replace
     return new_value
 
 

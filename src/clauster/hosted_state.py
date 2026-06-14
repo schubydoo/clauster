@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
+
+from .atomicio import atomic_write_text
 
 CURRENT_SCHEMA = 1
 
@@ -83,14 +84,9 @@ class HostedStateStore:
         return out
 
     def save(self, sessions: dict[str, dict]) -> None:
-        """Atomically persist ``{process_id: {persisted fields}}``."""
-        # mode=0o700: the state dir also holds session.secret/epoch and the
-        # claustrum socket dir — keep it owner-only (only applies on creation).
-        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        """Atomically persist ``{process_id: {persisted fields}}`` (durable, owner-only)."""
         payload = {"schema_version": CURRENT_SCHEMA, "sessions": sessions}
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, self._path)
+        atomic_write_text(self._path, json.dumps(payload, indent=2))
 
     def _migrate(self, data: dict, raw: str) -> dict:
         """Back up once, then re-stamp to the current schema.
@@ -102,7 +98,7 @@ class HostedStateStore:
         backup = self._path.with_suffix(self._path.suffix + ".bak")
         if not backup.exists():
             try:
-                backup.write_text(raw, encoding="utf-8")
+                atomic_write_text(backup, raw)
             except OSError as exc:
                 # Best-effort; never block the load, but surface it so a missing
                 # pre-migration backup isn't a silent loss before we coerce away.

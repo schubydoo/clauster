@@ -47,21 +47,16 @@ def test_old_schema_migrates_with_backup(tmp_path):
 def test_migrate_backup_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch):
     # A failed pre-migration .bak write must be surfaced (audit: no silent drops),
     # while the load still succeeds (the backup is best-effort). Monkeypatch the
-    # write rather than chmod — Windows ignores a dir's write bit, and that cell
-    # is merge-blocking.
-    import pathlib
-
+    # atomic writer rather than chmod — Windows ignores a dir's write bit, and that
+    # cell is merge-blocking.
     (tmp_path / "state.json").write_text(
         json.dumps({"schema_version": 0, "instances": {"a": {"label": "a"}}}), encoding="utf-8"
     )
-    real_write_text = pathlib.Path.write_text
 
-    def boom(self, *args, **kwargs):
-        if self.suffix == ".bak":
-            raise OSError("simulated: backup write failed")
-        return real_write_text(self, *args, **kwargs)
+    def boom(target, text):
+        raise OSError("simulated: backup write failed")
 
-    monkeypatch.setattr(pathlib.Path, "write_text", boom)
+    monkeypatch.setattr("clauster.state.atomic_write_text", boom)
     with caplog.at_level("WARNING", logger="clauster.state"):
         loaded = StateStore(tmp_path).load()
     assert loaded == {"a": {"label": "a"}}  # migration still succeeded

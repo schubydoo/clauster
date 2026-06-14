@@ -68,20 +68,15 @@ def test_non_dict_session_values_are_skipped(tmp_path):
 
 def test_migrate_backup_failure_is_logged_not_silent(tmp_path, caplog, monkeypatch):
     # A failed pre-migration .bak write is surfaced (no silent drop) while the load
-    # still succeeds. Monkeypatch the write rather than chmod (Windows ignores it).
-    import pathlib
-
+    # still succeeds. Monkeypatch the atomic writer rather than chmod (Windows ignores it).
     (tmp_path / "hosted_state.json").write_text(
         json.dumps({"schema_version": 0, "sessions": {"pid-1": _REC}}), encoding="utf-8"
     )
-    real_write_text = pathlib.Path.write_text
 
-    def boom(self, *args, **kwargs):
-        if self.suffix == ".bak":
-            raise OSError("simulated: backup write failed")
-        return real_write_text(self, *args, **kwargs)
+    def boom(target, text):
+        raise OSError("simulated: backup write failed")
 
-    monkeypatch.setattr(pathlib.Path, "write_text", boom)
+    monkeypatch.setattr("clauster.hosted_state.atomic_write_text", boom)
     with caplog.at_level("WARNING", logger="clauster.hosted_state"):
         loaded = HostedStateStore(tmp_path).load()
     assert loaded == {"pid-1": _REC}  # migration still succeeded
