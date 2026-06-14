@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+import clauster.hosted as hosted
 from clauster.claustrum_client import ClaustrumClient, ClaustrumError, DaemonUnreachable
 from clauster.hosted import (
     HostedManager,
@@ -31,6 +32,21 @@ pytestmark = pytest.mark.skipif(
 
 _PID = "01HOSTEDSESSION0000000000"
 _BIN = "/usr/bin/claude"
+
+
+@pytest.fixture(autouse=True)
+def _fast_stop_grace(monkeypatch):
+    """Shrink the stop grace so stop()'s INT→KILL escalation runs fast in tests.
+
+    A handful of tests call ``stop()`` purely as teardown without first emitting an
+    exit frame (the fake daemon must NOT auto-emit on kill — that deadlocks ``_push``
+    against the awaited kill reply). Those otherwise burn the full 2×5s grace each.
+    ``HostedSession.__init__`` resolves the grace from this global at construction, so
+    patching it covers both direct and ``HostedManager``-built sessions; tests that
+    pre-emit their exit are unaffected (``exited`` is already set, so the wait returns
+    immediately). Tests that need a real grace pass ``stop_grace=`` explicitly.
+    """
+    monkeypatch.setattr(hosted, "_STOP_GRACE_SECONDS", 0.05)
 
 
 async def _drain(queue: asyncio.Queue, *, timeout: float = 1.0) -> dict:
