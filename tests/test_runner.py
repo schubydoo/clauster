@@ -85,6 +85,11 @@ async def test_no_redaction_keeps_a_single_verbatim_bridge_log(runner_config, mo
     inst = await runner.spawn("alpha")
     assert inst.bridge_raw_log_path == inst.bridge_debug_log_path
     assert inst.bridge_debug_log_path is not None
+    if sys.platform != "win32":  # POSIX perms; Windows doesn't honor 0o600
+        # The single verbatim log holds the unredacted session URL, so it is pre-created
+        # 0600 (no group/other access) even with redaction off — never left to the
+        # bridge's umask-default --debug-file open.
+        assert inst.bridge_debug_log_path.stat().st_mode & 0o077 == 0
     assert "session_01TESTSTARTERAAAAAAAAAA" in inst.bridge_debug_log_path.read_text(
         encoding="utf-8"
     )

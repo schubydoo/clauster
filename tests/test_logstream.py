@@ -43,14 +43,43 @@ def test_initial_offset_small_file_is_zero(tmp_path: Path):
     assert logstream.initial_offset(p) == 0
 
 
-def test_initial_offset_tails_large_file(tmp_path: Path):
+def test_initial_offset_aligns_to_next_newline(tmp_path: Path):
+    # The tail window starts mid-line; the offset advances to the next newline so the
+    # first emitted line is whole (never the trailing fragment of a straddled line).
+    p = tmp_path / "l.log"
+    p.write_bytes(b"a" * 980 + b"\n" + b"second line\n")  # size 993; newline at 980
+    off = logstream.initial_offset(p, tail_bytes=20)  # start=973 (mid first line)
+    assert off == 981  # just past the newline at 980 — start of "second line"
+    assert logstream.read_new(p, off) == (993, "second line\n")  # whole lines only
+
+
+def test_initial_offset_no_newline_in_window_tails_from_end(tmp_path: Path):
+    # A window with no newline (a single line longer than tail_bytes — pathological for a
+    # debug log) has no whole line to show, so tail from the very end rather than emit a
+    # giant partial fragment.
     p = tmp_path / "l.log"
     p.write_bytes(b"x" * 100_000)
-    assert logstream.initial_offset(p, tail_bytes=1000) == 99_000
+    assert logstream.initial_offset(p, tail_bytes=1000) == 100_000
 
 
 def test_initial_offset_missing_file_is_zero(tmp_path: Path):
     assert logstream.initial_offset(tmp_path / "nope.log") == 0
+
+
+def test_initial_offset_open_error_falls_back_to_window_start(tmp_path: Path, monkeypatch):
+    # stat() succeeds but open() fails (perm/race) -> fall back to the raw window start;
+    # the call site's carry buffer re-aligns whole lines anyway.
+    p = tmp_path / "l.log"
+    p.write_bytes(b"a" * 980 + b"\nsecond\n")  # size 988, larger than the tail window
+    real_open = open
+
+    def boom(path, *a, **k):
+        if str(path) == str(p):
+            raise OSError("open failed")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", boom)
+    assert logstream.initial_offset(p, tail_bytes=20) == 968  # start = 988 - 20
 
 
 def test_read_new_open_error_returns_empty(tmp_path: Path, monkeypatch):

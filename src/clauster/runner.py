@@ -332,13 +332,15 @@ class SessionRunner:
 
         log_path = self._unique_log_path(name)
         raw_path = self._raw_log_path_for(log_path)
-        if raw_path != log_path:
-            # Create the private parse-source 0600 from the first inode — os.open(O_CREAT
-            # | O_EXCL, 0o600), NOT touch()+chmod. touch() honours the umask, so the
-            # verbatim session URL would be briefly group/world-readable in the window
-            # before chmod ran (and a reader's open fd survives the chmod). O_EXCL also
-            # refuses a pre-planted symlink at this per-spawn-unique path.
-            os.close(os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        # Create the verbatim parse-source 0600 from the first inode — UNCONDITIONALLY:
+        # when on-disk redaction is off, raw_path == log_path and IS the verbatim debug
+        # log (it holds the unredacted session URL + bridge output), so it must be
+        # owner-only too. os.open(O_CREAT | O_EXCL, 0o600), NOT touch()+chmod: touch()
+        # honours the umask, so the verbatim session URL would be briefly group/world-
+        # readable in the window before chmod ran (and a reader's open fd survives the
+        # chmod). O_EXCL also refuses a pre-planted symlink at this per-spawn-unique path;
+        # the bridge's --debug-file open then appends to this existing 0600 inode.
+        os.close(os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         instance = RemoteControlInstance(
             project=name,
             label=name,
