@@ -1,0 +1,97 @@
+name: Build binaries
+
+# Build the standalone one-file `clauster` binary on each target OS and smoke-test it
+# (boot + /healthz — the real PyInstaller one-file failure mode, which `--version` alone
+# misses). NON-REQUIRED signal job (like fuzzing / e2e): it proves the frozen build stays
+# runnable and uploads downloadable artifacts; it is NOT wired into a release here. The
+# `workflow_call` trigger lets the release pipeline reuse this exact matrix later
+# (attach + sign + publish on the draft) — see scratch/binary-release-plan.md (PR2b).
+on:
+  workflow_call:
+  workflow_dispatch:
+  # Nightly on the default branch: catch a src/dep change that silently breaks the
+  # frozen build without waiting for the next release.
+  schedule:
+    - cron: "37 5 * * *"
+  # Per-PR only when something that affects the bundle changes (the spec, the build/
+  # smoke scripts, this workflow, or the dependency set) — keeps the 3-OS build off
+  # the critical path for ordinary code PRs.
+  pull_request:
+    paths:
+      - clauster.spec
+      - scripts/smoke_binary.py
+      - .github/workflows/build-binaries.yml
+      - pyproject.toml
+      - uv.lock
+
+# Read-only token; no secrets used, so a fork PR runs it safely.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-binaries-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+            artifact: clauster
+          - os: macos-latest
+            target: macos-arm64
+            artifact: clauster
+          - os: windows-latest
+            target: windows-x86_64
+            artifact: clauster.exe
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+      - name: Set up Python + build env
+        run: |
+          uv python install 3.13
+          uv sync --extra package --python 3.13
+      - name: Build one-file binary
+        run: uv run pyinstaller clauster.spec
+      - name: Smoke test (boot + /healthz)
+        run: uv run python scripts/smoke_binary.py "dist/${{ matrix.artifact }}"
+      # Rename to a per-target asset name and emit a sha256, mirroring how the signed
+      # release assets will be named (PR2b). bash on all three runners (git-bash on
+      # Windows) keeps this single-shell.
+      - name: Stage + checksum
+        shell: bash
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="$("dist/$ARTIFACT" --version | awk '{print $NF}')"
+          [ -n "$version" ] || { echo "could not read version from the binary" >&2; exit 1; }
+          ext=""
+          case "$ARTIFACT" in *.exe) ext=".exe" ;; esac
+          name="clauster-${version}-${TARGET}${ext}"
+          mkdir -p out
+          cp "dist/$ARTIFACT" "out/$name"
+          if command -v sha256sum >/dev/null 2>&1; then
+            ( cd out && sha256sum "$name" > "$name.sha256" )
+          else
+            ( cd out && shasum -a 256 "$name" > "$name.sha256" )
+          fi
+          echo "staged out/$name (+ .sha256)"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clauster-binary-${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
