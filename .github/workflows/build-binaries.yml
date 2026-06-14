@@ -19,6 +19,7 @@ on:
   pull_request:
     paths:
       - clauster.spec
+      - pyinstaller_entry.py
       - scripts/smoke_binary.py
       - .github/workflows/build-binaries.yml
       - pyproject.toml
