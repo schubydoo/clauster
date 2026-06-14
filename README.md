@@ -103,7 +103,9 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   project's session transcripts. Token counts are exact (read from the transcript
   `usage`); the dollar figure is a ballpark — a hand-maintained USD price table
   (`usage.py`, as of 2026-05) that drifts as pricing changes, with unpriced models
-  counting as 0. Hide it with `usage.show_cost: false` (privacy / screen-share).
+  counting as 0. `usage.mode` selects what the badge shows — `cost`, `tokens`, or
+  `off` (hide it for privacy / screen-share); `usage.show_cost: false` is a
+  deprecated alias for `off`.
 
 ### Safety
 
@@ -127,9 +129,8 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   runs the `claude --remote-control` flag form under a PTY *keeper* sidecar, which
   **genuinely restores prior conversation context** on Resume (`--continue`) rather
   than recapping it. The keeper outlives a Clauster restart and is stopped by signal.
-  Single-session (vs. the default multi-session server). *Backend shipped; the
-  dashboard mode indicator + cross-restart UI rediscovery are in progress —
-  see [Roadmap](#roadmap).*
+  Single-session (vs. the default multi-session server). The dashboard surfaces the
+  resume mode per bridge and rediscovers a running pty bridge after a Clauster restart.
 - **Ghost-environment reaper** — find and archive/delete the server-side bridge
   environments that outlive their bridge and clutter the claude.ai/code "New session"
   selector. The CLI (`clauster reap-environments`) is always available; the
@@ -140,6 +141,13 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   and stops Claude Code *background* sessions (`claude --bg`), backed by
   `GET/POST/DELETE /api/agents`. It rides Claude Code's **agent-view research
   preview**, so it's experimental and may change with the upstream CLI.
+- **Hosted live-view channel (opt-in, experimental)** — an alternate substrate to
+  the remote-control bridge. With `claustrum.enabled: true`, Clauster connect-or-spawns
+  a single `claustrum` daemon per deployment and runs `claude` headless over its
+  stream-json channel, streaming the session **live in the browser** (with permission
+  prompts surfaced in the UI) instead of being driven from Claude Desktop / claude.ai.
+  Off by default and fail-closed — an unreachable daemon surfaces in `/healthz` and
+  never affects the bridge lifecycle. Requires the separate `claustrum` binary.
 
 ## Quick start (dev)
 
@@ -260,7 +268,8 @@ validate against newer versions.
 | `claude.resume_recap` | `false` | recap the prior transcript into a restarted bridge |
 | `claude.resume_mode` | `standard` | `pty` = native true-resume on Resume (POSIX); default for new bridges only — a bridge keeps the mode it launched with |
 | `reaper.ui_enabled` | `false` | expose the ghost-environment reaper in the dashboard |
-| `usage.show_cost` | `true` | show the per-project cost badge; `false` hides it (and skips the usage fetch) for privacy |
+| `claustrum.enabled` | `false` | enable the hosted live-view channel (connect-or-spawn the `claustrum` daemon) |
+| `usage.mode` | `cost` | per-project badge contents: `cost` (≈USD + tokens) · `tokens` (count only) · `off` (hide + skip the usage fetch). `usage.show_cost: false` is a deprecated alias for `off` |
 | `logs.redact_session_url` | `false` | redact the session URL on disk too, not just over WS |
 
 ## CLI

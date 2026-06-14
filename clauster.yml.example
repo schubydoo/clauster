@@ -37,7 +37,7 @@ claude:
 instance_defaults:
   spawn_mode: same-dir             # same-dir | worktree (git repos) | session
   permission_mode: default         # default | plan | acceptEdits | auto | dontAsk | bypassPermissions
-  capacity: 32                     # per-bridge session cap (Anthropic-imposed)
+  capacity: 32                     # reserved: intended max concurrent bridges; not yet enforced
 
 # Per-project overrides. allow_bypass_permissions is the hard ceiling for the
 # bypassPermissions footgun — it can't be selected in the UI unless set here.
