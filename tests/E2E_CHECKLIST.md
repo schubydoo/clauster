@@ -7,9 +7,9 @@ through in an actual browser (Chromium) before a release or after touching the
 dashboard JS/CSS.
 
 **Automated suite (first slice landed).** `tests/e2e/` now drives real headless
-Chromium (Playwright) against a live clauster. It is opt-in — run it with
-`scripts/e2e.sh` (excluded from the default/CI run, so the required `tests` gate
-is unchanged). So far it covers the **non-bridge** flows, marked **`[auto]`**
+Chromium (via the `agent-browser` CLI) against a live clauster. It is opt-in — run
+it with `scripts/e2e.sh` (excluded from the default/CI run, so the required `tests`
+gate is unchanged). So far it covers the **non-bridge** flows, marked **`[auto]`**
 below; the rest are still manual. The bridge-spawn slice
 (`tests/e2e/test_bridge_e2e.py`) drives a real bridge subprocess (the fake
 `claude` fixture) through the dashboard — trust-on-start, start → running →
