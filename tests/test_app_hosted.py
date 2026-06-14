@@ -9,6 +9,8 @@ endpoints, and the ``/ws/hosted`` stream — no real socket or cross-loop client
 from __future__ import annotations
 
 import asyncio
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,7 @@ from fastapi.testclient import TestClient
 import clauster.app as app_module
 from clauster import claude_cli
 from clauster.app import create_app
-from clauster.claustrum_client import ClaustrumError
+from clauster.claustrum_client import ClaustrumClient, ClaustrumError
 from clauster.config import load_config
 from clauster.hosted import HostedSessionError
 from clauster.models import InstanceStatus, RemoteControlInstance
@@ -569,3 +571,143 @@ def test_ws_hosted_handles_stream_teardown(write_config, projects_root):
     app = _app(write_config, manager=manager)
     with TestClient(app) as client, client.websocket_connect(f"/ws/hosted/{_HID}") as ws:
         assert ws.receive_json()["event_seq"] == 1
+
+
+# -- live-daemon lifespan + real-manager integration -----------------------
+#
+# The tests above stub the manager/daemon. These drive the REAL HostedManager
+# against a REAL in-process fake claustrum daemon, through the app's lifespan and
+# routes — so the route↔manager wiring and the lifespan reattach_all/aclose path
+# are exercised end-to-end, not just at the stub boundary.
+
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="claustrum hosted channel is POSIX-only (AF_UNIX)"
+)
+
+
+class _LiveFakeDaemon:
+    """A ClaustrumDaemon stand-in backed by a real fake daemon + real client.
+
+    ``ensure`` (run inside the app lifespan, on the app's event loop) starts an
+    in-process :class:`FakeClaustrum` and a connected :class:`ClaustrumClient`, so
+    ``reattach_all`` and hosted spawns hit a real socket. ``aclose`` tears both down.
+    """
+
+    instances: list[_LiveFakeDaemon] = []
+
+    def __init__(self, _config: object) -> None:
+        """Capture config (unused); nothing listens until :meth:`ensure`."""
+        from fake_claustrum import FakeClaustrum
+
+        self._sock_dir = Path(tempfile.mkdtemp(prefix="fc-app-"))
+        self._fake = FakeClaustrum(str(self._sock_dir / "d.sock"), "tok", support_want_pid=True)
+        self._client: ClaustrumClient | None = None
+        self.ensured = False
+        self.closed = False
+        _LiveFakeDaemon.instances.append(self)
+
+    @property
+    def client(self) -> ClaustrumClient | None:
+        """The connected client (None until :meth:`ensure`)."""
+        return self._client
+
+    @property
+    def fake(self):
+        """The underlying fake daemon (for test-side frame injection)."""
+        return self._fake
+
+    async def ensure(self) -> None:
+        """Start the fake daemon and connect a real client on the running loop."""
+        await self._fake.start()
+        self._client = ClaustrumClient(self._fake.socket_path, self._fake.token)
+        await self._client.connect()
+        self.ensured = True
+
+    async def aclose(self) -> None:
+        """Close the client and stop the fake daemon."""
+        self.closed = True
+        if self._client is not None:
+            await self._client.close()
+        await self._fake.stop()
+
+
+class _RaisingDaemon(_LiveFakeDaemon):
+    """A live daemon whose ``aclose`` raises — to prove the lifespan still tears down."""
+
+    async def aclose(self) -> None:
+        """Tear down the real resources, then surface a shutdown fault."""
+        await super().aclose()
+        raise ClaustrumError("daemon aclose blew up during shutdown")
+
+
+def _live_app(write_config, monkeypatch, tmp_path, *, daemon_cls=_LiveFakeDaemon):
+    monkeypatch.setattr(app_module, "ClaustrumDaemon", daemon_cls)
+    monkeypatch.setattr(app_module, "is_trusted", lambda *a, **k: True)
+    monkeypatch.setattr(app_module.claude_cli, "resolve_binary", lambda b: "/usr/bin/claude")
+    # Pin state_dir to the test tmp dir — the default is the SHARED ~/.clauster, and a
+    # real HostedManager would read/persist hosted_state.json there, leaking state
+    # across tests (and touching the live account's state dir). Isolate it.
+    state_dir = tmp_path / "live-state"
+    config = load_config(write_config(f"state_dir: {state_dir}\nclaustrum:\n  enabled: true\n"))
+    app = create_app(config)
+    return app
+
+
+@_POSIX_ONLY
+def test_lifespan_reattaches_and_closes_with_live_client(
+    write_config, projects_root, monkeypatch, tmp_path
+):
+    # Audit #6: the app lifespan drives HostedManager.reattach_all on startup and
+    # aclose on shutdown against a LIVE daemon client (real fake claustrum), not a
+    # stub. With nothing persisted, reattach_all returns an empty registry; the
+    # daemon connects on startup and closes on shutdown — both run without error.
+    _LiveFakeDaemon.instances.clear()
+    app = _live_app(write_config, monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        assert client.get("/api/hosted").json() == []  # real manager, no sessions
+    daemon = _LiveFakeDaemon.instances[-1]
+    assert daemon.ensured and daemon.closed  # startup + shutdown both ran
+
+
+@_POSIX_ONLY
+def test_lifespan_tears_down_even_when_shutdown_raises(
+    write_config, projects_root, monkeypatch, tmp_path
+):
+    # Audit #6 (fail-loud teardown): if the daemon's aclose RAISES on shutdown, the
+    # lifespan must still surface it rather than swallow it into a misleading clean
+    # exit — and the real resources are torn down first. The hosted manager's aclose
+    # runs before the daemon's, so a daemon-shutdown fault never strands sessions.
+    _RaisingDaemon.instances.clear()
+    app = _live_app(write_config, monkeypatch, tmp_path, daemon_cls=_RaisingDaemon)
+    with pytest.raises(ClaustrumError, match="aclose blew up"):
+        with TestClient(app) as client:
+            client.get("/api/hosted")
+    daemon = _RaisingDaemon.instances[-1]
+    assert daemon.closed  # real teardown happened before the fault surfaced
+
+
+@_POSIX_ONLY
+def test_spawn_hosted_drives_real_manager_end_to_end(
+    write_config, projects_root, monkeypatch, tmp_path
+):
+    # Audit #29: a hosted spawn route driven against the REAL HostedManager (with a
+    # fake claustrum underneath), not the stub — so route→_spawn_hosted→manager.spawn
+    # →HostedSession.start→daemon process.spawn is covered as one wired path.
+    _LiveFakeDaemon.instances.clear()
+    app = _live_app(write_config, monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        r = client.post("/api/instances", json={"project": "alpha", "channel": "hosted"})
+        assert r.status_code == 201
+        body = r.json()
+        assert body["channel"] == "hosted"
+        pid = body["claustrum_process_id"]
+        # The real manager registered a live session and it surfaces on the list route.
+        listed = client.get("/api/hosted").json()
+        assert [h["claustrum_process_id"] for h in listed] == [pid]
+        # The fake daemon actually received the stream-json spawn for this process.
+        daemon = _LiveFakeDaemon.instances[-1]
+        assert any(s["id"] == pid for s in daemon.fake.spawned)
+        spawned = next(s for s in daemon.fake.spawned if s["id"] == pid)
+        assert "--output-format" in spawned["args"] and "stream-json" in spawned["args"]
+        # A message routes through the real manager to the real session's stdin.
+        assert client.post(f"/api/instances/{pid}/message", json={"text": "hi"}).status_code == 202
