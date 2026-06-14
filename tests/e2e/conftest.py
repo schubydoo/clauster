@@ -1,6 +1,6 @@
 """Fixtures for the browser E2E suite.
 
-These tests drive a REAL headless Chromium (Playwright) against a REAL clauster
+These tests drive a REAL headless Chromium (via the ``agent-browser`` CLI) against a REAL clauster
 process — unlike the rest of the suite, which exercises logic in-process via
 Starlette's TestClient. The suite is opt-in (run with ``scripts/e2e.sh``) and is
 excluded from the default/CI run via ``--ignore=tests/e2e`` in pyproject, so it
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import http.client
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -49,6 +50,23 @@ class Server(NamedTuple):
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 FAKE_CLAUDE = FIXTURES / "fake_claude" / "claude"
 
+# Where a failed test's screenshot lands (gitignored). The CI workflow uploads this
+# dir as an artifact on failure so a headless, displayless run is still debuggable.
+ARTIFACT_DIR = Path(__file__).resolve().parent / "_artifacts"
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+    """Stash each phase's report on the item so fixtures can see pass/fail at teardown.
+
+    pytest doesn't otherwise expose the test outcome to a fixture's finalizer; this
+    records ``rep_setup`` / ``rep_call`` so the ``browser`` fixture can screenshot only
+    when the test actually failed.
+    """
+    outcome = yield
+    setattr(item, f"rep_{outcome.get_result().when}", outcome.get_result())
+
+
 # Known password for the auth_server fixture (hashed fresh per run).
 E2E_PASSWORD = "e2e-secret-123"
 
@@ -60,17 +78,31 @@ def e2e_password() -> str:
 
 
 @pytest.fixture
-def browser() -> Iterator[AgentBrowser]:
+def browser(request: pytest.FixtureRequest) -> Iterator[AgentBrowser]:
     """A fresh ``agent-browser`` session per test (closed on teardown for isolation).
 
     The suite runs serially (``scripts/e2e.sh`` clears the xdist addopts), so a single
     browser session at a time is safe; closing it per test resets cookies/storage so a
-    login in one test never leaks into the next.
+    login in one test never leaks into the next. On failure, snapshots the page into
+    :data:`ARTIFACT_DIR` *before* closing the session so CI can upload it.
     """
     driver = AgentBrowser()
     try:
         yield driver
     finally:
+        rep_call = getattr(request.node, "rep_call", None)
+        rep_setup = getattr(request.node, "rep_setup", None)
+        failed = (rep_call is not None and rep_call.failed) or (
+            rep_setup is not None and rep_setup.failed
+        )
+        if failed:
+            ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r"[^\w.-]", "_", request.node.nodeid)
+            if not driver.screenshot(str(ARTIFACT_DIR / f"{safe_name}.png")):
+                print(
+                    f"\n[e2e] could not capture screenshot for {request.node.nodeid}",
+                    file=sys.stderr,
+                )
         driver.close()
 
 

@@ -1,0 +1,65 @@
+name: E2E
+
+# Opt-in browser end-to-end suite (tests/e2e): a real headless Chromium driven via
+# Vercel's `agent-browser` CLI against a real `clauster` subprocess. Excluded from the
+# default/required `tests` gate (pyproject `--ignore=tests/e2e`) because it pulls a
+# browser binary and is slower; this job runs it as a NON-REQUIRED signal — like the
+# fuzzing job — so UI regressions surface without blocking the merge/coverage gate.
+on:
+  # Nightly on main: catch a DOM/selector drift that no PR happened to touch the UI in.
+  schedule:
+    - cron: "41 4 * * *"
+  # Manual re-run from the Actions tab (any branch).
+  workflow_dispatch:
+  # Per-PR only when something the suite actually exercises changed — keeps the job off
+  # the critical path for backend/docs-only PRs.
+  pull_request:
+    paths:
+      - "templates/**"
+      - "static/**"
+      - "tests/e2e/**"
+      - "scripts/e2e.sh"
+      - ".github/workflows/e2e.yml"
+
+# Read-only token; the job needs no write scopes and handles no secrets, so a fork PR
+# runs it safely (plain `pull_request`, never `pull_request_target`).
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: browser e2e (agent-browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up uv + Python
+        uses: ./.github/actions/setup
+        with:
+          python-version: "3.13"
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+      - name: Install agent-browser CLI
+        run: npm i -g agent-browser
+      - name: Install headless Chromium
+        run: agent-browser install
+      - name: Run E2E suite
+        run: scripts/e2e.sh
+      # The headless run has no display — a screenshot of the failing page (captured
+      # per-failure in tests/e2e/conftest.py) is the only post-mortem signal.
+      - name: Upload failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-failure-screenshots
+          path: tests/e2e/_artifacts/
+          if-no-files-found: ignore
+          retention-days: 7

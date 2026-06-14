@@ -251,6 +251,21 @@ class AgentBrowser:
             lambda: not self.role_visible(role, name), timeout_ms, f"{role} {name!r} hidden"
         )
 
+    # ----- diagnostics ----------------------------------------------------
+
+    def screenshot(self, path: str) -> bool:
+        """Best-effort screenshot of the current page to ``path``; return success.
+
+        Used by the failure hook to capture what the headless browser last showed
+        (invaluable when a CI run fails with no display). Deliberately never raises:
+        it runs during teardown of an already-failing test, so a capture error must
+        not mask the real failure — the caller logs the miss instead.
+        """
+        try:
+            return self._run("screenshot", path).returncode == 0
+        except (subprocess.SubprocessError, OSError):
+            return False
+
     # ----- teardown -------------------------------------------------------
 
     def close(self) -> None:
