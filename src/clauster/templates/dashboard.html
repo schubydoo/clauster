@@ -207,7 +207,7 @@
                   {# `!!` coercion: see the hosted-row note above. Without it, this Stop button is
                      stuck DISABLED on first paint because `agentStopping` has no key for this job
                      yet (Alpine 3.15.x x-for missing-key `:disabled` bug). #}
-                  <button class="btn btn-sm btn-outline-danger" :disabled="!!agentStopping[j.id]" @click="stopAgent(j)"
+                  <button type="button" class="btn btn-sm btn-outline-danger" :disabled="!!agentStopping[j.id]" @click="stopAgent(j)"
                           :title="j.bridge_session_id ? 'Stop and deregister the claude.ai session' : 'Stop and remove this session'">
                     <span x-text="agentStopping[j.id] ? 'Stopping…' : 'Stop'">Stop</span>
                   </button>
