@@ -59,12 +59,35 @@ def _incomplete_tail_len(data: bytes) -> int:
 
 
 def initial_offset(path: Path, tail_bytes: int = DEFAULT_TAIL_BYTES) -> int:
-    """Start near the end so we don't replay an entire large log on connect."""
+    """Start near the end on a line boundary, so the first emitted line is whole.
+
+    Tailing from ``size - tail_bytes`` lands mid-line, so the first thing the reader
+    would emit is the trailing fragment of the line that straddled that offset — and a
+    fragment can split a secret/id apart from its redaction context. Advance to just
+    after the next newline in the window so the first emitted line is whole. A window
+    with no newline at all (a single line longer than ``tail_bytes`` — pathological for
+    a debug log) has no whole line to show, so tail from the very end.
+    """
     try:
         size = path.stat().st_size
     except OSError:
         return 0
-    return max(0, size - tail_bytes)
+    start = max(0, size - tail_bytes)
+    if start == 0:
+        return 0  # the whole file fits in the window; its first line is already whole
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            window = fh.read(tail_bytes)
+    except OSError:
+        return start
+    newline = window.find(b"\n")
+    if newline == -1:
+        # No whole line in the window — tail from the very end. This deliberately drops
+        # the in-flight oversized line (incl. any secret on it), so the first thing later
+        # emitted is only the post-EOF remainder, never the giant fragment seen at connect.
+        return size
+    return start + newline + 1
 
 
 def read_new(path: Path, offset: int) -> tuple[int, str]:

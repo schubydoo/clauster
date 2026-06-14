@@ -92,6 +92,8 @@ class SessionRunner:
         self._binary = config.claude.binary
         self._claude_json = claude_json or Path("~/.claude.json").expanduser()
         self._log_dir = (config.state_dir / "logs").expanduser()
+        # Monotonic spawn counter → unique log filenames even for two same-ms spawns.
+        self._log_seq = 0
         self._instances: dict[str, RemoteControlInstance] = {}
         self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
@@ -332,13 +334,15 @@ class SessionRunner:
 
         log_path = self._unique_log_path(name)
         raw_path = self._raw_log_path_for(log_path)
-        if raw_path != log_path:
-            # Create the private parse-source 0600 from the first inode — os.open(O_CREAT
-            # | O_EXCL, 0o600), NOT touch()+chmod. touch() honours the umask, so the
-            # verbatim session URL would be briefly group/world-readable in the window
-            # before chmod ran (and a reader's open fd survives the chmod). O_EXCL also
-            # refuses a pre-planted symlink at this per-spawn-unique path.
-            os.close(os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        # Create the verbatim parse-source 0600 from the first inode — UNCONDITIONALLY:
+        # when on-disk redaction is off, raw_path == log_path and IS the verbatim debug
+        # log (it holds the unredacted session URL + bridge output), so it must be
+        # owner-only too. os.open(O_CREAT | O_EXCL, 0o600), NOT touch()+chmod: touch()
+        # honours the umask, so the verbatim session URL would be briefly group/world-
+        # readable in the window before chmod ran (and a reader's open fd survives the
+        # chmod). O_EXCL also refuses a pre-planted symlink at this per-spawn-unique path;
+        # the bridge's --debug-file open then appends to this existing 0600 inode.
+        os.close(os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         instance = RemoteControlInstance(
             project=name,
             label=name,
@@ -447,8 +451,13 @@ class SessionRunner:
 
     def _unique_log_path(self, name: str) -> Path:
         self._log_dir.mkdir(parents=True, exist_ok=True)
-        # Unique per spawn so the parser never reads a previous run's markers.
-        return self._log_dir / f"{name}-{int(time.time() * 1000)}.log"
+        # Unique per spawn so the parser never reads a previous run's markers — AND so the
+        # 0600 O_EXCL pre-create can't FileExistsError. The millisecond timestamp alone
+        # collides for two same-project spawns in the same ms (and a retry on it wouldn't
+        # advance the clock), so a monotonic per-runner counter guarantees a fresh path
+        # every call. _unique_log_path only runs on the event loop, so the bump is safe.
+        self._log_seq += 1
+        return self._log_dir / f"{name}-{int(time.time() * 1000)}-{self._log_seq}.log"
 
     def _raw_log_path_for(self, log_path: Path) -> Path:
         """Return the verbatim parse-source the bridge writes its ``--debug-file`` to.

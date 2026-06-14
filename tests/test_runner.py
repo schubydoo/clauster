@@ -85,10 +85,24 @@ async def test_no_redaction_keeps_a_single_verbatim_bridge_log(runner_config, mo
     inst = await runner.spawn("alpha")
     assert inst.bridge_raw_log_path == inst.bridge_debug_log_path
     assert inst.bridge_debug_log_path is not None
+    if sys.platform != "win32":  # POSIX perms; Windows doesn't honor 0o600
+        # The single verbatim log holds the unredacted session URL, so it is pre-created
+        # 0600 (no group/other access) even with redaction off — never left to the
+        # bridge's umask-default --debug-file open.
+        assert inst.bridge_debug_log_path.stat().st_mode & 0o077 == 0
     assert "session_01TESTSTARTERAAAAAAAAAA" in inst.bridge_debug_log_path.read_text(
         encoding="utf-8"
     )
     await runner.stop("alpha")
+
+
+def test_unique_log_path_distinct_within_same_millisecond(runner_config, monkeypatch):
+    # Two same-project spawns in the same millisecond must get distinct log paths, so the
+    # 0600 O_EXCL pre-create can't FileExistsError (the ms timestamp alone would collide,
+    # and a retry on it wouldn't advance the clock).
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.time", lambda: 1_700_000.0)  # frozen clock
+    assert runner._unique_log_path("alpha") != runner._unique_log_path("alpha")
 
 
 def test_flush_redacted_mirror_is_best_effort(runner_config, tmp_path):
