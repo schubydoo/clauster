@@ -303,9 +303,18 @@ def test_secret_truncated_on_disk_is_rejected(tmp_path, monkeypatch):
 
 
 def test_secret_unreadable_on_disk_is_rejected(tmp_path, monkeypatch):
-    # session.secret exists but can't be read (here: it's a directory) — the read OSError
-    # is absorbed and surfaced in the message so it's not misreported as merely truncated.
-    (tmp_path / "session.secret").mkdir()
+    # session.secret exists (so the O_EXCL create loses to it on every platform) but every
+    # read raises — the OSError is absorbed and surfaced in the message so it's not
+    # misreported as merely truncated. Force the read error directly rather than via a
+    # directory: os.open of a directory raises PermissionError (not FileExistsError) on
+    # Windows, before the read path is even reached.
+    import pathlib
+
+    def _unreadable(self):
+        raise OSError("read denied")
+
+    (tmp_path / "session.secret").write_bytes(b"")  # exists -> FileExistsError on O_EXCL
     monkeypatch.setattr(auth.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", _unreadable)
     with pytest.raises(RuntimeError, match="last read error"):
         auth.load_or_create_secret(tmp_path)
