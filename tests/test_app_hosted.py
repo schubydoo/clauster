@@ -9,6 +9,7 @@ endpoints, and the ``/ws/hosted`` stream — no real socket or cross-loop client
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -630,9 +631,13 @@ class _LiveFakeDaemon:
             if self._client is not None:
                 await self._client.close()
         finally:
-            # Always stop the fake daemon even if the client close raises, so a failed
-            # close can't leak the daemon/socket and make later integration tests flaky.
-            await self._fake.stop()
+            try:
+                # Always stop the fake daemon even if the client close raises, so a failed
+                # close can't leak the daemon/socket and make later integration tests flaky.
+                await self._fake.stop()
+            finally:
+                # Remove the mkdtemp socket dir so repeated runs don't accumulate /tmp dirs.
+                shutil.rmtree(self._sock_dir, ignore_errors=True)
 
 
 class _RaisingDaemon(_LiveFakeDaemon):
