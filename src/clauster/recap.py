@@ -22,27 +22,51 @@ from pathlib import Path
 
 HOOK_SCRIPT = Path(__file__).parent / "hooks" / "resume_recap.py"
 
+# Hidden CLI subcommand a frozen binary re-invokes to run the recap hook (see
+# clauster.__main__). In a PyInstaller one-file build the loose resume_recap.py
+# above lives in the ephemeral ``_MEIxxx`` extraction dir, gone once clauster
+# exits — so the hook command must point at the persistent executable instead.
+RECAP_SUBCOMMAND = "__recap-hook__"
+
+# Substrings that identify OUR recap hook command regardless of install mode:
+# source/venv -> "…resume_recap.py"; frozen binary -> "<exe> __recap-hook__".
+# Matching either lets a pip<->binary switch self-heal the one hook in place
+# rather than leaving a stale duplicate behind.
+_HOOK_MARKERS = ("resume_recap.py", RECAP_SUBCOMMAND)
+
+
+def _is_frozen() -> bool:
+    """Whether we're running from a PyInstaller-style one-file binary."""
+    return bool(getattr(sys, "frozen", False))
+
 
 def hook_command(python: str | None = None, script: Path | None = None) -> str:
     """Build the ``settings.json`` command that runs the recap hook.
 
-    Defaults to the *current* interpreter and the installed script path so the
-    hook runs under the same Python (and venv) Clauster runs in.
+    Source/venv installs run the bare stdlib script under the *current* interpreter
+    (fast, no Clauster import). A frozen binary instead re-invokes the persistent
+    executable with the hidden :data:`RECAP_SUBCOMMAND`, because its bundled copy
+    of the script sits in an ephemeral ``_MEIxxx`` dir that vanishes on exit.
     """
+    if _is_frozen():
+        return f'"{sys.executable}" {RECAP_SUBCOMMAND}'
     return f'"{python or sys.executable}" "{script or HOOK_SCRIPT}"'
 
 
-def _matching_hook(entry: object, marker: str) -> dict | None:
-    """Return the command-hook dict in this entry that references our script, or None.
+def _matching_hook(entry: object) -> dict | None:
+    """Return the command-hook dict in this entry that is OUR recap hook, or None.
 
-    Matches on the script *filename* (a stable identity) rather than the full
-    path so a moved venv / changed interpreter is recognized as the same hook
-    and updated in place instead of duplicated.
+    Matches on a stable signature (the script *filename* OR the frozen-binary
+    subcommand) rather than the full path, so a moved venv, changed interpreter,
+    or a pip<->binary switch is recognized as the same hook and updated in place
+    instead of duplicated.
     """
     if not isinstance(entry, dict):
         return None
     for hook in entry.get("hooks", []):
-        if isinstance(hook, dict) and marker in str(hook.get("command", "")):
+        if isinstance(hook, dict) and any(
+            m in str(hook.get("command", "")) for m in _HOOK_MARKERS
+        ):
             return hook
     return None
 
@@ -74,7 +98,6 @@ def ensure_recap_hook_installed(
     Unrelated SessionStart hooks (context-mode, the user's own) are preserved.
     """
     script = script or HOOK_SCRIPT
-    marker = Path(script).name
     command = command or hook_command(script=script)
     settings_path = Path(settings_path).expanduser()
 
@@ -97,7 +120,7 @@ def ensure_recap_hook_installed(
         hooks["SessionStart"] = session_start
 
     for entry in session_start:
-        hook = _matching_hook(entry, marker)
+        hook = _matching_hook(entry)
         if hook is not None:
             if hook.get("command") == command:
                 return False  # already registered with the right command

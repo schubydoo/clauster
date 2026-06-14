@@ -428,3 +428,59 @@ def test_installer_cleans_up_temp_file_when_atomic_write_fails(
         ensure_recap_hook_installed(settings)
     leftovers = [p.name for p in tmp_path.iterdir()]
     assert leftovers == []  # the .settings.*.tmp temp file was cleaned up
+
+
+# ----- frozen-binary (PyInstaller) mode -------------------------------------
+
+
+def test_hook_command_source_mode_runs_the_script(monkeypatch) -> None:
+    # Not frozen: the command runs the bare stdlib script under the interpreter.
+    monkeypatch.delattr("sys.frozen", raising=False)
+    script = Path("/x/resume_recap.py")
+    assert (
+        hook_command(python="/usr/bin/python3", script=script) == f'"/usr/bin/python3" "{script}"'
+    )
+
+
+def test_hook_command_frozen_mode_reinvokes_the_executable(monkeypatch) -> None:
+    # A one-file binary's bundled script lives in an ephemeral _MEIxxx dir, so the
+    # hook must re-invoke the persistent executable with the hidden subcommand.
+    from clauster.recap import RECAP_SUBCOMMAND
+
+    monkeypatch.setattr("sys.frozen", True, raising=False)
+    monkeypatch.setattr("sys.executable", "/opt/clauster/clauster")
+    assert hook_command() == f'"/opt/clauster/clauster" {RECAP_SUBCOMMAND}'
+
+
+def test_installer_self_heals_across_pip_to_binary_switch(tmp_path: Path, monkeypatch) -> None:
+    # Install the source/venv hook, then re-run as a frozen binary: the SAME entry is
+    # rewritten to the executable+subcommand form — one hook in place, not a duplicate.
+    from clauster.recap import RECAP_SUBCOMMAND
+
+    settings = tmp_path / "settings.json"
+    monkeypatch.delattr("sys.frozen", raising=False)
+    assert ensure_recap_hook_installed(settings) is True  # source mode
+    entries = json.loads(settings.read_text())["hooks"]["SessionStart"]
+    assert "resume_recap.py" in entries[0]["hooks"][0]["command"]
+
+    # "Switch to the binary": frozen, exe-based command.
+    monkeypatch.setattr("sys.frozen", True, raising=False)
+    monkeypatch.setattr("sys.executable", "/opt/clauster/clauster")
+    assert ensure_recap_hook_installed(settings) is True  # rewritten in place
+    entries = json.loads(settings.read_text())["hooks"]["SessionStart"]
+    assert len(entries) == 1  # not duplicated
+    cmd = entries[0]["hooks"][0]["command"]
+    assert cmd == f'"/opt/clauster/clauster" {RECAP_SUBCOMMAND}'
+    assert "resume_recap.py" not in cmd
+    assert ensure_recap_hook_installed(settings) is False  # idempotent in the new mode
+
+
+def test_hook_command_frozen_quotes_a_windows_exe_path(monkeypatch) -> None:
+    # The frozen command double-quotes sys.executable, so a Windows binary path with
+    # spaces and backslashes stays a single token the shell won't split.
+    from clauster.recap import RECAP_SUBCOMMAND
+
+    exe = r"C:\Program Files\clauster\clauster.exe"
+    monkeypatch.setattr("sys.frozen", True, raising=False)
+    monkeypatch.setattr("sys.executable", exe)
+    assert hook_command() == f'"{exe}" {RECAP_SUBCOMMAND}'
