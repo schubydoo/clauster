@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.9.0](https://github.com/schubydoo/clauster/compare/v0.8.0...v0.9.0) (2026-06-14)
+
+
+### Features
+
+* **agents:** cloud-deregistering stop for background sessions (BG-3) ([#218](https://github.com/schubydoo/clauster/issues/218)) ([c3bae48](https://github.com/schubydoo/clauster/commit/c3bae48a5fff570efac6ee5d954c8ed55cb4fbc7))
+* **agents:** dispatch a `claude --bg [--rc <name>]` background session (BG-2) ([#215](https://github.com/schubydoo/clauster/issues/215)) ([83e2ad4](https://github.com/schubydoo/clauster/commit/83e2ad47767d453f6f987675ff0986308bf0a028))
+* **agents:** read-only background-agents panel (BG-1) ([#214](https://github.com/schubydoo/clauster/issues/214)) ([a755723](https://github.com/schubydoo/clauster/commit/a75572306d21ef3b820b3a248bb63387f9a89ca9))
+* **agents:** wire dispatch + stop buttons into the bg-agents panel (BG-4) ([#220](https://github.com/schubydoo/clauster/issues/220)) ([99fb3eb](https://github.com/schubydoo/clauster/commit/99fb3eb16d0298a9393bac7fbcb7004a723d18fc))
+* configurable usage badge — currency conversion + tokens-only mode ([#192](https://github.com/schubydoo/clauster/issues/192)) ([d53a7f5](https://github.com/schubydoo/clauster/commit/d53a7f59232f723edce0f6ae7d4df479fdc2f253))
+* **hosted:** --resume respawn of a lost hosted session (CL-7) ([#236](https://github.com/schubydoo/clauster/issues/236)) ([671eee7](https://github.com/schubydoo/clauster/commit/671eee7288eecff8a551741ab51988105dc0b001))
+* **hosted:** claustrum daemon connect-or-spawn lifecycle (CL-2) ([#229](https://github.com/schubydoo/clauster/issues/229)) ([da8f72d](https://github.com/schubydoo/clauster/commit/da8f72d794a664ca805e8214ff5c2cabf52548c1))
+* **hosted:** claustrum NDJSON JSON-RPC client + fake daemon fixture (CL-1) ([#224](https://github.com/schubydoo/clauster/issues/224)) ([dff6c33](https://github.com/schubydoo/clauster/commit/dff6c332af4cee59a8d03f4c798664631246a99f))
+* **hosted:** hosted-channel session engine (CL-4a) ([#230](https://github.com/schubydoo/clauster/issues/230)) ([d9ab7e6](https://github.com/schubydoo/clauster/commit/d9ab7e67b8652e24c591d91e949256d450ff707e))
+* **hosted:** live-view UI for hosted sessions (CL-4c) ([#233](https://github.com/schubydoo/clauster/issues/233)) ([234e525](https://github.com/schubydoo/clauster/commit/234e52599e67ef9b0b0bff1f0ed2469947bc89d5))
+* **hosted:** orphan detection + recovery after a daemon restart (CL-8) ([#237](https://github.com/schubydoo/clauster/issues/237)) ([6a64eef](https://github.com/schubydoo/clauster/commit/6a64eefff57fec8caa90d9fdb7d51f3927ab7d3f))
+* **hosted:** permissions approve/deny UI for hosted sessions (CL-5) ([#234](https://github.com/schubydoo/clauster/issues/234)) ([d5acb2d](https://github.com/schubydoo/clauster/commit/d5acb2d51aeae0933b44b4889cc7a0b7779938f4))
+* **hosted:** persist + reattach hosted sessions across restarts (CL-6) ([#235](https://github.com/schubydoo/clauster/issues/235)) ([ea45088](https://github.com/schubydoo/clauster/commit/ea450880d6fb79c1a8520507e69c119de5e689b6))
+* **hosted:** wire the hosted channel into the app (CL-4b) ([#231](https://github.com/schubydoo/clauster/issues/231)) ([2e219a3](https://github.com/schubydoo/clauster/commit/2e219a3171166b1574bf9d1f125c5f284f8345c5))
+* **logs:** redact the session URL in the on-disk bridge log (redact_session_url) ([#200](https://github.com/schubydoo/clauster/issues/200)) ([aa60bf6](https://github.com/schubydoo/clauster/commit/aa60bf660fe88d4597c9b648a04d7322fd1f1783))
+* notify on bridge crash via Apprise (optional extra) ([#197](https://github.com/schubydoo/clauster/issues/197)) ([8a1d944](https://github.com/schubydoo/clauster/commit/8a1d9441f7c1b7fa388278cf226fab3f89d1c573))
+* per-project preflight endpoint (GET /api/projects/{name}/preflight) ([#193](https://github.com/schubydoo/clauster/issues/193)) ([18c0ec6](https://github.com/schubydoo/clauster/commit/18c0ec647eeab2eed88a96e964bc7ffba4c6f152))
+* **service:** default KillMode=process so pty bridges survive a restart ([#206](https://github.com/schubydoo/clauster/issues/206)) ([992f84b](https://github.com/schubydoo/clauster/commit/992f84b3c84a71e42f331cc28872e51c1da31a57))
+* **ui:** two-zone dashboard redesign; migrate icons to Tabler Icons ([#248](https://github.com/schubydoo/clauster/issues/248)) ([c060d93](https://github.com/schubydoo/clauster/commit/c060d93c576ffaf815d6344ac830b273e3195f4e))
+
+
+### Bug Fixes
+
+* **agents:** don't report a clean stop when no live worker was found ([#255](https://github.com/schubydoo/clauster/issues/255)) ([8dfd1e3](https://github.com/schubydoo/clauster/commit/8dfd1e3e959b6858b7d39112d005fe16ec765b80))
+* **app:** end send-only WS handlers on client disconnect — ghost tasks stalled shutdown ([#243](https://github.com/schubydoo/clauster/issues/243)) ([397d84b](https://github.com/schubydoo/clauster/commit/397d84b19ab0a4581c9e9c422ed6546c790a21ee))
+* **app:** enforce bypass-permissions ceiling on hosted + bg-agent channels ([#249](https://github.com/schubydoo/clauster/issues/249)) ([90d74c2](https://github.com/schubydoo/clauster/commit/90d74c2abf19c75131b0765ba7ab5dc5dc308097))
+* **app:** friendly HTML 404 for browser navigation; unify project-not-found wording ([#247](https://github.com/schubydoo/clauster/issues/247)) ([a6ad579](https://github.com/schubydoo/clauster/commit/a6ad57961134269da0cb50c388fe74c80b88d198))
+* **auth:** fsync parent dir when creating session.secret ([#261](https://github.com/schubydoo/clauster/issues/261)) ([8fafd6b](https://github.com/schubydoo/clauster/commit/8fafd6b94569bde84020ab87c2a370fb992ea732))
+* **ci:** always run CodeQL so docs-only PRs aren't blocked by code-scanning rule ([#196](https://github.com/schubydoo/clauster/issues/196)) ([71a0b66](https://github.com/schubydoo/clauster/commit/71a0b669f033e949dae4e315762f66e187540298))
+* correctness/robustness batch from a clean-room audit ([#252](https://github.com/schubydoo/clauster/issues/252)) ([4e097e3](https://github.com/schubydoo/clauster/commit/4e097e3e54da0753efb697be1561b1d3ca536439))
+* **docker:** bump base image digest to clear stale OpenSSL CVEs ([#216](https://github.com/schubydoo/clauster/issues/216)) ([231cd8d](https://github.com/schubydoo/clauster/commit/231cd8d20e8cc98779d59db43c7fdf7af43d752f))
+* don't render the live metrics line twice in rows layout ([#190](https://github.com/schubydoo/clauster/issues/190)) ([535efdd](https://github.com/schubydoo/clauster/commit/535efdd0a88e0eafe9803e87e41bbe3c81c4e088))
+* **hosted:** handle an over-limit claustrum frame without killing the reader ([#256](https://github.com/schubydoo/clauster/issues/256)) ([dc0249e](https://github.com/schubydoo/clauster/commit/dc0249ef88c60f56f3ec92a9c1eed9487d3d4874))
+* **hosted:** permission allow updatedInput + stop exit-latch race ([#242](https://github.com/schubydoo/clauster/issues/242)) ([a84b937](https://github.com/schubydoo/clauster/commit/a84b9374d5fd9dd57b3c1a4e4aeeb36457ea8722))
+* **hosted:** resolve parked requests on exit + fix live-view double-wire ([#254](https://github.com/schubydoo/clauster/issues/254)) ([0f83fe1](https://github.com/schubydoo/clauster/commit/0f83fe12ebaafe40f445e971cbfef005f84b65ea))
+* **hosted:** scrub claustrum's daemonize sentinel from the spawned daemon env ([#241](https://github.com/schubydoo/clauster/issues/241)) ([02242cb](https://github.com/schubydoo/clauster/commit/02242cbb2ce425086236b014d08be450f5bd5c0f))
+* **hosted:** surface terminal state in live-view; stop the dead-session reconnect loop ([#245](https://github.com/schubydoo/clauster/issues/245)) ([fb51cf4](https://github.com/schubydoo/clauster/commit/fb51cf42a5345ed756e45c16fe9d474b08496416))
+* **inspector:** gate cwd attribution on agent-view kind/state ([#213](https://github.com/schubydoo/clauster/issues/213)) ([c116fe9](https://github.com/schubydoo/clauster/commit/c116fe924e9c35f01f9e3b6c19f34b29f10e23f7))
+* **logs:** whole first WS tail line + 0600 verbatim bridge log when redaction off ([#259](https://github.com/schubydoo/clauster/issues/259)) ([f6f2b30](https://github.com/schubydoo/clauster/commit/f6f2b3048975a265650acccc1ef4f409441c5517))
+* scrub Clauster secrets from every spawned child environment ([#253](https://github.com/schubydoo/clauster/issues/253)) ([926f315](https://github.com/schubydoo/clauster/commit/926f315583aff2561f7b3e0c2f03419060ede80e))
+* **state:** harden state writes — 0700 dir, 0600 atomic temp, fsync durability ([#258](https://github.com/schubydoo/clauster/issues/258)) ([bc09bee](https://github.com/schubydoo/clauster/commit/bc09beeb86e0e8ae864c559f6064d56774c27d73))
+* **ui:** clear stale New-project dialog state on close, mode-switch, and edit ([#246](https://github.com/schubydoo/clauster/issues/246)) ([b000f75](https://github.com/schubydoo/clauster/commit/b000f751cae162c62d77854cc1c27e0d27d94d6f))
+* **ui:** label launch controls + guard the launch button against double-submit ([#260](https://github.com/schubydoo/clauster/issues/260)) ([be3efde](https://github.com/schubydoo/clauster/commit/be3efde00ef3844dc169720fe31b9ce643c07222))
+* **ui:** render the Active status rail + fix keyboard focus order ([#250](https://github.com/schubydoo/clauster/issues/250)) ([a82cbe8](https://github.com/schubydoo/clauster/commit/a82cbe80935cd511d19716569e8f437c1d3a5e94))
+* **ui:** restore the Tabler + Alpine.js attribution in the dashboard footer ([#198](https://github.com/schubydoo/clauster/issues/198)) ([9366c8b](https://github.com/schubydoo/clauster/commit/9366c8b46feece6f7e1cf10ed08999a55d181008))
+* **ui:** status-presentation parity, untrusted indicator, bypass-confirm gating ([#251](https://github.com/schubydoo/clauster/issues/251)) ([2becb73](https://github.com/schubydoo/clauster/commit/2becb738f768530eabbb31c76343c9ce662a1f04))
+* **usage:** tolerate malformed token values instead of 500-ing the rollup ([#257](https://github.com/schubydoo/clauster/issues/257)) ([dce4efc](https://github.com/schubydoo/clauster/commit/dce4efc16415781b880f9258f84412fdc08f128a))
+
 ## [0.8.0](https://github.com/schubydoo/clauster/compare/v0.7.0...v0.8.0) (2026-06-07)
 
 
