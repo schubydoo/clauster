@@ -290,3 +290,22 @@ def test_secret_env_too_short_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "too-short")
     with pytest.raises(ValueError, match="at least 32 bytes"):
         auth.load_or_create_secret(tmp_path)
+
+
+def test_secret_truncated_on_disk_is_rejected(tmp_path, monkeypatch):
+    # A partial/corrupt session.secret (<32 bytes, e.g. a crash mid-write) must not be
+    # used as a short signing key — refuse to boot rather than load it. Patch sleep so
+    # the loser-retry loop finishes instantly.
+    (tmp_path / "session.secret").write_bytes(b"short")  # 5 bytes
+    monkeypatch.setattr(auth.time, "sleep", lambda *_: None)
+    with pytest.raises(RuntimeError, match="truncated"):
+        auth.load_or_create_secret(tmp_path)
+
+
+def test_secret_unreadable_on_disk_is_rejected(tmp_path, monkeypatch):
+    # session.secret exists but can't be read (here: it's a directory) — the read OSError
+    # is absorbed and, with nothing valid to read, we refuse rather than hang or crash.
+    (tmp_path / "session.secret").mkdir()
+    monkeypatch.setattr(auth.time, "sleep", lambda *_: None)
+    with pytest.raises(RuntimeError, match="truncated"):
+        auth.load_or_create_secret(tmp_path)

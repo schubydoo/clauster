@@ -45,6 +45,11 @@ def load_or_create_secret(state_dir: Path) -> bytes:
     ``CLAUSTER_SESSION_SECRET`` wins (lets ephemeral-FS deploys keep sessions
     across restarts). Otherwise read/create ``state_dir/session.secret`` with
     ``O_CREAT|O_EXCL`` at mode 0600 so it's never briefly world-readable.
+
+    Concurrent starts converge on the single ``O_EXCL`` winner's 32-byte secret and
+    the write is ``fsync``-durable; a loser waits out the winner's write (and refuses
+    a truncated key) rather than reading a half-written file and booting with a
+    different/short signing key.
     """
     env = os.environ.get("CLAUSTER_SESSION_SECRET")
     if env:
@@ -65,13 +70,44 @@ def load_or_create_secret(state_dir: Path) -> bytes:
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
         fd = os.open(path, flags, 0o600)
     except FileExistsError:
-        return path.read_bytes()
+        return _read_existing_secret(path)
     try:
         secret = secrets.token_bytes(32)
-        os.write(fd, secret)
+        if os.write(fd, secret) != len(secret):  # pragma: no cover - 32B never short-writes
+            raise OSError(f"short write creating {path}")
+        os.fsync(
+            fd
+        )  # durable across a crash (a racing loser already sees the write via the page cache)
         return secret
     finally:
         os.close(fd)
+
+
+# How long a loser of the session.secret O_EXCL race waits for the winner to finish
+# writing the 32 bytes before giving up (100 * 10ms = 1s) — never boot on a partial key.
+_SECRET_READ_ATTEMPTS = 100
+_SECRET_READ_DELAY = 0.01
+
+
+def _read_existing_secret(path: Path) -> bytes:
+    """Read a ``session.secret`` another process created, waiting out a half-written file.
+
+    The ``O_EXCL`` winner creates the file empty, then writes the 32 bytes — a loser
+    that raced in can momentarily read 0 or partial bytes. Retry until the full secret
+    lands, and refuse a persistently-truncated one rather than boot with a short key.
+    """
+    for _ in range(_SECRET_READ_ATTEMPTS):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            data = b""
+        if len(data) >= 32:
+            return data
+        time.sleep(_SECRET_READ_DELAY)
+    raise RuntimeError(
+        f"session secret at {path} is truncated (<32 bytes); refusing a short signing "
+        "key — delete it to regenerate."
+    )
 
 
 # ----- passwords -----------------------------------------------------------
