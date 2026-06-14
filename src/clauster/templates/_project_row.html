@@ -77,7 +77,12 @@
                         <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="ladv = !ladv"
                                 :aria-expanded="ladv" x-text="ladv ? 'Hide advanced ⌃' : 'Advanced ⌄'">Advanced ⌄</button>
                         <div class="row g-2 mt-1" x-show="ladv" x-cloak>
-                          <div class="col-6">
+                          {# Spawn only applies to the standard (multi-session) bridge — it maps to
+                             `claude remote-control --spawn`. pty is a single interactive session run
+                             under the keeper with no `--spawn`, so it ignores these; hide them in pty
+                             mode rather than offer no-op choices. #}
+                          <div class="col-6"
+                               {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) !== 'pty'" x-cloak{% endif %}>
                             <label class="form-label small mb-1" for="spawn-{{ p.name }}">Spawn</label>
                             <select id="spawn-{{ p.name }}" class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']"
                                     title="Where the session runs: same-dir = the project directory · worktree = an isolated git worktree (git repos only) · session = a fresh sandboxed session.">
@@ -87,12 +92,17 @@
                             </select>
                           </div>
                           {% if pty_supported %}
+                          <div class="col-6 d-flex align-items-end"
+                               x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) === 'pty'" x-cloak>
+                            <p id="resume-hint-{{ p.name }}" class="form-hint text-secondary small mb-1">Runs as one session in the project directory.</p>
+                          </div>
                           <div class="col-6">
                             <label class="form-label small mb-1" for="resume-{{ p.name }}">Mode</label>
                             <select id="resume-{{ p.name }}" class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
-                                    title="standard = multi-session server. pty = single-session true-resume (restores prior conversation on Resume).">
-                              <option value="standard">standard</option>
-                              <option value="pty">pty (true-resume)</option>
+                                    aria-describedby="resume-hint-{{ p.name }}"
+                                    title="standard (multi-session bridge) = the claude remote-control server; supports the Spawn options. pty (single-session, true-resume) = one interactive session that restores its prior conversation on Resume; always runs in the project directory.">
+                              <option value="standard">standard (multi-session bridge)</option>
+                              <option value="pty">pty (single-session, true-resume)</option>
                             </select>
                           </div>
                           {% endif %}
