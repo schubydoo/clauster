@@ -210,6 +210,40 @@ def test_install_service_write_unwritable_returns_1(tmp_path, capsys, monkeypatc
     assert "sudo" in capsys.readouterr().err.lower()
 
 
+def test_install_service_write_non_permission_oserror_returns_1(tmp_path, capsys, monkeypatch):
+    # A non-PermissionError write failure (e.g. ENOSPC) also fails closed with the
+    # error line, but WITHOUT the privilege hint (that's PermissionError-specific).
+    def boom(self, *a, **k):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    rc = cli.main(["install-service", "systemd", "--write", str(tmp_path / "x.service")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "could not write" in err.lower()
+    assert "privileges" not in err.lower()  # the sudo hint is PermissionError-only
+
+
+@pytest.mark.parametrize(
+    "kind,marker,hint",
+    [
+        ("launchd", "<plist", "launchctl load"),
+        ("windows", "nssm install Clauster", "elevated prompt"),
+    ],
+)
+def test_install_service_write_prints_platform_next_step(kind, marker, hint, tmp_path, capsys):
+    # The --write next-step hint is platform-specific: launchctl on macOS, an
+    # elevated nssm prompt on Windows (systemd's daemon-reload hint is covered above).
+    dest = tmp_path / f"clauster.{kind}"
+    rc = cli.main(
+        ["install-service", kind, "-c", "/etc/clauster/clauster.yml", "--write", str(dest)]
+    )
+    assert rc == 0
+    assert marker in dest.read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert str(dest) in err and hint in err
+
+
 def test_install_service_write_without_path_uses_default(tmp_path, monkeypatch, capsys):
     dest = tmp_path / "clauster.service"
     monkeypatch.setattr(cli.ops, "default_service_path", lambda _kind: dest)
