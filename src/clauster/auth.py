@@ -27,6 +27,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
+from .atomicio import atomic_write_text, ensure_private_dir
 from .config import _LOOPBACK_HOSTS, ClausterConfig
 
 _SESSION_SALT = "clauster-session"
@@ -44,6 +45,11 @@ def load_or_create_secret(state_dir: Path) -> bytes:
     ``CLAUSTER_SESSION_SECRET`` wins (lets ephemeral-FS deploys keep sessions
     across restarts). Otherwise read/create ``state_dir/session.secret`` with
     ``O_CREAT|O_EXCL`` at mode 0600 so it's never briefly world-readable.
+
+    Concurrent starts converge on the single ``O_EXCL`` winner's 32-byte secret and
+    the write is ``fsync``-durable; a loser waits out the winner's write (and refuses
+    a truncated key) rather than reading a half-written file and booting with a
+    different/short signing key.
     """
     env = os.environ.get("CLAUSTER_SESSION_SECRET")
     if env:
@@ -55,7 +61,7 @@ def load_or_create_secret(state_dir: Path) -> bytes:
             )
         return raw
     state_dir = state_dir.expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)  # holds the secret
+    ensure_private_dir(state_dir)  # holds the secret — tighten even a pre-existing dir to 0700
     path = state_dir / "session.secret"
     # O_BINARY (Windows-only; 0 on POSIX) keeps os.write from translating any
     # 0x0A byte in the random secret into 0x0D 0x0A — which would corrupt ~12% of
@@ -64,13 +70,47 @@ def load_or_create_secret(state_dir: Path) -> bytes:
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
         fd = os.open(path, flags, 0o600)
     except FileExistsError:
-        return path.read_bytes()
+        return _read_existing_secret(path)
     try:
         secret = secrets.token_bytes(32)
-        os.write(fd, secret)
+        if os.write(fd, secret) != len(secret):  # pragma: no cover - 32B never short-writes
+            raise OSError(f"short write creating {path}")
+        os.fsync(
+            fd
+        )  # durable across a crash (a racing loser already sees the write via the page cache)
         return secret
     finally:
         os.close(fd)
+
+
+# How long a loser of the session.secret O_EXCL race waits for the winner to finish
+# writing the 32 bytes before giving up (100 * 10ms = 1s) — never boot on a partial key.
+_SECRET_READ_ATTEMPTS = 100
+_SECRET_READ_DELAY = 0.01
+
+
+def _read_existing_secret(path: Path) -> bytes:
+    """Read a ``session.secret`` another process created, waiting out a half-written file.
+
+    The ``O_EXCL`` winner creates the file empty, then writes the 32 bytes — a loser
+    that raced in can momentarily read 0 or partial bytes. Retry until the full secret
+    lands, and refuse a persistently-truncated one rather than boot with a short key.
+    """
+    last_err: OSError | None = None
+    for _ in range(_SECRET_READ_ATTEMPTS):
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            last_err = exc  # distinguish "unreadable" from "truncated" in the message
+            data = b""
+        if len(data) >= 32:
+            return data
+        time.sleep(_SECRET_READ_DELAY)
+    detail = f" (last read error: {last_err})" if last_err is not None else ""
+    raise RuntimeError(
+        f"session secret at {path} is truncated or unreadable{detail}; refusing a short "
+        "signing key — delete it to regenerate."
+    )
 
 
 # ----- passwords -----------------------------------------------------------
@@ -180,7 +220,6 @@ def bump_epoch(state_dir: Path, floor: int = 0) -> int:
     as 0; the floor carries the real value.
     """
     state_dir = state_dir.expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = state_dir / "session.epoch"
     try:
         text = path.read_text(encoding="utf-8").strip()
@@ -188,9 +227,7 @@ def bump_epoch(state_dir: Path, floor: int = 0) -> int:
     except (FileNotFoundError, OSError, ValueError):
         disk = 0  # unreadable/corrupt: rely on the floor, never regress
     new_value = max(disk, floor) + 1
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(str(new_value), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, str(new_value))  # ensures the dir is 0700, fsync-before-replace
     return new_value
 
 

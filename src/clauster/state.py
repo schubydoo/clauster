@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
+
+from .atomicio import atomic_write_text
 
 CURRENT_SCHEMA = 1
 _PERSISTED_FIELDS = ("label", "intentional_stop", "spawn_mode", "permission_mode", "resume_mode")
@@ -64,14 +65,9 @@ class StateStore:
         return out
 
     def save(self, instances: dict[str, dict]) -> None:
-        """Atomically persist ``{project: {persisted fields}}``."""
-        # mode=0o700: the state dir also holds session.secret/epoch (0700 has no
-        # group/other bits for umask to clear; only applies on creation).
-        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        """Atomically persist ``{project: {persisted fields}}`` (durable, owner-only)."""
         payload = {"schema_version": CURRENT_SCHEMA, "instances": instances}
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, self._path)
+        atomic_write_text(self._path, json.dumps(payload, indent=2))
 
     def _migrate(self, data: dict, raw: str) -> dict:
         """Back up once, then coerce to the current schema.
@@ -82,7 +78,7 @@ class StateStore:
         backup = self._path.with_suffix(self._path.suffix + ".bak")
         if not backup.exists():
             try:
-                backup.write_text(raw, encoding="utf-8")
+                atomic_write_text(backup, raw)
             except OSError as exc:
                 # Best-effort; never block the load, but surface it so a missing
                 # pre-migration backup isn't a silent loss before we coerce away
