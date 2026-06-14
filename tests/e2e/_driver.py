@@ -88,8 +88,12 @@ class AgentBrowser:
 
     def get_count(self, selector: str) -> int:
         """Number of elements matching ``selector`` (0 if none / on error)."""
-        match = re.search(r"-?\d+", self._run("get", "count", selector).stdout)
-        return int(match.group()) if match else 0
+        # Gate on a clean exit and a strictly-numeric payload: parsing the first
+        # integer out of arbitrary stdout would let digits in an error message
+        # masquerade as a count and produce false assertions.
+        result = self._run("get", "count", selector)
+        out = result.stdout.strip()
+        return int(out) if result.returncode == 0 and out.isdigit() else 0
 
     def get_url(self) -> str:
         """Current page URL."""
@@ -111,10 +115,13 @@ class AgentBrowser:
         Backed by the interactive snapshot (``snapshot -i``), which lists only
         visible, interactive nodes — the agent-browser analogue of Playwright's
         ``get_by_role(role, name=...)`` visibility check, for controls that have no
-        stable id/class to target by CSS.
+        stable id/class to target by CSS. Like Playwright's default, ``name`` is matched
+        case-insensitively as a substring (pass a full label for an unambiguous match).
         """
+        wanted = name.casefold()
         return any(
-            r.get("role") == role and r.get("name") == name for r in self._interactive_refs()
+            r.get("role") == role and wanted in (r.get("name") or "").casefold()
+            for r in self._interactive_refs()
         )
 
     # ----- interactions ---------------------------------------------------
@@ -244,6 +251,8 @@ class AgentBrowser:
         Unconditional and idempotent (``close --all`` is a harmless no-op when no
         session is open): a test that takes the ``browser`` fixture but never reaches
         :meth:`goto` (or fails before it) still resets the shared daemon, so a prior
-        test's cookies/storage can't leak into the next.
+        test's cookies/storage can't leak into the next. Fails loud on a non-zero exit
+        (``close --all`` exits 0 even when nothing is open) so a broken teardown can't
+        silently leak session state across tests.
         """
-        self._run("close", "--all")
+        self._run("close", "--all", check=True)
