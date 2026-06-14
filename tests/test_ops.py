@@ -194,6 +194,9 @@ def test_killmode_control_group_warns(monkeypatch):
     c = _check_systemd_killmode()
     assert c is not None and c.status == WARN
     assert "KillMode=process" in c.detail and "pty" in c.detail
+    # The remediation must be actionable: a concrete install + reload command.
+    assert "install-service systemd --write" in c.detail
+    assert "systemctl daemon-reload" in c.detail
 
 
 def test_killmode_subprocess_error_returns_none(monkeypatch):
@@ -560,3 +563,18 @@ def test_service_windows():
 def test_service_unknown_kind():
     with pytest.raises(ValueError):
         render_service_unit("upstart")
+
+
+def test_default_service_path_per_kind():
+    from clauster.ops import default_service_path
+
+    assert default_service_path("systemd") == Path("/etc/systemd/system/clauster.service")
+    assert default_service_path("launchd").name == "org.clauster.daemon.plist"
+    assert default_service_path("windows").name == "install-clauster-service.bat"
+
+
+def test_default_service_path_unknown_kind():
+    from clauster.ops import default_service_path
+
+    with pytest.raises(ValueError):
+        default_service_path("upstart")
