@@ -100,6 +100,7 @@ async def test_forget_refuses_when_keeper_process_still_live(runner_config, monk
             await runner.forget("alpha")
     finally:
         inst.bridge_pid = original_bridge_pid
+        inst.keeper_pid = None  # clear fake pid so stop() skips _cleanup_keeper(4242)
         await runner.stop("alpha")
 
 
