@@ -25,14 +25,19 @@ def ensure_private_dir(path: Path) -> None:
 
     ``mkdir``'s ``mode`` only applies when the directory is created, so this also
     ``chmod``s an already-existing directory — the state dir holds the session
-    secret and must stay owner-only. The ``chmod`` is best-effort (a no-op on
-    Windows, which has no POSIX mode bits).
+    secret and must stay owner-only. On POSIX a ``chmod`` failure is raised (fail
+    closed: we must not store the secret under a dir we can't secure); on Windows,
+    which has no POSIX mode bits, the ``chmod`` is a no-op that is ignored.
     """
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         path.chmod(0o700)
     except OSError:
-        pass
+        # On POSIX a chmod failure would leave a pre-existing dir that holds the session
+        # secret potentially too permissive — fail closed rather than silently degrade.
+        # Windows has no POSIX mode bits, so its chmod is a no-op we can safely ignore.
+        if os.name != "nt":
+            raise
 
 
 def atomic_write_text(target: Path, text: str) -> None:

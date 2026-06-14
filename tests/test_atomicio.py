@@ -46,6 +46,22 @@ def test_ensure_private_dir_tightens_a_preexisting_loose_dir(tmp_path):
     assert stat.S_IMODE(d.stat().st_mode) == 0o700
 
 
+def test_ensure_private_dir_fails_closed_on_posix_chmod_failure(tmp_path, monkeypatch):
+    # Fail closed: on POSIX a chmod failure must not silently leave the secret dir loose.
+    import pathlib
+
+    def _boom(self, *a, **k):
+        raise OSError("chmod denied")
+
+    monkeypatch.setattr(pathlib.Path, "chmod", _boom)
+    d = tmp_path / "state"
+    if sys.platform == "win32":
+        ensure_private_dir(d)  # chmod is a no-op on Windows — must not raise
+    else:
+        with pytest.raises(OSError, match="chmod denied"):
+            ensure_private_dir(d)
+
+
 def test_atomic_write_text_cleans_up_temp_on_replace_failure(tmp_path, monkeypatch):
     target = tmp_path / "f.txt"
 
