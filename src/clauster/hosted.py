@@ -168,14 +168,19 @@ class HostedSession:
         *,
         ring_size: int = _DEFAULT_RING_SIZE,
         queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
-        stop_grace: float = _STOP_GRACE_SECONDS,
+        stop_grace: float | None = None,
     ) -> None:
-        """Configure the session; nothing spawns until :meth:`start`."""
+        """Configure the session; nothing spawns until :meth:`start`.
+
+        ``stop_grace`` defaults to the module-level :data:`_STOP_GRACE_SECONDS`,
+        resolved at construction (not import) so a test can shorten it via the
+        global — including for sessions that :class:`HostedManager` builds internally.
+        """
         self._client = client
         self._process_id = process_id
         self._claude_binary = claude_binary
         self._queue_maxsize = queue_maxsize
-        self._stop_grace = stop_grace
+        self._stop_grace = stop_grace if stop_grace is not None else _STOP_GRACE_SECONDS
         self.status = "starting"
         self.exit_code: int | None = None
         self.claude_session_uuid: str | None = None
