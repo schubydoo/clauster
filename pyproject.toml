@@ -1,6 +1,6 @@
 [project]
 name = "clauster"
-version = "0.8.0"
+version = "0.9.0"
 description = "Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,7 +8,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "schubydoo", email = "12485317+schubydoo@users.noreply.github.com" }]
 keywords = ["claude", "claude-code", "remote-control", "self-hosted", "homelab"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 4 - Beta",
     "Framework :: FastAPI",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
