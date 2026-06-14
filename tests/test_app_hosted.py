@@ -63,6 +63,8 @@ class _StubManager:
         self.respond_error: Exception | None = None
         self.resume_error: Exception | None = None
         self.kill_orphan_error: Exception | None = None
+        self.forgotten: list[str] = []
+        self.forget_error: Exception | None = None
 
     def seed(self) -> RemoteControlInstance:
         inst = RemoteControlInstance(
@@ -129,6 +131,17 @@ class _StubManager:
         inst.status = InstanceStatus.STOPPED
         inst.is_orphan = False
         return inst
+
+    async def forget(self, hosted_id: str) -> None:
+        if self.forget_error is not None:
+            raise self.forget_error
+        # Mirror the production contract: an unknown id raises (the endpoint maps it
+        # to 404), so the stub can't mask a contract regression by silently no-opping.
+        if hosted_id not in self.instances:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        self.forgotten.append(hosted_id)
+        self.instances.pop(hosted_id, None)
+        self.sessions.pop(hosted_id, None)
 
     async def resume(self, client, hosted_id, *, cwd, claude_binary):
         if self.resume_error is not None:
@@ -208,6 +221,32 @@ def test_spawn_unknown_channel_is_422(write_config, projects_root):
     with TestClient(app) as client:
         r = client.post("/api/instances", json={"project": "alpha", "channel": "bogus"})
     assert r.status_code == 422
+
+
+# -- forget (POST /api/instances/{id}/forget) ------------------------------
+
+
+def test_forget_hosted_dispatches_to_manager(write_config):
+    manager = _StubManager()
+    manager.seed()
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/forget")
+    assert r.status_code == 200
+    assert r.json() == {"id": _HID, "forgotten": True}
+    assert manager.forgotten == [_HID]  # routed to the hosted manager, not the bridge runner
+
+
+def test_forget_hosted_live_is_409(write_config):
+    # A known hosted id that's still live: the manager refuses (HostedSessionError) -> 409.
+    manager = _StubManager()
+    manager.seed()
+    manager.forget_error = HostedSessionError("still running — Stop it first")
+    app = _app(write_config, manager=manager)
+    with TestClient(app) as client:
+        r = client.post(f"/api/instances/{_HID}/forget")
+    assert r.status_code == 409
+    assert "Stop it first" in r.json()["detail"]
 
 
 # -- list (GET /api/hosted) ------------------------------------------------

@@ -623,6 +623,22 @@ def test_dashboard_coerces_hosted_busy_disabled_bindings(write_config, tmp_path)
     assert ':disabled="hostedResuming[h.claustrum_process_id]"' not in html
 
 
+# ----- Forget buttons (drop a stopped session from Recent/resumable) ------
+
+
+def test_dashboard_renders_bridge_forget_button(write_config, tmp_path):
+    html = _client(write_config, tmp_path).get("/").text
+    assert '@click="forget(i.project)"' in html  # bridge Forget in Recent/resumable
+    # Coerced so the busy-state binding isn't stuck-disabled on first paint.
+    assert ':disabled="!!forgetting[i.project]"' in html
+
+
+def test_dashboard_renders_hosted_forget_button(write_config, tmp_path):
+    html = _client_with(write_config, tmp_path, "claustrum:\n  enabled: true\n").get("/").text
+    assert '@click="forgetHosted(h)"' in html
+    assert ':disabled="!!forgetting[h.claustrum_process_id]"' in html
+
+
 # ----- /api/projects/{name}/metrics (live per-bridge resource sample) ----
 
 

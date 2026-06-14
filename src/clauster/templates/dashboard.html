@@ -111,6 +111,14 @@
                           :disabled="!!hostedStopping[h.claustrum_process_id]" @click="stopHosted(h)">
                     <span x-text="hostedStopping[h.claustrum_process_id] ? 'Stopping…' : 'Stop'">Stop</span>
                   </button>
+                  {# Forget only for an ended, non-orphan hosted session (an orphan is a live
+                     survivor — Kill it first). `!!` coercion: see the detached-row note. #}
+                  <button type="button" class="btn btn-sm btn-ghost-secondary"
+                          x-show="['crashed', 'stopped', 'error'].includes(h.status) && !h.is_orphan"
+                          :disabled="!!forgetting[h.claustrum_process_id]" @click="forgetHosted(h)"
+                          title="Forget — drop this ended session from the list to start fresh. Does not stop a live session.">
+                    <span x-text="forgetting[h.claustrum_process_id] ? 'Forgetting…' : 'Forget'">Forget</span>
+                  </button>
                 </span>
               </div>
               <!-- live conversation view -->
@@ -418,6 +426,12 @@
                     <button type="button" class="btn btn-sm btn-success" @click="resume(i.project)"
                             :title="'Resume — reconnects the prior session (keeps ' + (resumeModeOf(i.project) || 'standard') + ' mode).'">
                       <svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Resume</button>
+                    {# `!!` coercion: a busy-map key absent on first paint renders this DISABLED
+                       under Alpine 3.15.x inside an x-for clone — coerce to a concrete bool. #}
+                    <button type="button" class="btn btn-sm btn-ghost-secondary" :disabled="!!forgetting[i.project]"
+                            @click="forget(i.project)"
+                            title="Forget — drop this stopped session from the list to start fresh. Does not stop a live session.">
+                      <span x-text="forgetting[i.project] ? 'Forgetting…' : 'Forget'">Forget</span></button>
                   </span>
                 </div>
               </div>

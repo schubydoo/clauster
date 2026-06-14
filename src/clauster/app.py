@@ -67,6 +67,7 @@ from .provisioning import (
 )
 from .redact import sanitize_line
 from .runner import (
+    InstanceStillLive,
     InvalidSpawnOption,
     PermissionModeNotAllowed,
     SessionRunner,
@@ -1133,6 +1134,29 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if hosted is not None:
             return await _resume_hosted(instance_id, hosted)
         return await _spawn_or_http(runner.resume(instance_id))
+
+    @app.post("/api/instances/{instance_id}/forget")
+    async def api_forget(instance_id: str) -> dict:
+        """Drop a stopped/crashed session's record so it leaves the Recent/resumable list.
+
+        Both bridges and hosted sessions persist a record that survives a Stop (so they
+        stay Resumable); forget removes it to start fresh. Fail closed: a still-live
+        session is refused with 409 (Stop/Kill it first) — forget never terminates a
+        process — and an unknown id is 404.
+        """
+        hosted = app.state.hosted.get_instance(instance_id)
+        try:
+            if hosted is not None:
+                # A known hosted id can only fail here as "still live" -> 409 (unknown
+                # hosted ids are None above and fall through to the bridge runner).
+                await app.state.hosted.forget(instance_id)
+            else:
+                await runner.forget(instance_id)
+        except UnknownProject as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (InstanceStillLive, HostedSessionError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"id": instance_id, "forgotten": True}
 
     @app.post("/api/projects/{name}/trust")
     async def api_trust(name: str) -> Project:

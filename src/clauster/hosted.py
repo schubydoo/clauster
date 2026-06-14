@@ -772,6 +772,44 @@ class HostedManager:
         await self._persist()
         return self._synced(inst)
 
+    async def forget(self, hosted_id: str) -> None:
+        """Drop a stopped hosted session's record so it leaves the Recent list (fail closed).
+
+        Lets the operator clear an ended (stopped/crashed/error) hosted session out of
+        the Recent/resumable list to start fresh. ``detach``es any lingering session
+        handle (drops its client-side stream subscription — its pump already completed
+        when the session reached a terminal state), removes the registry entry, then
+        re-persists — ``_persist`` writes the full registry, so the dropped row is gone
+        from ``hosted_state.json``.
+
+        Fail closed: a running/starting session, or a live orphan survivor, is refused
+        with :class:`HostedSessionError` — Stop it (or Kill the orphan) first; forget
+        never terminates a process. Raises :class:`HostedSessionError` for an unknown id.
+        """
+        inst = self._instances.get(hosted_id)
+        if inst is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        inst = self._synced(inst)
+        session = self._sessions.get(hosted_id)
+        if (session is not None and session.status in ("running", "starting")) or inst.status in (
+            InstanceStatus.RUNNING,
+            InstanceStatus.STARTING,
+        ):
+            raise HostedSessionError(
+                f"hosted session {hosted_id} is still running — Stop it first"
+            )
+        if inst.is_orphan:
+            raise HostedSessionError(
+                f"hosted session {hosted_id} is a live orphan — Kill it first"
+            )
+        # Detach the terminal session like resume() retires a dead row — drops the
+        # client-side ProcessStream subscriber deterministically instead of leaking it.
+        if session is not None:
+            await session.detach()
+        self._sessions.pop(hosted_id, None)
+        self._instances.pop(hosted_id, None)
+        await self._persist()
+
     @staticmethod
     def _is_orphan(instance: RemoteControlInstance) -> bool:
         """Whether a not-found instance is a recoverable (killable) survivor.

@@ -916,6 +916,64 @@ async def test_manager_stop_returns_synced_instance(fake_claustrum):
         assert result.status is InstanceStatus.STOPPED
 
 
+async def test_manager_forget_drops_stopped_session(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit_exit(pid, 0)
+        await asyncio.sleep(0.05)
+        await mgr.stop(pid)
+        assert mgr.get_instance(pid) is not None  # a stopped, resumable row
+
+        await mgr.forget(pid)
+        assert mgr.get_instance(pid) is None
+        assert mgr.session(pid) is None
+        assert mgr.list_instances() == []
+
+
+async def test_manager_forget_with_no_session_handle(fake_claustrum):
+    # A reattached row can carry an instance but no live session handle (its pump
+    # already completed / a clauster restart rebuilt the instance only). forget must
+    # skip the detach branch and still drop the row.
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit_exit(pid, 0)
+        await asyncio.sleep(0.05)
+        await mgr.stop(pid)
+        mgr._sessions.pop(pid, None)  # drop the session handle, keep the instance
+        assert mgr.session(pid) is None
+
+        await mgr.forget(pid)
+        assert mgr.get_instance(pid) is None
+
+
+async def test_manager_forget_refuses_running(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        with pytest.raises(HostedSessionError, match="still running"):
+            await mgr.forget(inst.claustrum_process_id)
+        assert mgr.get_instance(inst.claustrum_process_id) is not None  # left intact
+
+
+async def test_manager_forget_refuses_orphan(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit_exit(pid, 0)
+        await asyncio.sleep(0.05)
+        await mgr.stop(pid)
+        mgr.get_instance(pid).is_orphan = True  # a live survivor — must be Killed, not forgotten
+        with pytest.raises(HostedSessionError, match="orphan"):
+            await mgr.forget(pid)
+
+
+async def test_manager_forget_unknown_raises(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, _client, mgr):
+        with pytest.raises(HostedSessionError):
+            await mgr.forget("nope")
+
+
 async def test_manager_aclose_idempotent_over_exited(fake_claustrum):
     # aclose detaches (CL-6: leave running for reattach); over already-exited
     # sessions it's a harmless no-op and their STOPPED status is preserved.

@@ -70,6 +70,7 @@
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
       agentStopping: {},   // job id -> true while a stop request is in flight
+      forgetting: {},      // bridge/hosted id -> true while a forget request is in flight
       launching: {},       // project name -> true while a launch is in flight (double-submit guard)
       // --- hosted live-view sessions (claustrum stream-json channel, CL-4c) ---
       hosted: [],                 // GET /api/hosted snapshot (channel="hosted" instances)
@@ -388,6 +389,26 @@
         this.agentStopping[j.id] = false;
         await this.refresh();
       },
+      // Forget = drop a stopped/ended session's record so it leaves Recent/resumable.
+      // Fail-closed on the server (a live session is refused 409); never stops a process.
+      // `forget(name)` is a bridge (keyed by project), `forgetHosted(h)` a hosted session.
+      async _forget(id, label) {
+        if (!window.confirm("Forget \"" + label + "\"? This drops the stopped session from the "
+          + "list so you can start fresh. It does not stop a live session.")) return;
+        this.forgetting[id] = true;
+        try {
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/forget",
+                                  { method: "POST" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok) this.toast(label + ": forgotten", "success");
+          else this.toast(label + ": " + (b.detail || ("forget failed — " + res.status)), "error");
+        } catch (e) { this.toast(label + ": forget failed", "error"); }
+        finally { this.forgetting[id] = false; }
+        await this.refresh();
+      },
+      forget(name) { return this._forget(name, name); },
+      forgetHosted(h) { return this._forget(h.claustrum_process_id, h.project || h.claustrum_process_id); },
       statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
       // Display status: an "interrupted" bridge is one that stopped WITHOUT a
       // deliberate Stop (host restart / external kill). It's the same backend status
