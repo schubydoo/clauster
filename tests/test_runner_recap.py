@@ -95,6 +95,7 @@ def test_popen_injects_recap_env_when_enabled(runner_config, monkeypatch, tmp_pa
 
 def test_popen_scrubs_secret_and_omits_recap_when_disabled(runner_config, monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak-to-the-bridge")
+    monkeypatch.setenv("ORDINARY_BRIDGE_ENV", "kept")
     runner, _ = _runner_with_recap(runner_config, enabled=False)
     env = _capture_popen_env(runner, monkeypatch, tmp_path)
     # The bridge env is now the SCRUBBED parent environment (never None): the
@@ -102,4 +103,4 @@ def test_popen_scrubs_secret_and_omits_recap_when_disabled(runner_config, monkey
     assert env is not None
     assert "CLAUSTER_SESSION_SECRET" not in env
     assert "CLAUSTER_RESUME_RECAP" not in env
-    assert "PATH" in env
+    assert env["ORDINARY_BRIDGE_ENV"] == "kept"  # a non-secret var propagates (cross-platform)

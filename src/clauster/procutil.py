@@ -250,7 +250,8 @@ def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     bridge code, a cloned repo's hooks, or a background agent can never read the
     session-signing secret or password hash from its own ``os.environ`` and forge
     an auth cookie. ``extra`` overlays caller keys (e.g. the resume-recap flags)
-    AFTER scrubbing, so a legitimate override is never dropped.
+    AFTER scrubbing and is itself scrubbed, so the chokepoint never emits a
+    Clauster secret — not even one a caller passes back in via ``extra``.
 
     Scope is deliberately Clauster-only — a spawned ``claude`` legitimately needs
     e.g. ``ANTHROPIC_API_KEY``, so this is not a general secret firewall; it
@@ -258,5 +259,5 @@ def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """
     env = {k: v for k, v in os.environ.items() if not is_secret_env_name(k)}
     if extra:
-        env.update(extra)
+        env.update({k: v for k, v in extra.items() if not is_secret_env_name(k)})
     return env

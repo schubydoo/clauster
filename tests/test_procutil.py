@@ -290,10 +290,14 @@ def test_child_env_preserves_recap_and_path_pointers(monkeypatch):
 
 
 def test_child_env_overlays_extra_after_scrub(monkeypatch):
-    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "leak-me")
-    env = procutil.child_env({"CLAUSTER_RESUME_RECAP": "1"})
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak-from-environ")
+    # extra overlays non-secret keys, but a secret passed back via extra is also
+    # dropped — the chokepoint never emits a secret, even on caller misuse.
+    env = procutil.child_env(
+        {"CLAUSTER_RESUME_RECAP": "1", "CLAUSTER_SESSION_SECRET": "must-not-leak-from-extra"}
+    )
     assert env["CLAUSTER_RESUME_RECAP"] == "1"
-    assert "CLAUSTER_SESSION_SECRET" not in env  # overlay never resurrects a secret
+    assert "CLAUSTER_SESSION_SECRET" not in env  # neither the environ copy nor the overlay
 
 
 def test_child_env_returns_independent_copy(monkeypatch):
