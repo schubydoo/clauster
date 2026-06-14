@@ -74,11 +74,20 @@ def main(argv: list[str] | None = None) -> int:
     migrate_p.add_argument("-c", "--config", help="path to clauster.yml")
 
     svc_p = sub.add_parser(
-        "install-service", help="print a service unit (systemd/launchd/windows)"
+        "install-service", help="print (or, with --write, install) a service unit"
     )
     svc_p.add_argument("kind", choices=("systemd", "launchd", "windows"))
     svc_p.add_argument("-c", "--config", help="config path to embed in the unit")
     svc_p.add_argument("--user", help="run-as user (systemd)")
+    svc_p.add_argument(
+        "--write",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="PATH",
+        help="write the unit to PATH (or the conventional location) instead of printing it; "
+        "may need privileges (e.g. sudo) for a system path",
+    )
 
     reap_p = sub.add_parser(
         "reap-environments",
@@ -111,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "migrate":
         return _migrate(args.config)
     if args.command == "install-service":
-        return _install_service(args.kind, args.config, args.user)
+        return _install_service(args.kind, args.config, args.user, args.write)
     if args.command == "reap-environments":
         return _reap_environments(args.config, args.archive, args.force_delete)
     if args.command == "usage":
@@ -209,8 +218,42 @@ def _migrate(config_path: str | None) -> int:
     return 0
 
 
-def _install_service(kind: str, config_path: str | None, user: str | None) -> int:
-    print(ops.render_service_unit(kind, config_path=config_path, user=user))
+def _install_service(
+    kind: str, config_path: str | None, user: str | None, write: bool | str = False
+) -> int:
+    """Print a service unit, or write it to disk when ``--write`` is given.
+
+    ``write`` is False (print to stdout — the back-compatible default), True (write to
+    the conventional ``ops.default_service_path``), or a path string (write there). A
+    write that the process can't perform (a system path without privileges) fails
+    closed with a clear hint rather than a traceback.
+    """
+    unit = ops.render_service_unit(kind, config_path=config_path, user=user)
+    if write is False:
+        print(unit)
+        return 0
+    dest = Path(write) if isinstance(write, str) else ops.default_service_path(kind)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(unit, encoding="utf-8")
+    except OSError as exc:
+        print(f"clauster: could not write {dest}: {exc}", file=sys.stderr)
+        if isinstance(exc, PermissionError):
+            print("clauster: re-run with sufficient privileges (e.g. sudo).", file=sys.stderr)
+        return 1
+    print(f"clauster: wrote {kind} service unit to {dest}", file=sys.stderr)
+    if kind == "systemd":
+        print(
+            "clauster: next: sudo systemctl daemon-reload && sudo systemctl restart clauster",
+            file=sys.stderr,
+        )
+    elif kind == "launchd":
+        print(f"clauster: next: launchctl load {dest}", file=sys.stderr)
+    else:
+        print(
+            f"clauster: next: run {dest} from an elevated prompt (needs nssm on PATH)",
+            file=sys.stderr,
+        )
     return 0
 
 

@@ -187,6 +187,40 @@ def test_install_service_bad_kind_exits_2():
     assert ei.value.code == 2
 
 
+def test_install_service_write_to_path(tmp_path, capsys):
+    dest = tmp_path / "clauster.service"
+    rc = cli.main(
+        ["install-service", "systemd", "-c", "/etc/clauster/clauster.yml", "--write", str(dest)]
+    )
+    assert rc == 0
+    assert "[Service]" in dest.read_text(encoding="utf-8")
+    assert "KillMode=process" in dest.read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert str(dest) in err and "daemon-reload" in err  # confirms write + next-step hint
+
+
+def test_install_service_write_unwritable_returns_1(tmp_path, capsys, monkeypatch):
+    # A write the process can't perform fails closed with a hint, not a traceback.
+    def boom(self, *a, **k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    rc = cli.main(["install-service", "systemd", "--write", str(tmp_path / "x.service")])
+    assert rc == 1
+    assert "sudo" in capsys.readouterr().err.lower()
+
+
+def test_install_service_write_without_path_uses_default(tmp_path, monkeypatch, capsys):
+    dest = tmp_path / "clauster.service"
+    monkeypatch.setattr(cli.ops, "default_service_path", lambda _kind: dest)
+    rc = cli.main(["install-service", "systemd", "--write"])
+    assert rc == 0
+    assert dest.is_file()
+    assert "KillMode=process" in dest.read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert str(dest) in err and "daemon-reload" in err
+
+
 # ----- process title (instance_name) ------------------------------------
 
 

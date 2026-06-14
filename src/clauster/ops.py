@@ -255,9 +255,10 @@ def _check_systemd_killmode(unit: str = "clauster.service") -> Check | None:
     return Check(
         "systemd",
         WARN,
-        f"{unit}: KillMode={kill_mode} reaps live pty bridges on restart — set "
-        "KillMode=process (regenerate via `clauster install-service systemd`, then "
-        "reinstall + daemon-reload) so true-resume bridges survive",
+        f"{unit}: KillMode={kill_mode} reaps live pty bridges on a restart. To fix, install a "
+        "KillMode=process unit and reload: `sudo clauster install-service systemd --write` then "
+        f"`sudo systemctl daemon-reload && sudo systemctl restart {unit}` — that one restart "
+        "still reaps the current pty bridges, but later restarts won't.",
     )
 
 
@@ -542,6 +543,22 @@ def migrate_state(config: ClausterConfig) -> dict:
 # ----- install-service --------------------------------------------------
 
 _SERVICE_KINDS = ("systemd", "launchd", "windows")
+
+
+def default_service_path(kind: str) -> Path:
+    """Return the conventional install path for a service definition of *kind*.
+
+    Used by ``install-service --write`` (and referenced in the doctor remediation)
+    so a unit lands where the platform's service manager looks for it. systemd's
+    path is system-wide and needs privileges to write; the caller surfaces that.
+    """
+    if kind == "systemd":
+        return Path("/etc/systemd/system/clauster.service")
+    if kind == "launchd":
+        return Path("~/Library/LaunchAgents/org.clauster.daemon.plist").expanduser()
+    if kind == "windows":
+        return Path.cwd() / "install-clauster-service.bat"
+    raise ValueError(f"unknown service kind {kind!r}; expected one of {_SERVICE_KINDS}")
 
 
 def render_service_unit(
