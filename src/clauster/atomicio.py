@@ -65,14 +65,17 @@ def atomic_write_text(target: Path, text: str) -> None:
         # still removes the unique temp. We re-raise immediately — never a swallow.
         tmp.unlink(missing_ok=True)
         raise
-    _fsync_dir(directory)
+    fsync_dir(directory)
 
 
-def _fsync_dir(directory: Path) -> None:
-    """Best-effort ``fsync`` of a directory so the rename is durable.
+def fsync_dir(directory: Path) -> None:
+    """Best-effort ``fsync`` of a directory so a create/rename in it is durable.
 
-    A no-op where directory fsync isn't supported (e.g. Windows, where opening a
-    directory fails) — durability of the rename is then the filesystem's to keep.
+    On POSIX, ``fsync``-ing a file persists its data but not the directory entry
+    that links its name in — a crash can still drop a freshly created file. Call
+    this on the parent after creating or replacing a file there. A no-op where
+    directory fsync isn't supported (e.g. Windows, where opening a directory
+    fails) — durability is then the filesystem's to keep.
     """
     try:
         dir_fd = os.open(directory, os.O_RDONLY)
