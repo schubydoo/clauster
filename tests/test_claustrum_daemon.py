@@ -313,8 +313,10 @@ async def test_spawn_scrubs_ambient_daemon_sentinel(make_daemon, monkeypatch):
     monkeypatch.setenv("CLAUSTRUM_DAEMON_CHILD", "1")
     monkeypatch.setenv("CLAUSTRUM_TOKEN_PIPE", "9")
     monkeypatch.setenv("CLAUSTRUM_KEEP_THIS", "ok")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak-to-the-daemon")
     env = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]["env"]
     assert "CLAUDE_SSH_DAEMON_CHILD" not in env
     assert "CLAUSTRUM_DAEMON_CHILD" not in env
     assert "CLAUSTRUM_TOKEN_PIPE" not in env
+    assert "CLAUSTER_SESSION_SECRET" not in env  # Clauster secret scrubbed (procutil.child_env)
     assert env.get("CLAUSTRUM_KEEP_THIS") == "ok"  # unrelated env preserved

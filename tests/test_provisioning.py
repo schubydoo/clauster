@@ -25,6 +25,7 @@ from clauster.provisioning import (
     InvalidProjectName,
     ProvisionError,
     TargetExists,
+    _git_env,
     clone_project,
     create_project,
     validate_clone_url,
@@ -35,6 +36,16 @@ FAKE_GIT = Path(__file__).resolve().parent / "fixtures" / "fake_git"
 # Windows can't exec/resolve the extensionless `git` stub; a `.cmd` wrapper sits
 # beside it and is what shutil.which/subprocess must target on Windows.
 _WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
+
+
+def test_git_env_scrubs_clauster_secret(monkeypatch):
+    """A clone runs an attacker-controllable repo, so the git env must omit Clauster secrets."""
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak-to-a-clone")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH", "$argon2id$leak")
+    env = _git_env()
+    assert "CLAUSTER_SESSION_SECRET" not in env
+    assert "CLAUSTER_AUTH_PASSWORD_HASH" not in env
+    assert env["GIT_TERMINAL_PROMPT"] == "0"  # the git lockdown overlay still applies
 
 
 # ----- create -----------------------------------------------------------

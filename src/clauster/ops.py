@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-from . import claude_cli, environments
+from . import claude_cli, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import Project, _load_trusted_paths, trust_state_for
 from .state import CURRENT_SCHEMA, StateStore
@@ -193,6 +193,7 @@ def _check_repo_freshness(repo: Path | None = None) -> Check | None:
             capture_output=True,
             text=True,
             timeout=5,
+            env=procutil.child_env(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return Check("version", WARN, f"source checkout; git freshness check failed: {exc}")
@@ -239,6 +240,7 @@ def _check_systemd_killmode(unit: str = "clauster.service") -> Check | None:
             capture_output=True,
             text=True,
             timeout=5,
+            env=procutil.child_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None  # systemctl present but unusable (no manager, container) — stay quiet

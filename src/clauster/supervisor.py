@@ -38,7 +38,7 @@ from pathlib import Path
 
 from .claude_cli import resolve_binary
 from .models import BackgroundJob
-from .procutil import jiffies_to_epoch, proc_create_time
+from .procutil import child_env, jiffies_to_epoch, proc_create_time
 from .redact import redact_for_disk
 from .trust import trust_directory
 
@@ -316,7 +316,14 @@ def dispatch_background_job(
         resolved, rc_name=rc_name, model=model, permission_mode=permission_mode, prompt=prompt
     )
     try:
-        proc = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(
+            argv,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=child_env(),  # a `claude --bg` agent runs project code; keep secrets out
+        )
     except subprocess.TimeoutExpired as exc:
         raise DispatchError(f"`claude --bg` timed out after {timeout:g}s") from exc
     if proc.returncode != 0:
@@ -450,7 +457,11 @@ def _remove_job(resolved_binary: str, job_id: str) -> tuple[bool, str]:
     """Run ``claude rm <id>``; tolerate the supervisor-down soft-fail. (removed, detail)."""
     try:
         proc = subprocess.run(
-            [resolved_binary, "rm", job_id], capture_output=True, text=True, timeout=30
+            [resolved_binary, "rm", job_id],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=child_env(),
         )
     except subprocess.TimeoutExpired:
         return False, "`claude rm` timed out"

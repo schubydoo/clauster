@@ -18,6 +18,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from . import procutil
 from .claude_cli import resolve_binary
 from .models import Attribution, WorkingSession
 
@@ -41,6 +42,7 @@ def list_working_sessions(binary: str, *, timeout: float = 10.0) -> list[Working
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=procutil.child_env(),
         check=True,
     )
     return parse_agents_json(proc.stdout)

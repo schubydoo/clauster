@@ -84,14 +84,23 @@ def _capture_popen_env(runner: SessionRunner, monkeypatch, tmp_path: Path) -> di
 
 
 def test_popen_injects_recap_env_when_enabled(runner_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak-to-the-bridge")
     runner, _ = _runner_with_recap(runner_config, enabled=True)
     env = _capture_popen_env(runner, monkeypatch, tmp_path)
     assert env is not None
     assert env["CLAUSTER_RESUME_RECAP"] == "1"
     assert env["CLAUSTER_RESUME_RECAP_MAX_CHARS"] == "8000"
+    assert "CLAUSTER_SESSION_SECRET" not in env  # secret scrubbed even with recap on
 
 
-def test_popen_no_recap_env_when_disabled(runner_config, monkeypatch, tmp_path):
+def test_popen_scrubs_secret_and_omits_recap_when_disabled(runner_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "must-not-leak-to-the-bridge")
+    monkeypatch.setenv("ORDINARY_BRIDGE_ENV", "kept")
     runner, _ = _runner_with_recap(runner_config, enabled=False)
-    # env=None means the child inherits Clauster's environment unchanged.
-    assert _capture_popen_env(runner, monkeypatch, tmp_path) is None
+    env = _capture_popen_env(runner, monkeypatch, tmp_path)
+    # The bridge env is now the SCRUBBED parent environment (never None): the
+    # session secret is gone, no recap flags are set, ordinary vars survive.
+    assert env is not None
+    assert "CLAUSTER_SESSION_SECRET" not in env
+    assert "CLAUSTER_RESUME_RECAP" not in env
+    assert env["ORDINARY_BRIDGE_ENV"] == "kept"  # a non-secret var propagates (cross-platform)

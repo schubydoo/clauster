@@ -534,17 +534,21 @@ class SessionRunner:
         # for `claude`), so a bare name that the version probe resolves via
         # shutil.which would fail to spawn here. Also pins the binary we validated.
         cmd[0] = resolve_binary(cmd[0])
-        # When resume-recap is enabled, flag it in the bridge's env. The detached
-        # bridge's child sessions inherit this, and the SessionStart hook (wired
-        # into ~/.claude/settings.json) acts only when it is set — so the recap
-        # never fires for the user's non-Clauster sessions sharing that config.
-        popen_env: dict[str, str] | None = None
+        # Always build the child env from the SCRUBBED base (procutil.child_env)
+        # so the bridge — which runs project-controlled code — can never read a
+        # Clauster secret (session signing key, password hash) from its own
+        # os.environ. When resume-recap is enabled, flag it in the bridge's env:
+        # the detached bridge's child sessions inherit this, and the SessionStart
+        # hook (wired into ~/.claude/settings.json) acts only when it is set — so
+        # the recap never fires for the user's non-Clauster sessions sharing that
+        # config. The recap flags overlay AFTER scrubbing, so they are never lost.
+        recap_env: dict[str, str] = {}
         if self._config.claude.resume_recap:
-            popen_env = {
-                **os.environ,
+            recap_env = {
                 "CLAUSTER_RESUME_RECAP": "1",
                 "CLAUSTER_RESUME_RECAP_MAX_CHARS": str(self._config.claude.resume_recap_max_chars),
             }
+        popen_env = procutil.child_env(recap_env)
         # Capture stdout+stderr to a file so a failed start leaves a diagnosable
         # reason behind (the bridge logs the *why* there, not to --debug-file).
         # The detached child inherits its own dup of the fd, so the parent closes
@@ -664,6 +668,7 @@ class SessionRunner:
                 stdin=subprocess.DEVNULL,
                 stdout=err_fh,
                 stderr=subprocess.STDOUT,
+                env=procutil.child_env(),  # the keeper spawns the bridge; keep secrets out
                 start_new_session=True,
             )
         finally:
