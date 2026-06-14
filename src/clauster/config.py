@@ -21,9 +21,10 @@ _log = logging.getLogger("clauster.config")
 SCHEMA_VERSION = 1
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
-# The spawn/permission modes `claude remote-control` accepts (verified against
-# `claude remote-control --help`, claude 2.1.156). worktree requires a git repo;
-# bypassPermissions is footgun-gated (see `ProjectConfig.allow_bypass_permissions`).
+# The spawn/permission modes `claude remote-control` accepts (this list last
+# verified against `claude remote-control --help` at claude 2.1.156 — a check
+# version, distinct from the `min_version` support floor below). worktree requires
+# a git repo; bypassPermissions is footgun-gated (see `ProjectConfig.allow_bypass_permissions`).
 SpawnMode = Literal["same-dir", "worktree", "session"]
 PermissionMode = Literal["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"]
 # How a bridge is launched. "standard" = the headless `claude remote-control`
@@ -96,7 +97,7 @@ class ClaudeConfig(BaseModel):
 
 
 class InstanceDefaults(BaseModel):
-    """Default spawn/permission mode and capacity applied to new bridges."""
+    """Default spawn and permission mode applied to new bridges (plus a reserved capacity)."""
 
     spawn_mode: SpawnMode = Field(
         default="same-dir",
@@ -105,7 +106,12 @@ class InstanceDefaults(BaseModel):
     permission_mode: PermissionMode = Field(
         default="default", description="Default permission mode for new bridges."
     )
-    capacity: int = Field(default=32, ge=1, description="Max concurrent bridges (≥1).")
+    capacity: int = Field(
+        default=32,
+        ge=1,
+        description="Reserved: intended max concurrent bridges (≥1). Validated but not yet "
+        "enforced at spawn — no limit is applied today.",
+    )
 
 
 class ProjectConfig(BaseModel):

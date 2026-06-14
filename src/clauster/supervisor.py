@@ -1,4 +1,4 @@
-"""Read-only view of the agent-view supervisor's background sessions (bg-agents panel).
+"""Read, dispatch, and stop the agent-view supervisor's background sessions (bg-agents panel).
 
 Claude Code's agent view (2.1.139+, research preview) hosts ``claude --bg``
 background sessions under a per-user supervisor daemon. Its on-disk surface is
@@ -9,8 +9,9 @@ reverse-engineering:
 * ``~/.claude/daemon/roster.json``   — live workers (pid + procStart), kept by the
   supervisor for its own reconnect-after-restart
 
-This slice only OBSERVES (list for the dashboard); dispatch/stop are later
-slices. Conventions applied on the way in:
+This module lists jobs for the dashboard (:func:`list_background_jobs`),
+dispatches new ``claude --bg`` jobs (:func:`dispatch_background_job`), and stops
+running ones (:func:`stop_background_job`). Conventions applied on the way in:
 
 * **Tolerant per job, never silent** — one malformed ``state.json`` skips that
   job with a warning instead of failing the listing (or being swallowed).
