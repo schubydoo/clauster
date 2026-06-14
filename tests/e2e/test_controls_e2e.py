@@ -1,34 +1,31 @@
-"""Browser E2E for the card's secondary controls (overflow menu, session-link controls).
+"""Browser E2E for the secondary controls (overflow menu, running-session controls).
 
 A follow-on slice to ``test_smoke_e2e`` (non-bridge flows) and ``test_bridge_e2e``
-(bridge lifecycle). These port checklist rows that exercise the smaller card
-*controls* rather than the spawn lifecycle itself:
+(bridge lifecycle). These port checklist rows that exercise the smaller *controls*
+rather than the spawn lifecycle itself:
 
 * the **··· overflow menu** open / close (Alpine-driven, no Bootstrap JS) and its
-  always-present **Edit CLAUDE.md** item — drivable with no live bridge;
-* the running-bridge **session-link controls** — the **Open in Claude** deep
-  link plus the **QR** show / hide toggle and the **copy** button on the same
-  row — which need a real (fake-``claude``) bridge to surface a session URL.
+  always-present **Edit CLAUDE.md** item, which lives on the project row — drivable
+  with no live bridge;
+* the running-bridge **session controls** in the Active-sessions zone — the
+  **Open in Claude** deep link, the **QR** show / hide toggle, and the **Logs**
+  panel toggle — which need a real (fake-``claude``) bridge to surface a session.
 
-See ``tests/E2E_CHECKLIST.md`` for the full manual list; the rows covered here
-are marked ``[auto]``.
+The two-zone redesign dropped the per-card "copy session link" button (the
+``copy()`` toast path it drove is no longer reachable from the UI), so the old
+copy-toast row is replaced here by the Logs-panel toggle — the other always-present
+control on a running row. See ``tests/E2E_CHECKLIST.md`` for the manual list.
 """
-
-# TODO(redesign): the two-zone dashboard removed the old project card and its
-# "Start bridge" button — launching is now the per-project "Run Claude here"
-# popover, and the ··· overflow menu now lives on the project row. The Playwright
-# selectors below (.card lookups, "Start bridge") need re-targeting to the new
-# row + launch-popover markup. Out of scope for the unit-suite green-up; this
-# opt-in suite is excluded from the default/CI run.
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 import pytest
-from playwright.sync_api import Locator, Page, expect
 
 if TYPE_CHECKING:
+    from _driver import AgentBrowser
+
     from .conftest import Server
 
 pytestmark = pytest.mark.e2e
@@ -38,106 +35,105 @@ pytestmark = pytest.mark.e2e
 # (matches test_bridge_e2e).
 _STATUS_TIMEOUT = 20_000
 
+# Per-project overflow (···) menu: the trigger button and its single dropdown item.
+_MENU_TRIGGER = '.card-menu button[aria-label="More actions"]'
+_MENU_ITEM = ".card-menu .dropdown-item"  # the Edit/Close CLAUDE.md toggle
 
-def test_overflow_menu_opens_and_closes(page: Page, open_server: str) -> None:
+
+def _start_bridge(browser: AgentBrowser, project: str) -> None:
+    """Trust-on-start a fresh bridge and wait for RUNNING (mirrors test_bridge_e2e)."""
+    browser.click(f'[data-project="{project}"] .launch-anchor button')
+    browser.expect_visible(f'[data-project="{project}"] .launch-pop')
+    browser.check(f'[data-project="{project}"] input[name="lm-{project}"][value="desktop"]')
+    browser.click(f'[data-project="{project}"] .launch-pop button.btn-primary.w-100')
+    browser.check(f'[data-project="{project}"] .alert-warning input[type="checkbox"]')
+    browser.click(f'[data-project="{project}"] .alert-warning button.btn-warning')
+    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
+
+
+def test_overflow_menu_opens_and_closes(browser: AgentBrowser, open_server: str) -> None:
     """The ··· menu toggles open (revealing Edit CLAUDE.md) and closes on outside click.
 
-    Needs no bridge: the menu is Alpine-driven and present on every card.
+    Needs no bridge: the menu is Alpine-driven and present on every project row.
     """
-    page.goto(open_server)
-    card = page.locator('[data-project="beta"]')
-    expect(card).to_be_visible()
-
-    trigger = card.get_by_role("button", name="More actions")
-    menu_item = card.get_by_role("button", name="Edit CLAUDE.md")
+    browser.goto(open_server)
+    browser.expect_visible('[data-project="beta"]')
+    trigger = f'[data-project="beta"] {_MENU_TRIGGER}'
+    item = f'[data-project="beta"] {_MENU_ITEM}'
 
     # Closed by default (x-cloak/x-show keeps the item hidden until the menu opens).
-    expect(trigger).to_have_attribute("aria-expanded", "false")
-    expect(menu_item).to_be_hidden()
+    browser.expect_attr(trigger, "aria-expanded", "false")
+    browser.expect_hidden(item)
 
     # Open: aria-expanded flips and the Edit CLAUDE.md item is revealed.
-    trigger.click()
-    expect(trigger).to_have_attribute("aria-expanded", "true")
-    expect(menu_item).to_be_visible()
+    browser.click(trigger)
+    browser.expect_attr(trigger, "aria-expanded", "true")
+    browser.expect_visible(item)
+    browser.expect_text(item, "Edit CLAUDE.md")
 
     # @click.outside closes it again — click elsewhere on the page body.
-    page.locator("body").click(position={"x": 1, "y": 1})
-    expect(trigger).to_have_attribute("aria-expanded", "false")
-    expect(menu_item).to_be_hidden()
+    browser.eval_js("document.body.click()")
+    browser.expect_attr(trigger, "aria-expanded", "false")
+    browser.expect_hidden(item)
 
 
-def test_overflow_menu_toggles_claude_md_editor(page: Page, open_server: str) -> None:
+def test_overflow_menu_toggles_claude_md_editor(browser: AgentBrowser, open_server: str) -> None:
     """Choosing Edit CLAUDE.md from the ··· menu opens the inline editor and closes the menu."""
-    page.goto(open_server)
-    card = page.locator('[data-project="beta"]')
-    expect(card).to_be_visible()
+    browser.goto(open_server)
+    browser.expect_visible('[data-project="beta"]')
+    editor = '[data-project="beta"] textarea.cmd-text'
+    item = f'[data-project="beta"] {_MENU_ITEM}'
 
-    card.get_by_role("button", name="More actions").click()
-    editor = card.locator("textarea.cmd-text")
-    expect(editor).to_be_hidden()
+    browser.click(f'[data-project="beta"] {_MENU_TRIGGER}')
+    browser.expect_hidden(editor)
 
-    card.get_by_role("button", name="Edit CLAUDE.md").click()
+    browser.click(item)
     # The editor textarea appears and the menu closes itself (menu = false on click).
-    expect(editor).to_be_visible()
-    expect(card.get_by_role("button", name="Edit CLAUDE.md")).to_be_hidden()
+    browser.expect_visible(editor)
+    browser.expect_hidden(item)
 
 
-def _start_bridge(page: Page, card: Locator) -> None:
-    """Trust-on-start a fresh bridge and wait for RUNNING (mirrors test_bridge_e2e)."""
-    card.get_by_role("button", name="Start bridge").click()
-    card.get_by_role("checkbox").check()
-    card.get_by_role("button", name="Trust & start").click()
-    expect(card.get_by_role("status")).to_contain_text("Running", timeout=_STATUS_TIMEOUT)
+def test_running_bridge_session_link_and_qr(browser: AgentBrowser, bridge_server: Server) -> None:
+    """A running bridge surfaces the Open-in-Claude deep link plus a QR show/hide toggle."""
+    browser.goto(bridge_server.url)
+    browser.expect_visible('[data-project="gamma"]')
+    _start_bridge(browser, "gamma")
 
+    # The deep link renders once a session URL is known; "Open in Claude" is a link role.
+    browser.expect_role_visible("link", "Open in Claude")
 
-def test_running_bridge_session_link_controls(page: Page, bridge_server: Server) -> None:
-    """A running bridge surfaces the Open-in-Claude link plus copy and a QR show/hide toggle."""
-    page.goto(bridge_server.url)
-    card = page.locator('[data-project="gamma"]')
-    expect(card).to_be_visible()
-
-    _start_bridge(page, card)
-
-    # The deep link and its sibling controls render once a session URL is known.
-    # Scope copy to the session-link row by title (a second "copy" exists for the
-    # optional New-session/env link below it).
-    expect(card.get_by_role("link", name="Open session in Claude")).to_be_visible()
-    copy_btn = card.locator('button[title="Copy the session link to the clipboard."]')
-    qr_btn = card.get_by_role("button", name="QR", exact=True)
-    expect(copy_btn).to_be_visible()
-    expect(qr_btn).to_be_visible()
-
+    qr_btn = 'section.zone-active button[title="Show a QR code to open on your phone"]'
+    qr_img = 'section.zone-active img[alt="QR code for the session deep link"]'
+    browser.expect_visible(qr_btn)
     # QR is hidden until toggled; the QR image lives behind an x-if template.
-    qr_img = card.get_by_role("img", name="QR code for the session deep link")
-    expect(qr_img).to_be_hidden()
+    browser.expect_hidden(qr_img)
 
-    # Show: the button relabels to "hide QR" and the QR image renders.
-    qr_btn.click()
-    expect(card.get_by_role("button", name="hide QR")).to_be_visible()
-    expect(qr_img).to_be_visible()
+    # Show: the QR image renders.
+    browser.click(qr_btn)
+    browser.expect_visible(qr_img)
 
-    # Hide again: the image is removed and the button reverts to "QR".
-    card.get_by_role("button", name="hide QR").click()
-    expect(qr_img).to_be_hidden()
-    expect(card.get_by_role("button", name="QR")).to_be_visible()
+    # Hide again: the image is removed from the DOM.
+    browser.click(qr_btn)
+    browser.expect_hidden(qr_img)
 
 
-def test_running_bridge_copy_session_link_toasts(page: Page, bridge_server: Server) -> None:
-    """Clicking copy on a running bridge surfaces a confirmation toast (never silent)."""
-    page.goto(bridge_server.url)
-    card = page.locator('[data-project="gamma"]')
-    expect(card).to_be_visible()
+def test_running_bridge_logs_toggle(browser: AgentBrowser, bridge_server: Server) -> None:
+    """A running bridge's Logs control toggles the live-tail panel open and closed."""
+    browser.goto(bridge_server.url)
+    browser.expect_visible('[data-project="gamma"]')
+    _start_bridge(browser, "gamma")
 
-    # Grant clipboard so the copy() path can reach navigator.clipboard cleanly; even
-    # if it can't, the fallback execCommand path still toasts, so a toast must appear.
-    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    logs_btn = 'section.zone-active button:has(use[href="#ic-logs"])'
+    log_view = "section.zone-active pre.log-view"
+    browser.expect_text(logs_btn, "Logs")
+    browser.expect_hidden(log_view)
 
-    _start_bridge(page, card)
+    # Open: the button relabels to "Hide logs" and the live-tail <pre> renders.
+    browser.click(logs_btn)
+    browser.expect_text(logs_btn, "Hide logs")
+    browser.expect_visible(log_view)
 
-    # Wait for the control to render before clicking (matches the sibling test) so a
-    # session-URL/RUNNING race can't flake the click.
-    copy_btn = card.locator('button[title="Copy the session link to the clipboard."]')
-    expect(copy_btn).to_be_visible()
-    copy_btn.click()
-    # copy() toasts "Link copied" (or a manual-copy fallback) — assert a toast surfaces.
-    expect(page.get_by_text("Link copied")).to_be_visible()
+    # Close: the panel is removed and the button reverts to "Logs".
+    browser.click(logs_btn)
+    browser.expect_text(logs_btn, "Logs")
+    browser.expect_hidden(log_view)

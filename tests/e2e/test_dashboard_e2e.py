@@ -1,154 +1,163 @@
-"""Browser E2E for the non-bridge dashboard widgets (overflow menu, editor, new-project).
+"""Browser E2E for the non-bridge dashboard widgets (CLAUDE.md editor, new-project).
 
 The third slice of the automated browser suite (after ``test_smoke_e2e`` and the
 bridge-spawn ``test_bridge_e2e``). These drive real headless Chromium against a
-live clauster but, unlike the bridge slice, never spawn a ``claude`` subprocess —
-they exercise the dashboard's own widgets: the ``···`` overflow menu, the inline
-CLAUDE.md editor (open → edit → save), and the New-project create form (validation
-gate + in-place card insertion with no full-page reload). See
-``tests/E2E_CHECKLIST.md`` for the full manual list; these port the **CLAUDE.md
-editor** and **Create project (empty)** rows.
+live clauster and exercise the dashboard's own widgets: the inline CLAUDE.md editor
+(open → edit → save), and the New-project create form (validation gate + clone
+toggle + in-place row insertion with no full-page reload). See
+``tests/E2E_CHECKLIST.md`` for the full manual list.
 
-They use the function-scoped ``bridge_server`` for the flows that mutate the
-projects_root on disk (a saved CLAUDE.md, a freshly created project), so a write
-in one test never leaks into the next; the read-only validation checks ride the
+They use the function-scoped ``bridge_server`` for flows that mutate the
+projects_root on disk (a saved CLAUDE.md, a freshly created project), so a write in
+one test never leaks into the next; the read-only validation checks ride the
 module-scoped ``open_server``.
 """
 
-# TODO(redesign): the two-zone dashboard removed the old project card and its
-# "Start bridge" button — launching is now the per-project "Run Claude here"
-# popover. The Playwright selectors below (get_by_role("button", name="Start
-# bridge"), .card lookups) need re-targeting to the new row + launch-popover
-# markup. Out of scope for the unit-suite green-up; this opt-in suite is excluded
-# from the default/CI run.
-
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import pytest
-from playwright.sync_api import Page, expect
 
 if TYPE_CHECKING:
+    from _driver import AgentBrowser
+
     from .conftest import Server
 
 pytestmark = pytest.mark.e2e
-
 
 # A bridge spawn waits on the fake claude's readiness markers, then the dashboard's
 # 4s poll reconciles state — give the trust-and-start status transition headroom.
 _STATUS_TIMEOUT = 20_000
 
+# The New-project form: its toggle (the only primary button in the Projects zone
+# header) and the submit (scoped to the form's own .mt-3 block, so the warn-banner's
+# button can't be mistaken for it).
+_NEW_PROJECT_TOGGLE = "section.zone-projects .zone-actions button.btn-primary"
+_NEW_PROJECT_SUBMIT = 'div[x-show="np.open"] .mt-3 button.btn-primary'
 
-def test_overflow_menu_opens_claude_md_editor_and_saves(page: Page, bridge_server: Server) -> None:
+
+def test_overflow_menu_opens_claude_md_editor_and_saves(
+    browser: AgentBrowser, bridge_server: Server
+) -> None:
     """The ··· overflow menu reveals the CLAUDE.md editor; an edit saves in place.
 
-    Drives the overflow-menu row (Alpine toggles it, no Bootstrap JS) and the
-    CLAUDE.md editor row (load → edit → save → ``✓ saved``) against ``beta``, the
+    Drives the editor row (load → edit → save → ``✓ saved``) against ``beta``, the
     fixture project that already ships a CLAUDE.md. The write path refuses an
     untrusted directory (a 403), so the project is trusted first via the
-    trust-on-start gate — which also surfaces the editor's "bridge running" banner.
+    trust-on-start gate — which also surfaces the editor's "session running" banner.
     """
-    page.goto(bridge_server.url)
-    card = page.locator('[data-project="beta"]')
-    expect(card).to_be_visible()
+    browser.goto(bridge_server.url)
+    browser.expect_visible('[data-project="beta"]')
 
-    # Trust the directory (the only path to trust is the start gate); once RUNNING the
+    # Trust the directory (the only path to trust is the launch gate); once RUNNING the
     # write path is allowed. The bridge stays up so the editor shows its running banner.
-    card.get_by_role("button", name="Start bridge").click()
-    card.get_by_role("checkbox").check()
-    card.get_by_role("button", name="Trust & start").click()
-    expect(card.get_by_role("status")).to_contain_text("Running", timeout=_STATUS_TIMEOUT)
+    browser.click('[data-project="beta"] .launch-anchor button')
+    browser.expect_visible('[data-project="beta"] .launch-pop')
+    browser.check('[data-project="beta"] input[name="lm-beta"][value="desktop"]')
+    browser.click('[data-project="beta"] .launch-pop button.btn-primary.w-100')
+    browser.check('[data-project="beta"] .alert-warning input[type="checkbox"]')
+    browser.click('[data-project="beta"] .alert-warning button.btn-warning')
+    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
 
+    editor = '[data-project="beta"] textarea.cmd-text'
+    block = '[data-project="beta"] .border.rounded'  # the editor block (x-if template)
     # The editor is collapsed until opened from the overflow menu.
-    editor = card.locator(".cmd-text")
-    expect(editor).to_be_hidden()
+    browser.expect_hidden(editor)
 
     # Open the ··· menu, then click "Edit CLAUDE.md".
-    card.get_by_role("button", name="More actions").click()
-    card.get_by_role("button", name="Edit CLAUDE.md").click()
+    browser.click('[data-project="beta"] .card-menu button[aria-label="More actions"]')
+    browser.click('[data-project="beta"] .card-menu .dropdown-item')
 
     # The textarea loads the on-disk content (the fixture wrote "# beta\n"), and the
     # running bridge raises the "applies to new sessions" banner.
-    expect(editor).to_be_visible()
-    expect(editor).to_have_value("# beta\n")
-    expect(card.get_by_text("A bridge is running")).to_be_visible()
+    browser.expect_visible(editor)
+    assert browser.get_value(editor) == "# beta"  # agent-browser strips the trailing \n
+    browser.expect_text(f"{block} .alert-warning", "A session is running")
 
     # Edit and Save; the green "✓ saved" confirmation appears (no reload).
-    editor.fill("# beta\n\nedited by e2e\n")
-    card.get_by_role("button", name="Save").click()
-    expect(card.get_by_text("✓ saved")).to_be_visible()
+    browser.fill(editor, "# beta\n\nedited by e2e\n")
+    browser.click(f"{block} button.btn-primary")
+    browser.expect_text(f"{block} .text-green", "✓ saved")
 
-    # Re-opening the editor shows the persisted edit (close, then reopen). Assert the
+    # Re-opening the editor shows the persisted edit (Cancel, then reopen). Assert the
     # Cancel button is present first, so an auto-collapse-on-save regression fails here
     # explicitly rather than as an opaque no-op click + later hidden-state assertion.
-    expect(card.get_by_role("button", name="Cancel")).to_be_visible()
-    card.get_by_role("button", name="Cancel").click()
-    expect(editor).to_be_hidden()
-    card.get_by_role("button", name="More actions").click()
-    card.get_by_role("button", name="Edit CLAUDE.md").click()
-    expect(editor).to_have_value("# beta\n\nedited by e2e\n")
+    cancel = f"{block} .btn-list button:not(.btn-primary)"
+    browser.expect_visible(cancel)
+    browser.click(cancel)
+    browser.expect_hidden(editor)
+    browser.click('[data-project="beta"] .card-menu button[aria-label="More actions"]')
+    browser.click('[data-project="beta"] .card-menu .dropdown-item')
+    # A textarea's *value* (not its DOM text) carries the persisted edit; the reopen
+    # re-fetches from disk asynchronously, so poll the value (agent-browser strips the
+    # trailing newline). The driver has no expect_value, so poll get_value here.
+    browser.expect_visible(editor)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and browser.get_value(editor) != "# beta\n\nedited by e2e":
+        time.sleep(0.2)
+    assert browser.get_value(editor) == "# beta\n\nedited by e2e"
 
 
-def test_new_project_form_validation_and_clone_toggle(page: Page, open_server: str) -> None:
+def test_new_project_form_validation_and_clone_toggle(
+    browser: AgentBrowser, open_server: str
+) -> None:
     """The New-project form gates Create on a name and reveals the Git URL on Clone.
 
     Read-only validation: the submit stays disabled with an empty name, the clone
     radio swaps in the Git-URL input, and the create radio swaps it back out.
     """
-    page.goto(open_server)
-    page.get_by_role("button", name="+ New project").click()
-
-    name = page.locator('input[x-model="np.name"]')
-    expect(name).to_be_visible()
+    browser.goto(open_server)
+    browser.click(_NEW_PROJECT_TOGGLE)
+    browser.expect_visible("#np-name")
 
     # Empty name → the submit (Create) is disabled.
-    create = page.get_by_role("button", name="Create", exact=True)
-    expect(create).to_be_disabled()
-    name.fill("scratch-proj")
-    expect(create).to_be_enabled()
+    browser.expect_disabled(_NEW_PROJECT_SUBMIT)
+    browser.expect_text(_NEW_PROJECT_SUBMIT, "Create")
+    browser.fill("#np-name", "scratch-proj")
+    browser.expect_enabled(_NEW_PROJECT_SUBMIT)
 
     # The Git-URL input is clone-only: hidden under "Create empty", shown under "Clone".
-    # Click the radio labels by their `for` target (the empty-state CTA shares the
-    # "Clone from git URL" text, so match the form's own label, not visible text).
-    git_url = page.locator('input[x-model="np.url"]')
-    expect(git_url).to_be_hidden()
-    page.locator('label[for="np-clone"]').click()
-    expect(git_url).to_be_visible()
+    # Click the radio labels by their `for` target.
+    browser.expect_hidden("#np-url")
+    browser.click('label[for="np-clone"]')
+    browser.expect_visible("#np-url")
     # The submit relabels to "Clone" in clone mode.
-    expect(page.get_by_role("button", name="Clone", exact=True)).to_be_visible()
+    browser.expect_text(_NEW_PROJECT_SUBMIT, "Clone")
     # Switching back to create hides the URL field again.
-    page.locator('label[for="np-create"]').click()
-    expect(git_url).to_be_hidden()
+    browser.click('label[for="np-create"]')
+    browser.expect_hidden("#np-url")
 
 
-def test_create_empty_project_inserts_card_in_place(page: Page, bridge_server: Server) -> None:
-    """Creating an empty project inserts its card in the grid with no full-page reload.
+def test_create_empty_project_inserts_row_in_place(
+    browser: AgentBrowser, bridge_server: Server
+) -> None:
+    """Creating an empty project inserts its row in the grid with no full-page reload.
 
-    Pins a sentinel on ``window`` and asserts it survives the create, proving the
-    new card is grafted into the live grid (the checklist's "no full-page reload"
+    Pins a sentinel on ``window`` and asserts it survives the create, proving the new
+    row is grafted into the live grid (the checklist's "no full-page reload"
     guarantee) rather than fetched via a navigation.
     """
-    page.goto(bridge_server.url)
-    expect(page.locator("#project-grid")).to_be_visible()
+    browser.goto(bridge_server.url)
+    browser.expect_visible("#project-grid")
     # Sentinel: a full-page reload would wipe this.
-    page.evaluate("window.__e2e_no_reload = true")
+    browser.eval_js("window.__e2e_no_reload = true")
 
-    page.get_by_role("button", name="+ New project").click()
-    page.locator('input[x-model="np.name"]').fill("delta")
-    page.get_by_role("button", name="Create", exact=True).click()
+    browser.click(_NEW_PROJECT_TOGGLE)
+    browser.fill("#np-name", "delta")
+    browser.click(_NEW_PROJECT_SUBMIT)
 
-    # The new card appears in place (the create API call can be slow in CI, so give it
-    # the same headroom as the other waitable assertions in this file)...
-    new_card = page.locator('[data-project="delta"]')
-    expect(new_card).to_be_visible(timeout=_STATUS_TIMEOUT)
-    expect(new_card.get_by_role("heading", name="delta")).to_be_visible()
+    # The new row appears in place (the create API call can be slow in CI, so give it
+    # the same headroom as the other waitable assertions)...
+    browser.expect_visible('[data-project="delta"]', timeout_ms=_STATUS_TIMEOUT)
+    browser.expect_text('[data-project="delta"]', "delta")
     # ...and the page never navigated (sentinel intact).
-    assert page.evaluate("window.__e2e_no_reload") is True, (
+    assert browser.eval_js("window.__e2e_no_reload") == "true", (
         "page navigated during project creation — the window sentinel was wiped"
     )
 
-    # The inserted card is fully interactive without a refresh: an untrusted new
-    # project offers Start, which opens the trust prompt rather than spawning.
-    new_card.get_by_role("button", name="Start bridge").click()
-    expect(new_card.get_by_role("button", name="Trust & start")).to_be_visible()
+    # The inserted row is fully interactive without a refresh: it has its own launch
+    # popover, which opens on click.
+    browser.click('[data-project="delta"] .launch-anchor button')
+    browser.expect_visible('[data-project="delta"] .launch-pop')
