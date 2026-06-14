@@ -449,8 +449,76 @@ async def test_respond_after_exit_raises_not_claustrum_error(fake_claustrum):
         assert session.status == "crashed"
         with pytest.raises(HostedSessionError):
             await session.respond_control("perm-1", {"behavior": "allow"})
-        # Request not consumed — still parked, just unanswerable on a dead session.
+        # Exit clears the parked request (resolved as interrupted), so respond raises at
+        # the status guard without consuming anything — and no dead Allow/Deny lingers.
+        assert session.pending_requests == []
+
+
+async def test_exit_resolves_parked_permission_requests(fake_claustrum):
+    # A parked permission request can never be answered once the agent exits, so exit
+    # clears it and fans out a `control_resolved` (interrupted) — the live UI drops the
+    # dead Allow/Deny instead of leaving a button that 409s forever, and a reattach
+    # replays it as already-resolved.
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(queue, "control_request")
         assert [r.request_id for r in session.pending_requests] == ["perm-1"]
+        await fake.emit_exit(_PID, 0)
+        resolved = await _drain_until(queue, "control_resolved")
+        assert resolved["request_id"] == "perm-1" and resolved["behavior"] == "interrupted"
+        assert session.pending_requests == []
+
+
+async def test_respond_rejected_while_stopping(fake_claustrum):
+    # stop() latches _stopping before its SIGINT grace; a respond that races in while
+    # the status is still "running" must fail closed rather than write a control_response
+    # into a session being torn down.
+    async with _session(fake_claustrum, stop_grace=0.2) as (fake, session):
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(session.subscribe(), "control_request")
+        stop_task = asyncio.create_task(session.stop())
+        await asyncio.sleep(0.01)  # let stop() latch _stopping before we respond
+        assert session.status == "running" and session._stopping
+        with pytest.raises(HostedSessionError, match="stopping"):
+            await session.respond_control("perm-1", {"behavior": "allow"})
+        await stop_task
+
+
+async def test_exit_resolves_parked_requests_on_daemon_loss(fake_claustrum, monkeypatch):
+    # Daemon loss during stop() drives status="error" WITHOUT an exit frame (the pump
+    # never calls _on_exit), so the error path must resolve parked requests itself —
+    # the same invariant as a clean exit, not a dead Allow/Deny left actionable.
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(queue, "control_request")
+        assert [r.request_id for r in session.pending_requests] == ["perm-1"]
+
+        async def _boom(*_a, **_k):
+            raise ClaustrumError("daemon vanished mid-stop")
+
+        monkeypatch.setattr(session._client, "kill", _boom)
+        await session.stop()
+        assert session.status == "error"
+        resolved = await _drain_until(queue, "control_resolved")
+        assert resolved["request_id"] == "perm-1" and resolved["behavior"] == "interrupted"
+        assert session.pending_requests == []
 
 
 # -- input + lifecycle -----------------------------------------------------

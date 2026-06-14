@@ -188,6 +188,9 @@ class HostedSession:
         self._event_seq = 0
         self._subscribers: list[_Subscriber] = []
         self._pending: dict[str, _ControlRequest] = {}
+        # Latched at the start of stop() so a concurrent respond_control fails closed
+        # rather than writing a control_response into a session being killed.
+        self._stopping = False
         self._stream: ProcessStream | None = None
         self._source: asyncio.Queue[dict[str, Any]] | None = None
         self._pump_task: asyncio.Task[None] | None = None
@@ -299,6 +302,10 @@ class HostedSession:
             # would make the stdin write raise ClaustrumError (which the API doesn't
             # map), and the request would be consumed with no control_response sent.
             raise HostedSessionError(f"cannot respond on a {self.status} hosted session")
+        if self._stopping:
+            # stop() is mid-flight (status is still "running" during the SIGINT grace);
+            # don't write a response into a session we're tearing down.
+            raise HostedSessionError("hosted session is stopping")
         if request_id not in self._pending:
             raise HostedSessionError(f"no parked control request {request_id!r}")
         # Claim the request atomically (no await between the check and the pop, so
@@ -340,6 +347,7 @@ class HostedSession:
         if self.status in ("stopped", "crashed", "error"):
             await self._teardown()
             return
+        self._stopping = True  # reject any concurrent respond_control while we tear down
         try:
             await self._client.kill(self._process_id, signal="INT")
             if self._stream is not None:
@@ -357,6 +365,7 @@ class HostedSession:
                         pass
         except ClaustrumError as exc:  # pragma: no cover - daemon loss during stop (CL-4b)
             self.status = "error"
+            self._resolve_parked()  # a dead session must not leave a parked request stranded
             self._emit({"type": "lost", "reason": f"stop failed: {exc}"})
         finally:
             await self._teardown()
@@ -419,6 +428,7 @@ class HostedSession:
         except ClaustrumError as exc:  # pragma: no cover - daemon loss mid-pump (CL-4b)
             # A daemon-side failure surfaced through the reader; report it, don't swallow.
             self.status = "error"
+            self._resolve_parked()  # resolve any parked request so it isn't left stranded
             self._emit({"type": "lost", "reason": str(exc)})
 
     async def _on_line(self, stream: Any, line: str) -> None:
@@ -477,10 +487,27 @@ class HostedSession:
         if isinstance(sid, str) and sid:
             self.claude_session_uuid = sid
 
+    def _resolve_parked(self, behavior: str = "interrupted") -> None:
+        """Clear every parked control request, fanning out a resolution for each.
+
+        Called on any terminal/error transition: the agent is gone, so a parked
+        permission request can never be answered (respond_control fails closed on a
+        non-running session). Clearing it and telling watchers via control_resolved
+        keeps the live UI from showing a dead Allow/Deny that 409s forever, and a
+        reattach from replaying it through the ring as still-actionable.
+        """
+        parked_ids = list(self._pending)
+        self._pending.clear()
+        for request_id in parked_ids:
+            self._emit(
+                {"type": "control_resolved", "request_id": request_id, "behavior": behavior}
+            )
+
     def _on_exit(self, exit_code: Any) -> None:
-        """Latch the terminal status (stopped/crashed) and emit the exit event."""
+        """Latch the terminal status, resolve parked requests, emit the exit event."""
         self.exit_code = exit_code if isinstance(exit_code, int) else None
         self.status = "stopped" if self.exit_code == 0 else "crashed"
+        self._resolve_parked()
         self._emit({"type": "exit", "exit_code": self.exit_code})
 
     async def _write_stdin(self, frame: dict[str, Any]) -> None:
