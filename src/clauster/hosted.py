@@ -312,6 +312,9 @@ class HostedSession:
         # under asyncio's cooperative model this is exclusive): a concurrent
         # responder would now fail the existence check rather than racing us past
         # it and writing a second control_response for the same request_id.
+        # Popping BEFORE the await below is also load-bearing for the failure path:
+        # a concurrent _on_exit/_resolve_parked() then can't see this id in _pending,
+        # so the except branch is the SOLE emitter of its control_resolved (no dupe).
         parked = self._pending.pop(request_id)
         if response.get("behavior") == "allow" and "updatedInput" not in response:
             # The CLI's can_use_tool response schema requires updatedInput on every
@@ -327,8 +330,20 @@ class HostedSession:
             await self._send_control_response(request_id, response)
         except ClaustrumError:
             # Restore the claim if the transport write fails: the request must stay
-            # parked and retryable, never silently lost with the agent unanswered.
-            self._pending.setdefault(request_id, parked)
+            # parked and retryable — but only while the session is still answerable. If a
+            # concurrent exit/error drained _pending during the await (or stop() latched),
+            # re-parking would resurrect a dead prompt that 409s forever with no
+            # resolution; resolve it as interrupted instead so the live UI drops it.
+            if self.status == "running" and not self._stopping:
+                self._pending.setdefault(request_id, parked)
+            else:
+                self._emit(
+                    {
+                        "type": "control_resolved",
+                        "request_id": request_id,
+                        "behavior": "interrupted",
+                    }
+                )
             raise
         self._emit(
             {

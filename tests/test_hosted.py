@@ -521,6 +521,35 @@ async def test_exit_resolves_parked_requests_on_daemon_loss(fake_claustrum, monk
         assert session.pending_requests == []
 
 
+async def test_failed_write_resolves_instead_of_reparking_on_dead_session(
+    fake_claustrum, monkeypatch
+):
+    # A respond whose write fails AFTER a concurrent exit drained _pending must not
+    # resurrect the popped request onto a dead session (it would 409 forever with no
+    # resolution). The except path resolves it as interrupted instead of re-parking.
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(queue, "control_request")
+
+        async def _exit_then_fail(request_id, response):
+            session.status = "crashed"  # a concurrent exit lands during the write
+            raise ClaustrumError("daemon lost mid-write")
+
+        monkeypatch.setattr(session, "_send_control_response", _exit_then_fail)
+        with pytest.raises(ClaustrumError):
+            await session.respond_control("perm-1", {"behavior": "allow"})
+        # Not re-parked onto the dead session — resolved as interrupted instead.
+        assert session.pending_requests == []
+        resolved = await _drain_until(queue, "control_resolved")
+        assert resolved["request_id"] == "perm-1" and resolved["behavior"] == "interrupted"
+
+
 # -- input + lifecycle -----------------------------------------------------
 
 
