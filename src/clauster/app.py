@@ -902,10 +902,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         leaves a cloud orphan), then `claude rm`s the job. The job id is validated
         to the 8-hex short-id shape (also the `claude rm` argv-injection guard).
 
-        Returns `{id, settled, removed, detail}`. A `settled:false` row that didn't
-        exit in time is a 409 (escalate from the CLI — we don't force-kill, which
-        would orphan the cloud session); `removed:false` (supervisor idle-exited)
-        is reported in the body, not an error — the session is already stopped.
+        Returns `{id, settled, removed, detail}`. `settled` is True only for a
+        confirmed cloud-deregistering stop; `settled:false` (no live worker found)
+        is a 200 whose `detail` flags the unconfirmed stop / possible cloud orphan.
+        A session that was signalled but didn't settle in time raises StopError → 409
+        (escalate from the CLI — we don't force-kill, which would orphan the cloud
+        session); `removed:false` (supervisor idle-exited) is reported in the body.
         """
         if not supervisor.valid_job_id(job_id):
             raise HTTPException(status_code=422, detail="invalid job id")
