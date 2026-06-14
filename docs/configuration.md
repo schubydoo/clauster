@@ -79,7 +79,7 @@ Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
 | --- | --- | --- | --- |
 | `spawn_mode` | `same-dir` \| `worktree` \| `session` | `same-dir` | Default spawn mode for new bridges. `worktree` requires a git repo. |
 | `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` | `default` | Default permission mode for new bridges. |
-| `capacity` | int | `32` | Max concurrent bridges (≥1). |
+| `capacity` | int | `32` | Reserved: intended max concurrent bridges (≥1). Validated but not yet enforced at spawn — no limit is applied today. |
 <!-- END GEN: instance_defaults -->
 
 Permission modes: `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
