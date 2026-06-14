@@ -57,7 +57,7 @@ class AgentBrowser:
         below the fold gets ``elementFromPoint() == null`` and the click silently
         lands nowhere — the popover's submit button is the one that bites.
         """
-        self._run("set", "viewport", "1280", "2000")
+        self._run("set", "viewport", "1280", "2000", check=True)
         self._run("open", url, check=True)
         # Best-effort settle; the expect_* pollers absorb any residual async render.
         self._run("wait", "--load", "networkidle")
