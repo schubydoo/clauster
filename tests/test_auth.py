@@ -304,8 +304,8 @@ def test_secret_truncated_on_disk_is_rejected(tmp_path, monkeypatch):
 
 def test_secret_unreadable_on_disk_is_rejected(tmp_path, monkeypatch):
     # session.secret exists but can't be read (here: it's a directory) — the read OSError
-    # is absorbed and, with nothing valid to read, we refuse rather than hang or crash.
+    # is absorbed and surfaced in the message so it's not misreported as merely truncated.
     (tmp_path / "session.secret").mkdir()
     monkeypatch.setattr(auth.time, "sleep", lambda *_: None)
-    with pytest.raises(RuntimeError, match="truncated"):
+    with pytest.raises(RuntimeError, match="last read error"):
         auth.load_or_create_secret(tmp_path)

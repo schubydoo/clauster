@@ -96,17 +96,20 @@ def _read_existing_secret(path: Path) -> bytes:
     that raced in can momentarily read 0 or partial bytes. Retry until the full secret
     lands, and refuse a persistently-truncated one rather than boot with a short key.
     """
+    last_err: OSError | None = None
     for _ in range(_SECRET_READ_ATTEMPTS):
         try:
             data = path.read_bytes()
-        except OSError:
+        except OSError as exc:
+            last_err = exc  # distinguish "unreadable" from "truncated" in the message
             data = b""
         if len(data) >= 32:
             return data
         time.sleep(_SECRET_READ_DELAY)
+    detail = f" (last read error: {last_err})" if last_err is not None else ""
     raise RuntimeError(
-        f"session secret at {path} is truncated (<32 bytes); refusing a short signing "
-        "key — delete it to regenerate."
+        f"session secret at {path} is truncated or unreadable{detail}; refusing a short "
+        "signing key — delete it to regenerate."
     )
 
 
