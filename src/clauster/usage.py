@@ -13,6 +13,7 @@ Token counts, by contrast, are exact (read straight from the transcript's ``usag
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +39,31 @@ PRICES: dict[str, ModelPrice] = {
 }
 
 
+def _as_int(value: object) -> int:
+    """Coerce a usage token field to int; 0 for missing/null/non-numeric values.
+
+    A malformed token value (``"abc"``, ``[1, 2]``, ``null``, or a non-finite
+    ``NaN``/``Infinity`` — which ``json.loads`` accepts by default) must not abort the
+    whole project rollup with an unhandled coercion error — contribute 0 instead,
+    honoring the parser's skip-a-corrupt-line contract.
+    """
+    if isinstance(value, int):
+        # bool is an int subclass (True→1). A Python int is arbitrary-precision and
+        # never raises — crucially it must NOT go through math.isfinite below, which
+        # coerces to a C double and OverflowErrors on a huge JSON integer literal.
+        return value
+    if isinstance(value, float):
+        # int(nan) raises ValueError and int(±inf) raises OverflowError; json.loads
+        # decodes bare NaN/Infinity tokens to these, so coerce a non-finite float to 0.
+        return int(value) if math.isfinite(value) else 0
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
 @dataclass
 class TokenTotals:
     """Running token + message counts for one usage bucket (e.g. a model or day)."""
@@ -49,11 +75,16 @@ class TokenTotals:
     messages: int = 0
 
     def add_usage(self, usage: dict) -> None:
-        """Fold one message's ``usage`` dict into these totals (counts one message)."""
-        self.input += int(usage.get("input_tokens", 0) or 0)
-        self.output += int(usage.get("output_tokens", 0) or 0)
-        self.cache_creation += int(usage.get("cache_creation_input_tokens", 0) or 0)
-        self.cache_read += int(usage.get("cache_read_input_tokens", 0) or 0)
+        """Fold one message's ``usage`` dict into these totals (counts one message).
+
+        Token fields are coerced with :func:`_as_int`, so a missing, null, or
+        non-numeric value contributes 0 rather than raising — one malformed record
+        must never abort the whole rollup (which would 500 the usage endpoint).
+        """
+        self.input += _as_int(usage.get("input_tokens"))
+        self.output += _as_int(usage.get("output_tokens"))
+        self.cache_creation += _as_int(usage.get("cache_creation_input_tokens"))
+        self.cache_read += _as_int(usage.get("cache_read_input_tokens"))
         self.messages += 1
 
     def merge(self, other: TokenTotals) -> None:

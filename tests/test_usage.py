@@ -60,6 +60,38 @@ def test_token_totals_accumulate():
     assert t.total_tokens == 11 + 7 + 100 + 200
 
 
+def test_add_usage_tolerates_non_numeric_token_values():
+    # A malformed token value must contribute 0, not raise — one bad transcript line
+    # must never abort the whole rollup (it would 500 the usage endpoint).
+    t = TokenTotals()
+    t.add_usage(
+        {
+            "input_tokens": "abc",  # non-numeric string
+            "output_tokens": [1, 2],  # structured
+            "cache_creation_input_tokens": None,  # null
+            "cache_read_input_tokens": "42",  # numeric string → coerced
+        }
+    )
+    assert (t.input, t.output, t.cache_creation, t.cache_read, t.messages) == (0, 0, 0, 42, 1)
+
+
+def test_add_usage_tolerates_non_finite_floats():
+    # json.loads decodes bare NaN/Infinity tokens to these floats; int() raises
+    # ValueError/OverflowError on them, so they must coerce to 0 rather than abort.
+    t = TokenTotals()
+    t.add_usage({"input_tokens": float("inf"), "output_tokens": float("nan")})
+    assert (t.input, t.output, t.messages) == (0, 0, 1)
+
+
+def test_add_usage_handles_huge_integer_without_overflow():
+    # JSON integers are unbounded; one larger than a C double would OverflowError if
+    # routed through math.isfinite. A real int must pass through at full precision.
+    huge = 10**400
+    t = TokenTotals()
+    t.add_usage({"input_tokens": huge, "output_tokens": 5})
+    assert t.input == huge and t.output == 5 and t.messages == 1
+
+
 def test_cost_usd_opus_exact():
     t = TokenTotals(input=6, output=13, cache_creation=11715, cache_read=17228)
     # 6*15 + 13*75 + 11715*18.75 + 17228*1.5, per Mtok
@@ -125,6 +157,25 @@ def test_parse_tolerates_blank_and_corrupt_lines(tmp_path):
     )
     u = parse_transcript(p)
     assert u.totals.input == 5 and u.totals.messages == 1
+
+
+def test_parse_tolerates_malformed_token_values(tmp_path):
+    # A structurally-valid line whose usage holds a non-numeric ("oops") or non-finite
+    # (Infinity — json.loads accepts the bare token) value must be tolerated (counted
+    # with that field as 0), not abort the tally with an int()/OverflowError.
+    p = _transcript(
+        tmp_path,
+        [
+            _assistant("claude-opus-4-8", input_tokens="oops", output_tokens=5),
+            _assistant("claude-opus-4-8", input_tokens=float("inf"), output_tokens=5),
+            _assistant("claude-opus-4-8", input_tokens=10, output_tokens=20),
+        ],
+    )
+    u = parse_transcript(p)
+    totals = u.by_model["claude-opus-4-8"]
+    assert totals.input == 10  # "oops" and Infinity contributed 0 input; the valid line 10
+    assert totals.output == 30  # 5 + 5 + 20
+    assert totals.messages == 3  # all three lines counted
 
 
 def test_parse_tolerates_invalid_utf8(tmp_path):
