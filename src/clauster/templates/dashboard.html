@@ -85,23 +85,30 @@
                       title="Survived a daemon restart — Resume to recover or Kill to clean up">orphan</span>
                 <span class="fw-medium me-1" x-text="h.project"></span>
                 <span class="text-secondary small me-1" x-text="h.permission_mode"></span>
+                {# `:disabled` is coerced with `!!` on every busy-state binding below. These
+                   buttons live in an x-for clone and the busy maps (hostedStopping/hostedResuming/
+                   agentStopping) start without the row's key. Alpine 3.15.x renders a bare
+                   `:disabled="map[key]"` as DISABLED when that key is absent (an explicit false
+                   renders enabled) — so the Stop/Kill/Resume button is stuck un-clickable until
+                   the key exists. `!!` yields a concrete false for a missing key, which renders
+                   enabled. The sibling `x-text` ternaries are unaffected (undefined → 'Stop'). #}
                 <span class="ms-auto d-flex gap-1">
                   <template x-if="['crashed', 'stopped', 'error'].includes(h.status) && h.claude_session_uuid">
                     <button type="button" class="btn btn-sm btn-success"
-                            :disabled="hostedResuming[h.claustrum_process_id]" @click="resumeHosted(h)">
+                            :disabled="!!hostedResuming[h.claustrum_process_id]" @click="resumeHosted(h)">
                       <span x-text="hostedResuming[h.claustrum_process_id] ? 'Resuming…' : 'Resume'">Resume</span>
                     </button>
                   </template>
                   <template x-if="h.is_orphan">
                     <button type="button" class="btn btn-sm btn-outline-danger"
-                            :disabled="hostedStopping[h.claustrum_process_id]" @click="killHosted(h)">
+                            :disabled="!!hostedStopping[h.claustrum_process_id]" @click="killHosted(h)">
                       <span x-text="hostedStopping[h.claustrum_process_id] ? 'Killing…' : 'Kill'">Kill</span>
                     </button>
                   </template>
                   <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleHosted(h.claustrum_process_id)"
                           x-text="(hostedView[h.claustrum_process_id] && hostedView[h.claustrum_process_id].open) ? 'Hide' : 'View'">View</button>
                   <button type="button" class="btn btn-sm btn-outline-danger" x-show="['running', 'starting'].includes(h.status)"
-                          :disabled="hostedStopping[h.claustrum_process_id]" @click="stopHosted(h)">
+                          :disabled="!!hostedStopping[h.claustrum_process_id]" @click="stopHosted(h)">
                     <span x-text="hostedStopping[h.claustrum_process_id] ? 'Stopping…' : 'Stop'">Stop</span>
                   </button>
                 </span>
@@ -197,7 +204,10 @@
                 <span class="text-secondary small" x-text="j.worker_alive ? ('pid ' + j.worker_pid) : 'no process'"></span>
                 <span class="ms-auto d-flex align-items-center gap-2">
                   <span class="text-secondary small" x-text="agentWhen(j)"></span>
-                  <button class="btn btn-sm btn-outline-danger" :disabled="agentStopping[j.id]" @click="stopAgent(j)"
+                  {# `!!` coercion: see the hosted-row note above. Without it, this Stop button is
+                     stuck DISABLED on first paint because `agentStopping` has no key for this job
+                     yet (Alpine 3.15.x x-for missing-key `:disabled` bug). #}
+                  <button class="btn btn-sm btn-outline-danger" :disabled="!!agentStopping[j.id]" @click="stopAgent(j)"
                           :title="j.bridge_session_id ? 'Stop and deregister the claude.ai session' : 'Stop and remove this session'">
                     <span x-text="agentStopping[j.id] ? 'Stopping…' : 'Stop'">Stop</span>
                   </button>
