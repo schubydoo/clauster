@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+from _driver import AgentBrowser
 
 from clauster.auth import hash_password, make_hasher
 
@@ -56,6 +57,21 @@ E2E_PASSWORD = "e2e-secret-123"
 def e2e_password() -> str:
     """The plaintext password that authenticates against ``auth_server``."""
     return E2E_PASSWORD
+
+
+@pytest.fixture
+def browser() -> Iterator[AgentBrowser]:
+    """A fresh ``agent-browser`` session per test (closed on teardown for isolation).
+
+    The suite runs serially (``scripts/e2e.sh`` clears the xdist addopts), so a single
+    browser session at a time is safe; closing it per test resets cookies/storage so a
+    login in one test never leaks into the next.
+    """
+    driver = AgentBrowser()
+    try:
+        yield driver
+    finally:
+        driver.close()
 
 
 def _free_port() -> int:
