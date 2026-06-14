@@ -48,7 +48,10 @@ jobs:
         with:
           node-version: "24"
       - name: Install agent-browser CLI
-        run: npm i -g agent-browser
+        # Pinned for reproducibility. 0.27.3 regressed `check` on the trust-gate
+        # checkbox (8 failures in CI, 5 locally); 0.27.1 is the verified-green
+        # version the suite was developed against. Bump deliberately + re-verify.
+        run: npm i -g agent-browser@0.27.1
       - name: Install headless Chromium
         run: agent-browser install
       - name: Run E2E suite
