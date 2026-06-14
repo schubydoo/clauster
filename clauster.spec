@@ -7,12 +7,15 @@ Build in CI / a full environment (NOT the dev sandbox, which lacks runtime libs)
     pyinstaller clauster.spec
     # -> dist/clauster
 
+The analyzed script is ``pyinstaller_entry.py`` (an absolute-import shim), NOT
+``clauster/__main__.py``: PyInstaller runs the entry as top-level ``__main__`` with
+no package context, so ``__main__``'s relative imports would fail at runtime.
 Bundles the Jinja templates and static assets as data so the binary is self-contained,
 and pins uvicorn's dynamically-imported submodules as hidden imports.
 """
 
 a = Analysis(
-    ["src/clauster/__main__.py"],
+    ["pyinstaller_entry.py"],
     pathex=["src"],
     binaries=[],
     datas=[
