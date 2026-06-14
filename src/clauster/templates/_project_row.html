@@ -59,8 +59,8 @@
                            matters most for Fire-and-forget, which runs unattended. bypassPermissions
                            is offered only where the per-project config ceiling allows it. -->
                       <div class="mt-2">
-                        <label class="form-label small mb-1">Permissions</label>
-                        <select class="form-select form-select-sm" x-model="lperm"
+                        <label class="form-label small mb-1" for="perm-{{ p.name }}">Permissions</label>
+                        <select id="perm-{{ p.name }}" class="form-select form-select-sm" x-model="lperm"
                                 title="What the agent may do without asking: default = prompts each time · plan = read-only planning · acceptEdits = auto-accepts file edits · auto = model auto-approves what it judges safe · dontAsk = never prompts, denies anything not pre-approved{% if p.allow_bypass_permissions %} · bypassPermissions = skips all checks (gated ⚠){% endif %}.">
                           <option value="default">default</option>
                           <option value="plan">plan</option>
@@ -78,8 +78,8 @@
                                 :aria-expanded="ladv" x-text="ladv ? 'Hide advanced ⌃' : 'Advanced ⌄'">Advanced ⌄</button>
                         <div class="row g-2 mt-1" x-show="ladv" x-cloak>
                           <div class="col-6">
-                            <label class="form-label small mb-1">Spawn</label>
-                            <select class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']"
+                            <label class="form-label small mb-1" for="spawn-{{ p.name }}">Spawn</label>
+                            <select id="spawn-{{ p.name }}" class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']"
                                     title="Where the session runs: same-dir = the project directory · worktree = an isolated git worktree (git repos only) · session = a fresh sandboxed session.">
                               <option value="same-dir">same-dir</option>
                               {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
@@ -88,8 +88,8 @@
                           </div>
                           {% if pty_supported %}
                           <div class="col-6">
-                            <label class="form-label small mb-1">Mode</label>
-                            <select class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
+                            <label class="form-label small mb-1" for="resume-{{ p.name }}">Mode</label>
+                            <select id="resume-{{ p.name }}" class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
                                     title="standard = multi-session server. pty = single-session true-resume (restores prior conversation on Resume).">
                               <option value="standard">standard</option>
                               <option value="pty">pty (true-resume)</option>
@@ -99,6 +99,7 @@
                         </div>
                       </div>
                       <button type="button" class="btn btn-primary w-100 mt-2"
+                              :disabled="launching['{{ p.name }}']"
                               @click="launchRun('{{ p.name }}', lmode, lperm, lcloud, lprompt); lopen = false">
                         <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="lperm"></span>
                       </button>
@@ -172,7 +173,7 @@
                   ⚠ A session is running — saved changes apply to <strong>new</strong> sessions, not the attached one.</div>
                 <div class="alert alert-danger py-1" x-show="cmd['{{ p.name }}'].error" x-cloak x-text="cmd['{{ p.name }}'].error"></div>
                 <textarea class="form-control cmd-text" x-model="cmd['{{ p.name }}'].content" rows="12"
-                          spellcheck="false" autocomplete="off"
+                          spellcheck="false" autocomplete="off" aria-label="CLAUDE.md contents for {{ p.name }}"
                           :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving"></textarea>
                 <div class="btn-list mt-2">
                   <button type="button" class="btn btn-sm btn-primary" @click="saveClaudeMd('{{ p.name }}')"
