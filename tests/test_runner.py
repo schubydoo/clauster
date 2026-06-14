@@ -15,7 +15,7 @@ from clauster.models import (
     RemoteControlInstance,
     WorkingSession,
 )
-from clauster.runner import NotTrusted, SessionRunner, UnknownProject
+from clauster.runner import InstanceStillLive, NotTrusted, SessionRunner, UnknownProject
 from clauster.state import StateStore
 
 
@@ -40,6 +40,67 @@ async def test_spawn_ready_then_stop(runner_config, monkeypatch):
     assert stopped.status is InstanceStatus.STOPPED
     assert stopped.intentional_stop is True
     assert runner.running_count() == 0
+
+
+async def test_forget_drops_stopped_bridge_from_memory_and_disk(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.spawn("alpha")
+    await runner.stop("alpha")
+    assert runner.get_instance("alpha") is not None  # a stopped, resumable card
+
+    await runner.forget("alpha")
+    assert runner.get_instance("alpha") is None
+    assert "alpha" not in runner._persisted  # dropped from the overlay base too
+    # On disk: a fresh runner loads no record, so rediscover can't resurrect a card.
+    assert "alpha" not in SessionRunner(config, claude_json=claude_json)._persisted
+
+
+async def test_forget_refuses_running_bridge(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    await runner.spawn("alpha")
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("alpha")
+    assert runner.get_instance("alpha") is not None  # left intact, never killed
+    await runner.stop("alpha")  # cleanup the fake process
+
+
+async def test_forget_refuses_when_bridge_process_still_live_despite_status(
+    runner_config, monkeypatch
+):
+    # Defense in depth: a STOPPED status with a still-live process must not be forgotten.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    await runner.spawn("alpha")
+    inst = runner.get_instance("alpha")
+    assert inst is not None
+    inst.status = InstanceStatus.STOPPED  # lagging status (e.g. a missed poll)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("alpha")
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    await runner.stop("alpha")  # cleanup
+
+
+async def test_forget_refuses_when_keeper_process_still_live(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    await runner.spawn("alpha")
+    inst = runner.get_instance("alpha")
+    assert inst is not None
+    inst.status = InstanceStatus.STOPPED
+    inst.bridge_pid = None  # skip the bridge check, exercise the keeper branch
+    inst.keeper_pid = 4242
+    monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 123.0)
+    with pytest.raises(InstanceStillLive):
+        await runner.forget("alpha")
+
+
+async def test_forget_unknown_project_raises(runner_config):
+    with pytest.raises(UnknownProject):
+        await _make_runner(runner_config).forget("ghostproj")
 
 
 async def test_redact_session_url_splits_raw_and_redacted_on_disk(runner_config, monkeypatch):

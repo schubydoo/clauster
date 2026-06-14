@@ -72,6 +72,14 @@ class PermissionModeNotAllowed(SpawnError):
     """bypassPermissions requested for a project whose config ceiling forbids it."""
 
 
+class InstanceStillLive(RuntimeError):
+    """Raised when forget() is asked to drop a bridge that is still STARTING/RUNNING.
+
+    Not a SpawnError: forget is a lifecycle op, not a spawn, and the caller maps this
+    to 409 (Stop it first) rather than the 4xx the spawn errors map to.
+    """
+
+
 # How long to wait for a freshly-spawned bridge to reach its poll loop.
 _READY_TIMEOUT = 15.0
 _READY_POLL_INTERVAL = 0.25
@@ -1059,6 +1067,49 @@ class SessionRunner:
         instance.status = InstanceStatus.STOPPED
         self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
         return instance
+
+    async def forget(self, name: str) -> None:
+        """Drop a NON-LIVE bridge's record from memory and state.json (fail closed).
+
+        Lets the operator clear a stopped / crashed / interrupted bridge out of the
+        Recent/resumable list to start fresh. Removes the entry from BOTH the in-memory
+        registry and the persisted map — dropping only one leaves the other to
+        resurrect it (``_persist_subset`` overlays ``_persisted``; ``rediscover``
+        rebuilds a STOPPED card from it) — then re-persists so ``state.json`` no longer
+        carries it.
+
+        Fail closed: a live bridge (STARTING/RUNNING, or one whose bridge/keeper process
+        is still alive despite a lagging status) is refused with
+        :class:`InstanceStillLive` — it must be Stopped first; forget never kills a
+        process. Raises :class:`UnknownProject` when there's no such record at all.
+        """
+        instance = self._instances.get(name)
+        if instance is None and name not in self._persisted:
+            raise UnknownProject(f"no managed instance: {name!r}")
+        if instance is not None:
+            if instance.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING):
+                raise InstanceStillLive(
+                    f"{name!r} is {instance.status.value} — Stop it before forgetting"
+                )
+            # Defense in depth: never drop a record whose process is actually alive even
+            # if the status lags a missed poll — that would orphan a live bridge/keeper.
+            if instance.bridge_pid is not None and await asyncio.to_thread(
+                procutil.is_live_bridge, instance.bridge_pid, instance.bridge_proc_start
+            ):
+                raise InstanceStillLive(f"{name!r} still has a live bridge — Stop it first")
+            if (
+                instance.keeper_pid is not None
+                and await asyncio.to_thread(procutil.proc_create_time, instance.keeper_pid)
+                is not None
+            ):
+                raise InstanceStillLive(f"{name!r} still has a live keeper — Stop it first")
+            self._instances.pop(name, None)
+            self._procs.pop(name, None)
+        # Rebuild as a NEW dict rather than .pop() in place: _persist aliases _persisted
+        # and _last_saved to the same object, so mutating _persisted would also mutate the
+        # dedup baseline and _persist would skip the write (leaving the row on disk).
+        self._persisted = {k: v for k, v in self._persisted.items() if k != name}
+        await self._persist()
 
     @staticmethod
     def _signal_stop(pid: int, *, twice: bool = False) -> None:
