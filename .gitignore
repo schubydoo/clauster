@@ -35,5 +35,9 @@ scratch/
 # output path writes a root file literally named `--full-page` (the flag, no extension).
 /--full-page
 
+# Failure screenshots from the browser E2E suite (tests/e2e/conftest.py captures one
+# per failing test; CI uploads them as an artifact). Generated, never committed.
+/tests/e2e/_artifacts/
+
 # mkdocs-material build output (`mkdocs build`) — generated, never committed.
 /site/
