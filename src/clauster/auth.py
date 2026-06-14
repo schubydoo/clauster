@@ -27,7 +27,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from .atomicio import atomic_write_text, ensure_private_dir
+from .atomicio import atomic_write_text, ensure_private_dir, fsync_dir
 from .config import _LOOPBACK_HOSTS, ClausterConfig
 
 _SESSION_SALT = "clauster-session"
@@ -47,7 +47,8 @@ def load_or_create_secret(state_dir: Path) -> bytes:
     ``O_CREAT|O_EXCL`` at mode 0600 so it's never briefly world-readable.
 
     Concurrent starts converge on the single ``O_EXCL`` winner's 32-byte secret and
-    the write is ``fsync``-durable; a loser waits out the winner's write (and refuses
+    both the write and its parent-directory entry are ``fsync``-durable; a loser waits
+    out the winner's write (and refuses
     a truncated key) rather than reading a half-written file and booting with a
     different/short signing key.
     """
@@ -78,6 +79,9 @@ def load_or_create_secret(state_dir: Path) -> bytes:
         os.fsync(
             fd
         )  # durable across a crash (a racing loser already sees the write via the page cache)
+        # fsync the file alone persists its data but not the directory entry that names it;
+        # without this a crash could drop the new secret and rotate every session's key.
+        fsync_dir(state_dir)
         return secret
     finally:
         os.close(fd)

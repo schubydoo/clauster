@@ -81,7 +81,7 @@ def test_fsync_dir_ignores_open_error(tmp_path, monkeypatch):
         raise OSError("no dir fd")
 
     monkeypatch.setattr(atomicio.os, "open", _boom)
-    atomicio._fsync_dir(tmp_path)  # must not raise
+    atomicio.fsync_dir(tmp_path)  # must not raise
 
 
 def test_fsync_dir_ignores_fsync_error(tmp_path, monkeypatch):
@@ -91,7 +91,7 @@ def test_fsync_dir_ignores_fsync_error(tmp_path, monkeypatch):
         raise OSError("fsync rejected")
 
     monkeypatch.setattr(atomicio.os, "fsync", _boom)
-    atomicio._fsync_dir(tmp_path)  # must not raise
+    atomicio.fsync_dir(tmp_path)  # must not raise
 
 
 def test_ensure_private_dir_ignores_chmod_failure_on_windows(tmp_path, monkeypatch):

@@ -280,6 +280,16 @@ def test_secret_persists_and_is_0600(tmp_path):
     assert (tmp_path / "session.secret").stat().st_mode & 0o777 == 0o600
 
 
+def test_secret_create_fsyncs_parent_dir(tmp_path, monkeypatch):
+    # Creating session.secret must fsync the parent dir, not just the file: fsync of the
+    # file alone persists its data but not the directory entry, so a crash could drop the
+    # new secret and rotate every session's signing key on restart.
+    synced: list = []
+    monkeypatch.setattr(auth, "fsync_dir", lambda d: synced.append(d))
+    auth.load_or_create_secret(tmp_path)
+    assert synced == [tmp_path]
+
+
 def test_secret_env_override(tmp_path, monkeypatch):
     value = "x" * 40  # >= 32 bytes
     monkeypatch.setenv("CLAUSTER_SESSION_SECRET", value)
