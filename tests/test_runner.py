@@ -96,6 +96,15 @@ async def test_no_redaction_keeps_a_single_verbatim_bridge_log(runner_config, mo
     await runner.stop("alpha")
 
 
+def test_unique_log_path_distinct_within_same_millisecond(runner_config, monkeypatch):
+    # Two same-project spawns in the same millisecond must get distinct log paths, so the
+    # 0600 O_EXCL pre-create can't FileExistsError (the ms timestamp alone would collide,
+    # and a retry on it wouldn't advance the clock).
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.time", lambda: 1_700_000.0)  # frozen clock
+    assert runner._unique_log_path("alpha") != runner._unique_log_path("alpha")
+
+
 def test_flush_redacted_mirror_is_best_effort(runner_config, tmp_path):
     # The mirror flush must never raise on FS trouble (it runs in the poll loop and
     # at spawn): missing raw, an unreadable raw, and an unwritable public are all no-ops.
