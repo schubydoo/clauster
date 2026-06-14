@@ -181,13 +181,19 @@ class FakeClaustrum:
             return
         request_id = req.get("id")
         if req.get("auth") != self.token:
-            await self._reply(writer, request_id, error=(-32001, "Unauthorized: invalid or missing auth token"))
+            await self._reply(
+                writer, request_id, error=(-32001, "Unauthorized: invalid or missing auth token")
+            )
             return
         method = req.get("method")
         if method in self.hang_methods:
             return  # deliberately no reply
         params = req.get("params") or {}
-        handler = getattr(self, f"_m_{method.replace('.', '_')}", None) if isinstance(method, str) else None
+        handler = (
+            getattr(self, f"_m_{method.replace('.', '_')}", None)
+            if isinstance(method, str)
+            else None
+        )
         if handler is None:
             if method == "server.shutdown":
                 self._safe_close(writer)  # no response, connection closes
@@ -198,18 +204,26 @@ class FakeClaustrum:
 
     # -- methods -----------------------------------------------------------
 
-    async def _m_server_ping(self, request_id: Any, _params: dict, writer: asyncio.StreamWriter) -> None:
+    async def _m_server_ping(
+        self, request_id: Any, _params: dict, writer: asyncio.StreamWriter
+    ) -> None:
         await self._reply(writer, request_id, result={"pong": True})
 
-    async def _m_server_version(self, request_id: Any, _params: dict, writer: asyncio.StreamWriter) -> None:
+    async def _m_server_version(
+        self, request_id: Any, _params: dict, writer: asyncio.StreamWriter
+    ) -> None:
         await self._reply(
-            writer, request_id, result={"version": self.version, "platform": "linux", "arch": "amd64"}
+            writer,
+            request_id,
+            result={"version": self.version, "platform": "linux", "arch": "amd64"},
         )
 
     async def _m_server_capabilities(
         self, request_id: Any, _params: dict, writer: asyncio.StreamWriter
     ) -> None:
-        await self._reply(writer, request_id, result={"version": self.version, "methods": list(_METHODS)})
+        await self._reply(
+            writer, request_id, result={"version": self.version, "methods": list(_METHODS)}
+        )
 
     async def _m_process_spawn(
         self, request_id: Any, params: dict, writer: asyncio.StreamWriter
@@ -277,12 +291,15 @@ class FakeClaustrum:
                 result={"found": False, "running": False, "firstSeq": 0, "lastSeq": 0},
             )
             return
+        # Subscribe BEFORE replaying — this mirrors the real daemon's ordering
+        # (subscribe-then-replay), so a frame emitted concurrently with the reattach
+        # is delivered live rather than lost in the gap between replay and subscribe.
+        if writer not in proc.subscribers:
+            proc.subscribers.append(writer)
         replayed = [f for f in proc.frames if f["seq"] > from_seq]
         for frame in replayed:
             line = (json.dumps(frame, separators=(",", ":")) + "\n").encode("utf-8")
             writer.write(line)
-        if writer not in proc.subscribers:
-            proc.subscribers.append(writer)
         await writer.drain()
         first_seq = proc.frames[0]["seq"] if proc.frames else 0
         await self._reply(

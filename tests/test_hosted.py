@@ -521,6 +521,65 @@ async def test_exit_resolves_parked_requests_on_daemon_loss(fake_claustrum, monk
         assert session.pending_requests == []
 
 
+async def test_parked_control_request_payload_is_redacted(fake_claustrum):
+    # Negative control-plane redaction (audit #5): a secret-shaped value embedded in
+    # a parked permission control_request payload must be masked before it reaches
+    # the ring/fan-out — the raw secret must NOT appear in what subscribers (or a
+    # ring-replaying reconnect) see. The control plane gets the same defense-in-depth
+    # `_redact_obj` pass as data frames, not a bypass.
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": f"curl -H 'auth: {secret}' example.com"},
+                "context": {"token": secret},
+            },
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        event = await _drain_until(queue, "control_request")
+        # The fanned-out event's request payload is masked end-to-end.
+        assert secret not in json.dumps(event["request"])
+        assert "<redacted>" in event["request"]["context"]["token"]
+        assert "<redacted>" in event["request"]["input"]["command"]
+        # And the same masked copy is what a ring-replaying reconnect would receive.
+        replayed = await _drain_until(session.subscribe(), "control_request")
+        assert secret not in json.dumps(replayed)
+        # The PARKED request keeps the raw input so an "allow unchanged" replays the
+        # real tool input back to the agent (redaction is browser-facing only).
+        assert [r.request_id for r in session.pending_requests] == ["perm-1"]
+        parked_raw = json.dumps(session.pending_requests[0].request)
+        assert secret in parked_raw  # the unredacted secret survives in the parked copy
+        assert (
+            session.pending_requests[0].request["input"]["command"]
+            == frame["request"]["input"]["command"]
+        )
+
+
+async def test_bare_uuid_in_frame_leaf_is_masked_end_to_end(fake_claustrum):
+    # Audit #28: a bare UUID (account/instance identifier) appearing in a data-frame
+    # leaf — not just an env_/session_ prefixed id — is masked by `_redact_obj` before
+    # fan-out. The capture of session_id for --resume happens on the RAW frame, so the
+    # delivered copy can be fully redacted without losing resume.
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        bare = "abcdef01-2345-4678-89ab-cdef01234567"
+        frame = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": f"org {bare} done"}]},
+            "nested": {"deep": [{"org_uuid": bare}]},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        event = await _drain_until(queue, "frame")
+        assert bare not in json.dumps(event["frame"])  # masked everywhere it appears
+        assert event["frame"]["nested"]["deep"][0]["org_uuid"] == "<redacted>"
+        assert "<redacted>" in event["frame"]["message"]["content"][0]["text"]
+
+
 async def test_failed_write_resolves_instead_of_reparking_on_dead_session(
     fake_claustrum, monkeypatch
 ):
@@ -621,6 +680,59 @@ async def test_stop_escalates_to_sigkill_on_grace_timeout(fake_claustrum):
         signals = [k.get("signal") for k in fake.killed]
         assert signals[0] == "INT"
         assert "KILL" in signals
+
+
+async def test_stop_second_grace_expires_when_kill_yields_no_exit(fake_claustrum):
+    # Audit #31: after SIGINT times out we SIGKILL and wait a SECOND grace window for
+    # the daemon's exit frame. If even that never lands (the daemon never reports the
+    # exit), the second `wait_for` times out and stop() falls through cleanly — no
+    # hang, no crash, both signals were issued. This drives the second-grace TimeoutError
+    # branch (formerly pragma'd) with NO exit frame ever emitted.
+    async with _session(fake_claustrum, stop_grace=0.02) as (fake, session):
+        await session.stop()
+        signals = [k.get("signal") for k in fake.killed]
+        assert signals[0] == "INT"
+        assert "KILL" in signals
+        # The daemon never reported an exit, so there's no terminal code to latch.
+        assert session.exit_code is None
+        assert session._pump_task is None  # pump torn down regardless
+
+
+async def test_pump_surfaces_daemon_loss_as_error_and_resolves_parked(fake_claustrum):
+    # Audit #32: a daemon-side failure surfacing through the stream reader (a
+    # ClaustrumError out of the pump's source.get) must fail closed — status flips to
+    # "error", any parked request is resolved (never left as a dead Allow/Deny), and a
+    # `lost` event is fanned out (surfaced, not swallowed). Drives the _pump
+    # `except ClaustrumError` branch (formerly pragma'd).
+    async with _session(fake_claustrum) as (fake, session):
+        queue = session.subscribe()
+        frame = {
+            "request_id": "perm-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(queue, "control_request")
+        assert [r.request_id for r in session.pending_requests] == ["perm-1"]
+
+        # Inject a daemon-loss fault into the live pump's source: the next get() raises.
+        class _BoomSource:
+            async def get(self):
+                raise ClaustrumError("daemon vanished mid-pump")
+
+        session._source = _BoomSource()
+        # Nudge the pump: cancel the current get() so it loops back into _BoomSource.get.
+        session._pump_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await session._pump_task
+        # Re-run the pump body against the boom source to exercise the except branch.
+        await session._pump()
+        assert session.status == "error"
+        assert session.pending_requests == []  # resolved on loss, not stranded
+        lost = await _drain_until(queue, "lost")
+        assert "daemon vanished" in lost["reason"]
+        resolved = await _drain_until(session.subscribe(), "control_resolved")
+        assert resolved["request_id"] == "perm-1"
 
 
 async def test_stop_kill_escalation_waits_for_exit_and_latches(fake_claustrum):
@@ -994,6 +1106,50 @@ async def test_manager_reattach_daemon_error_is_recorded(fake_claustrum, tmp_pat
     inst = mgr.get_instance(pid)
     assert inst.status is InstanceStatus.ERROR
     assert "reattach failed" in (inst.error_detail or "")
+
+
+async def test_concurrent_persist_serializes_writes_no_lost_update(fake_claustrum, tmp_path):
+    # Audit #30: spawn/stop/aclose/poll can all call _persist concurrently. The persist
+    # lock must serialize snapshot→save→_last_saved so a slower writer carrying an OLDER
+    # snapshot can't finish last and overwrite a newer file (a lost update / regressed
+    # cursor). Race many persists against a deliberately slow, interleaving store and
+    # assert the final on-disk state matches the final in-memory registry exactly.
+    saved_snapshots: list[dict] = []
+
+    class _SlowStore:
+        """Records every save and yields mid-write so writers interleave."""
+
+        def __init__(self) -> None:
+            self._last: dict | None = None
+
+        def load(self) -> dict:
+            return {}
+
+        def save(self, sessions: dict) -> None:
+            # Snapshot the payload, then yield the event loop *inside* the critical
+            # section the lock is meant to protect — if the lock were missing, a
+            # second writer would clobber `self._last` here.
+            import time
+
+            saved_snapshots.append(dict(sessions))
+            time.sleep(0)  # cooperative point is the to_thread hop itself
+            self._last = dict(sessions)
+
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        store = _SlowStore()
+        mgr._store = store
+        # Register several instances, mutating the registry between persists so each
+        # snapshot legitimately differs (the diff-check can't early-return them all).
+        insts = [await _spawn(mgr, client, project=f"p{i}") for i in range(4)]
+        # Fire many persists concurrently; each takes the lock in turn.
+        await asyncio.gather(*(mgr.persist() for _ in range(12)))
+        # The final saved snapshot must equal the final registry projection — no writer
+        # regressed it to an older view.
+        final = {pid: mgr._record(mgr._synced(i)) for pid, i in mgr._instances.items()}
+        assert store._last == final
+        assert mgr._last_saved == final
+        # Every pid is present and intact in the last write (no dropped/corrupt entry).
+        assert set(store._last) == {i.claustrum_process_id for i in insts}
 
 
 async def test_manager_persist_tolerates_write_failure(fake_claustrum, caplog):

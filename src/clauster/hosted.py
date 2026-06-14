@@ -376,9 +376,9 @@ class HostedSession:
                         await asyncio.wait_for(
                             self._stream.exited.wait(), timeout=self._stop_grace
                         )
-                    except TimeoutError:  # pragma: no cover - daemon never reported exit
+                    except TimeoutError:
                         pass
-        except ClaustrumError as exc:  # pragma: no cover - daemon loss during stop (CL-4b)
+        except ClaustrumError as exc:  # daemon loss during stop (CL-4b)
             self.status = "error"
             self._resolve_parked()  # a dead session must not leave a parked request stranded
             self._emit({"type": "lost", "reason": f"stop failed: {exc}"})
@@ -440,7 +440,7 @@ class HostedSession:
                     self._emit({"type": "gap", "dropped": event.get("dropped", 0)})
         except asyncio.CancelledError:
             raise
-        except ClaustrumError as exc:  # pragma: no cover - daemon loss mid-pump (CL-4b)
+        except ClaustrumError as exc:  # daemon loss mid-pump (CL-4b)
             # A daemon-side failure surfaced through the reader; report it, don't swallow.
             self.status = "error"
             self._resolve_parked()  # resolve any parked request so it isn't left stranded
