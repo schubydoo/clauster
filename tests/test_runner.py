@@ -90,12 +90,17 @@ async def test_forget_refuses_when_keeper_process_still_live(runner_config, monk
     await runner.spawn("alpha")
     inst = runner.get_instance("alpha")
     assert inst is not None
+    original_bridge_pid = inst.bridge_pid
     inst.status = InstanceStatus.STOPPED
     inst.bridge_pid = None  # skip the bridge check, exercise the keeper branch
     inst.keeper_pid = 4242
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 123.0)
-    with pytest.raises(InstanceStillLive):
-        await runner.forget("alpha")
+    try:
+        with pytest.raises(InstanceStillLive):
+            await runner.forget("alpha")
+    finally:
+        inst.bridge_pid = original_bridge_pid
+        await runner.stop("alpha")
 
 
 async def test_forget_unknown_project_raises(runner_config):

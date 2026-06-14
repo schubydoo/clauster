@@ -404,7 +404,7 @@
           if (res.ok) this.toast(label + ": forgotten", "success");
           else this.toast(label + ": " + (b.detail || ("forget failed — " + res.status)), "error");
         } catch (e) { this.toast(label + ": forget failed", "error"); }
-        this.forgetting[id] = false;
+        finally { this.forgetting[id] = false; }
         await this.refresh();
       },
       forget(name) { return this._forget(name, name); },
