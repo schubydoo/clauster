@@ -4,7 +4,7 @@ Clauster needs the `claude` CLI on the host's `PATH` — Clauster spawns `claude
 it does **not** vendor it. Install Claude Code separately and make sure it is new
 enough (the default floor is `claude.min_version`, currently `2.1.145`). The
 `uv` / `pip` / `pipx` installs below also need **Python 3.11+**; the standalone
-binary, install script, and Scoop paths do not.
+binary, install script, Scoop, Homebrew, and Nix paths do not.
 
 ## With uv (recommended)
 
@@ -161,6 +161,38 @@ clauster run -c clauster.yml
 
 `scoop update clauster` picks up new releases automatically (the manifest tracks
 GitHub releases and re-verifies the checksum on each update).
+
+## Homebrew (macOS & Linux)
+
+[Homebrew](https://brew.sh) installs the standalone binary on macOS (Apple Silicon
+and Intel) and Linux (x86_64 and arm64) from the project's tap:
+
+```sh
+brew install schubydoo/clauster/clauster
+clauster run -c clauster.yml
+```
+
+That auto-taps `schubydoo/homebrew-clauster`; the two-step form is `brew tap
+schubydoo/clauster` then `brew install clauster`. Upgrade with `brew update && brew
+upgrade clauster` — the tap mirrors each release automatically and Homebrew verifies
+the SHA-256, so the unsigned-binary prompt the manual download warns about doesn't
+apply here. `clauster` still spawns `claude`, so keep Claude Code on your `PATH`.
+
+## Nix (flake)
+
+The repository is a [Nix flake](https://nixos.org/) exposing the standalone binary
+for `x86_64`/`aarch64` Linux and macOS. Run it ad hoc, or install it into a profile:
+
+```sh
+# Run without installing (forward args after --):
+nix run github:schubydoo/clauster -- run -c clauster.yml
+
+# Or install persistently:
+nix profile install github:schubydoo/clauster
+```
+
+The flake pins each release's signed binary by SHA-256, so `nix profile upgrade`
+picks up new releases. Windows is not a Nix target — use Scoop there.
 
 ## From source (development)
 
