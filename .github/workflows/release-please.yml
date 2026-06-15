@@ -187,7 +187,7 @@ jobs:
         id: provenance
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          subject-path: "dist/*.tar.gz,dist/*.whl,binaries/clauster-*"
+          subject-path: "dist/*.tar.gz,dist/*.whl,binaries/clauster-*,binaries/SHA256SUMS"
       - name: Attach signed assets to the draft, then publish
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
