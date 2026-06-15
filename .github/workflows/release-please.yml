@@ -204,6 +204,7 @@ jobs:
           UPLOAD_URL: ${{ needs.prepare.outputs.upload_url }}
           REPO: ${{ github.repository }}
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           # Derive + validate the numeric release id (a non-match would otherwise
@@ -250,7 +251,16 @@ jobs:
             echo "no SLSA provenance bundle produced; refusing to publish without provenance" >&2
             exit 1
           fi
-          provenance="dist/multiple.intoto.jsonl"
+          # Version-name the provenance asset to match the other release artifacts.
+          # Scorecard's Signed-Releases provenance probe matches on the `.intoto.jsonl`
+          # SUFFIX (strings.HasSuffix), not the exact name, so a prefix is safe; keep
+          # the `multiple` token (slsa-github-generator convention for a multi-subject
+          # bundle). Fall back to the bare name if the version output is somehow empty.
+          if [ -n "${VERSION:-}" ]; then
+            provenance="dist/clauster-${VERSION}-multiple.intoto.jsonl"
+          else
+            provenance="dist/multiple.intoto.jsonl"
+          fi
           cp "${PROVENANCE_BUNDLE}" "${provenance}"
           assets=("${dists[@]}" "${dist_sigs[@]}" "${bin_files[@]}" "${bin_sigs[@]}" \
                   "${sums[@]}" "${sums_sigs[@]}" "${provenance}")
