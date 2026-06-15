@@ -1,22 +1,26 @@
-name: Scoop manifest bump
+name: Packaging manifest bump
 
-# Keep the in-repo Scoop bucket manifest (bucket/clauster.json) in lockstep with
-# published releases. The manifest carries Scoop's own `checkver`/`autoupdate`
-# blocks, but nothing INVOKES them for a self-hosted bucket (the official Scoop
-# Excavator only services the ScoopInstaller org). Without this, `scoop install
-# clauster` keeps serving whatever version the committed manifest pins, frozen
-# until someone bumps it by hand.
+# Keep the in-repo package-manager manifests — the Scoop bucket (bucket/clauster.json),
+# the Homebrew formula (Formula/clauster.rb), and the Nix flake (flake.nix) — in
+# lockstep with published releases. Scoop's manifest carries `checkver`/`autoupdate`,
+# but nothing INVOKES them for a self-hosted bucket (the official Scoop Excavator only
+# services the ScoopInstaller org); Homebrew/Nix have no auto-update at all. Without
+# this, `scoop install` / `brew install` / `nix run` keep serving whatever version the
+# committed manifests pin, frozen until someone bumps them by hand.
 #
-# So on every published release we regenerate the manifest's version/url/hash from
-# the release's authoritative SHA256SUMS and open a PR. We DON'T push to main: main
-# is branch-protected, and the bump is reviewable like any other change. release-
-# please is deliberately NOT the mechanism — it runs at PR-prep time, before the
-# binaries (and therefore the hash) exist.
+# So on every published release we regenerate each manifest's version/url/hash from the
+# release's authoritative SHA256SUMS (via scripts/bump_packaging.py) and open a PR. We
+# DON'T push to main: main is branch-protected, and the bump is reviewable like any
+# other change. release-please is deliberately NOT the mechanism — it runs at PR-prep
+# time, before the binaries (and therefore the hashes) exist.
 #
-# Trust root: the SHA256SUMS asset, fetched over GitHub TLS from our own just-
-# published release — the same trust model the install.sh/install.ps1 one-liners
-# use. (Optional future hardening: `cosign verify-blob` against the shipped
-# SHA256SUMS.sigstore.json before trusting it.)
+# A manifest not yet on main is skipped (the helper no-ops on absent files), so this can
+# merge ahead of the Homebrew/Nix packaging and light them up once they land.
+#
+# Trust root: the SHA256SUMS asset, fetched over GitHub TLS from our own just-published
+# release — the same trust model the install.sh/install.ps1 one-liners use. (Optional
+# future hardening: `cosign verify-blob` against the shipped SHA256SUMS.sigstore.json
+# before trusting it.)
 on:
   release:
     types: [published]
@@ -25,7 +29,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to sync the Scoop manifest to (e.g. v0.11.0). Empty = latest published."
+        description: "Release tag to sync the packaging manifests to (e.g. v0.11.0). Empty = latest."
         required: false
         default: ""
 
@@ -34,12 +38,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: scoop-bump-${{ github.workflow }}
+  group: packaging-bump-${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
   bump:
-    name: Sync bucket/clauster.json to the release
+    name: Sync packaging manifests to the release
     # workflow_dispatch is restricted to the default branch so a dispatch from an
     # arbitrary ref can't run this write-capable job. (release events already use
     # the default branch's workflow file.)
@@ -96,10 +100,11 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "Target tag: $tag"
 
-      # Regenerate version/url/hash from the release's SHA256SUMS. Fails closed if
-      # the Windows asset (or its checksum) is missing — we never push a half-baked
-      # manifest. jq --indent 4 preserves the file's existing formatting.
-      - name: Regenerate Scoop manifest
+      # Regenerate version/url/hash for every present manifest from the release's
+      # SHA256SUMS. The helper fails closed (non-zero exit) if a present manifest's
+      # asset is missing or a stale version would survive — we never push a
+      # half-baked manifest. Absent manifests are skipped.
+      - name: Regenerate packaging manifests
         id: regen
         env:
           GH_TOKEN: ${{ github.token }}
@@ -107,41 +112,20 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -euo pipefail
-          manifest="bucket/clauster.json"
-          if [ ! -f "$manifest" ]; then
-            echo "::error::$manifest not found on the default branch"
-            exit 1
-          fi
-
           tmp="$(mktemp -d)"
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$tmp"
+          python3 scripts/bump_packaging.py "$VERSION" "$GITHUB_REPOSITORY" "$tmp/SHA256SUMS"
 
-          asset="clauster-${VERSION}-windows-x86_64.exe"
-          hash="$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
-          if ! printf '%s' "$hash" | grep -Eq '^[0-9a-f]{64}$'; then
-            echo "::error::no valid sha256 for $asset in the $TAG SHA256SUMS (got '${hash:-<empty>}')"
-            exit 1
-          fi
-
-          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${asset}#/clauster.exe"
-          jq --indent 4 \
-            --arg v "$VERSION" --arg u "$url" --arg h "$hash" \
-            '.version = $v
-             | .architecture."64bit".url = $u
-             | .architecture."64bit".hash = $h' \
-            "$manifest" > "$manifest.new"
-          mv "$manifest.new" "$manifest"
-
-          if git diff --quiet -- "$manifest"; then
-            echo "Manifest already at $VERSION — nothing to do."
+          if git diff --quiet; then
+            echo "Manifests already at $VERSION — nothing to do."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            git --no-pager diff -- "$manifest"
+            git --no-pager diff --stat
           fi
 
       # Push to a per-version branch and open (or update) a PR. Never main.
-      - name: Open Scoop bump PR
+      - name: Open packaging bump PR
         if: ${{ steps.regen.outputs.changed == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -149,17 +133,17 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -euo pipefail
-          branch="scoop-bump/${TAG}"
+          branch="packaging-bump/${TAG}"
           case "$branch" in
-            scoop-bump/v[0-9]*) ;;
+            packaging-bump/v[0-9]*) ;;
             *) echo "::error::refusing to push to unexpected branch '$branch'"; exit 1 ;;
           esac
 
           git config user.name "clauster-ci[bot]"
           git config user.email "clauster-ci[bot]@users.noreply.github.com"
           git checkout -B "$branch"
-          git add bucket/clauster.json
-          git commit -m "chore(scoop): bump bucket manifest to ${VERSION}"
+          git add bucket/clauster.json Formula/clauster.rb flake.nix
+          git commit -m "chore(packaging): bump manifests to ${VERSION}"
           git push --force-with-lease \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${branch}"
 
@@ -167,14 +151,15 @@ jobs:
           existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$branch" --json number --jq 'length')"
           if [ "$existing" = "0" ]; then
             body="$(printf '%s\n' \
-              "Auto-generated by \`scoop-bump.yml\` on release **${TAG}**." \
+              "Auto-generated by \`packaging-bump.yml\` on release **${TAG}**." \
               "" \
-              "Updates \`bucket/clauster.json\` version/url/hash from the release's" \
-              "signed \`SHA256SUMS\` (Windows x86_64). Review + merge to publish the" \
-              "new version to Scoop users.")"
+              "Regenerates the Scoop / Homebrew / Nix manifests' version, URLs, and" \
+              "checksums from the release's signed \`SHA256SUMS\` (only manifests present" \
+              "on main are touched). Review + merge to publish the new version to those" \
+              "package managers.")"
             gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
-              --title "chore(scoop): bump bucket manifest to ${VERSION}" \
+              --title "chore(packaging): bump manifests to ${VERSION}" \
               --body "$body"
           else
-            echo "PR already open for $branch — pushed the updated manifest to it."
+            echo "PR already open for $branch — pushed the updated manifests to it."
           fi
