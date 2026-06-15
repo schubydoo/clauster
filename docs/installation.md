@@ -1,9 +1,10 @@
 # Installation
 
-Clauster requires **Python 3.11+** and the `claude` CLI on the host's `PATH` —
-Clauster spawns `claude`, it does **not** vendor it. Install Claude Code
-separately and make sure it is new enough (the default floor is
-`claude.min_version`, currently `2.1.145`).
+Clauster needs the `claude` CLI on the host's `PATH` — Clauster spawns `claude`,
+it does **not** vendor it. Install Claude Code separately and make sure it is new
+enough (the default floor is `claude.min_version`, currently `2.1.145`). The
+`uv` / `pip` / `pipx` installs below also need **Python 3.11+**; the standalone
+binary, install script, and Scoop paths do not.
 
 ## With uv (recommended)
 
@@ -68,7 +69,8 @@ less clauster-install.sh && bash clauster-install.sh
 ```
 
 If no binary is published for your platform yet, the script prints a `pip`/`uvx`
-fallback and exits. On **Windows**, use [Scoop](#scoop-windows) instead.
+fallback and exits. On **Windows**, use the [PowerShell
+installer](#install-script-windows-powershell) or [Scoop](#scoop-windows).
 
 The script authenticates the binary by SHA-256 against the release's
 `SHA256SUMS`, which it trusts over HTTPS from GitHub — the standard
@@ -76,6 +78,31 @@ The script authenticates the binary by SHA-256 against the release's
 `SHA256SUMS` and the binary against their `.sigstore.json` bundles), download the
 binary yourself and use the `cosign` / `gh attestation verify` flow under
 [Standalone binary](#standalone-binary-no-python) below.
+
+## Install script (Windows, PowerShell)
+
+The PowerShell equivalent of the script above. It resolves the latest release,
+downloads `clauster.exe`, **verifies its SHA-256** against the release's
+`SHA256SUMS`, installs it under `%LOCALAPPDATA%\Programs\clauster`, and adds that
+directory to your user `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/schubydoo/clauster/main/install.ps1 | iex
+```
+
+Environment overrides: `$env:CLAUSTER_VERSION` pins a version, and
+`$env:CLAUSTER_INSTALL_DIR` overrides the install directory. To review the script
+before running it (it trusts `SHA256SUMS` over HTTPS, the same as the Unix
+one-liner):
+
+```powershell
+irm https://raw.githubusercontent.com/schubydoo/clauster/main/install.ps1 -OutFile install.ps1
+notepad install.ps1 ; .\install.ps1
+```
+
+The binary is Sigstore-signed but not authenticode-signed, so SmartScreen may
+warn on first run — the installer clears the file's mark-of-the-web after the
+checksum passes, but a fresh download via the browser may still prompt.
 
 ## Standalone binary (no Python)
 

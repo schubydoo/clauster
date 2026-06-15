@@ -152,10 +152,17 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
 ## Install
 
 No Python needed — the install script grabs the signed standalone binary for your
-OS, verifies its checksum, and drops it on your `PATH` (Linux & macOS):
+OS, verifies its checksum, and installs it to `~/.local/bin` (Linux & macOS),
+printing a PATH hint if that directory isn't already on your `PATH`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash
+```
+
+On **Windows**, the PowerShell equivalent installs `clauster.exe` the same way:
+
+```powershell
+irm https://raw.githubusercontent.com/schubydoo/clauster/main/install.ps1 | iex
 ```
 
 Or pick another path — `uv tool install clauster` (recommended for a Python host),

@@ -110,9 +110,11 @@ resolve_latest() {  # echo the latest version (tag minus leading v)
         url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
             "https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest")"
     elif have wget; then
+        # HTTP headers are CRLF-terminated, so strip the trailing CR — otherwise the
+        # version carries a \r into the asset URL and 404s on wget-only hosts.
         url="$(wget -q -S -O /dev/null \
             "https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest" 2>&1 \
-            | awk '/^[[:space:]]*Location:/ {print $2}' | tail -n1)"
+            | awk '/^[[:space:]]*Location:/ {print $2}' | tail -n1 | tr -d '\r')"
     else
         die "Need curl or wget to resolve the latest version."
     fi
@@ -217,15 +219,13 @@ main() {
            warn "  echo 'export PATH=\"${dir}:\$PATH\"' >> ~/.bashrc && source ~/.bashrc" ;;
     esac
 
-    # Verify
+    # Verify: require a zero exit AND a 'clauster' identity banner — not merely
+    # non-empty output (a failing binary could still print something to stdout).
     local got_ver=""
-    if [ -x "$dest" ]; then
-        got_ver="$("$dest" --version 2>/dev/null || true)"
-    fi
-    if [ -n "$got_ver" ]; then
+    if got_ver="$("$dest" --version 2>/dev/null)" && printf '%s' "$got_ver" | grep -qi '^clauster'; then
         ok "${got_ver} installed"
     else
-        warn "Installed, but could not run '${dest} --version' to confirm."
+        warn "Installed to ${dest}, but '${dest} --version' did not confirm a clauster binary."
     fi
 
     info "Clauster spawns the 'claude' CLI but does not vendor it — make sure Claude Code is on your PATH."
