@@ -63,5 +63,6 @@ jobs:
           $dest = Join-Path $env:LOCALAPPDATA 'Programs\clauster\clauster.exe'
           if (-not (Test-Path $dest)) { throw "clauster.exe was not installed at $dest" }
           $v = & $dest --version
+          if ($LASTEXITCODE -ne 0) { throw "clauster.exe --version exited with code $LASTEXITCODE" }
           Write-Host "version: $v"
           if ($v -notmatch '^clauster') { throw "unexpected --version output: $v" }

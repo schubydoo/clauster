@@ -81,6 +81,8 @@ function Install-Clauster {
         if ([string]::IsNullOrEmpty($expected)) {
             Write-Err "Release v$ver has no $target binary ($asset not in SHA256SUMS)."
             Show-Fallback
+            # Signal failure to callers/CI without `exit` (which would kill an iex host).
+            $global:LASTEXITCODE = 1
             return
         }
 
@@ -148,4 +150,6 @@ try {
 }
 catch {
     Write-Err $_.Exception.Message
+    # Signal failure to callers/CI without `exit` (which would kill an iex host).
+    $global:LASTEXITCODE = 1
 }
