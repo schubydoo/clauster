@@ -1,9 +1,10 @@
 # Installation
 
-Clauster requires **Python 3.11+** and the `claude` CLI on the host's `PATH` —
-Clauster spawns `claude`, it does **not** vendor it. Install Claude Code
-separately and make sure it is new enough (the default floor is
-`claude.min_version`, currently `2.1.145`).
+Clauster needs the `claude` CLI on the host's `PATH` — Clauster spawns `claude`,
+it does **not** vendor it. Install Claude Code separately and make sure it is new
+enough (the default floor is `claude.min_version`, currently `2.1.145`). The
+`uv` / `pip` / `pipx` installs below also need **Python 3.11+**; the standalone
+binary, install script, and Scoop paths do not.
 
 ## With uv (recommended)
 
@@ -40,6 +41,124 @@ clauster run -c clauster.yml
 
 The package installs a single `clauster` console entry point
 (`clauster.__main__:main`); `python -m clauster` is equivalent.
+
+## Install script (Linux & macOS, no Python)
+
+The quickest way to get the standalone binary. The script detects your OS +
+architecture, downloads the matching binary from the latest release, **verifies
+its SHA-256** against the release's signed `SHA256SUMS`, and installs it to
+`~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash
+```
+
+`wget -qO- <url> | bash` works too. Environment overrides:
+
+| Variable | Effect |
+| --- | --- |
+| `CLAUSTER_VERSION` | Pin a version (e.g. `0.10.0`) instead of the latest release |
+| `CLAUSTER_INSTALL_DIR` | Install directory (default `~/.local/bin`) |
+
+**Prefer to read before you pipe?** Piping a script straight into `bash` runs
+remote code sight-unseen. To review it first, download, inspect, then run:
+
+```sh
+curl -fsSL -o clauster-install.sh https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh
+less clauster-install.sh && bash clauster-install.sh
+```
+
+If no binary is published for your platform yet, the script prints a `pip`/`uvx`
+fallback and exits. On **Windows**, use the [PowerShell
+installer](#install-script-windows-powershell) or [Scoop](#scoop-windows).
+
+The script authenticates the binary by SHA-256 against the release's
+`SHA256SUMS`, which it trusts over HTTPS from GitHub — the standard
+`curl … | bash` trust model. For the stronger keyless-signature check (verifying
+`SHA256SUMS` and the binary against their `.sigstore.json` bundles), download the
+binary yourself and use the `cosign` / `gh attestation verify` flow under
+[Standalone binary](#standalone-binary-no-python) below.
+
+## Install script (Windows, PowerShell)
+
+The PowerShell equivalent of the script above. It resolves the latest release,
+downloads `clauster.exe`, **verifies its SHA-256** against the release's
+`SHA256SUMS`, installs it under `%LOCALAPPDATA%\Programs\clauster`, and adds that
+directory to your user `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/schubydoo/clauster/main/install.ps1 | iex
+```
+
+Environment overrides: `$env:CLAUSTER_VERSION` pins a version, and
+`$env:CLAUSTER_INSTALL_DIR` overrides the install directory. To review the script
+before running it (it trusts `SHA256SUMS` over HTTPS, the same as the Unix
+one-liner):
+
+```powershell
+irm https://raw.githubusercontent.com/schubydoo/clauster/main/install.ps1 -OutFile install.ps1
+notepad install.ps1 ; .\install.ps1
+```
+
+The binary is Sigstore-signed but not authenticode-signed, so SmartScreen may
+warn on first run — the installer clears the file's mark-of-the-web after the
+checksum passes, but a fresh download via the browser may still prompt.
+
+## Standalone binary (no Python)
+
+Prefer to grab the file yourself? Each release attaches a single-file binary per
+OS + architecture, built with PyInstaller. It still spawns `claude`, so the CLI
+must be on your `PATH`.
+
+| OS / arch | Asset |
+| --- | --- |
+| Linux x86_64 | `clauster-<version>-linux-x86_64` |
+| macOS arm64 (Apple Silicon) | `clauster-<version>-macos-arm64` |
+| Windows x86_64 | `clauster-<version>-windows-x86_64.exe` |
+
+Download from the [latest release](https://github.com/schubydoo/clauster/releases/latest),
+**verify the checksum** against the release's `SHA256SUMS`, then run it. The asset
+name carries the version, so resolve it first (GitHub's `latest/download/`
+redirect needs the exact filename):
+
+```sh
+# Linux x86_64 — swap clauster-$VER-linux-x86_64 for clauster-$VER-macos-arm64 on Apple Silicon
+VER=$(curl -fsSL https://api.github.com/repos/schubydoo/clauster/releases/latest \
+  | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+curl -LO https://github.com/schubydoo/clauster/releases/download/v$VER/clauster-$VER-linux-x86_64
+curl -LO https://github.com/schubydoo/clauster/releases/download/v$VER/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS    # expect: clauster-$VER-linux-x86_64: OK
+chmod +x clauster-$VER-linux-x86_64
+./clauster-$VER-linux-x86_64 run -c clauster.yml
+```
+
+Every binary is also **Sigstore-signed** (keyless) — a `<asset>.sigstore.json`
+bundle sits beside it, and the release carries SLSA provenance
+(`*.intoto.jsonl`). Verify the build with the
+[`cosign`](https://docs.sigstore.dev/) / `gh attestation verify` toolchain if you
+want the full supply-chain check.
+
+!!! note "Unsigned for the OS, on purpose"
+    The binaries are Sigstore-signed but not yet OS code-signed, so the first run
+    needs one extra step. On **macOS**, Gatekeeper quarantines a downloaded
+    binary — clear it with `xattr -d com.apple.quarantine
+    clauster-<version>-macos-arm64`, or right-click → **Open** once. On
+    **Windows**, SmartScreen may warn on first launch; choose **More info → Run
+    anyway** (installing via Scoop, below, avoids the browser-download prompt).
+
+## Scoop (Windows)
+
+On Windows, [Scoop](https://scoop.sh) installs the standalone binary and keeps it
+updated. This repository doubles as a Scoop bucket:
+
+```powershell
+scoop bucket add clauster https://github.com/schubydoo/clauster
+scoop install clauster
+clauster run -c clauster.yml
+```
+
+`scoop update clauster` picks up new releases automatically (the manifest tracks
+GitHub releases and re-verifies the checksum on each update).
 
 ## From source (development)
 

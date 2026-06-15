@@ -149,6 +149,29 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   Off by default and fail-closed — an unreachable daemon surfaces in `/healthz` and
   never affects the bridge lifecycle. Requires the separate `claustrum` binary.
 
+## Install
+
+No Python needed — the install script grabs the signed standalone binary for your
+OS, verifies its checksum, and installs it to `~/.local/bin` (Linux & macOS),
+printing a PATH hint if that directory isn't already on your `PATH`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash
+```
+
+On **Windows**, the PowerShell equivalent installs `clauster.exe` the same way:
+
+```powershell
+irm https://raw.githubusercontent.com/schubydoo/clauster/main/install.ps1 | iex
+```
+
+Or pick another path — `uv tool install clauster` (recommended for a Python host),
+`pip`/`pipx`, [Scoop](https://scoop.sh) on Windows (`scoop bucket add clauster
+https://github.com/schubydoo/clauster && scoop install clauster`), or
+[Docker](#docker). Full recipes — including supply-chain verification — are in the
+[Installation guide](https://schubydoo.github.io/clauster/installation/). To hack
+on Clauster itself, use the dev quick-start below.
+
 ## Quick start (dev)
 
 ```sh
