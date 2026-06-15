@@ -97,8 +97,15 @@ def bump_flake(text: str, version: str, sums: dict[str, str]) -> str:
     """Rewrite the Nix flake's version and each present system's sha256.
 
     The flake's ``file`` field interpolates ``${version}``, so only the top-level
-    version string and the per-system checksums need rewriting.
+    version string and the per-system checksums need rewriting. Because that
+    interpolation hides the version from ``stale_versions`` (which only sees numeric
+    tokens), fail closed here if the flake declares an arch missing from SHA256SUMS —
+    otherwise its stale sha256 would silently survive the bump.
     """
+    declared = set(re.findall(r'file = "clauster-\$\{version\}-([^"]+)"', text))
+    missing = declared - set(arch_assets(version, sums))
+    if missing:
+        raise ValueError(f"flake.nix: arch(es) {sorted(missing)} absent from SHA256SUMS")
     text = re.sub(r'(version = ")[^"]+(";)', rf"\g<1>{version}\g<2>", text, count=1)
     for arch, digest in arch_assets(version, sums).items():
         block = re.compile(

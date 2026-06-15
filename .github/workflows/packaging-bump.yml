@@ -142,7 +142,11 @@ jobs:
           git config user.name "clauster-ci[bot]"
           git config user.email "clauster-ci[bot]@users.noreply.github.com"
           git checkout -B "$branch"
-          git add bucket/clauster.json Formula/clauster.rb flake.nix
+          # Stage only the manifests that exist — the bump helper skips absent ones,
+          # so `git add <missing-path>` must not hard-fail the job.
+          for f in bucket/clauster.json Formula/clauster.rb flake.nix; do
+            [ -f "$f" ] && git add "$f"
+          done
           git commit -m "chore(packaging): bump manifests to ${VERSION}"
           git push --force-with-lease \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${branch}"

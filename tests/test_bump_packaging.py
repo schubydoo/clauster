@@ -173,6 +173,23 @@ def test_fail_closed_when_present_arch_has_no_checksum(tmp_path):
     assert '"version": "0.10.0"' in (tmp_path / "bucket" / "clauster.json").read_text()
 
 
+def test_fail_closed_when_flake_arch_missing_from_sums(tmp_path):
+    # The flake's `file` field interpolates ${version}, so a stale per-arch sha256
+    # carries no version token for the generic guard to catch. The flake declares a
+    # linux block; SHA256SUMS omits the linux asset -> the bump must abort, not
+    # silently keep the old linux checksum.
+    sums = (
+        f"{NEW_MACOS}  clauster-0.11.0-macos-arm64\n"
+        f"{NEW_WIN}  clauster-0.11.0-windows-x86_64.exe\n"
+    )
+    _seed(tmp_path, scoop=None, formula=None, sums=sums)
+    result = _run(tmp_path)
+    assert result.returncode == 1
+    assert "linux-x86_64" in result.stderr
+    # Untouched: no partial write.
+    assert OLD_LINUX in (tmp_path / "flake.nix").read_text()
+
+
 def test_rejects_malformed_version(tmp_path):
     _seed(tmp_path)
     result = _run(tmp_path, version="0.11")

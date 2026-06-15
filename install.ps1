@@ -147,6 +147,11 @@ function Install-Clauster {
 # when this script is piped into `iex`).
 try {
     Install-Clauster
+    # Success: normalize the exit code. The `--version` probe inside Install-Clauster
+    # can leave $LASTEXITCODE non-zero without throwing (a launch that exits non-zero
+    # but doesn't error), which would otherwise make a successful install look failed
+    # to a piped `iex` caller or CI.
+    $global:LASTEXITCODE = 0
 }
 catch {
     Write-Err $_.Exception.Message
