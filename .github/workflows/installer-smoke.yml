@@ -1,0 +1,116 @@
+name: Installer smoke
+
+# Smoke-test every install method on real runners (the cross-OS / package-manager
+# coverage the dev host can't provide): the one-line installers install.sh (Linux +
+# macOS) and install.ps1 (Windows), the Homebrew formula (macOS), and the Nix flake
+# (Linux). Each resolves a published release, installs the standalone binary, and
+# asserts the installed `clauster` reports a version. Validates the install code (this
+# PR's) against the real release assets. Non-required signal job (like build-binaries).
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - install.sh
+      - install.ps1
+      - Formula/clauster.rb
+      - flake.nix
+      - flake.lock
+      - .github/workflows/installer-smoke.yml
+
+# Read-only; the installers only fetch public release assets. No secrets.
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-smoke-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sh:
+    name: install.sh (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest -> linux-x86_64, macos-latest -> macos-arm64: both have a
+        # published 0.10.0 binary, so install.sh should succeed end-to-end.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Run install.sh + verify
+        run: |
+          set -euo pipefail
+          bash ./install.sh
+          export PATH="$HOME/.local/bin:$PATH"
+          clauster --version
+          clauster --version | grep -q '^clauster'
+
+  ps1:
+    name: install.ps1 (windows)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      # install.ps1 runs under a function + try/catch (no `exit`, for iex safety); it
+      # signals failure via $global:LASTEXITCODE rather than a non-zero process exit,
+      # so verify the OUTCOME (binary present + runnable) — more robust than trusting
+      # the script's exit status.
+      - name: Run install.ps1 + verify
+        shell: pwsh
+        run: |
+          ./install.ps1
+          $dest = Join-Path $env:LOCALAPPDATA 'Programs\clauster\clauster.exe'
+          if (-not (Test-Path $dest)) { throw "clauster.exe was not installed at $dest" }
+          $v = & $dest --version
+          if ($LASTEXITCODE -ne 0) { throw "clauster.exe --version exited with code $LASTEXITCODE" }
+          Write-Host "version: $v"
+          if ($v -notmatch '^clauster') { throw "unexpected --version output: $v" }
+
+  brew:
+    name: Homebrew (macos-arm64)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: brew install via a local tap + verify
+        run: |
+          set -euo pipefail
+          # Modern Homebrew refuses a bare local formula path — it must live in a tap.
+          # Stage our formula into an ephemeral local tap (mirrors real consumption via
+          # a homebrew-<x> repo) and install from there.
+          brew tap-new schubydoo/local --no-git
+          tap_dir="$(brew --repository schubydoo/local)"
+          mkdir -p "$tap_dir/Formula"
+          cp ./Formula/clauster.rb "$tap_dir/Formula/clauster.rb"
+          brew install --formula schubydoo/local/clauster
+          clauster --version
+          clauster --version | grep -q '^clauster'
+
+  nix:
+    name: Nix flake (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Nix, build + run the flake
+        run: |
+          set -euo pipefail
+          # Single-user install (no daemon/systemd needed in CI).
+          sh <(curl -L https://nixos.org/nix/install) --no-daemon
+          . "$HOME/.nix-profile/etc/profile.d/nix.sh"
+          export NIX_CONFIG="experimental-features = nix-command flakes"
+          # --no-update-lock-file uses the committed flake.lock and errors if it's
+          # stale (rather than silently regenerating it), asserting lock/flake match.
+          nix build .#clauster -L --no-update-lock-file
+          ./result/bin/clauster --version
+          ./result/bin/clauster --version | grep -q '^clauster'
+          nix run .#clauster --no-update-lock-file -- --version

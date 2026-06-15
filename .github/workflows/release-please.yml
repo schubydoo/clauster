@@ -20,7 +20,7 @@ name: Release Please
 #
 # Job DAG:
 #   prepare  -> cut the draft (or determine no release); emit release_created/upload_url
-#   binaries -> (only on a release) build the standalone one-file binaries, 3-OS matrix
+#   binaries -> (only on a release) build the standalone one-file binaries, 5-target matrix
 #   publish  -> (only on a release) build+sign dists+binaries, attach to the draft, publish
 #   next_pr  -> (every push) open/update the next release PR + sync uv.lock, AFTER any publish
 
@@ -145,7 +145,7 @@ jobs:
           path: binaries
           merge-multiple: true
       # Replace the per-target .sha256 files with a single signed SHA256SUMS over
-      # the binaries, and assert all three expected targets are present BEFORE we
+      # the binaries, and assert all five expected targets are present BEFORE we
       # sign/attach anything — a missing target must abort, never silently ship a
       # partial set.
       - name: Collect binaries + checksums
@@ -156,7 +156,7 @@ jobs:
           rm -f ./*.sha256
           shopt -s nullglob
           bins=(clauster-*)
-          for want in linux-x86_64 macos-arm64 windows-x86_64; do
+          for want in linux-x86_64 linux-arm64 macos-arm64 macos-x86_64 windows-x86_64; do
             match=0
             for b in "${bins[@]}"; do case "$b" in *"$want"*) match=1 ;; esac; done
             [ "$match" -eq 1 ] || { echo "missing binary for target '$want'; aborting" >&2; exit 1; }
