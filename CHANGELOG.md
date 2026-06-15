@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/schubydoo/clauster/compare/v0.10.0...v0.11.0) (2026-06-15)
+
+
+### Features
+
+* **install:** one-line installers, Scoop/Homebrew/Nix + release auto-bump ([#287](https://github.com/schubydoo/clauster/issues/287)) ([feb666f](https://github.com/schubydoo/clauster/commit/feb666f645f50e962f4ce7964282f6848da8a54a))
+
 ## [0.10.0](https://github.com/schubydoo/clauster/compare/v0.9.0...v0.10.0) (2026-06-15)
 
 
