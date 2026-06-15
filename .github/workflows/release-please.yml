@@ -167,6 +167,23 @@ jobs:
             shasum -a 256 "${bins[@]}" > SHA256SUMS
           fi
           echo "collected ${#bins[@]} binaries + SHA256SUMS"
+      # SLSA build provenance over the dists, binaries, and checksum manifest (the
+      # in-toto bundle we also attach as multiple.intoto.jsonl so Scorecard's
+      # Signed-Releases provenance probe credits it — it scans assets, not the
+      # attestation API). Step-level actions/attest (not slsa-github-generator, which
+      # targets a release by TAG after publish) because our draft is tag-less here.
+      #
+      # MUST run BEFORE the signing step below: the `binaries/clauster-*` glob would
+      # otherwise also match the `.sigstore.json` bundles Sigstore writes next to each
+      # binary, enumerating signature files as provenance subjects (a real artifact's
+      # provenance is fine; a signature bundle's is meaningless noise). Attesting first
+      # — while only the real artifacts exist — keeps the subject set to exactly the
+      # dists + binaries + SHA256SUMS.
+      - name: Generate SLSA build provenance
+        id: provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: "dist/*.tar.gz,dist/*.whl,binaries/clauster-*,binaries/SHA256SUMS"
       # Sigstore-sign the dists, the binaries, and the checksum manifest. Sigstore v3
       # writes a .sigstore.json bundle next to each input and exits non-zero on
       # failure, so a signing error aborts before publish.
@@ -178,16 +195,6 @@ jobs:
             ./dist/*.whl
             ./binaries/clauster-*
             ./binaries/SHA256SUMS
-      # SLSA build provenance over BOTH dists and binaries (the in-toto bundle we
-      # also attach as multiple.intoto.jsonl so Scorecard's Signed-Releases
-      # provenance probe credits it — it scans assets, not the attestation API).
-      # Step-level actions/attest (not slsa-github-generator, which targets a release
-      # by TAG after publish) because our draft is tag-less until publish.
-      - name: Generate SLSA build provenance
-        id: provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
-        with:
-          subject-path: "dist/*.tar.gz,dist/*.whl,binaries/clauster-*,binaries/SHA256SUMS"
       - name: Attach signed assets to the draft, then publish
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -197,6 +204,7 @@ jobs:
           UPLOAD_URL: ${{ needs.prepare.outputs.upload_url }}
           REPO: ${{ github.repository }}
           PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           # Derive + validate the numeric release id (a non-match would otherwise
@@ -243,7 +251,16 @@ jobs:
             echo "no SLSA provenance bundle produced; refusing to publish without provenance" >&2
             exit 1
           fi
-          provenance="dist/multiple.intoto.jsonl"
+          # Version-name the provenance asset to match the other release artifacts.
+          # Scorecard's Signed-Releases provenance probe matches on the `.intoto.jsonl`
+          # SUFFIX (strings.HasSuffix), not the exact name, so a prefix is safe; keep
+          # the `multiple` token (slsa-github-generator convention for a multi-subject
+          # bundle). Fall back to the bare name if the version output is somehow empty.
+          if [ -n "${VERSION:-}" ]; then
+            provenance="dist/clauster-${VERSION}-multiple.intoto.jsonl"
+          else
+            provenance="dist/multiple.intoto.jsonl"
+          fi
           cp "${PROVENANCE_BUNDLE}" "${provenance}"
           assets=("${dists[@]}" "${dist_sigs[@]}" "${bin_files[@]}" "${bin_sigs[@]}" \
                   "${sums[@]}" "${sums_sigs[@]}" "${provenance}")
