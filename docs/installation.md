@@ -41,6 +41,62 @@ clauster run -c clauster.yml
 The package installs a single `clauster` console entry point
 (`clauster.__main__:main`); `python -m clauster` is equivalent.
 
+## Standalone binary (no Python)
+
+Each release attaches a single-file binary per OS, built with PyInstaller — grab
+one if you don't want a Python toolchain on the host. It still spawns `claude`,
+so the CLI must be on your `PATH`.
+
+| OS / arch | Asset |
+| --- | --- |
+| Linux x86_64 | `clauster-<version>-linux-x86_64` |
+| macOS arm64 (Apple Silicon) | `clauster-<version>-macos-arm64` |
+| Windows x86_64 | `clauster-<version>-windows-x86_64.exe` |
+
+Download from the [latest release](https://github.com/schubydoo/clauster/releases/latest),
+**verify the checksum** against the release's `SHA256SUMS`, then run it. The asset
+name carries the version, so resolve it first (GitHub's `latest/download/`
+redirect needs the exact filename):
+
+```sh
+# Linux x86_64 — swap clauster-$VER-linux-x86_64 for clauster-$VER-macos-arm64 on Apple Silicon
+VER=$(curl -fsSL https://api.github.com/repos/schubydoo/clauster/releases/latest \
+  | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+curl -LO https://github.com/schubydoo/clauster/releases/download/v$VER/clauster-$VER-linux-x86_64
+curl -LO https://github.com/schubydoo/clauster/releases/download/v$VER/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS    # expect: clauster-$VER-linux-x86_64: OK
+chmod +x clauster-$VER-linux-x86_64
+./clauster-$VER-linux-x86_64 run -c clauster.yml
+```
+
+Every binary is also **Sigstore-signed** (keyless) — a `<asset>.sigstore.json`
+bundle sits beside it, and the release carries SLSA provenance
+(`*.intoto.jsonl`). Verify the build with the
+[`cosign`](https://docs.sigstore.dev/) / `gh attestation verify` toolchain if you
+want the full supply-chain check.
+
+!!! note "Unsigned for the OS, on purpose"
+    The binaries are Sigstore-signed but not yet OS code-signed, so the first run
+    needs one extra step. On **macOS**, Gatekeeper quarantines a downloaded
+    binary — clear it with `xattr -d com.apple.quarantine
+    clauster-<version>-macos-arm64`, or right-click → **Open** once. On
+    **Windows**, SmartScreen may warn on first launch; choose **More info → Run
+    anyway** (installing via Scoop, below, avoids the browser-download prompt).
+
+## Scoop (Windows)
+
+On Windows, [Scoop](https://scoop.sh) installs the standalone binary and keeps it
+updated. This repository doubles as a Scoop bucket:
+
+```powershell
+scoop bucket add clauster https://github.com/schubydoo/clauster
+scoop install clauster
+clauster run -c clauster.yml
+```
+
+`scoop update clauster` picks up new releases automatically (the manifest tracks
+GitHub releases and re-verifies the checksum on each update).
+
 ## From source (development)
 
 ```sh
