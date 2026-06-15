@@ -28,10 +28,17 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: brew install + verify
+      - name: brew install via a local tap + verify
         run: |
           set -euo pipefail
-          brew install --formula ./Formula/clauster.rb
+          # Modern Homebrew refuses a bare local formula path — it must live in a tap.
+          # Stage our formula into an ephemeral local tap (mirrors real consumption via
+          # a homebrew-<x> repo) and install from there.
+          brew tap-new schubydoo/local --no-git
+          tap_dir="$(brew --repository schubydoo/local)"
+          mkdir -p "$tap_dir/Formula"
+          cp ./Formula/clauster.rb "$tap_dir/Formula/clauster.rb"
+          brew install --formula schubydoo/local/clauster
           clauster --version
           clauster --version | grep -q '^clauster'
 
