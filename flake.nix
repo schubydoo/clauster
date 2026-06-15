@@ -8,12 +8,21 @@
     let
       version = "0.11.0";
 
-      # The published 0.10.0 standalone binaries, keyed by Nix system. macOS Intel
-      # and Linux arm64 are not built yet (use pip/uv there for now).
+      # The published standalone binaries, keyed by Nix system. Windows is not a Nix
+      # target (use the Scoop bucket there). Checksums are auto-bumped per release by
+      # packaging-bump.yml from the release SHA256SUMS.
       assets = {
         "x86_64-linux" = {
           file = "clauster-${version}-linux-x86_64";
           sha256 = "9ef8e2d2757b8c6315c551db0e2698a9118ab4d110c1cd7fb90538e006893264";
+        };
+        "aarch64-linux" = {
+          file = "clauster-${version}-linux-arm64";
+          sha256 = "0e08db0b8966cb5a7bdb2fe827e8be54ceed400dab33c5db1ca0ca24d1ea2dfc";
+        };
+        "x86_64-darwin" = {
+          file = "clauster-${version}-macos-x86_64";
+          sha256 = "88b688476865b53dd87aa41b37abd7bb8db1f655015e5cacfab03c96407289ac";
         };
         "aarch64-darwin" = {
           file = "clauster-${version}-macos-arm64";

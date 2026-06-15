@@ -113,7 +113,9 @@ must be on your `PATH`.
 | OS / arch | Asset |
 | --- | --- |
 | Linux x86_64 | `clauster-<version>-linux-x86_64` |
+| Linux arm64 | `clauster-<version>-linux-arm64` |
 | macOS arm64 (Apple Silicon) | `clauster-<version>-macos-arm64` |
+| macOS x86_64 (Intel) | `clauster-<version>-macos-x86_64` |
 | Windows x86_64 | `clauster-<version>-windows-x86_64.exe` |
 
 Download from the [latest release](https://github.com/schubydoo/clauster/releases/latest),

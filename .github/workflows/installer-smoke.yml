@@ -31,9 +31,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu-latest -> linux-x86_64, macos-latest -> macos-arm64: both have a
-        # published 0.10.0 binary, so install.sh should succeed end-to-end.
-        os: [ubuntu-latest, macos-latest]
+        # One runner per published binary arch so install.sh is smoked end-to-end on
+        # each: ubuntu-latest->linux-x86_64, ubuntu-24.04-arm->linux-arm64,
+        # macos-latest->macos-arm64, macos-15-intel->macos-x86_64.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -72,8 +73,12 @@ jobs:
           if ($v -notmatch '^clauster') { throw "unexpected --version output: $v" }
 
   brew:
-    name: Homebrew (macos-arm64)
-    runs-on: macos-latest
+    name: Homebrew (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel] # Apple Silicon + Intel
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -94,8 +99,12 @@ jobs:
           clauster --version | grep -q '^clauster'
 
   nix:
-    name: Nix flake (x86_64-linux)
-    runs-on: ubuntu-latest
+    name: Nix flake (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm] # x86_64 + arm64 Linux
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
