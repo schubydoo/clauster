@@ -151,9 +151,15 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
 
 ## Install
 
-Pick a path — `uv tool install clauster` (recommended), `pip`/`pipx`, a
-**standalone single-file binary** (no Python; checksummed + Sigstore-signed),
-[Scoop](https://scoop.sh) on Windows (`scoop bucket add clauster
+No Python needed — the install script grabs the signed standalone binary for your
+OS, verifies its checksum, and drops it on your `PATH` (Linux & macOS):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash
+```
+
+Or pick another path — `uv tool install clauster` (recommended for a Python host),
+`pip`/`pipx`, [Scoop](https://scoop.sh) on Windows (`scoop bucket add clauster
 https://github.com/schubydoo/clauster && scoop install clauster`), or
 [Docker](#docker). Full recipes — including supply-chain verification — are in the
 [Installation guide](https://schubydoo.github.io/clauster/installation/). To hack

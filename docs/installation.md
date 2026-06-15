@@ -41,11 +41,47 @@ clauster run -c clauster.yml
 The package installs a single `clauster` console entry point
 (`clauster.__main__:main`); `python -m clauster` is equivalent.
 
+## Install script (Linux & macOS, no Python)
+
+The quickest way to get the standalone binary. The script detects your OS +
+architecture, downloads the matching binary from the latest release, **verifies
+its SHA-256** against the release's signed `SHA256SUMS`, and installs it to
+`~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash
+```
+
+`wget -qO- <url> | bash` works too. Environment overrides:
+
+| Variable | Effect |
+| --- | --- |
+| `CLAUSTER_VERSION` | Pin a version (e.g. `0.10.0`) instead of the latest release |
+| `CLAUSTER_INSTALL_DIR` | Install directory (default `~/.local/bin`) |
+
+**Prefer to read before you pipe?** Piping a script straight into `bash` runs
+remote code sight-unseen. To review it first, download, inspect, then run:
+
+```sh
+curl -fsSL -o clauster-install.sh https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh
+less clauster-install.sh && bash clauster-install.sh
+```
+
+If no binary is published for your platform yet, the script prints a `pip`/`uvx`
+fallback and exits. On **Windows**, use [Scoop](#scoop-windows) instead.
+
+The script authenticates the binary by SHA-256 against the release's
+`SHA256SUMS`, which it trusts over HTTPS from GitHub — the standard
+`curl … | bash` trust model. For the stronger keyless-signature check (verifying
+`SHA256SUMS` and the binary against their `.sigstore.json` bundles), download the
+binary yourself and use the `cosign` / `gh attestation verify` flow under
+[Standalone binary](#standalone-binary-no-python) below.
+
 ## Standalone binary (no Python)
 
-Each release attaches a single-file binary per OS, built with PyInstaller — grab
-one if you don't want a Python toolchain on the host. It still spawns `claude`,
-so the CLI must be on your `PATH`.
+Prefer to grab the file yourself? Each release attaches a single-file binary per
+OS + architecture, built with PyInstaller. It still spawns `claude`, so the CLI
+must be on your `PATH`.
 
 | OS / arch | Asset |
 | --- | --- |
