@@ -57,9 +57,9 @@ jobs:
           sh <(curl -L https://nixos.org/nix/install) --no-daemon
           . "$HOME/.nix-profile/etc/profile.d/nix.sh"
           export NIX_CONFIG="experimental-features = nix-command flakes"
-          # --locked asserts the committed flake.lock is consistent with flake.nix
-          # (fails instead of silently regenerating it).
-          nix build .#clauster -L --locked
+          # --no-update-lock-file uses the committed flake.lock and errors if it's
+          # stale (rather than silently regenerating it), asserting lock/flake match.
+          nix build .#clauster -L --no-update-lock-file
           ./result/bin/clauster --version
           ./result/bin/clauster --version | grep -q '^clauster'
-          nix run .#clauster --locked -- --version
+          nix run .#clauster --no-update-lock-file -- --version
