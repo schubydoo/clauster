@@ -6,18 +6,18 @@
   outputs =
     { self, nixpkgs }:
     let
-      version = "0.10.0";
+      version = "0.11.0";
 
       # The published 0.10.0 standalone binaries, keyed by Nix system. macOS Intel
       # and Linux arm64 are not built yet (use pip/uv there for now).
       assets = {
         "x86_64-linux" = {
           file = "clauster-${version}-linux-x86_64";
-          sha256 = "c1052df6ee5bf0519e33c2981c522b59143281bea2f7cb9075c62f07aa4c8c87";
+          sha256 = "9ef8e2d2757b8c6315c551db0e2698a9118ab4d110c1cd7fb90538e006893264";
         };
         "aarch64-darwin" = {
           file = "clauster-${version}-macos-arm64";
-          sha256 = "be06f18dae69680bcffbf7b167faed6fec6cc81bf50329fbb39a20d9d8b3efa2";
+          sha256 = "aec2d0c69c6aff0e74921e973e65bbc11229920c94ac575919af84d0271ab0b8";
         };
       };
 
