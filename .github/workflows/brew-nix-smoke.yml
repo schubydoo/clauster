@@ -1,0 +1,56 @@
+name: Brew/Nix smoke
+
+# Validate the Homebrew formula and the Nix flake on real runners (the dev host has
+# neither). Each installs the published 0.10.0 standalone binary and asserts
+# `clauster --version`. Manual + on changes to the packaging files. Non-required.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - Formula/clauster.rb
+      - flake.nix
+      - flake.lock
+      - .github/workflows/brew-nix-smoke.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brew-nix-smoke-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  brew:
+    name: Homebrew (macos-arm64)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: brew install + verify
+        run: |
+          set -euo pipefail
+          brew install --formula ./Formula/clauster.rb
+          clauster --version
+          clauster --version | grep -q '^clauster'
+
+  nix:
+    name: Nix flake (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Nix, build + run the flake
+        run: |
+          set -euo pipefail
+          # Single-user install (no daemon/systemd needed in CI).
+          sh <(curl -L https://nixos.org/nix/install) --no-daemon
+          . "$HOME/.nix-profile/etc/profile.d/nix.sh"
+          export NIX_CONFIG="experimental-features = nix-command flakes"
+          nix build .#clauster -L
+          ./result/bin/clauster --version
+          ./result/bin/clauster --version | grep -q '^clauster'
+          nix run .#clauster -- --version
