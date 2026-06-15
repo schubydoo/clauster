@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.10.0](https://github.com/schubydoo/clauster/compare/v0.9.0...v0.10.0) (2026-06-15)
+
+
+### Features
+
+* **ops:** make install-service --write install the unit + actionable systemd doctor fix ([#267](https://github.com/schubydoo/clauster/issues/267)) ([bf32d00](https://github.com/schubydoo/clauster/commit/bf32d0071b35811a02d3e459d178bd84a01f0397))
+* **sessions:** Forget a stopped session to clear it from Recent/resumable ([#268](https://github.com/schubydoo/clauster/issues/268)) ([7b68db8](https://github.com/schubydoo/clauster/commit/7b68db8cb9b7214b1669ff7fe0cedf2d1202eeb1))
+
+
+### Bug Fixes
+
+* **recap:** make the SessionStart hook survive a frozen one-file binary ([#279](https://github.com/schubydoo/clauster/issues/279)) ([6caa0ae](https://github.com/schubydoo/clauster/commit/6caa0ae8cdc3edb32904ba2623187b3fc9511302))
+* **ui:** clarify launch Mode label + gate Spawn selector to the standard bridge ([#265](https://github.com/schubydoo/clauster/issues/265)) ([fefc3d9](https://github.com/schubydoo/clauster/commit/fefc3d9b1a28c296be9004a5293cfb7cd55556fc))
+* **ui:** make detached & hosted Stop/Kill/Resume clickable; honest claude.ai framing ([#266](https://github.com/schubydoo/clauster/issues/266)) ([fdfd326](https://github.com/schubydoo/clauster/commit/fdfd326af97fb52317d030ed27bac60e4f3bf7fa))
+
+
+### Performance
+
+* **test:** shrink hosted stop-grace so the suite isn't 30s slower ([#275](https://github.com/schubydoo/clauster/issues/275)) ([3a1cd76](https://github.com/schubydoo/clauster/commit/3a1cd764caed15c705c82d1b8343483cffbcd342))
+
 ## [0.9.0](https://github.com/schubydoo/clauster/compare/v0.8.0...v0.9.0) (2026-06-14)
 
 
