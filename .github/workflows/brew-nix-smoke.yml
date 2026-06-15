@@ -57,15 +57,9 @@ jobs:
           sh <(curl -L https://nixos.org/nix/install) --no-daemon
           . "$HOME/.nix-profile/etc/profile.d/nix.sh"
           export NIX_CONFIG="experimental-features = nix-command flakes"
-          nix build .#clauster -L
+          # --locked asserts the committed flake.lock is consistent with flake.nix
+          # (fails instead of silently regenerating it).
+          nix build .#clauster -L --locked
           ./result/bin/clauster --version
           ./result/bin/clauster --version | grep -q '^clauster'
-          nix run .#clauster -- --version
-      # Emit the generated lockfile so we can commit a reproducible flake.lock
-      # (the dev host has no nix to `nix flake lock` locally).
-      - name: Upload flake.lock
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: flake-lock
-          path: flake.lock
-          if-no-files-found: error
+          nix run .#clauster --locked -- --version
