@@ -14,7 +14,7 @@ on:
   schedule:
     - cron: "37 5 * * *"
   # Per-PR only when something that affects the bundle changes (the spec, the build/
-  # smoke scripts, this workflow, or the dependency set) — keeps the 5-target build off
+  # smoke scripts, this workflow, or the dependency set) — keeps the 4-target build off
   # the critical path for ordinary code PRs.
   pull_request:
     paths:
@@ -53,11 +53,9 @@ jobs:
           - os: macos-latest
             target: macos-arm64
             artifact: clauster
-          # macos-13 is the last Intel (x86_64) macOS runner image; revisit if/when
-          # GitHub retires it (the macos-arm64 leg above stays the durable mac target).
-          - os: macos-13
-            target: macos-x86_64
-            artifact: clauster
+          # No macOS Intel (x86_64) leg: macos-13 (the free standard Intel runner) was
+          # retired and the remaining Intel runners are billed larger runners, for an
+          # EoL platform — Intel-mac users install via pip / uv / Homebrew-from-source.
           - os: windows-latest
             target: windows-x86_64
             artifact: clauster.exe
