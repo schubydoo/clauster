@@ -183,11 +183,13 @@ def test_fail_closed_when_flake_arch_missing_from_sums(tmp_path):
         f"{NEW_WIN}  clauster-0.11.0-windows-x86_64.exe\n"
     )
     _seed(tmp_path, scoop=None, formula=None, sums=sums)
+    before = (tmp_path / "flake.nix").read_text()
     result = _run(tmp_path)
     assert result.returncode == 1
     assert "linux-x86_64" in result.stderr
-    # Untouched: no partial write.
-    assert OLD_LINUX in (tmp_path / "flake.nix").read_text()
+    # Untouched: the whole file is byte-identical (not just the linux sha256) — proves
+    # no partial write (e.g. a bumped version line) slipped through.
+    assert (tmp_path / "flake.nix").read_text() == before
 
 
 def test_rejects_malformed_version(tmp_path):

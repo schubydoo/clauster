@@ -73,7 +73,10 @@ function Install-Clauster {
         $expected = ''
         foreach ($l in Get-Content -LiteralPath $sumsPath) {
             $parts = $l -split '\s+', 2
-            if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $asset) {
+            # TrimStart('*') tolerates a binary-mode marker ("<hash> *<name>"), matching
+            # bump_packaging.py; our releases use text mode, so this is defensive parity.
+            $name = if ($parts.Count -eq 2) { $parts[1].Trim().TrimStart('*') } else { '' }
+            if ($parts.Count -eq 2 -and $name -eq $asset) {
                 $expected = $parts[0].ToLower()
                 break
             }
@@ -137,6 +140,10 @@ function Install-Clauster {
         Write-Info "Clauster spawns the 'claude' CLI but does not vendor it - make sure Claude Code is on your PATH."
         Write-Info 'The binary is Sigstore-signed but not authenticode-signed, so SmartScreen may warn on first run.'
         Write-Ok 'Installation complete!'
+        # Only reached on success. The `--version` probe above can leave $LASTEXITCODE
+        # non-zero without throwing; normalize so a successful install reports 0 to a
+        # piped `iex` caller / CI. (Failure paths return/throw before here with 1.)
+        $global:LASTEXITCODE = 0
     }
     finally {
         Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
@@ -147,11 +154,6 @@ function Install-Clauster {
 # when this script is piped into `iex`).
 try {
     Install-Clauster
-    # Success: normalize the exit code. The `--version` probe inside Install-Clauster
-    # can leave $LASTEXITCODE non-zero without throwing (a launch that exits non-zero
-    # but doesn't error), which would otherwise make a successful install look failed
-    # to a piped `iex` caller or CI.
-    $global:LASTEXITCODE = 0
 }
 catch {
     Write-Err $_.Exception.Message
