@@ -172,6 +172,19 @@ def test_dashboard_ux_polish_followups(write_config):
     assert "hostedStatusDot(status) {" in page  # the helper is defined and shipped
 
 
+def test_dashboard_surfaces_crashed_instance_error_detail(write_config):
+    # #313: a bridge that spawns then CRASHES has `error_detail` set (None on success), but the
+    # card never rendered it — the failure reason was invisible (a silent dead card). The
+    # `detailOf(name)` helper already returns the instance's error_detail; the card must both
+    # GATE on it (x-show — error_detail is only set on ERROR/CRASHED, so presence == a failure
+    # to surface) AND RENDER it (x-text, which auto-escapes — no XSS from the captured stderr
+    # tail). This is distinct from `errorOf` (a transient ACTION error, already shown).
+    page = _client(write_config).get("/").text
+    # detailOf must be USED in the markup (it was defined-but-unused before), keyed per project.
+    assert re.search(r"x-show=\"detailOf\(\s*'alpha'\s*\)\"", page)  # gated on the failure reason
+    assert re.search(r"x-text=\"detailOf\(\s*'alpha'\s*\)\"", page)  # and actually displayed
+
+
 def test_dashboard_has_readiness_panel(write_config):
     # Readiness is now a header pill (severity-aware: "blocking" vs "check(s)") that
     # opens a collapsible panel titled "Before you start a session". The pill logic
