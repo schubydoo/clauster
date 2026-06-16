@@ -70,7 +70,9 @@ restarts — the dashboard JS/CSS are cached static assets.
       button (toasts "Link copied"), and the **QR** show/hide toggle (image appears
       then clears); the phone-scan check stays manual.
 - [ ] **External sessions** (started outside Clauster) appear with their distinct
-      indicator.
+      indicator. **`[auto]`** (`test_observability_e2e`): a fake `agents --json` session
+      in a managed dir that Clauster didn't start is attributed EXTERNAL and shows the
+      "External session active" indicator (a project with none shows nothing).
 - [ ] **Live log tail** streams over WS; ANSI stripped; IDs/tokens redacted.
       **`[auto]`** (`test_actions_e2e`): a running bridge's Logs panel populates with
       the streamed marker lines, ANSI is stripped, and the session id / bearer token on
@@ -94,7 +96,8 @@ restarts — the dashboard JS/CSS are cached static assets.
       full-page reload**, and that card being Start/Trust-interactive without a
       refresh. The clone download, progress bar, and "Show it" CTA stay manual.
 - [ ] **Per-project cost badge** lazy-loads `≈$X.XX` after first paint; blank
-      project shows no badge.
+      project shows no badge. **`[auto]`** (`test_observability_e2e`): a project with a
+      seeded usage transcript shows the `≈`-prefixed badge; a blank project shows none.
 - [ ] **Login / logout** (when `auth.password_required`): login, then logout
       revokes everywhere (old cookie rejected). **`[auto]`** for login (wrong
       password gated, correct reaches the dashboard); logout-revocation still manual.
@@ -114,6 +117,9 @@ restarts — the dashboard JS/CSS are cached static assets.
 - [ ] **Connection-lost banner** — stop the server (or block `/api/instances`);
       after ~2 failed polls a "Lost connection … retrying" banner appears; it
       **clears** when the server returns. A 401 mid-session bounces to `/login`.
+      **`[auto]`** (`test_observability_e2e`): killing the server subprocess mid-session
+      makes the banner appear. The **clears-on-return** recovery and the **401→/login**
+      bounce stay manual.
 - [ ] **Action errors surface** — a failed start/stop/restart/trust shows an
       inline error on the card (not just a toast that vanishes); a failed copy
       toasts rather than failing silently.
