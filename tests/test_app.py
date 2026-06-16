@@ -74,13 +74,14 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     assert "s.token === token" in page
     assert "const token = ++this._logSeq;" in page
     # Negative guard (CodeRabbit): pin the EXACT liveness check so a regression that
-    # reintroduces the object-identity comparison (`logs[name] === state`, always
-    # false through Alpine's Proxy) ALONGSIDE the token check fails this test — the
+    # reintroduces the object-identity comparison (`logs[name] !== state`, always true
+    # through Alpine's Proxy) ALONGSIDE the token check fails this test — the
     # `s.token === token` substring above would otherwise survive that reintroduction.
-    assert (
-        "const live = () => { const s = self.logs[name]; "
-        "return !!s && s.open && s.token === token; };"
-    ) in page
+    assert "return s && s.open && s.token === token ? s : null;" in page
+    # liveState() must return the live PROXY (so handlers mutate through Alpine's reactivity
+    # and each frame repaints immediately) — not the raw `state` object, whose mutations
+    # bypass the Proxy set-traps and only surface on the next reactive flush.
+    assert "const s = liveState();" in page  # onmessage mutates the resolved proxy, not raw state
     # Single-flight guard that QUEUES a trailing refresh (so action-flow refreshes aren't
     # dropped), plus the reset + trailing run — assert all three so a regression fails.
     assert "if (this._refreshing) { this._refreshQueued = true; return; }" in page
