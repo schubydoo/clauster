@@ -10,7 +10,12 @@ drifts from what is committed here.
   comparing, so either compact or pretty JSON works.
 - `settings.json` — `description`, `homepage`, `topics`, `has_issues`,
   `has_wiki`, `has_projects`, the three `allow_*_merge` flags, and
-  `delete_branch_on_merge`.
+  `delete_branch_on_merge`. **Token split:** `GET /repos` returns the merge flags
+  (and `delete_branch_on_merge`) only to an admin-scope token, which the drift
+  check's default `GITHUB_TOKEN` lacks. So the PR-facing `drift` job (no secrets, fork-safe)
+  verifies labels + the read-visible settings, and a separate `settings-admin` job
+  verifies the merge flags with `REPO_CONFIG_TOKEN` — running **only on non-PR events**
+  (push to `main` / schedule / dispatch), so no secret is ever exposed to a PR.
 
 ## What runs
 
@@ -21,16 +26,18 @@ JSON here, and prints any drift to the workflow's job summary.
 
 ## It is READ-ONLY and ADVISORY
 
-- **Read-only.** The workflow only performs `gh api` GETs with the default
-  `GITHUB_TOKEN`. It uses no secrets and writes nothing — not labels, not
-  settings, not branch protection or rulesets (those are owned by the repo
-  ruleset and are intentionally out of scope).
-- **Fork-safe.** Plain `pull_request` trigger (never `pull_request_target`) with
-  `permissions: contents: read` (+ `issues: read` for the label API). A fork PR
-  cannot exfiltrate or mutate anything.
-- **Non-blocking.** The job always exits `0` (drift only prints a diff) and is
-  additionally wrapped in `continue-on-error`. **Do not add it to the repo's
-  required status checks** — it must never gate a merge.
+- **Read-only.** Both jobs only perform `gh api` GETs and write nothing — not
+  labels, not settings, not branch protection or rulesets (those are owned by the
+  repo ruleset and are intentionally out of scope; reconciliation lives in
+  `repo-config-apply.yml`).
+- **Fork-safe.** The `drift` job uses the default `GITHUB_TOKEN` (no secrets) on a
+  plain `pull_request` trigger (never `pull_request_target`) with read-only
+  permissions — a fork PR cannot exfiltrate or mutate anything. The
+  `settings-admin` job uses `REPO_CONFIG_TOKEN` **only on non-PR events** (`push`
+  to `main` / `schedule` / `dispatch`), so the secret is never exposed to a PR.
+- **Non-blocking.** Both jobs always exit `0` (they only print a diff) and are
+  additionally wrapped in `continue-on-error`. **Do not add either to the repo's
+  required status checks** — they must never gate a merge.
 
 ## Applying the baseline (reconcile)
 
