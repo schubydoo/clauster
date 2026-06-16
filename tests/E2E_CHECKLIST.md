@@ -72,6 +72,9 @@ restarts — the dashboard JS/CSS are cached static assets.
 - [ ] **External sessions** (started outside Clauster) appear with their distinct
       indicator.
 - [ ] **Live log tail** streams over WS; ANSI stripped; IDs/tokens redacted.
+      **`[auto]`** (`test_actions_e2e`): a running bridge's Logs panel populates with
+      the streamed marker lines, ANSI is stripped, and the session id / bearer token on
+      the bridge's deep-link line are redacted (`sanitize_line`).
 - [ ] **CLAUDE.md editor** — load, edit, save; stale-bridge banner; 409 conflict
       surfaces. **`[auto]`** for open-via-··· (the overflow menu) → load → edit →
       save (`✓ saved`, persisted on reopen) plus the running-bridge banner
@@ -99,12 +102,27 @@ restarts — the dashboard JS/CSS are cached static assets.
       icons render (no broken `<use>` refs). **`[auto]`** (persistence across reload).
 - [ ] **Action-button icons** (Tabler) render on Start/Stop/Resume/Trust/Edit/
       logs/QR/copy/Open and follow the button text color in both themes.
+      **`[auto]`** (`test_a11y_e2e`) for a representative always-present set: the
+      per-project play + ··· overflow icons and the theme toggle's active sun/moon icon
+      each render with a non-zero box (a broken `<use>` sprite ref renders zero-size).
+      The color-follows-text check stays manual.
+- [ ] **Accessibility (a11y)** — no serious/critical WCAG 2 A/AA violations on the
+      dashboard or login page (interactive controls have accessible names, inputs have
+      labels, images have alt). **`[auto]`** (`test_a11y_e2e`): vendored, network-free
+      axe-core (`tests/e2e/vendor/axe.min.js`, registered as a page init script) runs
+      `axe.run` in-page on both and asserts zero serious/critical violations.
 - [ ] **Connection-lost banner** — stop the server (or block `/api/instances`);
       after ~2 failed polls a "Lost connection … retrying" banner appears; it
       **clears** when the server returns. A 401 mid-session bounces to `/login`.
 - [ ] **Action errors surface** — a failed start/stop/restart/trust shows an
       inline error on the card (not just a toast that vanishes); a failed copy
       toasts rather than failing silently.
+      **`[auto]`** (`test_actions_e2e`) for the trust-on-start failure: an obstructed
+      trust write surfaces in the persistent inline `errorOf` `.alert-danger` block (and
+      it outlives the ~4.5s toast). The failed-copy toast stays manual. Note: a
+      fake-`claude` *spawn crash* is surfaced as an error-**status** instance, not via
+      `errorOf` (the spawn POST still returns 201); only the non-OK action responses
+      (trust/stop/resume) feed the inline block.
 
 ## Gated / opt-in flows — MUST set the flag first
 
