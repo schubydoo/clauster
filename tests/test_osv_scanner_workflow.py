@@ -52,11 +52,14 @@ def test_osv_uses_are_sha_pinned():
 
 def test_osv_is_fork_safe_trigger():
     # The whole fork-safety posture rests on plain `pull_request` (read-only token, no secrets) —
-    # never `pull_request_target`. Assert it here so a future trigger flip can't silently pass the
-    # other guards. PyYAML parses the `on:` key as the boolean True; str() covers dict/list forms.
+    # never `pull_request_target`. Assert BOTH the positive (PR triggering present, so the diff
+    # scan actually runs) and the negative (no privileged trigger), by key membership not substring
+    # (`pull_request` is a prefix of `pull_request_target`). PyYAML parses the `on:` key as True.
     doc = _doc()
     on = doc.get(True, doc.get("on", {}))
-    assert "pull_request_target" not in str(on), "use pull_request, never pull_request_target"
+    keys = set(on) if isinstance(on, dict) else set()
+    assert "pull_request" in keys, "must trigger on pull_request (the fork-safe diff scan)"
+    assert "pull_request_target" not in keys, "use pull_request, never pull_request_target"
 
 
 def test_osv_calls_the_reusable_workflow():
