@@ -27,6 +27,7 @@ class Notifier:
     """
 
     def __init__(self, config: NotificationsConfig) -> None:
+        """Build the Apprise targets from config (never raises)."""
         self._config = config
         self._apprise = None
         if config.enabled and config.urls:
