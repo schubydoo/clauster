@@ -82,13 +82,23 @@ jobs:
           set -euo pipefail
           set +e
           ./osv-scanner scan source -r --format sarif --output-file results.sarif .
-          code=$?
-          set -e
-          # 0 = no vulns, 1 = vulns found (report-only — surfaces in the SARIF, does not fail the
-          # job). Any other exit code is a real scanner error and must fail the job.
-          if [ "$code" -gt 1 ]; then echo "::error::osv-scanner failed (exit $code)"; exit "$code"; fi
+          echo "OSV_EXIT=$?" >> "$GITHUB_ENV"
+          exit 0 # never fail here — upload the SARIF first, then surface a real error below
       - name: Upload SARIF to code scanning
+        # Upload whenever a SARIF exists — including a partial one written before a scanner error,
+        # for triage. hashFiles() guards the no-file case (e.g. an earlier step failed) so this is
+        # a clean no-op rather than an error.
+        if: ${{ hashFiles('results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: results.sarif
           category: osv-scanner
+      - name: Surface a real scanner error
+        if: ${{ always() }}
+        run: |
+          # 0 = no vulns, 1 = vulns found (report-only — surfaces in the SARIF, not a failure).
+          # Anything else is a real osv-scanner error: fail the job AFTER the SARIF upload above.
+          if [ "${OSV_EXIT:-0}" -gt 1 ]; then
+            echo "::error::osv-scanner failed (exit ${OSV_EXIT})"
+            exit "${OSV_EXIT}"
+          fi
