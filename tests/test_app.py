@@ -85,22 +85,30 @@ def test_dashboard_hosted_view_token_guard(write_config):
     # is the same Proxy footgun that bit openLogs; the token survives the Proxy.
     page = _client(write_config).get("/").text
     assert "const token = ++this._hostedSeq;" in page
-    # Pin the EXACT liveness helper so a regression that reintroduces the object-identity
-    # comparison alongside a token check still fails this test. liveView() must return the
-    # live PROXY (or null) — not a bool — so the handlers mutate THROUGH Alpine's reactivity
-    # and the panel repaints immediately; a raw-`view` mutation bypasses the Proxy set-traps
-    # and the "link dropped" banner would only surface on the next reactive flush.
-    assert "return w && w.open && w.token === token ? w : null;" in page
-    assert "w.connLost = true;" in page  # the dropped-link flag is set THROUGH the proxy
+    # Pin the liveness helper whitespace-tolerantly (CodeRabbit: an exact-string pin breaks on
+    # harmless reformatting). liveView() must return the live PROXY (or null) — not a bool — so
+    # the handlers mutate THROUGH Alpine's reactivity and the panel repaints immediately; a
+    # raw-`view` mutation bypasses the Proxy set-traps and the "link dropped" banner would only
+    # surface on the next reactive flush.
+    assert re.search(
+        r"return\s+w\s*&&\s*w\.open\s*&&\s*w\.token\s*===\s*token\s*\?\s*w\s*:\s*null", page
+    )
+    assert re.search(
+        r"(?<![\w.])w\.connLost\s*=\s*true", page
+    )  # dropped-link flag set THROUGH the proxy
     # The reconnect timer must also gate on the token, not the always-false `w === view`
     # (raw vs Proxy), or a genuinely-dropped live link would never reconnect.
-    assert "if (w2 && w2.token === token && w2.open) self.openHosted(id);" in page
+    assert re.search(r"w2\s*&&\s*w2\.token\s*===\s*token\s*&&\s*w2\.open", page)
     # Negative guards: the buggy identity comparisons AND the reactivity-bypassing raw
     # mutations must be gone from the hosted path.
     assert "self.hostedView[id] !== view" not in page
     assert "if (w === view && w.open)" not in page
-    assert "view.connLost = true;" not in page  # was the raw-object (non-reactive) write
-    assert "view.ws = ws;" not in page  # ws is now assigned through the proxy
+    assert (
+        re.search(r"(?<![\w.])view\.connLost\s*=", page) is None
+    )  # was the raw (non-reactive) write
+    assert (
+        re.search(r"(?<![\w.])view\.ws\s*=\s*ws", page) is None
+    )  # ws now assigned through the proxy
 
 
 def test_dashboard_footer_credits_vendored_assets(write_config):
