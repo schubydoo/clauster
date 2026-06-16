@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import types
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import ValidationError
 
@@ -130,3 +131,40 @@ def validate_edits(raw: dict[str, Any], edits: dict[str, Any]) -> dict[str, Any]
     except ValidationError as exc:
         raise ConfigValidationError(str(exc)) from exc
     return candidate
+
+
+def _resolve_field_info(path: str) -> Any:
+    """Resolve the pydantic ``FieldInfo`` for a dotted editable path."""
+    model: Any = ClausterConfig
+    parts = path.split(".")
+    for part in parts[:-1]:
+        model = model.model_fields[part].annotation
+    return model.model_fields[parts[-1]]
+
+
+def _classify(annotation: Any) -> tuple[str, list[str] | None]:
+    """Map a field annotation to a UI control type + enum choices (if any)."""
+    origin = get_origin(annotation)
+    if origin in (Union, types.UnionType):
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return _classify(non_none[0])
+    if origin is Literal:
+        return "enum", [str(a) for a in get_args(annotation)]
+    if annotation is bool:  # bool before int (bool is an int subclass)
+        return "bool", None
+    if annotation is int:
+        return "int", None
+    if annotation is float:
+        return "float", None
+    return "str", None
+
+
+def field_specs() -> dict[str, dict[str, Any]]:
+    """Return per-field UI metadata (``type``/``choices``/``description``) for the editor."""
+    specs: dict[str, dict[str, Any]] = {}
+    for path in EDITABLE_FIELDS:
+        info = _resolve_field_info(path)
+        kind, choices = _classify(info.annotation)
+        specs[path] = {"type": kind, "choices": choices, "description": info.description or ""}
+    return specs

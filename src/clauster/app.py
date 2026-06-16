@@ -826,6 +826,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return {
             "fields": config_editor.editable_values(cfg),
             "editable": list(config_editor.EDITABLE_FIELDS),
+            "specs": config_editor.field_specs(),
             "hash": config_editor.file_hash(path) if path is not None else None,
         }
 

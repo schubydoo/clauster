@@ -10,6 +10,7 @@ from clauster.config_editor import (
     ConfigValidationError,
     DisallowedFieldError,
     editable_values,
+    field_specs,
     file_hash,
     validate_edits,
 )
@@ -55,6 +56,19 @@ def test_validate_edits_trips_fail_closed_validator(write_config) -> None:
     raw = _raw(write_config)
     with pytest.raises(ConfigValidationError):
         validate_edits(raw, {"instance_defaults.capacity": -1})
+
+
+def test_field_specs_classifies_control_types() -> None:
+    specs = field_specs()
+    assert set(specs) == set(EDITABLE_FIELDS)
+    assert specs["metrics.show_disk"]["type"] == "bool"
+    assert specs["instance_defaults.capacity"]["type"] == "int"
+    assert specs["usage.fx_rate"]["type"] == "float"
+    # A Literal field surfaces its choices for a dropdown.
+    rm = specs["instance_defaults.permission_mode"]
+    assert rm["type"] == "enum" and rm["choices"]
+    # An Optional[str] resolves to a plain string control.
+    assert specs["instance_defaults.session_name_prefix"]["type"] == "str"
 
 
 def test_file_hash_changes_with_content(write_config) -> None:
