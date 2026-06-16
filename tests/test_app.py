@@ -119,15 +119,20 @@ def test_dashboard_hosted_view_token_guard(write_config):
     # (raw vs Proxy), or a genuinely-dropped live link would never reconnect.
     assert re.search(r"w2\s*&&\s*w2\.token\s*===\s*token\s*&&\s*w2\.open", page)
     # Negative guards: the buggy identity comparisons AND the reactivity-bypassing raw
-    # mutations must be gone from the hosted path.
-    assert "self.hostedView[id] !== view" not in page
-    assert "if (w === view && w.open)" not in page
+    # mutations must be gone from the hosted path. Strip comment-only lines first — the token
+    # comment legitimately *names* `this.hostedView[id] !== view` as the bug — then reject both
+    # receiver forms (`this.`/`self.`) and both operators (`!==`/`===`) as executable code, so
+    # the original regression can't slip back in under either spelling (CodeRabbit).
+    hosted_code = "\n".join(ln for ln in page.splitlines() if not ln.lstrip().startswith("//"))
+    assert "this.hostedView[id] !== view" not in hosted_code
+    assert "this.hostedView[id] === view" not in hosted_code
+    assert "self.hostedView[id] !== view" not in hosted_code
+    assert "self.hostedView[id] === view" not in hosted_code
+    assert "if (w === view && w.open)" not in hosted_code
     assert (
-        re.search(r"(?<![\w.])view\.connLost\s*=", page) is None
-    )  # was the raw (non-reactive) write
-    assert (
-        re.search(r"(?<![\w.])view\.ws\s*=\s*ws", page) is None
-    )  # ws now assigned through the proxy
+        re.search(r"(?<![\w.])view\.connLost\s*=", hosted_code) is None
+    )  # raw (non-reactive) write
+    assert re.search(r"(?<![\w.])view\.ws\s*=\s*ws", hosted_code) is None  # ws now via the proxy
 
 
 def test_dashboard_footer_credits_vendored_assets(write_config):
