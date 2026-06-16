@@ -51,7 +51,13 @@ def test_osv_uses_are_sha_pinned():
 
 
 def test_osv_calls_the_reusable_workflow():
-    assert any("google/osv-scanner-action" in r for r in _all_uses(_doc()))
+    # Match the actual reusable-workflow call shape, not a bare substring (CodeRabbit): a loose
+    # `"...action" in r` would still pass if the reusable call were dropped and only some
+    # unrelated step-level use of the repo remained.
+    assert any(
+        r.startswith("google/osv-scanner-action/.github/workflows/osv-scanner-reusable")
+        for r in _all_uses(_doc())
+    )
 
 
 def test_osv_permissions_are_minimal():
@@ -64,6 +70,11 @@ def test_osv_permissions_are_minimal():
     assert jobs
     for name, job in jobs.items():
         perms = job.get("permissions", {})
+        # Exactly these three scopes — reject any extra grant (e.g. pull-requests: write) so the
+        # guard truly enforces minimal permissions, not just the presence of the required keys.
+        assert set(perms) == {"contents", "security-events", "actions"}, (
+            f"{name}: permissions must be exactly contents/security-events/actions"
+        )
         assert perms.get("contents") == "read", f"{name}: contents must be read"
         assert perms.get("security-events") == "write", f"{name}: needs security-events: write"
         assert perms.get("actions") == "read", f"{name}: actions must be read"
