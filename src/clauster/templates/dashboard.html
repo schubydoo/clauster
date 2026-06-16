@@ -17,6 +17,8 @@
   <style>
     .log-view { max-height: 320px; overflow: auto; font-size: .78rem; line-height: 1.35;
                 white-space: pre-wrap; word-break: break-word; margin: 0; }
+    /* #fff is required — a QR code needs a light field + quiet zone to scan reliably;
+       intentionally NOT theme-variabled (a dark field breaks phone scanning). */
     .qr-box { background: #fff; padding: 8px; border-radius: 8px; width: max-content; }
     .toast-stack { position: fixed; bottom: 1rem; right: 1rem; z-index: 1090;
                    display: flex; flex-direction: column; gap: .5rem; max-width: 360px; }
@@ -384,6 +386,8 @@
                     <span class="me-2">⚠ Live tail disconnected — the bridge may have stopped.</span>
                     <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project)">Reconnect</button>
                   </div>
+                  {# bg-dark/text-white: terminal-style log view, intentionally dark in both
+                     themes (a console reads as dark) — not a theming straggler to "fix". #}
                   <pre class="log-view bg-dark text-white rounded p-2" :id="'log-' + i.project"
                        x-text="logs[i.project].lines.join('\n')"></pre>
                 </div>
