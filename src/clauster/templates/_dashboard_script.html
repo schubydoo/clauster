@@ -98,6 +98,7 @@
       trusting: {},       // project name -> bool (trust request in flight)
       toasts: [],
       _toastSeq: 0,
+      _logSeq: 0,          // monotonic token per opened log tail (retire check; see openLogs)
       connLost: false,    // polling has failed repeatedly -> data is stale
       _refreshFails: 0,
       _refreshing: false,    // single-flight guard for refresh()
@@ -1255,30 +1256,46 @@
         }
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
-        const state = { open: true, ws: null, lines: [], pending: [], paused: false, lost: false };
+        // Tag this tail with a unique token; the retire check below compares the token, NOT
+        // object identity — once Alpine wraps `state` in a reactive Proxy, comparing the raw
+        // object against the stored proxy is ALWAYS unequal and would drop every frame (see
+        // liveState() below, which returns the proxy so handlers mutate through reactivity).
+        const token = ++this._logSeq;
+        const state = { open: true, ws: null, token, lines: [], pending: [], paused: false, lost: false };
         this.logs[name] = state;
         const self = this;
+        // Resolve the LIVE tail as the reactive proxy (or null if retired). The token compare
+        // (not object identity) survives the Proxy wrap; returning the proxy `s` — not the raw
+        // `state` — means the handlers below mutate THROUGH Alpine's reactivity, so each frame
+        // renders immediately. Mutating the raw `state` instead bypasses the Proxy set-traps and
+        // the tail would only repaint on the next unrelated reactive flush (the 4s poll). This
+        // matches closeLogs/pauseLogs/resumeLogs, which already mutate the proxy.
+        const liveState = () => {
+          const s = self.logs[name];
+          return s && s.open && s.token === token ? s : null;
+        };
         const ws = new WebSocket(url);
         ws.onmessage = (ev) => {
-          if (!state.open || self.logs[name] !== state) return;  // a retired socket → ignore
-          state.lost = false;  // a frame arrived → the tail is live again
-          if (state.paused) {
-            state.pending.push(ev.data);
-            if (state.pending.length > MAX_PENDING) state.pending.splice(0, state.pending.length - MAX_PENDING);
+          const s = liveState();
+          if (!s) return;  // a retired socket → ignore
+          s.lost = false;  // a frame arrived → the tail is live again
+          if (s.paused) {
+            s.pending.push(ev.data);
+            if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
             return;
           }
-          state.lines.push(ev.data);
-          if (state.lines.length > MAX_LOG_LINES) state.lines.splice(0, state.lines.length - MAX_LOG_LINES);
+          s.lines.push(ev.data);
+          if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
           self.$nextTick(() => self.scrollLog(name));
         };
         // A dropped socket (bridge stopped/died, server 1008 close, network blip) leaves the
         // panel showing a frozen tail; mark it lost so the panel surfaces the disconnect. Bound
-        // to `state` + identity-checked, so a retired socket can't flip the fresh panel, and
+        // via liveState() + token-checked, so a retired socket can't flip the fresh panel, and
         // closeLogs() clears `open` first so an intentional close never trips this.
-        const lost = () => { if (state.open && self.logs[name] === state) state.lost = true; };
+        const lost = () => { const s = liveState(); if (s) s.lost = true; };
         ws.onerror = lost;
         ws.onclose = lost;
-        state.ws = ws;
+        this.logs[name].ws = ws;
       },
       closeLogs(name) {
         const s = this.logs[name];

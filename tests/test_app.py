@@ -66,9 +66,28 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     assert "ws.onclose = lost" in page and "ws.onerror = lost" in page  # FIX 3 handlers
     assert "Live tail disconnected" in page  # FIX 3 UI surface
     # openLogs is idempotent + state-bound: a reconnect retires the prior state and binds the
-    # new socket's handlers to its own `state`, identity-checked against the live logs[name],
-    # so two tails can't stream into one view and a retired socket can't flip the fresh panel.
-    assert "self.logs[name] !== state" in page
+    # new socket's handlers to its own tail, token-checked against the live logs[name], so two
+    # tails can't stream into one view and a retired socket can't flip the fresh panel. The
+    # check compares a per-tail TOKEN, not the object reference: assigning `state` into Alpine's
+    # reactive `this.logs` wraps it in a Proxy, so an object-identity check (`logs[name] !==
+    # state`) is always true and drops every frame — the token survives the Proxy.
+    assert "const token = ++this._logSeq;" in page
+    # The retire check compares a per-tail TOKEN, not object identity. Pin it whitespace-
+    # tolerantly (CodeRabbit: an exact-string pin breaks on harmless reformatting) and assert
+    # liveState() RETURNS the live proxy (so handlers mutate through Alpine's reactivity and
+    # each frame repaints immediately) rather than the raw `state`, whose mutations bypass the
+    # Proxy set-traps and only surface on the next reactive flush.
+    assert re.search(
+        r"return\s+s\s*&&\s*s\.open\s*&&\s*s\.token\s*===\s*token\s*\?\s*s\s*:\s*null", page
+    )
+    assert re.search(
+        r"const\s+s\s*=\s*liveState\(\)\s*;", page
+    )  # onmessage uses the resolved proxy
+    # Negative guard (CodeRabbit): reintroducing the object-identity comparison (always true
+    # through the Proxy, which drops every frame) must FAIL this test, not survive on the
+    # token substring above. The bug compared `logs[name]` to the raw `state` object.
+    assert "logs[name] !== state" not in page
+    assert "logs[name] === state" not in page
     # Single-flight guard that QUEUES a trailing refresh (so action-flow refreshes aren't
     # dropped), plus the reset + trailing run — assert all three so a regression fails.
     assert "if (this._refreshing) { this._refreshQueued = true; return; }" in page
