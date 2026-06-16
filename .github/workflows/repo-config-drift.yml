@@ -94,13 +94,15 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           # --- SETTINGS --------------------------------------------------
-          if gh api "repos/$REPO" --jq '{
-               description, homepage, topics: (.topics | sort),
-               has_issues, has_wiki, has_projects,
-               allow_squash_merge, allow_merge_commit, allow_rebase_merge,
-               delete_branch_on_merge
-             }' | jq -S '.' > live-settings.json \
-             && jq -S '.' .github/repo-config/settings.json > baseline-settings.json; then
+          # The merge flags (allow_*_merge, delete_branch_on_merge) are intentionally NOT compared:
+          # GET /repos returns them only to an admin-level token, and the default GITHUB_TOKEN has
+          # no `administration` scope, so it reads them as null → a permanent false drift. They
+          # stay in settings.json and are reconciled by the apply workflow (REPO_CONFIG_TOKEN, which
+          # has Administration); the main ruleset enforces squash-only/linear history regardless.
+          # One shared filter projects BOTH sides to the read-visible subset, so they can't diverge.
+          settings_filter='{description, homepage, topics: (.topics | sort), has_issues, has_wiki, has_projects}'
+          if gh api "repos/$REPO" --jq "$settings_filter" | jq -S '.' > live-settings.json \
+             && jq -S "$settings_filter" .github/repo-config/settings.json > baseline-settings.json; then
             if diff -u baseline-settings.json live-settings.json > settings.diff; then
               echo "### Settings: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
             else

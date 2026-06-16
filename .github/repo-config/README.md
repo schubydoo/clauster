@@ -10,7 +10,13 @@ drifts from what is committed here.
   comparing, so either compact or pretty JSON works.
 - `settings.json` — `description`, `homepage`, `topics`, `has_issues`,
   `has_wiki`, `has_projects`, the three `allow_*_merge` flags, and
-  `delete_branch_on_merge`.
+  `delete_branch_on_merge`. The merge flags + `delete_branch_on_merge` are
+  **reconciled by the apply workflow but not verified by the drift check**:
+  `GET /repos` returns them only to an admin-level token, and the drift check's
+  default `GITHUB_TOKEN` has no `administration` scope, so it would read them as
+  `null` (a false drift). The drift check therefore compares only the
+  read-visible subset; the main ruleset enforces squash-only/linear history
+  regardless.
 
 ## What runs
 
