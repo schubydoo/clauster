@@ -279,7 +279,7 @@
                   ? ('⚠ ' + readinessBlockers().length + ' blocking')
                   : ('⚠ ' + readinessWarnings().length + (readinessWarnings().length === 1 ? ' check' : ' checks'))"></button>
         <button type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Edit configuration"
-                title="Edit configuration" @click="openConfig()">
+                title="Edit configuration" :disabled="configEditor.loading" @click="openConfig()">
           <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-edit"/></svg>
         </button>
         <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme" title="Toggle dark / light theme">
@@ -668,14 +668,15 @@
 
   <!-- Config editor modal (FE-3) — Tier-A operational settings only. -->
   <template x-if="configEditor.open">
-    <div class="modal modal-blur d-block" tabindex="-1" style="background: rgba(0,0,0,.4)"
-         @keydown.escape.window="configEditor.open = false">
+    <div class="modal modal-blur d-block" tabindex="-1" data-test="cfg-modal" style="background: rgba(0,0,0,.4)"
+         @keydown.escape.window="closeConfig()" @keydown.tab="trapConfigTab($event)"
+         @click.self="closeConfig()">
       <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
            aria-labelledby="cfg-editor-title">
-        <div class="modal-content">
+        <div class="modal-content" x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())">
           <div class="modal-header">
             <h3 class="modal-title" id="cfg-editor-title">Configuration</h3>
-            <button type="button" class="btn-close" aria-label="Close" @click="configEditor.open = false"></button>
+            <button type="button" class="btn-close" aria-label="Close" @click="closeConfig()"></button>
           </div>
           <div class="modal-body">
             <p class="text-secondary small">
@@ -724,9 +725,9 @@
             </template>
           </div>
           <div class="modal-footer">
-            <button type="button" class="btn" @click="configEditor.open = false">Close</button>
+            <button type="button" class="btn" @click="closeConfig()">Close</button>
             <button type="button" class="btn btn-primary" data-test="cfg-save"
-                    :disabled="configEditor.saving || configEditor.loading"
+                    :disabled="configEditor.saving || configEditor.loading || !configDirty()"
                     @click="saveConfig()">
               <span x-text="configEditor.saving ? 'Saving…' : 'Save changes'">Save changes</span>
             </button>

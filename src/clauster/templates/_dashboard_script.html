@@ -71,7 +71,7 @@
       configEditor: {
         open: false, loading: false, saving: false,
         fields: {}, specs: {}, edits: {}, editable: [], hash: null,
-        error: "", saved: false,
+        error: "", saved: false, trigger: null,
       },
       agents: [],
       agentDispatchOpen: false,
@@ -294,9 +294,32 @@
       configFieldsFor(section) {
         return this.configEditor.editable.filter((p) => p.split(".")[0] === section);
       },
+      configDirty() {
+        const c = this.configEditor;
+        return c.editable.some((p) => c.edits[p] !== c.fields[p]);
+      },
+      closeConfig() {
+        const c = this.configEditor;
+        c.open = false;
+        document.body.style.overflow = "";  // release the scroll lock
+        if (c.trigger && c.trigger.focus) c.trigger.focus();  // restore focus to the opener
+      },
+      // Manual focus trap (no @alpinejs/focus plugin loaded): wrap Tab at the dialog edges.
+      trapConfigTab(e) {
+        const sel = 'a[href],button:not([disabled]),input:not([disabled]),' +
+          'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+        const f = e.currentTarget.querySelectorAll(sel);
+        if (!f.length) return;
+        const first = f[0], last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+        else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+      },
       async openConfig() {
         const c = this.configEditor;
+        if (c.open || c.loading) return;  // single-flight: ignore re-entry while loading/open
+        c.trigger = document.activeElement;  // remember the opener to restore focus on close
         c.open = true; c.error = ""; c.saved = false; c.loading = true;
+        document.body.style.overflow = "hidden";  // lock background scroll while modal is up
         try {
           const res = await fetch(ROOT + "/api/config");
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
@@ -310,6 +333,7 @@
       },
       async saveConfig() {
         const c = this.configEditor;
+        if (c.saving) return;  // single-flight insurance (the button is also :disabled while saving)
         // Send only fields the user actually changed (avoids null->"" churn on untouched optionals).
         const edits = {};
         for (const p of c.editable) {
