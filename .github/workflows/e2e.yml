@@ -51,10 +51,17 @@ jobs:
         with:
           node-version: "24"
       - name: Install agent-browser CLI
-        # Pinned for reproducibility. 0.27.3 regressed `check` on the trust-gate
-        # checkbox (8 failures in CI, 5 locally); 0.27.1 is the verified-green
-        # version the suite was developed against. Bump deliberately + re-verify.
-        run: npm i -g agent-browser@0.27.1
+        # Pinned + integrity-checked via tests/e2e/package-lock.json (`npm ci`),
+        # instead of an unpinned `npm i -g` (the global install Scorecard flags as
+        # Pinned-Dependencies). 0.27.3 regressed `check` on the trust-gate checkbox
+        # (8 failures in CI, 5 locally); 0.27.1 is the verified-green version the
+        # suite was developed against. Bump deliberately (lockfile) + re-verify.
+        # Put node_modules/.bin on PATH so `agent-browser` resolves for later steps
+        # and scripts/e2e.sh without a global install.
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Install headless Chromium
         run: agent-browser install
       - name: Run E2E suite
