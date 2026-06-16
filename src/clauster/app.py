@@ -87,6 +87,7 @@ class LoginThrottle:
     """In-process per-IP failed-login limiter — cheap brute-force resistance."""
 
     def __init__(self, max_failures: int = 5, window_seconds: int = 300) -> None:
+        """Set the failure threshold and the rolling window in seconds."""
         self._max = max_failures
         self._window = window_seconds
         self._failures: dict[str, list[float]] = {}

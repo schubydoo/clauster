@@ -32,6 +32,7 @@ class StateStore:
     """
 
     def __init__(self, state_dir: Path) -> None:
+        """Point the store at ``state.json`` under ``state_dir``."""
         self._path = state_dir.expanduser() / "state.json"
 
     def load(self) -> dict[str, dict]:
