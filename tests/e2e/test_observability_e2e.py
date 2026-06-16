@@ -91,6 +91,10 @@ def test_external_session_rich_display_in_active_zone_and_project_detail(
     assert "pid 999999" in row_text
     assert "unmanaged" in row_text
 
+    # Observe-only contract: an unmanaged session exposes NO lifecycle controls. The macro
+    # renders no <button> at all, so this guards against a future edit slipping one in.
+    browser.expect_hidden('[data-test="external-row"] button')
+
     # The 'external' source filter is offered alongside the other run-location filters.
     filters = browser.get_text('[aria-label="Filter sessions by where they run"]').lower()
     assert "external" in filters
