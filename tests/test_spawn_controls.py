@@ -69,6 +69,15 @@ def test_build_cmd_no_session_name_prefix_by_default(runner_config):
     assert "--remote-control-session-name-prefix" not in cmd
 
 
+def test_build_cmd_omits_session_name_prefix_for_session_mode(runner_config):
+    # `session` is single-session, so the prefix is out of scope even when configured.
+    config, claude_json = runner_config
+    config.instance_defaults.session_name_prefix = "acme"
+    runner = SessionRunner(config, claude_json=claude_json)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "session", "default")
+    assert "--remote-control-session-name-prefix" not in cmd
+
+
 # ----- validation -------------------------------------------------------
 
 

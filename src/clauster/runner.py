@@ -544,8 +544,9 @@ class SessionRunner:
             "--permission-mode",
             permission_mode,
         ]
-        # Brand auto-generated session names when configured (multi-session bridge only).
-        if defaults.session_name_prefix:
+        # Brand auto-generated session names when configured. Multi-session modes only
+        # (same-dir/worktree) — `session` is single-session, so the prefix is out of scope.
+        if defaults.session_name_prefix and spawn_mode in ("same-dir", "worktree"):
             cmd += ["--remote-control-session-name-prefix", defaults.session_name_prefix]
         # --capacity caps concurrent sessions inside a same-dir/worktree bridge; it does
         # not apply to the single-session `session` spawn mode, so don't pass it there.
