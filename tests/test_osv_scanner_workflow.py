@@ -62,14 +62,25 @@ def test_osv_is_fork_safe_trigger():
     assert "pull_request_target" not in keys, "use pull_request, never pull_request_target"
 
 
-def test_osv_calls_the_reusable_workflow():
-    # Match the actual reusable-workflow call shape, not a bare substring (CodeRabbit): a loose
-    # `"...action" in r` would still pass if the reusable call were dropped and only some
-    # unrelated step-level use of the repo remained.
+def test_osv_pr_scan_uses_the_reusable_workflow():
+    # The PR (diff) scan still rides the reusable PR workflow. Match the actual call-shape, not a
+    # bare substring (CodeRabbit). The scheduled scan deliberately does NOT use the reusable
+    # full-scan workflow — see test_scheduled_scan_pins_and_verifies_the_osv_binary.
     assert any(
-        r.startswith("google/osv-scanner-action/.github/workflows/osv-scanner-reusable")
+        r.startswith("google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr")
         for r in _all_uses(_doc())
     )
+
+
+def test_scheduled_scan_pins_and_verifies_the_osv_binary():
+    # The scheduled scan runs the OSV-Scanner BINARY itself (the reusable full-scan workflow pulls
+    # a tag-pinned download-artifact the repo's require-SHA policy rejects). Lock the safety
+    # properties: a pinned version, a sha256 gate, the v2 invocation, and Renovate tracking.
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    assert "OSV_VERSION:" in raw and "OSV_SHA256:" in raw
+    assert "sha256sum -c" in raw  # the binary is checksum-verified before it runs
+    assert "scan source" in raw  # the OSV-Scanner v2 invocation
+    assert "renovate: datasource=github-releases depName=google/osv-scanner" in raw
 
 
 def test_osv_permissions_are_minimal():

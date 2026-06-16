@@ -42,12 +42,53 @@ jobs:
       actions: read # read run metadata for the SARIF upload
 
   # Full scan on a schedule, on pushes to main, and on manual dispatch.
+  # Full scan on a schedule, on pushes to main, and on manual dispatch. Run via the pinned
+  # OSV-Scanner BINARY rather than the reusable full-scan workflow: that workflow references a
+  # conditional actions/download-artifact@<tag> internally, which the repo's require-SHA-pin
+  # policy rejects at action-resolution time (it never runs, but still must resolve). The binary
+  # is pinned by version + verified by sha256 and the SARIF upload is SHA-pinned, so this stays
+  # policy- and Scorecard-clean. Revert to the reusable workflow once upstream SHA-pins that
+  # action in a release — tracked on the project board.
   scan-scheduled:
+    name: full scan (pinned binary)
     if: github.event_name != 'pull_request'
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-    with:
-      fail-on-vuln: false # report-only signal for now; flip to blocking once tuned
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       security-events: write # upload the SARIF to Security > Code scanning
       contents: read # checkout + read the lockfiles
-      actions: read # read run metadata for the SARIF upload
+      actions: read # codeql-action/upload-sarif reads run metadata
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install OSV-Scanner (pinned release, checksum-verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # renovate: datasource=github-releases depName=google/osv-scanner
+          OSV_VERSION: "v2.3.8"
+          # Bump together with OSV_VERSION: sha256 of osv-scanner_linux_amd64 from the release's
+          # osv-scanner_SHA256SUMS. Renovate bumps the version; the sha256sum -c below then fails
+          # the job until this is updated to match — a deliberate fail-loud, never a silent skip.
+          OSV_SHA256: "bc98e15319ed0d515e3f9235287ba53cdc5535d576d24fd573978ecfe9ab92dc"
+        run: |
+          set -euo pipefail
+          gh release download "$OSV_VERSION" --repo google/osv-scanner \
+            --pattern osv-scanner_linux_amd64 --output osv-scanner
+          echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+      - name: Scan committed lockfiles (report-only)
+        run: |
+          set -euo pipefail
+          set +e
+          ./osv-scanner scan source -r --format sarif --output-file results.sarif .
+          code=$?
+          set -e
+          # 0 = no vulns, 1 = vulns found (report-only — surfaces in the SARIF, does not fail the
+          # job). Any other exit code is a real scanner error and must fail the job.
+          if [ "$code" -gt 1 ]; then echo "::error::osv-scanner failed (exit $code)"; exit "$code"; fi
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: results.sarif
+          category: osv-scanner
