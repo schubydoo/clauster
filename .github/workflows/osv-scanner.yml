@@ -1,0 +1,53 @@
+name: OSV-Scanner
+
+# Scan our committed lockfiles (uv.lock, package-lock.json, tests/e2e/package-lock.json,
+# flake.lock) against the OSV database (osv.dev) and upload SARIF to Security > Code scanning.
+# Complements Dependabot: a broader advisory corpus, and it scans the *resolved* lockfiles
+# rather than manifest version ranges. Non-required signal jobs (like fuzzing / e2e), and
+# report-only for now (`fail-on-vuln: false`) so findings surface without blocking merges —
+# flip to blocking once the signal is tuned. Tracked as #320 on Project #3.
+#
+# The OSV reusable workflows are SHA-PINNED, not tag-pinned. GitHub allows a reusable-workflow
+# ref to be a SHA, tag, or branch (SHA is the safest — GitHub's own recommendation). Pinning by
+# SHA — instead of the tag the OSV docs show — keeps the required `zizmor` workflow-audit check
+# green and avoids re-introducing the Scorecard Pinned-Dependencies alerts cleared in #319.
+# Renovate tracks the pin via the trailing `# vX.Y.Z` comment (helpers:pinGitHubActionDigests).
+
+on:
+  pull_request:
+  schedule:
+    - cron: "27 5 * * 1" # weekly full scan, Monday 05:27 UTC
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# No secrets, and fork PRs run safely (plain `pull_request`, never `pull_request_target`).
+# Default-deny at the workflow level; each job grants only what it needs (least privilege).
+permissions: {}
+
+concurrency:
+  group: osv-scanner-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Diff-aware scan on PRs: reports only the vulnerabilities the PR introduces.
+  scan-pr:
+    if: github.event_name == 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    with:
+      fail-on-vuln: false # report-only signal for now; flip to blocking once tuned
+    permissions:
+      security-events: write # upload the SARIF to Security > Code scanning
+      contents: read # checkout + read the lockfiles
+      actions: read # read run metadata for the SARIF upload
+
+  # Full scan on a schedule, on pushes to main, and on manual dispatch.
+  scan-scheduled:
+    if: github.event_name != 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    with:
+      fail-on-vuln: false # report-only signal for now; flip to blocking once tuned
+    permissions:
+      security-events: write # upload the SARIF to Security > Code scanning
+      contents: read # checkout + read the lockfiles
+      actions: read # read run metadata for the SARIF upload
