@@ -73,6 +73,14 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     # state`) is always true and drops every frame — the token survives the Proxy.
     assert "s.token === token" in page
     assert "const token = ++this._logSeq;" in page
+    # Negative guard (CodeRabbit): pin the EXACT liveness check so a regression that
+    # reintroduces the object-identity comparison (`logs[name] === state`, always
+    # false through Alpine's Proxy) ALONGSIDE the token check fails this test — the
+    # `s.token === token` substring above would otherwise survive that reintroduction.
+    assert (
+        "const live = () => { const s = self.logs[name]; "
+        "return !!s && s.open && s.token === token; };"
+    ) in page
     # Single-flight guard that QUEUES a trailing refresh (so action-flow refreshes aren't
     # dropped), plus the reset + trailing run — assert all three so a regression fails.
     assert "if (this._refreshing) { this._refreshQueued = true; return; }" in page

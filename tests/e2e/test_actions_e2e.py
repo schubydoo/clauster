@@ -23,6 +23,7 @@ See ``tests/E2E_CHECKLIST.md`` for the full manual list.
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -85,9 +86,13 @@ def test_failed_action_surfaces_inline_error(
     browser.expect_visible(error_block, timeout_ms=_STATUS_TIMEOUT)
     assert browser.get_text(error_block).strip(), "inline error block rendered empty"
 
-    # ...and it is genuinely persistent (not a toast that auto-dismisses): still shown
-    # well past the ~4.5s toast lifetime.
+    # ...and it is genuinely persistent (not a toast that auto-dismisses): wait past the
+    # 4.5s toast lifetime (templates/_dashboard_script.html toast() -> setTimeout 4500ms)
+    # and confirm the inline block is STILL shown with its message — a transient toast
+    # would be gone by now, so this can't pass on a toast that merely happened to match.
+    time.sleep(5.0)
     browser.expect_visible(error_block)
+    assert browser.get_text(error_block).strip(), "inline error block did not persist"
     # The failed action did not spawn a running bridge.
     assert "Running" not in browser.get_text("section.zone-active")
 
