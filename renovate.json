@@ -41,6 +41,17 @@
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\S+=(?<currentValue>\\S+)"
       ],
       "versioningTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the OSV-Scanner binary version pinned in the scheduled scan. Renovate bumps OSV_VERSION; update OSV_SHA256 to match (the workflow's sha256sum -c fails loudly until you do — the hosted Renovate App can't recompute a binary checksum).",
+      "managerFilePatterns": [
+        "^\\.github/workflows/osv-scanner\\.yml$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+OSV_VERSION:\\s*\"(?<currentValue>v[0-9][^\"]*)\""
+      ],
+      "versioningTemplate": "semver"
     }
   ],
   "packageRules": [
