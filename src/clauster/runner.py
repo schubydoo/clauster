@@ -72,6 +72,10 @@ class PermissionModeNotAllowed(SpawnError):
     """bypassPermissions requested for a project whose config ceiling forbids it."""
 
 
+class CapacityExceeded(SpawnError):
+    """A new bridge would exceed instance_defaults.max_bridges (clauster-enforced cap)."""
+
+
 class InstanceStillLive(RuntimeError):
     """Raised when forget() is asked to drop a bridge that is still STARTING/RUNNING.
 
@@ -341,6 +345,23 @@ class SessionRunner:
                 )
             self._recap_hook_ensured = True
 
+        # Enforce the optional clauster-side concurrent-bridge cap. Past the idempotency
+        # early-return, this project is NOT currently live, so every live instance is a
+        # different bridge. Fail closed BEFORE any per-spawn side effect (file/process).
+        max_bridges = defaults.max_bridges
+        if max_bridges is not None:
+            live = sum(
+                1
+                for other, inst in self._instances.items()
+                if other != name
+                and inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+            )
+            if live >= max_bridges:
+                raise CapacityExceeded(
+                    f"max_bridges={max_bridges} reached ({live} live); "
+                    "stop a bridge before starting another"
+                )
+
         log_path = self._unique_log_path(name)
         raw_path = self._raw_log_path_for(log_path)
         # Create the verbatim parse-source 0600 from the first inode — UNCONDITIONALLY:
@@ -510,7 +531,8 @@ class SessionRunner:
         self, log_path: Path, name: str, spawn_mode: str, permission_mode: str
     ) -> list[str]:
         """Build the `claude remote-control` argv. Pure (no side effects) so it's unit-testable."""
-        return [
+        defaults = self._config.instance_defaults
+        cmd = [
             self._binary,
             "remote-control",
             "--name",
@@ -522,6 +544,15 @@ class SessionRunner:
             "--permission-mode",
             permission_mode,
         ]
+        # Brand auto-generated session names when configured. Multi-session modes only
+        # (same-dir/worktree) — `session` is single-session, so the prefix is out of scope.
+        if defaults.session_name_prefix and spawn_mode in ("same-dir", "worktree"):
+            cmd += ["--remote-control-session-name-prefix", defaults.session_name_prefix]
+        # --capacity caps concurrent sessions inside a same-dir/worktree bridge; it does
+        # not apply to the single-session `session` spawn mode, so don't pass it there.
+        if spawn_mode in ("same-dir", "worktree"):
+            cmd += ["--capacity", str(defaults.capacity)]
+        return cmd
 
     @staticmethod
     def _stderr_path_for(log_path: Path) -> Path:

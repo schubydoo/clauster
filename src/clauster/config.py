@@ -97,7 +97,7 @@ class ClaudeConfig(BaseModel):
 
 
 class InstanceDefaults(BaseModel):
-    """Default spawn and permission mode applied to new bridges (plus a reserved capacity)."""
+    """Per-bridge defaults: spawn/permission mode, session-name prefix, and capacity limits."""
 
     spawn_mode: SpawnMode = Field(
         default="same-dir",
@@ -106,11 +106,26 @@ class InstanceDefaults(BaseModel):
     permission_mode: PermissionMode = Field(
         default="default", description="Default permission mode for new bridges."
     )
+    session_name_prefix: str | None = Field(
+        default=None,
+        description="Optional prefix for auto-generated Remote Control session names (maps to "
+        "`claude remote-control --remote-control-session-name-prefix`); applies to the standard "
+        "multi-session bridge only. Unset → claude's default (the hostname).",
+    )
     capacity: int = Field(
         default=32,
         ge=1,
-        description="Reserved: intended max concurrent bridges (≥1). Validated but not yet "
-        "enforced at spawn — no limit is applied today.",
+        description="Max concurrent sessions a single standard bridge runs in `same-dir`/"
+        "`worktree` spawn mode (≥1); passed to `claude remote-control --capacity`. Ignored for "
+        "`session` spawn mode and the pty bridge (both single-session).",
+    )
+    max_bridges: int | None = Field(
+        default=None,
+        ge=1,
+        description="Best-effort clauster cap on concurrent remote-control bridges "
+        "(standard/pty; ≥1) — NOT hosted/bg-agent sessions. A bridge spawn over the cap is "
+        "refused (409); cross-project concurrent spawns may transiently overshoot by a few. "
+        "Unset → no limit. Distinct from `capacity` (per-bridge sessions).",
     )
 
 

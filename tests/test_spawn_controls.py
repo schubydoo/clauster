@@ -17,6 +17,7 @@ from clauster.app import create_app
 from clauster.config import ClausterConfig, ProjectConfig, load_config
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import (
+    CapacityExceeded,
     InvalidSpawnOption,
     PermissionModeNotAllowed,
     SessionRunner,
@@ -37,6 +38,44 @@ def test_build_cmd_includes_spawn_and_permission_flags(runner_config):
     assert cmd[cmd.index("--name") + 1] == "alpha"
     assert cmd[cmd.index("--spawn") + 1] == "worktree"
     assert cmd[cmd.index("--permission-mode") + 1] == "plan"
+
+
+def test_build_cmd_passes_capacity_for_multisession_modes(runner_config):
+    config, claude_json = runner_config
+    config.instance_defaults.capacity = 7
+    runner = SessionRunner(config, claude_json=claude_json)
+    for mode in ("same-dir", "worktree"):
+        cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", mode, "default")
+        assert cmd[cmd.index("--capacity") + 1] == "7"
+
+
+def test_build_cmd_omits_capacity_for_session_mode(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "session", "default")
+    assert "--capacity" not in cmd
+
+
+def test_build_cmd_session_name_prefix_when_set(runner_config):
+    config, claude_json = runner_config
+    config.instance_defaults.session_name_prefix = "acme"
+    runner = SessionRunner(config, claude_json=claude_json)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default")
+    assert cmd[cmd.index("--remote-control-session-name-prefix") + 1] == "acme"
+
+
+def test_build_cmd_no_session_name_prefix_by_default(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default")
+    assert "--remote-control-session-name-prefix" not in cmd
+
+
+def test_build_cmd_omits_session_name_prefix_for_session_mode(runner_config):
+    # `session` is single-session, so the prefix is out of scope even when configured.
+    config, claude_json = runner_config
+    config.instance_defaults.session_name_prefix = "acme"
+    runner = SessionRunner(config, claude_json=claude_json)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "session", "default")
+    assert "--remote-control-session-name-prefix" not in cmd
 
 
 # ----- validation -------------------------------------------------------
@@ -109,6 +148,32 @@ async def test_spawn_uses_config_defaults(runner_config, monkeypatch):
     assert inst.permission_mode == "plan"
     assert inst.spawn_mode == "same-dir"
     await runner.stop("alpha")
+
+
+# ----- max_bridges (clauster-enforced concurrent-bridge cap) -----------
+
+
+async def test_max_bridges_refuses_over_cap(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.instance_defaults.max_bridges = 1
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.spawn("alpha", spawn_mode="same-dir")  # 1st: 0 live others -> ok
+    with pytest.raises(CapacityExceeded):
+        await runner.spawn("beta", spawn_mode="same-dir")  # 2nd: 1 live >= cap -> refused
+    await runner.stop("alpha")
+
+
+async def test_max_bridges_unset_allows_concurrent(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    assert config.instance_defaults.max_bridges is None  # default: no limit
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.spawn("alpha", spawn_mode="same-dir")
+    await runner.spawn("beta", spawn_mode="same-dir")  # no cap -> both live
+    assert runner.running_count() == 2
+    await runner.stop("alpha")
+    await runner.stop("beta")
 
 
 # ----- session-mode reconcile ------------------------------------------

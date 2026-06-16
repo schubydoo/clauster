@@ -79,7 +79,9 @@ Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
 | --- | --- | --- | --- |
 | `spawn_mode` | `same-dir` \| `worktree` \| `session` | `same-dir` | Default spawn mode for new bridges. `worktree` requires a git repo. |
 | `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` | `default` | Default permission mode for new bridges. |
-| `capacity` | int | `32` | Reserved: intended max concurrent bridges (≥1). Validated but not yet enforced at spawn — no limit is applied today. |
+| `session_name_prefix` | str \| null | `null` | Optional prefix for auto-generated Remote Control session names (maps to `claude remote-control --remote-control-session-name-prefix`); applies to the standard multi-session bridge only. Unset → claude's default (the hostname). |
+| `capacity` | int | `32` | Max concurrent sessions a single standard bridge runs in `same-dir`/`worktree` spawn mode (≥1); passed to `claude remote-control --capacity`. Ignored for `session` spawn mode and the pty bridge (both single-session). |
+| `max_bridges` | int \| null | `null` | Best-effort clauster cap on concurrent remote-control bridges (standard/pty; ≥1) — NOT hosted/bg-agent sessions. A bridge spawn over the cap is refused (409); cross-project concurrent spawns may transiently overshoot by a few. Unset → no limit. Distinct from `capacity` (per-bridge sessions). |
 <!-- END GEN: instance_defaults -->
 
 Permission modes: `default`, `plan`, `acceptEdits`, `auto`, `dontAsk`,
