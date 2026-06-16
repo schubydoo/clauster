@@ -685,7 +685,7 @@
             </p>
             <div class="text-secondary" x-show="configEditor.loading" x-cloak>Loading…</div>
             <div class="alert alert-danger py-2" x-show="configEditor.error" x-cloak x-text="configEditor.error"></div>
-            <div class="alert alert-success py-2" x-show="configEditor.saved" x-cloak>Saved — restart Clauster to apply.</div>
+            <div class="alert alert-success py-2" data-test="cfg-saved" x-show="configEditor.saved" x-cloak>Saved — restart Clauster to apply.</div>
             <template x-for="section in configSections()" :key="section">
               <div class="mb-3" x-show="!configEditor.loading">
                 <div class="fw-bold text-capitalize mb-2" x-text="section.replace(/_/g, ' ')"></div>
@@ -725,7 +725,8 @@
           </div>
           <div class="modal-footer">
             <button type="button" class="btn" @click="configEditor.open = false">Close</button>
-            <button type="button" class="btn btn-primary" :disabled="configEditor.saving || configEditor.loading"
+            <button type="button" class="btn btn-primary" data-test="cfg-save"
+                    :disabled="configEditor.saving || configEditor.loading"
                     @click="saveConfig()">
               <span x-text="configEditor.saving ? 'Saving…' : 'Save changes'">Save changes</span>
             </button>

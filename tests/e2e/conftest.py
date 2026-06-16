@@ -280,6 +280,19 @@ def bridge_server(
 
 
 @pytest.fixture
+def config_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A loopback clauster seeded with a known Tier-A value for the config-editor E2E.
+
+    Function-scoped so the on-disk config write (and its backup) from one test never
+    leaks into the next. The config file is ``state_dir.parent / 'clauster.yml'``.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-config")
+    yield from _start_server(tmp, mutable_projects_tree, extra="usage:\n  fx_rate: 1.0\n")
+
+
+@pytest.fixture
 def trust_fail_bridge_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:
