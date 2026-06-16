@@ -185,7 +185,12 @@ jobs:
           # Guarded like the drift job: a gh/jq failure reports "degraded" rather than aborting.
           if gh api "repos/$REPO" --jq "$filter" | jq -S '.' > live-admin.json \
              && jq -S "$filter" .github/repo-config/settings.json > baseline-admin.json; then
-            if diff -u baseline-admin.json live-admin.json > admin.diff; then
+            if jq -e 'any(.[]; . == null)' live-admin.json >/dev/null; then
+              # The API returned the repo but null'd these admin-only fields → the token lacks
+              # effective admin visibility (scope / SSO), NOT real drift. Report degraded so a
+              # mis-scoped token can't masquerade as a booleans-vs-null false DRIFT.
+              echo "### Merge settings: check degraded ⚠️ (token lacks admin visibility)" >> "$GITHUB_STEP_SUMMARY"
+            elif diff -u baseline-admin.json live-admin.json > admin.diff; then
               echo "### Merge settings: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
             else
               {
