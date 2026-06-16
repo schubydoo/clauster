@@ -110,13 +110,17 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Install Nix, build + run the flake
+      # Install Nix via the SHA-pinned action instead of `curl | sh` (the unpinned
+      # download-then-run Scorecard flags as Pinned-Dependencies). The action verifies
+      # its own installer; flakes are enabled via extra_nix_config.
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build + run the flake
         run: |
           set -euo pipefail
-          # Single-user install (no daemon/systemd needed in CI).
-          sh <(curl -L https://nixos.org/nix/install) --no-daemon
-          . "$HOME/.nix-profile/etc/profile.d/nix.sh"
-          export NIX_CONFIG="experimental-features = nix-command flakes"
           # --no-update-lock-file uses the committed flake.lock and errors if it's
           # stale (rather than silently regenerating it), asserting lock/flake match.
           nix build .#clauster -L --no-update-lock-file
