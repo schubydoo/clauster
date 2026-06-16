@@ -981,6 +981,10 @@ def test_capture_error_detail_redacts_session_tokens(tmp_path):
     assert "env_01BX5ZZKBKACTAV9WEVGEMMVRZ" not in inst.error_detail
     assert "<redacted>" in inst.error_detail  # ids masked, not dropped
     assert "\x1b[" not in inst.error_detail  # ANSI stripped
+    # ...but the failure reason must SURVIVE redaction — masking secrets must not wipe the
+    # diagnostic context the card exists to show (CodeRabbit).
+    assert "Created initial session" in inst.error_detail
+    assert "failed to start" in inst.error_detail
 
 
 def test_read_markers_tolerates_non_utf8_bytes(tmp_path):
