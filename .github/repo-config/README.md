@@ -32,9 +32,23 @@ JSON here, and prints any drift to the workflow's job summary.
   additionally wrapped in `continue-on-error`. **Do not add it to the repo's
   required status checks** — it must never gate a merge.
 
-The **apply / reconcile** half (writing labels and settings back to match these
-baselines) is intentionally **not** built here: it needs a privileged App token
-and is a maintainer-side action.
+## Applying the baseline (reconcile)
+
+The **apply / reconcile** half — writing labels and settings back to match these
+baselines — is
+[`.github/workflows/repo-config-apply.yml`](../workflows/repo-config-apply.yml).
+It is **maintainer-run only** and fail-safe:
+
+- **`workflow_dispatch` only** (never `pull_request`/`push`) — a write workflow must
+  not be reachable from an automatic or untrusted trigger.
+- **`dry_run` defaults true** — it prints the plan to the job summary and writes
+  nothing until you uncheck it.
+- **`prune` defaults false** — it does not delete labels missing from the baseline
+  unless you opt in (a delete strips the label from every issue/PR).
+- Writes use a **`REPO_CONFIG_TOKEN`** secret — a scoped GitHub App token or
+  fine-grained PAT with **Administration: write** + **Issues: write**. The default
+  `GITHUB_TOKEN` cannot `PATCH` repo settings, so an apply with no secret fails
+  closed. Branch protection / rulesets stay out of scope (owned by the ruleset).
 
 ## Updating the baseline
 

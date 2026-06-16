@@ -1,0 +1,119 @@
+name: Repo Config Apply
+
+# The WRITE half of the advisory repo-config-drift check: reconcile the live repo
+# LABELS + basic SETTINGS to the committed baselines in .github/repo-config/.
+#
+# Maintainer-run only and fail-safe by construction:
+#   * workflow_dispatch ONLY — never pull_request/push. A write workflow must not be
+#     reachable from an untrusted or automatic trigger.
+#   * dry_run defaults TRUE — prints the plan; writes only when explicitly unchecked.
+#   * prune (delete labels not in the baseline) defaults FALSE — opt-in, because a
+#     delete removes the label from every issue/PR (e.g. the board's `tracked`).
+#   * Writes use REPO_CONFIG_TOKEN — a scoped GitHub App token or fine-grained PAT
+#     (Administration: write + Issues: write) the maintainer provisions. The default
+#     GITHUB_TOKEN cannot PATCH repo settings, so an apply with no secret fails closed.
+#   * Branch protection / rulesets are OUT OF SCOPE (owned by the repo ruleset) — this
+#     touches only labels + the metadata the drift check compares.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the plan without writing (uncheck to actually apply)"
+        type: boolean
+        default: true
+      prune:
+        description: "Delete live labels not in the baseline (destructive; off by default)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: repo-config-apply-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: reconcile labels + settings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout only — every repo-config write goes through REPO_CONFIG_TOKEN
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Reconcile labels + settings to the committed baselines
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          PRUNE: ${{ inputs.prune }}
+          # The secret is the privileged writer; fall back to GITHUB_TOKEN for the
+          # read-only dry-run plan. An apply (dry_run=false) with no secret fails closed below.
+          GH_TOKEN: ${{ secrets.REPO_CONFIG_TOKEN || github.token }}
+          HAS_TOKEN: ${{ secrets.REPO_CONFIG_TOKEN != '' }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          S="$GITHUB_STEP_SUMMARY"
+          mode="apply"; [ "$DRY_RUN" = "true" ] && mode="dry-run"
+          echo "## Repo config apply ($mode)" >> "$S"
+          plan() { echo "- $*" >> "$S"; }
+
+          # Fail closed: a real apply needs the privileged token (GITHUB_TOKEN can't
+          # PATCH settings). The dry-run plan reads fine with the default token.
+          if [ "$DRY_RUN" != "true" ] && [ "$HAS_TOKEN" != "true" ]; then
+            echo "::error::REPO_CONFIG_TOKEN is not set — cannot apply. Provision a scoped" \
+                 "App token / fine-grained PAT (Administration: write + Issues: write) as the" \
+                 "secret, or re-run with dry_run checked."
+            exit 1
+          fi
+
+          # --limit 1000: `gh label list` defaults to 30, which would truncate the live set
+          # on a label-heavy repo — making the reconcile re-create existing labels (then abort
+          # on the duplicate) and miss extras during prune.
+          live_labels="$(gh label list --repo "$REPO" --limit 1000 --json name,color,description)"
+
+          # --- LABELS: create or update every baseline label -------------------------
+          while read -r l; do
+            name="$(jq -r '.name' <<<"$l")"
+            color="$(jq -r '.color' <<<"$l")"
+            desc="$(jq -r '.description // ""' <<<"$l")"
+            if jq -e --arg n "$name" 'any(.[]; .name == $n)' <<<"$live_labels" >/dev/null; then
+              plan "update label: $name"
+              [ "$DRY_RUN" = "true" ] || gh label edit "$name" --repo "$REPO" --color "$color" --description "$desc"
+            else
+              plan "create label: $name"
+              [ "$DRY_RUN" = "true" ] || gh label create "$name" --repo "$REPO" --color "$color" --description "$desc"
+            fi
+          done < <(jq -c '.[]' .github/repo-config/labels.json)
+
+          # --- LABELS: prune extras (opt-in, destructive) ---------------------------
+          while read -r name; do
+            if ! jq -e --arg n "$name" 'any(.[]; .name == $n)' .github/repo-config/labels.json >/dev/null; then
+              if [ "$PRUNE" = "true" ]; then
+                plan "delete label: $name (prune)"
+                [ "$DRY_RUN" = "true" ] || gh label delete "$name" --repo "$REPO" --yes
+              else
+                plan "extra label NOT in baseline: $name (skipped — set prune to delete)"
+              fi
+            fi
+          done < <(jq -r '.[].name' <<<"$live_labels")
+
+          # --- SETTINGS: PATCH the scalar fields, PUT the topics --------------------
+          plan "patch settings (description/homepage/features/merge flags)"
+          if [ "$DRY_RUN" != "true" ]; then
+            jq '{description, homepage, has_issues, has_wiki, has_projects,
+                 allow_squash_merge, allow_merge_commit, allow_rebase_merge,
+                 delete_branch_on_merge}' .github/repo-config/settings.json \
+              | gh api -X PATCH "repos/$REPO" --input -
+          fi
+          plan "set topics"
+          if [ "$DRY_RUN" != "true" ]; then
+            jq '{names: .topics}' .github/repo-config/settings.json \
+              | gh api -X PUT "repos/$REPO/topics" --input -
+          fi
+
+          echo "" >> "$S"
+          echo "Done ($mode)." >> "$S"
