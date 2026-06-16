@@ -212,7 +212,7 @@
 
             <!-- external (unmanaged) session note — expandable per-session detail -->
             <div class="mt-2" x-show="hasExternal('{{ p.name }}')" x-cloak>
-              <button type="button"
+              <button type="button" data-test="external-toggle"
                       class="btn btn-link btn-sm p-0 text-secondary text-decoration-none d-inline-flex align-items-center"
                       @click="toggleExternalNote('{{ p.name }}')"
                       :aria-expanded="!!externalOpen['{{ p.name }}']"
@@ -225,7 +225,7 @@
                 <span class="text-muted ms-1" aria-hidden="true"
                       x-text="externalOpen['{{ p.name }}'] ? '▾' : '▸'"></span>
               </button>
-              <div class="mt-1 ps-3" x-show="externalOpen['{{ p.name }}']" x-cloak>
+              <div class="mt-1 ps-3" data-test="external-detail" x-show="externalOpen['{{ p.name }}']" x-cloak>
                 <template x-for="s in (externalSessions['{{ p.name }}'] || [])" :key="externalKey(s)">
                   <div class="d-flex align-items-center flex-wrap gap-1 small text-secondary py-1">
                     <span class="badge text-capitalize" :class="externalBadge(s.state)" x-text="s.state || 'active'"></span>

@@ -68,6 +68,42 @@ def test_external_session_indicator_shows_for_unmanaged_session(
     browser.expect_hidden('[data-project="beta"] [x-show="hasExternal(\'beta\')"]')
 
 
+def test_external_session_rich_display_in_active_zone_and_project_detail(
+    browser: AgentBrowser, external_session_server: Server
+) -> None:
+    """FE-4 (#300): the unmanaged session gets a read-only Active-zone row + expandable detail.
+
+    The seeded EXTERNAL session (pid 999999 in ``alpha``) must surface on both surfaces the
+    user chose: a first-class read-only row in the Active zone, and an expandable per-session
+    detail under the project-row note. Adoption controls are intentionally absent — observe-only.
+    """
+    browser.goto(external_session_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+
+    # Active zone: an external session counts as live, so a read-only row renders carrying the
+    # project, an "external" mode badge, and the real pid. No Stop/Resume button (unmanaged).
+    row = '[data-test="external-row"]'
+    browser.expect_visible(row, timeout_ms=_BANNER_TIMEOUT)
+    # .mode-badge uppercases its text via CSS, so compare case-insensitively.
+    row_text = browser.get_text(row).lower()
+    assert "external" in row_text
+    assert "alpha" in row_text
+    assert "pid 999999" in row_text
+    assert "unmanaged" in row_text
+
+    # The 'external' source filter is offered alongside the other run-location filters.
+    filters = browser.get_text('[aria-label="Filter sessions by where they run"]').lower()
+    assert "external" in filters
+
+    # Project-row note: detail is collapsed until the toggle is clicked, then shows the session's
+    # state + pid inline. The toggle is a real <button> (aria-expanded) for keyboard/SR users.
+    detail = '[data-project="alpha"] [data-test="external-detail"]'
+    browser.expect_hidden(detail)
+    browser.click('[data-project="alpha"] [data-test="external-toggle"]')
+    browser.expect_visible(detail)
+    assert "pid 999999" in browser.get_text(detail)
+
+
 def test_connection_lost_banner_appears_when_server_dies(
     browser: AgentBrowser, bridge_server: Server
 ) -> None:

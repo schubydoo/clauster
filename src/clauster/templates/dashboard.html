@@ -238,7 +238,7 @@
 {# External (unmanaged) session row — a `claude` session in a project dir that Clauster
    didn't start. Observe-only: no controls, since Clauster doesn't own its lifecycle. #}
 {% macro external_row() %}
-            <div class="list-group-item sess-row" :class="externalRailClass(s)" x-show="activeFilter === 'all' || activeFilter === 'external'">
+            <div class="list-group-item sess-row" data-test="external-row" :class="externalRailClass(s)" x-show="activeFilter === 'all' || activeFilter === 'external'">
               <div class="d-flex align-items-center flex-wrap gap-1">
                 <span class="badge bg-yellow-lt mode-badge me-1">external</span>
                 <span class="badge me-1 text-capitalize" :class="externalBadge(s.state)" x-text="s.state || 'active'"></span>
