@@ -66,6 +66,7 @@
     return {
       instances: {},
       externalSessions: {},
+      externalOpen: {},   // project name -> true while its external-session detail is expanded
       agents: [],
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
@@ -230,7 +231,7 @@
       endedAgents() { return this.agents.filter((j) => !(j.worker_alive || ["working", "blocked"].includes(j.state))); },
       // Stopped/crashed bridges that can be reconnected (Resume) — surfaced in Recent.
       endedBridges() { return Object.values(this.instances).filter((i) => this.isResumable(i.project)); },
-      hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length > 0; },
+      hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length > 0; },
       hasRecent() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length > 0; },
       recentCount() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length; },
       // Status -> left-rail colour: the rail encodes liveness/attention, NOT mode (mode is
@@ -468,6 +469,41 @@
         return Array.isArray(s) ? s.length : 0;
       },
       hasExternal(name) { return this.externalCount(name) > 0; },
+      toggleExternalNote(name) { this.externalOpen[name] = !this.externalOpen[name]; },
+      // Flatten {project: [session]} -> [{project, ...session}] for the Active list. The
+      // grouped-by-project shape stays the source of truth (project-row note reads it directly).
+      externalSessionsFlat() {
+        const out = [];
+        const map = this.externalSessions || {};
+        for (const name of Object.keys(map)) {
+          const arr = Array.isArray(map[name]) ? map[name] : [];
+          for (const s of arr) out.push({ ...s, project: name });
+        }
+        return out;
+      },
+      // Stable x-for key: the local UUID is unique per session; fall back to project:pid for a
+      // pre-2.1.139 CLI that might omit it.
+      externalKey(s) { return s.local_uuid || (s.project + ":" + s.pid); },
+      // Left-rail colour encodes attention. Unmanaged sessions Clauster can't control default to
+      // yellow (attention); a known agent-view "working" state reads as live, "blocked" as warn.
+      externalRailClass(s) {
+        if (s.state === "working") return "sess-live";
+        return "sess-warn";
+      },
+      // Reuse the agent-view state->badge map; "" (pre-2.1.139) gets a neutral managed-unaware tint.
+      externalBadge(state) { return state ? this.agentBadgeClass(state) : "bg-yellow-lt"; },
+      // Relative uptime from started_at (epoch ms). Coarse buckets — this is a glance, not a clock.
+      externalWhen(s) {
+        const t = Number(s.started_at);
+        if (!t || isNaN(t)) return "";
+        const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        if (secs < 60) return secs + "s";
+        const mins = Math.floor(secs / 60);
+        if (mins < 60) return mins + "m";
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return hrs + "h";
+        return Math.floor(hrs / 24) + "d";
+      },
       async loadUsage(name) {
         if (USAGE_MODE === "off") return;  // badge disabled — don't even fetch usage
         try {

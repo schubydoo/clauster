@@ -235,6 +235,26 @@
             </div>
 {% endmacro %}
 
+{# External (unmanaged) session row — a `claude` session in a project dir that Clauster
+   didn't start. Observe-only: no controls, since Clauster doesn't own its lifecycle. #}
+{% macro external_row() %}
+            <div class="list-group-item sess-row" data-test="external-row" :class="externalRailClass(s)" x-show="activeFilter === 'all' || activeFilter === 'external'">
+              <div class="d-flex align-items-center flex-wrap gap-1">
+                <span class="badge bg-yellow-lt mode-badge me-1">external</span>
+                <span class="badge me-1 text-capitalize" :class="externalBadge(s.state)" x-text="s.state || 'active'"></span>
+                <span class="fw-medium me-1" x-text="s.project"></span>
+                <span class="status-dot status-dot-animated bg-yellow me-1" aria-hidden="true"
+                      title="A claude session Clauster didn't start"></span>
+                <span class="text-secondary small" x-text="'pid ' + s.pid"></span>
+                <span class="ms-auto d-flex align-items-center gap-2">
+                  <span class="text-secondary small" x-show="externalWhen(s)" x-cloak x-text="'up ' + externalWhen(s)"></span>
+                  <span class="badge bg-secondary-lt" title="Not managed by Clauster — observe only">unmanaged</span>
+                </span>
+              </div>
+              <div class="small mt-1 text-secondary text-truncate" x-show="s.cwd"><code x-text="s.cwd"></code></div>
+            </div>
+{% endmacro %}
+
 <!-- One dashboard() scope spans header + body + footer so the header readiness pill and
      the zones share a single component (one poll loop, one readiness/state object). -->
 <div class="page" x-data="dashboard()" x-init="init()">
@@ -325,7 +345,7 @@
         <span class="zone-sub">what Claude is running for you right now</span>
         <div class="zone-actions" x-show="hasLive()" x-cloak>
           <div class="btn-group btn-group-sm" role="group" aria-label="Filter sessions by where they run">
-            <template x-for="f in ['all','browser','desktop','detached']" :key="f">
+            <template x-for="f in ['all','browser','desktop','detached','external']" :key="f">
               <button type="button" class="btn" @click="activeFilter = f" :aria-pressed="activeFilter === f"
                       :class="activeFilter === f ? 'btn-primary' : 'btn-ghost-secondary'" x-text="f"></button>
             </template>
@@ -397,6 +417,9 @@
 
           <!-- detached (fire-and-forget / background) sessions — live only -->
           <template x-for="j in liveAgents()" :key="j.id">{{ detached_row() }}</template>
+
+          <!-- external (unmanaged) sessions — observe only, no controls -->
+          <template x-for="s in externalSessionsFlat()" :key="externalKey(s)">{{ external_row() }}</template>
 
         </div>
       </div>
