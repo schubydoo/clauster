@@ -96,6 +96,7 @@ class SessionRunner:
     """Owns the lifecycle of managed bridges: spawn, resume, stop, and status polling."""
 
     def __init__(self, config: ClausterConfig, claude_json: Path | None = None) -> None:
+        """Bind the runner to config and the ``~/.claude.json`` trust file."""
         self._config = config
         self._binary = config.claude.binary
         self._claude_json = claude_json or Path("~/.claude.json").expanduser()

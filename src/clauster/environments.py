@@ -56,6 +56,7 @@ class EnvironmentsAPIError(RuntimeError):
     """The environments API returned a non-2xx status or an unusable body."""
 
     def __init__(self, status: int, detail: str) -> None:
+        """Build the error from the API HTTP status and detail text."""
         super().__init__(f"environments API returned {status}: {detail}")
         self.status = status
         self.detail = detail
@@ -182,6 +183,7 @@ class EnvironmentsClient:
         transport: Transport | None = None,
         base: str = API_BASE,
     ) -> None:
+        """Bind the client to credentials, with optional transport and API base."""
         self._cred = credentials
         self._transport = transport or _https_transport
         self._base = base.rstrip("/")
