@@ -18,6 +18,7 @@ real bridge lifecycle with a clean slate per test.
 from __future__ import annotations
 
 import http.client
+import json
 import os
 import re
 import socket
@@ -45,6 +46,10 @@ class Server(NamedTuple):
 
     url: str
     state_dir: Path
+    # The running ``clauster run`` subprocess. Defaulted so the many ``Server(url,
+    # state_dir)`` constructions stay valid; the connection-lost test uses it to kill
+    # the server mid-session and watch the dashboard's retry banner appear.
+    proc: subprocess.Popen | None = None
 
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -173,7 +178,7 @@ def _start_server(
     base_url = f"http://127.0.0.1:{port}"
     try:
         _wait_ready(port, proc)
-        yield Server(base_url, state_dir)
+        yield Server(base_url, state_dir, proc)
     finally:
         proc.terminate()
         try:
@@ -327,3 +332,73 @@ def bridge_server_pty(
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge-pty")
     yield from _start_server(tmp, mutable_projects_tree, extra="  resume_mode: pty\n")
+
+
+@pytest.fixture
+def usage_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A clauster whose ``alpha`` project has a seeded usage transcript (cost badge).
+
+    The per-project cost/token badge lazy-loads from ``/api/projects/<name>/usage``,
+    which reads Claude's per-session transcripts under
+    ``$HOME/.claude/projects/<sanitized-cwd>/``. ``_start_server`` isolates HOME to
+    ``tmp/home``, so pre-seed one priced transcript for ``alpha`` there (its badge
+    renders) and leave ``beta`` blank (no badge). ``usage.mode`` defaults to ``cost``,
+    so no extra config is needed. Function-scoped: the seed is per-test.
+    """
+    from clauster.pointers import sanitize_cwd  # pure cwd→dirname mapping
+
+    tmp = tmp_path_factory.mktemp("e2e-usage")
+    alpha = (mutable_projects_tree / "alpha").resolve()
+    transcript_dir = tmp / "home" / ".claude" / "projects" / sanitize_cwd(alpha)
+    transcript_dir.mkdir(parents=True)
+    # 200k input + 100k output on sonnet → ≈$2.10 (0.2·$3 + 0.1·$15), a clearly non-zero badge.
+    (transcript_dir / "seed.jsonl").write_text(
+        json.dumps(
+            {
+                "message": {
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"input_tokens": 200000, "output_tokens": 100000},
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    yield from _start_server(tmp, mutable_projects_tree)
+
+
+@pytest.fixture
+def external_session_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A clauster that sees one EXTERNAL working session in ``alpha``.
+
+    The fake ``claude agents --json`` returns (via ``FAKE_CLAUDE_AGENTS``) a session
+    whose cwd is ``alpha`` but which Clauster never started, so
+    :func:`inspector.reconcile` attributes it ``EXTERNAL`` → the dashboard shows the
+    "External session active" indicator. A 1s ``agents_json_poll_interval_seconds``
+    (the first ``poll_once`` runs at loop start) makes it appear within a poll.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-external")
+    alpha = (mutable_projects_tree / "alpha").resolve()
+    agents = json.dumps(
+        [
+            {
+                "pid": 999999,  # not a real clauster bridge → reconcile() marks it EXTERNAL
+                "cwd": str(alpha),
+                "kind": "interactive",  # a bridge-eligible kind (not background)
+                "state": "running",  # non-terminal
+                "startedAt": 1735689600000,  # epoch ms (the model rejects an ISO string)
+                "sessionId": "e2e-external-0000",
+            }
+        ]
+    )
+    # Poll agents --json every 1s (default 300) so the cross-check lands promptly.
+    yield from _start_server(
+        tmp,
+        mutable_projects_tree,
+        extra="  agents_json_poll_interval_seconds: 1\n",
+        extra_env={"FAKE_CLAUDE_AGENTS": agents},
+    )
