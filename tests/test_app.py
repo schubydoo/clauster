@@ -76,6 +76,33 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     assert "this._refreshQueued = false; this.refresh();" in page
 
 
+def test_dashboard_hosted_view_token_guard(write_config):
+    # openHosted retires a prior socket and binds each socket's onmessage/onclose to its own
+    # `view`, checked against the live hostedView[id]. That check must compare a per-view TOKEN,
+    # not the object reference: assigning `view` into Alpine's reactive `this.hostedView` wraps
+    # it in a Proxy, so an object-identity check (`hostedView[id] !== view`) is ALWAYS true and
+    # drops every streamed frame — and silently disables the onclose reconnect/ended path. This
+    # is the same Proxy footgun that bit openLogs; the token survives the Proxy.
+    page = _client(write_config).get("/").text
+    assert "const token = ++this._hostedSeq;" in page
+    # Pin the EXACT liveness helper so a regression that reintroduces the object-identity
+    # comparison alongside a token check still fails this test. liveView() must return the
+    # live PROXY (or null) — not a bool — so the handlers mutate THROUGH Alpine's reactivity
+    # and the panel repaints immediately; a raw-`view` mutation bypasses the Proxy set-traps
+    # and the "link dropped" banner would only surface on the next reactive flush.
+    assert "return w && w.open && w.token === token ? w : null;" in page
+    assert "w.connLost = true;" in page  # the dropped-link flag is set THROUGH the proxy
+    # The reconnect timer must also gate on the token, not the always-false `w === view`
+    # (raw vs Proxy), or a genuinely-dropped live link would never reconnect.
+    assert "if (w2 && w2.token === token && w2.open) self.openHosted(id);" in page
+    # Negative guards: the buggy identity comparisons AND the reactivity-bypassing raw
+    # mutations must be gone from the hosted path.
+    assert "self.hostedView[id] !== view" not in page
+    assert "if (w === view && w.open)" not in page
+    assert "view.connLost = true;" not in page  # was the raw-object (non-reactive) write
+    assert "view.ws = ws;" not in page  # ws is now assigned through the proxy
+
+
 def test_dashboard_footer_credits_vendored_assets(write_config):
     # The footer must credit the bundled MIT front-end assets (Tabler + Alpine.js)
     # and link the third-party notices. This regressed once when a card redesign
