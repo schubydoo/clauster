@@ -1257,8 +1257,9 @@
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
         // Tag this tail with a unique token; the retire check below compares the token, NOT
-        // the object reference (`this.logs[name] !== state` is ALWAYS true once Alpine wraps
-        // `state` in a Proxy, which would drop every frame — see liveState() below).
+        // object identity — once Alpine wraps `state` in a reactive Proxy, comparing the raw
+        // object against the stored proxy is ALWAYS unequal and would drop every frame (see
+        // liveState() below, which returns the proxy so handlers mutate through reactivity).
         const token = ++this._logSeq;
         const state = { open: true, ws: null, token, lines: [], pending: [], paused: false, lost: false };
         this.logs[name] = state;
