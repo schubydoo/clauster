@@ -98,6 +98,7 @@
       trusting: {},       // project name -> bool (trust request in flight)
       toasts: [],
       _toastSeq: 0,
+      _logSeq: 0,          // monotonic token per opened log tail (retire check; see openLogs)
       connLost: false,    // polling has failed repeatedly -> data is stale
       _refreshFails: 0,
       _refreshing: false,    // single-flight guard for refresh()
@@ -1255,12 +1256,18 @@
         }
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
-        const state = { open: true, ws: null, lines: [], pending: [], paused: false, lost: false };
+        // Tag this tail with a unique token. The retire check below compares the token,
+        // NOT the object reference: assigning `state` into Alpine's reactive `this.logs`
+        // wraps it in a Proxy, so `this.logs[name] !== state` (raw vs Proxy) is ALWAYS
+        // true and would drop every frame. Comparing the token survives the Proxy.
+        const token = ++this._logSeq;
+        const state = { open: true, ws: null, token, lines: [], pending: [], paused: false, lost: false };
         this.logs[name] = state;
         const self = this;
+        const live = () => { const s = self.logs[name]; return !!s && s.open && s.token === token; };
         const ws = new WebSocket(url);
         ws.onmessage = (ev) => {
-          if (!state.open || self.logs[name] !== state) return;  // a retired socket → ignore
+          if (!live()) return;  // a retired socket → ignore
           state.lost = false;  // a frame arrived → the tail is live again
           if (state.paused) {
             state.pending.push(ev.data);
@@ -1273,9 +1280,9 @@
         };
         // A dropped socket (bridge stopped/died, server 1008 close, network blip) leaves the
         // panel showing a frozen tail; mark it lost so the panel surfaces the disconnect. Bound
-        // to `state` + identity-checked, so a retired socket can't flip the fresh panel, and
+        // to `state` + token-checked, so a retired socket can't flip the fresh panel, and
         // closeLogs() clears `open` first so an intentional close never trips this.
-        const lost = () => { if (state.open && self.logs[name] === state) state.lost = true; };
+        const lost = () => { if (live()) state.lost = true; };
         ws.onerror = lost;
         ws.onclose = lost;
         state.ws = ws;

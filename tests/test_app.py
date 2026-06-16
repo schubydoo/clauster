@@ -66,9 +66,13 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     assert "ws.onclose = lost" in page and "ws.onerror = lost" in page  # FIX 3 handlers
     assert "Live tail disconnected" in page  # FIX 3 UI surface
     # openLogs is idempotent + state-bound: a reconnect retires the prior state and binds the
-    # new socket's handlers to its own `state`, identity-checked against the live logs[name],
-    # so two tails can't stream into one view and a retired socket can't flip the fresh panel.
-    assert "self.logs[name] !== state" in page
+    # new socket's handlers to its own tail, token-checked against the live logs[name], so two
+    # tails can't stream into one view and a retired socket can't flip the fresh panel. The
+    # check compares a per-tail TOKEN, not the object reference: assigning `state` into Alpine's
+    # reactive `this.logs` wraps it in a Proxy, so an object-identity check (`logs[name] !==
+    # state`) is always true and drops every frame — the token survives the Proxy.
+    assert "s.token === token" in page
+    assert "const token = ++this._logSeq;" in page
     # Single-flight guard that QUEUES a trailing refresh (so action-flow refreshes aren't
     # dropped), plus the reset + trailing run — assert all three so a regression fails.
     assert "if (this._refreshing) { this._refreshQueued = true; return; }" in page
