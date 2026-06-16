@@ -122,8 +122,13 @@ def test_dashboard_hosted_view_token_guard(write_config):
     # mutations must be gone from the hosted path. Strip comment-only lines first — the token
     # comment legitimately *names* `this.hostedView[id] !== view` as the bug — then reject both
     # receiver forms (`this.`/`self.`) and both operators (`!==`/`===`) as executable code, so
-    # the original regression can't slip back in under either spelling (CodeRabbit).
-    hosted_code = "\n".join(ln for ln in page.splitlines() if not ln.lstrip().startswith("//"))
+    # the original regression can't slip back in under either spelling. Strip BOTH `/* ... */`
+    # block comments and `//` comment-only lines first, so a future comment naming the buggy
+    # pattern in either style can't mask a real regression (CodeRabbit).
+    hosted_code = re.sub(r"/\*.*?\*/", "", page, flags=re.DOTALL)
+    hosted_code = "\n".join(
+        ln for ln in hosted_code.splitlines() if not ln.lstrip().startswith("//")
+    )
     assert "this.hostedView[id] !== view" not in hosted_code
     assert "this.hostedView[id] === view" not in hosted_code
     assert "self.hostedView[id] !== view" not in hosted_code
