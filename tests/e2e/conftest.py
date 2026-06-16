@@ -131,7 +131,12 @@ def _wait_ready(port: int, proc: subprocess.Popen, timeout: float = 25.0) -> Non
     raise RuntimeError(f"clauster never became ready on port {port} within {timeout}s")
 
 
-def _start_server(tmp: Path, projects_root: Path, extra: str = "") -> Iterator[Server]:
+def _start_server(
+    tmp: Path,
+    projects_root: Path,
+    extra: str = "",
+    extra_env: dict[str, str] | None = None,
+) -> Iterator[Server]:
     port = _free_port()
     state_dir = tmp / "state"
     cfg = tmp / "clauster.yml"
@@ -150,13 +155,20 @@ def _start_server(tmp: Path, projects_root: Path, extra: str = "") -> Iterator[S
     # an env override fully isolates it.
     home = tmp / "home"
     home.mkdir(exist_ok=True)
+    env = {**os.environ, "HOME": str(home)}
+    # ``extra_env`` lets a fixture select the fake ``claude``'s behaviour (e.g.
+    # FAKE_CLAUDE_MODE=stderr_error to induce a real spawn failure, or
+    # FAKE_CLAUDE_LOG_EXTRA to emit an ANSI + session-token line for the log-tail
+    # redaction check). The fake reads these from its own environment.
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(
         [sys.executable, "-m", "clauster", "run", "-c", str(cfg)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,
-        env={**os.environ, "HOME": str(home)},
+        env=env,
     )
     base_url = f"http://127.0.0.1:{port}"
     try:
@@ -260,6 +272,46 @@ def bridge_server(
     """
     tmp = tmp_path_factory.mktemp("e2e-bridge")
     yield from _start_server(tmp, mutable_projects_tree)
+
+
+@pytest.fixture
+def trust_fail_bridge_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A bridge_server whose trust-on-start write fails, surfacing an inline error.
+
+    The trust-on-start flow (the first step of a bridge spawn) writes the isolated
+    ``HOME/.claude.json``; here that path is pre-created as a *directory*, so the
+    writer's atomic ``os.replace`` raises ``OSError`` and the trust POST returns 500.
+    The dashboard then renders the failure in the persistent inline ``errorOf``
+    ``.alert-danger`` block on the card — not just a transient toast. A deterministic,
+    real action failure (vs a fake-``claude`` crash, which the runner surfaces as an
+    error-*status* instance rather than the ``errorOf`` block).
+
+    Function-scoped like :func:`bridge_server` so the obstruction / failed-action
+    state never leaks across tests.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-bridge-trustfail")
+    # _start_server creates HOME at ``tmp/home`` with ``mkdir(exist_ok=True)``; pre-create
+    # it and obstruct the trust file before the server starts.
+    (tmp / "home").mkdir()
+    (tmp / "home" / ".claude.json").mkdir()
+    yield from _start_server(tmp, mutable_projects_tree)
+
+
+@pytest.fixture
+def log_extra_bridge_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A bridge_server whose fake ``claude`` emits an ANSI + session-token log line.
+
+    Sets ``FAKE_CLAUDE_LOG_EXTRA=1`` so the fake writes one extra ``--debug-file``
+    line carrying ANSI color codes and a ``claude.ai/code/session_…`` deep link plus a
+    bearer token — the live-tail redaction test asserts the streamed view strips the
+    ANSI and masks the session id / token (clauster's :func:`clauster.redact.sanitize_line`).
+    """
+    tmp = tmp_path_factory.mktemp("e2e-bridge-logx")
+    yield from _start_server(tmp, mutable_projects_tree, extra_env={"FAKE_CLAUDE_LOG_EXTRA": "1"})
 
 
 @pytest.fixture
