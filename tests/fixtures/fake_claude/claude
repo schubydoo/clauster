@@ -141,6 +141,17 @@ def run_bridge(args):
 
     log(f"2026-01-01T00:00:00.300Z [DEBUG] [bridge:work] Starting poll loop spawnMode=same-dir maxSessions=32 environmentId={ENV_ID}")
 
+    if os.environ.get("FAKE_CLAUDE_LOG_EXTRA"):
+        # One extra line carrying ANSI color codes, a session deep link, and a bearer
+        # token, so an E2E can assert the WS live-tail strips ANSI and redacts the
+        # session id / token (clauster's sanitize_line). Gated behind the env var so it
+        # never perturbs the marker-sequence the unit tests assert against.
+        log(
+            f"\x1b[33m2026-01-01T00:00:00.400Z [DEBUG] [bridge:link] "
+            f"Continue at https://claude.ai/code/{PTY_SESSION} "
+            f"Authorization: Bearer sk-FAKEFAKEFAKEFAKEFAKE\x1b[0m"
+        )
+
     stopped = {"v": False}
 
     def handler(_signum, _frame):

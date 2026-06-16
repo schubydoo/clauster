@@ -15,12 +15,20 @@ their accessible label, by ARIA role + name (``*_role`` helpers).
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
+from pathlib import Path
 
 # The CLI is installed globally (``agent-browser install`` in scripts/e2e.sh / CI).
 _BIN = "agent-browser"
+
+# Vendored, network-free axe-core (pinned). Registered as a page init script (via the
+# ``AGENT_BROWSER_INIT_SCRIPTS`` env the driver injects into every subcommand) so
+# ``window.axe`` exists before the first navigation — the a11y smoke tests then run
+# ``axe.run`` in-page. Committed so the suite needs no network.
+_AXE_SCRIPT = Path(__file__).resolve().parent / "vendor" / "axe.min.js"
 
 # Poll cadence for the expect_* helpers; the per-call timeout is the caller's (the
 # suite's _STATUS_TIMEOUT / _GATE_TIMEOUT constants), defaulting to 5s.
@@ -37,13 +45,23 @@ class AgentBrowser:
     # ----- process plumbing ----------------------------------------------
 
     def _run(self, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
-        """Run one ``agent-browser`` subcommand and capture its output."""
+        """Run one ``agent-browser`` subcommand and capture its output.
+
+        Injects ``AGENT_BROWSER_INIT_SCRIPTS`` so the vendored axe-core is registered
+        as a page init script before the first navigation (every subcommand inherits
+        it, including ``open``) — that makes ``window.axe`` available for the a11y
+        smoke tests without any network fetch. Harmless for the non-a11y subcommands.
+        """
+        env = dict(os.environ)
+        if _AXE_SCRIPT.exists():
+            env["AGENT_BROWSER_INIT_SCRIPTS"] = str(_AXE_SCRIPT)
         return subprocess.run(
             [_BIN, *args],
             capture_output=True,
             text=True,
             check=check,
             timeout=60,
+            env=env,
         )
 
     # ----- navigation -----------------------------------------------------
@@ -162,6 +180,18 @@ class AgentBrowser:
     def eval_js(self, script: str) -> str:
         """Evaluate ``script`` in the page and return its stdout."""
         return self._run("eval", script, check=True).stdout.strip()
+
+    def eval_json(self, script: str):
+        """Evaluate ``script`` and parse its result as JSON.
+
+        ``agent-browser eval`` serializes the evaluated value as JSON on stdout (an
+        object/array comes back as a parseable JSON document). Have the script *return
+        the value* (an object or array — not ``JSON.stringify(...)``, which would
+        double-encode into a JSON string) and this parses it in one step. Awaited
+        promises resolve first, so an ``async`` IIFE (e.g. ``axe.run``) works directly.
+        """
+        out = self._run("eval", script, check=True).stdout.strip()
+        return json.loads(out)
 
     # ----- polling assertions (replace Playwright's auto-retrying expect) -
 
