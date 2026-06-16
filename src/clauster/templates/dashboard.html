@@ -278,6 +278,10 @@
                 x-text="readinessBlockers().length
                   ? ('⚠ ' + readinessBlockers().length + ' blocking')
                   : ('⚠ ' + readinessWarnings().length + (readinessWarnings().length === 1 ? ' check' : ' checks'))"></button>
+        <button type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Edit configuration"
+                title="Edit configuration" @click="openConfig()">
+          <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-edit"/></svg>
+        </button>
         <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme" title="Toggle dark / light theme">
           <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
           <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
@@ -661,6 +665,75 @@
       </div>
     </div>
   </footer>
+
+  <!-- Config editor modal (FE-3) — Tier-A operational settings only. -->
+  <template x-if="configEditor.open">
+    <div class="modal modal-blur d-block" tabindex="-1" style="background: rgba(0,0,0,.4)"
+         @keydown.escape.window="configEditor.open = false">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
+           aria-labelledby="cfg-editor-title">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h3 class="modal-title" id="cfg-editor-title">Configuration</h3>
+            <button type="button" class="btn-close" aria-label="Close" @click="configEditor.open = false"></button>
+          </div>
+          <div class="modal-body">
+            <p class="text-secondary small">
+              Operational settings only. Authentication, secrets, network bind, and structural
+              fields are managed in the config file / CLI and are not shown here. Saved changes take
+              effect after a Clauster restart.
+            </p>
+            <div class="text-secondary" x-show="configEditor.loading" x-cloak>Loading…</div>
+            <div class="alert alert-danger py-2" x-show="configEditor.error" x-cloak x-text="configEditor.error"></div>
+            <div class="alert alert-success py-2" x-show="configEditor.saved" x-cloak>Saved — restart Clauster to apply.</div>
+            <template x-for="section in configSections()" :key="section">
+              <div class="mb-3" x-show="!configEditor.loading">
+                <div class="fw-bold text-capitalize mb-2" x-text="section.replace(/_/g, ' ')"></div>
+                <template x-for="path in configFieldsFor(section)" :key="path">
+                  <div class="row align-items-center mb-2">
+                    <label class="col-5 col-form-label small text-truncate" :for="'cfg-' + path"
+                           :title="(configEditor.specs[path] && configEditor.specs[path].description) || path"
+                           x-text="path.split('.').slice(1).join('.')"></label>
+                    <div class="col-7">
+                      <template x-if="configEditor.specs[path] && configEditor.specs[path].type === 'bool'">
+                        <label class="form-check form-switch mb-0">
+                          <input class="form-check-input" type="checkbox" :id="'cfg-' + path"
+                                 x-model="configEditor.edits[path]">
+                        </label>
+                      </template>
+                      <template x-if="configEditor.specs[path] && configEditor.specs[path].type === 'enum'">
+                        <select class="form-select form-select-sm" :id="'cfg-' + path" x-model="configEditor.edits[path]">
+                          <template x-for="opt in configEditor.specs[path].choices" :key="opt">
+                            <option :value="opt" x-text="opt"></option>
+                          </template>
+                        </select>
+                      </template>
+                      <template x-if="configEditor.specs[path] && ['int', 'float'].includes(configEditor.specs[path].type)">
+                        <input class="form-control form-control-sm" type="number" :id="'cfg-' + path"
+                               :step="configEditor.specs[path].type === 'float' ? 'any' : '1'"
+                               x-model.number="configEditor.edits[path]">
+                      </template>
+                      <template x-if="configEditor.specs[path] && configEditor.specs[path].type === 'str'">
+                        <input class="form-control form-control-sm" type="text" :id="'cfg-' + path"
+                               x-model="configEditor.edits[path]">
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn" @click="configEditor.open = false">Close</button>
+            <button type="button" class="btn btn-primary" :disabled="configEditor.saving || configEditor.loading"
+                    @click="saveConfig()">
+              <span x-text="configEditor.saving ? 'Saving…' : 'Save changes'">Save changes</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
 </div>
 
 {% include "_dashboard_script.html" %}

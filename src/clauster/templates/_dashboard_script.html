@@ -67,6 +67,12 @@
       instances: {},
       externalSessions: {},
       externalOpen: {},   // project name -> true while its external-session detail is expanded
+      // --- in-app config editor (FE-3, Tier-A allowlist) ---
+      configEditor: {
+        open: false, loading: false, saving: false,
+        fields: {}, specs: {}, edits: {}, editable: [], hash: null,
+        error: "", saved: false,
+      },
       agents: [],
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
@@ -276,6 +282,60 @@
         setTimeout(() => this.dismissToast(id), 4500);
       },
       dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
+      // --- config editor (FE-3) ---
+      configSections() {
+        const seen = [];
+        for (const p of this.configEditor.editable) {
+          const s = p.split(".")[0];
+          if (!seen.includes(s)) seen.push(s);
+        }
+        return seen;
+      },
+      configFieldsFor(section) {
+        return this.configEditor.editable.filter((p) => p.split(".")[0] === section);
+      },
+      async openConfig() {
+        const c = this.configEditor;
+        c.open = true; c.error = ""; c.saved = false; c.loading = true;
+        try {
+          const res = await fetch(ROOT + "/api/config");
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) { c.error = "Failed to load configuration."; return; }
+          const d = await res.json();
+          c.fields = d.fields || {}; c.specs = d.specs || {};
+          c.editable = d.editable || []; c.hash = d.hash;
+          c.edits = { ...c.fields };  // seed the form from current values
+        } catch (e) { c.error = "Failed to load configuration."; }
+        finally { c.loading = false; }
+      },
+      async saveConfig() {
+        const c = this.configEditor;
+        // Send only fields the user actually changed (avoids null->"" churn on untouched optionals).
+        const edits = {};
+        for (const p of c.editable) {
+          if (c.edits[p] !== c.fields[p]) edits[p] = c.edits[p];
+        }
+        if (Object.keys(edits).length === 0) { c.error = "No changes to save."; c.saved = false; return; }
+        c.saving = true; c.error = ""; c.saved = false;
+        try {
+          const res = await fetch(ROOT + "/api/config", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ edits, hash: c.hash }),
+          });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) {
+            const d = await res.json();
+            c.hash = d.hash; c.saved = true;
+            c.fields = { ...c.edits };  // new baseline so a second save only sends new changes
+          } else if (res.status === 409) {
+            c.error = "The config file changed on disk — close and reopen to reload.";
+          } else {
+            const d = await res.json().catch(() => ({}));
+            c.error = d.detail || ("Save failed (" + res.status + ").");
+          }
+        } catch (e) { c.error = "Save failed."; }
+        finally { c.saving = false; }
+      },
       async refresh() {
         // Single-flight: setInterval can fire a new tick while a slow refresh is still
         // awaiting. Without this, an older refresh can resolve AFTER a newer one and clobber
