@@ -64,6 +64,20 @@ def test_forget_running_bridge_409(runner_config, monkeypatch):
         forget = client.post("/api/instances/alpha/forget")
         assert forget.status_code == 409  # Stop it first; forget never kills
         assert any(i["project"] == "alpha" for i in client.get("/api/instances").json())
+
+
+def test_max_bridges_cap_returns_409(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.instance_defaults.max_bridges = 1
+    runner = SessionRunner(config, claude_json=claude_json)
+    with TestClient(create_app(config, runner=runner)) as client:
+        first = client.post("/api/instances", json={"project": "alpha"})
+        assert first.status_code == 201, first.text
+        second = client.post("/api/instances", json={"project": "beta"})  # 1 live >= cap
+        assert second.status_code == 409, second.text
+        assert "max_bridges" in second.json()["detail"]
+        client.delete("/api/instances/alpha")
         client.delete("/api/instances/alpha")  # cleanup the fake process
 
 
