@@ -70,7 +70,10 @@ jobs:
             exit 1
           fi
 
-          live_labels="$(gh label list --repo "$REPO" --json name,color,description)"
+          # --limit 1000: `gh label list` defaults to 30, which would truncate the live set
+          # on a label-heavy repo — making the reconcile re-create existing labels (then abort
+          # on the duplicate) and miss extras during prune.
+          live_labels="$(gh label list --repo "$REPO" --limit 1000 --json name,color,description)"
 
           # --- LABELS: create or update every baseline label -------------------------
           while read -r l; do

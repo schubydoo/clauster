@@ -59,6 +59,13 @@ def test_apply_writes_through_the_provisioned_secret():
     assert "HAS_TOKEN" in raw and "cannot apply" in raw  # the fail-closed guard
 
 
+def test_apply_lists_all_labels_not_just_the_default_page():
+    # `gh label list` defaults to 30; the reconcile must page past that or it would
+    # re-create existing labels (then abort on the duplicate) on a label-heavy repo.
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    assert re.search(r"gh label list[^\n]*--limit\s+\d{3,}", raw)
+
+
 def test_apply_actions_are_sha_pinned():
     doc = _doc()
     refs = [
