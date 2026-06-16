@@ -5,9 +5,9 @@
   "delete_branch_on_merge": true,
   "description": "Your homelab's Claude Code launchpad. Self-hosted web UI that spawns & manages remote-control bridges on a remote host from any browser or phone — start/stop, spawn & permission modes, CLAUDE.md editor, git clone, live log tail, cost tracking. Loopback by default; password/reverse-proxy auth. No telemetry.",
   "has_issues": true,
-  "has_projects": false,
+  "has_projects": true,
   "has_wiki": false,
-  "homepage": "https://github.com/schubydoo/clauster",
+  "homepage": "https://schubydoo.github.io/clauster/",
   "topics": [
     "anthropic",
     "claude",
