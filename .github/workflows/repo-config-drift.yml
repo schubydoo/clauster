@@ -1,33 +1,31 @@
 name: Repo Config Drift
 
-# Advisory, READ-ONLY drift check for repository LABELS and a few basic repo
-# settings against the committed baselines in .github/repo-config/.
+# Advisory drift check for repository LABELS and basic SETTINGS against the committed
+# baselines in .github/repo-config/. The WRITE/reconcile half is repo-config-apply.yml.
 #
-# SAFETY — this workflow is deliberately the safe, read-only half of a
-# settings-reconciler. It NEVER writes:
-#   * Only `gh api` GETs with the default GITHUB_TOKEN — no secrets, no PATs.
-#   * Plain `pull_request` trigger (NOT pull_request_target) + read-only
-#     permissions, so it is safe to run on fork PRs: a fork contributor cannot
-#     exfiltrate anything or mutate repo config.
-#   * It does NOT touch branch protection or rulesets — the repo ruleset owns
-#     those and they are intentionally out of scope.
+# Advisory only — NEVER blocks a merge: both jobs are continue-on-error, always exit 0,
+# and only print to the job summary. Do NOT add either to the required status checks.
 #
-# NON-BLOCKING — this is advisory only and must NEVER gate a merge:
-#   * Do not add it to the repo's required status checks.
-#   * The drift step always exits 0 (it just prints a diff to the job summary),
-#     and is additionally guarded with continue-on-error so a transient gh/api
-#     failure can never block a PR.
-#
-# The apply/reconcile half (writing labels/settings back) is intentionally NOT
-# built here: it needs a privileged App token and is maintainer-side.
+# TOKEN SPLIT:
+#   * `drift` (default GITHUB_TOKEN, no secrets) verifies labels + the read-VISIBLE
+#     settings. Plain `pull_request` (never pull_request_target) + read-only perms, so it
+#     is safe on fork PRs — a fork can't exfiltrate or mutate anything.
+#   * `settings-admin` verifies the merge flags (allow_*_merge, delete_branch_on_merge),
+#     which GET /repos returns ONLY to an admin-scope token (the GITHUB_TOKEN lacks it). It
+#     uses REPO_CONFIG_TOKEN and runs ONLY on non-PR events (push:main / schedule /
+#     dispatch), so no secret is ever exposed to a PR (fork or not). Read-only — it never
+#     writes; reconciliation stays in repo-config-apply.yml.
+#   * Branch protection / rulesets are out of scope (owned by the repo ruleset).
 
 on:
   pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 7 * * 1" # weekly admin-settings verify, Monday 07:30 UTC
   workflow_dispatch:
 
-permissions:
-  contents: read
-  issues: read # labels live on the issues API surface
+permissions: {}
 
 concurrency:
   group: repo-config-drift-${{ github.event.pull_request.number || github.ref }}
@@ -38,6 +36,9 @@ jobs:
     name: repo-config drift (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read # checkout
+      issues: read # labels live on the issues API surface
     steps:
       # SHA-pinned (repo policy requires full-length commit SHAs) and
       # persist-credentials:false — this job only reads via `gh api`, it never
@@ -142,4 +143,67 @@ jobs:
 
           # Advisory: never gate a merge. `continue-on-error` on the step covers any
           # unexpected `set -e` exit; the normal / drift / degraded paths reach here.
+          exit 0
+
+  # Verify the admin-only merge settings (allow_*_merge, delete_branch_on_merge) that the
+  # default GITHUB_TOKEN can't read. Runs ONLY on non-PR events, so REPO_CONFIG_TOKEN is never
+  # exposed to a (fork) PR. Read-only + advisory like the drift job — reconciliation lives in
+  # repo-config-apply.yml.
+  settings-admin:
+    name: repo-config settings — admin-only fields (advisory)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout (the read of repo settings uses REPO_CONFIG_TOKEN, not GITHUB_TOKEN)
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Check admin-only settings drift (advisory, never blocks)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.REPO_CONFIG_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Repo config drift — admin-only merge settings (advisory)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # One shared filter, projected identically onto both sides — same DRY pattern as the
+          # read-visible settings in the drift job.
+          filter='{allow_squash_merge, allow_merge_commit, allow_rebase_merge, delete_branch_on_merge}'
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "> REPO_CONFIG_TOKEN not set — admin-only fields not verified (degraded)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Guarded like the drift job: a gh/jq failure reports "degraded" rather than aborting.
+          if gh api "repos/$REPO" --jq "$filter" | jq -S '.' > live-admin.json \
+             && jq -S "$filter" .github/repo-config/settings.json > baseline-admin.json; then
+            if diff -u baseline-admin.json live-admin.json > admin.diff; then
+              echo "### Merge settings: no drift ✅" >> "$GITHUB_STEP_SUMMARY"
+            else
+              {
+                echo "### Merge settings: DRIFT ⚠️"
+                echo ""
+                echo "Live merge settings differ from \`.github/repo-config/settings.json\`."
+                echo ""
+                echo '```diff'
+                cat admin.diff
+                echo '```'
+                echo ""
+                echo "> Advisory — does not block. Reconcile via the Repo Config Apply workflow,"
+                echo "> or refresh \`.github/repo-config/settings.json\`."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "### Merge settings: check degraded ⚠️ (API / permission / rate-limit)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Advisory: never gate a merge.
           exit 0
