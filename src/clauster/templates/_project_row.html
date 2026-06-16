@@ -182,7 +182,7 @@
             <div class="alert alert-danger mt-2 mb-0" x-show="detailOf('{{ p.name }}')" x-cloak role="alert">
               <h4 class="alert-title">Session failed to start</h4>
               <pre class="mb-0 mt-1 text-break" style="white-space: pre-wrap; max-height: 12rem; overflow: auto;"
-                   x-text="detailOf('{{ p.name }}')"></pre>
+                   tabindex="0" aria-label="Failure detail" x-text="detailOf('{{ p.name }}')"></pre>
             </div>
 
             <!-- CLAUDE.md editor (overflow-menu action) -->

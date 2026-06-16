@@ -979,8 +979,11 @@ class SessionRunner:
         except OSError:
             return
         if text:
-            # Bound it: the UI shows a reason, not a full transcript.
-            instance.error_detail = text[-2000:]
+            # Redact before storing: this tail is surfaced inline in the UI, and the bridge's
+            # startup banner prints env_/session_/cse_ bearer-credential ids — same posture as
+            # the at-rest log mirror. Redact first (strips ANSI so an escape-split id can't slip
+            # through), THEN bound it: the UI shows a reason, not a full transcript.
+            instance.error_detail = redact.redact_for_disk(text)[-2000:]
 
     def _project_path(self, name: str) -> Path | None:
         proj = self._discovered().get(name)

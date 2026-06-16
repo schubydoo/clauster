@@ -962,6 +962,27 @@ def test_capture_error_detail_unreadable_is_noop(tmp_path):
     assert inst.error_detail is None
 
 
+def test_capture_error_detail_redacts_session_tokens(tmp_path):
+    # error_detail is the bridge's captured stdout+stderr tail, now surfaced inline in the UI
+    # (#313). The startup banner prints env_/session_/cse_ bearer-credential ids; a crash after
+    # the banner would otherwise paint a LIVE token onto the project card. Capture must redact
+    # (same posture as the at-rest log mirror) and strip ANSI first so an escape-split id can't
+    # slip through.
+    log = tmp_path / "b.log"
+    (tmp_path / "b.stderr.log").write_text(
+        "Created initial session session_01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        "\x1b[31menv_01BX5ZZKBKACTAV9WEVGEMMVRZ\x1b[0m failed to start\n",
+        encoding="utf-8",
+    )
+    inst = RemoteControlInstance(project="x", label="x", bridge_debug_log_path=log)
+    SessionRunner._capture_error_detail(inst)
+    assert inst.error_detail is not None
+    assert "session_01ARZ3NDEKTSV4RRFFQ69G5FAV" not in inst.error_detail
+    assert "env_01BX5ZZKBKACTAV9WEVGEMMVRZ" not in inst.error_detail
+    assert "<redacted>" in inst.error_detail  # ids masked, not dropped
+    assert "\x1b[" not in inst.error_detail  # ANSI stripped
+
+
 def test_read_markers_tolerates_non_utf8_bytes(tmp_path):
     # The debug log is raw bridge output; a stray non-UTF-8 byte must NOT raise
     # UnicodeDecodeError (a ValueError, which the read's OSError guard would not
