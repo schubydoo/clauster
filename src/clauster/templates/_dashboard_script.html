@@ -78,7 +78,8 @@
       hostedForm: { project: "", permission_mode: DEFAULT_PERMISSION_MODE, busy: false },
       hostedStopping: {},         // hosted id -> true while a stop is in flight
       hostedResuming: {},         // hosted id -> true while a resume is in flight
-      hostedView: {},             // hosted id -> { open, ws, lastSeq, events[], input, sending, connLost }
+      hostedView: {},             // hosted id -> { open, ws, token, lastSeq, events[], input, sending, connLost }
+      _hostedSeq: 0,              // monotonic token per opened hosted live-view (retire check; see openHosted)
       errors: {},
       qrOpen: {},
       qrNonce: {},
@@ -1038,35 +1039,52 @@
       // Open (or reconnect) the live stream, resuming from the last event we rendered
       // so a reload / dropped link catches up via ?after= without re-dumping the ring.
       openHosted(id) {
-        // Idempotent + identity-bound (the #252 openLogs pattern): retire any prior
-        // socket first, then bind THIS socket's handlers to its own `view`, identity-
-        // checked against the live hostedView[id]. So a Hide→View race or a stale
-        // reconnect can't leave two sockets streaming into one view (duplicating the
-        // transcript), and a retired socket's late onmessage/onclose can't touch the
-        // fresh view. The new view carries the prior events/input/cursor forward.
+        // Idempotent + token-bound (mirrors openLogs): retire any prior socket first, then
+        // bind THIS socket's handlers to its own `view`, checked against the live
+        // hostedView[id] by a per-view TOKEN. So a Hide→View race or a stale reconnect can't
+        // leave two sockets streaming into one view (duplicating the transcript), and a
+        // retired socket's late onmessage/onclose can't touch the fresh view. The new view
+        // carries the prior events/input/cursor forward.
+        //
+        // The retire check compares the token, NOT the object reference: assigning `view`
+        // into Alpine's reactive `this.hostedView` wraps it in a Proxy, so
+        // `this.hostedView[id] !== view` (raw vs Proxy) is ALWAYS true and would drop every
+        // frame — and disable the onclose reconnect/ended path. Comparing the token survives
+        // the Proxy.
         const prev = this.hostedView[id];
         if (prev) {
           prev.open = false;
           if (prev.ws) { try { prev.ws.close(); } catch (e) {} }
         }
         const after = prev ? prev.lastSeq : 0;
-        const view = { open: true, ws: null, lastSeq: after, events: prev ? prev.events : [],
+        const token = ++this._hostedSeq;
+        const view = { open: true, ws: null, token, lastSeq: after, events: prev ? prev.events : [],
                        input: prev ? prev.input : "", sending: false, connLost: false,
                        ended: false, endedReason: "" };
         this.hostedView[id] = view;
         const self = this;
+        // Resolve the LIVE view as the reactive proxy (or null if retired). Return the proxy
+        // `w` — not the raw `view` — so handlers mutate THROUGH Alpine's reactivity and the
+        // panel repaints immediately; mutating the raw `view` bypasses the Proxy set-traps and
+        // the "link dropped" banner would only surface on the next reactive flush (the 4s
+        // poll). The token compare survives the Proxy where object identity would not.
+        const liveView = () => {
+          const w = self.hostedView[id];
+          return w && w.open && w.token === token ? w : null;
+        };
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const url = proto + "://" + location.host + ROOT + "/ws/hosted/" +
                     encodeURIComponent(id) + "?after=" + after;
         const ws = new WebSocket(url);
         ws.onmessage = (ev) => {
-          if (!view.open || self.hostedView[id] !== view) return;  // a retired socket → ignore
+          if (!liveView()) return;  // a retired socket → ignore (_renderHostedEvent re-reads the proxy)
           let e; try { e = JSON.parse(ev.data); } catch (_) { return; }
           self._renderHostedEvent(id, e);
         };
         ws.onclose = () => {
-          if (!view.open || self.hostedView[id] !== view) return;  // deliberate close / retired → don't reconnect
-          if (view.ended) return;        // a terminal frame already settled the view
+          const w = liveView();
+          if (!w) return;  // deliberate close / retired → don't reconnect
+          if (w.ended) return;        // a terminal frame already settled the view
           // Only reconnect a session the snapshot still reports as live. A stopped /
           // crashed / gone session closes the socket immediately (server 1008); blindly
           // reconnecting it loops forever and mislabels a dead session "reconnecting…".
@@ -1076,10 +1094,10 @@
             self._markHostedEnded(id, h);
             return;
           }
-          view.connLost = true;          // genuinely live — honest: the link dropped
-          setTimeout(() => { const w = self.hostedView[id]; if (w === view && w.open) self.openHosted(id); }, 1500);
+          w.connLost = true;          // through the proxy → the "link dropped" banner repaints
+          setTimeout(() => { const w2 = self.hostedView[id]; if (w2 && w2.token === token && w2.open) self.openHosted(id); }, 1500);
         };
-        view.ws = ws;
+        this.hostedView[id].ws = ws;
       },
       closeHosted(id) {
         const v = this.hostedView[id];

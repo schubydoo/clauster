@@ -95,6 +95,51 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     assert "this._refreshQueued = false; this.refresh();" in page
 
 
+def test_dashboard_hosted_view_token_guard(write_config):
+    # openHosted retires a prior socket and binds each socket's onmessage/onclose to its own
+    # `view`, checked against the live hostedView[id]. That check must compare a per-view TOKEN,
+    # not the object reference: assigning `view` into Alpine's reactive `this.hostedView` wraps
+    # it in a Proxy, so an object-identity check (`hostedView[id] !== view`) is ALWAYS true and
+    # drops every streamed frame — and silently disables the onclose reconnect/ended path. This
+    # is the same Proxy footgun that bit openLogs; the token survives the Proxy.
+    page = _client(write_config).get("/").text
+    assert "const token = ++this._hostedSeq;" in page
+    # Pin the liveness helper whitespace-tolerantly (CodeRabbit: an exact-string pin breaks on
+    # harmless reformatting). liveView() must return the live PROXY (or null) — not a bool — so
+    # the handlers mutate THROUGH Alpine's reactivity and the panel repaints immediately; a
+    # raw-`view` mutation bypasses the Proxy set-traps and the "link dropped" banner would only
+    # surface on the next reactive flush.
+    assert re.search(
+        r"return\s+w\s*&&\s*w\.open\s*&&\s*w\.token\s*===\s*token\s*\?\s*w\s*:\s*null", page
+    )
+    assert re.search(
+        r"(?<![\w.])w\.connLost\s*=\s*true", page
+    )  # dropped-link flag set THROUGH the proxy
+    # The reconnect timer must also gate on the token, not the always-false `w === view`
+    # (raw vs Proxy), or a genuinely-dropped live link would never reconnect.
+    assert re.search(r"w2\s*&&\s*w2\.token\s*===\s*token\s*&&\s*w2\.open", page)
+    # Negative guards: the buggy identity comparisons AND the reactivity-bypassing raw
+    # mutations must be gone from the hosted path. Strip comment-only lines first — the token
+    # comment legitimately *names* `this.hostedView[id] !== view` as the bug — then reject both
+    # receiver forms (`this.`/`self.`) and both operators (`!==`/`===`) as executable code, so
+    # the original regression can't slip back in under either spelling. Strip BOTH `/* ... */`
+    # block comments and `//` comment-only lines first, so a future comment naming the buggy
+    # pattern in either style can't mask a real regression (CodeRabbit).
+    hosted_code = re.sub(r"/\*.*?\*/", "", page, flags=re.DOTALL)
+    hosted_code = "\n".join(
+        ln for ln in hosted_code.splitlines() if not ln.lstrip().startswith("//")
+    )
+    assert "this.hostedView[id] !== view" not in hosted_code
+    assert "this.hostedView[id] === view" not in hosted_code
+    assert "self.hostedView[id] !== view" not in hosted_code
+    assert "self.hostedView[id] === view" not in hosted_code
+    assert "if (w === view && w.open)" not in hosted_code
+    assert (
+        re.search(r"(?<![\w.])view\.connLost\s*=", hosted_code) is None
+    )  # raw (non-reactive) write
+    assert re.search(r"(?<![\w.])view\.ws\s*=\s*ws", hosted_code) is None  # ws now via the proxy
+
+
 def test_dashboard_footer_credits_vendored_assets(write_config):
     # The footer must credit the bundled MIT front-end assets (Tabler + Alpine.js)
     # and link the third-party notices. This regressed once when a card redesign
