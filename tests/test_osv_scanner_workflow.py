@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "osv-scanner.yml"
-_SHA = re.compile(r"^[0-9a-f]{40}$")
+_SHA = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)  # a valid SHA may be written uppercase
 
 
 def _doc():
@@ -48,6 +48,15 @@ def test_osv_uses_are_sha_pinned():
     assert refs, "expected at least the OSV reusable-workflow call"
     unpinned = [r for r in refs if not _is_pinned(r)]
     assert unpinned == [], f"tag-pinned uses would fail zizmor + Scorecard: {unpinned}"
+
+
+def test_osv_is_fork_safe_trigger():
+    # The whole fork-safety posture rests on plain `pull_request` (read-only token, no secrets) —
+    # never `pull_request_target`. Assert it here so a future trigger flip can't silently pass the
+    # other guards. PyYAML parses the `on:` key as the boolean True; str() covers dict/list forms.
+    doc = _doc()
+    on = doc.get(True, doc.get("on", {}))
+    assert "pull_request_target" not in str(on), "use pull_request, never pull_request_target"
 
 
 def test_osv_calls_the_reusable_workflow():
