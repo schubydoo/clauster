@@ -86,16 +86,20 @@ class _Subscriber:
 
     The socket reader must never stall on a slow viewer, so a full queue drops
     the event and counts it; the next event the queue *can* take is preceded by
-    an ``overflow`` marker carrying the dropped count, so gaps are honest.
+    an overflow marker carrying the dropped count, so gaps are honest. The marker
+    ``type`` is parameterized (``overflow_type``) because consumers distinguish
+    the channels: the claustrum client uses ``"overflow"`` and the hosted channel
+    uses ``"gap"``.
     """
 
     queue: asyncio.Queue[dict[str, Any]]
     dropped: int = 0
+    overflow_type: str = "overflow"
 
     def offer(self, event: dict[str, Any]) -> None:
         """Enqueue ``event`` for this watcher, never blocking the caller."""
         if self.dropped:
-            marker = {"type": "overflow", "dropped": self.dropped}
+            marker = {"type": self.overflow_type, "dropped": self.dropped}
             try:
                 self.queue.put_nowait(marker)
             except asyncio.QueueFull:

@@ -812,7 +812,9 @@ def test_subscriber_overflow_inserts_gap_marker():
     # Unit-level: a full queue drops + counts, then prepends a gap once it drains.
     from clauster.hosted import _Subscriber
 
-    sub = _Subscriber(asyncio.Queue(maxsize=2))
+    # The hosted channel constructs its subscribers with the "gap" overflow marker
+    # (the shared _Subscriber defaults to "overflow" for the claustrum-client path).
+    sub = _Subscriber(asyncio.Queue(maxsize=2), overflow_type="gap")
     sub.offer({"event_seq": 1})  # queued
     sub.offer({"event_seq": 2})  # queued (full now)
     sub.offer({"event_seq": 3})  # dropped
