@@ -2,6 +2,12 @@
 
 Thanks for your interest in Clauster!
 
+## Code of conduct
+
+This project adheres to the [Contributor Covenant](CODE_OF_CONDUCT.md) code of
+conduct. By participating, you are expected to uphold it; please report
+unacceptable behavior as described there.
+
 ## Dev setup
 
 ```sh
