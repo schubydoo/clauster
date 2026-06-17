@@ -210,6 +210,19 @@ class AuthConfig(BaseModel):
         description="Extra WebSocket / CSRF origins (e.g. the proxy domain).",
     )
 
+    @field_validator("api_token_hash", mode="before")
+    @classmethod
+    def _blank_token_hash_is_none(cls, v: object) -> object:
+        # A blank / whitespace-only hash can never match a presented token (it fails
+        # closed), but a truthy "  " would still satisfy the enforced-auth check in
+        # _missing_enforced_auth and PERMIT a non-loopback bind that no token can ever
+        # authenticate — a locked-out dashboard flying a false "enforced auth" flag.
+        # Normalize it to None so only a REAL hash counts, mirroring the empty
+        # password_hash being treated as unset.
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
 
 def _missing_enforced_auth(host: str, auth: AuthConfig) -> bool:
     """Return True when binding ``host`` would NOT actually enforce authentication.

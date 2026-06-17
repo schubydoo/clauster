@@ -159,6 +159,25 @@ def test_api_token_without_enabled_rejected(write_config):
         load_config(write_config("host: 0.0.0.0\nauth:\n  api_token_hash: 'deadbeef'\n"))
 
 
+@pytest.mark.parametrize("blank", ["''", "'   '", '"\t"'])
+def test_blank_api_token_hash_is_not_enforced_auth(write_config, blank):
+    # A blank/whitespace-only hash can never authenticate a token, so it must NOT
+    # count as enforced auth — a non-loopback bind that relies on it alone is the
+    # same GHSA-#88 open-door footgun and must be refused (the validator maps the
+    # blank value to None so it is treated as unset, like an empty password_hash).
+    with pytest.raises(ValueError, match="without enforced auth"):
+        load_config(
+            write_config(f"host: 0.0.0.0\nauth:\n  enabled: true\n  api_token_hash: {blank}\n")
+        )
+
+
+def test_blank_api_token_hash_normalizes_to_none(write_config):
+    # Loopback bind so the config is otherwise valid: the blank hash is normalized
+    # to None rather than retained as a falsely-"configured" credential.
+    config = load_config(write_config("auth:\n  enabled: true\n  api_token_hash: '   '\n"))
+    assert config.auth.api_token_hash is None
+
+
 def test_env_override_scalar(write_config, monkeypatch):
     cfg_path = write_config()
     monkeypatch.setenv("CLAUSTER_PORT", "9999")
