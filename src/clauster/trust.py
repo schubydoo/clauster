@@ -38,7 +38,7 @@ try:
 except ImportError:  # pragma: no cover - exercised only on Windows
     fcntl = None  # type: ignore[assignment]
 
-from .discovery import CLAUDE_JSON, trust_state_for
+from .discovery import CLAUDE_JSON, _load_trusted_paths, trust_state_for
 from .models import TrustState
 
 _log = logging.getLogger("clauster.trust")
@@ -142,8 +142,6 @@ def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) ->
 
 def is_trusted(path: Path, claude_json: Path = CLAUDE_JSON) -> bool:
     """Whether ``path`` (or an ancestor) has accepted the Claude trust dialog."""
-    from .discovery import _load_trusted_paths
-
     return trust_state_for(path, _load_trusted_paths(claude_json)) is TrustState.TRUSTED
 
 
