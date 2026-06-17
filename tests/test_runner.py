@@ -761,6 +761,15 @@ def test_adoptable_external_projects(runner_config, monkeypatch):
     assert runner.adoptable_external_projects() == {"alpha"}
 
 
+def test_adoptable_skips_undiscovered_project(runner_config, monkeypatch):
+    # Defensive guard: if a project vanishes from discovery between
+    # external_sessions_by_project() and adoptable's own _discovered() snapshot (a
+    # filesystem race), the name is skipped — no crash, never adoptable.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(runner, "external_sessions_by_project", lambda: {"ghost-project": []})
+    assert runner.adoptable_external_projects() == set()
+
+
 async def test_adopt_then_stop_uses_single_sigint(runner_config, monkeypatch):
     # The payoff of pinning standard: an adopted session Stops via a clean single SIGINT
     # to the pointer pid (twice=False), never the pty confirming double-SIGINT.
