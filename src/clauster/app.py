@@ -22,6 +22,8 @@ from . import (
     __version__,
     auth,
     claude_cli,
+    config_editor,
+    config_writer,
     environments,
     logstream,
     metrics,
@@ -810,6 +812,57 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_sessions() -> dict[str, list[WorkingSession]]:
         """External (unmanaged) working sessions grouped by project name (bug #4)."""
         return runner.external_sessions_by_project()
+
+    @app.get("/api/config")
+    async def api_config_get() -> dict:
+        """Tier-A editable config values + a content hash, for the in-app editor (FE-3).
+
+        Only allowlisted operational fields are returned — no auth/secret/bind/
+        structural value is ever surfaced (structural redaction). Auth-gated like
+        every ``/api/*`` route by the guard middleware.
+        """
+        cfg = app.state.config
+        path = cfg.source_path
+        return {
+            "fields": config_editor.editable_values(cfg),
+            "editable": list(config_editor.EDITABLE_FIELDS),
+            "specs": config_editor.field_specs(),
+            "hash": config_editor.file_hash(path) if path is not None else None,
+        }
+
+    @app.put("/api/config")
+    async def api_config_put(body: dict) -> dict:
+        """Apply allowlisted config edits: re-validate + backup + atomic write.
+
+        Tier-A only — a non-allowlisted key is a 400, never a silent drop. Requires
+        the ``hash`` from GET (external-edit guard → 409 on mismatch). Writes to disk
+        but does **not** live-reload; the response flags that a restart is needed.
+        """
+        cfg = app.state.config
+        path = cfg.source_path
+        if path is None:
+            raise HTTPException(status_code=409, detail="config has no on-disk source to edit")
+        edits = body.get("edits")
+        if not isinstance(edits, dict) or not edits:
+            raise HTTPException(
+                status_code=422, detail="body must include a non-empty 'edits' map"
+            )
+        expected = body.get("hash")
+        if not isinstance(expected, str) or not expected:
+            raise HTTPException(
+                status_code=422, detail="body must include the 'hash' from GET /api/config"
+            )
+        try:
+            new_hash = await asyncio.to_thread(
+                config_writer.write_edits, path, edits, expected_hash=expected
+            )
+        except config_editor.DisallowedFieldError as exc:
+            raise HTTPException(status_code=400, detail=f"not editable: {exc}") from exc
+        except config_editor.StaleConfigError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except config_editor.ConfigValidationError as exc:
+            raise HTTPException(status_code=422, detail=f"invalid config: {exc}") from exc
+        return {"hash": new_hash, "restart_required": True}
 
     @app.get("/api/agents")
     async def api_agents() -> list[BackgroundJob]:
