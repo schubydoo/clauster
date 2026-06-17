@@ -43,3 +43,14 @@ repos:
         language: system
         types: [markdown]
         exclude: '(^|/)(vendor|node_modules)/'
+
+      - id: config-reference
+        name: config reference (gen_config_reference.py --check)
+        # docs/configuration.md tables are generated from the config models;
+        # fail if they drifted. Mirrors the tests-job guard + lint-docs.sh so the
+        # drift is caught before push. Triggers on the inputs that can drift it:
+        # the models, the generator, and the generated page itself.
+        entry: uv run python scripts/gen_config_reference.py --check
+        language: system
+        pass_filenames: false
+        files: '^(src/clauster/config\.py|scripts/gen_config_reference\.py|docs/configuration\.md)$'
