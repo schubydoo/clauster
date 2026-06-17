@@ -110,7 +110,17 @@ def test_parse_bearer_extracts_credential(header, expected_key):
 
 @pytest.mark.parametrize(
     "header",
-    [None, "", "Basic abc", "Bearer", "Bearer ", "Bearer    ", "Token abc", "abc"],
+    [
+        None,
+        "",
+        "Basic abc",
+        "Bearer",
+        "Bearer ",
+        "Bearer    ",
+        "Token abc",
+        "abc",
+        "Bearer tok1 tok2",  # embedded space rejected per RFC 6750 §2.1
+    ],
 )
 def test_parse_bearer_rejects_malformed(header):
     assert auth.parse_bearer(header) is None
