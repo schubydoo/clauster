@@ -1,0 +1,83 @@
+# Privacy & data at rest
+
+Clauster sends **no telemetry, ever** — there is no analytics, crash reporting,
+or usage beaconing in the code. The only outbound network traffic is the work
+you ask for: cloning a repository, the gated ghost-environment reaper, and the
+`claude` bridge talking to its first-party API. See
+[Security](security.md) for the auth, trust, and redaction model.
+
+That covers what *leaves* the host. This page covers what Clauster keeps **on
+disk locally** — every at-rest artifact, what it contains, how long it lives,
+and how to purge it. The bridge transcripts that `claude` itself writes are
+included because Clauster reads them (for the cost badge) even though it does
+not author them.
+
+!!! info "Two roots"
+    Almost everything Clauster writes lives under your configured **`state_dir`**
+    (default `~/.clauster`). The session **transcripts** and background-agent
+    state are written by the `claude` CLI under **`~/.claude/`** in the runtime
+    user's home — Clauster only reads those.
+
+## At-rest inventory
+
+The paths below assume the default `state_dir` of `~/.clauster`; substitute your
+configured value if you changed it.
+
+| Artifact | Path | Contains | Lifetime |
+| --- | --- | --- | --- |
+| Bridge state | `~/.clauster/state.json` | Per-project bridge records, keyed by project name — the few fields the startup scan can't re-derive: the bridge label, the intentional-stop flag, and the spawn / permission / resume modes. The pid, environment id, session URLs, and status are **re-derived live** and are not persisted here. | Persists across restarts; an entry is dropped when you **Forget** the bridge. |
+| Hosted state | `~/.clauster/hosted_state.json` | Hosted-session (claustrum live-view) records keyed by process id — the `claude` session uuid, the reattach replay cursor, the log path, and the project / label / permission mode. | Written only when the hosted channel is used; entry removed when the session is forgotten. |
+| Session secret | `~/.clauster/session.secret` | The HMAC key that signs login-session cookies (`0600`). Not personal data, but a credential. | Created on first run; stable across restarts unless deleted (deleting it logs everyone out). |
+| Session epoch | `~/.clauster/session.epoch` | A monotonic counter used to invalidate all sessions at once. | Persists; bumped on a global logout. |
+| `CLAUDE.md` edit audit | `~/.clauster/claude_md_audit.log` | One JSON line per in-dashboard `CLAUDE.md` edit: project, user, action, byte size, and a SHA-256 of the content (not the content itself). | Append-only; never rotated or truncated by Clauster. |
+| Bridge debug logs | `~/.clauster/logs/<name>-<ts>-<seq>.log` | The `claude` bridge's `--debug-file` output. May contain the session deep-link URL (which embeds session / environment ids). | Rotated at `logs.bridge_log_max_size_mb` (default 10 MB); `logs.keep_rotated` rotated files kept (default 5). |
+| Bridge stderr | `~/.clauster/logs/<name>-<ts>-<seq>.stderr.log` | The bridge's stdout/stderr (startup and controller-auth errors the `--debug-file` does not capture). | Same `logs/` directory; cleaned up alongside the bridge logs. |
+| Private raw log | `~/.clauster/logs/<name>-<ts>-<seq>.raw.log` | Only written when `logs.redact_session_url: true`. The verbatim (unredacted) parse-source kept `0600`; the public `.log` becomes a redacted mirror. | Same lifetime as the bridge log it shadows. |
+| PTY keeper sidecar | `~/.clauster/logs/<name>-<ts>-<seq>.keeper.json` | For **pty**-mode bridges: a small discovery file recording the bridge pid, its start time, the session id, and the `claude.ai/code` connect URL so a restarted Clauster can re-find the bridge. | Lives beside the bridge log; superseded on each new pty launch for that bridge. |
+| Keeper stdout | `~/.clauster/logs/<name>-<ts>-<seq>.keeper.log` | The PTY keeper sidecar's own stdout/stderr. | Same `logs/` directory. |
+| Claustrum socket + token | `~/.clauster/claustrum/daemon.sock` (and the daemon's auth token) | Present only when `claustrum.enabled` is set: the AF_UNIX socket and the token the daemon authenticates with. | Created when the daemon is spawned; the daemon is intentionally left running across Clauster restarts. |
+| Session transcripts | `~/.claude/projects/<sanitized-cwd>/<uuid>.jsonl` | Written by `claude`, **not** Clauster: the full conversation transcript per session. Clauster reads these for the per-project cost / token badge. | Owned by the `claude` CLI; Clauster never deletes them. |
+| Bridge pointer | `~/.claude/projects/<sanitized-cwd>/bridge-pointer.json` | A pointer `claude` writes linking a directory to its active session. | Owned by the `claude` CLI. |
+| Background-agent state | `~/.claude/jobs/<id>/state.json` | Written by `claude --bg`: per background-session state the agent-view panel renders. | Owned by the `claude` CLI. |
+| Background-agent roster | `~/.claude/daemon/roster.json` | Written by `claude`: the live background-worker roster (pid + start time). | Owned by the `claude` CLI. |
+
+!!! warning "What can identify a session"
+    The session and environment ids (and the deep-link URL that embeds them) act
+    as **bearer-equivalent credentials** for a live session. Clauster keeps them
+    out of the WebSocket log stream by default (see
+    [Log redaction](security.md#log-redaction)), but they are still recorded on
+    disk as operational state — in the pty keeper sidecars and, unless
+    `logs.redact_session_url` is set, the on-disk bridge log. Protect them with
+    `state_dir` filesystem permissions.
+
+## How to purge
+
+All Clauster-owned state lives under `state_dir`, so the bluntest reset is to
+remove that directory while the app is **stopped**.
+
+!!! danger "Stop Clauster first"
+    Purging files out from under a running Clauster (or a live bridge) can leave
+    orphaned bridge processes. Stop all bridges from the dashboard and stop the
+    Clauster service before deleting anything.
+
+- **Forget a single bridge** — the dashboard **Forget** action removes the
+  bridge's record from `state.json` / `hosted_state.json`. Its log files in
+  `~/.clauster/logs/` are not auto-deleted; remove them by name if you want them
+  gone.
+- **Clear all bridge logs** — delete `~/.clauster/logs/` (recreated on the next
+  spawn). This also clears the keeper sidecars and stderr/raw logs.
+- **Reset all login sessions** — delete `~/.clauster/session.secret` and
+  `~/.clauster/session.epoch`; everyone is logged out and a fresh secret is
+  minted on the next start.
+- **Clear the `CLAUDE.md` edit history** — delete
+  `~/.clauster/claude_md_audit.log`.
+- **Full Clauster reset** — remove the whole `~/.clauster/` directory. Your
+  projects under `projects_root` and the `claude`-owned transcripts are not
+  touched.
+- **Remove session transcripts** — these belong to the `claude` CLI under
+  `~/.claude/projects/`. Delete the relevant `<sanitized-cwd>/` directory (or
+  individual `<uuid>.jsonl` files) if you want the conversation history gone.
+  Doing so also removes the data behind the cost / token badge.
+
+After a purge, restart Clauster: a fresh `state_dir` is created on demand and
+the dashboard starts from an empty state.
