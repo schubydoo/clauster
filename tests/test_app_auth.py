@@ -341,6 +341,89 @@ def test_ws_streams_sanitized_lines(runner_config, tmp_path):
     assert "env_01TESTENVAAAAAAAAAAAAAAAA" not in line  # id redacted (D11)
 
 
+# ----- API token (Bearer) auth (#360) --------------------------------------
+
+_TOKEN, _TOKEN_HASH = auth.mint_token()
+
+
+def _token_client(runner_config) -> TestClient:
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.api_token_hash = _TOKEN_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    return TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+
+def _bearer(token: str = _TOKEN) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_token_authenticates_api_get(runner_config):
+    client = _token_client(runner_config)
+    assert client.get("/api/instances", headers=_bearer()).status_code == 200
+
+
+def test_no_token_is_401(runner_config):
+    client = _token_client(runner_config)
+    assert client.get("/api/instances").status_code == 401
+
+
+def test_wrong_token_is_401(runner_config):
+    client = _token_client(runner_config)
+    assert client.get("/api/instances", headers=_bearer("clauster_pat_wrong")).status_code == 401
+
+
+def test_malformed_authorization_header_is_401(runner_config):
+    client = _token_client(runner_config)
+    resp = client.get("/api/instances", headers={"Authorization": "Basic abc"})
+    assert resp.status_code == 401
+
+
+def test_token_disabled_when_auth_off(runner_config):
+    # Master switch: with auth.enabled False, a configured token never gates (and
+    # never opens a NEW path) — the request passes through like any other.
+    config, claude_json = runner_config
+    config.auth.api_token_hash = _TOKEN_HASH  # configured but auth.enabled stays False
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    assert client.get("/api/instances").status_code == 200
+
+
+def test_token_exempts_csrf_origin_check(runner_config):
+    # A Bearer request carries no ambient cookie, so the CSRF Origin gate is
+    # exempt (mirrors the reverse-proxy exemption). No Origin header at all here:
+    # an empty body reaches the route -> 422 (proves auth+CSRF both passed).
+    client = _token_client(runner_config)
+    resp = client.post("/api/instances", json={}, headers=_bearer())
+    assert resp.status_code == 422
+
+
+def test_unsafe_method_without_token_or_origin_blocked(runner_config):
+    # Belt-and-suspenders: a NON-token unsafe request with no Origin is still
+    # CSRF-blocked (the token exemption must not have widened the gate).
+    client = _token_client(runner_config)
+    resp = client.request("POST", "/api/instances", json={}, headers={"referer": ""})
+    assert resp.status_code == 403
+
+
+def test_token_authorizes_websocket_without_origin(runner_config):
+    # A headless token client sends no Origin; the WS Origin requirement is
+    # exempt for the token path. Reaching accept (then the 1008 close for the
+    # nonexistent instance) proves the gate opened.
+    client = _token_client(runner_config)
+    with client.websocket_connect("/ws/bridge-log/ghost", headers=_bearer()) as ws:
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_text()
+
+
+def test_bad_token_websocket_rejected(runner_config):
+    client = _token_client(runner_config)
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/ws/bridge-log/ghost", headers=_bearer("clauster_pat_wrong")
+        ):
+            pass
+
+
 # ----- misc app behaviours --------------------------------------------------
 
 

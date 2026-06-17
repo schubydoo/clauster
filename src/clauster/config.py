@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -182,6 +183,12 @@ class AuthConfig(BaseModel):
     password_hash: str | None = Field(
         default=None, description="argon2id hash from `clauster hash-password`."
     )
+    api_token_hash: str | None = Field(
+        default=None,
+        description="SHA-256 hash of an inbound API bearer token from "
+        "`clauster hash-token`. Enables `Authorization: Bearer <token>` auth for "
+        "headless/API clients. Only the hash is stored; the raw token is shown once.",
+    )
     reverse_proxy: ReverseProxyConfig = Field(
         default_factory=ReverseProxyConfig,
         description="Trusted-reverse-proxy auth settings.",
@@ -204,20 +211,45 @@ class AuthConfig(BaseModel):
         description="Extra WebSocket / CSRF origins (e.g. the proxy domain).",
     )
 
+    @field_validator("api_token_hash", mode="before")
+    @classmethod
+    def _blank_token_hash_is_none(cls, v: object) -> object:
+        # A blank / whitespace-only hash can never match a presented token (it fails
+        # closed), but a truthy "  " would still satisfy the enforced-auth check in
+        # _missing_enforced_auth and PERMIT a non-loopback bind that no token can ever
+        # authenticate — a locked-out dashboard flying a false "enforced auth" flag.
+        # Normalize it to None so only a REAL hash counts, mirroring the empty
+        # password_hash being treated as unset.
+        #
+        # A non-empty value that is NOT a 64-char lowercase hex digest can never
+        # match a token (``hash_token`` always returns SHA-256 hex) yet would still
+        # satisfy the enforced-auth check and PERMIT a non-loopback bind — the same
+        # false-"enforced auth" footgun. Reject it loudly so the operator fixes the
+        # config instead of shipping a dashboard no token can ever unlock.
+        if isinstance(v, str) and not v.strip():
+            return None
+        if isinstance(v, str) and not re.fullmatch(r"[0-9a-f]{64}", v):
+            raise ValueError(
+                "api_token_hash must be a 64-character lowercase hex string "
+                "(the SHA-256 output from `clauster hash-token`)"
+            )
+        return v
+
 
 def _missing_enforced_auth(host: str, auth: AuthConfig) -> bool:
     """Return True when binding ``host`` would NOT actually enforce authentication.
 
     The runtime guard gates on ``auth.enabled``, so a non-loopback bind only enforces
-    auth when ``auth.enabled`` is set together with a method (``password_required`` or
-    ``reverse_proxy.enabled``). Loopback never needs auth. The explicit
-    ``allow_unauthenticated_network`` opt-out is intentionally left to callers (the
-    config validator permits it; ``ops._check_auth`` downgrades it to a warning) so
+    auth when ``auth.enabled`` is set together with a method (``password_required``,
+    ``reverse_proxy.enabled``, or an ``api_token_hash``). Loopback never needs auth. The
+    explicit ``allow_unauthenticated_network`` opt-out is intentionally left to callers
+    (the config validator permits it; ``ops._check_auth`` downgrades it to a warning) so
     both use one shared definition of "enforced auth" without conflating the opt-out.
     """
     if host in _LOOPBACK_HOSTS:
         return False
-    return not (auth.enabled and (auth.password_required or auth.reverse_proxy.enabled))
+    method = auth.password_required or auth.reverse_proxy.enabled or bool(auth.api_token_hash)
+    return not (auth.enabled and method)
 
 
 class CloneConfig(BaseModel):
@@ -594,6 +626,19 @@ class ClausterConfig(BaseModel):
         pc = self.projects.get(project_name)
         return bool(pc and pc.allow_bypass_permissions)
 
+    def bypass_denied(self, project_name: str, permission_mode: str | None) -> bool:
+        """Whether ``bypassPermissions`` is requested but the project's ceiling forbids it.
+
+        The single decision every spawn channel shares: it is the one place that
+        combines "is bypass being asked for" with the per-project hard ceiling
+        (:meth:`allows_bypass`). Each channel calls this and raises its own
+        exception type, so a new spawn path cannot diverge from the ceiling by
+        hand-rolling the check. Returns ``True`` only when the effective mode is
+        ``bypassPermissions`` and the project does not allow it (fail closed:
+        callers raise when this is ``True``).
+        """
+        return permission_mode == "bypassPermissions" and not self.allows_bypass(project_name)
+
     @field_validator("projects_root", "state_dir", mode="before")
     @classmethod
     def _expand_user(cls, v: object) -> object:
@@ -624,8 +669,9 @@ class ClausterConfig(BaseModel):
             raise ValueError(
                 f"refusing non-loopback host={self.host!r} without enforced auth. Set "
                 "auth.enabled: true together with auth.password_required (+ a hash from "
-                "`clauster hash-password`) or auth.reverse_proxy.enabled — or, to opt out "
-                "on a trusted LAN, auth.allow_unauthenticated_network."
+                "`clauster hash-password`), auth.reverse_proxy.enabled, or auth.api_token_hash "
+                "(from `clauster hash-token`) — or, to opt out on a trusted LAN, "
+                "auth.allow_unauthenticated_network."
             )
         # Fail closed: password auth required but no hash configured would lock everyone out
         # (or, worse, be skipped) — refuse to start with a clear message.

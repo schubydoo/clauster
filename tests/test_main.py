@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from clauster import __main__ as cli
+from clauster import auth
 from clauster.config import ClausterConfig
 
 # .cmd on Windows: the extensionless stub isn't launchable by subprocess, and
@@ -91,6 +92,22 @@ def test_hash_password_mismatch_exits_2(monkeypatch):
 def test_hash_password_empty_exits_2(monkeypatch):
     monkeypatch.setattr(cli.getpass, "getpass", lambda *_: "")
     assert cli.main(["hash-password"]) == 2
+
+
+# ----- hash-token (#360) ------------------------------------------------
+
+
+def test_hash_token_prints_raw_to_stdout_and_hash_to_stderr(capsys):
+    assert cli.main(["hash-token"]) == 0
+    captured = capsys.readouterr()
+    # The raw token (and only it) is on stdout so `hash-token | client` is clean.
+    raw = captured.out.strip()
+    assert raw.startswith("clauster_pat_")
+    assert raw not in captured.err  # raw secret is never echoed into the guidance
+    # The hash to paste into the config goes to stderr, and round-trips with the raw.
+    assert "api_token_hash:" in captured.err
+    assert auth.hash_token(raw) in captured.err
+    assert auth.verify_token(raw, auth.hash_token(raw)) is True
 
 
 # ----- doctor -----------------------------------------------------------
