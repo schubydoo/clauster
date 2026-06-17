@@ -246,6 +246,15 @@
                 <span class="text-muted ms-1" aria-hidden="true"
                       x-text="externalOpen['{{ p.name }}'] ? '▾' : '▸'"></span>
               </button>
+              <!-- Adopt: take over a *standard* external bridge so Clauster manages it (#330).
+                   Server-gated to standard sessions — a pty external session stays display-only. -->
+              <button type="button" data-test="adopt-btn"
+                      x-show="isAdoptable('{{ p.name }}')" x-cloak
+                      class="btn btn-sm btn-outline-primary ms-2 py-0"
+                      @click="adopt('{{ p.name }}')"
+                      title="Take over this external session so Clauster can Stop and observe it. A later Resume starts a fresh session.">
+                Manage
+              </button>
               <div class="mt-1 ps-3" id="ext-detail-{{ p.name }}" data-test="external-detail" x-show="externalOpen['{{ p.name }}']" x-cloak>
                 <template x-for="s in (externalSessions['{{ p.name }}'] || [])" :key="externalKey(s)">
                   <div class="d-flex align-items-center flex-wrap gap-1 small text-secondary py-1">

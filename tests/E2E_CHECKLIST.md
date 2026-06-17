@@ -73,6 +73,11 @@ restarts — the dashboard JS/CSS are cached static assets.
       indicator. **`[auto]`** (`test_observability_e2e`): a fake `agents --json` session
       in a managed dir that Clauster didn't start is attributed EXTERNAL and shows the
       "External session active" indicator (a project with none shows nothing).
+- [ ] **External-session adoption** (#330): a **standard** external session shows a
+      **Manage** button on its project-row external note; clicking it (confirm dialog
+      warns "Resume starts fresh") promotes it to a managed RUNNING row with Stop/observe,
+      and the external note clears. A **pty** external session shows the note but **no**
+      Manage button (adoption is standard-only).
 - [ ] **Live log tail** streams over WS; ANSI stripped; IDs/tokens redacted.
       **`[auto]`** (`test_actions_e2e`): a running bridge's Logs panel populates with
       the streamed marker lines, ANSI is stripped, and the session id / bearer token on
