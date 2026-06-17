@@ -36,7 +36,8 @@ a project, start a bridge, and attach to it from `claude.ai/code` or the mobile 
 
 > **Status: pre-1.0, in active development.** Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
-> [Auth & networking](#auth--networking)). **No telemetry, ever.**
+> [Auth & networking](#auth--networking)). **No telemetry, ever** — see
+> [Privacy & data at rest](docs/privacy.md) for what Clauster keeps locally.
 
 <table>
   <tr>

@@ -82,6 +82,7 @@ mode, this *recaps* the prior conversation rather than truly restoring it.
 - [Installation](installation.md) — pip / uv, Docker / Compose, running.
 - [Configuration](configuration.md) — the complete `clauster.yml` reference.
 - [Security](security.md) — trust model, auth, redaction.
+- [Privacy](privacy.md) — what Clauster keeps on disk, and how to purge it.
 - [Networking](networking.md) — the loopback / non-loopback auth matrix.
 - [Architecture](architecture.md) — module map and bridge lifecycle.
 - [Operations](operations.md) — monitoring + troubleshooting runbook.
