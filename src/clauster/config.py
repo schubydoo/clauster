@@ -614,6 +614,19 @@ class ClausterConfig(BaseModel):
         pc = self.projects.get(project_name)
         return bool(pc and pc.allow_bypass_permissions)
 
+    def bypass_denied(self, project_name: str, permission_mode: str | None) -> bool:
+        """Whether ``bypassPermissions`` is requested but the project's ceiling forbids it.
+
+        The single decision every spawn channel shares: it is the one place that
+        combines "is bypass being asked for" with the per-project hard ceiling
+        (:meth:`allows_bypass`). Each channel calls this and raises its own
+        exception type, so a new spawn path cannot diverge from the ceiling by
+        hand-rolling the check. Returns ``True`` only when the effective mode is
+        ``bypassPermissions`` and the project does not allow it (fail closed:
+        callers raise when this is ``True``).
+        """
+        return permission_mode == "bypassPermissions" and not self.allows_bypass(project_name)
+
     @field_validator("projects_root", "state_dir", mode="before")
     @classmethod
     def _expand_user(cls, v: object) -> object:
