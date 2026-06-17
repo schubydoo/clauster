@@ -84,6 +84,7 @@ mode, this *recaps* the prior conversation rather than truly restoring it.
 - [Security](security.md) — trust model, auth, redaction.
 - [Networking](networking.md) — the loopback / non-loopback auth matrix.
 - [Architecture](architecture.md) — module map and bridge lifecycle.
+- [Operations](operations.md) — monitoring + troubleshooting runbook.
 
 ## Stack
 
