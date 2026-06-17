@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from . import procutil
-from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream
+from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
 from .config import PermissionMode
 from .hosted_state import HostedStateStore
 from .models import InstanceStatus, RemoteControlInstance
@@ -110,35 +110,6 @@ def build_hosted_argv(
 
 class HostedSessionError(ClaustrumError):
     """Raised when a hosted-session operation is invalid for the current state."""
-
-
-@dataclass
-class _Subscriber:
-    """One browser watcher's bounded queue with a never-block overflow marker.
-
-    Mirrors :class:`clauster.claustrum_client._Subscriber`: a full queue drops the
-    event and counts it, and the next event the queue can take is preceded by a
-    ``gap`` marker carrying the dropped count, so a slow viewer never stalls the
-    single daemon reader and gaps stay honest.
-    """
-
-    queue: asyncio.Queue[dict[str, Any]]
-    dropped: int = 0
-
-    def offer(self, event: dict[str, Any]) -> None:
-        """Enqueue ``event`` for this watcher, never blocking the caller."""
-        if self.dropped:
-            marker = {"type": "gap", "dropped": self.dropped}
-            try:
-                self.queue.put_nowait(marker)
-            except asyncio.QueueFull:
-                self.dropped += 1
-                return
-            self.dropped = 0
-        try:
-            self.queue.put_nowait(event)
-        except asyncio.QueueFull:
-            self.dropped += 1
 
 
 @dataclass
@@ -410,7 +381,7 @@ class HostedSession:
         the consumer goes away.
         """
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self._queue_maxsize)
-        sub = _Subscriber(queue)
+        sub = _Subscriber(queue, overflow_type="gap")
         if self._ring and self._ring[0]["event_seq"] > after_seq + 1:
             sub.offer({"type": "gap", "from_seq": after_seq, "to_seq": self._ring[0]["event_seq"]})
         for event in self._ring:
