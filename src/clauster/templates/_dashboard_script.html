@@ -324,6 +324,7 @@
       },
       closeConfig() {
         const c = this.configEditor;
+        if (c.saving) return;  // don't close mid-save — a stale response could clobber the next open
         c.open = false;
         document.body.style.overflow = "";  // release the scroll lock
         if (c.trigger && c.trigger.focus) c.trigger.focus();  // restore focus to the opener

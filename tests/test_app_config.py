@@ -65,3 +65,19 @@ def test_put_config_requires_edits_and_hash_422(write_config, tmp_path):
     h = client.get("/api/config").json()["hash"]
     assert client.put("/api/config", json={"hash": h}).status_code == 422
     assert client.put("/api/config", json={"edits": {"usage.fx_rate": 2.0}}).status_code == 422
+
+
+def test_config_routes_handle_missing_source_path(tmp_path, projects_root):
+    # A config built directly (not via load_config) has no on-disk source path.
+    from clauster.config import ClausterConfig
+
+    config = ClausterConfig(
+        projects_root=projects_root, state_dir=tmp_path / "s", claude={"binary": str(FAKE_CLAUDE)}
+    )
+    client = TestClient(create_app(config))
+    # GET reports a null hash (nothing on disk to fingerprint) but still serves the values.
+    body = client.get("/api/config").json()
+    assert body["hash"] is None and body["fields"]
+    # PUT has nowhere to write -> 409, not a 500.
+    res = client.put("/api/config", json={"edits": {"usage.fx_rate": 2.0}, "hash": "x"})
+    assert res.status_code == 409

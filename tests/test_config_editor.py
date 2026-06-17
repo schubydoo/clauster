@@ -27,8 +27,8 @@ def _raw(write_config, extra: str = "") -> dict:
 def test_editable_values_extracts_only_tier_a(write_config) -> None:
     config = load_config(write_config("usage:\n  fx_rate: 2.5\n"))
     vals = editable_values(config)
-    # Every returned key is in the allowlist; a known Tier-A value round-trips.
-    assert set(vals) <= set(EDITABLE_FIELDS)
+    # Exactly the allowlist — equality (not subset) catches a silently-dropped field.
+    assert set(vals) == set(EDITABLE_FIELDS)
     assert vals["usage.fx_rate"] == 2.5
     # No secret/auth/bind field is ever surfaced.
     assert not any(k.startswith(("auth.", "host", "port")) for k in vals)
@@ -83,6 +83,20 @@ def test_field_specs_carries_rich_ui_metadata() -> None:
     # Master/child dependency for disabling, and a placeholder for an optional field.
     assert specs["metrics.normalize_cpu"]["depends_on"] == "metrics.enabled"
     assert specs["instance_defaults.max_bridges"]["placeholder"]
+
+
+def test_classify_and_constraints_cover_edge_annotations() -> None:
+    import types as _types
+
+    import annotated_types as at
+
+    from clauster.config_editor import _classify, _constraints
+
+    # A union with >1 non-None member falls through to the scalar-string fallback.
+    assert _classify(int | str | None) == ("str", None)
+    # Lt maps to max; Ge to min; an unrecognized metadata item is simply skipped (loop tail).
+    meta = _types.SimpleNamespace(metadata=[at.Lt(lt=5), at.Ge(ge=1), object()])
+    assert _constraints(meta) == {"max": 5, "min": 1}
 
 
 def test_file_hash_changes_with_content(write_config) -> None:
