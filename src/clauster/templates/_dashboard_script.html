@@ -71,7 +71,7 @@
       configEditor: {
         open: false, loading: false, saving: false,
         fields: {}, specs: {}, edits: {}, editable: [], hash: null,
-        error: "", saved: false, trigger: null,
+        error: "", saved: false, trigger: null, gen: 0,
       },
       configQuery: "",
       agents: [],
@@ -323,8 +323,10 @@
         return c.editable.some((p) => c.edits[p] !== c.fields[p]);
       },
       closeConfig() {
+        // Always closeable (no mid-save block — that would strand the scroll-lock and the
+        // user if a save hung). A stale in-flight save can't clobber a reopened session
+        // because saveConfig is generation-guarded (see configEditor.gen).
         const c = this.configEditor;
-        if (c.saving) return;  // don't close mid-save — a stale response could clobber the next open
         c.open = false;
         document.body.style.overflow = "";  // release the scroll lock
         if (c.trigger && c.trigger.focus) c.trigger.focus();  // restore focus to the opener
@@ -333,7 +335,9 @@
       trapConfigTab(e) {
         const sel = 'a[href],button:not([disabled]),input:not([disabled]),' +
           'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-        const f = e.currentTarget.querySelectorAll(sel);
+        // Exclude display:none elements (filtered-out sections / hidden control branches):
+        // they match the selector but aren't focusable, which would leak the trap past them.
+        const f = [...e.currentTarget.querySelectorAll(sel)].filter((el) => el.offsetParent !== null);
         if (!f.length) return;
         const first = f[0], last = f[f.length - 1];
         if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
@@ -342,6 +346,7 @@
       async openConfig() {
         const c = this.configEditor;
         if (c.open || c.loading) return;  // single-flight: ignore re-entry while loading/open
+        c.gen = (c.gen || 0) + 1;  // bump generation so a stale in-flight save is ignored on reopen
         c.trigger = document.activeElement;  // remember the opener to restore focus on close
         c.open = true; c.error = ""; c.saved = false; c.loading = true; this.configQuery = "";
         document.body.style.overflow = "hidden";  // lock background scroll while modal is up
@@ -359,10 +364,15 @@
       async saveConfig() {
         const c = this.configEditor;
         if (c.saving) return;  // single-flight insurance (the button is also :disabled while saving)
-        // Send only fields the user actually changed (avoids null->"" churn on untouched optionals).
+        const myGen = c.gen;  // capture this session; a reopen bumps c.gen and voids this save
+        // Send only fields the user actually changed. Skip a blanked numeric input (x-model.number
+        // yields "" when cleared) — treat it as "no change", not a "" sent to an int/float field.
         const edits = {};
         for (const p of c.editable) {
-          if (c.edits[p] !== c.fields[p]) edits[p] = c.edits[p];
+          const v = c.edits[p];
+          const t = (c.specs[p] || {}).type;
+          if ((t === "int" || t === "float") && (v === "" || v === null)) continue;
+          if (v !== c.fields[p]) edits[p] = v;
         }
         if (Object.keys(edits).length === 0) { c.error = "No changes to save."; c.saved = false; return; }
         c.saving = true; c.error = ""; c.saved = false;
@@ -371,6 +381,7 @@
             method: "PUT", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ edits, hash: c.hash }),
           });
+          if (c.gen !== myGen) return;  // session was closed+reopened mid-save — drop this response
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
           if (res.ok) {
             const d = await res.json();

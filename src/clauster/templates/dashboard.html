@@ -756,7 +756,7 @@
                       </template>
                       <template x-if="['int', 'float'].includes(configEditor.specs[path].type)">
                         <div class="input-group input-group-sm">
-                          <input class="form-control" type="number" :id="'cfg-' + path"
+                          <input class="form-control form-control-sm" type="number" :id="'cfg-' + path"
                                  :min="configEditor.specs[path].min" :max="configEditor.specs[path].max"
                                  :step="configEditor.specs[path].step"
                                  :placeholder="configEditor.specs[path].placeholder || (configEditor.specs[path].default != null ? 'default ' + configEditor.specs[path].default : '')"
@@ -773,13 +773,14 @@
                       <div class="cfg-help text-secondary" x-show="configEditor.specs[path].description" x-cloak
                            x-text="configEditor.specs[path].description"></div>
                       <div class="cfg-help text-warning" x-show="configFieldDisabled(path)" x-cloak
-                           x-text="'Turn on “' + (configEditor.specs[configEditor.specs[path].depends_on] || {}).label + '” to use this.'"></div>
+                           x-text="'Turn on “' + ((configEditor.specs[configEditor.specs[path].depends_on] || {}).label || configEditor.specs[path].depends_on) + '” to use this.'"></div>
                     </div>
                   </div>
                 </template>
               </section>
             </template>
-            <div class="text-secondary small" x-show="!configEditor.loading && !configSections().some(s => configFieldsVisible(s).length)" x-cloak>
+            <div class="text-secondary small" aria-live="polite"
+                 x-show="!configEditor.loading && !configSections().some(s => configFieldsVisible(s).length)" x-cloak>
               No settings match “<span x-text="configQuery"></span>”.
             </div>
           </div>
