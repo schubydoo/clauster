@@ -249,11 +249,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # worker, so the in-memory value is authoritative.
     app.state.session_epoch = auth.read_epoch(config.state_dir)
 
-    def _authenticate(scope) -> tuple[str | None, bool]:
-        """Return (user, via_proxy) for the request/connection.
+    def _authenticate(scope) -> tuple[str | None, bool, bool]:
+        """Return (user, via_proxy, via_token) for the request/connection.
 
         Works for both Request and WebSocket (both expose
-        .headers/.cookies/.client/.url).
+        .headers/.cookies/.client/.url). ``via_proxy`` and ``via_token`` mark
+        non-cookie credentials that carry no ambient browser state, so the CSRF
+        Origin gate exempts them (a captured Origin can't ride them cross-site).
         """
         rp = config.auth.reverse_proxy
         if rp.enabled and auth.peer_trusted(auth.peer_ip(scope), rp.trusted_ips):
@@ -268,14 +270,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 scope.url.path,
                 rp.hmac_window_seconds,
             ):
-                return remote_user, True
+                return remote_user, True, False
+        # API token (#360): an Authorization: Bearer credential, hashed at rest.
+        # A token is one more enforced-auth METHOD behind the same auth.enabled
+        # master switch — never a bypass of it (the guard still gates on enabled).
+        presented = auth.parse_bearer(scope.headers.get("authorization"))
+        if presented and auth.verify_token(presented, config.auth.api_token_hash):
+            return _SESSION_USER, False, True
         user = auth.read_session(
             _serializer,
             scope.cookies.get(_SESSION_COOKIE),
             config.auth.session_max_age_seconds,
             current_epoch=app.state.session_epoch,
         )
-        return (user, False) if user else (None, False)
+        return (user, False, False) if user else (None, False, False)
 
     def _origin_allowed(request: Request) -> bool:
         # Origin only: Referer is spoofable/suppressible (Referrer-Policy, downgrades)
@@ -323,10 +331,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def guard(request: Request, call_next):
         if not config.auth.enabled:
             return await call_next(request)
-        user, via_proxy = _authenticate(request)
-        # CSRF: an unsafe method needs a trusted Origin — unless it's a proxy
-        # request, whose HMAC is already bound to method+path.
-        if request.method in _UNSAFE_METHODS and not via_proxy and not _origin_allowed(request):
+        user, via_proxy, via_token = _authenticate(request)
+        # CSRF: an unsafe method needs a trusted Origin — unless the credential is
+        # non-cookie. A proxy HMAC is already bound to method+path; a Bearer token
+        # carries no ambient cookie a cross-site page could ride, and a browser
+        # fetch can't set Authorization cross-origin without a preflight we never
+        # CORS-allow. Both are exempt; cookie/session requests still need Origin.
+        if (
+            request.method in _UNSAFE_METHODS
+            and not via_proxy
+            and not via_token
+            and not _origin_allowed(request)
+        ):
             return JSONResponse({"detail": "origin check failed"}, status_code=403)
         if _is_public(request.url.path):
             return await call_next(request)
@@ -1323,11 +1339,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return Response(content=buf.getvalue(), media_type="image/svg+xml")
 
     def _ws_authorized(websocket: WebSocket) -> bool:
-        """Strict Origin check + session/proxy auth, BEFORE accepting (D12)."""
+        """Strict Origin check + session/proxy/token auth, BEFORE accepting (D12)."""
+        user, _via_proxy, via_token = _authenticate(websocket)
+        if user is None:
+            return False
+        # The Origin allowlist is a cross-site WS-hijack defense for ambient
+        # (cookie) credentials — browsers always send Origin. A Bearer-token
+        # client (headless/API) carries no ambient credential and sends no
+        # Origin, so the check would wrongly reject it; exempt the token path
+        # exactly as the HTTP CSRF gate does. Cookie/proxy auth still needs it.
+        if via_token:
+            return True
         origin = websocket.headers.get("origin")
-        if not origin or auth.normalize_origin(origin) not in _allowed_origins:
-            return False  # cross-site WS hijack defense; browsers always send Origin
-        return _authenticate(websocket)[0] is not None
+        return bool(origin) and auth.normalize_origin(origin) in _allowed_origins
 
     @app.websocket("/ws/bridge-log/{instance_id}")
     async def ws_bridge_log(websocket: WebSocket, instance_id: str) -> None:

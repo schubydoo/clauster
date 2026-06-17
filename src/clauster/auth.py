@@ -4,8 +4,10 @@ Pure functions + small helpers — deliberately free of any FastAPI/Starlette
 import so the security-sensitive logic is unit-testable in isolation. The
 web wiring (middleware, routes, cookie handling) lives in ``app.py``.
 
-Three trust paths:
+Four trust paths:
   - password login  -> signed-cookie session  (``issue_session`` / ``read_session``)
+  - API token        -> hashed bearer credential
+                        (``mint_token`` / ``hash_token`` / ``verify_token`` / ``parse_bearer``)
   - reverse proxy    -> peer-IP allowlist + HMAC-signed header
                         (``peer_trusted`` / ``verify_proxy_hmac``)
   - cross-site guard -> strict Origin allowlist
@@ -143,6 +145,63 @@ def verify_password(hasher: PasswordHasher, stored_hash: str | None, attempt: st
     except (VerificationError, InvalidHashError):
         return False
     return stored_hash is not None
+
+
+# ----- API tokens (inbound Bearer credential, #360) ------------------------
+
+# A self-identifying prefix on the raw token: greppable for log redaction
+# (see redact._SECRET_RES) and unmistakable in an operator's clipboard. The
+# secret part is 32 bytes of urlsafe base64 (~43 chars, 256 bits of entropy).
+_TOKEN_PREFIX = "clauster_pat_"  # noqa: S105 — a label, not a secret
+
+
+def mint_token() -> tuple[str, str]:
+    """Return ``(raw_token, hash)`` for a fresh API token.
+
+    The raw token is shown to the operator exactly once (it is never stored);
+    only the hash is persisted in ``auth.api_token_hash``. SHA-256 is the right
+    primitive here — a 256-bit random needs no slow KDF (unlike a low-entropy
+    password), and a per-request argon2 verify would tax every API call.
+    """
+    raw = _TOKEN_PREFIX + secrets.token_urlsafe(32)
+    return raw, hash_token(raw)
+
+
+def hash_token(raw: str) -> str:
+    """SHA-256 hex digest of a raw API token (the at-rest form)."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def verify_token(presented: str | None, stored_hash: str | None) -> bool:
+    """Constant-time check that ``presented`` matches the configured token hash.
+
+    Fail-closed: returns False when no token is configured (``stored_hash`` is
+    None/empty) or none is presented, with no early-exit timing oracle. The
+    comparison is always run against a same-length hex digest via
+    ``hmac.compare_digest`` so a mismatch leaks nothing about the stored value.
+    """
+    if not presented or not stored_hash:
+        return False
+    return hmac.compare_digest(hash_token(presented), stored_hash)
+
+
+def parse_bearer(header_value: str | None) -> str | None:
+    """Extract the credential from an ``Authorization: Bearer <token>`` header.
+
+    Returns None on absence/malformation (wrong scheme, missing/empty credential,
+    or a credential containing an embedded space) rather than raising. The scheme
+    match is case-insensitive per RFC 7235; the credential is rejected on an
+    embedded space since RFC 6750 §2.1 restricts ``b64token`` to a space-free set.
+    """
+    if not header_value:
+        return None
+    scheme, _, credential = header_value.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    credential = credential.strip()
+    if not credential or " " in credential:
+        return None
+    return credential
 
 
 # ----- sessions ------------------------------------------------------------

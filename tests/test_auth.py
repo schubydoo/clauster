@@ -42,6 +42,90 @@ def test_password_no_hash_is_false():
     assert auth.verify_password(h, "not-a-valid-argon2-hash", "anything") is False
 
 
+# ----- API tokens (#360) ---------------------------------------------------
+
+
+def test_mint_token_shape_and_hash():
+    raw, token_hash = auth.mint_token()
+    assert raw.startswith("clauster_pat_")
+    # 32 bytes urlsafe-base64 -> 43 chars after the prefix; high-entropy, no padding.
+    assert len(raw) > len("clauster_pat_") + 40
+    assert token_hash == auth.hash_token(raw)
+    assert token_hash == hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def test_mint_token_unique():
+    raw1, _ = auth.mint_token()
+    raw2, _ = auth.mint_token()
+    assert raw1 != raw2  # fresh randomness each call
+
+
+def test_verify_token_roundtrip():
+    raw, token_hash = auth.mint_token()
+    assert auth.verify_token(raw, token_hash) is True
+    assert auth.verify_token(raw + "x", token_hash) is False
+    assert auth.verify_token("clauster_pat_totally-wrong", token_hash) is False
+
+
+def test_verify_token_fail_closed_without_configured_hash():
+    # No token configured -> nothing authenticates (no oracle from a missing hash).
+    raw, _ = auth.mint_token()
+    assert auth.verify_token(raw, None) is False
+    assert auth.verify_token(raw, "") is False
+
+
+def test_verify_token_none_presented_is_false():
+    _, token_hash = auth.mint_token()
+    assert auth.verify_token(None, token_hash) is False
+    assert auth.verify_token("", token_hash) is False
+
+
+def test_verify_token_uses_constant_time_compare(monkeypatch):
+    # Pin the constant-time guarantee: a regression to `==` would skip compare_digest.
+    raw, token_hash = auth.mint_token()
+    calls: list[tuple[str, str]] = []
+    real = hmac.compare_digest
+
+    def spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(auth.hmac, "compare_digest", spy)
+    assert auth.verify_token(raw, token_hash) is True
+    assert calls, "verify_token must route through hmac.compare_digest"
+
+
+@pytest.mark.parametrize(
+    ("header", "expected_key"),
+    [
+        ("Bearer clauster_pat_abc123", "clauster_pat_abc123"),
+        ("bearer clauster_pat_abc123", "clauster_pat_abc123"),  # case-insensitive scheme
+        ("BEARER clauster_pat_abc123", "clauster_pat_abc123"),
+        ("Bearer   spaced  ", "spaced"),  # surrounding whitespace stripped
+    ],
+)
+def test_parse_bearer_extracts_credential(header, expected_key):
+    assert auth.parse_bearer(header) == expected_key
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        None,
+        "",
+        "Basic abc",
+        "Bearer",
+        "Bearer ",
+        "Bearer    ",
+        "Token abc",
+        "abc",
+        "Bearer tok1 tok2",  # embedded space rejected per RFC 6750 §2.1
+    ],
+)
+def test_parse_bearer_rejects_malformed(header):
+    assert auth.parse_bearer(header) is None
+
+
 # ----- sessions ------------------------------------------------------------
 
 
