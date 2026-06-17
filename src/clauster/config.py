@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -219,8 +220,19 @@ class AuthConfig(BaseModel):
         # authenticate — a locked-out dashboard flying a false "enforced auth" flag.
         # Normalize it to None so only a REAL hash counts, mirroring the empty
         # password_hash being treated as unset.
+        #
+        # A non-empty value that is NOT a 64-char lowercase hex digest can never
+        # match a token (``hash_token`` always returns SHA-256 hex) yet would still
+        # satisfy the enforced-auth check and PERMIT a non-loopback bind — the same
+        # false-"enforced auth" footgun. Reject it loudly so the operator fixes the
+        # config instead of shipping a dashboard no token can ever unlock.
         if isinstance(v, str) and not v.strip():
             return None
+        if isinstance(v, str) and not re.fullmatch(r"[0-9a-f]{64}", v):
+            raise ValueError(
+                "api_token_hash must be a 64-character lowercase hex string "
+                "(the SHA-256 output from `clauster hash-token`)"
+            )
         return v
 
 

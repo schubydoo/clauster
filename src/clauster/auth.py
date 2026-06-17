@@ -188,8 +188,10 @@ def verify_token(presented: str | None, stored_hash: str | None) -> bool:
 def parse_bearer(header_value: str | None) -> str | None:
     """Extract the credential from an ``Authorization: Bearer <token>`` header.
 
-    Returns None on absence/malformation (wrong scheme, missing/empty credential)
-    rather than raising. The scheme match is case-insensitive per RFC 7235.
+    Returns None on absence/malformation (wrong scheme, missing/empty credential,
+    or a credential containing an embedded space) rather than raising. The scheme
+    match is case-insensitive per RFC 7235; the credential is rejected on an
+    embedded space since RFC 6750 §2.1 restricts ``b64token`` to a space-free set.
     """
     if not header_value:
         return None
@@ -197,7 +199,9 @@ def parse_bearer(header_value: str | None) -> str | None:
     if scheme.lower() != "bearer":
         return None
     credential = credential.strip()
-    return credential or None
+    if not credential or " " in credential:
+        return None
+    return credential
 
 
 # ----- sessions ------------------------------------------------------------
