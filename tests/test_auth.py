@@ -58,12 +58,18 @@ def test_session_tampered_wrong_key_or_missing():
     assert auth.read_session(s, None, 3600) is None  # absent
 
 
-def test_session_expired():
-    import time
+def test_session_expired(monkeypatch):
+    # Deterministic expiry: drive itsdangerous' clock instead of a wall-clock
+    # sleep. The token is signed at a fixed instant, then read one second later,
+    # so it is reliably older than max_age=0 with no real-time wait.
+    from itsdangerous.timed import TimestampSigner
+
+    clock = {"now": 1_000_000}
+    monkeypatch.setattr(TimestampSigner, "get_timestamp", lambda self: clock["now"])
 
     s = auth.make_serializer(b"secret-key-0001")
     tok = auth.issue_session(s, "admin")
-    time.sleep(1.1)
+    clock["now"] += 1  # advance past the signing instant
     assert auth.read_session(s, tok, max_age=0) is None  # older than max_age
 
 
