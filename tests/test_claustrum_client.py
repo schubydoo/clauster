@@ -24,6 +24,7 @@ from clauster.claustrum_client import (
     ProcessStream,
     RpcError,
 )
+from conftest import wait_until
 
 # The claustrum client speaks JSON-RPC over an AF_UNIX socket; asyncio has no
 # start_unix_server/open_unix_connection on Windows (same posture as the pty
@@ -312,7 +313,7 @@ async def test_disconnect_fails_pending_and_close_is_idempotent(fake_claustrum):
 
     # Daemon drops the connection mid-stream -> the reader sees EOF.
     fake.disconnect_all()
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: client._reader_task is not None and client._reader_task.done())
     with pytest.raises(DaemonUnreachable):
         await client.ping()
     await client.close()
