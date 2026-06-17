@@ -76,7 +76,8 @@ def test_migrate_backup_failure_is_logged_not_silent(tmp_path, caplog, monkeypat
     def boom(target, text):
         raise OSError("simulated: backup write failed")
 
-    monkeypatch.setattr("clauster.hosted_state.atomic_write_text", boom)
+    # The shared KeyedJsonStore._migrate (in clauster.state) owns the .bak write.
+    monkeypatch.setattr("clauster.state.atomic_write_text", boom)
     with caplog.at_level("WARNING", logger="clauster.hosted_state"):
         loaded = HostedStateStore(tmp_path).load()
     assert loaded == {"pid-1": _REC}  # migration still succeeded

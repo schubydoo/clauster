@@ -16,11 +16,9 @@ de-duplication make a stale or missing cursor cost only replay overlap.
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 
-from .atomicio import atomic_write_text
+from .state import KeyedJsonStore
 
 CURRENT_SCHEMA = 1
 
@@ -43,68 +41,17 @@ _PERSISTED_FIELDS = (
 _log = logging.getLogger("clauster.hosted_state")
 
 
-class HostedStateStore:
+class HostedStateStore(KeyedJsonStore):
     """Persists hosted-session records keyed by ``claustrum_process_id``.
 
     Backed by a single ``hosted_state.json`` under the state dir; reads tolerate a
     missing/corrupt file (degrade to ``{}``) and migrate older schemas in place.
+    The record map is JSON-keyed ``"sessions"`` (vs the bridge store's
+    ``"instances"``), so older on-disk files keep loading unchanged.
     """
 
-    def __init__(self, state_dir: Path) -> None:
-        """Bind the store to ``hosted_state.json`` under ``state_dir``."""
-        self._path = state_dir.expanduser() / "hosted_state.json"
-
-    def load(self) -> dict[str, dict]:
-        """Return ``{process_id: {persisted fields}}``.
-
-        Tolerates a missing or corrupt file (returns ``{}``) and migrates an older
-        ``schema_version`` (taking a ``.bak`` first). Unknown fields are dropped.
-        """
-        try:
-            raw = self._path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError, UnicodeDecodeError):
-            # A non-UTF-8 (UnicodeDecodeError) or unreadable file is the "corrupt"
-            # case the docstring promises to tolerate — degrade to {}.
-            return {}
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        if data.get("schema_version") != CURRENT_SCHEMA:
-            data = self._migrate(data, raw)
-        sessions = data.get("sessions")
-        if not isinstance(sessions, dict):
-            return {}
-        out: dict[str, dict] = {}
-        for process_id, fields in sessions.items():
-            if isinstance(fields, dict):
-                out[process_id] = {k: fields[k] for k in _PERSISTED_FIELDS if k in fields}
-        return out
-
-    def save(self, sessions: dict[str, dict]) -> None:
-        """Atomically persist ``{process_id: {persisted fields}}`` (durable, owner-only)."""
-        payload = {"schema_version": CURRENT_SCHEMA, "sessions": sessions}
-        atomic_write_text(self._path, json.dumps(payload, indent=2))
-
-    def _migrate(self, data: dict, raw: str) -> dict:
-        """Back up once, then re-stamp to the current schema.
-
-        Only v1 exists today: a well-formed ``sessions`` map is preserved (load then
-        filters each record to known fields), and a non-dict ``sessions`` value
-        degrades to empty. A one-time ``.bak`` is taken before re-stamping.
-        """
-        backup = self._path.with_suffix(self._path.suffix + ".bak")
-        if not backup.exists():
-            try:
-                atomic_write_text(backup, raw)
-            except OSError as exc:
-                # Best-effort; never block the load, but surface it so a missing
-                # pre-migration backup isn't a silent loss before we coerce away.
-                _log.warning("could not write %s backup: %s", backup, exc)
-        sessions = data.get("sessions")
-        return {
-            "schema_version": CURRENT_SCHEMA,
-            "sessions": sessions if isinstance(sessions, dict) else {},
-        }
+    _FILENAME = "hosted_state.json"
+    _MAP_KEY = "sessions"
+    _PERSISTED_FIELDS = _PERSISTED_FIELDS
+    _SCHEMA = CURRENT_SCHEMA
+    _LOG = _log
