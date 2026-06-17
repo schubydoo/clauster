@@ -17,6 +17,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from . import claude_cli, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
@@ -25,7 +26,12 @@ from .state import CURRENT_SCHEMA, StateStore
 
 # ----- doctor -----------------------------------------------------------
 
-OK, WARN, FAIL = "ok", "warn", "fail"
+# Ops-local diagnostic vocabulary; not promoted to models/config (it's doctor-local).
+CheckStatus = Literal["ok", "warn", "fail"]
+
+OK: CheckStatus = "ok"
+WARN: CheckStatus = "warn"
+FAIL: CheckStatus = "fail"
 
 
 @dataclass
@@ -33,7 +39,7 @@ class Check:
     """One doctor diagnostic result: a named check, its status, and a detail line."""
 
     name: str
-    status: str  # OK | WARN | FAIL
+    status: CheckStatus
     detail: str
 
 
