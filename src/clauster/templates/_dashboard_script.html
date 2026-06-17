@@ -102,6 +102,8 @@
       confirmNew: {},
       cmd: {},
       usage: {},
+      preflight: {},      // project name -> per-project preflight result ({ok, checks}); lazy-loaded
+      preflightOpen: {},  // project name -> true while its preflight-warning detail is expanded
       metrics: {},        // project name -> live CPU/mem/disk sample (null when not running)
       trustState: {},     // project name -> 'trusted' | 'untrusted' (reactive; no reload on trust)
       trusting: {},       // project name -> bool (trust request in flight)
@@ -131,7 +133,7 @@
         }
         this.trustState = { ...INITIAL_TRUST };
         await this.refresh();
-        for (const n of PROJECT_NAMES) this.loadUsage(n);
+        for (const n of PROJECT_NAMES) { this.loadUsage(n); this.loadPreflight(n); }
         this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
         setInterval(() => this.refresh(), 4000);
         // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
@@ -636,6 +638,20 @@
           if (res.ok) this.usage[name] = await res.json();
         } catch (e) { /* badge stays hidden */ }
       },
+      // --- per-project preflight readiness (FE-1b) ---
+      async loadPreflight(name) {
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/preflight");
+          if (res.ok) this.preflight[name] = await res.json();
+        } catch (e) { /* pill stays hidden — preflight is advisory, never blocks */ }
+      },
+      // WARN-status checks for a project (the ones worth flagging before a clean launch).
+      preflightWarnings(name) {
+        const p = this.preflight[name];
+        return (p && Array.isArray(p.checks)) ? p.checks.filter((c) => c.status === "warn") : [];
+      },
+      preflightWarnCount(name) { return this.preflightWarnings(name).length; },
+      togglePreflight(name) { this.preflightOpen[name] = !this.preflightOpen[name]; },
       // Tokens counted toward the displayed total: all categories, or input+output
       // only when usage.token_total_includes_cache is false (cache usually dominates).
       displayTokens(u) {

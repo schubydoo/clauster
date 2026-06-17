@@ -51,6 +51,28 @@ def test_cost_badge_shows_for_seeded_project_only(
     browser.expect_hidden('[data-project="beta"] [x-text="usageLabel(\'beta\')"]')
 
 
+def test_preflight_pill_surfaces_for_unready_project(
+    browser: AgentBrowser, usage_server: Server
+) -> None:
+    """A project with a preflight warning (untrusted dir) shows the attention pill + detail.
+
+    The E2E projects start untrusted (HOME-isolated, trust-on-start), so the per-project
+    preflight reports a WARN and the pill renders; expanding it lists the specific check.
+    """
+    browser.goto(usage_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+
+    pill = '[data-project="alpha"] [data-test="preflight-pill"]'
+    browser.expect_visible(pill)
+    assert "preflight" in browser.get_text(pill).lower()
+
+    # Collapsed until clicked, then the specific warning check(s) appear.
+    detail = '[data-project="alpha"] [data-test="preflight-detail"]'
+    browser.expect_hidden(detail)
+    browser.click(pill)
+    browser.expect_visible(detail)
+
+
 def test_external_session_indicator_shows_for_unmanaged_session(
     browser: AgentBrowser, external_session_server: Server
 ) -> None:

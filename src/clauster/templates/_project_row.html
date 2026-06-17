@@ -24,6 +24,17 @@
                     :title="runningCountFor('{{ p.name }}') + ' live session(s) — see Active sessions below'"
                     x-text="'● ' + runningCountFor('{{ p.name }}') + ' running'"></span>
 
+              <!-- preflight readiness pill (FE-1b): an attention chip, shown only when a
+                   per-project precondition warns (untrusted dir, non-git for worktree mode);
+                   click to expand the specific checks. Silent when the project is launch-ready. -->
+              <button type="button" class="badge bg-yellow-lt border-0" x-cloak data-test="preflight-pill"
+                      x-show="preflightWarnCount('{{ p.name }}') > 0"
+                      @click="togglePreflight('{{ p.name }}')"
+                      :aria-expanded="!!preflightOpen['{{ p.name }}']"
+                      :title="preflightWarnCount('{{ p.name }}') + ' preflight check(s) to review before a clean launch'">
+                ⚠ <span x-text="preflightWarnCount('{{ p.name }}')"></span> preflight
+              </button>
+
               <!-- right cluster: Run Claude here + overflow -->
               <span class="ms-auto d-flex align-items-center gap-1">
                 <span class="launch-anchor">
@@ -138,6 +149,15 @@
             </div>
 
             <!-- expandables (below the row, full width) -->
+            <!-- preflight readiness detail (FE-1b) — the specific warning checks, on demand -->
+            <div class="mt-2 ps-1 small" data-test="preflight-detail" x-show="preflightOpen['{{ p.name }}'] && preflightWarnCount('{{ p.name }}') > 0" x-cloak>
+              <template x-for="c in preflightWarnings('{{ p.name }}')" :key="c.name">
+                <div class="d-flex align-items-start gap-1 py-1">
+                  <span class="text-warning" aria-hidden="true">⚠</span>
+                  <span><span class="fw-medium text-capitalize" x-text="c.name"></span><span class="text-secondary" x-text="': ' + c.detail"></span></span>
+                </div>
+              </template>
+            </div>
             <!-- trust-on-start confirm (bridge / Desktop launch path) -->
             <div class="alert alert-warning mt-2" x-show="confirmTrust['{{ p.name }}']" x-cloak>
               <div>
