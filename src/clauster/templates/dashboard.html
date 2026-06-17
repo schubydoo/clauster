@@ -98,6 +98,17 @@
        padding strip for rows to bleed through); the intro carries the spacing instead. */
     [data-test="cfg-modal"] .modal-body { padding-top: 0; }
     [data-test="cfg-modal"] .cfg-intro { padding-top: var(--tblr-modal-padding, 1.5rem); }
+
+    /* #357: honor the OS "reduce motion" preference for first-party + Alpine
+       x-transition motion (Tabler ships its own rules for vendored components). */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
   </style>
 </head>
 <body>
@@ -388,13 +399,16 @@
         <span class="zone-sub">what Claude is running for you right now</span>
         <div class="zone-actions" x-show="hasLive()" x-cloak>
           <div class="btn-group btn-group-sm" role="group" aria-label="Filter sessions by where they run">
-            <template x-for="f in ['all','browser','desktop','detached','external']" :key="f">
+            <template x-for="f in presentFilters()" :key="f">
               <button type="button" class="btn" @click="activeFilter = f" :aria-pressed="activeFilter === f"
                       :class="activeFilter === f ? 'btn-primary' : 'btn-ghost-secondary'" x-text="f"></button>
             </template>
           </div>
         </div>
       </div>
+
+      <div class="text-secondary small px-1 py-2" x-show="hasLive() && activeFilterCount() === 0" x-cloak
+           role="status" aria-live="polite">No sessions match this filter.</div>
 
       <div class="card" x-show="hasLive()" x-cloak>
         <div class="list-group list-group-flush">
@@ -672,10 +686,9 @@
       {% endif %}
 
       <!-- ===== Toasts ===== -->
-      <div class="toast-stack">
+      <div class="toast-stack" role="log" aria-live="polite" aria-label="Notifications">
         <template x-for="t in toasts" :key="t.id">
-          <div class="alert" :class="{'alert-success': t.type==='success', 'alert-danger': t.type==='error', 'alert-warning': t.type==='warning', 'alert-info': t.type==='info'}"
-               role="alert">
+          <div class="alert" :class="{'alert-success': t.type==='success', 'alert-danger': t.type==='error', 'alert-warning': t.type==='warning', 'alert-info': t.type==='info'}">
             <div class="d-flex">
               <div x-text="t.msg"></div>
               <a href="#" class="btn-close ms-auto" @click.prevent="dismissToast(t.id)"></a>

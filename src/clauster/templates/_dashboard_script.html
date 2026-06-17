@@ -245,6 +245,28 @@
       // Stopped/crashed bridges that can be reconnected (Resume) — surfaced in Recent.
       endedBridges() { return Object.values(this.instances).filter((i) => this.isResumable(i.project)); },
       hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length > 0; },
+      // #357: only offer filter chips for session types actually present, so a chip can
+      // never select an empty set on open.
+      presentFilters() {
+        const f = ["all"];
+        if (this.liveHosted().length) f.push("browser");
+        if (this.activeBridges().length) f.push("desktop");
+        if (this.liveAgents().length) f.push("detached");
+        if (this.externalSessionsFlat().length) f.push("external");
+        return f;
+      },
+      // #357: live sessions matching the active filter; 0 drives the "no matches" line
+      // (e.g. the selected type empties out while still active).
+      activeFilterCount() {
+        const counts = {
+          all: this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length,
+          browser: this.liveHosted().length,
+          desktop: this.activeBridges().length,
+          detached: this.liveAgents().length,
+          external: this.externalSessionsFlat().length,
+        };
+        return counts[this.activeFilter] ?? 0;
+      },
       hasRecent() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length > 0; },
       recentCount() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length; },
       // Whether the Recent group actually holds a *resumable* item, so the label doesn't
