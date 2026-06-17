@@ -234,6 +234,57 @@ def test_is_live_bridge_still_gated_on_bridge_cmdline(monkeypatch):
     assert procutil.is_live_bridge(1234, 1000.0) is False  # hosted cmdline ≠ bridge
 
 
+# -- standard-subcommand discriminator (adoption gate, #330) -----------------
+
+
+def test_is_standard_bridge_cmdline_matches_subcommand():
+    assert procutil.is_standard_bridge_cmdline(["claude", "remote-control", "--name", "x"]) is True
+    # binary resolved to an absolute path still carries the standalone subcommand token
+    assert procutil.is_standard_bridge_cmdline(["python3", "/p/claude", "remote-control"]) is True
+
+
+def test_is_standard_bridge_cmdline_rejects_flag_form_and_non_bridge():
+    # The pty/true-resume form is the --remote-control / --rc FLAG, not the subcommand;
+    # is_bridge_cmdline matches it (substring), so the stricter gate must reject it.
+    assert procutil.is_bridge_cmdline(["claude", "--remote-control", "--resume", "u"]) is True
+    assert (
+        procutil.is_standard_bridge_cmdline(["claude", "--remote-control", "--resume", "u"])
+        is False
+    )
+    assert procutil.is_standard_bridge_cmdline(["claude", "--rc", "name"]) is False
+    assert procutil.is_standard_bridge_cmdline([]) is False
+    assert procutil.is_standard_bridge_cmdline(["claude", "agents", "--json"]) is False
+    assert procutil.is_standard_bridge_cmdline(["python3", "pytest"]) is False  # no claude
+
+
+def test_is_standard_bridge_cmdline_rejects_flag_form_with_remote_control_named_project():
+    # A project literally named "remote-control" passed as the pty flag's positional puts
+    # the bare token into argv; the explicit flag-rejection must still classify it pty.
+    assert (
+        procutil.is_standard_bridge_cmdline(["claude", "--remote-control", "remote-control"])
+        is False
+    )
+    # joined-flag form (--remote-control=name) is rejected too
+    assert procutil.is_standard_bridge_cmdline(["claude", "--remote-control=foo"]) is False
+
+
+def test_is_live_standard_bridge_gates_on_standard_cmdline(monkeypatch):
+    # Standard subcommand + alive + matching create-time -> trusted.
+    monkeypatch.setattr(
+        procutil.psutil, "Process", _fake_proc(cmdline=("claude", "remote-control"), ct=1000.0)
+    )
+    assert procutil.is_live_standard_bridge(1234, 1000.0) is True
+    # The flag-form (pty) bridge is alive and passes the loose is_live_bridge gate, but
+    # the standard gate rejects it — that asymmetry is the whole point of the new check.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(cmdline=("claude", "--remote-control", "--resume", "u"), ct=1000.0),
+    )
+    assert procutil.is_live_bridge(1234, 1000.0) is True
+    assert procutil.is_live_standard_bridge(1234, 1000.0) is False
+
+
 def test_kill_if_match_kills_only_on_match(monkeypatch):
     killed: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: killed.append(pid))

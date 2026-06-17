@@ -4,7 +4,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
+from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import SessionRunner
+
+
+class _FakePtr:
+    """Stand-in for a live Anthropic bridge-pointer.json, for adoption tests (#330)."""
+
+    pid, proc_start, environment_id, session_id = 4242, "1000", "env_x", "session_x"
 
 
 def _client(runner_config) -> TestClient:
@@ -160,3 +167,61 @@ def test_trust_endpoint_read_failure_returns_500(runner_config, monkeypatch):
         resp = client.post("/api/projects/alpha/trust")
         assert resp.status_code == 500
         assert "could not update trust state" in resp.json()["detail"]
+
+
+# -- external-session adoption endpoints (FE-4b, #330) -----------------------
+
+
+def test_adoptable_endpoint_returns_sorted(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr(runner, "adoptable_external_projects", lambda: {"gamma", "alpha"})
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.get("/api/sessions/adoptable")
+        assert resp.status_code == 200
+        assert resp.json() == ["alpha", "gamma"]  # sorted for a stable UI order
+
+
+def test_adopt_endpoint_success(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.post("/api/projects/alpha/adopt")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "running"
+        assert body["bridge_pid"] == 4242
+        assert body["resume_mode"] == "standard"
+
+
+def test_adopt_endpoint_unavailable_returns_409(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr())
+    # Gate fails (pty/flag-form bridge, or stale pointer) -> 409, not a partial adopt.
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: False)
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.post("/api/projects/alpha/adopt")
+        assert resp.status_code == 409
+
+
+def test_adopt_endpoint_already_managed_returns_409(runner_config):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING
+    )
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.post("/api/projects/alpha/adopt")
+        assert resp.status_code == 409
+
+
+def test_adopt_endpoint_unknown_project_returns_404(runner_config):
+    with _client(runner_config) as client:
+        resp = client.post("/api/projects/does-not-exist/adopt")
+        assert resp.status_code == 404

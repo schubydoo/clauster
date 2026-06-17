@@ -67,6 +67,7 @@
       instances: {},
       externalSessions: {},
       externalOpen: {},   // project name -> true while its external-session detail is expanded
+      adoptableProjects: [],  // names whose external session is a standard bridge we can adopt (#330)
       // --- in-app config editor (FE-3, Tier-A allowlist) ---
       configEditor: {
         open: false, loading: false, saving: false,
@@ -424,13 +425,14 @@
         this._refreshing = true;
         let ok = true;
         try {
-          const [iRes, sRes, aRes] = await Promise.all([
+          const [iRes, sRes, aRes, dRes] = await Promise.all([
             fetch(ROOT + "/api/instances"),
             fetch(ROOT + "/api/sessions"),
             fetch(ROOT + "/api/agents"),
+            fetch(ROOT + "/api/sessions/adoptable"),
           ]);
           // Session expired mid-use -> bounce to login instead of silently showing stale data.
-          if (iRes.status === 401 || sRes.status === 401 || aRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (iRes.status === 401 || sRes.status === 401 || aRes.status === 401 || dRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
           if (iRes.ok) {
             const list = await iRes.json();
             const next = {};
@@ -445,6 +447,10 @@
           else { ok = false; }
           if (aRes.ok) this.agents = await aRes.json();
           else { ok = false; }
+          // Adoptable set is advisory (gates the Adopt button only); a failed fetch
+          // just hides the affordance rather than failing the whole refresh.
+          if (dRes.ok) this.adoptableProjects = await dRes.json();
+          else { this.adoptableProjects = []; }
           // Hosted sessions live in a separate registry (HostedManager); only poll
           // them when the claustrum channel is configured.
           if (CLAUSTRUM_ENABLED) {
@@ -614,6 +620,9 @@
       },
       hasExternal(name) { return this.externalCount(name) > 0; },
       toggleExternalNote(name) { this.externalOpen[name] = !this.externalOpen[name]; },
+      // Whether the project's external session is a standard bridge Clauster can adopt (#330).
+      // Server-computed (only it can read the bridge cmdline); pty external sessions are excluded.
+      isAdoptable(name) { return this.adoptableProjects.includes(name); },
       // Flatten {project: [session]} -> [{project, ...session}] for the Active list. The
       // grouped-by-project shape stays the source of truth (project-row note reads it directly).
       externalSessionsFlat() {
@@ -1105,6 +1114,40 @@
         } catch (e) {
           this.errors[name] = String(e);
           if (prev) this.instances[name] = prev; else delete this.instances[name];
+        }
+        await this.refresh();
+      },
+      async adopt(name) {
+        // Take over an external (terminal/Desktop-started) standard bridge so Clauster
+        // can Stop/observe it. Confirm first — adoption is opt-in and a later Resume of
+        // the adopted session starts fresh (its prior conversation isn't recoverable).
+        if (!window.confirm("Manage the external session in \"" + name + "\"?\n\n"
+            + "Clauster will take it over so you can Stop and observe it. Its prior "
+            + "conversation isn't recoverable — a later Resume starts a fresh session.")) return;
+        this.errors[name] = null;
+        const prev = this.instances[name];
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/adopt",
+                                  { method: "POST" });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            this.errors[name] = body.detail || "failed to adopt";
+            this.toast(name + ": adopt failed", "error");
+          } else {
+            this.instances[name] = body;
+            // Optimistically drop the now-managed session from the external lists so the
+            // "external session active" note + Manage button disappear at once (the server
+            // reclassifies it TRACKED on its next poll; the refresh() below confirms).
+            // Reassign whole objects/arrays so Alpine sees the change reactively.
+            const ext = { ...this.externalSessions }; delete ext[name];
+            this.externalSessions = ext;
+            this.adoptableProjects = this.adoptableProjects.filter((n) => n !== name);
+            this.toast(name + ": now managed", "success");
+          }
+        } catch (e) {
+          this.errors[name] = String(e);
+          if (prev) this.instances[name] = prev; else delete this.instances[name];
+          this.toast(name + ": adopt failed", "error");
         }
         await this.refresh();
       },

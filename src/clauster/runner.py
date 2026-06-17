@@ -39,6 +39,7 @@ from .config import (
 from .discovery import discover_projects, is_valid_project_name
 from .models import (
     Attribution,
+    BridgePointer,
     InstanceStatus,
     Project,
     RemoteControlInstance,
@@ -81,6 +82,16 @@ class InstanceStillLive(RuntimeError):
 
     Not a SpawnError: forget is a lifecycle op, not a spawn, and the caller maps this
     to 409 (Stop it first) rather than the 4xx the spawn errors map to.
+    """
+
+
+class AdoptionUnavailable(RuntimeError):
+    """Raised when adopt() can't take over an external session.
+
+    The project has no live *standard* bridge to adopt — it ended between the poll
+    that surfaced it and the click, or it's a pty (flag-form) bridge, which is unsafe
+    to adopt (no recoverable keeper, terminal-coupled Stop). A lifecycle op, not a
+    spawn; the caller maps it to 409.
     """
 
 
@@ -1274,22 +1285,138 @@ class SessionRunner:
                 if resume_mode == "pty"
                 else None
             )
-            self._instances[proj.name] = RemoteControlInstance(
-                project=proj.name,
+            self._instances[proj.name] = self._instance_from_pointer(
+                proj.name,
+                ptr,
                 label=saved.get("label") or proj.name,
                 spawn_mode=spawn_mode,
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
-                keeper_pid=keeper_pid,
-                intentional_stop=False,
-                status=InstanceStatus.RUNNING,
-                bridge_pid=ptr.pid,
                 bridge_proc_start=bridge_proc_start,
-                environment_id=ptr.environment_id,
-                starter_session_id=ptr.session_id,
-                url=f"https://claude.ai/code?environment={ptr.environment_id}",
+                keeper_pid=keeper_pid,
             )
         await self._persist()
+
+    @staticmethod
+    def _instance_from_pointer(
+        name: str,
+        ptr: BridgePointer,
+        *,
+        label: str,
+        spawn_mode: SpawnMode,
+        permission_mode: PermissionMode,
+        resume_mode: ResumeMode,
+        bridge_proc_start: float | None,
+        keeper_pid: int | None,
+    ) -> RemoteControlInstance:
+        """Build a RUNNING managed instance from a live Anthropic-written pointer.
+
+        The pointer supplies the live-derived facts (bridge pid, env id, connect URL);
+        the modes/label/keeper come from the caller (the persisted record or config
+        defaults — the pointer carries none of them). Shared by :meth:`rediscover`
+        (startup reattach of survivors) and :meth:`adopt` (runtime take-over of a
+        standard external session) so both synthesize an identical managed shape. A
+        bridge found alive is by definition NOT intentionally stopped.
+        """
+        return RemoteControlInstance(
+            project=name,
+            label=label,
+            spawn_mode=spawn_mode,
+            permission_mode=permission_mode,
+            resume_mode=resume_mode,
+            keeper_pid=keeper_pid,
+            intentional_stop=False,
+            status=InstanceStatus.RUNNING,
+            bridge_pid=ptr.pid,
+            bridge_proc_start=bridge_proc_start,
+            environment_id=ptr.environment_id,
+            starter_session_id=ptr.session_id,
+            url=f"https://claude.ai/code?environment={ptr.environment_id}",
+        )
+
+    async def adopt(self, name: str) -> RemoteControlInstance:
+        """Take over a live *standard* external bridge as a managed instance (#330).
+
+        Promotes an externally-started ``claude remote-control`` bridge — one Clauster
+        didn't spawn (a terminal- or Desktop-launched session, surfaced as EXTERNAL by
+        the ``agents --json`` cross-check) — into a fully-managed RUNNING instance so it
+        gains the Stop/observe controls, *without* waiting for a restart. (``rediscover``
+        already adopts such bridges at startup; this is the runtime equivalent, reusing
+        the same pointer-synthesis.)
+
+        Fail closed — never kills, never guesses:
+
+        - unknown project -> :class:`UnknownProject` (404);
+        - already managed -> :class:`InstanceStillLive` (409);
+        - no live *standard* bridge at its pointer (it ended, or it's a pty/flag-form
+          bridge, which is unsafe to adopt — no recoverable keeper, terminal-coupled
+          Stop) -> :class:`AdoptionUnavailable` (409). pty external sessions stay
+          display-only.
+
+        Caveat the UI must carry: a standard bridge's environment server dies with its
+        host, so a later Resume of the adopted session is a *fresh* Start, not a
+        continuation of its prior conversation.
+        """
+        # Hold the per-project spawn lock so a concurrent spawn()/resume()/forget()
+        # can't race the registry between the liveness check and the insert.
+        async with self._spawn_lock_for(name):
+            if name in self._instances:
+                raise InstanceStillLive(f"{name!r} is already managed — nothing to adopt")
+            proj = self._discovered().get(name)
+            if proj is None:
+                raise UnknownProject(f"no such project: {name!r}")
+            ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
+            # Re-check liveness AND the standard-subcommand cmdline at click time: a
+            # stale pointer (the bridge died since the poll) or a pty/flag-form bridge
+            # both fail the gate, so adoption can only ever take over a live standard
+            # bridge — the one shape it can safely Stop.
+            if ptr is None or not await asyncio.to_thread(
+                procutil.is_live_standard_bridge, ptr.pid, ptr.proc_start
+            ):
+                raise AdoptionUnavailable(
+                    f"{name!r} has no live standard bridge to adopt — it may have ended, "
+                    "or it's a pty (true-resume) bridge, which can't be adopted"
+                )
+            saved = self._persisted.get(name, {})
+            spawn_mode, permission_mode, _resume_mode = self._saved_modes(saved)
+            instance = self._instance_from_pointer(
+                name,
+                ptr,
+                label=saved.get("label") or name,
+                spawn_mode=spawn_mode,
+                permission_mode=permission_mode,
+                # The live process is positively confirmed standard above (cmdline
+                # gate), so pin "standard" rather than trusting a possibly-stale
+                # persisted resume_mode — keeper recovery / double-SIGINT stop stay off.
+                resume_mode="standard",
+                bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
+                keeper_pid=None,
+            )
+            self._instances[name] = instance
+            await self._persist()
+            return instance
+
+    def adoptable_external_projects(self) -> set[str]:
+        """Project names whose live EXTERNAL session is a *standard* bridge safe to adopt.
+
+        A standard external bridge writes an Anthropic pointer whose pid is a live
+        ``claude remote-control`` subcommand process; a pty (flag-form) external bridge
+        is excluded (unsafe to adopt — see :meth:`adopt`), as is one whose pointer has
+        gone stale. Computed from the same pointer + cmdline checks :meth:`adopt`
+        enforces, so the dashboard's Adopt affordance can never offer an adoption that
+        :meth:`adopt` would then refuse. Synchronous (filesystem + ``psutil``); call it
+        off-loop.
+        """
+        discovered = self._discovered()
+        adoptable: set[str] = set()
+        for name in self.external_sessions_by_project():
+            proj = discovered.get(name)
+            if proj is None:
+                continue
+            ptr = pointers.pointer_for_project(proj.path)
+            if ptr is not None and procutil.is_live_standard_bridge(ptr.pid, ptr.proc_start):
+                adoptable.add(name)
+        return adoptable
 
     async def poll_once(self) -> None:
         """Reconcile bridge liveness and cross-check `claude agents --json`.
@@ -1368,6 +1495,14 @@ class SessionRunner:
         # the record (intentionally — it preserves the project's modes for a later managed
         # spawn). Re-materialization by `_stopped_from_persisted` is cleaned by the next poll.
         for n, inst in list(self._instances.items()):
+            # Only prune non-live (STOPPED/CRASHED) phantoms. A RUNNING/STARTING instance
+            # here that isn't in live_projects was inserted AFTER this poll snapshotted
+            # live_projects (the lock-free poll races a lock-held adopt()/spawn() that lands
+            # during the list_working_sessions suspension) — pruning it would silently undo
+            # a just-adopted/spawned bridge. The first loop already reconciled every instance
+            # it saw, so a genuinely-dead record is no longer RUNNING by the time we get here.
+            if inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
+                continue
             if (
                 inst.project not in live_projects
                 and inst.project in discovered

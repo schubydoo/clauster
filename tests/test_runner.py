@@ -15,7 +15,13 @@ from clauster.models import (
     RemoteControlInstance,
     WorkingSession,
 )
-from clauster.runner import InstanceStillLive, NotTrusted, SessionRunner, UnknownProject
+from clauster.runner import (
+    AdoptionUnavailable,
+    InstanceStillLive,
+    NotTrusted,
+    SessionRunner,
+    UnknownProject,
+)
 from clauster.state import StateStore
 
 
@@ -636,6 +642,189 @@ def test_external_sessions_by_project(runner_config):
 def test_external_sessions_empty_when_none(runner_config):
     runner = _make_runner(runner_config)
     assert runner.external_sessions_by_project() == {}
+
+
+# -- external-session adoption (FE-4b, #330) ---------------------------------
+
+
+class _FakePtr:
+    """Stand-in for a live Anthropic bridge-pointer.json (sessionId/env/pid/procStart)."""
+
+    def __init__(self, pid=4242):
+        self.pid = pid
+        self.proc_start = "1000"
+        self.environment_id = "env_x"
+        self.session_id = "session_x"
+
+
+async def test_adopt_promotes_external_standard_session(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+
+    inst = await runner.adopt("alpha")
+    assert inst.status is InstanceStatus.RUNNING
+    assert inst.bridge_pid == 4242
+    assert inst.resume_mode == "standard"  # standard external bridge
+    assert inst.keeper_pid is None  # no keeper for a standard bridge
+    assert inst.environment_id == "env_x"
+    assert "env_x" in (inst.url or "")
+    assert runner.get_instance("alpha") is inst
+    # Persisted so a clauster restart keeps managing it.
+    fresh = SessionRunner(config, claude_json=claude_json)
+    assert "alpha" in fresh._persisted
+
+
+async def test_adopt_refuses_pty_or_dead_external(runner_config, monkeypatch):
+    # is_live_standard_bridge is False for a pty (flag-form) bridge OR a pointer that
+    # went stale between the poll and the click -> fail closed, never partially adopt.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr())
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: False)
+    with pytest.raises(AdoptionUnavailable):
+        await runner.adopt("alpha")
+    assert runner.get_instance("alpha") is None
+
+
+async def test_adopt_refuses_when_no_pointer(runner_config, monkeypatch):
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    with pytest.raises(AdoptionUnavailable):
+        await runner.adopt("alpha")
+    assert runner.get_instance("alpha") is None
+
+
+async def test_adopt_refuses_already_managed(runner_config):
+    runner = _make_runner(runner_config)
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING
+    )
+    with pytest.raises(InstanceStillLive):
+        await runner.adopt("alpha")
+
+
+async def test_adopt_unknown_project(runner_config):
+    runner = _make_runner(runner_config)
+    with pytest.raises(UnknownProject):
+        await runner.adopt("does-not-exist")
+
+
+async def test_adopt_pins_standard_over_stale_persisted_pty_mode(runner_config, monkeypatch):
+    # A project that previously ran pty leaves resume_mode="pty" persisted. The LIVE
+    # bridge is positively confirmed standard (cmdline gate), so the adopted instance
+    # must pin "standard" — else stop() would wrongly use the pty double-SIGINT path.
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "my-alpha", "resume_mode": "pty", "spawn_mode": "same-dir"}}
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+
+    inst = await runner.adopt("alpha")
+    assert inst.resume_mode == "standard"  # pinned, NOT the stale persisted "pty"
+    assert inst.keeper_pid is None
+    assert inst.label == "my-alpha"  # persisted label still overlaid
+    assert inst.spawn_mode == "same-dir"  # only resume_mode is pinned; other modes kept
+
+
+def test_adoptable_external_projects(runner_config, monkeypatch):
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    root = config.projects_root
+
+    def session(pid, rel):
+        return WorkingSession(
+            pid=pid,
+            cwd=root / rel,
+            kind="interactive",
+            started_at=pid,
+            local_uuid=f"u{pid}",
+            attribution=Attribution.EXTERNAL,
+        )
+
+    runner._sessions = [session(11, "alpha"), session(22, "beta"), session(33, "gamma")]
+    # alpha + beta have a pointer; gamma has none. Only alpha's is a live STANDARD bridge
+    # (beta's is a pty/flag-form bridge -> excluded from adoption).
+    ptrs = {"alpha": _FakePtr(11), "beta": _FakePtr(22)}
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: ptrs.get(path.name))
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_standard_bridge", lambda pid, *a, **k: pid == 11
+    )
+    assert runner.adoptable_external_projects() == {"alpha"}
+
+
+def test_adoptable_skips_undiscovered_project(runner_config, monkeypatch):
+    # Defensive guard: if a project vanishes from discovery between
+    # external_sessions_by_project() and adoptable's own _discovered() snapshot (a
+    # filesystem race), the name is skipped — no crash, never adoptable.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(runner, "external_sessions_by_project", lambda: {"ghost-project": []})
+    assert runner.adoptable_external_projects() == set()
+
+
+async def test_adopt_then_stop_uses_single_sigint(runner_config, monkeypatch):
+    # The payoff of pinning standard: an adopted session Stops via a clean single SIGINT
+    # to the pointer pid (twice=False), never the pty confirming double-SIGINT.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    await runner.adopt("alpha")
+
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        SessionRunner,
+        "_signal_stop",
+        staticmethod(lambda pid, *, twice=False: calls.append((pid, twice))),
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    async def _noop_exit(self, *a, **k):
+        return None
+
+    monkeypatch.setattr(SessionRunner, "_await_exit", _noop_exit)
+    inst = await runner.stop("alpha")
+    assert inst.status is InstanceStatus.STOPPED
+    assert calls == [(4242, False)]  # single SIGINT to the adopted bridge's pid
+
+
+async def test_poll_does_not_prune_freshly_adopted_running_instance(runner_config, monkeypatch):
+    # Race regression: poll_once() is lock-free and snapshots live_projects BEFORE its
+    # list_working_sessions suspension. A lock-held adopt() landing during that suspension
+    # inserts a RUNNING instance the snapshot never saw — the prune loop must NOT delete it
+    # (it targets only non-live STOPPED phantoms). Reproduced deterministically by inserting
+    # the instance as a side effect of list_working_sessions, exactly when the race occurs.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    cwd = config.projects_root / "alpha"
+
+    def list_then_adopt(*a, **k):
+        # adopt() completes mid-suspension: a RUNNING instance for alpha appears AFTER
+        # live_projects (empty — no managed bridge existed at snapshot) was computed.
+        runner._instances["alpha"] = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.RUNNING,
+            resume_mode="standard",
+            bridge_pid=4242,
+        )
+        return [
+            WorkingSession(pid=999, cwd=cwd, kind="interactive", started_at=999, local_uuid="u")
+        ]
+
+    monkeypatch.setattr(inspector, "list_working_sessions", list_then_adopt)
+    await runner.poll_once()
+    assert "alpha" in runner._instances  # adopted RUNNING instance survived the prune
 
 
 async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monkeypatch):

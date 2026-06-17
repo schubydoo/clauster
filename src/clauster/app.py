@@ -69,6 +69,7 @@ from .provisioning import (
 )
 from .redact import sanitize_line
 from .runner import (
+    AdoptionUnavailable,
     InstanceStillLive,
     InvalidSpawnOption,
     PermissionModeNotAllowed,
@@ -813,6 +814,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """External (unmanaged) working sessions grouped by project name (bug #4)."""
         return runner.external_sessions_by_project()
 
+    @app.get("/api/sessions/adoptable")
+    async def api_sessions_adoptable() -> list[str]:
+        """Project names whose live external session is a standard bridge safe to adopt (#330).
+
+        The dashboard gates its per-project Adopt affordance on this list — a pty
+        (flag-form) external bridge is excluded (unsafe to adopt; see runner.adopt).
+        Off-loaded to a thread (filesystem + ``psutil``). Auth-gated by the guard
+        middleware like every other ``/api/*`` route.
+        """
+        return sorted(await asyncio.to_thread(runner.adoptable_external_projects))
+
     @app.get("/api/config")
     async def api_config_get() -> dict:
         """Tier-A editable config values + a content hash, for the in-app editor (FE-3).
@@ -1211,6 +1223,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except (InstanceStillLive, HostedSessionError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"id": instance_id, "forgotten": True}
+
+    @app.post("/api/projects/{name}/adopt")
+    async def api_adopt(name: str) -> RemoteControlInstance:
+        """Take over a live standard external session as a managed instance (#330).
+
+        Fail closed: unknown project -> 404; already managed, or no live standard
+        bridge to adopt (it ended, or it's a pty bridge) -> 409. A pty external
+        session is never adoptable — it stays display-only.
+        """
+        try:
+            return await runner.adopt(name)
+        except UnknownProject as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (InstanceStillLive, AdoptionUnavailable) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/projects/{name}/trust")
     async def api_trust(name: str) -> Project:

@@ -64,6 +64,33 @@ def is_bridge_cmdline(cmdline: list[str]) -> bool:
     return all(tok in cmdline or tok in joined for tok in _BRIDGE_CMDLINE)
 
 
+def is_standard_bridge_cmdline(cmdline: list[str]) -> bool:
+    """Whether a cmdline is the *standard* ``claude remote-control`` subcommand bridge.
+
+    The standard (multi-session) form carries ``remote-control`` as a standalone
+    argv token (``claude remote-control …``); the pty true-resume form is the
+    ``--remote-control`` / ``--rc`` **flag** instead. :func:`is_bridge_cmdline`
+    matches both (it substring-tests the joined cmdline), so it can't tell them
+    apart — this exact-token check can, and only the subcommand form passes.
+
+    External-session adoption (#330) is gated on this: a standard external bridge is
+    safely adoptable (its pid is its own process group, Stop is a clean single
+    SIGINT), whereas a pty external bridge is not (no recoverable keeper, its Stop is
+    terminal-coupled). A flag-form bridge must therefore fail this gate.
+    """
+    if not cmdline:
+        return False
+    if _BRIDGE_BINARY_HINT not in " ".join(cmdline):
+        return False
+    # Reject the flag form explicitly FIRST: `--remote-control <name>` / `--rc <name>` /
+    # `--remote-control=…`. Otherwise a project literally named "remote-control", passed as
+    # the flag's positional, would put the bare token into argv and sneak past the
+    # membership check below — misclassifying a pty bridge as adoptable.
+    if any(tok == "--rc" or tok.startswith("--remote-control") for tok in cmdline):
+        return False
+    return "remote-control" in cmdline  # exact argv element (the subcommand), not a flag
+
+
 def is_hosted_cmdline(cmdline: list[str]) -> bool:
     """Whether a command line is a headless ``claude … stream-json`` hosted agent.
 
@@ -135,6 +162,21 @@ def is_live_bridge(pid: int, proc_start: str | float | None, *, tolerance: float
     non-zombie, start-time matches, AND a ``claude … remote-control`` cmdline.
     """
     return is_live_process(pid, proc_start, tolerance=tolerance, require_cmdline=is_bridge_cmdline)
+
+
+def is_live_standard_bridge(
+    pid: int, proc_start: str | float | None, *, tolerance: float = 2.0
+) -> bool:
+    """Whether ``pid`` is a live bridge AND the *standard* subcommand form.
+
+    Like :func:`is_live_bridge`, but the cmdline gate is the stricter
+    :func:`is_standard_bridge_cmdline` — used to confirm an external session is a
+    standard bridge before adopting it (a pty/flag-form bridge fails the gate; see
+    that function for why pty adoption is unsafe).
+    """
+    return is_live_process(
+        pid, proc_start, tolerance=tolerance, require_cmdline=is_standard_bridge_cmdline
+    )
 
 
 def is_killable_hosted(pid: int, proc_start: str | float | None) -> bool:
