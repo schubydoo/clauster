@@ -1495,6 +1495,14 @@ class SessionRunner:
         # the record (intentionally — it preserves the project's modes for a later managed
         # spawn). Re-materialization by `_stopped_from_persisted` is cleaned by the next poll.
         for n, inst in list(self._instances.items()):
+            # Only prune non-live (STOPPED/CRASHED) phantoms. A RUNNING/STARTING instance
+            # here that isn't in live_projects was inserted AFTER this poll snapshotted
+            # live_projects (the lock-free poll races a lock-held adopt()/spawn() that lands
+            # during the list_working_sessions suspension) — pruning it would silently undo
+            # a just-adopted/spawned bridge. The first loop already reconciled every instance
+            # it saw, so a genuinely-dead record is no longer RUNNING by the time we get here.
+            if inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
+                continue
             if (
                 inst.project not in live_projects
                 and inst.project in discovered

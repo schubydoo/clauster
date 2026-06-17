@@ -789,6 +789,35 @@ async def test_adopt_then_stop_uses_single_sigint(runner_config, monkeypatch):
     assert calls == [(4242, False)]  # single SIGINT to the adopted bridge's pid
 
 
+async def test_poll_does_not_prune_freshly_adopted_running_instance(runner_config, monkeypatch):
+    # Race regression: poll_once() is lock-free and snapshots live_projects BEFORE its
+    # list_working_sessions suspension. A lock-held adopt() landing during that suspension
+    # inserts a RUNNING instance the snapshot never saw — the prune loop must NOT delete it
+    # (it targets only non-live STOPPED phantoms). Reproduced deterministically by inserting
+    # the instance as a side effect of list_working_sessions, exactly when the race occurs.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    cwd = config.projects_root / "alpha"
+
+    def list_then_adopt(*a, **k):
+        # adopt() completes mid-suspension: a RUNNING instance for alpha appears AFTER
+        # live_projects (empty — no managed bridge existed at snapshot) was computed.
+        runner._instances["alpha"] = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.RUNNING,
+            resume_mode="standard",
+            bridge_pid=4242,
+        )
+        return [
+            WorkingSession(pid=999, cwd=cwd, kind="interactive", started_at=999, local_uuid="u")
+        ]
+
+    monkeypatch.setattr(inspector, "list_working_sessions", list_then_adopt)
+    await runner.poll_once()
+    assert "alpha" in runner._instances  # adopted RUNNING instance survived the prune
+
+
 async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monkeypatch):
     # A phantom STOPPED instance (e.g. `_stopped_from_persisted` from a stale pointer)
     # must not shadow a live EXTERNAL (flag-form/tmux) bridge at the same cwd: poll_once
