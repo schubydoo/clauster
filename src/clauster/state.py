@@ -15,12 +15,32 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from .atomicio import atomic_write_text
 
 CURRENT_SCHEMA = 1
 
 _log = logging.getLogger("clauster.state")
+
+
+@runtime_checkable
+class KeyedStore(Protocol):
+    """The ``{key: {fields}}`` load/save contract shared by every state store.
+
+    Both the legacy JSON stores here and the DB-backed stores in
+    :mod:`clauster.db.stores` satisfy this, so callers (the runner, the hosted
+    manager) type against the contract rather than a concrete class — the seam the
+    persistence foundation (#362) swapped the backend behind.
+    """
+
+    def load(self) -> dict[str, dict]:
+        """Return the persisted ``{key: {fields}}`` map (``{}`` if unreadable)."""
+        ...
+
+    def save(self, records: dict[str, dict]) -> None:
+        """Persist the full ``{key: {fields}}`` map (a replace, not a merge)."""
+        ...
 
 
 class KeyedJsonStore:

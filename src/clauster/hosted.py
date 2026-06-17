@@ -45,9 +45,9 @@ from typing import Any
 from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
 from .config import PermissionMode
-from .hosted_state import HostedStateStore
 from .models import InstanceStatus, RemoteControlInstance
 from .redact import sanitize_line
+from .state import KeyedStore
 
 logger = logging.getLogger(__name__)
 
@@ -553,7 +553,7 @@ class HostedManager:
     touches no bridge-lifecycle code. The dashboard unions both for display.
     """
 
-    def __init__(self, store: HostedStateStore | None = None) -> None:
+    def __init__(self, store: KeyedStore | None = None) -> None:
         """Create an empty manager (no sessions until :meth:`spawn`/:meth:`reattach_all`).
 
         ``store`` enables CL-6 restart resilience: spawn/stop persist the registry and

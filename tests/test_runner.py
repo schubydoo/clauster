@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 
 from clauster import bridge_log, inspector, procutil
+from clauster.db.persistence import Persistence
 from clauster.models import (
     Attribution,
     InstanceStatus,
@@ -22,12 +23,21 @@ from clauster.runner import (
     SessionRunner,
     UnknownProject,
 )
-from clauster.state import StateStore
 
 
 def _make_runner(runner_config) -> SessionRunner:
     config, claude_json = runner_config
     return SessionRunner(config, claude_json=claude_json)
+
+
+def _db_state_store(state_dir):
+    """A DB-backed StateStore on ``state_dir`` (persistence is DB-backed since #362).
+
+    Tests seed/read persisted state through this; a separate ``SessionRunner`` builds
+    its own engine on the SAME SQLite file under ``state_dir`` (WAL + busy-timeout
+    make concurrent engines safe), so it observes what the test wrote.
+    """
+    return Persistence(state_dir).state_store()
 
 
 async def test_spawn_ready_then_stop(runner_config, monkeypatch):
@@ -360,7 +370,7 @@ async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_con
     # (not wiped on the post-rediscover save, which would later resume it with
     # default modes — a silent downgrade).
     config, claude_json = runner_config
-    StateStore(config.state_dir).save(
+    _db_state_store(config.state_dir).save(
         {
             "alpha": {
                 "label": "Custom Label",
@@ -382,7 +392,7 @@ async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_con
     assert inst.label == "Custom Label"
     assert inst.intentional_stop is True  # carried through
 
-    reloaded = StateStore(config.state_dir).load()
+    reloaded = _db_state_store(config.state_dir).load()
     assert reloaded["alpha"]["permission_mode"] == "plan"
     assert reloaded["alpha"]["spawn_mode"] == "same-dir"
     assert reloaded["alpha"]["resume_mode"] == "standard"
@@ -395,7 +405,7 @@ async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_conf
     # conversation) — this is the dogfood bug. A discovered project with NO persisted
     # record is left absent: no phantom card offering to resume nothing.
     config, claude_json = runner_config
-    StateStore(config.state_dir).save(
+    _db_state_store(config.state_dir).save(
         {
             "alpha": {
                 "label": "alpha",
@@ -718,7 +728,7 @@ async def test_adopt_pins_standard_over_stale_persisted_pty_mode(runner_config, 
     # bridge is positively confirmed standard (cmdline gate), so the adopted instance
     # must pin "standard" — else stop() would wrongly use the pty double-SIGINT path.
     config, claude_json = runner_config
-    StateStore(config.state_dir).save(
+    _db_state_store(config.state_dir).save(
         {"alpha": {"label": "my-alpha", "resume_mode": "pty", "spawn_mode": "same-dir"}}
     )
     runner = SessionRunner(config, claude_json=claude_json)
@@ -930,7 +940,7 @@ async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
 async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     config, claude_json = runner_config
     # alpha was intentionally stopped with a custom label; zeta is stale/persisted.
-    StateStore(config.state_dir).save(
+    _db_state_store(config.state_dir).save(
         {
             "alpha": {
                 "label": "my-alpha",
@@ -967,7 +977,7 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
 
 async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkeypatch):
     config, claude_json = runner_config
-    StateStore(config.state_dir).save(
+    _db_state_store(config.state_dir).save(
         {
             "alpha": {
                 "label": "alpha",
