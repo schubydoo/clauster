@@ -40,6 +40,13 @@ CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.1
 (all merge-blocking; Linux additionally enforces the 96% coverage gate), plus
 lint, security scanners, and dependency review.
 
+## Documentation
+
+Project docs live under [`docs/`](docs/index.md) (published with MkDocs). When
+working on operability or deployment, the [Operations runbook](docs/operations.md)
+collects health checks (`/healthz`, `/metrics`), `clauster doctor`, crash alerts,
+reading the bridge debug log, the `KillMode` restart caveat, and backup/recovery.
+
 ## License
 
 By contributing, you agree that your contributions are licensed under the

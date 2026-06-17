@@ -85,6 +85,7 @@ mode, this *recaps* the prior conversation rather than truly restoring it.
 - [Privacy](privacy.md) — what Clauster keeps on disk, and how to purge it.
 - [Networking](networking.md) — the loopback / non-loopback auth matrix.
 - [Architecture](architecture.md) — module map and bridge lifecycle.
+- [Operations](operations.md) — monitoring + troubleshooting runbook.
 
 ## Stack
 
