@@ -236,13 +236,24 @@
       // so the Active zone (fixed at the top) only ever shows what's genuinely running.
       liveHosted() { return this.hosted.filter((h) => ["running", "starting", "stopping"].includes(h.status)); },
       endedHosted() { return this.hosted.filter((h) => ["stopped", "crashed", "error"].includes(h.status)); },
-      liveAgents() { return this.agents.filter((j) => j.worker_alive || ["working", "blocked"].includes(j.state)); },
-      endedAgents() { return this.agents.filter((j) => !(j.worker_alive || ["working", "blocked"].includes(j.state))); },
+      // A detached session is "live" while its worker process runs or it's actively
+      // working/blocked; once ended there's no process to Stop — only Forget (remove the record).
+      agentLive(j) { return j.worker_alive || ["working", "blocked"].includes(j.state); },
+      liveAgents() { return this.agents.filter((j) => this.agentLive(j)); },
+      endedAgents() { return this.agents.filter((j) => !this.agentLive(j)); },
       // Stopped/crashed bridges that can be reconnected (Resume) — surfaced in Recent.
       endedBridges() { return Object.values(this.instances).filter((i) => this.isResumable(i.project)); },
       hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length > 0; },
       hasRecent() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length > 0; },
       recentCount() { return this.endedHosted().length + this.endedBridges().length + this.endedAgents().length; },
+      // Whether the Recent group actually holds a *resumable* item, so the label doesn't
+      // imply resume for a set of ended background agents (which are never resumable):
+      // ended bridges are resumable by definition (isResumable), ended hosted only with a
+      // claude_session_uuid, ended detached agents never. (#333 Option B)
+      hasResumable() {
+        return this.endedBridges().length > 0
+          || this.endedHosted().some((h) => h.claude_session_uuid);
+      },
       // Status -> left-rail colour: the rail encodes liveness/attention, NOT mode (mode is
       // already the badge). live=green · starting=azure · attention=yellow · ended=grey.
       hostedRailClass(h) {
@@ -495,9 +506,15 @@
       },
       async stopAgent(j) {
         const label = j.name || j.id;
-        const msg = j.bridge_session_id
-          ? "Stop \"" + label + "\"? This deregisters its cloud session."
-          : "Stop and remove \"" + label + "\"?";
+        const live = this.agentLive(j);
+        const msg = live
+          ? (j.bridge_session_id
+              ? "Stop \"" + label + "\"? This deregisters its cloud session."
+              : "Stop and remove \"" + label + "\"?")
+          : (j.bridge_session_id
+              ? "Remove \"" + label + "\" from the list? The worker has already ended, so its "
+                + "claude.ai session is not deregistered — re-check `claude agents` for an orphan."
+              : "Remove \"" + label + "\" from the list?");
         if (!window.confirm(msg)) return;
         this.agentStopping[j.id] = true;
         try {
