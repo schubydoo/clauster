@@ -228,7 +228,7 @@
       liveHosted() { return this.hosted.filter((h) => ["running", "starting", "stopping"].includes(h.status)); },
       endedHosted() { return this.hosted.filter((h) => ["stopped", "crashed", "error"].includes(h.status)); },
       // A detached session is "live" while its worker process runs or it's actively
-      // working/blocked; once ended there's no process to Stop (only Forget/Deregister).
+      // working/blocked; once ended there's no process to Stop — only Forget (remove the record).
       agentLive(j) { return j.worker_alive || ["working", "blocked"].includes(j.state); },
       liveAgents() { return this.agents.filter((j) => this.agentLive(j)); },
       endedAgents() { return this.agents.filter((j) => !this.agentLive(j)); },
