@@ -25,6 +25,7 @@ from clauster.hosted import (
 )
 from clauster.hosted_state import HostedStateStore
 from clauster.models import InstanceStatus, RemoteControlInstance
+from conftest import wait_until
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="claustrum hosted channel is POSIX-only (AF_UNIX)"
@@ -259,7 +260,14 @@ async def test_initialize_control_request_auto_acked(fake_claustrum):
         }
         await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
         # Auto-acked: a control_response success lands on stdin and nothing parks.
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: any(
+                f.get("type") == "control_response"
+                and f["response"]["subtype"] == "success"
+                and f["response"]["request_id"] == "init-1"
+                for f in _stdin_frames(fake)
+            )
+        )
         frames = _stdin_frames(fake)
         assert any(
             f.get("type") == "control_response"
@@ -290,7 +298,9 @@ async def test_permission_request_is_parked_not_auto_answered(fake_claustrum):
         assert [r.request_id for r in session.pending_requests] == ["perm-1"]
 
         await session.respond_control("perm-1", {"behavior": "allow"})
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        )
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses and responses[0]["response"]["request_id"] == "perm-1"
         # The CLI requires updatedInput on every allow — defaulted from the parked
@@ -325,7 +335,9 @@ async def test_allow_without_parked_input_sends_empty_record(fake_claustrum, req
         await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
         await _drain_until(session.subscribe(), "control_request")
         await session.respond_control("perm-1", {"behavior": "allow"})
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        )
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses[0]["response"]["response"] == {"behavior": "allow", "updatedInput": {}}
 
@@ -358,8 +370,7 @@ async def test_failed_response_write_leaves_request_parked(fake_claustrum, monke
         # Retry once the transport recovers: the same request answers cleanly.
         monkeypatch.undo()
         await session.respond_control("perm-1", {"behavior": "allow"})
-        await asyncio.sleep(0.05)
-        assert session.pending_requests == []
+        await wait_until(lambda: not session.pending_requests)
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses and responses[-1]["response"]["request_id"] == "perm-1"
 
@@ -396,7 +407,7 @@ async def test_concurrent_responders_answer_a_request_once(fake_claustrum, monke
         )
         errors = [r for r in results if isinstance(r, Exception)]
         assert len(errors) == 1 and isinstance(errors[0], HostedSessionError)
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: not session.pending_requests)
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert len(responses) == 1
         assert session.pending_requests == []
@@ -418,7 +429,9 @@ async def test_allow_with_explicit_updated_input_is_preserved(fake_claustrum):
         await session.respond_control(
             "perm-1", {"behavior": "allow", "updatedInput": {"command": "echo edited"}}
         )
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        )
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses[0]["response"]["response"]["updatedInput"] == {"command": "echo edited"}
 
@@ -437,7 +450,9 @@ async def test_deny_response_is_not_modified(fake_claustrum):
         await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
         await _drain_until(session.subscribe(), "control_request")
         await session.respond_control("perm-1", {"behavior": "deny", "message": "no"})
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
+        )
         responses = [f for f in _stdin_frames(fake) if f.get("type") == "control_response"]
         assert responses[0]["response"]["response"] == {"behavior": "deny", "message": "no"}
 
@@ -461,8 +476,7 @@ async def test_respond_after_exit_raises_not_claustrum_error(fake_claustrum):
         await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
         await _drain_until(session.subscribe(), "control_request")
         await fake.emit_exit(_PID, 3)  # session crashes while the request is parked
-        await asyncio.sleep(0.05)
-        assert session.status == "crashed"
+        await wait_until(lambda: session.status == "crashed")
         with pytest.raises(HostedSessionError):
             await session.respond_control("perm-1", {"behavior": "allow"})
         # Exit clears the parked request (resolved as interrupted), so respond raises at
@@ -504,7 +518,7 @@ async def test_respond_rejected_while_stopping(fake_claustrum):
         await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
         await _drain_until(session.subscribe(), "control_request")
         stop_task = asyncio.create_task(session.stop())
-        await asyncio.sleep(0.01)  # let stop() latch _stopping before we respond
+        await wait_until(lambda: session._stopping)
         assert session.status == "running" and session._stopping
         with pytest.raises(HostedSessionError, match="stopping"):
             await session.respond_control("perm-1", {"behavior": "allow"})
@@ -631,7 +645,7 @@ async def test_failed_write_resolves_instead_of_reparking_on_dead_session(
 async def test_send_message_writes_user_frame(fake_claustrum):
     async with _session(fake_claustrum) as (fake, session):
         await session.send_message("hello there")
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: _stdin_frames(fake))
         frames = _stdin_frames(fake)
         assert frames == [{"type": "user", "message": {"role": "user", "content": "hello there"}}]
 
@@ -639,8 +653,7 @@ async def test_send_message_writes_user_frame(fake_claustrum):
 async def test_send_message_rejected_after_exit(fake_claustrum):
     async with _session(fake_claustrum) as (fake, session):
         await fake.emit_exit(_PID, 0)
-        await asyncio.sleep(0.05)
-        assert session.status == "stopped"
+        await wait_until(lambda: session.status == "stopped")
         with pytest.raises(HostedSessionError):
             await session.send_message("too late")
 
@@ -875,7 +888,7 @@ async def test_manager_send_routes_to_session(fake_claustrum):
     async with _manager(fake_claustrum) as (fake, client, mgr):
         inst = await _spawn(mgr, client)
         await mgr.send(inst.claustrum_process_id, "hello")
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: _stdin_frames(fake, inst.claustrum_process_id))
         frames = _stdin_frames(fake, inst.claustrum_process_id)
         assert frames == [{"type": "user", "message": {"role": "user", "content": "hello"}}]
 
@@ -896,9 +909,11 @@ async def test_manager_respond_routes_to_session(fake_claustrum):
             "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
         }
         await fake.emit(pid, "stdout", (json.dumps(frame) + "\n").encode())
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: mgr.session(pid) and mgr.session(pid).pending_requests)
         await mgr.respond(pid, "perm-1", {"behavior": "allow"})
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: [f for f in _stdin_frames(fake, pid) if f.get("type") == "control_response"]
+        )
         responses = [f for f in _stdin_frames(fake, pid) if f.get("type") == "control_response"]
         assert responses and responses[0]["response"]["request_id"] == "perm-1"
 
@@ -917,7 +932,7 @@ async def test_manager_synced_reflects_exit(fake_claustrum):
             pid, "stdout", (json.dumps({"type": "system", "session_id": "u-1"}) + "\n").encode()
         )
         await fake.emit_exit(pid, 0)
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
         synced = mgr.get_instance(pid)
         assert synced.status is InstanceStatus.STOPPED
         assert synced.claude_session_uuid == "u-1"
@@ -929,7 +944,7 @@ async def test_manager_stop_returns_synced_instance(fake_claustrum):
         inst = await _spawn(mgr, client)
         pid = inst.claustrum_process_id
         await fake.emit_exit(pid, 0)  # exit first so stop() doesn't wait out the grace
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
         result = await mgr.stop(pid)
         assert result.status is InstanceStatus.STOPPED
 
@@ -939,7 +954,7 @@ async def test_manager_forget_drops_stopped_session(fake_claustrum):
         inst = await _spawn(mgr, client)
         pid = inst.claustrum_process_id
         await fake.emit_exit(pid, 0)
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
         await mgr.stop(pid)
         assert mgr.get_instance(pid) is not None  # a stopped, resumable row
 
@@ -957,7 +972,7 @@ async def test_manager_forget_with_no_session_handle(fake_claustrum):
         inst = await _spawn(mgr, client)
         pid = inst.claustrum_process_id
         await fake.emit_exit(pid, 0)
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
         await mgr.stop(pid)
         mgr._sessions.pop(pid, None)  # drop the session handle, keep the instance
         assert mgr.session(pid) is None
@@ -979,7 +994,7 @@ async def test_manager_forget_refuses_orphan(fake_claustrum):
         inst = await _spawn(mgr, client)
         pid = inst.claustrum_process_id
         await fake.emit_exit(pid, 0)
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
         await mgr.stop(pid)
         mgr.get_instance(pid).is_orphan = True  # a live survivor — must be Killed, not forgotten
         with pytest.raises(HostedSessionError, match="orphan"):
@@ -1000,7 +1015,12 @@ async def test_manager_aclose_idempotent_over_exited(fake_claustrum):
         b = await _spawn(mgr, client, project="b")
         for inst in (a, b):
             await fake.emit_exit(inst.claustrum_process_id, 0)
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: all(
+                mgr.get_instance(i.claustrum_process_id).status is InstanceStatus.STOPPED
+                for i in (a, b)
+            )
+        )
         await mgr.aclose()
         assert all(
             mgr.get_instance(i.claustrum_process_id).status is InstanceStatus.STOPPED
@@ -1037,7 +1057,7 @@ async def _spawn_gen1(fake, store):
         )
         pid = inst.claustrum_process_id
         await fake.emit(pid, "stdout", b'{"type":"system","subtype":"init"}\n')
-        await asyncio.sleep(0.05)  # let the pump drain the frame + advance daemon_last_seq
+        await wait_until(lambda: mgr.get_instance(pid).daemon_last_seq > 0)
         await mgr.aclose()  # detach (NOT kill) + persist the cursor
     return pid
 
@@ -1259,7 +1279,7 @@ async def _crash_with_uuid(fake, mgr, client, uuid):
         pid, "stdout", (json.dumps({"type": "system", "session_id": uuid}) + "\n").encode()
     )
     await fake.emit_exit(pid, 1)  # nonzero → crashed
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.CRASHED)
     return pid
 
 
@@ -1302,7 +1322,7 @@ async def test_manager_resume_persists_only_resumed_row(fake_claustrum, tmp_path
             old_id, "stdout", (json.dumps({"type": "system", "session_id": uuid}) + "\n").encode()
         )
         await fake.emit_exit(old_id, 1)
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: mgr.get_instance(old_id).status is InstanceStatus.CRASHED)
         resumed = await mgr.resume(client, old_id, cwd=str(tmp_path), claude_binary=_BIN)
         new_id = resumed.claustrum_process_id
 
@@ -1353,7 +1373,7 @@ async def test_manager_resume_without_uuid_raises(fake_claustrum):
         inst = await _spawn(mgr, client)
         pid = inst.claustrum_process_id
         await fake.emit_exit(pid, 1)  # crashed, but no session_id was ever seen
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.CRASHED)
         with pytest.raises(HostedSessionError):
             await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import sys
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -103,3 +105,20 @@ def runner_config(tmp_path: Path, projects_root: Path):
         claude={"binary": str(FAKE_CLAUDE)},
     )
     return config, claude_json
+
+
+async def wait_until(
+    predicate: Callable[[], Any],
+    *,
+    timeout: float = 2.0,
+    interval: float = 0.01,
+) -> Any:
+    """Poll predicate() until truthy, returning the result; raise AssertionError on timeout."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        result = predicate()
+        if result:
+            return result
+        if asyncio.get_event_loop().time() >= deadline:
+            raise AssertionError(f"condition not met within {timeout}s")
+        await asyncio.sleep(interval)
