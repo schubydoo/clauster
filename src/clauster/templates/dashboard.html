@@ -464,7 +464,7 @@
       <div class="mt-2" x-show="hasRecent()" x-cloak x-data="{ recentOpen: false }">
         <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="recentOpen = !recentOpen"
                 :aria-expanded="recentOpen"
-                x-text="(recentOpen ? '▾ ' : '▸ ') + 'Recent / resumable (' + recentCount() + ')'"></button>
+                x-text="(recentOpen ? '▾ ' : '▸ ') + 'Recent' + (hasResumable() ? ' / resumable' : '') + ' (' + recentCount() + ')'"></button>
         <div class="card mt-1" x-show="recentOpen" x-cloak>
           <div class="list-group list-group-flush">
             {% if claustrum_enabled %}
