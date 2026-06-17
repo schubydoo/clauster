@@ -659,8 +659,10 @@
       async loadPreflight(name) {
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/preflight");
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
           if (res.ok) this.preflight[name] = await res.json();
-        } catch (e) { /* pill stays hidden — preflight is advisory, never blocks */ }
+          else delete this.preflight[name];  // drop a stale cache on a non-OK response
+        } catch (e) { delete this.preflight[name]; /* advisory — pill hides on failure */ }
       },
       // WARN-status checks for a project (the ones worth flagging before a clean launch).
       preflightWarnings(name) {
@@ -1128,7 +1130,7 @@
         this.trusting[name] = true;
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/trust", { method: "POST" });
-          if (res.ok) { this.trustState[name] = "trusted"; this.toast(name + ": trusted", "success"); }
+          if (res.ok) { this.trustState[name] = "trusted"; this.loadPreflight(name); this.toast(name + ": trusted", "success"); }
           else {
             const b = await res.json().catch(() => ({}));
             this.errors[name] = b.detail || "trust failed";  // inline, not just a 4.5s toast

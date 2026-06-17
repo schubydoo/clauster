@@ -71,6 +71,9 @@ def test_preflight_pill_surfaces_for_unready_project(
     browser.expect_hidden(detail)
     browser.click(pill)
     browser.expect_visible(detail)
+    # The rendered detail names the failing check (the untrusted-workspace warning here),
+    # so a regression in the rendered check content fails — not just the expand interaction.
+    assert "trust" in browser.get_text(detail).lower()
 
 
 def test_external_session_indicator_shows_for_unmanaged_session(
