@@ -71,6 +71,20 @@ def test_field_specs_classifies_control_types() -> None:
     assert specs["instance_defaults.session_name_prefix"]["type"] == "str"
 
 
+def test_field_specs_carries_rich_ui_metadata() -> None:
+    specs = field_specs()
+    poll = specs["claude.agents_json_poll_interval_seconds"]
+    # Human label + raw key + section heading for grouping.
+    assert poll["label"] == "Liveness poll interval"
+    assert poll["key"] == "agents_json_poll_interval_seconds"
+    assert poll["section_label"] == "Claude"
+    # Numeric bound + unit + default surfaced for the control.
+    assert poll["unit"] == "seconds" and poll["min"] == 1 and poll["default"] == 300
+    # Master/child dependency for disabling, and a placeholder for an optional field.
+    assert specs["metrics.normalize_cpu"]["depends_on"] == "metrics.enabled"
+    assert specs["instance_defaults.max_bridges"]["placeholder"]
+
+
 def test_file_hash_changes_with_content(write_config) -> None:
     path = write_config("usage:\n  fx_rate: 1.0\n")
     h1 = file_hash(path)
