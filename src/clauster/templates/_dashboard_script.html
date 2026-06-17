@@ -73,6 +73,7 @@
         fields: {}, specs: {}, edits: {}, editable: [], hash: null,
         error: "", saved: false, trigger: null,
       },
+      configQuery: "",
       agents: [],
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
@@ -294,6 +295,29 @@
       configFieldsFor(section) {
         return this.configEditor.editable.filter((p) => p.split(".")[0] === section);
       },
+      configSectionLabel(section) {
+        const first = this.configFieldsFor(section)[0];
+        return (first && this.configEditor.specs[first] && this.configEditor.specs[first].section_label) || section;
+      },
+      // Fields in a section that match the filter (label / key / description, case-insensitive).
+      configFieldsVisible(section) {
+        const q = (this.configQuery || "").trim().toLowerCase();
+        const fields = this.configFieldsFor(section);
+        if (!q) return fields;
+        return fields.filter((p) => {
+          const s = this.configEditor.specs[p] || {};
+          return ((s.label || "") + " " + (s.key || "") + " " + (s.description || "")).toLowerCase().includes(q);
+        });
+      },
+      // A child field is disabled while its master switch is off (visual dependency gating).
+      configFieldDisabled(path) {
+        const dep = this.configEditor.specs[path] && this.configEditor.specs[path].depends_on;
+        return !!dep && !this.configEditor.edits[dep];
+      },
+      scrollToSection(section) {
+        const el = document.getElementById("cfg-sec-" + section);
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      },
       configDirty() {
         const c = this.configEditor;
         return c.editable.some((p) => c.edits[p] !== c.fields[p]);
@@ -318,7 +342,7 @@
         const c = this.configEditor;
         if (c.open || c.loading) return;  // single-flight: ignore re-entry while loading/open
         c.trigger = document.activeElement;  // remember the opener to restore focus on close
-        c.open = true; c.error = ""; c.saved = false; c.loading = true;
+        c.open = true; c.error = ""; c.saved = false; c.loading = true; this.configQuery = "";
         document.body.style.overflow = "hidden";  // lock background scroll while modal is up
         try {
           const res = await fetch(ROOT + "/api/config");
