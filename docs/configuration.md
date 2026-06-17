@@ -112,6 +112,7 @@ projects:
 | `enabled` | bool | `false` | **Master auth switch.** Must be `true` for password / reverse-proxy auth to actually gate requests. |
 | `password_required` | bool | `false` | Require password login. Needs `password_hash`. |
 | `password_hash` | str \| null | `null` | argon2id hash from `clauster hash-password`. |
+| `api_token_hash` | str \| null | `null` | SHA-256 hash of an inbound API bearer token from `clauster hash-token`. Enables `Authorization: Bearer <token>` auth for headless/API clients. Only the hash is stored; the raw token is shown once. |
 | `allow_unauthenticated_network` | bool | `false` | Explicit opt-out: permit a non-loopback bind **without** enforced auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. |
 | `cookie_secure` | `auto` \| `always` \| `never` | `auto` | Session-cookie `Secure` flag. `auto` = Secure only over https (or a trusted proxy's `X-Forwarded-Proto=https`). |
 | `session_max_age_seconds` | int | `604800` | Session lifetime (≥1; default 7 days). |

@@ -182,6 +182,12 @@ class AuthConfig(BaseModel):
     password_hash: str | None = Field(
         default=None, description="argon2id hash from `clauster hash-password`."
     )
+    api_token_hash: str | None = Field(
+        default=None,
+        description="SHA-256 hash of an inbound API bearer token from "
+        "`clauster hash-token`. Enables `Authorization: Bearer <token>` auth for "
+        "headless/API clients. Only the hash is stored; the raw token is shown once.",
+    )
     reverse_proxy: ReverseProxyConfig = Field(
         default_factory=ReverseProxyConfig,
         description="Trusted-reverse-proxy auth settings.",
@@ -209,15 +215,16 @@ def _missing_enforced_auth(host: str, auth: AuthConfig) -> bool:
     """Return True when binding ``host`` would NOT actually enforce authentication.
 
     The runtime guard gates on ``auth.enabled``, so a non-loopback bind only enforces
-    auth when ``auth.enabled`` is set together with a method (``password_required`` or
-    ``reverse_proxy.enabled``). Loopback never needs auth. The explicit
-    ``allow_unauthenticated_network`` opt-out is intentionally left to callers (the
-    config validator permits it; ``ops._check_auth`` downgrades it to a warning) so
+    auth when ``auth.enabled`` is set together with a method (``password_required``,
+    ``reverse_proxy.enabled``, or an ``api_token_hash``). Loopback never needs auth. The
+    explicit ``allow_unauthenticated_network`` opt-out is intentionally left to callers
+    (the config validator permits it; ``ops._check_auth`` downgrades it to a warning) so
     both use one shared definition of "enforced auth" without conflating the opt-out.
     """
     if host in _LOOPBACK_HOSTS:
         return False
-    return not (auth.enabled and (auth.password_required or auth.reverse_proxy.enabled))
+    method = auth.password_required or auth.reverse_proxy.enabled or bool(auth.api_token_hash)
+    return not (auth.enabled and method)
 
 
 class CloneConfig(BaseModel):
@@ -624,8 +631,9 @@ class ClausterConfig(BaseModel):
             raise ValueError(
                 f"refusing non-loopback host={self.host!r} without enforced auth. Set "
                 "auth.enabled: true together with auth.password_required (+ a hash from "
-                "`clauster hash-password`) or auth.reverse_proxy.enabled — or, to opt out "
-                "on a trusted LAN, auth.allow_unauthenticated_network."
+                "`clauster hash-password`), auth.reverse_proxy.enabled, or auth.api_token_hash "
+                "(from `clauster hash-token`) — or, to opt out on a trusted LAN, "
+                "auth.allow_unauthenticated_network."
             )
         # Fail closed: password auth required but no hash configured would lock everyone out
         # (or, worse, be skipped) — refuse to start with a clear message.

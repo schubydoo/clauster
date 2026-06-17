@@ -140,6 +140,25 @@ def test_password_required_with_hash_ok(write_config):
     assert config.host == "0.0.0.0"
 
 
+def test_api_token_counts_as_enforced_auth(write_config):
+    # An api_token_hash (with auth.enabled) is a real enforced-auth method, so a
+    # non-loopback bind is permitted without a password or reverse proxy (#360).
+    config = load_config(
+        write_config(
+            "host: 0.0.0.0\nauth:\n  enabled: true\n  api_token_hash: 'deadbeef'\n",
+        )
+    )
+    assert config.host == "0.0.0.0"
+    assert config.auth.api_token_hash == "deadbeef"
+
+
+def test_api_token_without_enabled_rejected(write_config):
+    # Same footgun guard as password/proxy: a token configured but auth.enabled
+    # left false is a silent open door on a non-loopback bind -> refuse to start.
+    with pytest.raises(ValueError, match="without enforced auth"):
+        load_config(write_config("host: 0.0.0.0\nauth:\n  api_token_hash: 'deadbeef'\n"))
+
+
 def test_env_override_scalar(write_config, monkeypatch):
     cfg_path = write_config()
     monkeypatch.setenv("CLAUSTER_PORT", "9999")
