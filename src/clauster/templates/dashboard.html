@@ -71,6 +71,33 @@
     .zone-active .sess-row.sess-starting { border-left-color: var(--tblr-azure); }
     .zone-active .sess-row.sess-warn { border-left-color: var(--tblr-yellow); }
     .zone-active .sess-row.sess-dead { border-left-color: var(--tblr-secondary); }
+
+    /* Config editor: human-layer rows with clear section division. */
+    .cfg-section { margin-bottom: 1.25rem; }
+    /* Section headers are plain dividers (NOT sticky) — only the nav bar floats, so the
+       two sticky layers can't overlap at top:0. */
+    .cfg-section-head { margin: 0 0 .25rem; padding: .4rem 0;
+      font-size: .75rem; font-weight: 600; letter-spacing: .05em;
+      text-transform: uppercase; color: var(--tblr-secondary);
+      border-bottom: 2px solid var(--tblr-border-color); }
+    .cfg-row { padding: .55rem 0; border-bottom: 1px solid var(--tblr-border-color); }
+    .cfg-row:last-child { border-bottom: 0; }
+    .cfg-row-disabled { opacity: .5; }
+    .cfg-key { font-family: var(--tblr-font-monospace, monospace); font-size: .7rem;
+      color: var(--tblr-secondary); }
+    .cfg-help { font-size: .8125rem; margin-top: .25rem; }
+    /* Sticky filter + jump-nav: an OPAQUE bar with a bottom edge so rows scroll cleanly
+       behind it instead of bleeding through. Full-bleed across the modal-body padding. */
+    .cfg-nav { position: sticky; top: 0; z-index: 3;
+      margin: 0 calc(-1 * var(--tblr-modal-padding, 1.5rem)) .75rem;
+      padding: .65rem var(--tblr-modal-padding, 1.5rem) .55rem;
+      background: var(--tblr-bg-surface, var(--tblr-body-bg));
+      border-bottom: 1px solid var(--tblr-border-color);
+      box-shadow: 0 6px 6px -6px rgba(0, 0, 0, .25); }
+    /* Zero the body's top padding so the sticky nav pins flush to the top (no uncovered
+       padding strip for rows to bleed through); the intro carries the spacing instead. */
+    [data-test="cfg-modal"] .modal-body { padding-top: 0; }
+    [data-test="cfg-modal"] .cfg-intro { padding-top: var(--tblr-modal-padding, 1.5rem); }
   </style>
 </head>
 <body>
@@ -278,6 +305,10 @@
                 x-text="readinessBlockers().length
                   ? ('⚠ ' + readinessBlockers().length + ' blocking')
                   : ('⚠ ' + readinessWarnings().length + (readinessWarnings().length === 1 ? ' check' : ' checks'))"></button>
+        <button type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Edit configuration"
+                title="Edit configuration" :disabled="configEditor.loading" @click="openConfig()">
+          <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-edit"/></svg>
+        </button>
         <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme" title="Toggle dark / light theme">
           <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
           <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
@@ -661,6 +692,113 @@
       </div>
     </div>
   </footer>
+
+  <!-- Config editor modal (FE-3) — Tier-A operational settings only. -->
+  <template x-if="configEditor.open">
+    <div class="modal modal-blur d-block" tabindex="-1" data-test="cfg-modal" style="background: rgba(0,0,0,.4)"
+         @keydown.escape.window="closeConfig()" @keydown.tab="trapConfigTab($event)"
+         @click.self="closeConfig()">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
+           aria-labelledby="cfg-editor-title">
+        <div class="modal-content" x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())">
+          <div class="modal-header">
+            <h3 class="modal-title" id="cfg-editor-title">Configuration</h3>
+            <button type="button" class="btn-close" aria-label="Close" @click="closeConfig()"></button>
+          </div>
+          <div class="modal-body">
+            <p class="cfg-intro text-secondary small mb-2">
+              Operational settings only. Authentication, secrets, network bind, and structural
+              fields are managed in the config file / CLI and are not shown here.
+            </p>
+            <div class="text-secondary" x-show="configEditor.loading" x-cloak>Loading…</div>
+            <div class="alert alert-danger py-2" x-show="configEditor.error" x-cloak x-text="configEditor.error"></div>
+            <div class="alert alert-success py-2" data-test="cfg-saved" x-show="configEditor.saved" x-cloak>Saved — restart Clauster to apply.</div>
+
+            <!-- Filter + section jump-nav (sticky) -->
+            <div class="cfg-nav" x-show="!configEditor.loading" x-cloak>
+              <input type="search" class="form-control form-control-sm mb-2" x-model="configQuery"
+                     placeholder="Filter settings…" aria-label="Filter settings">
+              <div class="btn-group btn-group-sm flex-wrap" role="group" aria-label="Jump to section">
+                <template x-for="s in configSections()" :key="s">
+                  <button type="button" class="btn btn-ghost-secondary" @click="scrollToSection(s)"
+                          x-show="configFieldsVisible(s).length"
+                          x-text="configSectionLabel(s)"></button>
+                </template>
+              </div>
+            </div>
+
+            <template x-for="section in configSections()" :key="section">
+              <section class="cfg-section" :id="'cfg-sec-' + section"
+                       x-show="!configEditor.loading && configFieldsVisible(section).length">
+                <h4 class="cfg-section-head" x-text="configSectionLabel(section)"></h4>
+                <template x-for="path in configFieldsVisible(section)" :key="path">
+                  <div class="cfg-row row align-items-start g-2" :class="{ 'cfg-row-disabled': configFieldDisabled(path) }">
+                    <div class="col-5">
+                      <label class="form-label mb-0 small fw-medium" :for="'cfg-' + path"
+                             x-text="configEditor.specs[path].label"></label>
+                      <div class="cfg-key" x-text="configEditor.specs[path].key"></div>
+                    </div>
+                    <div class="col-7">
+                      <template x-if="configEditor.specs[path].type === 'bool'">
+                        <label class="form-check form-switch mb-0 d-inline-flex align-items-center">
+                          <input class="form-check-input" type="checkbox" :id="'cfg-' + path"
+                                 :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]">
+                          <span class="ms-2 small text-secondary" x-text="configEditor.edits[path] ? 'On' : 'Off'"></span>
+                        </label>
+                      </template>
+                      <template x-if="configEditor.specs[path].type === 'enum'">
+                        <select class="form-select form-select-sm" :id="'cfg-' + path"
+                                :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]">
+                          <template x-for="opt in configEditor.specs[path].choices" :key="opt">
+                            <option :value="opt" x-text="opt"></option>
+                          </template>
+                        </select>
+                      </template>
+                      <template x-if="['int', 'float'].includes(configEditor.specs[path].type)">
+                        <div class="input-group input-group-sm">
+                          <input class="form-control form-control-sm" type="number" :id="'cfg-' + path"
+                                 :min="configEditor.specs[path].min" :max="configEditor.specs[path].max"
+                                 :step="configEditor.specs[path].step"
+                                 :placeholder="configEditor.specs[path].placeholder || (configEditor.specs[path].default != null ? 'default ' + configEditor.specs[path].default : '')"
+                                 :disabled="configFieldDisabled(path)" x-model.number="configEditor.edits[path]">
+                          <span class="input-group-text" x-show="configEditor.specs[path].unit"
+                                x-text="configEditor.specs[path].unit"></span>
+                        </div>
+                      </template>
+                      <template x-if="configEditor.specs[path].type === 'str'">
+                        <input class="form-control form-control-sm" type="text" :id="'cfg-' + path"
+                               :placeholder="configEditor.specs[path].placeholder || (configEditor.specs[path].default != null ? configEditor.specs[path].default : '')"
+                               :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]">
+                      </template>
+                      <div class="cfg-help text-secondary" x-show="configEditor.specs[path].description" x-cloak
+                           x-text="configEditor.specs[path].description"></div>
+                      <div class="cfg-help text-warning" x-show="configFieldDisabled(path)" x-cloak
+                           x-text="'Turn on “' + ((configEditor.specs[configEditor.specs[path].depends_on] || {}).label || configEditor.specs[path].depends_on) + '” to use this.'"></div>
+                    </div>
+                  </div>
+                </template>
+              </section>
+            </template>
+            <div class="text-secondary small" aria-live="polite"
+                 x-show="!configEditor.loading && !configSections().some(s => configFieldsVisible(s).length)" x-cloak>
+              No settings match “<span x-text="configQuery"></span>”.
+            </div>
+          </div>
+          <div class="modal-footer justify-content-between">
+            <span class="text-secondary small">Saved changes take effect after a Clauster restart.</span>
+            <span class="d-flex gap-2">
+              <button type="button" class="btn" @click="closeConfig()">Close</button>
+              <button type="button" class="btn btn-primary" data-test="cfg-save"
+                      :disabled="configEditor.saving || configEditor.loading || !configDirty()"
+                      @click="saveConfig()">
+                <span x-text="configEditor.saving ? 'Saving…' : 'Save changes'">Save changes</span>
+              </button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
 </div>
 
 {% include "_dashboard_script.html" %}

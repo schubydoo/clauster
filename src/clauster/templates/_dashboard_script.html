@@ -67,6 +67,13 @@
       instances: {},
       externalSessions: {},
       externalOpen: {},   // project name -> true while its external-session detail is expanded
+      // --- in-app config editor (FE-3, Tier-A allowlist) ---
+      configEditor: {
+        open: false, loading: false, saving: false,
+        fields: {}, specs: {}, edits: {}, editable: [], hash: null,
+        error: "", saved: false, trigger: null, gen: 0,
+      },
+      configQuery: "",
       agents: [],
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
@@ -276,6 +283,124 @@
         setTimeout(() => this.dismissToast(id), 4500);
       },
       dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
+      // --- config editor (FE-3) ---
+      configSections() {
+        const seen = [];
+        for (const p of this.configEditor.editable) {
+          const s = p.split(".")[0];
+          if (!seen.includes(s)) seen.push(s);
+        }
+        return seen;
+      },
+      configFieldsFor(section) {
+        return this.configEditor.editable.filter((p) => p.split(".")[0] === section);
+      },
+      configSectionLabel(section) {
+        const first = this.configFieldsFor(section)[0];
+        return (first && this.configEditor.specs[first] && this.configEditor.specs[first].section_label) || section;
+      },
+      // Fields in a section that match the filter (label / key / description, case-insensitive).
+      configFieldsVisible(section) {
+        const q = (this.configQuery || "").trim().toLowerCase();
+        const fields = this.configFieldsFor(section);
+        if (!q) return fields;
+        return fields.filter((p) => {
+          const s = this.configEditor.specs[p] || {};
+          return ((s.label || "") + " " + (s.key || "") + " " + (s.description || "")).toLowerCase().includes(q);
+        });
+      },
+      // A child field is disabled while its master switch is off (visual dependency gating).
+      configFieldDisabled(path) {
+        const dep = this.configEditor.specs[path] && this.configEditor.specs[path].depends_on;
+        return !!dep && !this.configEditor.edits[dep];
+      },
+      scrollToSection(section) {
+        const el = document.getElementById("cfg-sec-" + section);
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      },
+      configDirty() {
+        const c = this.configEditor;
+        return c.editable.some((p) => c.edits[p] !== c.fields[p]);
+      },
+      closeConfig() {
+        // Always closeable (no mid-save block — that would strand the scroll-lock and the
+        // user if a save hung). A stale in-flight save can't clobber a reopened session
+        // because saveConfig is generation-guarded (see configEditor.gen).
+        const c = this.configEditor;
+        c.open = false;
+        document.body.style.overflow = "";  // release the scroll lock
+        if (c.trigger && c.trigger.focus) c.trigger.focus();  // restore focus to the opener
+      },
+      // Manual focus trap (no @alpinejs/focus plugin loaded): wrap Tab at the dialog edges.
+      trapConfigTab(e) {
+        const sel = 'a[href],button:not([disabled]),input:not([disabled]),' +
+          'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+        // Exclude display:none elements (filtered-out sections / hidden control branches):
+        // they match the selector but aren't focusable, which would leak the trap past them.
+        const f = [...e.currentTarget.querySelectorAll(sel)].filter((el) => el.offsetParent !== null);
+        if (!f.length) return;
+        const first = f[0], last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+        else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+      },
+      async openConfig() {
+        const c = this.configEditor;
+        if (c.open || c.loading) return;  // single-flight: ignore re-entry while loading/open
+        c.gen = (c.gen || 0) + 1;  // bump generation so a stale in-flight save is ignored on reopen
+        c.trigger = document.activeElement;  // remember the opener to restore focus on close
+        c.open = true; c.error = ""; c.saved = false; c.loading = true; this.configQuery = "";
+        document.body.style.overflow = "hidden";  // lock background scroll while modal is up
+        try {
+          const res = await fetch(ROOT + "/api/config");
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) { c.error = "Failed to load configuration."; return; }
+          const d = await res.json();
+          c.fields = d.fields || {}; c.specs = d.specs || {};
+          c.editable = d.editable || []; c.hash = d.hash;
+          c.edits = { ...c.fields };  // seed the form from current values
+        } catch (e) { c.error = "Failed to load configuration."; }
+        finally { c.loading = false; }
+      },
+      async saveConfig() {
+        const c = this.configEditor;
+        if (c.saving) return;  // single-flight insurance (the button is also :disabled while saving)
+        const myGen = c.gen;  // capture this session; a reopen bumps c.gen and voids this save
+        // Send only fields the user actually changed. Skip a blanked numeric input (x-model.number
+        // yields "" when cleared) — treat it as "no change", not a "" sent to an int/float field.
+        const edits = {};
+        for (const p of c.editable) {
+          const v = c.edits[p];
+          const t = (c.specs[p] || {}).type;
+          if ((t === "int" || t === "float") && (v === "" || v === null)) continue;
+          if (v !== c.fields[p]) edits[p] = v;
+        }
+        if (Object.keys(edits).length === 0) { c.error = "No changes to save."; c.saved = false; return; }
+        c.saving = true; c.error = ""; c.saved = false;
+        try {
+          const res = await fetch(ROOT + "/api/config", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ edits, hash: c.hash }),
+          });
+          if (c.gen !== myGen) return;  // session was closed+reopened mid-save — drop this response
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok) {
+            const d = await res.json();
+            c.hash = d.hash; c.saved = true;
+            // Advance the baseline with ONLY the fields actually sent — not all of c.edits.
+            // A blanked numeric was skipped from `edits` (kept on disk), so copying c.edits
+            // wholesale would record "" as saved while disk kept the old value. Re-seed the
+            // form from the corrected baseline so a skipped blank reverts to its real value.
+            c.fields = { ...c.fields, ...edits };
+            c.edits = { ...c.fields };
+          } else if (res.status === 409) {
+            c.error = "The config file changed on disk — close and reopen to reload.";
+          } else {
+            const d = await res.json().catch(() => ({}));
+            c.error = d.detail || ("Save failed (" + res.status + ").");
+          }
+        } catch (e) { c.error = "Save failed."; }
+        finally { c.saving = false; }
+      },
       async refresh() {
         // Single-flight: setInterval can fire a new tick while a slow refresh is still
         // awaiting. Without this, an older refresh can resolve AFTER a newer one and clobber
