@@ -1028,6 +1028,7 @@
           window.Alpine.initTree(node);  // hydrate the injected row under dashboard()
         }
         this.loadUsage(name);
+        this.loadPreflight(name);  // a fragment-inserted row has no init() — load its preflight too
       },
       // The card is now inserted reactively; "Show it" scrolls to it and moves
       // DOM focus there too (keyboard/screen-reader users land on the new card).

@@ -32,7 +32,7 @@
                       @click="togglePreflight('{{ p.name }}')"
                       :aria-expanded="!!preflightOpen['{{ p.name }}']"
                       :title="preflightWarnCount('{{ p.name }}') + ' preflight check(s) to review before a clean launch'">
-                ⚠ <span x-text="preflightWarnCount('{{ p.name }}')"></span> preflight
+                <span aria-hidden="true">⚠</span> <span x-text="preflightWarnCount('{{ p.name }}')"></span> preflight
               </button>
 
               <!-- right cluster: Run Claude here + overflow -->
