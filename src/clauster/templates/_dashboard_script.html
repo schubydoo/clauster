@@ -377,7 +377,8 @@
               ? "Stop \"" + label + "\"? This deregisters its cloud session."
               : "Stop and remove \"" + label + "\"?")
           : (j.bridge_session_id
-              ? "Deregister \"" + label + "\"? This drops its ended cloud session."
+              ? "Remove \"" + label + "\" from the list? The worker has already ended, so its "
+                + "claude.ai session is not deregistered — re-check `claude agents` for an orphan."
               : "Remove \"" + label + "\" from the list?");
         if (!window.confirm(msg)) return;
         this.agentStopping[j.id] = true;
