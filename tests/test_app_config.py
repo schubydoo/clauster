@@ -26,8 +26,22 @@ def test_get_config_returns_tier_a_only(write_config, tmp_path):
     body = res.json()
     assert body["fields"]["usage.fx_rate"] == 1.0
     assert isinstance(body["hash"], str) and body["hash"]
-    # No auth/secret/bind field is ever surfaced.
-    assert not any(k.startswith(("auth.", "host", "port")) for k in body["fields"])
+    # Redaction regression net: no auth / secret / bind / clone / structural key is ever
+    # surfaced (the GET only returns the Tier-A allowlist — this guards against a future
+    # allowlist edit accidentally widening it).
+    forbidden_prefixes = (
+        "auth.",
+        "reverse_proxy.",
+        "clone.",
+        "host",
+        "port",
+        "state_dir",
+        "projects_root",
+    )
+    secret_keys = ("password_hash", "shared_secret", "urls", "binary")
+    keys = list(body["fields"])
+    assert not any(k.startswith(forbidden_prefixes) for k in keys)
+    assert not any(any(s in k for s in secret_keys) for k in keys)
 
 
 def test_put_config_applies_tier_a_edit(write_config, tmp_path):

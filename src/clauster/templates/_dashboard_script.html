@@ -386,7 +386,12 @@
           if (res.ok) {
             const d = await res.json();
             c.hash = d.hash; c.saved = true;
-            c.fields = { ...c.edits };  // new baseline so a second save only sends new changes
+            // Advance the baseline with ONLY the fields actually sent — not all of c.edits.
+            // A blanked numeric was skipped from `edits` (kept on disk), so copying c.edits
+            // wholesale would record "" as saved while disk kept the old value. Re-seed the
+            // form from the corrected baseline so a skipped blank reverts to its real value.
+            c.fields = { ...c.fields, ...edits };
+            c.edits = { ...c.fields };
           } else if (res.status === 409) {
             c.error = "The config file changed on disk — close and reopen to reload.";
           } else {
