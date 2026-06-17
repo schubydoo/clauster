@@ -61,3 +61,25 @@ def test_write_creates_missing_section(write_config) -> None:
     path = write_config("")
     write_edits(path, {"logs.keep_rotated": 9}, expected_hash=file_hash(path))
     assert load_config(path).logs.keep_rotated == 9
+
+
+def test_write_prunes_old_backups_to_five(write_config) -> None:
+    path = write_config("usage:\n  fx_rate: 1.0\n")
+    for i in range(7):
+        write_edits(path, {"usage.fx_rate": float(i + 2)})  # no hash check — just churn backups
+    backups = list(path.parent.glob(path.name + ".bak-*"))
+    assert len(backups) == 5  # newest 5 kept, older pruned
+
+
+def test_write_restores_on_post_write_parse_failure(write_config, monkeypatch) -> None:
+    path = write_config("usage:\n  fx_rate: 1.0\n")
+    original = path.read_text(encoding="utf-8")
+
+    def _boom(_p):
+        raise ValueError("simulated post-write load failure")
+
+    # The render passes validation but the post-write re-parse fails -> restore + re-raise.
+    monkeypatch.setattr("clauster.config_writer.load_config", _boom)
+    with pytest.raises(ValueError, match="simulated"):
+        write_edits(path, {"usage.fx_rate": 5.0}, expected_hash=file_hash(path))
+    assert path.read_text(encoding="utf-8") == original  # rolled back to the pre-write content

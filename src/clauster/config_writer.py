@@ -74,7 +74,8 @@ def write_edits(
         _set_ruamel(doc, dotted, value)
 
     # 4. Backup the prior content, then atomically replace via a same-dir temp file.
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    # Microsecond precision so two edits in the same second don't collide on one backup name.
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
     path.with_name(path.name + f".bak-{stamp}").write_bytes(original_bytes)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
