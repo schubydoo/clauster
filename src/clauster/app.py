@@ -994,10 +994,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         (:class:`PermissionModeNotAllowed`, mapped to 403 below). The hosted and
         background-agent channels spawn outside the runner, so they must mirror the
         gate here or a crafted request could run a session in bypass mode that the
-        project's ``allow_bypass_permissions`` ceiling explicitly forbids. Fail
-        closed with the same 403 + wording the bridge path uses.
+        project's ``allow_bypass_permissions`` ceiling explicitly forbids. Both
+        paths share the single :meth:`ClausterConfig.bypass_denied` decision so they
+        can't diverge; this channel keeps its own exception type. Fail closed with
+        the same 403 + wording the bridge path uses.
         """
-        if permission_mode == "bypassPermissions" and not config.allows_bypass(project):
+        if config.bypass_denied(project, permission_mode):
             raise HTTPException(
                 status_code=403,
                 detail=(
