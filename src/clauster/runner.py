@@ -238,9 +238,9 @@ class SessionRunner:
         self,
         name: str,
         *,
-        spawn_mode: str | None = None,
-        permission_mode: str | None = None,
-        resume_mode: str | None = None,
+        spawn_mode: SpawnMode | None = None,
+        permission_mode: PermissionMode | None = None,
+        resume_mode: ResumeMode | None = None,
         resume: bool = False,
     ) -> RemoteControlInstance:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
@@ -286,9 +286,9 @@ class SessionRunner:
         self,
         name: str,
         *,
-        spawn_mode: str | None = None,
-        permission_mode: str | None = None,
-        resume_mode: str | None = None,
+        spawn_mode: SpawnMode | None = None,
+        permission_mode: PermissionMode | None = None,
+        resume_mode: ResumeMode | None = None,
         resume: bool = False,
     ) -> RemoteControlInstance:
         # Body of spawn(), always run under the per-project lock (see spawn()).
@@ -528,7 +528,7 @@ class SessionRunner:
             _log.warning("could not write redacted bridge log for %s: %s", instance.project, exc)
 
     def _build_cmd(
-        self, log_path: Path, name: str, spawn_mode: str, permission_mode: str
+        self, log_path: Path, name: str, spawn_mode: SpawnMode, permission_mode: PermissionMode
     ) -> list[str]:
         """Build the `claude remote-control` argv. Pure (no side effects) so it's unit-testable."""
         defaults = self._config.instance_defaults
@@ -570,8 +570,8 @@ class SessionRunner:
         cwd: Path,
         log_path: Path,
         name: str,
-        spawn_mode: str,
-        permission_mode: str,
+        spawn_mode: SpawnMode,
+        permission_mode: PermissionMode,
         debug_path: Path | None = None,
     ) -> subprocess.Popen:
         # The bridge writes its --debug-file to `debug_path` (the private raw parse-
@@ -664,7 +664,7 @@ class SessionRunner:
         return log_path.with_name(log_path.stem + ".keeper.json")
 
     def _build_pty_bridge_argv(
-        self, log_path: Path, name: str, permission_mode: str, *, resume: bool
+        self, log_path: Path, name: str, permission_mode: PermissionMode, *, resume: bool
     ) -> list[str]:
         """Build the flag-form bridge argv (`claude --remote-control …`). Pure/testable.
 
@@ -817,7 +817,7 @@ class SessionRunner:
         proj: Project,
         name: str,
         log_path: Path,
-        permission_mode: str,
+        permission_mode: PermissionMode,
         resume: bool,
     ) -> RemoteControlInstance:
         """Spawn path for `resume_mode == "pty"`: launch the keeper, discover via sidecar."""

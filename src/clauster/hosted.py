@@ -44,6 +44,7 @@ from typing import Any
 
 from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream
+from .config import PermissionMode
 from .hosted_state import HostedStateStore
 from .models import InstanceStatus, RemoteControlInstance
 from .redact import sanitize_line
@@ -92,7 +93,7 @@ _STOP_GRACE_SECONDS = 5.0
 def build_hosted_argv(
     claude_binary: str,
     *,
-    permission_mode: str,
+    permission_mode: PermissionMode,
     resume_uuid: str | None = None,
 ) -> list[str]:
     """Build the headless stream-json spawn argv for a hosted session.
@@ -215,7 +216,7 @@ class HostedSession:
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
-        permission_mode: str = "acceptEdits",
+        permission_mode: PermissionMode = "acceptEdits",
         resume_uuid: str | None = None,
         want_pid: bool = False,
     ) -> None:
@@ -618,7 +619,7 @@ class HostedManager:
         label: str,
         cwd: str,
         claude_binary: str,
-        permission_mode: str,
+        permission_mode: PermissionMode,
         resume_uuid: str | None = None,
     ) -> RemoteControlInstance:
         """Start a hosted session and register its dashboard instance.
@@ -648,7 +649,7 @@ class HostedManager:
         label: str,
         cwd: str,
         claude_binary: str,
-        permission_mode: str,
+        permission_mode: PermissionMode,
         resume_uuid: str | None = None,
     ) -> RemoteControlInstance:
         """Spawn + register a hosted session WITHOUT persisting (caller persists).
@@ -671,7 +672,7 @@ class HostedManager:
             project=project,
             label=label,
             channel="hosted",
-            permission_mode=permission_mode,  # type: ignore[arg-type]
+            permission_mode=permission_mode,
             claustrum_process_id=process_id,
             agent_pid=session.agent_pid,
             agent_proc_start=proc_start,
