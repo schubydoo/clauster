@@ -63,12 +63,54 @@ def test_write_creates_missing_section(write_config) -> None:
     assert load_config(path).logs.keep_rotated == 9
 
 
-def test_write_prunes_old_backups_to_five(write_config) -> None:
+def test_write_prunes_old_backups_keeping_newest_five(write_config) -> None:
     path = write_config("usage:\n  fx_rate: 1.0\n")
+    created: list[str] = []
     for i in range(7):
+        before = set(path.parent.glob(path.name + ".bak-*"))
         write_edits(path, {"usage.fx_rate": float(i + 2)})  # no hash check — just churn backups
-    backups = list(path.parent.glob(path.name + ".bak-*"))
-    assert len(backups) == 5  # newest 5 kept, older pruned
+        created += [p.name for p in path.parent.glob(path.name + ".bak-*") if p not in before]
+    surviving = sorted(p.name for p in path.parent.glob(path.name + ".bak-*"))
+    # The newest 5 by timestamp are kept (not just any 5).
+    assert surviving == sorted(created)[-5:]
+
+
+def test_write_cleans_temp_file_on_replace_failure(write_config, monkeypatch) -> None:
+    import clauster.config_writer as cw
+
+    path = write_config("usage:\n  fx_rate: 1.0\n")
+
+    def _boom(*_a, **_k):
+        raise OSError("simulated atomic-replace failure")
+
+    monkeypatch.setattr(cw.os, "replace", _boom)
+    with pytest.raises(OSError, match="simulated"):
+        write_edits(path, {"usage.fx_rate": 2.0}, expected_hash=file_hash(path))
+    # The unique temp file is removed on failure — no orphan left behind.
+    assert not list(path.parent.glob(path.name + ".*.tmp"))
+
+
+def test_concurrent_writes_serialize_exactly_one_wins(write_config) -> None:
+    import threading
+
+    path = write_config("usage:\n  fx_rate: 1.0\n")
+    h = file_hash(path)
+    outcomes: list[str] = []
+
+    def worker(val: float) -> None:
+        try:
+            write_edits(path, {"usage.fx_rate": val}, expected_hash=h)
+            outcomes.append("ok")
+        except StaleConfigError:
+            outcomes.append("stale")
+
+    threads = [threading.Thread(target=worker, args=(v,)) for v in (2.0, 3.0)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # The lock serializes; the second write sees changed bytes and is rejected stale.
+    assert sorted(outcomes) == ["ok", "stale"]
 
 
 def test_write_restores_on_post_write_parse_failure(write_config, monkeypatch) -> None:
