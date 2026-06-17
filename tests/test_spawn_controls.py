@@ -443,3 +443,104 @@ def test_bypass_option_shown_with_ceiling(write_config):
     # critical fragments separately so harmless attribute reordering/spacing can't break it.
     assert '<option value="bypassPermissions"' in html
     assert ":disabled=\"lmode !== 'desktop'\"" in html
+
+
+# ----- shared bypass-ceiling predicate (one decision for every channel) -------
+#
+# #351: the "bypassPermissions requires the per-project ceiling" decision used to be
+# hand-rolled in three places (runner._validate_spawn_options, app._enforce_bypass_ceiling
+# called from the hosted and background-agent routes). They now all call the single
+# ClausterConfig.bypass_denied predicate, each keeping its own exception type. These tests
+# lock that decision down directly AND across every spawn entry point, so a new channel
+# (or a default-mode change) cannot diverge from the ceiling through a stale copy.
+
+
+def _ceiling_config(projects_root, *, allow: bool) -> ClausterConfig:
+    return ClausterConfig(
+        projects_root=projects_root,
+        projects={"alpha": {"allow_bypass_permissions": allow}},
+    )
+
+
+@pytest.mark.parametrize(
+    ("permission_mode", "allow", "expected"),
+    [
+        # The one case that denies: bypass requested AND the ceiling forbids it.
+        ("bypassPermissions", False, True),
+        # Ceiling permits bypass for this project -> allowed.
+        ("bypassPermissions", True, False),
+        # Non-bypass modes are never gated by the ceiling, regardless of the flag.
+        ("default", False, False),
+        ("default", True, False),
+        ("acceptEdits", False, False),
+        ("plan", True, False),
+        # A resolved-but-None mode (channel passed nothing) is not bypass -> allowed.
+        (None, False, False),
+    ],
+)
+def test_bypass_denied_truth_table(projects_root, permission_mode, allow, expected):
+    config = _ceiling_config(projects_root, allow=allow)
+    assert config.bypass_denied("alpha", permission_mode) is expected
+
+
+def test_bypass_denied_unknown_project_denies_bypass(projects_root):
+    # An absent project has no ceiling entry -> allows_bypass is False -> bypass is denied.
+    config = _ceiling_config(projects_root, allow=True)
+    assert config.bypass_denied("ghost", "bypassPermissions") is True
+    assert config.bypass_denied("ghost", "default") is False
+
+
+# Every spawn entry point must reach the SAME decision. Parametrize the request across the
+# three HTTP-reachable channels so divergence is structurally visible: if a channel ever
+# stops routing through the shared predicate, exactly one row here flips.
+#
+#   bridge     -> POST /api/instances (default channel)        runner._validate_spawn_options
+#   hosted     -> POST /api/instances {channel: hosted}        app._enforce_bypass_ceiling
+#   background -> POST /api/agents                              app._enforce_bypass_ceiling
+#
+# These exercise only the REJECT paths, which short-circuit in validation before any process
+# is spawned (the module-docstring contract for app-level tests), so they never touch a real
+# binary or daemon. The bridge ALLOW path is covered at the runner level by
+# test_bypass_with_ceiling_allowed (which wires the fake `claude` via runner_config); the
+# hosted/background ALLOW paths clear the gate without a real spawn and are asserted below.
+def _bypass_post(client: TestClient, channel: str):
+    if channel == "background":
+        return client.post(
+            "/api/agents", json={"project": "alpha", "permission_mode": "bypassPermissions"}
+        )
+    body = {"project": "alpha", "permission_mode": "bypassPermissions"}
+    if channel == "hosted":
+        body["channel"] = "hosted"
+    return client.post("/api/instances", json=body)
+
+
+@pytest.mark.parametrize("channel", ["bridge", "hosted", "background"])
+def test_every_channel_rejects_bypass_without_ceiling(write_config, channel):
+    # `with` so the lifespan runs for the background-task route (testing.md); harmless for the
+    # others. No ceiling configured -> every channel must 403 through the shared predicate.
+    with _client(write_config) as client:
+        assert _bypass_post(client, channel).status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("channel", "expected_status"),
+    [
+        # Hosted clears the gate then 503s on the absent claustrum daemon (not a 403).
+        ("hosted", 503),
+        # Background clears the gate then dispatches via the stubbed supervisor -> 201.
+        ("background", 201),
+    ],
+)
+def test_spawnless_channels_clear_gate_with_ceiling(
+    write_config, monkeypatch, channel, expected_status
+):
+    # The two channels that can clear the gate via HTTP without a real spawn: hosted dead-ends
+    # at the absent daemon (503), background dispatches through a stub (201). Both prove the
+    # shared predicate let the bypass THROUGH (the salient assertion is "not 403").
+    monkeypatch.setattr(
+        "clauster.supervisor.dispatch_background_job", lambda cwd, **kwargs: "abcd1234"
+    )
+    with _client(write_config, _BYPASS_CEILING) as client:
+        resp = _bypass_post(client, channel)
+        assert resp.status_code != 403
+        assert resp.status_code == expected_status

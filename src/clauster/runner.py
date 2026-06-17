@@ -484,7 +484,7 @@ class SessionRunner:
             raise InvalidSpawnOption(
                 f"worktree mode requires a git repository: {proj.name!r} is not one"
             )
-        if permission_mode == "bypassPermissions" and not self._config.allows_bypass(proj.name):
+        if self._config.bypass_denied(proj.name, permission_mode):
             raise PermissionModeNotAllowed(
                 f"bypassPermissions is not enabled for project {proj.name!r}. Set "
                 "projects.<name>.allow_bypass_permissions: true in clauster.yml first."
