@@ -74,10 +74,11 @@
 
     /* Config editor: human-layer rows with clear section division. */
     .cfg-section { margin-bottom: 1.25rem; }
-    .cfg-section-head { position: sticky; top: 0; z-index: 2; margin: 0 0 .25rem;
-      padding: .4rem 0; font-size: .75rem; font-weight: 600; letter-spacing: .05em;
+    /* Section headers are plain dividers (NOT sticky) — only the nav bar floats, so the
+       two sticky layers can't overlap at top:0. */
+    .cfg-section-head { margin: 0 0 .25rem; padding: .4rem 0;
+      font-size: .75rem; font-weight: 600; letter-spacing: .05em;
       text-transform: uppercase; color: var(--tblr-secondary);
-      background: var(--tblr-bg-surface, var(--tblr-body-bg));
       border-bottom: 2px solid var(--tblr-border-color); }
     .cfg-row { padding: .55rem 0; border-bottom: 1px solid var(--tblr-border-color); }
     .cfg-row:last-child { border-bottom: 0; }
@@ -85,8 +86,18 @@
     .cfg-key { font-family: var(--tblr-font-monospace, monospace); font-size: .7rem;
       color: var(--tblr-secondary); }
     .cfg-help { font-size: .8125rem; margin-top: .25rem; }
-    .cfg-nav { position: sticky; top: 0; z-index: 3; padding-bottom: .5rem;
-      background: var(--tblr-bg-surface, var(--tblr-body-bg)); }
+    /* Sticky filter + jump-nav: an OPAQUE bar with a bottom edge so rows scroll cleanly
+       behind it instead of bleeding through. Full-bleed across the modal-body padding. */
+    .cfg-nav { position: sticky; top: 0; z-index: 3;
+      margin: 0 calc(-1 * var(--tblr-modal-padding, 1.5rem)) .75rem;
+      padding: .65rem var(--tblr-modal-padding, 1.5rem) .55rem;
+      background: var(--tblr-bg-surface, var(--tblr-body-bg));
+      border-bottom: 1px solid var(--tblr-border-color);
+      box-shadow: 0 6px 6px -6px rgba(0, 0, 0, .25); }
+    /* Zero the body's top padding so the sticky nav pins flush to the top (no uncovered
+       padding strip for rows to bleed through); the intro carries the spacing instead. */
+    [data-test="cfg-modal"] .modal-body { padding-top: 0; }
+    [data-test="cfg-modal"] .cfg-intro { padding-top: var(--tblr-modal-padding, 1.5rem); }
   </style>
 </head>
 <body>
@@ -695,7 +706,7 @@
             <button type="button" class="btn-close" aria-label="Close" @click="closeConfig()"></button>
           </div>
           <div class="modal-body">
-            <p class="text-secondary small mb-2">
+            <p class="cfg-intro text-secondary small mb-2">
               Operational settings only. Authentication, secrets, network bind, and structural
               fields are managed in the config file / CLI and are not shown here.
             </p>
