@@ -241,12 +241,24 @@
                 <span class="text-secondary small" x-text="j.worker_alive ? ('pid ' + j.worker_pid) : 'no process'"></span>
                 <span class="ms-auto d-flex align-items-center gap-2">
                   <span class="text-secondary small" x-text="agentWhen(j)"></span>
-                  {# `!!` coercion: see the hosted-row note above. Without it, this Stop button is
-                     stuck DISABLED on first paint because `agentStopping` has no key for this job
-                     yet (Alpine 3.15.x x-for missing-key `:disabled` bug). #}
-                  <button type="button" class="btn btn-sm btn-outline-danger" :disabled="!!agentStopping[j.id]" @click="stopAgent(j)"
-                          :title="j.bridge_session_id ? 'Stop and deregister the claude.ai session' : 'Stop and remove this session'">
-                    <span x-text="agentStopping[j.id] ? 'Stopping…' : 'Stop'">Stop</span>
+                  {# Liveness-aware action. A live worker is "Stop" (destructive red): the DELETE
+                     double-SIGINTs it for an orderly cloud-deregistering shutdown. An ENDED
+                     session has no live worker, so the deregistering SIGINT can't run — the
+                     DELETE only `claude rm`s the local record. So it reads "Forget" (neutral,
+                     not red, not "Deregister" — nothing is deregistered when the worker is gone);
+                     for an ended claude.ai session the title flags the possible cloud orphan.
+                     `!!` coercion: see the hosted-row note above — without it the button is
+                     stuck DISABLED on first paint (Alpine 3.15.x x-for missing-key `:disabled`). #}
+                  <button type="button" class="btn btn-sm" :disabled="!!agentStopping[j.id]" @click="stopAgent(j)"
+                          :class="agentLive(j) ? 'btn-outline-danger' : 'btn-outline-secondary'"
+                          :title="agentLive(j)
+                            ? (j.bridge_session_id ? 'Stop and deregister the claude.ai session' : 'Stop this running session')
+                            : (j.bridge_session_id
+                                ? 'Remove this ended session from the list (its claude.ai session is not deregistered — re-check `claude agents` for an orphan)'
+                                : 'Remove this ended session from the list')">
+                    <span x-text="agentStopping[j.id]
+                      ? (agentLive(j) ? 'Stopping…' : 'Removing…')
+                      : (agentLive(j) ? 'Stop' : 'Forget')">Stop</span>
                   </button>
                 </span>
               </div>
