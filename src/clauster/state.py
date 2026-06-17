@@ -84,8 +84,10 @@ class KeyedJsonStore:
     def _migrate(self, data: dict, raw: str) -> dict:
         """Back up once, then coerce to the current schema.
 
-        Only v1 exists today, so any unrecognized/older shape is conservatively
-        reset to an empty v1 — we never trust ambiguous legacy data.
+        Only v1 exists today: a well-formed record map is preserved as-is, and a
+        missing or non-dict map degrades to an empty v1 — we never trust an
+        ambiguous shape. The pre-coerce ``.bak`` guards against losing data we
+        couldn't interpret.
         """
         backup = self._path.with_suffix(self._path.suffix + ".bak")
         if not backup.exists():
