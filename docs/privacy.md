@@ -25,8 +25,9 @@ configured value if you changed it.
 
 | Artifact | Path | Contains | Lifetime |
 | --- | --- | --- | --- |
-| Bridge state | `~/.clauster/state.json` | Per-project bridge records, keyed by project name — the few fields the startup scan can't re-derive: the bridge label, the intentional-stop flag, and the spawn / permission / resume modes. The pid, environment id, session URLs, and status are **re-derived live** and are not persisted here. | Persists across restarts; an entry is dropped when you **Forget** the bridge. |
-| Hosted state | `~/.clauster/hosted_state.json` | Hosted-session (claustrum live-view) records keyed by process id — the `claude` session uuid, the reattach replay cursor, the log path, and the project / label / permission mode. | Written only when the hosted channel is used; entry removed when the session is forgotten. |
+| Persistence database | `~/.clauster/clauster.db` | The SQLite database that backs all runtime persistence: the per-project bridge records and the hosted-session (claustrum live-view) records described below. The same fields the legacy JSON files held — bridge label, intentional-stop flag, spawn / permission / resume modes; hosted `claude` session uuid, reattach replay cursor, log path, and project / label / permission mode. The pid, environment id, session URLs, and status are **re-derived live** and are not persisted here. (Set `database_url` to point this at an external Postgres instead.) | Created on first run; an entry is dropped when you **Forget** the bridge or session. Stable across restarts. |
+| Legacy bridge state (import source) | `~/.clauster/state.json` → `state.json.imported` | The pre-database per-project bridge store. On the first boot onto the database its rows are imported into `clauster.db` and the file is renamed `state.json.imported` (kept, not deleted). No longer written by Clauster after the import. | Present only on installs that predate the database; renamed `*.imported` once imported. |
+| Legacy hosted state (import source) | `~/.clauster/hosted_state.json` → `hosted_state.json.imported` | The pre-database hosted-session store. Imported into `clauster.db` on the first database boot and renamed `hosted_state.json.imported`. No longer written after the import. | Present only on installs that predate the database; renamed `*.imported` once imported. |
 | Session secret | `~/.clauster/session.secret` | The HMAC key that signs login-session cookies (`0600`). Not personal data, but a credential. | Created on first run; stable across restarts unless deleted (deleting it logs everyone out). |
 | Session epoch | `~/.clauster/session.epoch` | A monotonic counter used to invalidate all sessions at once. | Persists; bumped on a global logout. |
 | `CLAUDE.md` edit audit | `~/.clauster/claude_md_audit.log` | One JSON line per in-dashboard `CLAUDE.md` edit: project, user, action, byte size, and a SHA-256 of the content (not the content itself). | Append-only; never rotated or truncated by Clauster. |
@@ -61,9 +62,8 @@ remove that directory while the app is **stopped**.
     Clauster service before deleting anything.
 
 - **Forget a single bridge** — the dashboard **Forget** action removes the
-  bridge's record from `state.json` / `hosted_state.json`. Its log files in
-  `~/.clauster/logs/` are not auto-deleted; remove them by name if you want them
-  gone.
+  bridge's record from `clauster.db`. Its log files in `~/.clauster/logs/` are
+  not auto-deleted; remove them by name if you want them gone.
 - **Clear all bridge logs** — delete `~/.clauster/logs/` (recreated on the next
   spawn). This also clears the keeper sidecars and stderr/raw logs.
 - **Reset all login sessions** — delete `~/.clauster/session.secret` and

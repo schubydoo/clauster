@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 
 import pytest
 
@@ -86,6 +87,77 @@ async def test_refresh_drops_bridge_on_sampling_error(runner_config, monkeypatch
     monkeypatch.setattr("clauster.runner.metrics.sample_tree", _boom)
     await runner._refresh_metrics_cache()  # must not raise
     assert runner.metrics_snapshot("alpha") is None
+
+
+async def test_refresh_drops_bridge_on_cancelled_sample(runner_config, monkeypatch):
+    # A per-task CancelledError is stored by gather(return_exceptions=True) as a
+    # BaseException (not an Exception) — it must be dropped, never mis-stored as a
+    # sample. Guards the isinstance(..., BaseException) check (#407 review).
+    runner = _runner(runner_config)
+    _running(runner)
+
+    def _cancel(*a, **k):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", _cancel)
+    await runner._refresh_metrics_cache()  # must not raise; the bridge is dropped
+    assert runner.metrics_snapshot("alpha") is None
+
+
+async def test_refresh_samples_bridges_concurrently(runner_config, monkeypatch):
+    # The N per-bridge samples run concurrently (#407). Asserted structurally, not by
+    # wall-clock: a shared counter records how many samplers are in-flight at once. The
+    # serial loop would never exceed 1; the concurrent gather drives several at once. A
+    # barrier blocks each sampler until all N have entered, so the peak is observable
+    # regardless of thread-pool width or scheduler timing.
+    runner = _runner(runner_config)
+    n = 4
+    for i in range(n):
+        _running(runner, project=f"bridge{i}")
+
+    barrier = threading.Barrier(n, timeout=5)
+    lock = threading.Lock()
+    in_flight = 0
+    peak = 0
+
+    def _tracked(pid, **k):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        barrier.wait()  # hold until all N samplers have arrived → forces overlap
+        with lock:
+            in_flight -= 1
+        return {"cpu_percent": 1.0, "procs": 1}
+
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", _tracked)
+    await runner._refresh_metrics_cache()
+
+    assert len(runner.metrics_snapshots()) == n  # every bridge sampled
+    assert peak == n  # all N ran at once — a serial loop would peak at 1
+
+
+async def test_refresh_isolates_one_failing_bridge_from_the_rest(runner_config, monkeypatch):
+    # One bridge's sampler raising must drop only that bridge, never abort the others
+    # (#407 preserves the per-bridge error isolation of the old serial loop). Both bridges
+    # use the _running default start=None so the create-time guard is skipped and the
+    # sentinel pid actually reaches sample_tree — i.e. "bad" is dropped by the EXCEPTION
+    # path, not by a guard short-circuit.
+    runner = _runner(runner_config)
+    _running(runner, project="good")
+    _running(runner, project="bad")
+
+    def _selective(pid, **k):
+        # The "bad" bridge is identified by a sentinel pid set below.
+        if pid == 999_999:
+            raise RuntimeError("boom")
+        return {"cpu_percent": 1.0, "procs": 1}
+
+    runner._instances["bad"].bridge_pid = 999_999
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", _selective)
+    await runner._refresh_metrics_cache()  # must not raise
+    assert runner.metrics_snapshot("good") is not None
+    assert runner.metrics_snapshot("bad") is None
 
 
 async def _noop():
