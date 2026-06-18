@@ -496,8 +496,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
         async def _one(inst: RemoteControlInstance) -> tuple[str, float, int] | None:
             pid = inst.bridge_pid
-            if pid is None:  # narrowed for the type checker; filtered above already
+            if pid is None:  # pragma: no cover - narrowed for pyright; the filter excludes it
                 return None
+            # Guard PID reuse: if the live PID's create-time no longer matches the one
+            # recorded for this bridge, the OS recycled it onto an unrelated process —
+            # don't attribute its cpu/rss to this project (mirrors api_project_metrics).
+            start = inst.bridge_proc_start
+            if start is not None:
+                cur = await asyncio.to_thread(procutil.proc_create_time, pid)
+                if cur is None or abs(cur - start) > 2.0:
+                    return None
             try:
                 sample = await asyncio.to_thread(
                     metrics.sample_tree,
