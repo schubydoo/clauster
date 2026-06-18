@@ -28,9 +28,7 @@ from . import (
     config_writer,
     environments,
     logstream,
-    metrics,
     ops,
-    procutil,
     prometheus,
     supervisor,
     usage,
@@ -479,48 +477,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         return result
 
-    async def _sample_running_bridges() -> list[tuple[str, float, int]]:
-        """Sample (project, cpu, rss) for every running bridge in parallel (best-effort).
+    def _cached_bridge_samples() -> list[tuple[str, float, int]]:
+        """(project, cpu, rss) for each bridge in the server-side metrics cache (#354).
 
-        Each `sample_tree` sleeps a short interval to measure CPU, so they run
-        concurrently off the loop — total latency stays ~one interval regardless of
-        bridge count. A per-bridge sampling error drops that bridge, never the scrape.
+        Reads the runner's snapshot (refreshed off the request path by the metrics
+        task), so the scrape does no per-request sampling — O(1), consistent with the
+        per-project / batch endpoints. Empty when metrics are disabled (cache stays bare).
         """
-        if not config.metrics.enabled:
-            return []
-        targets = [
-            inst
-            for inst in runner.list_instances()
-            if inst.status is InstanceStatus.RUNNING and inst.bridge_pid is not None
+        return [
+            (project, float(s["cpu_percent"]), int(s["rss_bytes"]))
+            for project, s in runner.metrics_snapshots().items()
         ]
-
-        async def _one(inst: RemoteControlInstance) -> tuple[str, float, int] | None:
-            pid = inst.bridge_pid
-            if pid is None:  # pragma: no cover - narrowed for pyright; the filter excludes it
-                return None
-            # Guard PID reuse: if the live PID's create-time no longer matches the one
-            # recorded for this bridge, the OS recycled it onto an unrelated process —
-            # don't attribute its cpu/rss to this project (mirrors api_project_metrics).
-            start = inst.bridge_proc_start
-            if start is not None:
-                cur = await asyncio.to_thread(procutil.proc_create_time, pid)
-                if cur is None or abs(cur - start) > 2.0:
-                    return None
-            try:
-                sample = await asyncio.to_thread(
-                    metrics.sample_tree,
-                    pid,
-                    interval=config.metrics.sample_interval_seconds,
-                    normalize_cpu=config.metrics.normalize_cpu,
-                )
-            except Exception:  # fail closed — a sampling error never breaks the scrape
-                return None
-            if not sample:
-                return None
-            return (inst.project, float(sample["cpu_percent"]), int(sample["rss_bytes"]))
-
-        sampled = await asyncio.gather(*(_one(i) for i in targets))
-        return [s for s in sampled if s is not None]
 
     @app.get("/metrics")
     async def prometheus_metrics() -> Response:
@@ -542,7 +509,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             version=__version__,
             instances=runner.list_instances(),
             project_count=len(projects),
-            bridge_samples=await _sample_running_bridges(),
+            bridge_samples=_cached_bridge_samples(),
             crash_counts=runner.crash_counts(),
             hosted_sessions=hosted_live,
             claustrum_up=claustrum_up,
@@ -664,37 +631,31 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/projects/{name}/metrics")
     async def api_project_metrics(name: str) -> dict:
-        # Live CPU/memory/disk for a project's running bridge (dashboard badge).
-        # Meaningful only while a bridge runs (and metrics are enabled); otherwise
-        # {running: false}. The two-sample read runs off the event loop. No discovery
-        # scan needed: an unknown name simply has no running instance.
+        # Live CPU/memory/disk for a project's running bridge (dashboard badge). Served
+        # from the server-side snapshot the runner's metrics task refreshes every
+        # metrics.poll_seconds (#354), so the read is O(1) with no per-request thread —
+        # request cost no longer scales with the running-bridge count. A project with no
+        # current sample (off, just-started, or stopped) reports {running: false}.
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
-        if not config.metrics.enabled:  # feature off → never sample, even on a direct hit
+        if not config.metrics.enabled:
             return {"running": False}
-        inst = runner.get_instance(name)
-        if inst is None or inst.status is not InstanceStatus.RUNNING or inst.bridge_pid is None:
-            return {"running": False}
-        try:
-            # Guard PID reuse since the last poll: if the live PID's start time no
-            # longer matches the bridge we recorded, the OS recycled it onto an
-            # unrelated process — don't attribute its metrics to this bridge.
-            start = inst.bridge_proc_start
-            if start is not None:
-                cur = await asyncio.to_thread(procutil.proc_create_time, inst.bridge_pid)
-                if cur is None or abs(cur - start) > 2.0:
-                    return {"running": False}
-            sample = await asyncio.to_thread(
-                metrics.sample_tree,
-                inst.bridge_pid,
-                interval=config.metrics.sample_interval_seconds,
-                normalize_cpu=config.metrics.normalize_cpu,
-            )
-        except Exception:  # fail closed — a sampling error must never 500 the endpoint
-            return {"running": False}
-        if sample is None:  # pid vanished between the status check and the sample
+        sample = runner.metrics_snapshot(name)
+        if sample is None:
             return {"running": False}
         return {"running": True, **sample}
+
+    @app.get("/api/metrics")
+    async def api_metrics_batch() -> dict:
+        # Batch counterpart to the per-project endpoint (#354): one O(1) read of every
+        # running bridge's cached sample, so a dashboard can refresh all badges in a
+        # single request instead of one per bridge.
+        if not config.metrics.enabled:
+            return {}
+        return {
+            name: {"running": True, **sample}
+            for name, sample in runner.metrics_snapshots().items()
+        }
 
     # --- ghost-environment reaper (spec §11), dashboard surface ----------------
     # Destructive first-party API, so: opt-in config gate, fail-closed live set,
