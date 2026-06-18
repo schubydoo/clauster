@@ -244,16 +244,24 @@ them) — intentional, so an upgrade restart doesn't drop live coding sessions.
 
 ### Routine backup
 
-`clauster backup` tars the `state_dir` (runtime bridge state in `state.json`)
-plus the active config into a single archive:
+`clauster backup` tars the whole `state_dir` — the `clauster.db` persistence
+database (the live store for bridge and hosted-session records) plus everything
+else under it — together with the active config into a single archive:
 
 ```sh
 clauster backup -c /etc/clauster/clauster.yml -o /var/backups/
 ```
 
 Restore it with `clauster restore <archive>` (it can restore state alone or also
-write the config back out). `clauster migrate` upgrades an older `state.json` to
-the current schema.
+write the config back out).
+
+The database schema is migrated automatically: on every start Clauster brings
+`clauster.db` to the latest [Alembic](https://alembic.sqlalchemy.org/) revision
+before serving, and **refuses to start** (fail-closed) if that migration fails —
+so a routine upgrade-and-restart is all an in-place schema change needs. The
+separate `clauster migrate` command is a legacy helper that only upgrades an
+older `state.json` to the current JSON schema; on a database-backed install
+(`state.json` already imported) there is nothing for it to do.
 
 ### `clauster keepers` — stop an orphaned pty keeper
 
