@@ -731,7 +731,7 @@ def test_dispatch_rejects_invalid_resume(tmp_path, monkeypatch):
 
 
 def _fake_job(**kw):
-    base = {"id": "29e8026f", "session_id": _UUID, "cwd": Path("/proj")}
+    base = {"id": "29e8026f", "session_id": _UUID, "cwd": Path("/proj"), "worker_alive": False}
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -755,6 +755,7 @@ def test_resume_background_job_dispatches(monkeypatch):
     "job,match",
     [
         (None, "no background job"),
+        (_fake_job(worker_alive=True), "still live"),  # API mirrors the UI's live gate
         (_fake_job(session_id=None), "no resumable session id"),
         (_fake_job(session_id="29e8026f"), "no resumable session id"),  # 8-hex is not a uuid
         (_fake_job(cwd=None), "no recorded working directory"),

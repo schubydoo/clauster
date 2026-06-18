@@ -421,6 +421,10 @@ def resume_background_job(
     job = next((j for j in list_background_jobs(jobs_dir, roster_json) if j.id == job_id), None)
     if job is None:
         raise ResumeError(f"no background job {job_id!r}")
+    # Server-side guard mirroring the UI's `!agentLive(j)` gate: resuming a still-live
+    # session would spawn a second worker over the same transcript. Don't rely on the UI.
+    if job.worker_alive:
+        raise ResumeError(f"job {job_id!r} is still live — stop it before resuming")
     if not valid_session_id(job.session_id):
         raise ResumeError(f"job {job_id!r} has no resumable session id")
     if job.cwd is None:
