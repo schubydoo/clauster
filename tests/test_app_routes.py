@@ -874,6 +874,20 @@ def test_prometheus_drops_bridge_on_pid_reuse(
     assert "clauster_bridge_cpu_percent" not in client.get("/metrics").text
 
 
+def test_prometheus_samples_when_pid_create_time_matches(write_config, tmp_path, monkeypatch):
+    # bridge_proc_start set AND the live create-time matches → the guard passes and the
+    # bridge is sampled normally.
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    _running_bridge(client)
+    client.app.state.runner._instances["alpha"].bridge_proc_start = 100.0
+    monkeypatch.setattr("clauster.app.procutil.proc_create_time", lambda *a, **k: 100.0)
+    monkeypatch.setattr(
+        "clauster.app.metrics.sample_tree", lambda *a, **k: {"cpu_percent": 5.0, "rss_bytes": 64}
+    )
+    body = client.get("/metrics").text
+    assert 'clauster_bridge_cpu_percent{project="alpha"} 5.0' in body
+
+
 def test_metrics_token_grants_scrape_without_session(runner_config):
     # With auth on and a metrics_token set, a valid Bearer token reaches /metrics with no
     # session; a wrong/absent token is rejected; the existing gauges are unchanged.
