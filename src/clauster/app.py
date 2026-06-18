@@ -1119,6 +1119,33 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except supervisor.StopError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/api/agents/{job_id}/resume", status_code=201)
+    async def api_resume_agent(job_id: str) -> dict:
+        """Resume an ended `claude --bg` session into a new bg job inheriting its transcript.
+
+        The path `{job_id}` is the 8-hex short id (validated like the stop path); the
+        `--resume` argument is the job's full session UUID, validated separately
+        (`valid_session_id`) — the 8-hex guard would reject a UUID. Resume mints a NEW
+        job id (and session UUID) that inherits the prior transcript, so `{id}` returned
+        here differs from the path id; the panel surfaces it as a new row.
+        """
+        if not supervisor.valid_job_id(job_id):
+            raise HTTPException(status_code=422, detail="invalid job id")
+        try:
+            new_id = await asyncio.to_thread(
+                supervisor.resume_background_job,
+                job_id,
+                binary=config.claude.binary,
+                claude_json=runner.claude_json,
+            )
+        except claude_cli.ClaudeNotFound as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except supervisor.ResumeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except supervisor.DispatchError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"id": new_id}
+
     def _enforce_bypass_ceiling(project: str, permission_mode: str | None) -> None:
         """Reject ``bypassPermissions`` when a project's config ceiling forbids it.
 

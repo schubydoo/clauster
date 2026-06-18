@@ -244,14 +244,19 @@ def build_dispatch_argv(
     model: str | None = None,
     permission_mode: str | None = None,
     prompt: str | None = None,
+    resume: str | None = None,
 ) -> list[str]:
     """Build the ``claude --bg [...]`` argv. Pure (no side effects) — unit-testable.
 
     ``rc_name`` opens the cloud door (``--rc`` → a cloud-visible Remote Control
     session); omit it for a purely local background job. ``prompt`` is the
     trailing positional (the session's initial instruction) and may be omitted.
+    ``resume`` is a prior session's full UUID — ``--bg --resume <uuid>`` continues
+    that conversation in a new bg job inheriting its transcript (#336).
     """
     argv = [binary, "--bg"]
+    if resume:
+        argv += ["--resume", resume]
     if rc_name:
         argv += ["--rc", rc_name]
     if model:
@@ -276,6 +281,7 @@ def dispatch_background_job(
     binary: str = "claude",
     claude_json: Path | None = None,
     timeout: float = _DISPATCH_TIMEOUT,
+    resume: str | None = None,
 ) -> str:
     """Dispatch a ``claude --bg`` background session in ``cwd``; return its job id.
 
@@ -308,13 +314,22 @@ def dispatch_background_job(
     for label, value in flag_values:
         if value is not None and not _flag_value_ok(value):
             raise DispatchError(f"invalid {label}: {value!r}")
+    # The resume arg is a session UUID, not a flag value: validate it to the RFC-4122
+    # shape (the 8-hex job-id guard would reject it) so it can't smuggle an argv flag.
+    if resume is not None and not valid_session_id(resume):
+        raise DispatchError(f"invalid resume session id: {resume!r}")
     resolved = resolve_binary(binary)  # absolute path, or ClaudeNotFound
     if claude_json is None:
         trust_directory(cwd)
     else:
         trust_directory(cwd, claude_json)
     argv = build_dispatch_argv(
-        resolved, rc_name=rc_name, model=model, permission_mode=permission_mode, prompt=prompt
+        resolved,
+        rc_name=rc_name,
+        model=model,
+        permission_mode=permission_mode,
+        prompt=prompt,
+        resume=resume,
     )
     try:
         proc = subprocess.run(
@@ -344,6 +359,12 @@ def dispatch_background_job(
 # it also guards the `claude rm <id>` argv against injection.
 _JOB_ID_RE = re.compile(r"[0-9a-f]{8}")
 
+# Session UUID shape (RFC-4122, 8-4-4-4-12 hex) — guards the `--resume <uuid>` argv
+# against injection. Distinct from the 8-hex job id (#336).
+_SESSION_ID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
 # How long to wait for the SIGINT'd session to actually exit (orderly settle).
 _SETTLE_TIMEOUT = 20.0
 _SETTLE_POLL = 0.5
@@ -363,6 +384,58 @@ class StopError(RuntimeError):
 def valid_job_id(job_id: object) -> bool:
     """Whether ``job_id`` matches the 8-hex short-id shape (argv-injection guard)."""
     return isinstance(job_id, str) and _JOB_ID_RE.fullmatch(job_id) is not None
+
+
+def valid_session_id(session_id: object) -> bool:
+    """Whether ``session_id`` matches the RFC-4122 UUID shape (resume argv guard, #336).
+
+    The ``--resume`` argument is the full session UUID, NOT the 8-hex job id, so the
+    job-id guard would wrongly reject it; this validates the UUID's own shape.
+    """
+    return isinstance(session_id, str) and _SESSION_ID_RE.fullmatch(session_id) is not None
+
+
+class ResumeError(RuntimeError):
+    """An ended `claude --bg` session could not be resumed (raised fail-closed, #336)."""
+
+
+def resume_background_job(
+    job_id: str,
+    *,
+    binary: str = "claude",
+    claude_json: Path | None = None,
+    jobs_dir: Path | None = None,
+    roster_json: Path | None = None,
+    timeout: float = _DISPATCH_TIMEOUT,
+) -> str:
+    """Resume an ended `claude --bg` session into a NEW bg job that inherits it (#336).
+
+    Looks the job up by its 8-hex id, reads its full session UUID + cwd, then
+    dispatches ``claude --bg --resume <uuid>`` in that cwd. Returns the **new** job
+    id — a resume mints a fresh 8-hex id (and a new session UUID) that inherits the
+    prior transcript, so the resumed agent surfaces as a new panel row.
+
+    Fail-closed: a job that no longer exists, has no recorded session UUID, or has
+    no cwd raises :class:`ResumeError` rather than dispatching a malformed resume.
+    """
+    job = next((j for j in list_background_jobs(jobs_dir, roster_json) if j.id == job_id), None)
+    if job is None:
+        raise ResumeError(f"no background job {job_id!r}")
+    # Server-side guard mirroring the UI's `!agentLive(j)` gate: resuming a still-live
+    # session would spawn a second worker over the same transcript. Don't rely on the UI.
+    if job.worker_alive:
+        raise ResumeError(f"job {job_id!r} is still live — stop it before resuming")
+    if not valid_session_id(job.session_id):
+        raise ResumeError(f"job {job_id!r} has no resumable session id")
+    if job.cwd is None:
+        raise ResumeError(f"job {job_id!r} has no recorded working directory")
+    return dispatch_background_job(
+        job.cwd,
+        resume=job.session_id,
+        binary=binary,
+        claude_json=claude_json,
+        timeout=timeout,
+    )
 
 
 def _live_session_pid(job_id: str, workers: dict[str, dict]) -> int | None:
