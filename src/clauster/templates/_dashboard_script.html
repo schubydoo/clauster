@@ -20,9 +20,10 @@
   const ROOT = "{{ request.scope.root_path }}";
   const MAX_LOG_LINES = 1000;
   const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
-  // Reconnect delay for the bridge-log tail. openHosted uses the same 1500ms inline (line ~1413);
-  // a single shared constant will land with the reconnect-backoff follow-up that touches both paths.
+  // Reconnect delay + retry cap for the bridge-log tail. openHosted uses the same 1500ms inline and
+  // (still) has no cap; unifying both into shared constants + real backoff is the remaining follow-up.
   const LOG_RECONNECT_MS = 1500;
+  const MAX_LOG_RECONNECTS = 5;  // give up auto-reconnect after this many consecutive failures (CodeRabbit)
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
@@ -1602,7 +1603,8 @@
         // hosted view, which carries its events forward on reopen.
         const state = { open: true, ws: null, token,
                         lines: prev ? prev.lines : [], pending: prev ? prev.pending : [],
-                        paused: prev ? prev.paused : false, lost: false, reconnecting: false };
+                        paused: prev ? prev.paused : false, lost: false, reconnecting: false,
+                        attempts: prev ? prev.attempts : 0 };
         this.logs[name] = state;
         const self = this;
         // Resolve the LIVE tail as the reactive proxy (or null if retired). The token compare
@@ -1619,7 +1621,7 @@
         ws.onmessage = (ev) => {
           const s = liveState();
           if (!s) return;  // a retired socket → ignore
-          s.lost = false; s.reconnecting = false;  // a frame arrived → the tail is live again
+          s.lost = false; s.reconnecting = false; s.attempts = 0;  // a frame arrived → tail is live, reset the retry cap
           if (s.paused) {
             s.pending.push(ev.data);
             if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
@@ -1646,6 +1648,14 @@
           if (!["running", "starting"].includes(self.statusOf(name))) {
             s.reconnecting = false; s.lost = true; return;
           }
+          // Cap consecutive failed reconnects: if the snapshot still reads "running" but the socket
+          // keeps closing (a stale poll after the bridge died, or a server that 1008s every attempt),
+          // give up after MAX_LOG_RECONNECTS instead of looping until the poll catches up. A streamed
+          // frame (onmessage) resets the counter, so a genuinely-healthy tail reconnects indefinitely.
+          if (s.attempts >= MAX_LOG_RECONNECTS) {
+            s.reconnecting = false; s.lost = true; return;
+          }
+          s.attempts += 1;
           s.lost = false; s.reconnecting = true;  // through the proxy → surfaces "reconnecting…"
           setTimeout(() => {
             const s2 = self.logs[name];

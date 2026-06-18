@@ -120,6 +120,10 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     # The reconnect timer gates on the per-tail TOKEN + open (not object identity, which is
     # always-true through the Proxy) or a genuinely-dropped live tail would never re-open.
     assert re.search(r"s2\s*&&\s*s2\.token\s*===\s*token\s*&&\s*s2\.open", page)
+    # Retry cap (CodeRabbit): consecutive failed reconnects are bounded by MAX_LOG_RECONNECTS so a
+    # stale "running" snapshot can't loop forever; a streamed frame resets the counter.
+    assert "const MAX_LOG_RECONNECTS" in page
+    assert re.search(r"s\.attempts\s*>=\s*MAX_LOG_RECONNECTS", page)
     assert "Live tail dropped" in page  # FIX 3 reconnecting UI surface
     assert "Live tail disconnected" in page  # FIX 3 disconnect UI surface (bridge actually gone)
     # openLogs is idempotent + state-bound: a reconnect retires the prior state and binds the
