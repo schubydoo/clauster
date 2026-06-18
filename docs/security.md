@@ -122,8 +122,13 @@ Put an **IdP / IAP** in front — an SSO/forward-auth proxy (Authelia, Authentik
 Cloudflare Access, Pomerium, oauth2-proxy) or a private overlay (Tailscale,
 WireGuard) — so a real identity is checked *before* a request reaches Clauster.
 The reverse-proxy path (peer-IP allowlist + an HMAC-signed user header,
-`auth.reverse_proxy`) is built to trust exactly such a proxy; keep password
-login loopback-only once proxy auth is configured.
+`auth.reverse_proxy`) is built to trust exactly such a proxy. Once it is your
+primary gate, prefer **dropping `password_required` entirely** — the `/login`
+route is deliberately exempt from the auth middleware (so a locked-out operator
+can always reach it), which means there is *no* Clauster-side option to restrict
+it to loopback. If you need to keep a password fallback, the fronting proxy must
+block or `403` `POST /login` from non-loopback sources — that is the only
+enforcement point.
 
 ### The login lockout is friction, not a boundary
 
@@ -139,7 +144,10 @@ account-security boundary — the fronting IdP/IAP above is. See
 
 - Add the public origin(s) to `auth.allowed_origins`: the strict `Origin`
   allowlist on unsafe methods (and on WebSocket accept) is the CSRF guard, so an
-  origin you don't list is rejected.
+  origin you don't list is rejected. Set it to your **public URL** (e.g.
+  `https://clauster.example.com`), not the internal `host:` bind address — when
+  TLS terminates at a proxy, the `Origin` Clauster sees is the public hostname,
+  so a bind-address value silently `403`s every request.
 - Sessions are signed cookies with server-side revocation — logout bumps a
   persistent epoch, so "log out everywhere" instantly kills a cookie that may
   have leaked. Keep `session_max_age_seconds` short for an exposed deployment.
