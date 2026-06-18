@@ -325,8 +325,10 @@ Planned work, roughly in priority order — the public-facing companion to the i
 - **v0.3 — operability** — a homepage-dashboard widget endpoint and i18n string
   extraction (crash notifications and the `/metrics` Prometheus endpoint already
   shipped).
-- **Docs site** — publish the in-repo [`docs/`](docs/index.md) pages (setup,
-  networking, config reference, security model) as a proper docs site.
+
+*Shipped:* the in-repo [`docs/`](docs/index.md) pages (setup, networking, config
+reference, security model) are published as a live docs site at
+[schubydoo.github.io/clauster](https://schubydoo.github.io/clauster/).
 
 ## Stack
 
