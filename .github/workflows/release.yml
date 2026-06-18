@@ -28,8 +28,67 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate: a build may ship to PyPI + GHCR :latest ONLY if it is a vN.N.N release
+  # tag whose commit is on origin/main. Without this, a workflow_dispatch with a
+  # free-form `tag` (a branch name or arbitrary ref) would build and publish that
+  # ref as a real release (#400). Siblings gate likewise: nightly.yml refuses a
+  # non-main ref; packaging-bump.yml validates the ^vN.N.N$ shape.
+  validate:
+    name: Validate release ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      # The publish jobs check out THIS SHA (not the tag name), so they build
+      # exactly the commit validated here — no tag-repoint TOCTOU window.
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history so the on-main ancestry check is reliable
+      - name: Require a vN.N.N tag whose commit is on origin/main
+        id: resolve
+        env:
+          # Indirect through env to keep the ref out of the shell line (zizmor).
+          RESOLVED_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="$RESOLVED_TAG"
+          # Strip CR/LF: $tag (user-controlled inputs.tag) is echoed into the
+          # ::error:: annotations below, where a stray newline could smuggle a
+          # second runner workflow-command into the log.
+          tag="${tag//[$'\r\n']/}"
+          # 1) Shape — only stable vMAJOR.MINOR.PATCH tags publish.
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Refusing to publish '$tag': not a vMAJOR.MINOR.PATCH release tag."
+            exit 1
+          fi
+          # 2) The tag must exist on origin and resolve to a commit. --force because
+          #    fetch-depth:0 already fetched the tag at clone time; without it git
+          #    refuses to re-fetch ("would clobber"), and we want origin's canonical tag.
+          if ! git fetch --no-tags --force origin "refs/tags/${tag}:refs/tags/${tag}"; then
+            echo "::error::Refusing to publish '$tag': no such tag on origin."
+            exit 1
+          fi
+          # `^{commit}` peels an annotated tag to its commit object; without it
+          # rev-parse returns the tag object's SHA and the ancestry check below
+          # would compare the wrong object type.
+          tag_commit="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          # 3) That commit must be reachable from origin/main — this is what blocks
+          #    a tag (or dispatch input) pointing at an unreviewed, off-main ref.
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$tag_commit" FETCH_HEAD; then
+            echo "::error::Refusing to publish '$tag': commit $tag_commit is not on origin/main."
+            exit 1
+          fi
+          echo "Validated '$tag' ($tag_commit): a vN.N.N tag on origin/main."
+          echo "sha=$tag_commit" >> "$GITHUB_OUTPUT"
+
   pypi:
     name: PyPI publish (Trusted Publishing)
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
@@ -42,7 +101,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
       - name: Set up uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
@@ -66,6 +125,7 @@ jobs:
 
   docker:
     name: GHCR image (multi-arch)
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Deployment environment for the GHCR push — gives an audit trail of every
@@ -84,7 +144,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
       - name: Set up QEMU
         uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
       - name: Set up Buildx
