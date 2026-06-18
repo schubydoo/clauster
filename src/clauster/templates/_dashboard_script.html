@@ -34,6 +34,9 @@
   const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
   const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
   const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
+  // Pre-selected launch mode. Hosted ("browser") is opt-in and fails closed when
+  // claustrum is off, so on a default install we pre-select a working mode (#345).
+  const DEFAULT_LAUNCH_MODE = CLAUSTRUM_ENABLED ? "browser" : "desktop";
 
   // Humanize a token count for the compact badge (1.2M / 3.4k); the exact value
   // lives in the tooltip (usageTitle).
@@ -163,11 +166,18 @@
       // Outcome-language launch choices — jargon (hosted/bridge/background) mapped to
       // the plain result the user gets. The "cloud" checkbox folds into Fire-and-forget.
       launchModes() {
-        return [
-          { id: "browser", label: "Here in the browser", sub: "watch it work live, approve tools inline" },
+        const modes = [
           { id: "desktop", label: "In claude.ai / Desktop", sub: "connect from your phone or the Claude app" },
           { id: "detached", label: "Fire-and-forget", sub: "runs detached — check back later" },
         ];
+        // Hosted ("browser") needs claustrum; offering it on a default install pre-selects
+        // a fail-closed mode (#345). Only surface it — first, and badged experimental —
+        // when the channel is actually enabled.
+        if (CLAUSTRUM_ENABLED) {
+          modes.unshift({ id: "browser", label: "Here in the browser",
+                          sub: "watch it work live, approve tools inline", badge: "experimental" });
+        }
+        return modes;
       },
       // Route a launch by chosen mode: browser=hosted, desktop=bridge, detached=background.
       async launchRun(name, mode, perm, cloud, prompt) {
@@ -196,8 +206,15 @@
             this.toast(name + ": running in the browser", "success");
             await this.refresh();
             if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);  // watch it immediately
-          } else { this.toast("start failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("start failed", "error"); }
+          } else { this.toast(this._hostedFailMsg(b.detail || res.status), "error"); }
+        } catch (e) { this.toast(this._hostedFailMsg(), "error"); }
+      },
+      // Hosted runs need claustrum; a fail-closed launch otherwise dead-ends with a bare
+      // error. Point the user at the precondition rather than just reporting failure (#345).
+      _hostedFailMsg(detail) {
+        const base = "couldn't run in the browser";
+        if (!CLAUSTRUM_ENABLED) return base + " — needs claustrum enabled (see docs)";
+        return detail ? base + " — " + detail : base;
       },
       async _launchDetached(name, prompt, cloud, perm) {
         try {

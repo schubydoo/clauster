@@ -40,6 +40,7 @@ _SECRET_RES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS access key id
     re.compile(r"\bsk-[A-Za-z0-9-]{16,}\b"),  # OpenAI/Anthropic-style
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),  # Slack tokens
+    re.compile(r"\bclauster_pat_[A-Za-z0-9_-]{16,}\b"),  # clauster API token (#360)
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._-]{12,}\b"),  # Authorization: Bearer …
 )
 

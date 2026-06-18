@@ -2,6 +2,12 @@
 
 Thanks for your interest in Clauster!
 
+## Code of conduct
+
+This project adheres to the [Contributor Covenant](CODE_OF_CONDUCT.md) code of
+conduct. By participating, you are expected to uphold it; please report
+unacceptable behavior as described there.
+
 ## Dev setup
 
 ```sh
@@ -39,6 +45,13 @@ uv run clauster
 CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.14
 (all merge-blocking; Linux additionally enforces the 96% coverage gate), plus
 lint, security scanners, and dependency review.
+
+## Documentation
+
+Project docs live under [`docs/`](docs/index.md) (published with MkDocs). When
+working on operability or deployment, the [Operations runbook](docs/operations.md)
+collects health checks (`/healthz`, `/metrics`), `clauster doctor`, crash alerts,
+reading the bridge debug log, the `KillMode` restart caveat, and backup/recovery.
 
 ## License
 

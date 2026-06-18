@@ -4,7 +4,7 @@
    freshly created project is always shown). #}
           <div class="list-group-item" data-project="{{ p.name }}"
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
-               x-data="{ lopen: false, lmode: 'browser', lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', ladv: false }">
+               x-data="{ lopen: false, lmode: DEFAULT_LAUNCH_MODE, lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', ladv: false }">
             <div class="d-flex align-items-center flex-wrap gap-2">
               <svg class="ico text-success" style="flex:none" role="img" aria-label="Directory trusted" x-cloak
                    x-show="trustState['{{ p.name }}'] === 'trusted'" title="Directory trusted"><use href="#ic-trust"/></svg>
@@ -51,7 +51,10 @@
                           <input type="radio" class="form-check-input mt-1 me-2" :name="'lm-{{ p.name }}'" :value="m.id" x-model="lmode"
                                  @change="if (lmode !== 'desktop' && lperm === 'bypassPermissions') lperm = DEFAULT_PERMISSION_MODE">
                           <span>
-                            <span class="fw-medium d-block" x-text="m.label"></span>
+                            <span class="fw-medium d-block">
+                              <span x-text="m.label"></span>
+                              <span class="badge bg-azure-lt ms-1" x-show="m.badge" x-cloak x-text="m.badge"></span>
+                            </span>
                             <span class="text-secondary small" x-text="m.sub"></span>
                           </span>
                         </label>

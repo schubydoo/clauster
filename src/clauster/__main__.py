@@ -1,9 +1,9 @@
 """Entry point: ``clauster`` / ``python -m clauster``.
 
-Subcommands: ``run`` (default), ``hash-password``, ``doctor``, ``backup``,
-``restore``, ``migrate``, ``install-service``, ``reap-environments``,
-``usage``. Bare ``clauster`` and ``clauster -c <cfg>`` still mean ``run``
-for backward compatibility.
+Subcommands: ``run`` (default), ``hash-password``, ``hash-token``, ``doctor``,
+``backup``, ``restore``, ``migrate``, ``install-service``,
+``reap-environments``, ``usage``. Bare ``clauster`` and ``clauster -c <cfg>``
+still mean ``run`` for backward compatibility.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import uvicorn
 
 from . import __version__, claude_cli, environments, ops, usage
 from .app import create_app
-from .auth import hash_password, make_hasher
+from .auth import hash_password, make_hasher, mint_token
 from .config import ClausterConfig, load_config
 from .recap import RECAP_SUBCOMMAND
 
@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - defensive: a cosmetic retitle must not
 _COMMANDS = {
     "run",
     "hash-password",
+    "hash-token",
     "doctor",
     "backup",
     "restore",
@@ -60,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run", help="run the server (default)")
     run_p.add_argument("-c", "--config", help="path to clauster.yml")
     sub.add_parser("hash-password", help="hash a password for auth.password_hash")
+    sub.add_parser("hash-token", help="mint an API token + hash for auth.api_token_hash")
 
     doctor_p = sub.add_parser("doctor", help="diagnose config / environment")
     doctor_p.add_argument("-c", "--config", help="path to clauster.yml")
@@ -117,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "hash-password":
         return _hash_password()
+    if args.command == "hash-token":
+        return _hash_token()
     if args.command == "doctor":
         return _doctor(args.config)
     if args.command == "backup":
@@ -160,6 +164,26 @@ def _hash_password() -> int:
         print("clauster: passwords do not match", file=sys.stderr)
         return 2
     print(hash_password(make_hasher(), password))
+    return 0
+
+
+def _hash_token() -> int:
+    """Mint an API token: print the raw token once + the hash for the config.
+
+    The raw token is shown exactly once — store it in the client now, it cannot be
+    recovered. Only the hash goes in ``auth.api_token_hash`` (or the
+    ``CLAUSTER_AUTH_API_TOKEN_HASH`` env var). Guidance is on stderr so
+    ``clauster hash-token`` can be piped without capturing the prose.
+    """
+    raw, token_hash = mint_token()
+    print("Token (shown once — copy it into your client now):", file=sys.stderr)
+    print(raw)
+    print(file=sys.stderr)
+    print(
+        "Add this to clauster.yml under auth (or set CLAUSTER_AUTH_API_TOKEN_HASH):",
+        file=sys.stderr,
+    )
+    print(f"  api_token_hash: {token_hash}", file=sys.stderr)
     return 0
 
 
