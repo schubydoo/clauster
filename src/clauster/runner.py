@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from . import bridge_log, inspector, pointers, procutil, redact
+from . import bridge_log, inspector, metrics, pointers, procutil, redact
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
@@ -138,6 +138,11 @@ class SessionRunner:
         self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
         self._poll_task: asyncio.Task | None = None
+        # Server-side per-project metrics snapshot (#354): the metrics task refreshes it
+        # off the request path so /api/projects/{name}/metrics + the batch read + the
+        # /metrics scrape all serve from the last sample at O(1), no per-request thread.
+        self._metrics_cache: dict[str, dict] = {}
+        self._metrics_task: asyncio.Task | None = None
         # Per-spawn background tasks that watch a STARTING bridge until it either
         # registers an environment (-> RUNNING) or proves stuck (-> ERROR).
         self._startup_watches: dict[str, asyncio.Task] = {}
@@ -182,6 +187,77 @@ class SessionRunner:
     def crash_counts(self) -> dict[str, int]:
         """Return a copy of the per-project bridge-crash tally since process start (#352)."""
         return dict(self._crash_counts)
+
+    def metrics_snapshot(self, name: str) -> dict | None:
+        """Return a copy of the last cached resource sample for ``name``, or None (#354)."""
+        sample = self._metrics_cache.get(name)
+        return dict(sample) if sample is not None else None
+
+    def metrics_snapshots(self) -> dict[str, dict]:
+        """Return a copy of the per-project cached resource samples (#354 batch read)."""
+        return dict(self._metrics_cache)
+
+    async def _refresh_metrics_cache(self) -> None:
+        """Re-sample every running bridge into ``_metrics_cache`` (#354).
+
+        Samples sequentially — one ``to_thread`` at a time — so thread-pool pressure
+        stays O(1) regardless of bridge count (the whole point: move the N concurrent
+        per-request samples off the request path onto one background sampler). The PID
+        create-time guard mirrors the per-request path so a recycled PID is never
+        attributed to a bridge. The cache is replaced wholesale, so a stopped/crashed
+        bridge's stale sample drops out.
+        """
+        fresh: dict[str, dict] = {}
+        for inst in list(self._instances.values()):
+            pid = inst.bridge_pid
+            if inst.status is not InstanceStatus.RUNNING or pid is None:
+                continue
+            start = inst.bridge_proc_start
+            if start is not None:
+                cur = await asyncio.to_thread(procutil.proc_create_time, pid)
+                if cur is None or abs(cur - start) > 2.0:
+                    continue  # PID reused onto an unrelated process — skip
+            try:
+                sample = await asyncio.to_thread(
+                    metrics.sample_tree,
+                    pid,
+                    interval=self._config.metrics.sample_interval_seconds,
+                    normalize_cpu=self._config.metrics.normalize_cpu,
+                )
+            except Exception as exc:  # noqa: BLE001 - drop this bridge, never the loop
+                _log.debug("metrics sample failed for %s: %s", inst.project, exc)
+                continue
+            if sample:
+                fresh[inst.project] = sample
+        self._metrics_cache = fresh
+
+    def _warn_if_refresh_slow(self, elapsed: float) -> None:
+        """Warn when a refresh outran the poll period (samples are going stale, #354).
+
+        If sampling N bridges (each ~sample_interval_seconds) outgrows poll_seconds, the
+        effective refresh rate degrades silently — surface it instead.
+        """
+        poll = self._config.metrics.poll_seconds
+        if elapsed > poll:
+            _log.warning(
+                "metrics refresh took %.1fs, exceeding poll_seconds=%.1f — samples may "
+                "be stale; reduce running bridges or raise metrics.poll_seconds",
+                elapsed,
+                poll,
+            )
+
+    async def _metrics_refresh_forever(self) -> None:
+        """Refresh the metrics cache every ``metrics.poll_seconds`` until cancelled."""
+        while True:
+            started = time.monotonic()
+            try:
+                await self._refresh_metrics_cache()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _log.exception("metrics cache refresh failed; continuing")
+            self._warn_if_refresh_slow(time.monotonic() - started)
+            await asyncio.sleep(self._config.metrics.poll_seconds)
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
         """Return the instance with this id, or None if unknown."""
@@ -1675,6 +1751,10 @@ class SessionRunner:
         """Rediscover already-running bridges, then start the background poll loop."""
         await self.rediscover()
         self._poll_task = asyncio.create_task(self._poll_forever())
+        # Server-side metrics sampler (#354): only when the feature is on. Keeps the
+        # per-project / batch / scrape reads at O(1) with no per-request thread.
+        if self._config.metrics.enabled:
+            self._metrics_task = asyncio.create_task(self._metrics_refresh_forever())
 
     async def _poll_forever(self) -> None:
         interval = self._config.claude.agents_json_poll_interval_seconds
@@ -1702,10 +1782,12 @@ class SessionRunner:
             if not task.done():
                 task.cancel()
         self._startup_watches.clear()
-        if self._poll_task is not None:
-            self._poll_task.cancel()
-            try:
-                await self._poll_task
-            except asyncio.CancelledError:
-                pass
-            self._poll_task = None
+        for attr in ("_poll_task", "_metrics_task"):
+            task = getattr(self, attr)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, attr, None)

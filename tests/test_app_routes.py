@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
@@ -655,16 +654,33 @@ def test_metrics_no_running_bridge_returns_false(write_config, tmp_path):
 
 
 def test_metrics_running_bridge_returns_sample(write_config, tmp_path):
-    from clauster.models import InstanceStatus, RemoteControlInstance
-
+    # The endpoint now serves the runner's cached snapshot (#354) — O(1), no sampling.
     client = _client(write_config, tmp_path)
-    inst = RemoteControlInstance(project="alpha", label="alpha")
-    inst.status = InstanceStatus.RUNNING
-    inst.bridge_pid = os.getpid()  # a live pid → a real sample
-    client.app.state.runner._instances["alpha"] = inst
+    client.app.state.runner._metrics_cache["alpha"] = {
+        "cpu_percent": 3.0,
+        "rss_bytes": 4096,
+        "procs": 2,
+    }
     body = client.get("/api/projects/alpha/metrics").json()
-    assert body["running"] is True
-    assert "cpu_percent" in body and "rss_bytes" in body and body["procs"] >= 1
+    assert body == {"running": True, "cpu_percent": 3.0, "rss_bytes": 4096, "procs": 2}
+
+
+def test_metrics_batch_returns_all_cached(write_config, tmp_path):
+    # The batch endpoint (#354) returns every cached bridge in one O(1) read.
+    client = _client(write_config, tmp_path)
+    client.app.state.runner._metrics_cache = {
+        "alpha": {"cpu_percent": 1.0, "rss_bytes": 10},
+        "beta": {"cpu_percent": 2.0, "rss_bytes": 20},
+    }
+    body = client.get("/api/metrics").json()
+    assert body["alpha"] == {"running": True, "cpu_percent": 1.0, "rss_bytes": 10}
+    assert body["beta"]["cpu_percent"] == 2.0
+
+
+def test_metrics_batch_empty_when_disabled(write_config, tmp_path):
+    client = _client_with(write_config, tmp_path, "metrics:\n  enabled: false\n")
+    client.app.state.runner._metrics_cache["alpha"] = {"cpu_percent": 1.0, "rss_bytes": 10}
+    assert client.get("/api/metrics").json() == {}
 
 
 def test_metrics_disabled_returns_false_even_when_running(write_config, tmp_path):
@@ -686,44 +702,8 @@ def test_dashboard_injects_metrics_flags(write_config, tmp_path):
     assert "const METRICS_POLL_MS = 4000;" in html
 
 
-def _running_metrics_client(write_config, tmp_path):
-    from clauster.models import InstanceStatus, RemoteControlInstance
-
-    client = _client(write_config, tmp_path)
-    inst = RemoteControlInstance(project="alpha", label="alpha")
-    inst.status = InstanceStatus.RUNNING
-    inst.bridge_pid = os.getpid()
-    client.app.state.runner._instances["alpha"] = inst
-    return client, inst
-
-
-def test_metrics_sampler_failure_returns_false(write_config, tmp_path, monkeypatch):
-    # Fail closed: a sampling exception must yield {running: false}, never a 500.
-    from clauster import metrics as metrics_mod
-
-    client, _ = _running_metrics_client(write_config, tmp_path)
-
-    def boom(*a, **k):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(metrics_mod, "sample_tree", boom)
-    r = client.get("/api/projects/alpha/metrics")
-    assert r.status_code == 200
-    assert r.json() == {"running": False}
-
-
-def test_metrics_pid_reuse_guard_returns_false(write_config, tmp_path):
-    # A recorded start time that no longer matches the live PID = reuse → not-running.
-    client, inst = _running_metrics_client(write_config, tmp_path)
-    inst.bridge_proc_start = 1.0  # nowhere near os.getpid()'s real create time
-    assert client.get("/api/projects/alpha/metrics").json() == {"running": False}
-
-
-def test_metrics_gone_pid_returns_false(write_config, tmp_path):
-    # No proc_start recorded (guard skipped) + a dead PID → sample is None → false.
-    client, inst = _running_metrics_client(write_config, tmp_path)
-    inst.bridge_pid = 2_147_483_646
-    assert client.get("/api/projects/alpha/metrics").json() == {"running": False}
+# Sampling-guard behavior (sampler error, PID reuse, dead PID) now lives in the runner's
+# metrics-cache refresh — see tests/test_metrics_cache.py. The endpoint just reads the cache.
 
 
 # ----- Prometheus /metrics exposition (gated, default off) --------------
@@ -780,19 +760,10 @@ def test_prometheus_exposes_crash_counter(write_config, tmp_path):
     assert 'clauster_bridge_crashes_total{project="alpha"} 2' in body
 
 
-def test_prometheus_exposes_per_bridge_cpu_rss(write_config, tmp_path, monkeypatch):
-    from clauster.models import InstanceStatus, RemoteControlInstance
-
+def test_prometheus_exposes_per_bridge_cpu_rss(write_config, tmp_path):
+    # /metrics reads the runner's metrics cache (#354) — no per-scrape sampling.
     client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
-    inst = RemoteControlInstance(project="alpha", label="alpha")
-    inst.status = InstanceStatus.RUNNING
-    inst.bridge_pid = 4242
-    client.app.state.runner._instances["alpha"] = inst
-    # Stub the tree sampler the app calls so the test needs no real process.
-    monkeypatch.setattr(
-        "clauster.app.metrics.sample_tree",
-        lambda *a, **k: {"cpu_percent": 7.5, "rss_bytes": 2048},
-    )
+    client.app.state.runner._metrics_cache["alpha"] = {"cpu_percent": 7.5, "rss_bytes": 2048}
     body = client.get("/metrics").text
     assert 'clauster_bridge_cpu_percent{project="alpha"} 7.5' in body
     assert 'clauster_bridge_rss_bytes{project="alpha"} 2048' in body
@@ -815,77 +786,15 @@ def test_prometheus_claustrum_up_zero_when_enabled_but_no_daemon(write_config, t
     assert "clauster_claustrum_up 0" in client.get("/metrics").text
 
 
-def _running_bridge(client, *, pid=4242):
-    from clauster.models import InstanceStatus, RemoteControlInstance
-
-    inst = RemoteControlInstance(project="alpha", label="alpha")
-    inst.status = InstanceStatus.RUNNING
-    inst.bridge_pid = pid
-    client.app.state.runner._instances["alpha"] = inst
-
-
-def test_prometheus_skips_cpu_rss_when_metrics_disabled(write_config, tmp_path):
-    # metrics.enabled false → no per-bridge sampling, so no cpu/rss series (gauges off).
-    client = _client_with(
-        write_config,
-        tmp_path,
-        "observability:\n  prometheus_enabled: true\nmetrics:\n  enabled: false\n",
-    )
-    _running_bridge(client)
-    body = client.get("/metrics").text
-    assert "clauster_bridge_cpu_percent" not in body
-
-
-def test_prometheus_drops_bridge_on_sampling_error(write_config, tmp_path, monkeypatch):
-    # A sampling error for a bridge drops it from the scrape, never 500s the endpoint.
+def test_prometheus_no_cpu_rss_when_cache_empty(write_config, tmp_path):
+    # With nothing in the metrics cache (e.g. metrics disabled → task never runs), the
+    # scrape emits no per-bridge cpu/rss series.
     client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
-    _running_bridge(client)
-    monkeypatch.setattr(
-        "clauster.app.metrics.sample_tree",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
-    r = client.get("/metrics")
-    assert r.status_code == 200
-    assert "clauster_bridge_cpu_percent" not in r.text
-
-
-def test_prometheus_drops_bridge_on_empty_sample(write_config, tmp_path, monkeypatch):
-    # sample_tree returns None (pid already gone) → that bridge is omitted.
-    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
-    _running_bridge(client)
-    monkeypatch.setattr("clauster.app.metrics.sample_tree", lambda *a, **k: None)
-    body = client.get("/metrics").text
-    assert "clauster_bridge_cpu_percent" not in body
-
-
-@pytest.mark.parametrize("cur_create_time", [None, 999.0])
-def test_prometheus_drops_bridge_on_pid_reuse(
-    write_config, tmp_path, monkeypatch, cur_create_time
-):
-    # If the live PID's create-time no longer matches (or is gone), don't attribute its
-    # cpu/rss to this bridge — guard against PID reuse, mirroring api_project_metrics.
-    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
-    _running_bridge(client)
-    client.app.state.runner._instances["alpha"].bridge_proc_start = 100.0
-    monkeypatch.setattr("clauster.app.procutil.proc_create_time", lambda *a, **k: cur_create_time)
-    monkeypatch.setattr(
-        "clauster.app.metrics.sample_tree", lambda *a, **k: {"cpu_percent": 9.0, "rss_bytes": 1}
-    )
     assert "clauster_bridge_cpu_percent" not in client.get("/metrics").text
 
 
-def test_prometheus_samples_when_pid_create_time_matches(write_config, tmp_path, monkeypatch):
-    # bridge_proc_start set AND the live create-time matches → the guard passes and the
-    # bridge is sampled normally.
-    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
-    _running_bridge(client)
-    client.app.state.runner._instances["alpha"].bridge_proc_start = 100.0
-    monkeypatch.setattr("clauster.app.procutil.proc_create_time", lambda *a, **k: 100.0)
-    monkeypatch.setattr(
-        "clauster.app.metrics.sample_tree", lambda *a, **k: {"cpu_percent": 5.0, "rss_bytes": 64}
-    )
-    body = client.get("/metrics").text
-    assert 'clauster_bridge_cpu_percent{project="alpha"} 5.0' in body
+# The per-bridge sampling guards (error / PID reuse / dead PID / wholesale replace) are
+# exercised at the runner-cache layer — see tests/test_metrics_cache.py.
 
 
 def test_metrics_token_grants_scrape_without_session(runner_config):
