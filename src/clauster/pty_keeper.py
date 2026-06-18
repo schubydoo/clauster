@@ -307,12 +307,20 @@ def find_orphan_keepers(log_dir: Path, carded_projects: set[str]) -> list[Keeper
     orphan (nothing to stop).
     """
     carded_files: set[Path] = set()
+    protected_names: set[str] = set()
     for project in carded_projects:
         try:
             carded_files.update(log_dir.glob(f"{project}-*{_KEEPER_SUFFIX}"))
         except OSError:
-            continue
-    return [k for k in iter_keepers(log_dir) if k.alive and k.sidecar not in carded_files]
+            # Can't enumerate this project's sidecars — protect it by parsed name
+            # instead, so a live carded keeper can never surface as an orphan. This
+            # over-protects (a name parse is approximate), never under-protects.
+            protected_names.add(project)
+    return [
+        k
+        for k in iter_keepers(log_dir)
+        if k.alive and k.sidecar not in carded_files and k.project not in protected_names
+    ]
 
 
 def stop_keeper(keeper_pid: int, *, expect_create_time: float | None = None) -> bool:
@@ -345,8 +353,14 @@ def stop_keeper(keeper_pid: int, *, expect_create_time: float | None = None) -> 
     # one) before reporting the outcome rather than racing the kill.
     for _ in range(10):
         procutil.reap_if_exited(keeper_pid)
-        if procutil.proc_create_time(keeper_pid) is None:
+        current = procutil.proc_create_time(keeper_pid)
+        if current is None:
             return True
+        if (
+            expect_create_time is not None
+            and abs(current - expect_create_time) > _KEEPER_START_TOLERANCE
+        ):
+            return True  # PID recycled onto a new process → the keeper we killed is gone
         time.sleep(0.1)
     return False
 

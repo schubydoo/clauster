@@ -77,6 +77,21 @@ def test_find_orphan_keepers_tolerates_glob_error(tmp_path, monkeypatch):
     assert pty_keeper.find_orphan_keepers(tmp_path, {"alpha"}) == []
 
 
+def test_find_orphan_keepers_carded_glob_error_protects_by_name(tmp_path, monkeypatch):
+    # iter_keepers succeeds (a live keeper for carded "alpha"), but alpha's per-project
+    # glob raises → the carded keeper must still NOT surface as an orphan (fail-closed).
+    _sidecar(tmp_path, "alpha", keeper_pid=os.getpid())
+    real_glob = pty_keeper.Path.glob
+
+    def _selective(self, pattern):
+        if pattern.startswith("alpha-"):
+            raise OSError("simulated unreadable")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(pty_keeper.Path, "glob", _selective)
+    assert pty_keeper.find_orphan_keepers(tmp_path, {"alpha"}) == []
+
+
 # ----- stop ----------------------------------------------------------------
 
 
@@ -135,6 +150,17 @@ def test_stop_keeper_true_when_exits_at_reuse_guard(monkeypatch):
     monkeypatch.setattr(procutil, "proc_create_time", lambda pid: next(seq))
     monkeypatch.setattr(procutil, "force_kill_tree", _no_force)
     assert pty_keeper.stop_keeper(123, expect_create_time=1.0) is True
+
+
+def test_stop_keeper_true_when_pid_reused_after_force(monkeypatch):
+    # Matching through grace + the pre-force guard; force fires; then the PID is recycled
+    # (create-time changes) in the post-force poll → report the kill as succeeded.
+    times = iter([100.0] * 8 + [100.0, 999.0])  # grace(8) + pre-force guard + post-force
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(pty_keeper.time, "sleep", lambda s: None)
+    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: next(times))
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: None)
+    assert pty_keeper.stop_keeper(123, expect_create_time=100.0) is True
 
 
 def test_stop_keeper_kills_a_real_process():
