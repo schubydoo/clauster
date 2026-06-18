@@ -4,6 +4,9 @@ Clauster's guiding principle is **fail closed, never silently**: auth gates
 default to denial, and a configuration that would serve an unauthenticated
 dashboard to the network is refused at startup rather than quietly accepted.
 
+For what Clauster keeps on disk — and how to purge it — see
+[Privacy & data at rest](privacy.md).
+
 ## Authentication (fail-closed)
 
 The auth foundation lives in `auth.py` as pure, FastAPI-free functions (the web

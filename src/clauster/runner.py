@@ -36,6 +36,7 @@ from .config import (
     ResumeMode,
     SpawnMode,
 )
+from .db.persistence import Persistence
 from .discovery import discover_projects, is_valid_project_name
 from .models import (
     Attribution,
@@ -47,7 +48,6 @@ from .models import (
 )
 from .notify import Notifier
 from .recap import ensure_recap_hook_installed
-from .state import StateStore
 from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
 
 _log = logging.getLogger("clauster.runner")
@@ -110,8 +110,20 @@ _PROC_START_TOLERANCE = 2.0
 class SessionRunner:
     """Owns the lifecycle of managed bridges: spawn, resume, stop, and status polling."""
 
-    def __init__(self, config: ClausterConfig, claude_json: Path | None = None) -> None:
-        """Bind the runner to config and the ``~/.claude.json`` trust file."""
+    def __init__(
+        self,
+        config: ClausterConfig,
+        claude_json: Path | None = None,
+        persistence: Persistence | None = None,
+    ) -> None:
+        """Bind the runner to config and the ``~/.claude.json`` trust file.
+
+        Builds (or reuses) the :class:`Persistence` container — engine + migrated,
+        imported database. A fresh one runs the fail-closed startup (migrate to
+        head, then a one-time legacy-JSON import); the app passes its own so the
+        whole process shares a single engine. ``persistence`` is exposed so the app
+        can reuse it for the hosted-session store.
+        """
         self._config = config
         self._binary = config.claude.binary
         self._claude_json = claude_json or Path("~/.claude.json").expanduser()
@@ -135,8 +147,10 @@ class SessionRunner:
         self._recap_hook_ensured = False
         # ~/.claude/settings.json sits beside the ~/.claude.json we honor for trust.
         self._settings_json = self._claude_json.parent / ".claude" / "settings.json"
-        # Lightweight persistence of label / intentional_stop / spawn_mode (D14).
-        self._state = StateStore(config.state_dir)
+        # Persistence of label / intentional_stop / spawn_mode (D14), now DB-backed
+        # (#362) behind the same load()/save() dict contract the JSON store had.
+        self._persistence = persistence or Persistence(config.state_dir, config.database_url)
+        self._state = self._persistence.state_store()
         self._persisted: dict[str, dict] = self._state.load()
         self._last_saved: dict[str, dict] | None = None
         # Best-effort outbound notifications (Apprise; optional extra). No-op unless
@@ -151,6 +165,11 @@ class SessionRunner:
     def claude_json(self) -> Path:
         """The claude.json whose trusted-dirs this runner honors (for trust checks)."""
         return self._claude_json
+
+    @property
+    def persistence(self) -> Persistence:
+        """The shared persistence container (engine + DB-backed stores)."""
+        return self._persistence
 
     def list_instances(self) -> list[RemoteControlInstance]:
         """Return a snapshot list of all managed bridge instances."""
@@ -484,7 +503,7 @@ class SessionRunner:
             raise InvalidSpawnOption(
                 f"worktree mode requires a git repository: {proj.name!r} is not one"
             )
-        if permission_mode == "bypassPermissions" and not self._config.allows_bypass(proj.name):
+        if self._config.bypass_denied(proj.name, permission_mode):
             raise PermissionModeNotAllowed(
                 f"bypassPermissions is not enabled for project {proj.name!r}. Set "
                 "projects.<name>.allow_bypass_permissions: true in clauster.yml first."

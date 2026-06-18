@@ -31,6 +31,8 @@ dependencies = [
     "itsdangerous>=2.2",
     "python-multipart>=0.0.9",
     "setproctitle>=1.3",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +40,13 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
+    "hypothesis>=6.0",
+    # Linux-only (no Windows/macOS atheris wheels — the marker keeps `uv lock`
+    # cross-platform and the Windows/macOS cells green). In `dev` so the fuzz-
+    # harness import-smoke test (tests/test_fuzz_harness_smoke.py) actually runs
+    # in the default suite on Linux instead of perpetually skipping; it
+    # importorskips where atheris is absent.
+    "atheris>=3.0.0; sys_platform == 'linux'",
     "pytest-cov>=5.0",
     "pytest-xdist>=3.6.1",
     "ruff>=0.8",
@@ -62,12 +71,13 @@ notify = [
     "apprise>=1.9",
 ]
 fuzz = [
-    # Run the fuzz/ harnesses locally: `uv pip install '.[fuzz]'` then
-    # `python fuzz/<name>_fuzzer.py -max_total_time=60`. Kept OUT of `dev` on
-    # purpose, and marked linux-only — atheris has no Windows wheels, so an
-    # unmarked dep would break `uv lock` (it resolves cross-platform) and the
-    # Windows/macOS test cells. In CI the OSS-Fuzz base-builder-python image
-    # (ClusterFuzzLite) already provides atheris, so build.sh doesn't need this.
+    # Standalone-fuzzing convenience extra: `uv pip install '.[fuzz]'` then
+    # `python fuzz/<name>_fuzzer.py -max_total_time=60`. atheris is also in `dev`
+    # (so the import-smoke test runs in the default suite); this extra keeps the
+    # fuzzing dependency discoverable on its own. Marked linux-only — atheris has
+    # no Windows/macOS wheels, so an unmarked dep would break cross-platform
+    # `uv lock` and the Windows/macOS cells. In CI the OSS-Fuzz base-builder-python
+    # image (ClusterFuzzLite) already provides atheris, so build.sh doesn't need this.
     "atheris>=3.0.0; sys_platform == 'linux'",
 ]
 

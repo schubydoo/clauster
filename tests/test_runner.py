@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from typing import cast
 import pytest
 
 from clauster import bridge_log, inspector, procutil
+from clauster.db.persistence import Persistence
 from clauster.models import (
     Attribution,
     InstanceStatus,
@@ -22,12 +24,39 @@ from clauster.runner import (
     SessionRunner,
     UnknownProject,
 )
-from clauster.state import StateStore
 
 
 def _make_runner(runner_config) -> SessionRunner:
     config, claude_json = runner_config
     return SessionRunner(config, claude_json=claude_json)
+
+
+@contextlib.contextmanager
+def _db_persistence(state_dir):
+    """Yield a ``Persistence`` on ``state_dir``, disposing its engine on exit.
+
+    A separate ``SessionRunner`` builds its own engine on the SAME SQLite file under
+    ``state_dir`` (WAL + busy-timeout make concurrent engines safe), so it observes
+    what the test wrote. Disposing on exit keeps a pooled connection from being GC'd
+    undisposed (the ResourceWarning) or left holding the SQLite file open.
+    """
+    persistence = Persistence(state_dir)
+    try:
+        yield persistence
+    finally:
+        persistence.dispose()
+
+
+def _db_save(state_dir, records):
+    """Seed ``records`` into a DB-backed StateStore on ``state_dir``, then dispose."""
+    with _db_persistence(state_dir) as persistence:
+        persistence.state_store().save(records)
+
+
+def _db_load(state_dir):
+    """Return the persisted StateStore records on ``state_dir``, then dispose."""
+    with _db_persistence(state_dir) as persistence:
+        return persistence.state_store().load()
 
 
 async def test_spawn_ready_then_stop(runner_config, monkeypatch):
@@ -360,7 +389,8 @@ async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_con
     # (not wiped on the post-rediscover save, which would later resume it with
     # default modes — a silent downgrade).
     config, claude_json = runner_config
-    StateStore(config.state_dir).save(
+    _db_save(
+        config.state_dir,
         {
             "alpha": {
                 "label": "Custom Label",
@@ -369,7 +399,7 @@ async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_con
                 "resume_mode": "standard",
                 "intentional_stop": True,
             }
-        }
+        },
     )
     runner = SessionRunner(config, claude_json=claude_json)
     await runner.rediscover()  # bridge gone, but a persisted record exists
@@ -382,7 +412,7 @@ async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_con
     assert inst.label == "Custom Label"
     assert inst.intentional_stop is True  # carried through
 
-    reloaded = StateStore(config.state_dir).load()
+    reloaded = _db_load(config.state_dir)
     assert reloaded["alpha"]["permission_mode"] == "plan"
     assert reloaded["alpha"]["spawn_mode"] == "same-dir"
     assert reloaded["alpha"]["resume_mode"] == "standard"
@@ -395,7 +425,8 @@ async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_conf
     # conversation) — this is the dogfood bug. A discovered project with NO persisted
     # record is left absent: no phantom card offering to resume nothing.
     config, claude_json = runner_config
-    StateStore(config.state_dir).save(
+    _db_save(
+        config.state_dir,
         {
             "alpha": {
                 "label": "alpha",
@@ -403,7 +434,7 @@ async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_conf
                 "resume_mode": "pty",
                 "intentional_stop": False,
             }
-        }
+        },
     )
     runner = SessionRunner(config, claude_json=claude_json)
     await runner.rediscover()
@@ -718,8 +749,9 @@ async def test_adopt_pins_standard_over_stale_persisted_pty_mode(runner_config, 
     # bridge is positively confirmed standard (cmdline gate), so the adopted instance
     # must pin "standard" — else stop() would wrongly use the pty double-SIGINT path.
     config, claude_json = runner_config
-    StateStore(config.state_dir).save(
-        {"alpha": {"label": "my-alpha", "resume_mode": "pty", "spawn_mode": "same-dir"}}
+    _db_save(
+        config.state_dir,
+        {"alpha": {"label": "my-alpha", "resume_mode": "pty", "spawn_mode": "same-dir"}},
     )
     runner = SessionRunner(config, claude_json=claude_json)
     monkeypatch.setattr(
@@ -930,7 +962,8 @@ async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
 async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     config, claude_json = runner_config
     # alpha was intentionally stopped with a custom label; zeta is stale/persisted.
-    StateStore(config.state_dir).save(
+    _db_save(
+        config.state_dir,
         {
             "alpha": {
                 "label": "my-alpha",
@@ -942,7 +975,7 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
                 "intentional_stop": True,
                 "spawn_mode": "same-dir",
             },
-        }
+        },
     )
     runner = SessionRunner(config, claude_json=claude_json)
 
@@ -967,7 +1000,8 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
 
 async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkeypatch):
     config, claude_json = runner_config
-    StateStore(config.state_dir).save(
+    _db_save(
+        config.state_dir,
         {
             "alpha": {
                 "label": "alpha",
@@ -975,7 +1009,7 @@ async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkey
                 "spawn_mode": "BOGUS",
                 "permission_mode": "NOPE",
             },
-        }
+        },
     )
     runner = SessionRunner(config, claude_json=claude_json)
 

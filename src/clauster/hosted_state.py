@@ -50,7 +50,7 @@ class HostedStateStore(KeyedJsonStore):
     ``"instances"``), so older on-disk files keep loading unchanged.
     """
 
-    _FILENAME = "hosted_state.json"
+    FILENAME = "hosted_state.json"
     _MAP_KEY = "sessions"
     _PERSISTED_FIELDS = _PERSISTED_FIELDS
     _SCHEMA = CURRENT_SCHEMA
