@@ -79,6 +79,62 @@ def test_env_config_and_home_candidates(write_config, monkeypatch):
     assert config.source_path == cfg_path
 
 
+def test_env_file_indirection_reads_secret(write_config, monkeypatch, tmp_path):
+    # CLAUSTER_<X>_FILE reads the value from a file (trailing newline stripped) — for
+    # secrets rendered to /run/secrets by Docker/K8s/Vault (#368).
+    secret_file = tmp_path / "pw_hash"
+    secret_file.write_text("argon2-hash-from-file\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", str(secret_file))
+    config = load_config(write_config())
+    assert config.auth.password_hash == "argon2-hash-from-file"
+
+
+def test_env_file_wins_over_plain_var(write_config, monkeypatch, tmp_path):
+    secret_file = tmp_path / "pw_hash"
+    secret_file.write_text("from-file", encoding="utf-8")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH", "from-env")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", str(secret_file))
+    config = load_config(write_config())
+    assert config.auth.password_hash == "from-file"
+
+
+def test_blank_env_file_falls_through_to_plain_var(write_config, monkeypatch):
+    # A blank _FILE is treated as unset so the plain env var still applies.
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", "   ")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH", "from-env")
+    config = load_config(write_config())
+    assert config.auth.password_hash == "from-env"
+
+
+def test_unreadable_env_file_fails_closed(write_config, monkeypatch, tmp_path):
+    # A _FILE pointing at a missing file is a misconfiguration — fail closed, never
+    # silently fall back to the (possibly empty) plain env var.
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", str(tmp_path / "nope"))
+    with pytest.raises(ValueError, match="unreadable file"):
+        load_config(write_config())
+
+
+def test_empty_env_file_fails_closed(write_config, monkeypatch, tmp_path):
+    # A present-but-empty (or whitespace-only) secret file is a blank-rendered secret —
+    # raise rather than apply "" (which would look like an absent override).
+    secret_file = tmp_path / "pw_hash"
+    secret_file.write_text("   \n", encoding="utf-8")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", str(secret_file))
+    with pytest.raises(ValueError, match="empty file"):
+        load_config(write_config())
+
+
+def test_non_utf8_env_file_fails_closed(write_config, monkeypatch, tmp_path):
+    # A binary/corrupt mount must fail closed with the documented error, and the
+    # offending bytes must NOT appear in the message (no secret-fragment leak).
+    secret_file = tmp_path / "pw_hash"
+    secret_file.write_bytes(b"\xff\xfe\x80secret")
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH_FILE", str(secret_file))
+    with pytest.raises(ValueError, match="not valid UTF-8") as exc:
+        load_config(write_config())
+    assert "secret" not in str(exc.value)
+
+
 def test_non_loopback_host_rejected_without_auth(write_config):
     cfg_path = write_config("host: 0.0.0.0\n")
     with pytest.raises(ValueError, match="non-loopback"):

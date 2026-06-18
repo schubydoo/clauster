@@ -2,6 +2,9 @@
 
 Search order:  $CLAUSTER_CONFIG  ->  ./clauster.yml  ->  $CLAUSTER_HOME/clauster.yml
 Any scalar key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value.
+Every such var also has a CLAUSTER_<...>_FILE form that reads the value from a file
+(file wins; trailing whitespace stripped) — for secrets rendered to /run/secrets by
+Docker/K8s/Vault, keeping them out of the process environment.
 Schema is additive-only: old configs must always validate against newer versions.
 """
 
@@ -734,9 +737,36 @@ def _set_nested(d: dict, path: tuple[str, ...], value: object) -> None:
     cur[path[-1]] = value
 
 
+def _read_secret_file(file_var: str, file_path: str) -> str:
+    """Return the secret in ``file_path``, trailing whitespace stripped. Fail closed.
+
+    Secret files (Docker/K8s/Vault render them under ``/run/secrets``) usually carry
+    a trailing newline, so it is stripped. Every failure mode surfaces rather than
+    silently falling back to the plain env var: an unreadable path, non-UTF-8 bytes
+    (a binary/corrupt mount), or an empty file (a blank-rendered secret) all raise.
+    """
+    try:
+        value = Path(file_path).read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError:
+        # The error carries the offending bytes (a secret fragment) — keep them out of
+        # the message AND the traceback (``from None``) so nothing leaks.
+        raise ValueError(f"{file_var} file {file_path!r} is not valid UTF-8 text") from None
+    except OSError as exc:
+        raise ValueError(f"{file_var} points to an unreadable file {file_path!r}: {exc}") from exc
+    if not value:
+        raise ValueError(f"{file_var} points to an empty file {file_path!r}")
+    return value
+
+
 def _apply_env_overrides(data: dict) -> dict:
     for env_name, path in _scalar_env_map(ClausterConfig).items():
-        if env_name in os.environ:
+        # Secret indirection: for any CLAUSTER_<X>, a CLAUSTER_<X>_FILE wins and reads
+        # the value from a file, keeping the argon2 hash / session secret out of the
+        # process environment. A blank _FILE is treated as unset (falls through).
+        file_path = os.environ.get(f"{env_name}_FILE", "").strip()
+        if file_path:
+            _set_nested(data, path, _read_secret_file(f"{env_name}_FILE", file_path))
+        elif env_name in os.environ:
             _set_nested(data, path, os.environ[env_name])
     return data
 

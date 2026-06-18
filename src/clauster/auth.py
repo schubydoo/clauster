@@ -30,7 +30,7 @@ from argon2.exceptions import InvalidHashError, VerificationError
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from .atomicio import atomic_write_text, ensure_private_dir, fsync_dir
-from .config import _LOOPBACK_HOSTS, ClausterConfig
+from .config import _LOOPBACK_HOSTS, ClausterConfig, _read_secret_file
 
 _SESSION_SALT = "clauster-session"
 # A real argon2id hash used to keep verify timing constant when no password is
@@ -41,12 +41,34 @@ _DUMMY_HASH = PasswordHasher().hash("clauster-dummy-do-not-use")
 # ----- session secret -----------------------------------------------------
 
 
+def _session_secret_from_env() -> tuple[str, str] | None:
+    """Return ``(secret, source_var)`` from the environment, or None if unset.
+
+    ``CLAUSTER_SESSION_SECRET_FILE`` (file contents win, trailing whitespace stripped,
+    fail-closed on a missing/empty/non-UTF-8 file via the shared
+    :func:`clauster.config._read_secret_file`) keeps the secret out of the process
+    environment for Docker/K8s/Vault ``/run/secrets`` deploys; otherwise the plain
+    ``CLAUSTER_SESSION_SECRET`` is used unchanged. The returned source-var name lets
+    the caller name the *actual* variable in a downstream error.
+    """
+    file_path = os.environ.get("CLAUSTER_SESSION_SECRET_FILE", "").strip()
+    if file_path:
+        return _read_secret_file("CLAUSTER_SESSION_SECRET_FILE", file_path), (
+            "CLAUSTER_SESSION_SECRET_FILE"
+        )
+    plain = os.environ.get("CLAUSTER_SESSION_SECRET")
+    if plain:
+        return plain, "CLAUSTER_SESSION_SECRET"
+    return None
+
+
 def load_or_create_secret(state_dir: Path) -> bytes:
     """Return the session-signing secret.
 
-    ``CLAUSTER_SESSION_SECRET`` wins (lets ephemeral-FS deploys keep sessions
-    across restarts). Otherwise read/create ``state_dir/session.secret`` with
-    ``O_CREAT|O_EXCL`` at mode 0600 so it's never briefly world-readable.
+    ``CLAUSTER_SESSION_SECRET`` (or its ``CLAUSTER_SESSION_SECRET_FILE`` indirection)
+    wins (lets ephemeral-FS deploys keep sessions across restarts). Otherwise
+    read/create ``state_dir/session.secret`` with ``O_CREAT|O_EXCL`` at mode 0600 so
+    it's never briefly world-readable.
 
     Concurrent starts converge on the single ``O_EXCL`` winner's 32-byte secret and
     both the write and its parent-directory entry are ``fsync``-durable; a loser waits
@@ -54,12 +76,13 @@ def load_or_create_secret(state_dir: Path) -> bytes:
     a truncated key) rather than reading a half-written file and booting with a
     different/short signing key.
     """
-    env = os.environ.get("CLAUSTER_SESSION_SECRET")
-    if env:
-        raw = env.encode("utf-8")
+    from_env = _session_secret_from_env()
+    if from_env is not None:
+        value, source_var = from_env
+        raw = value.encode("utf-8")
         if len(raw) < 32:
             raise ValueError(
-                "CLAUSTER_SESSION_SECRET must be at least 32 bytes; "
+                f"{source_var} must be at least 32 bytes; "
                 'generate one with `python -c "import secrets; print(secrets.token_hex(32))"`.'
             )
         return raw
