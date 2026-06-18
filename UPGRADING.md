@@ -56,6 +56,7 @@ needed and whether the checkout is behind `origin`.
 > **pty (true-resume) bridges do *not* survive a `systemctl restart`** — the
 > default `KillMode=control-group` reaps the whole service cgroup, killing the
 > bridge. Its transcript is preserved (resume with `claude --continue`), but the
-> live session ends. If you run pty bridges, plan upgrades for a quiet window;
-> `clauster doctor` reports your setup and `clauster install-service` (re)generates
-> the service unit.
+> live session ends. `clauster doctor` flags a unit with the reaping default;
+> `sudo clauster install-service systemd --write` then installs a
+> `KillMode=process` unit so pty bridges survive *future* restarts (the one
+> restart that applies the new unit still reaps the current bridges).
