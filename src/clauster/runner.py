@@ -230,7 +230,9 @@ class SessionRunner:
         """Re-sample every running bridge into ``_metrics_cache`` (#354, #407).
 
         Samples all bridges CONCURRENTLY — each per-bridge ``to_thread`` is launched
-        together and ``gather``ed — so refresh wall-time is ~max-per-bridge, not the sum
+        together and ``gather``ed — so refresh wall-time is ~max-per-bridge (capped by the
+        default ``asyncio`` thread-pool, ``min(32, cpu+4)``; past that the samples batch),
+        not the sum
         (#407; previously serial, which is why a high bridge count outran ``poll_seconds``
         and triggered ``_warn_if_refresh_slow``). The PID create-time guard mirrors the
         per-request path so a recycled PID is never attributed to a bridge. Each bridge is
@@ -245,7 +247,10 @@ class SessionRunner:
         )
         fresh: dict[str, dict] = {}
         for inst, sample in zip(targets, results, strict=True):
-            if isinstance(sample, Exception):  # drop this bridge, never the loop
+            # BaseException, not Exception: a per-task CancelledError is stored by
+            # gather(return_exceptions=True) and is NOT an Exception — drop it too,
+            # never mis-store it as a sample (the outer cancel propagates separately).
+            if isinstance(sample, BaseException):  # drop this bridge, never the loop
                 _log.debug("metrics sample failed for %s: %s", inst.project, sample)
                 continue
             if sample:

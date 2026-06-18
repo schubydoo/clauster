@@ -89,6 +89,21 @@ async def test_refresh_drops_bridge_on_sampling_error(runner_config, monkeypatch
     assert runner.metrics_snapshot("alpha") is None
 
 
+async def test_refresh_drops_bridge_on_cancelled_sample(runner_config, monkeypatch):
+    # A per-task CancelledError is stored by gather(return_exceptions=True) as a
+    # BaseException (not an Exception) — it must be dropped, never mis-stored as a
+    # sample. Guards the isinstance(..., BaseException) check (#407 review).
+    runner = _runner(runner_config)
+    _running(runner)
+
+    def _cancel(*a, **k):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", _cancel)
+    await runner._refresh_metrics_cache()  # must not raise; the bridge is dropped
+    assert runner.metrics_snapshot("alpha") is None
+
+
 async def test_refresh_samples_bridges_concurrently(runner_config, monkeypatch):
     # The N per-bridge samples run concurrently (#407). Asserted structurally, not by
     # wall-clock: a shared counter records how many samplers are in-flight at once. The
