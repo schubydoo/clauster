@@ -150,7 +150,10 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   stream-json channel, streaming the session **live in the browser** (with permission
   prompts surfaced in the UI) instead of being driven from Claude Desktop / claude.ai.
   Off by default and fail-closed — an unreachable daemon surfaces in `/healthz` and
-  never affects the bridge lifecycle. Requires the separate `claustrum` binary.
+  never affects the bridge lifecycle. Requires the separate `claustrum` daemon
+  binary, which is **not yet publicly distributed** — there is
+  currently no public install or build recipe, so leave `claustrum.enabled: false`
+  unless you already have the binary on your `PATH`.
 
 ## Install
 
@@ -188,15 +191,21 @@ it; it isn't vendored).
 
 ## First bridge in 60 seconds
 
-With the server running (above) and `claude` on your `PATH`, spawning your first
-bridge is a handful of clicks — no terminal needed once it's started:
+With the server running (above) and an **authenticated `claude` on your `PATH`**,
+spawning your first bridge is a handful of clicks — no terminal needed once it's
+started. Clauster *spawns* `claude` — it doesn't vendor it — and a spawned bridge
+inherits the host user's `claude` authentication, so `claude` must be logged in
+(interactive `claude` login **or** `ANTHROPIC_API_KEY` in the environment — either
+satisfies the check) before any bridge can connect. `clauster doctor` (step 2)
+confirms it; see the [Quickstart prerequisites](docs/quickstart.md) for the full
+list.
 
 1. **Point Clauster at your code.** Set `projects_root` in `clauster.yml` to a
    directory whose subfolders are projects (e.g. `~/code`); each child directory
    becomes a card.
-2. **Sanity-check the host (optional).** `clauster doctor` confirms `claude` is found
-   and new enough and that `projects_root` / the state dir are usable — fix any ✗
-   before spawning.
+2. **Sanity-check the host (optional).** `clauster doctor` confirms `claude` is found,
+   new enough, and **logged in** (the bridge inherits this login), and that
+   `projects_root` / the state dir are usable — fix any ✗ before spawning.
 3. **Open the dashboard** at <http://127.0.0.1:7621>. You'll see one card per project.
 4. **Start a bridge.** On a project's card, click **Start**. Clauster launches
    `claude remote-control` in that directory and the card flips to *Running* with a
