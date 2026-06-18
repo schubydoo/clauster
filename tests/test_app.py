@@ -101,13 +101,34 @@ def test_dashboard_active_zone_precedes_projects_in_dom(write_config):
 
 def test_dashboard_log_ws_and_refresh_robustness(write_config):
     # Audit fixes (frontend, no JS unit harness — guard the wiring by presence):
-    #  FIX 3 — the bridge-log WebSocket sets onclose/onerror so a dropped socket flips a
-    #          `lost` flag and the panel surfaces the disconnect instead of a frozen tail.
+    #  FIX 3 — the bridge-log tail AUTO-RECONNECTS a dropped-but-live socket (mirroring the hosted
+    #          live-view) instead of stranding on a manual-Reconnect "disconnected" banner. onclose
+    #          gates the reconnect on the bridge still being live + the per-tail token, so a
+    #          genuinely-stopped bridge stays on the disconnect banner and a retired socket can't
+    #          reconnect; only a live bridge surfaces "reconnecting…" and retries.
     #  FIX 4 — the 4s refresh poll has an in-flight guard so a slow tick can't resolve after
     #          a newer one and clobber this.instances / this.hosted with stale data.
     page = _client(write_config).get("/").text
-    assert "ws.onclose = lost" in page and "ws.onerror = lost" in page  # FIX 3 handlers
-    assert "Live tail disconnected" in page  # FIX 3 UI surface
+    # Liveness gate: reconnect only while the bridge is running/starting (whitespace-tolerant
+    # pin so a reformat doesn't break it — CodeRabbit).
+    assert re.search(
+        r'\["running",\s*"starting"\]\.includes\(\s*self\.statusOf\(name\)\s*\)', page
+    )
+    assert re.search(
+        r"s\.reconnecting\s*=\s*true", page
+    )  # transient drop surfaces "reconnecting…"
+    # The reconnect timer gates on the per-tail TOKEN + open (not object identity, which is
+    # always-true through the Proxy) or a genuinely-dropped live tail would never re-open.
+    assert re.search(r"s2\s*&&\s*s2\.token\s*===\s*token\s*&&\s*s2\.open", page)
+    # Retry cap (CodeRabbit): consecutive failed reconnects are bounded by MAX_LOG_RECONNECTS so a
+    # stale "running" snapshot can't loop forever; a streamed frame resets the counter.
+    assert "const MAX_LOG_RECONNECTS" in page
+    assert re.search(r"s\.attempts\s*>=\s*MAX_LOG_RECONNECTS", page)
+    # A streamed frame resets the counter (onmessage) so a healthy tail reconnects without limit;
+    # pin it so dropping the reset can't silently let a working tail cap out (@claude).
+    assert re.search(r"s\.attempts\s*=\s*0\b", page)
+    assert "Live tail dropped" in page  # FIX 3 reconnecting UI surface
+    assert "Live tail disconnected" in page  # FIX 3 disconnect UI surface (bridge actually gone)
     # openLogs is idempotent + state-bound: a reconnect retires the prior state and binds the
     # new socket's handlers to its own tail, token-checked against the live logs[name], so two
     # tails can't stream into one view and a retired socket can't flip the fresh panel. The

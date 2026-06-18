@@ -20,6 +20,10 @@
   const ROOT = "{{ request.scope.root_path }}";
   const MAX_LOG_LINES = 1000;
   const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
+  // Reconnect delay + retry cap for the bridge-log tail. openHosted uses the same 1500ms inline and
+  // (still) has no cap; unifying both into shared constants + real backoff is the remaining follow-up.
+  const LOG_RECONNECT_MS = 1500;
+  const MAX_LOG_RECONNECTS = 5;  // give up auto-reconnect after this many consecutive failures (CodeRabbit)
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
@@ -1594,7 +1598,13 @@
         // object against the stored proxy is ALWAYS unequal and would drop every frame (see
         // liveState() below, which returns the proxy so handlers mutate through reactivity).
         const token = ++this._logSeq;
-        const state = { open: true, ws: null, token, lines: [], pending: [], paused: false, lost: false };
+        // Carry the prior tail's lines/buffer forward across a reconnect (auto-reconnect below,
+        // or the Reconnect button) so a transient drop doesn't blank the panel — mirrors the
+        // hosted view, which carries its events forward on reopen.
+        const state = { open: true, ws: null, token,
+                        lines: prev ? prev.lines : [], pending: prev ? prev.pending : [],
+                        paused: prev ? prev.paused : false, lost: false, reconnecting: false,
+                        attempts: prev ? prev.attempts : 0 };
         this.logs[name] = state;
         const self = this;
         // Resolve the LIVE tail as the reactive proxy (or null if retired). The token compare
@@ -1612,6 +1622,8 @@
           const s = liveState();
           if (!s) return;  // a retired socket → ignore
           s.lost = false;  // a frame arrived → the tail is live again
+          s.reconnecting = false;
+          s.attempts = 0;  // reset the retry cap — a healthy tail reconnects without limit
           if (s.paused) {
             s.pending.push(ev.data);
             if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
@@ -1621,13 +1633,38 @@
           if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
           self.$nextTick(() => self.scrollLog(name));
         };
-        // A dropped socket (bridge stopped/died, server 1008 close, network blip) leaves the
-        // panel showing a frozen tail; mark it lost so the panel surfaces the disconnect. Bound
-        // via liveState() + token-checked, so a retired socket can't flip the fresh panel, and
-        // closeLogs() clears `open` first so an intentional close never trips this.
-        const lost = () => { const s = liveState(); if (s) s.lost = true; };
-        ws.onerror = lost;
-        ws.onclose = lost;
+        // A dropped socket (network blip, an idle proxy/tunnel reaping a quiet WS, bridge death)
+        // used to strand the panel on a "disconnected" banner needing a manual Reconnect. Instead,
+        // if the bridge is still live, auto-reconnect after a short delay so a transient drop
+        // self-heals — mirroring the hosted live-view (openHosted). Only when the bridge is
+        // actually gone do we surface the "disconnected — may have stopped" banner. Token-checked
+        // via liveState() so a retired socket can't touch the fresh panel; closeLogs()/openLogs()
+        // clear `open` first so an intentional close never reconnects. onclose always follows
+        // onerror, so it alone decides — no separate onerror handler needed.
+        ws.onclose = () => {
+          const s = liveState();
+          if (!s) return;  // deliberate close / retired → don't reconnect
+          // Only reconnect a tail whose bridge the snapshot still reports as live; a stopped /
+          // crashed / gone bridge stays on the disconnect banner instead of looping forever. The
+          // 4s /api/instances poll keeps statusOf() fresh, so this converges either way.
+          if (!["running", "starting"].includes(self.statusOf(name))) {
+            s.reconnecting = false; s.lost = true; return;
+          }
+          // Cap consecutive failed reconnects: if the snapshot still reads "running" but the socket
+          // keeps closing (a stale poll after the bridge died, or a server that 1008s every attempt),
+          // give up after MAX_LOG_RECONNECTS instead of looping until the poll catches up. A streamed
+          // frame (onmessage) resets the counter, so a genuinely-healthy tail reconnects indefinitely.
+          if (s.attempts >= MAX_LOG_RECONNECTS) {
+            s.reconnecting = false; s.lost = true; return;
+          }
+          s.attempts += 1;
+          s.lost = false;
+          s.reconnecting = true;  // through the proxy → surfaces "reconnecting…"
+          setTimeout(() => {
+            const s2 = self.logs[name];
+            if (s2 && s2.token === token && s2.open) self.openLogs(name);
+          }, LOG_RECONNECT_MS);
+        };
         this.logs[name].ws = ws;
       },
       closeLogs(name) {

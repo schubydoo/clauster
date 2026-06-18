@@ -472,7 +472,13 @@
                     <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="logs[i.project].paused" x-cloak>paused
                       (<span x-text="logs[i.project].pending.length"></span> buffered)</span>
                   </div>
+                  <div class="alert alert-info py-1 px-2 mb-1 d-flex align-items-center"
+                       role="status" aria-live="polite"
+                       x-show="logs[i.project].reconnecting" x-cloak>
+                    <span class="me-2">⏳ Live tail dropped — reconnecting…</span>
+                  </div>
                   <div class="alert alert-warning py-1 px-2 mb-1 d-flex align-items-center"
+                       role="alert"
                        x-show="logs[i.project].lost" x-cloak>
                     <span class="me-2">⚠ Live tail disconnected — the bridge may have stopped.</span>
                     <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project)">Reconnect</button>
