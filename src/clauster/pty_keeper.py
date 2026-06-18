@@ -37,6 +37,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import procutil
@@ -216,6 +217,152 @@ def main(argv: list[str] | None = None) -> int:
     if not bridge_argv:
         parser.error("no bridge argv given after `--`")
     return run_keeper(bridge_argv, ns.sidecar, cwd=ns.cwd)
+
+
+# --- orphan-keeper management (#301) -----------------------------------------
+#
+# A keeper is a detached process that outlives a Clauster restart. The normal
+# stop path (runner.stop -> _cleanup_keeper) covers a keeper still attached to a
+# project card. But if the card is gone (the project was removed), no card can
+# show or stop it — it is invisible and unkillable. These helpers let a sweep
+# (the `clauster keepers` CLI) list and stop such orphans from the sidecar files
+# alone, with no running runner.
+
+# A keeper sidecar is `<name>-<ms>-<seq>.keeper.json`; this reverses the stem to
+# the project name for display only — orphan classification uses the same
+# forward glob the runner uses (see find_orphan_keepers), never this parse.
+_KEEPER_STEM_RE = re.compile(r"^(?P<name>.+)-\d+-\d+$")
+_KEEPER_SUFFIX = ".keeper.json"
+_KEEPER_START_TOLERANCE = 2.0  # PID-reuse guard slack, matching runner's bridge tolerance
+
+
+@dataclass(frozen=True)
+class KeeperInfo:
+    """A discovered keeper sidecar plus its derived liveness/identity (#301)."""
+
+    sidecar: Path
+    project: str | None
+    keeper_pid: int | None
+    bridge_pid: int | None
+    session_id: str | None
+    state: str | None
+    alive: bool
+    keeper_create_time: float | None  # the keeper PID's create-time (PID-reuse guard)
+
+
+def _read_sidecar(path: Path) -> dict:
+    """Read a keeper sidecar, tolerating absent / mid-write / invalid files (-> {})."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _project_from_sidecar(filename: str) -> str | None:
+    """Best-effort project name from a `<name>-<ms>-<seq>.keeper.json` filename."""
+    stem = filename[: -len(_KEEPER_SUFFIX)] if filename.endswith(_KEEPER_SUFFIX) else filename
+    m = _KEEPER_STEM_RE.match(stem)
+    return m.group("name") if m else None
+
+
+def _int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def iter_keepers(log_dir: Path) -> list[KeeperInfo]:
+    """Discover every `*.keeper.json` sidecar under ``log_dir`` with liveness (#301)."""
+    try:
+        files = sorted(log_dir.glob(f"*{_KEEPER_SUFFIX}"))
+    except OSError:
+        return []
+    out: list[KeeperInfo] = []
+    for f in files:
+        data = _read_sidecar(f)
+        keeper_pid = _int_or_none(data.get("keeper_pid"))
+        create_time = procutil.proc_create_time(keeper_pid) if keeper_pid is not None else None
+        state = data.get("state")
+        session_id = data.get("session_id")
+        out.append(
+            KeeperInfo(
+                sidecar=f,
+                project=_project_from_sidecar(f.name),
+                keeper_pid=keeper_pid,
+                bridge_pid=_int_or_none(data.get("bridge_pid")),
+                session_id=session_id if isinstance(session_id, str) else None,
+                state=state if isinstance(state, str) else None,
+                alive=create_time is not None,
+                keeper_create_time=create_time,
+            )
+        )
+    return out
+
+
+def find_orphan_keepers(log_dir: Path, carded_projects: set[str]) -> list[KeeperInfo]:
+    """Return live keepers whose sidecar belongs to no current project card (#301).
+
+    Classification uses the same forward glob the runner uses to attach a keeper
+    to a project (``<project>-*.keeper.json``), so it can't mis-attribute a
+    keeper via an ambiguous filename reverse-parse. A dead keeper is not an
+    orphan (nothing to stop).
+    """
+    carded_files: set[Path] = set()
+    protected_names: set[str] = set()
+    for project in carded_projects:
+        try:
+            carded_files.update(log_dir.glob(f"{project}-*{_KEEPER_SUFFIX}"))
+        except OSError:
+            # Can't enumerate this project's sidecars — protect it by parsed name
+            # instead, so a live carded keeper can never surface as an orphan. This
+            # over-protects (a name parse is approximate), never under-protects.
+            protected_names.add(project)
+    return [
+        k
+        for k in iter_keepers(log_dir)
+        if k.alive and k.sidecar not in carded_files and k.project not in protected_names
+    ]
+
+
+def stop_keeper(keeper_pid: int, *, expect_create_time: float | None = None) -> bool:
+    """Stop a keeper process (graceful reap, then force-kill its whole tree).
+
+    Returns True once the process is gone. The reap loop is a no-op for a keeper
+    that is not the caller's child (the CLI is a separate process), so the force
+    path is what actually stops a detached orphan and its bridge subtree.
+
+    ``expect_create_time`` (the create-time captured when the keeper was
+    classified) is a PID-reuse guard: if, after the grace window, the PID's
+    create-time no longer matches, the original keeper already exited and the PID
+    was recycled onto an unrelated process — refuse the SIGKILL rather than kill a
+    stranger.
+    """
+    for _ in range(8):  # ~2s grace, mirroring runner._cleanup_keeper
+        procutil.reap_if_exited(keeper_pid)
+        if procutil.proc_create_time(keeper_pid) is None:
+            return True
+        time.sleep(0.25)
+    if expect_create_time is not None:
+        current = procutil.proc_create_time(keeper_pid)
+        if current is None:
+            return True  # exited during the grace window — nothing left to kill
+        if abs(current - expect_create_time) > _KEEPER_START_TOLERANCE:
+            return False  # PID reused onto another process — do not kill it
+    procutil.force_kill_tree(keeper_pid)
+    # SIGKILL is asynchronous: the process may still be running/zombie for a beat
+    # after force_kill_tree returns, so poll briefly (reaping our own child if it is
+    # one) before reporting the outcome rather than racing the kill.
+    for _ in range(10):
+        procutil.reap_if_exited(keeper_pid)
+        current = procutil.proc_create_time(keeper_pid)
+        if current is None:
+            return True
+        if (
+            expect_create_time is not None
+            and abs(current - expect_create_time) > _KEEPER_START_TOLERANCE
+        ):
+            return True  # PID recycled onto a new process → the keeper we killed is gone
+        time.sleep(0.1)
+    return False
 
 
 if __name__ == "__main__":  # pragma: no cover — exercised via subprocess in tests

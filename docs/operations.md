@@ -255,6 +255,26 @@ Restore it with `clauster restore <archive>` (it can restore state alone or also
 write the config back out). `clauster migrate` upgrades an older `state.json` to
 the current schema.
 
+### `clauster keepers` — stop an orphaned pty keeper
+
+A **pty** (true-resume) bridge runs under a detached *keeper* process that
+outlives a Clauster restart. The normal stop path cleans up a keeper still
+attached to a project card, but if the card is gone — its project was removed —
+no dashboard row can show or stop it, leaving a live keeper (and its bridge)
+running invisibly.
+
+`clauster keepers` sweeps the keeper sidecars and surfaces those **orphans** (a
+live keeper whose sidecar belongs to no current card):
+
+```sh
+clauster keepers -c /etc/clauster/clauster.yml             # list orphaned keepers
+clauster keepers -c /etc/clauster/clauster.yml --kill 12345 # stop one by keeper PID
+```
+
+`--kill` refuses any PID that isn't a current orphan, so it can never take down a
+keeper still attached to a card. On success it stops the keeper (and its bridge
+subtree) and removes the stale sidecar.
+
 ### Recovering from a corrupted or partially-written state file
 
 Clauster writes its on-disk state safely. `state.json` is written

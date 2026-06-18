@@ -2,8 +2,8 @@
 
 Subcommands: ``run`` (default), ``hash-password``, ``hash-token``, ``doctor``,
 ``backup``, ``restore``, ``migrate``, ``install-service``,
-``reap-environments``, ``usage``. Bare ``clauster`` and ``clauster -c <cfg>``
-still mean ``run`` for backward compatibility.
+``reap-environments``, ``keepers``, ``usage``. Bare ``clauster`` and
+``clauster -c <cfg>`` still mean ``run`` for backward compatibility.
 """
 
 from __future__ import annotations
@@ -16,12 +16,13 @@ from pathlib import Path
 
 import uvicorn
 
-from . import __version__, claude_cli, environments, ops, usage
+from . import __version__, claude_cli, environments, ops, pty_keeper, usage
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_token
 from .config import ClausterConfig, load_config
 from .logging_config import setup_logging
 from .recap import RECAP_SUBCOMMAND
+from .state import StateStore
 
 # setproctitle is a required dependency (so the retitle works out of the box). The
 # guard is defensive, not optionality: a cosmetic process-rename must never crash
@@ -42,6 +43,7 @@ _COMMANDS = {
     "migrate",
     "install-service",
     "reap-environments",
+    "keepers",
     "usage",
 }
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
@@ -110,6 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         help="hard-delete ghosts, discarding queued work (instead of archiving)",
     )
 
+    keepers_p = sub.add_parser(
+        "keepers", help="list or stop orphaned pty keepers (no project card)"
+    )
+    keepers_p.add_argument("-c", "--config", help="path to clauster.yml")
+    keepers_p.add_argument(
+        "--kill",
+        type=int,
+        metavar="PID",
+        help="stop the orphaned keeper with this keeper PID (refuses a carded keeper)",
+    )
+
     usage_p = sub.add_parser("usage", help="token + approx cost summary for a session transcript")
     usage_p.add_argument("transcript", help="path to a session transcript .jsonl")
 
@@ -134,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         return _install_service(args.kind, args.config, args.user, args.write)
     if args.command == "reap-environments":
         return _reap_environments(args.config, args.archive, args.force_delete)
+    if args.command == "keepers":
+        return _keepers(args.config, args.kill)
     if args.command == "usage":
         return _usage(args.transcript)
     return _run(getattr(args, "config", None))
@@ -363,6 +378,54 @@ def _reap_environments(config_path: str | None, archive: bool, force_delete: boo
             print(f"clauster: failed to {action} {g.id}: {exc}", file=sys.stderr)
             return 1
     print(f"clauster: {action}d {len(ghosts)} ghost environment(s)", file=sys.stderr)
+    return 0
+
+
+def _keepers(config_path: str | None, kill_pid: int | None) -> int:
+    """List orphaned pty keepers, or stop one by keeper PID (#301).
+
+    An orphan is a *live* keeper whose sidecar belongs to no current project card
+    (e.g. its project was removed), so no dashboard row can show or stop it.
+    ``--kill`` refuses any PID that isn't a current orphan — it never touches a
+    keeper still attached to a card.
+    """
+    config = _load_or_exit(config_path)
+    log_dir = (config.state_dir / "logs").expanduser()
+    carded = set(StateStore(config.state_dir).load())
+    orphans = pty_keeper.find_orphan_keepers(log_dir, carded)
+    if kill_pid is not None:
+        target = next((k for k in orphans if k.keeper_pid == kill_pid), None)
+        if target is None:
+            print(
+                f"clauster: no orphaned keeper with pid {kill_pid} — it may be carded, "
+                "already gone, or not a keeper; refusing to kill.",
+                file=sys.stderr,
+            )
+            return 2
+        if not pty_keeper.stop_keeper(kill_pid, expect_create_time=target.keeper_create_time):
+            print(
+                f"clauster: failed to stop keeper {kill_pid} "
+                "(it may have exited or its PID was reused)",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            target.sidecar.unlink()  # drop the now-stale sidecar so it stops being listed
+        except OSError:
+            pass
+        print(f"clauster: stopped orphaned keeper {kill_pid} (project {target.project or '?'})")
+        return 0
+    if not orphans:
+        print("clauster: no orphaned keepers")
+        return 0
+    print(
+        f"clauster: {len(orphans)} orphaned keeper(s) — stop with `clauster keepers --kill <pid>`:"
+    )
+    for k in orphans:
+        print(
+            f"  keeper_pid={k.keeper_pid}  project={k.project or '?'}  "
+            f"bridge_pid={k.bridge_pid}  session={k.session_id or '-'}  state={k.state or '-'}"
+        )
     return 0
 
 
