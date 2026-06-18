@@ -249,7 +249,8 @@ docker run -d --name clauster \
   `claude.binary`) to an absolute path you've mounted anywhere. Either way, also mount
   the runtime user's `~/.claude` credentials — or build a derived image that installs
   `claude`.
-- Logs are JSON by default (`CLAUSTER_LOG_FORMAT`); health is at `/healthz`. Images
+- Logs are human text by default; set `CLAUSTER_LOG_FORMAT=json` for structured
+  JSON (both redact session URLs / bearer ids). Health is at `/healthz`. Images
   are cosign-signed with build provenance + SBOM attestations.
 
 ### Docker Compose
