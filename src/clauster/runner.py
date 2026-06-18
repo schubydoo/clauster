@@ -201,35 +201,52 @@ class SessionRunner:
         """Return a copy of the per-project cached resource samples (#354 batch read)."""
         return dict(self._metrics_cache)
 
-    async def _refresh_metrics_cache(self) -> None:
-        """Re-sample every running bridge into ``_metrics_cache`` (#354).
+    async def _sample_one_bridge(self, inst: RemoteControlInstance) -> dict | None:
+        """Sample a single running bridge's resource tree, or None to skip it (#407).
 
-        Samples sequentially — one ``to_thread`` at a time — so thread-pool pressure
-        stays O(1) regardless of bridge count (the whole point: move the N concurrent
-        per-request samples off the request path onto one background sampler). The PID
-        create-time guard mirrors the per-request path so a recycled PID is never
-        attributed to a bridge. The cache is replaced wholesale, so a stopped/crashed
-        bridge's stale sample drops out.
+        The whole per-bridge cost — the PID create-time reuse guard and the blocking
+        ``metrics.sample_tree`` walk — is offloaded via ``asyncio.to_thread`` here so a
+        caller can ``gather`` the bridges and pay ~max-per-bridge wall-time instead of the
+        sum. Returns the sample dict on success, or ``None`` when the bridge is not running,
+        has no pid, fails the create-time guard (recycled pid), or the sampler returns
+        nothing. Exceptions propagate to the gather caller, which isolates them per bridge.
         """
+        pid = inst.bridge_pid
+        if inst.status is not InstanceStatus.RUNNING or pid is None:
+            return None
+        start = inst.bridge_proc_start
+        if start is not None:
+            cur = await asyncio.to_thread(procutil.proc_create_time, pid)
+            if cur is None or abs(cur - start) > 2.0:
+                return None  # PID reused onto an unrelated process — skip
+        return await asyncio.to_thread(
+            metrics.sample_tree,
+            pid,
+            interval=self._config.metrics.sample_interval_seconds,
+            normalize_cpu=self._config.metrics.normalize_cpu,
+        )
+
+    async def _refresh_metrics_cache(self) -> None:
+        """Re-sample every running bridge into ``_metrics_cache`` (#354, #407).
+
+        Samples all bridges CONCURRENTLY — each per-bridge ``to_thread`` is launched
+        together and ``gather``ed — so refresh wall-time is ~max-per-bridge, not the sum
+        (#407; previously serial, which is why a high bridge count outran ``poll_seconds``
+        and triggered ``_warn_if_refresh_slow``). The PID create-time guard mirrors the
+        per-request path so a recycled PID is never attributed to a bridge. Each bridge is
+        isolated via ``return_exceptions`` — one failing sampler is logged and dropped, never
+        the rest. The cache is replaced wholesale, so a stopped/crashed bridge's stale sample
+        drops out.
+        """
+        targets = list(self._instances.values())
+        results = await asyncio.gather(
+            *(self._sample_one_bridge(inst) for inst in targets),
+            return_exceptions=True,
+        )
         fresh: dict[str, dict] = {}
-        for inst in list(self._instances.values()):
-            pid = inst.bridge_pid
-            if inst.status is not InstanceStatus.RUNNING or pid is None:
-                continue
-            start = inst.bridge_proc_start
-            if start is not None:
-                cur = await asyncio.to_thread(procutil.proc_create_time, pid)
-                if cur is None or abs(cur - start) > 2.0:
-                    continue  # PID reused onto an unrelated process — skip
-            try:
-                sample = await asyncio.to_thread(
-                    metrics.sample_tree,
-                    pid,
-                    interval=self._config.metrics.sample_interval_seconds,
-                    normalize_cpu=self._config.metrics.normalize_cpu,
-                )
-            except Exception as exc:  # noqa: BLE001 - drop this bridge, never the loop
-                _log.debug("metrics sample failed for %s: %s", inst.project, exc)
+        for inst, sample in zip(targets, results, strict=True):
+            if isinstance(sample, Exception):  # drop this bridge, never the loop
+                _log.debug("metrics sample failed for %s: %s", inst.project, sample)
                 continue
             if sample:
                 fresh[inst.project] = sample

@@ -88,6 +88,53 @@ async def test_refresh_drops_bridge_on_sampling_error(runner_config, monkeypatch
     assert runner.metrics_snapshot("alpha") is None
 
 
+async def test_refresh_samples_bridges_concurrently(runner_config, monkeypatch):
+    # The N per-bridge samples run concurrently (#407): a slow blocking sampler over
+    # many bridges costs ~max-per-bridge wall-time, not the sum. With a serial loop the
+    # elapsed would be >= N * delay; concurrent it stays close to a single delay.
+    import time as _time
+
+    runner = _runner(runner_config)
+    n = 8
+    delay = 0.1
+    for i in range(n):
+        _running(runner, project=f"bridge{i}")
+
+    def _slow(pid, **k):
+        _time.sleep(delay)  # blocking, like the real psutil walk
+        return {"cpu_percent": 1.0, "procs": 1}
+
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", _slow)
+    started = _time.monotonic()
+    await runner._refresh_metrics_cache()
+    elapsed = _time.monotonic() - started
+
+    assert len(runner.metrics_snapshots()) == n  # every bridge sampled
+    # Serial would be >= n*delay (0.8s); concurrent is ~delay. Use a generous bound
+    # that still excludes the serial path on a loaded host.
+    assert elapsed < n * delay / 2
+
+
+async def test_refresh_isolates_one_failing_bridge_from_the_rest(runner_config, monkeypatch):
+    # One bridge's sampler raising must drop only that bridge, never abort the others
+    # (#407 preserves the per-bridge error isolation of the old serial loop).
+    runner = _runner(runner_config)
+    _running(runner, project="good")
+    _running(runner, project="bad")
+
+    def _selective(pid, **k):
+        # The "bad" bridge is identified by a sentinel pid set below.
+        if pid == 999_999:
+            raise RuntimeError("boom")
+        return {"cpu_percent": 1.0, "procs": 1}
+
+    runner._instances["bad"].bridge_pid = 999_999
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", _selective)
+    await runner._refresh_metrics_cache()  # must not raise
+    assert runner.metrics_snapshot("good") is not None
+    assert runner.metrics_snapshot("bad") is None
+
+
 async def _noop():
     return None
 
