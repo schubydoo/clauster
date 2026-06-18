@@ -122,10 +122,18 @@ _BAD_SCHEMES = st.sampled_from(
 
 @_PROP
 @given(scheme=_BAD_SCHEMES, host=st.from_regex(r"[a-z]{1,12}\.example\.com", fullmatch=True))
-def test_non_allowlisted_scheme_always_rejected(scheme: str, host: str) -> None:
-    """Any scheme outside the allowlist raises InvalidCloneUrl (even to a public IP)."""
-    # No DNS stub needed: validate_clone_url checks the scheme allowlist before it
-    # ever resolves the host, so a bad scheme always raises before getaddrinfo runs.
+def test_non_allowlisted_scheme_always_rejected(
+    scheme: str, host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any scheme outside the allowlist raises InvalidCloneUrl without resolving DNS."""
+    # Enforce (not just describe) the ordering invariant: validate_clone_url must
+    # reject a disallowed scheme BEFORE it ever resolves the host. That ordering is
+    # SSRF-relevant — a bad-scheme URL should never trigger a DNS lookup — so fail
+    # loudly if getaddrinfo is reached at all.
+    monkeypatch.setattr(
+        "clauster.provisioning.socket.getaddrinfo",
+        lambda *_a, **_k: pytest.fail("getaddrinfo must not run for a disallowed scheme"),
+    )
     with pytest.raises(InvalidCloneUrl):
         validate_clone_url(f"{scheme}://{host}/repo.git", CloneConfig())
 
