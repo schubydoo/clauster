@@ -11,9 +11,9 @@
       document.documentElement.setAttribute("data-bs-theme", t);
     })();
   </script>
-  <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css">
-  <script defer src="{{ request.scope.root_path }}/static/alpine.min.js"></script>
+  <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg?v={{ asset_version }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css?v={{ asset_version }}">
+  <script defer src="{{ request.scope.root_path }}/static/alpine.min.js?v={{ asset_version }}"></script>
   <style>
     .log-view { max-height: 320px; overflow: auto; font-size: .78rem; line-height: 1.35;
                 white-space: pre-wrap; word-break: break-word; margin: 0; }

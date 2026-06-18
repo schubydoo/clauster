@@ -39,6 +39,37 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_static_assets_carry_immutable_cache_control(write_config):
+    # #353: vendored assets are cacheable forever (safe because URLs are version-busted).
+    resp = _client(write_config).get("/static/alpine.min.js")
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_missing_static_asset_has_no_immutable_cache(write_config):
+    # Only a 200 file response gets the immutable header — a 404 must not (so a
+    # mistyped/removed asset isn't cached-forever as missing).
+    resp = _client(write_config).get("/static/does-not-exist.js")
+    assert resp.status_code == 404
+    assert "immutable" not in resp.headers.get("cache-control", "")
+
+
+def test_large_response_is_gzip_compressed(write_config):
+    # #353: responses over the threshold are gzip-compressed for clients that accept it.
+    resp = _client(write_config).get("/", headers={"accept-encoding": "gzip"})
+    assert resp.status_code == 200
+    assert resp.headers.get("content-encoding") == "gzip"
+
+
+def test_asset_urls_are_version_busted(write_config):
+    # #353: linked assets carry ?v=<app version> so an upgrade busts the immutable cache.
+    from clauster import __version__
+
+    page = _client(write_config).get("/").text
+    assert f"tabler.min.css?v={__version__}" in page
+    assert f"alpine.min.js?v={__version__}" in page
+
+
 def test_dashboard_active_zone_precedes_projects_in_dom(write_config):
     # The Active-sessions zone is pinned above Projects, but it must achieve that by DOM
     # source order — NOT a CSS `order` hack — so keyboard / screen-reader focus order matches

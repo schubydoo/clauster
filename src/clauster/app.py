@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import (
     __version__,
@@ -118,6 +119,26 @@ _PKG_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
 
+# One year in seconds — the conventional far-future max-age for fingerprinted assets.
+_IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+
+
+class _ImmutableStaticFiles(StaticFiles):
+    """StaticFiles that marks assets cacheable-forever (#353).
+
+    Safe because every linked asset is version-busted by the app version (templates
+    append ``?v={{ asset_version }}``): a clauster upgrade changes ``__version__``, so
+    the URL changes and the browser re-fetches rather than serving a stale bundle.
+    Only successful file responses get the header — a 304/404 is left untouched.
+    """
+
+    async def get_response(self, path: str, scope: dict) -> Response:  # type: ignore[override]
+        """Serve the file, tagging a 200 with the immutable Cache-Control header."""
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = _IMMUTABLE_CACHE
+        return response
+
 
 def _reap_ws_task(task: asyncio.Task) -> None:
     """Retrieve a finished WS helper task's outcome so the loop never warns about it."""
@@ -215,7 +236,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # Hold strong refs to in-flight clone tasks so they aren't GC'd mid-run.
     _clone_tasks: set[asyncio.Task] = set()
     templates = Jinja2Blocks(directory=str(_TEMPLATES_DIR))
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    # Version-bust the vendored asset URLs so the immutable cache below is safe across
+    # upgrades (templates link them as `...?v={{ asset_version }}`).
+    templates.env.globals["asset_version"] = __version__
+    # Compress responses over the threshold — the ~665KB uncompressed Tabler/Alpine
+    # bundle and the JSON poll responses both shrink ~4-5x for remote/proxied clients
+    # that don't compress at the proxy (invisible on LAN). Below it, the gzip overhead
+    # isn't worth it.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+    app.mount("/static", _ImmutableStaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception(request: Request, exc: StarletteHTTPException) -> Response:
