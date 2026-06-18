@@ -623,6 +623,38 @@ def test_dashboard_coerces_hosted_busy_disabled_bindings(write_config, tmp_path)
     assert ':disabled="hostedResuming[h.claustrum_process_id]"' not in html
 
 
+# ----- busy-flag reset in `finally` (401-redirect wedge, #401) ------
+# Each async action handler sets a busy flag, then on a 401 does
+# `window.location.assign(ROOT + "/login"); return;`. A plain post-try reset is skipped
+# by that 401 `return`, so the control wedges (button stuck disabled / input stuck) when
+# the login redirect is slow or blocked. The reset must live in a `finally` so it runs on
+# every path including the 401 early-return — the same pattern as resumeAgent (#336).
+
+
+def test_dashboard_busy_flags_reset_in_finally(write_config, tmp_path):
+    html = _client_with(write_config, tmp_path, "claustrum:\n  enabled: true\n").get("/").text
+    # Each flag's reset must appear ONLY inside a `finally` (count == finally-count == N),
+    # so a 401 early-return can't strand the control. dispatchAgent + startHosted share
+    # `f.busy`; stopHosted + killHosted share `hostedStopping[id]` — hence the 2s.
+    assert html.count("f.busy = false;") == html.count("finally { f.busy = false; }") == 2
+    assert (
+        html.count("this.hostedStopping[id] = false;")
+        == html.count("finally { this.hostedStopping[id] = false; }")
+        == 2
+    )
+    assert (
+        html.count("this.agentStopping[j.id] = false;")
+        == html.count("finally { this.agentStopping[j.id] = false; }")
+        == 1
+    )
+    assert (
+        html.count("this.hostedResuming[id] = false;")
+        == html.count("finally { this.hostedResuming[id] = false; }")
+        == 1
+    )
+    assert html.count("v.sending = false;") == html.count("finally { v.sending = false; }") == 1
+
+
 # ----- Forget buttons (drop a stopped session from Recent/resumable) ------
 
 
