@@ -392,6 +392,18 @@ class SessionRunner:
                     "stop a bridge before starting another"
                 )
 
+        # Prune old bridge-log sets per the retention policy before creating this
+        # spawn's set (so the new files are never a deletion candidate). Off the loop;
+        # best-effort — a retention error must never block a spawn. Snapshot the live
+        # instances' protected set keys HERE on the loop — reading self._instances from
+        # the worker thread could race a concurrent spawn's write to it.
+        protected = {
+            self._log_set_key(Path(p).name)
+            for inst in self._instances.values()
+            for p in (inst.bridge_debug_log_path, inst.bridge_raw_log_path)
+            if p is not None
+        }
+        await asyncio.to_thread(self._prune_logs, protected)
         log_path = self._unique_log_path(name)
         raw_path = self._raw_log_path_for(log_path)
         # Create the verbatim parse-source 0600 from the first inode — UNCONDITIONALLY:
@@ -518,6 +530,87 @@ class SessionRunner:
         # every call. _unique_log_path only runs on the event loop, so the bump is safe.
         self._log_seq += 1
         return self._log_dir / f"{name}-{int(time.time() * 1000)}-{self._log_seq}.log"
+
+    # Suffixes of one spawn's log "set" — all share the `<name>-<ms>-<seq>` stem.
+    # Longest-match-first so `.keeper.log` / `.raw.log` strip whole, not just `.log`.
+    _LOG_SET_SUFFIXES = (".raw.log", ".stderr.log", ".keeper.json", ".keeper.log", ".log")
+
+    @classmethod
+    def _log_set_key(cls, filename: str) -> str:
+        """Map a log filename to its spawn-set key (the shared `<name>-<ms>-<seq>` stem)."""
+        for suf in cls._LOG_SET_SUFFIXES:
+            if filename.endswith(suf):
+                return filename[: -len(suf)]
+        return filename
+
+    def _prune_logs(self, protected: set[str]) -> None:
+        """Apply the ``logs.retention_*`` policy to the bridge-log dir (best-effort).
+
+        Groups files into per-spawn sets (a ``.log`` and its ``.raw.log`` /
+        ``.stderr.log`` / ``.keeper.json`` / ``.keeper.log`` siblings share a stem) and
+        deletes whole sets that exceed the configured age / count / total-size limits,
+        oldest first. ``protected`` (the set keys of live instances' logs, snapshotted on
+        the event loop by the caller) is never pruned. A ``0`` limit disables that
+        dimension. Runs off the event loop (via ``to_thread``) on each spawn; a transient
+        FS error is logged and never aborts the spawn.
+        """
+        logs = self._config.logs
+        max_age_days, max_files, max_total_mb = (
+            logs.retention_max_age_days,
+            logs.retention_max_files,
+            logs.retention_max_total_mb,
+        )
+        if not (max_age_days or max_files or max_total_mb):
+            return
+        try:
+            entries = [p for p in self._log_dir.iterdir() if p.is_file()]
+        except OSError as exc:
+            _log.warning("bridge-log retention: could not list %s: %s", self._log_dir, exc)
+            return
+
+        sets: dict[str, list[Path]] = {}
+        for p in entries:
+            sets.setdefault(self._log_set_key(p.name), []).append(p)
+
+        def _stat(paths: list[Path]) -> tuple[float, int]:
+            mtime, size = 0.0, 0
+            for p in paths:
+                try:
+                    st = p.stat()
+                except OSError:  # pragma: no cover - TOCTOU only; is_file() already stat-filtered
+                    continue
+                mtime, size = max(mtime, st.st_mtime), size + st.st_size
+            return mtime, size
+
+        info = {k: _stat(v) for k, v in sets.items()}
+        ordered = sorted(sets, key=lambda k: info[k][0], reverse=True)  # newest first
+        doomed: set[str] = set()
+        if max_age_days:
+            cutoff = time.time() - max_age_days * 86400
+            # A set with no datable file (mtime stays 0.0 — every file failed to stat) is
+            # never age-pruned: we don't delete what we can't date.
+            doomed.update(k for k in ordered if info[k][0] and info[k][0] < cutoff)
+        if max_files:
+            survivors = [k for k in ordered if k not in doomed]
+            doomed.update(survivors[max_files:])
+        if max_total_mb:
+            survivors = [k for k in ordered if k not in doomed]  # newest first
+            total = sum(info[k][1] for k in survivors)
+            for k in reversed(survivors):  # oldest first
+                if total <= max_total_mb * 1024 * 1024:
+                    break
+                doomed.add(k)
+                total -= info[k][1]
+
+        doomed -= protected  # keep live bridges' log sets regardless of age/count/size
+        for k in doomed:
+            for p in sets[k]:
+                try:
+                    p.unlink()
+                except OSError as exc:
+                    _log.debug("bridge-log retention: could not delete %s: %s", p, exc)
+        if doomed:
+            _log.info("bridge-log retention pruned %d log set(s)", len(doomed))
 
     def _raw_log_path_for(self, log_path: Path) -> Path:
         """Return the verbatim parse-source the bridge writes its ``--debug-file`` to.

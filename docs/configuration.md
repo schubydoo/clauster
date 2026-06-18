@@ -180,6 +180,9 @@ See [Security](security.md) and [Networking](networking.md) for the full matrix.
 | `keep_rotated` | int | `5` | Number of rotated log files to keep (≥0). |
 | `redact_session_url` | bool | `false` | `false` = hybrid: the bridge debug log is verbatim on disk, redacted only over the WebSocket. `true` also redacts the on-disk bridge debug log — the bridge writes a private `0600` raw copy (which Clauster still parses for readiness + the deep link) and the public log becomes a redacted mirror of it. Scope is the bridge log only: the pty keeper sidecar and `state.json` still record session/environment ids as operational state, protected by `state_dir` permissions. |
 | `strip_ansi_in_stream` | bool | `true` | Strip ANSI escape sequences from the streamed log. |
+| `retention_max_age_days` | int | `30` | Delete a spawn's bridge-log set once its newest file is older than this many days (`0` = keep forever). Bounds unbounded disk growth and at-rest retention of session logs (which by default include the session URL). Pruned on each spawn. |
+| `retention_max_files` | int | `0` | Keep at most this many of the most recent bridge-log sets, deleting the oldest beyond it (`0` = unlimited). A 'set' is one spawn's `.log` + its `.raw.log` / `.stderr.log` / `.keeper.json` siblings. |
+| `retention_max_total_mb` | int | `0` | Cap the total size of the bridge-logs directory in MB, deleting the oldest sets until under the cap (`0` = unlimited). |
 <!-- END GEN: logs -->
 
 ## `clone` — project clone/create guards (`CloneConfig`)

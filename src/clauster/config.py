@@ -329,6 +329,27 @@ class LogsConfig(BaseModel):
     strip_ansi_in_stream: bool = Field(
         default=True, description="Strip ANSI escape sequences from the streamed log."
     )
+    retention_max_age_days: int = Field(
+        default=30,
+        ge=0,
+        description="Delete a spawn's bridge-log set once its newest file is older than "
+        "this many days (`0` = keep forever). Bounds unbounded disk growth and at-rest "
+        "retention of session logs (which by default include the session URL). Pruned on "
+        "each spawn.",
+    )
+    retention_max_files: int = Field(
+        default=0,
+        ge=0,
+        description="Keep at most this many of the most recent bridge-log sets, deleting "
+        "the oldest beyond it (`0` = unlimited). A 'set' is one spawn's `.log` + its "
+        "`.raw.log` / `.stderr.log` / `.keeper.json` siblings.",
+    )
+    retention_max_total_mb: int = Field(
+        default=0,
+        ge=0,
+        description="Cap the total size of the bridge-logs directory in MB, deleting the "
+        "oldest sets until under the cap (`0` = unlimited).",
+    )
 
 
 class UsageConfig(BaseModel):
