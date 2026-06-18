@@ -61,6 +61,7 @@ component_management:
         - src/clauster/inspector.py
         - src/clauster/supervisor.py
         - src/clauster/bridge_log.py
+        - src/clauster/atomicio.py
     - component_id: hosted
       name: hosted channel
       paths:
@@ -96,11 +97,17 @@ component_management:
       paths:
         - src/clauster/hooks/**
         - src/clauster/recap.py
+    - component_id: persistence
+      name: persistence (db)
+      paths:
+        - src/clauster/db/**
     - component_id: cli_config
       name: cli & config
       paths:
         - src/clauster/ops.py
         - src/clauster/config.py
+        - src/clauster/config_editor.py
+        - src/clauster/config_writer.py
         - src/clauster/models.py
         - src/clauster/claude_cli.py
         - src/clauster/__main__.py
