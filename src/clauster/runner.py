@@ -49,6 +49,7 @@ from .models import (
 from .notify import Notifier
 from .recap import ensure_recap_hook_installed
 from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
+from .webhooks import WebhookEmitter
 
 _log = logging.getLogger("clauster.runner")
 
@@ -167,6 +168,9 @@ class SessionRunner:
         # tracked here so the tasks aren't garbage-collected mid-flight.
         self._notifier = Notifier(config.notifications)
         self._notify_tasks: set[asyncio.Task] = set()
+        # Outbound lifecycle webhooks (#371). Fail-open and fire-and-forget, sharing the
+        # GC-safety task set above; no-op unless enabled with a usable url.
+        self._webhooks = WebhookEmitter(config.webhooks)
 
     # ----- read API -------------------------------------------------------
 
@@ -522,6 +526,9 @@ class SessionRunner:
         instance.resume_mode = (
             "pty" if self._is_pty_mode(prior, requested=resume_mode) else "standard"
         )
+        # One spawn-event chokepoint for both modes: the instance is registered, STARTING,
+        # and its resume_mode is now resolved. A "ready" follows iff it reaches RUNNING.
+        self._emit_webhook("spawn", instance)
         if instance.resume_mode == "pty":
             return await self._spawn_pty(instance, proj, name, log_path, permission_mode, resume)
 
@@ -995,6 +1002,7 @@ class SessionRunner:
         self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen
     ) -> None:
         """Fold the keeper sidecar into the instance (the pty analogue of `_apply_markers`)."""
+        prev_status = instance.status
         bp = info.get("bridge_pid")
         if isinstance(bp, int):
             instance.bridge_pid = bp
@@ -1017,6 +1025,8 @@ class SessionRunner:
             instance.status = InstanceStatus.ERROR
         else:
             instance.status = InstanceStatus.STARTING  # let the startup-watch promote it
+        if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
+            self._emit_webhook("ready", instance)  # only on the transition, not every poll
 
     async def _spawn_pty(
         self,
@@ -1105,6 +1115,7 @@ class SessionRunner:
         markers: bridge_log.BridgeMarkers,
         proc: subprocess.Popen,
     ) -> None:
+        prev_status = instance.status
         instance.bridge_id = markers.bridge_id or instance.bridge_id
         instance.environment_id = markers.environment_id or instance.environment_id
         instance.starter_session_id = markers.starter_session_id or instance.starter_session_id
@@ -1123,6 +1134,8 @@ class SessionRunner:
             # RUNNING (or CRASHED if it later dies). Prevents a false "Failed to
             # start" on a bridge that is simply still coming up.
             instance.status = InstanceStatus.STARTING
+        if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
+            self._emit_webhook("ready", instance)  # only on the transition, not every poll
 
     async def _post_spawn_enrich(
         self, instance: RemoteControlInstance, project_path: Path
@@ -1295,6 +1308,7 @@ class SessionRunner:
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
             self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
+            self._emit_webhook("stop", instance)
             return instance
 
         # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
@@ -1308,6 +1322,7 @@ class SessionRunner:
             await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
         instance.status = InstanceStatus.STOPPED
         self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
+        self._emit_webhook("stop", instance)
         return instance
 
     async def forget(self, name: str) -> None:
@@ -1646,6 +1661,7 @@ class SessionRunner:
                     self._crash_counts.get(instance.project, 0) + 1
                 )
                 self._notify_crash(instance)
+                self._emit_webhook("crash", instance)
             if alive:
                 live_projects.add(instance.project)
                 # Keep the public bridge log redacted-current as the bridge writes.
@@ -1742,6 +1758,27 @@ class SessionRunner:
         # Fire-and-forget: anotify sends off-thread and swallows its own errors. Keep a
         # reference so the task isn't GC'd mid-send; drop it on completion.
         task = asyncio.create_task(self._notifier.anotify(title, body))
+        self._notify_tasks.add(task)
+        task.add_done_callback(self._notify_tasks.discard)
+
+    def _emit_webhook(self, event: str, instance: RemoteControlInstance) -> None:
+        """Fire a best-effort lifecycle webhook (off-loop; never blocks/raises, #371).
+
+        ``event`` is one of ``spawn`` / ``ready`` / ``stop`` / ``crash``. No-op unless
+        webhooks are active and this event is enabled. The POST is fire-and-forget and
+        fail-open — a slow or broken endpoint can't affect the bridge lifecycle.
+        """
+        if not self._webhooks.wants(event):
+            return
+        payload = {
+            "project": instance.project,
+            "label": instance.label,
+            "status": instance.status.value,
+            "resume_mode": instance.resume_mode,
+            "spawn_mode": instance.spawn_mode,
+            "session_id": instance.starter_session_id,
+        }
+        task = asyncio.create_task(self._webhooks.aemit(event, payload))
         self._notify_tasks.add(task)
         task.add_done_callback(self._notify_tasks.discard)
 
