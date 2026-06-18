@@ -12,7 +12,10 @@ fuzzed symbols must still exist and import cleanly. ``main()`` / ``atheris.Fuzz(
 is guarded behind ``if __name__ == "__main__"`` and never runs here.
 
 Atheris ships Linux-only wheels (see ``pyproject.toml``); the test skips where it
-is unavailable rather than failing a Windows/macOS CI cell.
+is unavailable rather than failing a Windows/macOS CI cell. It also skips on a
+Python newer than Atheris supports — Atheris 2.0 raises ``RuntimeError`` (not
+``ImportError``) at import on an unsupported version (e.g. 3.14), which
+``importorskip`` would not catch.
 """
 
 from __future__ import annotations
@@ -22,7 +25,10 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("atheris", reason="atheris is Linux-only; harnesses can't import without it")
+try:
+    import atheris  # noqa: F401  — availability gate only; harnesses import it themselves
+except (ImportError, RuntimeError) as exc:  # RuntimeError: unsupported Python (Atheris 2.0)
+    pytest.skip(f"atheris unavailable: {exc}", allow_module_level=True)
 
 _FUZZ_DIR = Path(__file__).resolve().parent.parent / "fuzz"
 _HARNESSES = sorted(p.name for p in _FUZZ_DIR.glob("*_fuzzer.py"))
