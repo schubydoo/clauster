@@ -435,6 +435,22 @@ def test_secret_env_file_non_utf8_fails_closed(tmp_path, monkeypatch):
     assert "sekret" not in str(exc.value)
 
 
+def test_secret_env_file_blank_falls_through_to_plain(tmp_path, monkeypatch):
+    # A blank _FILE is treated as unset, so the plain CLAUSTER_SESSION_SECRET applies.
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET_FILE", "   ")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "s" * 40)
+    assert auth.load_or_create_secret(tmp_path) == ("s" * 40).encode()
+
+
+def test_secret_env_file_too_short_names_file_var(tmp_path, monkeypatch):
+    # The too-short error must name the variable the value actually came from.
+    secret_file = tmp_path / "session_secret"
+    secret_file.write_text("short", encoding="utf-8")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET_FILE", str(secret_file))
+    with pytest.raises(ValueError, match="CLAUSTER_SESSION_SECRET_FILE must be at least 32 bytes"):
+        auth.load_or_create_secret(tmp_path)
+
+
 def test_secret_truncated_on_disk_is_rejected(tmp_path, monkeypatch):
     # A partial/corrupt session.secret (<32 bytes, e.g. a crash mid-write) must not be
     # used as a short signing key — refuse to boot rather than load it. Patch sleep so

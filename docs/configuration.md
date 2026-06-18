@@ -49,10 +49,16 @@ its own `CLAUSTER_SESSION_SECRET_FILE` (it is read outside the config schema):
 
 ```yaml
 # docker-compose: render a secret to a file and point clauster at it
-environment:
-  CLAUSTER_AUTH_PASSWORD_HASH_FILE: /run/secrets/clauster_pw_hash
+services:
+  clauster:
+    environment:
+      CLAUSTER_AUTH_PASSWORD_HASH_FILE: /run/secrets/clauster_pw_hash
+    secrets:
+      - clauster_pw_hash
+
 secrets:
-  - clauster_pw_hash
+  clauster_pw_hash:
+    file: ./secrets/pw_hash.txt
 ```
 
 **Schema is additive-only.** Old configs always validate against newer versions;
