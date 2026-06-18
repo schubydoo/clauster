@@ -394,8 +394,16 @@ class SessionRunner:
 
         # Prune old bridge-log sets per the retention policy before creating this
         # spawn's set (so the new files are never a deletion candidate). Off the loop;
-        # best-effort — a retention error must never block a spawn.
-        await asyncio.to_thread(self._prune_logs)
+        # best-effort — a retention error must never block a spawn. Snapshot the live
+        # instances' protected set keys HERE on the loop — reading self._instances from
+        # the worker thread could race a concurrent spawn's write to it.
+        protected = {
+            self._log_set_key(Path(p).name)
+            for inst in self._instances.values()
+            for p in (inst.bridge_debug_log_path, inst.bridge_raw_log_path)
+            if p is not None
+        }
+        await asyncio.to_thread(self._prune_logs, protected)
         log_path = self._unique_log_path(name)
         raw_path = self._raw_log_path_for(log_path)
         # Create the verbatim parse-source 0600 from the first inode — UNCONDITIONALLY:
@@ -535,15 +543,16 @@ class SessionRunner:
                 return filename[: -len(suf)]
         return filename
 
-    def _prune_logs(self) -> None:
+    def _prune_logs(self, protected: set[str]) -> None:
         """Apply the ``logs.retention_*`` policy to the bridge-log dir (best-effort).
 
         Groups files into per-spawn sets (a ``.log`` and its ``.raw.log`` /
         ``.stderr.log`` / ``.keeper.json`` / ``.keeper.log`` siblings share a stem) and
         deletes whole sets that exceed the configured age / count / total-size limits,
-        oldest first. Sets still owned by a tracked instance are never pruned. A ``0``
-        limit disables that dimension. Runs off the event loop (via ``to_thread``) on each
-        spawn; a transient FS error is logged and never aborts the spawn.
+        oldest first. ``protected`` (the set keys of live instances' logs, snapshotted on
+        the event loop by the caller) is never pruned. A ``0`` limit disables that
+        dimension. Runs off the event loop (via ``to_thread``) on each spawn; a transient
+        FS error is logged and never aborts the spawn.
         """
         logs = self._config.logs
         max_age_days, max_files, max_total_mb = (
@@ -563,22 +572,12 @@ class SessionRunner:
         for p in entries:
             sets.setdefault(self._log_set_key(p.name), []).append(p)
 
-        # Never prune a set still owned by a tracked instance — an idle long-lived
-        # bridge can age past the cutoff (mtime only advances on writes) while its log
-        # is still in use, and the count/size caps mustn't evict a live bridge's log.
-        protected = {
-            self._log_set_key(Path(path).name)
-            for inst in self._instances.values()
-            for path in (inst.bridge_debug_log_path, inst.bridge_raw_log_path)
-            if path is not None
-        }
-
         def _stat(paths: list[Path]) -> tuple[float, int]:
             mtime, size = 0.0, 0
             for p in paths:
                 try:
                     st = p.stat()
-                except OSError:
+                except OSError:  # pragma: no cover - TOCTOU only; is_file() already stat-filtered
                     continue
                 mtime, size = max(mtime, st.st_mtime), size + st.st_size
             return mtime, size
@@ -588,6 +587,8 @@ class SessionRunner:
         doomed: set[str] = set()
         if max_age_days:
             cutoff = time.time() - max_age_days * 86400
+            # A set with no datable file (mtime stays 0.0 — every file failed to stat) is
+            # never age-pruned: we don't delete what we can't date.
             doomed.update(k for k in ordered if info[k][0] and info[k][0] < cutoff)
         if max_files:
             survivors = [k for k in ordered if k not in doomed]
