@@ -124,6 +124,9 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     # stale "running" snapshot can't loop forever; a streamed frame resets the counter.
     assert "const MAX_LOG_RECONNECTS" in page
     assert re.search(r"s\.attempts\s*>=\s*MAX_LOG_RECONNECTS", page)
+    # A streamed frame resets the counter (onmessage) so a healthy tail reconnects without limit;
+    # pin it so dropping the reset can't silently let a working tail cap out (@claude).
+    assert re.search(r"s\.attempts\s*=\s*0\b", page)
     assert "Live tail dropped" in page  # FIX 3 reconnecting UI surface
     assert "Live tail disconnected" in page  # FIX 3 disconnect UI surface (bridge actually gone)
     # openLogs is idempotent + state-bound: a reconnect retires the prior state and binds the

@@ -1621,7 +1621,9 @@
         ws.onmessage = (ev) => {
           const s = liveState();
           if (!s) return;  // a retired socket → ignore
-          s.lost = false; s.reconnecting = false; s.attempts = 0;  // a frame arrived → tail is live, reset the retry cap
+          s.lost = false;  // a frame arrived → the tail is live again
+          s.reconnecting = false;
+          s.attempts = 0;  // reset the retry cap — a healthy tail reconnects without limit
           if (s.paused) {
             s.pending.push(ev.data);
             if (s.pending.length > MAX_PENDING) s.pending.splice(0, s.pending.length - MAX_PENDING);
@@ -1656,7 +1658,8 @@
             s.reconnecting = false; s.lost = true; return;
           }
           s.attempts += 1;
-          s.lost = false; s.reconnecting = true;  // through the proxy → surfaces "reconnecting…"
+          s.lost = false;
+          s.reconnecting = true;  // through the proxy → surfaces "reconnecting…"
           setTimeout(() => {
             const s2 = self.logs[name];
             if (s2 && s2.token === token && s2.open) self.openLogs(name);
