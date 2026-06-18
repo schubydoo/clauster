@@ -24,7 +24,8 @@ Key modules under `src/clauster/`:
 | `procutil.py` | `psutil`-based process introspection: liveness with PID-reuse defense (create-time + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery. |
 | `auth.py` | Auth foundation (fail-closed; pure functions, no FastAPI import). |
 | `config.py` | Config load, env-override, and validation (`ClausterConfig`). |
-| `state.py` | `state.json` persistence. |
+| `db/` | Persistence layer: `engine.py` (resolves the DB URL — SQLite `clauster.db` under `state_dir` by default, or a configured `database_url`), `models.py`/`stores.py` (SQLAlchemy schema + record stores), `bootstrap.py` (startup Alembic-to-head + one-time legacy-JSON import, both fail-closed), and the packaged Alembic `migrations/`. |
+| `state.py` | Legacy `state.json` store — now an import source only (the live store is `clauster.db`). |
 | `models.py` | Domain models. |
 | `metrics.py` | Per-bridge resource sampling (CPU / memory / disk). |
 | `usage.py` | Token + approximate-cost rollup from session transcripts. |
@@ -35,7 +36,7 @@ Key modules under `src/clauster/`:
 | `claustrum_client.py` | Async unix-socket NDJSON JSON-RPC client for the claustrum daemon (hosted live-view channel; experimental). |
 | `claustrum_daemon.py` | Connect-or-spawn lifecycle + auth-token management + health for the per-deployment claustrum daemon (experimental). |
 | `hosted.py` | Hosted-channel session engine — `HostedSession` (stream-json spawn, stdout control-plane routing, redaction + ring buffer + fan-out, fail-closed permission parking) and `HostedManager` (registry, separate from the bridge runner). Has a live-view + permissions UI and reattaches across restarts; experimental. |
-| `hosted_state.py` | `HostedStateStore` — persists hosted sessions to a separate `hosted_state.json` keyed by `claustrum_process_id` (the bridge `state.json` is project-keyed), so a Clauster restart can reattach them. |
+| `hosted_state.py` | Legacy `hosted_state.json` store for hosted sessions, keyed by `claustrum_process_id` — now an import source only (hosted-session records live in `clauster.db`, letting a Clauster restart reattach them). |
 | `hooks/resume_recap.py` | The `SessionStart` hook that recaps the prior conversation into a restarted bridge. |
 
 ## The two bridge modes
@@ -132,9 +133,17 @@ resume always honour the recorded mode.
 - `config.py` loads `clauster.yml` (search order + `CLAUSTER_<UPPER_SNAKE_PATH>`
     env overrides), applies the fail-closed validators, and produces a validated
     `ClausterConfig`. See [Configuration](configuration.md).
-- `state.py` persists runtime bridge state to `state.json` in the `state_dir`;
-    `clauster migrate` upgrades it to the current schema, and
-    `clauster backup`/`restore` tar the `state_dir` + config.
+- `db/` is the persistence layer: `db/engine.py` resolves the database URL
+    (a SQLite `clauster.db` under the `state_dir` by default, or a configured
+    `database_url` such as Postgres) and `db/bootstrap.py` runs the Alembic
+    migrations to head on startup — fail-closed, refusing to start on a failed
+    migration — then performs a one-time import of any legacy `state.json` /
+    `hosted_state.json` (renaming each to `*.imported`). `state.py` /
+    `hosted_state.py` remain only as those legacy JSON stores and import sources.
+- `clauster migrate` is a legacy helper that upgrades an older `state.json` to
+    the current JSON schema (the database schema is migrated automatically at
+    startup, above); `clauster backup`/`restore` tar the `state_dir`
+    (`clauster.db` included) + config.
 
 ## Conventions
 

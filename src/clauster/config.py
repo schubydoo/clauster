@@ -661,7 +661,8 @@ class ClausterConfig(BaseModel):
     port: int = Field(default=7621, ge=1, le=65535, description="Bind port (1–65535).")
     state_dir: Path = Field(
         default=Path("~/.clauster"),
-        description="Where `state.json` and runtime state live. `~` is expanded.",
+        description="Where `clauster.db` and runtime state live (`state.json` is a "
+        "legacy import source). `~` is expanded.",
     )
     database_url: str | None = Field(
         default=None,

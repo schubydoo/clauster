@@ -558,7 +558,8 @@
             this.toast("dispatch failed — " + (b.detail || res.status), "error");
           }
         } catch (e) { this.toast("dispatch failed", "error"); }
-        f.busy = false;
+        // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
+        finally { f.busy = false; }
         await this.refresh();
       },
       async stopAgent(j) {
@@ -590,7 +591,8 @@
           else if (res.ok) this.toast(label + ": stopped (cleanup pending — " + (b.detail || "supervisor restarting") + ")", "warning");
           else this.toast(label + ": stop failed — " + (b.detail || res.status), "error");
         } catch (e) { this.toast(label + ": stop failed", "error"); }
-        this.agentStopping[j.id] = false;
+        // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
+        finally { this.agentStopping[j.id] = false; }
         await this.refresh();
       },
       // Resume an ended bg agent: `--bg --resume <session uuid>` continues the prior
@@ -1283,7 +1285,8 @@
             this.toast("hosted start failed — " + (b.detail || res.status), "error");
           }
         } catch (e) { this.toast("hosted start failed", "error"); }
-        f.busy = false;
+        // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
+        finally { f.busy = false; }
       },
       async stopHosted(h) {
         const id = h.claustrum_process_id;
@@ -1295,7 +1298,8 @@
           if (res.ok) this.toast("hosted session stopped", "success");
           else { const b = await res.json().catch(() => ({})); this.toast("stop failed — " + (b.detail || res.status), "error"); }
         } catch (e) { this.toast("stop failed", "error"); }
-        this.hostedStopping[id] = false;
+        // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
+        finally { this.hostedStopping[id] = false; }
         this.closeHosted(id);
         await this.refresh();
       },
@@ -1313,7 +1317,8 @@
           if (res.ok) { killed = true; this.toast("orphaned session killed", "success"); }
           else { const b = await res.json().catch(() => ({})); this.toast("kill failed — " + (b.detail || res.status), "error"); }
         } catch (e) { this.toast("kill failed", "error"); }
-        this.hostedStopping[id] = false;
+        // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
+        finally { this.hostedStopping[id] = false; }
         // Only tear down the view on a successful kill; a failed kill leaves the orphan
         // actionable (refresh re-fetches its row so it stays in the list).
         if (killed) this.closeHosted(id);
@@ -1338,7 +1343,8 @@
             this.toast("resume failed — " + (b.detail || res.status), "error");
           }
         } catch (e) { this.toast("resume failed", "error"); }
-        this.hostedResuming[id] = false;
+        // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
+        finally { this.hostedResuming[id] = false; }
       },
       toggleHosted(id) {
         const v = this.hostedView[id];
@@ -1548,7 +1554,8 @@
           if (res.ok) { v.input = ""; }
           else { const b = await res.json().catch(() => ({})); this.toast("send failed — " + (b.detail || res.status), "error"); }
         } catch (e) { this.toast("send failed", "error"); }
-        v.sending = false;
+        // reset on EVERY path incl. the 401 early-return so the input can't wedge (#336 pattern; fixes #401).
+        finally { v.sending = false; }
       },
       // Answer a parked tool-permission request (CL-5). Optimistically flips the item
       // on success; the control_resolved event confirms it (idempotent).
