@@ -151,7 +151,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   prompts surfaced in the UI) instead of being driven from Claude Desktop / claude.ai.
   Off by default and fail-closed — an unreachable daemon surfaces in `/healthz` and
   never affects the bridge lifecycle. Requires the separate `claustrum` daemon
-  binary (`claustrum.binary`), which is **not yet publicly distributed** — there is
+  binary, which is **not yet publicly distributed** — there is
   currently no public install or build recipe, so leave `claustrum.enabled: false`
   unless you already have the binary on your `PATH`.
 
