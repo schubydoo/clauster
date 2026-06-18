@@ -97,6 +97,55 @@ Failed logins are rate-limited in two layers, returning **`429` with a
 WebSocket connections are **authenticated before accept** and origin-checked.
 Add the proxy domain or any extra trusted origins to `auth.allowed_origins`.
 
+## Exposing beyond the LAN
+
+Clauster defaults to a loopback bind and assumes **trusted host-local
+infrastructure** — the gates above harden *that* model. But the README pitches
+phone/remote use, and many will expose Clauster to a hostile network (Tailscale
+Funnel, Cloudflare Tunnel, a public reverse proxy). Host hardening itself — OS
+patching, firewalling, and the tunnel/proxy you front with — stays your
+responsibility; the notes below are the Clauster-side minimums for that case.
+
+### Require TLS
+
+Never serve the dashboard or its session cookie over plain HTTP off-host.
+Terminate TLS at a proxy or tunnel and force the secure cookie with
+`auth.cookie_secure: always`, so the cookie can't ride a downgraded request in
+the clear. Clauster already warns at startup when password auth is on but the
+cookie would likely ship without `Secure` — on a hostile network, treat that
+warning as a hard stop.
+
+### Front with an identity-aware proxy
+
+A single shared password is the weakest link for an internet-exposed deployment.
+Put an **IdP / IAP** in front — an SSO/forward-auth proxy (Authelia, Authentik,
+Cloudflare Access, Pomerium, oauth2-proxy) or a private overlay (Tailscale,
+WireGuard) — so a real identity is checked *before* a request reaches Clauster.
+The reverse-proxy path (peer-IP allowlist + an HMAC-signed user header,
+`auth.reverse_proxy`) is built to trust exactly such a proxy; keep password
+login loopback-only once proxy auth is configured.
+
+### The login lockout is friction, not a boundary
+
+The built-in failed-login throttle (per-key lock + a global backoff, returning
+`429` + `Retry-After`) raises the cost of brute force, but its counters are
+**in-process only** — they reset on restart and aren't shared across workers or
+replicas, and behind a shared-IP proxy the global path degrades to a bounded
+delay rather than a hard lockout. It is brute-force friction, not an
+account-security boundary — the fronting IdP/IAP above is. See
+[Login throttle](#login-throttle-brute-force-friction).
+
+### CSRF & sessions on a hostile network
+
+- Add the public origin(s) to `auth.allowed_origins`: the strict `Origin`
+  allowlist on unsafe methods (and on WebSocket accept) is the CSRF guard, so an
+  origin you don't list is rejected.
+- Sessions are signed cookies with server-side revocation — logout bumps a
+  persistent epoch, so "log out everywhere" instantly kills a cookie that may
+  have leaked. Keep `session_max_age_seconds` short for an exposed deployment.
+- `SameSite=Lax` + `Secure` (above) limit cross-site cookie replay; the fronting
+  proxy must not strip or forge the `Origin` / forwarded headers Clauster checks.
+
 ## Workspace trust
 
 A bridge **refuses to spawn in an untrusted directory**. Trust lives in
