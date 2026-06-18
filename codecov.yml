@@ -80,6 +80,8 @@ component_management:
         - src/clauster/prometheus.py
         - src/clauster/notify.py
         - src/clauster/claude_md.py
+        - src/clauster/logging_config.py
+        - src/clauster/webhooks.py
     - component_id: provisioning
       name: provisioning
       paths:
@@ -94,13 +96,31 @@ component_management:
         - src/clauster/environments.py
     - component_id: hooks_recap
       name: hooks & recap
+      # Same glob problem as persistence below: `src/clauster/hooks/**` compiles to
+      # `(?s:src/clauster/hooks/.*)\Z` and isn't picked up by Codecov's component
+      # matcher — it was masked here only by the explicit recap.py path. List the
+      # hooks module explicitly (the form the other components use, `^…py.*`).
       paths:
-        - src/clauster/hooks/**
+        - src/clauster/hooks/__init__.py
+        - src/clauster/hooks/resume_recap.py
         - src/clauster/recap.py
     - component_id: persistence
       name: persistence (db)
+      # Codecov's component matcher does NOT pick up a `src/clauster/db/**` glob here
+      # (it leaves the component empty even when db/ is covered 100%), whereas the
+      # explicit file paths the other components use DO match — so list the db modules
+      # explicitly. Keep this list in sync as db/ grows (same convention as above).
       paths:
-        - src/clauster/db/**
+        - src/clauster/db/__init__.py
+        - src/clauster/db/engine.py
+        - src/clauster/db/bootstrap.py
+        - src/clauster/db/models.py
+        - src/clauster/db/persistence.py
+        - src/clauster/db/stores.py
+        - src/clauster/db/migrations/__init__.py
+        - src/clauster/db/migrations/env.py
+        - src/clauster/db/migrations/versions/__init__.py
+        - src/clauster/db/migrations/versions/0001_baseline.py
     - component_id: cli_config
       name: cli & config
       paths:
