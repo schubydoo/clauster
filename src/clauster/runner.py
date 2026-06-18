@@ -131,6 +131,10 @@ class SessionRunner:
         # Monotonic spawn counter → unique log filenames even for two same-ms spawns.
         self._log_seq = 0
         self._instances: dict[str, RemoteControlInstance] = {}
+        # Per-project bridge-crash tally since process start, exposed as the
+        # clauster_bridge_crashes_total counter (#352) — a crash that resumes between
+        # scrapes still leaves a trace, unlike the current-status gauge.
+        self._crash_counts: dict[str, int] = {}
         self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
         self._poll_task: asyncio.Task | None = None
@@ -174,6 +178,10 @@ class SessionRunner:
     def list_instances(self) -> list[RemoteControlInstance]:
         """Return a snapshot list of all managed bridge instances."""
         return list(self._instances.values())
+
+    def crash_counts(self) -> dict[str, int]:
+        """Return a copy of the per-project bridge-crash tally since process start (#352)."""
+        return dict(self._crash_counts)
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
         """Return the instance with this id, or None if unknown."""
@@ -1558,6 +1566,9 @@ class SessionRunner:
                 prev_status is not InstanceStatus.CRASHED
                 and instance.status is InstanceStatus.CRASHED
             ):
+                self._crash_counts[instance.project] = (
+                    self._crash_counts.get(instance.project, 0) + 1
+                )
                 self._notify_crash(instance)
             if alive:
                 live_projects.add(instance.project)

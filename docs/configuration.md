@@ -252,7 +252,8 @@ auth guard. See [Networking](networking.md) for scraping behind auth.
 <!-- BEGIN GEN: observability -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard. |
+| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token` is set. |
+| `metrics_token` | str \| null | `null` | Optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — presented as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Compared in constant time. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` to keep it out of the config file. |
 <!-- END GEN: observability -->
 
 ## `notifications` — outbound alerts via Apprise (`NotificationsConfig`)

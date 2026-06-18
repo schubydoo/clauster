@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import io
 import logging
 import sys
@@ -358,6 +359,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     def _is_public(path: str) -> bool:
         return path == "/healthz" or path == "/login" or path.startswith("/static/")
 
+    def _metrics_token_ok(request: Request) -> bool:
+        """Whether the request carries the configured `/metrics` scrape token (#352)."""
+        token = config.observability.metrics_token
+        if not token:
+            return False
+        presented = auth.parse_bearer(request.headers.get("authorization"))
+        return presented is not None and hmac.compare_digest(presented, token)
+
     @app.middleware("http")
     async def guard(request: Request, call_next):
         if not config.auth.enabled:
@@ -378,6 +387,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if _is_public(request.url.path):
             return await call_next(request)
         if user is None:
+            # A valid scrape token grants /metrics access without a session (Prometheus
+            # can't log in). Strictly additive: only /metrics, only on an exact match.
+            if request.url.path == "/metrics" and _metrics_token_ok(request):
+                return await call_next(request)
             if request.url.path.startswith("/api/"):
                 return JSONResponse({"detail": "authentication required"}, status_code=401)
             return RedirectResponse(f"{_root}/login", status_code=303)
@@ -466,17 +479,73 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         return result
 
+    async def _sample_running_bridges() -> list[tuple[str, float, int]]:
+        """Sample (project, cpu, rss) for every running bridge in parallel (best-effort).
+
+        Each `sample_tree` sleeps a short interval to measure CPU, so they run
+        concurrently off the loop — total latency stays ~one interval regardless of
+        bridge count. A per-bridge sampling error drops that bridge, never the scrape.
+        """
+        if not config.metrics.enabled:
+            return []
+        targets = [
+            inst
+            for inst in runner.list_instances()
+            if inst.status is InstanceStatus.RUNNING and inst.bridge_pid is not None
+        ]
+
+        async def _one(inst: RemoteControlInstance) -> tuple[str, float, int] | None:
+            pid = inst.bridge_pid
+            if pid is None:  # pragma: no cover - narrowed for pyright; the filter excludes it
+                return None
+            # Guard PID reuse: if the live PID's create-time no longer matches the one
+            # recorded for this bridge, the OS recycled it onto an unrelated process —
+            # don't attribute its cpu/rss to this project (mirrors api_project_metrics).
+            start = inst.bridge_proc_start
+            if start is not None:
+                cur = await asyncio.to_thread(procutil.proc_create_time, pid)
+                if cur is None or abs(cur - start) > 2.0:
+                    return None
+            try:
+                sample = await asyncio.to_thread(
+                    metrics.sample_tree,
+                    pid,
+                    interval=config.metrics.sample_interval_seconds,
+                    normalize_cpu=config.metrics.normalize_cpu,
+                )
+            except Exception:  # fail closed — a sampling error never breaks the scrape
+                return None
+            if not sample:
+                return None
+            return (inst.project, float(sample["cpu_percent"]), int(sample["rss_bytes"]))
+
+        sampled = await asyncio.gather(*(_one(i) for i in targets))
+        return [s for s in sampled if s is not None]
+
     @app.get("/metrics")
     async def prometheus_metrics() -> Response:
-        # Stays behind the auth guard like every route; scraping a guarded deploy
-        # needs auth/network handling (see the PR's follow-up note).
+        # Behind the auth guard unless observability.metrics_token is set (then a valid
+        # scrape token grants access without a session — see the guard).
         if not config.observability.prometheus_enabled:
             raise HTTPException(status_code=404, detail="metrics endpoint is disabled")
         projects = await list_projects()
+        hosted_live = sum(
+            1
+            for inst in app.state.hosted.list_instances()
+            if inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
+        )
+        claustrum_up: bool | None = None
+        if config.claustrum.enabled:
+            daemon = getattr(app.state, "claustrum_daemon", None)
+            claustrum_up = daemon is not None and bool(daemon.status().get("running"))
         body = prometheus.render_metrics(
             version=__version__,
             instances=runner.list_instances(),
             project_count=len(projects),
+            bridge_samples=await _sample_running_bridges(),
+            crash_counts=runner.crash_counts(),
+            hosted_sessions=hosted_live,
+            claustrum_up=claustrum_up,
         )
         return Response(content=body, media_type=prometheus.CONTENT_TYPE)
 

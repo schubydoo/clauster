@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
@@ -769,6 +770,166 @@ def test_prometheus_counts_reflect_seeded_instances(write_config, tmp_path):
     assert 'clauster_bridges{status="running"} 1' in body
     assert 'clauster_bridges{status="stopped"} 1' in body
     assert 'clauster_bridges{status="starting"} 0' in body
+
+
+def test_prometheus_exposes_crash_counter(write_config, tmp_path):
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    client.app.state.runner._crash_counts["alpha"] = 2
+    body = client.get("/metrics").text
+    assert "# TYPE clauster_bridge_crashes_total counter" in body
+    assert 'clauster_bridge_crashes_total{project="alpha"} 2' in body
+
+
+def test_prometheus_exposes_per_bridge_cpu_rss(write_config, tmp_path, monkeypatch):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = 4242
+    client.app.state.runner._instances["alpha"] = inst
+    # Stub the tree sampler the app calls so the test needs no real process.
+    monkeypatch.setattr(
+        "clauster.app.metrics.sample_tree",
+        lambda *a, **k: {"cpu_percent": 7.5, "rss_bytes": 2048},
+    )
+    body = client.get("/metrics").text
+    assert 'clauster_bridge_cpu_percent{project="alpha"} 7.5' in body
+    assert 'clauster_bridge_rss_bytes{project="alpha"} 2048' in body
+
+
+def test_prometheus_exposes_hosted_gauge_and_omits_claustrum_when_disabled(write_config, tmp_path):
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    body = client.get("/metrics").text
+    assert "clauster_hosted_sessions 0" in body
+    assert "clauster_claustrum_up" not in body  # claustrum disabled by default → omitted
+
+
+def test_prometheus_claustrum_up_zero_when_enabled_but_no_daemon(write_config, tmp_path):
+    # With claustrum enabled but no live daemon (no lifespan), the gauge reports 0.
+    client = _client_with(
+        write_config,
+        tmp_path,
+        "observability:\n  prometheus_enabled: true\nclaustrum:\n  enabled: true\n",
+    )
+    assert "clauster_claustrum_up 0" in client.get("/metrics").text
+
+
+def _running_bridge(client, *, pid=4242):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = pid
+    client.app.state.runner._instances["alpha"] = inst
+
+
+def test_prometheus_skips_cpu_rss_when_metrics_disabled(write_config, tmp_path):
+    # metrics.enabled false → no per-bridge sampling, so no cpu/rss series (gauges off).
+    client = _client_with(
+        write_config,
+        tmp_path,
+        "observability:\n  prometheus_enabled: true\nmetrics:\n  enabled: false\n",
+    )
+    _running_bridge(client)
+    body = client.get("/metrics").text
+    assert "clauster_bridge_cpu_percent" not in body
+
+
+def test_prometheus_drops_bridge_on_sampling_error(write_config, tmp_path, monkeypatch):
+    # A sampling error for a bridge drops it from the scrape, never 500s the endpoint.
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    _running_bridge(client)
+    monkeypatch.setattr(
+        "clauster.app.metrics.sample_tree",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    assert "clauster_bridge_cpu_percent" not in r.text
+
+
+def test_prometheus_drops_bridge_on_empty_sample(write_config, tmp_path, monkeypatch):
+    # sample_tree returns None (pid already gone) → that bridge is omitted.
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    _running_bridge(client)
+    monkeypatch.setattr("clauster.app.metrics.sample_tree", lambda *a, **k: None)
+    body = client.get("/metrics").text
+    assert "clauster_bridge_cpu_percent" not in body
+
+
+@pytest.mark.parametrize("cur_create_time", [None, 999.0])
+def test_prometheus_drops_bridge_on_pid_reuse(
+    write_config, tmp_path, monkeypatch, cur_create_time
+):
+    # If the live PID's create-time no longer matches (or is gone), don't attribute its
+    # cpu/rss to this bridge — guard against PID reuse, mirroring api_project_metrics.
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    _running_bridge(client)
+    client.app.state.runner._instances["alpha"].bridge_proc_start = 100.0
+    monkeypatch.setattr("clauster.app.procutil.proc_create_time", lambda *a, **k: cur_create_time)
+    monkeypatch.setattr(
+        "clauster.app.metrics.sample_tree", lambda *a, **k: {"cpu_percent": 9.0, "rss_bytes": 1}
+    )
+    assert "clauster_bridge_cpu_percent" not in client.get("/metrics").text
+
+
+def test_prometheus_samples_when_pid_create_time_matches(write_config, tmp_path, monkeypatch):
+    # bridge_proc_start set AND the live create-time matches → the guard passes and the
+    # bridge is sampled normally.
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    _running_bridge(client)
+    client.app.state.runner._instances["alpha"].bridge_proc_start = 100.0
+    monkeypatch.setattr("clauster.app.procutil.proc_create_time", lambda *a, **k: 100.0)
+    monkeypatch.setattr(
+        "clauster.app.metrics.sample_tree", lambda *a, **k: {"cpu_percent": 5.0, "rss_bytes": 64}
+    )
+    body = client.get("/metrics").text
+    assert 'clauster_bridge_cpu_percent{project="alpha"} 5.0' in body
+
+
+def test_metrics_token_grants_scrape_without_session(runner_config):
+    # With auth on and a metrics_token set, a valid Bearer token reaches /metrics with no
+    # session; a wrong/absent token is rejected; the existing gauges are unchanged.
+    from clauster.app import create_app
+    from clauster.runner import SessionRunner
+
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.observability.prometheus_enabled = True
+    config.observability.metrics_token = "scrape-me"  # noqa: S105 — test token
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+    ok = client.get("/metrics", headers={"authorization": "Bearer scrape-me"})
+    assert ok.status_code == 200 and "clauster_build_info" in ok.text
+
+    wrong = client.get(
+        "/metrics", headers={"authorization": "Bearer nope"}, follow_redirects=False
+    )
+    assert wrong.status_code in {302, 303, 307, 401, 403}  # denied, not a 500
+    assert "clauster_build_info" not in wrong.text  # payload withheld
+
+    none = client.get("/metrics", follow_redirects=False)
+    assert none.status_code in {302, 303, 307, 401, 403}
+    assert "clauster_build_info" not in none.text
+
+
+def test_metrics_token_unset_keeps_endpoint_behind_guard(runner_config):
+    from clauster.app import create_app
+    from clauster.runner import SessionRunner
+
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.observability.prometheus_enabled = True
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    # No token configured → a Bearer is meaningless; the guard still requires a session.
+    r = client.get(
+        "/metrics", headers={"authorization": "Bearer anything"}, follow_redirects=False
+    )
+    assert r.status_code in {302, 303, 307, 401, 403}
+    assert "clauster_build_info" not in r.text
 
 
 # ----- /api/widget (homepage-dashboard summary) -------------------------
