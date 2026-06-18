@@ -126,6 +126,19 @@ async def test_refresh_forever_continues_after_unexpected_error(runner_config, m
         await runner._metrics_refresh_forever()
 
 
+async def test_refresh_forever_propagates_cancel_from_refresh(runner_config, monkeypatch):
+    # A CancelledError from the refresh itself is re-raised (not swallowed by the loop),
+    # so task cancellation stops the loop promptly.
+    runner = _runner(runner_config)
+
+    async def _cancel():
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(runner, "_refresh_metrics_cache", _cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await runner._metrics_refresh_forever()
+
+
 def test_warn_if_refresh_slow(runner_config, caplog):
     # A refresh slower than poll_seconds warns; a fast one is silent (no spam).
     runner = _runner(runner_config)
