@@ -51,6 +51,12 @@ not unified.
 > session, watch it stream live, drive it, approve/deny tool prompts, and resume
 > it after a restart — backed by `WS /ws/hosted/{id}` and `GET /api/hosted`.
 >
+> **The key user-visible difference:** a **bridge** (`remote-control` / pty) is
+> **cloud-visible** — attachable from `claude.ai/code` and the Claude mobile app.
+> A **hosted** session is **local live-view only** — it streams in this dashboard
+> but is *never* attachable from the Claude app. Starting a hosted session and then
+> trying to open it on your phone is a dead end by design.
+>
 > With `claustrum.keep_children` (default on) the daemon is spawned with
 > `-keep-children`, so a daemon restart or upgrade leaves hosted agents running:
 > on reconnect Clauster reattaches the sessions it can, and marks survivors it
