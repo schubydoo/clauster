@@ -56,16 +56,25 @@ jobs:
         run: |
           set -euo pipefail
           tag="$RESOLVED_TAG"
+          # Strip CR/LF: $tag (user-controlled inputs.tag) is echoed into the
+          # ::error:: annotations below, where a stray newline could smuggle a
+          # second runner workflow-command into the log.
+          tag="${tag//[$'\r\n']/}"
           # 1) Shape — only stable vMAJOR.MINOR.PATCH tags publish.
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Refusing to publish '$tag': not a vMAJOR.MINOR.PATCH release tag."
             exit 1
           fi
-          # 2) The tag must exist on origin and resolve to a commit.
+          # 2) The tag must exist on origin and resolve to a commit. --force because
+          #    fetch-depth:0 already fetched the tag at clone time; without it git
+          #    refuses to re-fetch ("would clobber"), and we want origin's canonical tag.
           if ! git fetch --no-tags --force origin "refs/tags/${tag}:refs/tags/${tag}"; then
             echo "::error::Refusing to publish '$tag': no such tag on origin."
             exit 1
           fi
+          # `^{commit}` peels an annotated tag to its commit object; without it
+          # rev-parse returns the tag object's SHA and the ancestry check below
+          # would compare the wrong object type.
           tag_commit="$(git rev-parse "refs/tags/${tag}^{commit}")"
           # 3) That commit must be reachable from origin/main — this is what blocks
           #    a tag (or dispatch input) pointing at an unreviewed, off-main ref.
