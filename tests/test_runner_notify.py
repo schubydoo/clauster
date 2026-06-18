@@ -83,6 +83,8 @@ async def test_poll_once_crash_fires_notification(runner_config, monkeypatch):
 
     await runner.poll_once()
     assert runner._instances["alpha"].status is InstanceStatus.CRASHED
+    # The same transition bumps the per-project crash counter (#352 metrics).
+    assert runner.crash_counts() == {"alpha": 1}
     await asyncio.gather(*runner._notify_tasks)
     assert len(rec.calls) == 1
 

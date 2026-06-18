@@ -511,8 +511,17 @@ class ObservabilityConfig(BaseModel):
     prometheus_enabled: bool = Field(
         default=False,
         description="Gate a text-format `/metrics` endpoint (build info, bridge counts "
-        "by status, project count). Off by default; when off, `/metrics` returns 404. "
-        "The endpoint stays **behind** the auth guard.",
+        "by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum "
+        "gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays "
+        "**behind** the auth guard unless `metrics_token` is set.",
+    )
+    metrics_token: str | None = Field(
+        default=None,
+        description="Optional bearer token that lets a scraper (e.g. Prometheus) reach "
+        "`/metrics` without a browser session — presented as `Authorization: Bearer "
+        "<token>`. When set, a valid token OR a normal session grants access; when unset, "
+        "`/metrics` stays behind the auth guard. Compared in constant time. Supply via "
+        "`CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` to keep it out of the config file.",
     )
 
 

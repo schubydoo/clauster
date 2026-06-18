@@ -771,6 +771,80 @@ def test_prometheus_counts_reflect_seeded_instances(write_config, tmp_path):
     assert 'clauster_bridges{status="starting"} 0' in body
 
 
+def test_prometheus_exposes_crash_counter(write_config, tmp_path):
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    client.app.state.runner._crash_counts["alpha"] = 2
+    body = client.get("/metrics").text
+    assert "# TYPE clauster_bridge_crashes_total counter" in body
+    assert 'clauster_bridge_crashes_total{project="alpha"} 2' in body
+
+
+def test_prometheus_exposes_per_bridge_cpu_rss(write_config, tmp_path, monkeypatch):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    inst.status = InstanceStatus.RUNNING
+    inst.bridge_pid = 4242
+    client.app.state.runner._instances["alpha"] = inst
+    # Stub the tree sampler the app calls so the test needs no real process.
+    monkeypatch.setattr(
+        "clauster.app.metrics.sample_tree",
+        lambda *a, **k: {"cpu_percent": 7.5, "rss_bytes": 2048},
+    )
+    body = client.get("/metrics").text
+    assert 'clauster_bridge_cpu_percent{project="alpha"} 7.5' in body
+    assert 'clauster_bridge_rss_bytes{project="alpha"} 2048' in body
+
+
+def test_prometheus_exposes_hosted_gauge_and_omits_claustrum_when_disabled(write_config, tmp_path):
+    client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
+    body = client.get("/metrics").text
+    assert "clauster_hosted_sessions 0" in body
+    assert "clauster_claustrum_up" not in body  # claustrum disabled by default → omitted
+
+
+def test_metrics_token_grants_scrape_without_session(runner_config):
+    # With auth on and a metrics_token set, a valid Bearer token reaches /metrics with no
+    # session; a wrong/absent token is rejected; the existing gauges are unchanged.
+    from clauster.app import create_app
+    from clauster.runner import SessionRunner
+
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.observability.prometheus_enabled = True
+    config.observability.metrics_token = "scrape-me"  # noqa: S105 — test token
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+    ok = client.get("/metrics", headers={"authorization": "Bearer scrape-me"})
+    assert ok.status_code == 200 and "clauster_build_info" in ok.text
+
+    wrong = client.get(
+        "/metrics", headers={"authorization": "Bearer nope"}, follow_redirects=False
+    )
+    assert wrong.status_code != 200  # redirected to login / unauthorized
+
+    none = client.get("/metrics", follow_redirects=False)
+    assert none.status_code != 200
+
+
+def test_metrics_token_unset_keeps_endpoint_behind_guard(runner_config):
+    from clauster.app import create_app
+    from clauster.runner import SessionRunner
+
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.observability.prometheus_enabled = True
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    # No token configured → a Bearer is meaningless; the guard still requires a session.
+    r = client.get(
+        "/metrics", headers={"authorization": "Bearer anything"}, follow_redirects=False
+    )
+    assert r.status_code != 200
+
+
 # ----- /api/widget (homepage-dashboard summary) -------------------------
 
 
