@@ -86,32 +86,82 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 
 
 class LoginThrottle:
-    """In-process per-IP failed-login limiter — cheap brute-force resistance."""
+    """In-process failed-login limiter: a per-key hard lock + a global backoff fallback.
 
-    def __init__(self, max_failures: int = 5, window_seconds: int = 300) -> None:
-        """Set the failure threshold and the rolling window in seconds."""
+    The per-key window (``max_failures`` within ``window_seconds``) precisely limits a
+    *distinguishable* client — a direct peer IP, or a reverse-proxy-asserted user. But
+    behind a trusted reverse proxy that asserts no user, every login shares the proxy's
+    socket IP, so a per-IP lock would lock **everyone** out (one attacker DoSing all
+    users). For that shared-IP case the caller passes ``shared=True``: the per-key lock
+    is skipped and only the **global backoff** applies — once shared-path failures exceed
+    ``global_ceiling`` in the window, attempts must wait an exponentially-growing interval
+    (surfaced as ``429`` + ``Retry-After``), degrading a flood to a delay rather than a
+    blanket lockout a legitimate user can never get past. The two paths are independent: a
+    shared-proxy flood never 429s a distinguishable direct client, and vice versa.
+
+    In-process only: the counters reset on restart and are **not** shared across workers
+    or replicas. For an internet-exposed deployment a fronting IdP/IAP (or the
+    reverse-proxy auth) is the real control; this is brute-force friction, not an
+    account-security boundary.
+    """
+
+    def __init__(
+        self,
+        max_failures: int = 5,
+        window_seconds: int = 300,
+        *,
+        global_ceiling: int = 20,
+        backoff_cap_seconds: float = 60.0,
+    ) -> None:
+        """Set the per-key threshold/window and the global-backoff ceiling/cap."""
         self._max = max_failures
         self._window = window_seconds
         self._failures: dict[str, list[float]] = {}
+        self._global: list[float] = []
+        self._global_ceiling = global_ceiling
+        self._backoff_cap = backoff_cap_seconds
 
-    def allowed(self, ip: str | None) -> bool:
-        """Whether ``ip`` is under the failure limit within the rolling window."""
-        if not ip:
-            return True
+    def allowed(self, key: str | None, *, shared: bool = False) -> tuple[bool, float]:
+        """Return ``(allowed, retry_after_seconds)`` for a login attempt from ``key``.
+
+        The two paths are independent: a ``shared`` proxy IP is governed only by the
+        global backoff, a distinguishable client only by its per-key window — so a
+        shared-proxy flood never spills over to 429 a direct client (or vice versa).
+        """
         now = time.monotonic()
-        recent = [t for t in self._failures.get(ip, []) if now - t < self._window]
-        self._failures[ip] = recent
-        return len(recent) < self._max
+        if shared:
+            # Global backoff: past the ceiling, require an exponentially-growing gap since
+            # the last failure (capped), so a shared-proxy-IP flood can't lock everyone out
+            # but is still throttled to a crawl.
+            self._global = [t for t in self._global if now - t < self._window]
+            over = len(self._global) - self._global_ceiling
+            if over > 0 and self._global:
+                backoff = min(self._backoff_cap, 2.0 ** min(over, 30))
+                wait = backoff - (now - self._global[-1])
+                if wait > 0:
+                    return False, wait
+            return True, 0.0
+        # Per-key hard lock for a distinguishable client.
+        if key:
+            recent = [t for t in self._failures.get(key, []) if now - t < self._window]
+            self._failures[key] = recent
+            if len(recent) >= self._max:
+                return False, float(self._window)
+        return True, 0.0
 
-    def record_failure(self, ip: str | None) -> None:
-        """Record one failed login attempt from ``ip``."""
-        if ip:
-            self._failures.setdefault(ip, []).append(time.monotonic())
+    def record_failure(self, key: str | None, *, shared: bool = False) -> None:
+        """Record one failed attempt — globally for a shared proxy IP, else per-key."""
+        now = time.monotonic()
+        if shared:
+            self._global = [t for t in self._global if now - t < self._window]
+            self._global.append(now)
+        elif key:
+            self._failures.setdefault(key, []).append(now)
 
-    def reset(self, ip: str | None) -> None:
-        """Clear ``ip``'s recorded failures (called on a successful login)."""
-        if ip is not None:
-            self._failures.pop(ip, None)
+    def reset(self, key: str | None) -> None:
+        """Clear ``key``'s per-key failures (called on a successful login)."""
+        if key is not None:
+            self._failures.pop(key, None)
 
 
 _PKG_DIR = Path(__file__).resolve().parent
@@ -335,12 +385,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return request.headers.get("x-forwarded-proto", "").lower() == "https"
         return False
 
-    def _throttle_key(request: Request) -> str | None:
-        # Behind a trusted reverse proxy every login shares the proxy's socket IP,
-        # so a per-IP limiter becomes global (one attacker locks everyone out).
-        # Key on the proxy-asserted user instead — the trusted proxy overwrites
-        # this header, so a client can't forge it. NB: with proxy auth configured,
-        # password login is best kept loopback-only; this just hardens the overlap.
+    def _throttle_key(request: Request) -> tuple[str | None, bool]:
+        # Returns (key, shared). Behind a trusted reverse proxy every login shares the
+        # proxy's socket IP, so a per-IP limiter becomes global (one attacker locks
+        # everyone out). Key on the proxy-asserted user instead — the trusted proxy
+        # overwrites this header, so a client can't forge it. When no user is asserted,
+        # the key falls back to the shared proxy IP: mark it shared=True so the per-key
+        # hard lock is skipped and only the global backoff applies.
         rp = config.auth.reverse_proxy
         ip = auth.peer_ip(request)
         if rp.enabled and auth.peer_trusted(ip, rp.trusted_ips):
@@ -351,8 +402,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # semgrep's flask format-string-response rule is a false positive
                 # on this non-route helper (bare nosemgrep: the line trips nothing
                 # else, and the precise rule id overflows the line-length limit).
-                return f"proxy-user:{user}"  # nosemgrep
-        return ip
+                return f"proxy-user:{user}", False  # nosemgrep
+            return ip, True  # shared proxy IP — global backoff only, no per-key lockout
+        return ip, False
 
     def _is_public(path: str) -> bool:
         return path == "/healthz" or path == "/login" or path.startswith("/static/")
@@ -402,14 +454,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.post("/login")
     async def login_submit(request: Request) -> Response:
-        throttle_key = _throttle_key(request)
-        if not _throttle.allowed(throttle_key):
-            return templates.TemplateResponse(
+        throttle_key, throttle_shared = _throttle_key(request)
+        allowed, retry_after = _throttle.allowed(throttle_key, shared=throttle_shared)
+        if not allowed:
+            resp = templates.TemplateResponse(
                 request,
                 "login.html",
-                {"error": "Too many attempts — wait a few minutes."},
+                {"error": "Too many attempts — please try again later."},
                 status_code=429,
             )
+            resp.headers["Retry-After"] = str(max(1, int(retry_after) + 1))
+            return resp
         form = await request.form()
         if auth.verify_password(_hasher, config.auth.password_hash, str(form.get("password", ""))):
             _throttle.reset(throttle_key)
@@ -424,7 +479,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 path=_root or "/",
             )
             return resp
-        _throttle.record_failure(throttle_key)
+        _throttle.record_failure(throttle_key, shared=throttle_shared)
         return templates.TemplateResponse(
             request, "login.html", {"error": "Incorrect password."}, status_code=401
         )

@@ -157,6 +157,7 @@ def test_login_throttled_after_repeated_failures(runner_config):
         follow_redirects=False,
     )
     assert resp.status_code == 429
+    assert int(resp.headers["retry-after"]) >= 1  # tells the client when to retry
 
 
 # ----- cookie flags --------------------------------------------------------
@@ -428,7 +429,56 @@ def test_bad_token_websocket_rejected(runner_config):
 
 
 def test_throttle_allows_when_ip_unknown():
-    assert LoginThrottle().allowed(None) is True
+    assert LoginThrottle().allowed(None) == (True, 0.0)
+
+
+def test_throttle_per_key_lock_after_max_failures():
+    t = LoginThrottle(max_failures=3, window_seconds=300)
+    for _ in range(3):
+        assert t.allowed("1.2.3.4")[0] is True
+        t.record_failure("1.2.3.4")
+    allowed, retry_after = t.allowed("1.2.3.4")
+    assert allowed is False and retry_after == 300.0
+    assert t.allowed("9.9.9.9")[0] is True  # a different key is unaffected
+    t.reset("1.2.3.4")
+    assert t.allowed("1.2.3.4")[0] is True  # success clears the lock
+
+
+def test_throttle_shared_proxy_ip_skips_per_key_lock_uses_global_backoff():
+    # A shared proxy IP: per-key lock would lock everyone out, so it's skipped — only the
+    # global backoff applies once failures cross the ceiling.
+    t = LoginThrottle(
+        max_failures=3, window_seconds=300, global_ceiling=5, backoff_cap_seconds=60.0
+    )
+    for _ in range(5):  # at the ceiling, still allowed (shared → no per-key lock)
+        assert t.allowed("proxy-ip", shared=True)[0] is True
+        t.record_failure("proxy-ip", shared=True)
+    # The 6th failure pushes the global count over the ceiling → backoff (429 + wait).
+    t.record_failure("proxy-ip", shared=True)
+    allowed, retry_after = t.allowed("proxy-ip", shared=True)
+    assert allowed is False and 0.0 < retry_after <= 60.0
+    assert "proxy-ip" not in t._failures  # per-key lock truly skipped for a shared key
+
+
+def test_throttle_paths_are_independent():
+    # A shared-proxy flood must NOT 429 a distinguishable direct client (no cross-spill),
+    # and a direct client's per-key lock must NOT touch the global counter.
+    t = LoginThrottle(max_failures=3, window_seconds=300, global_ceiling=2)
+    for _ in range(10):
+        t.record_failure("proxy-ip", shared=True)
+    assert t.allowed("1.2.3.4")[0] is True  # direct client unaffected by the shared flood
+    t2 = LoginThrottle(max_failures=2, window_seconds=300, global_ceiling=2)
+    for _ in range(2):
+        t2.record_failure("1.2.3.4")
+    assert t2._global == []  # a per-key failure never feeds the global ceiling
+
+
+def test_throttle_backoff_is_capped():
+    t = LoginThrottle(global_ceiling=1, backoff_cap_seconds=5.0)
+    for _ in range(40):  # drive the exponent way past the cap
+        t.record_failure("x", shared=True)
+    _, retry_after = t.allowed("x", shared=True)
+    assert retry_after <= 5.0
 
 
 def test_login_form_redirects_when_already_authed(runner_config):
