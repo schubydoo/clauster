@@ -4,6 +4,7 @@ import json
 import logging
 import signal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -695,4 +696,111 @@ def test_api_stop_agent_claude_not_found_is_503(write_config, tmp_path, monkeypa
 
     monkeypatch.setattr(supervisor, "stop_background_job", boom)
     r = _client(write_config, tmp_path).delete(f"/api/agents/{_JID}")
+    assert r.status_code == 503
+
+
+# ----- resume (BG-4, #336) ---------------------------------------------------
+
+_UUID = "29e8026f-1234-4abc-8def-0123456789ab"  # a full RFC-4122 session UUID
+
+
+def test_build_dispatch_argv_resume():
+    assert supervisor.build_dispatch_argv("/abs/claude", resume=_UUID) == [
+        "/abs/claude",
+        "--bg",
+        "--resume",
+        _UUID,
+    ]
+
+
+def test_valid_session_id():
+    assert supervisor.valid_session_id(_UUID)
+    assert supervisor.valid_session_id(_UUID.upper())  # hex case-insensitive
+    assert not supervisor.valid_session_id("29e8026f")  # the 8-hex job id is NOT a session id
+    assert not supervisor.valid_session_id("--rc evil")  # argv-injection shape rejected
+    assert not supervisor.valid_session_id(_UUID + "x")
+    assert not supervisor.valid_session_id(None)
+    assert not supervisor.valid_session_id(123)
+
+
+def test_dispatch_rejects_invalid_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
+    monkeypatch.setattr(supervisor, "trust_directory", lambda *a, **k: None)
+    with pytest.raises(supervisor.DispatchError, match="resume session id"):
+        supervisor.dispatch_background_job(tmp_path, resume="--evil")
+
+
+def _fake_job(**kw):
+    base = {"id": "29e8026f", "session_id": _UUID, "cwd": Path("/proj")}
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_resume_background_job_dispatches(monkeypatch):
+    captured: dict = {}
+
+    def _fake_dispatch(cwd, **kw):
+        captured["cwd"], captured["kw"] = cwd, kw
+        return "newjob01"  # resume mints a NEW 8-hex id
+
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: [_fake_job()])
+    monkeypatch.setattr(supervisor, "dispatch_background_job", _fake_dispatch)
+    new_id = supervisor.resume_background_job("29e8026f", binary="/abs/claude")
+    assert new_id == "newjob01"
+    assert captured["cwd"] == Path("/proj")
+    assert captured["kw"]["resume"] == _UUID  # the FULL uuid, not the 8-hex id
+
+
+@pytest.mark.parametrize(
+    "job,match",
+    [
+        (None, "no background job"),
+        (_fake_job(session_id=None), "no resumable session id"),
+        (_fake_job(session_id="29e8026f"), "no resumable session id"),  # 8-hex is not a uuid
+        (_fake_job(cwd=None), "no recorded working directory"),
+    ],
+)
+def test_resume_background_job_errors(job, match, monkeypatch):
+    jobs = [] if job is None else [job]
+    monkeypatch.setattr(supervisor, "list_background_jobs", lambda *a, **k: jobs)
+    with pytest.raises(supervisor.ResumeError, match=match):
+        supervisor.resume_background_job("29e8026f")
+
+
+def test_api_resume_agent(write_config, tmp_path, monkeypatch):
+    monkeypatch.setattr(supervisor, "resume_background_job", lambda *a, **k: "newjob01")
+    r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
+    assert r.status_code == 201
+    assert r.json() == {"id": "newjob01"}
+
+
+def test_api_resume_agent_invalid_job_id(write_config, tmp_path):
+    r = _client(write_config, tmp_path).post("/api/agents/BADID!/resume")
+    assert r.status_code == 422
+
+
+def test_api_resume_agent_not_resumable(write_config, tmp_path, monkeypatch):
+    def _boom(*a, **k):
+        raise supervisor.ResumeError("no resumable session id")
+
+    monkeypatch.setattr(supervisor, "resume_background_job", _boom)
+    r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
+    assert r.status_code == 409
+
+
+def test_api_resume_agent_dispatch_error(write_config, tmp_path, monkeypatch):
+    def _boom(*a, **k):
+        raise supervisor.DispatchError("bg failed")
+
+    monkeypatch.setattr(supervisor, "resume_background_job", _boom)
+    r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
+    assert r.status_code == 502
+
+
+def test_api_resume_agent_claude_not_found(write_config, tmp_path, monkeypatch):
+    def _boom(*a, **k):
+        raise ClaudeNotFound("nope")
+
+    monkeypatch.setattr(supervisor, "resume_background_job", _boom)
+    r = _client(write_config, tmp_path).post("/api/agents/29e8026f/resume")
     assert r.status_code == 503

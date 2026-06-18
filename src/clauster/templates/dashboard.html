@@ -265,6 +265,15 @@
                      for an ended claude.ai session the title flags the possible cloud orphan.
                      `!!` coercion: see the hosted-row note above — without it the button is
                      stuck DISABLED on first paint (Alpine 3.15.x x-for missing-key `:disabled`). #}
+                  {# Resume an ENDED agent with a session UUID: `--bg --resume` continues the
+                     prior conversation in a new job (#336). `!!` coercion on :disabled — same
+                     Alpine 3.15.x x-for missing-key guard as the sibling buttons. #}
+                  <button type="button" class="btn btn-sm btn-outline-primary me-1"
+                          x-show="!agentLive(j) && j.session_id" x-cloak
+                          :disabled="!!agentResuming[j.id]" @click="resumeAgent(j)"
+                          title="Resume this ended session — continues the conversation in a new background job">
+                    <span x-text="agentResuming[j.id] ? 'Resuming…' : 'Resume'">Resume</span>
+                  </button>
                   <button type="button" class="btn btn-sm" :disabled="!!agentStopping[j.id]" @click="stopAgent(j)"
                           :class="agentLive(j) ? 'btn-outline-danger' : 'btn-outline-secondary'"
                           :title="agentLive(j)

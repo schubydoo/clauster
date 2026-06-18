@@ -82,6 +82,7 @@
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
       agentStopping: {},   // job id -> true while a stop request is in flight
+      agentResuming: {},   // job id -> true while a resume request is in flight (#336)
       forgetting: {},      // bridge/hosted id -> true while a forget request is in flight
       launching: {},       // project name -> true while a launch is in flight (double-submit guard)
       // --- hosted live-view sessions (claustrum stream-json channel, CL-4c) ---
@@ -590,6 +591,23 @@
           else this.toast(label + ": stop failed — " + (b.detail || res.status), "error");
         } catch (e) { this.toast(label + ": stop failed", "error"); }
         this.agentStopping[j.id] = false;
+        await this.refresh();
+      },
+      // Resume an ended bg agent: `--bg --resume <session uuid>` continues the prior
+      // conversation in a NEW job (new id), so we refresh to surface the new row (#336).
+      async resumeAgent(j) {
+        const label = j.name || j.id;
+        this.agentResuming[j.id] = true;
+        try {
+          const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id) + "/resume", { method: "POST" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          const b = await res.json().catch(() => ({}));
+          if (res.ok && b.id) this.toast(label + ": resumed as " + b.id, "success");
+          else this.toast(label + ": resume failed — " + (b.detail || res.status), "error");
+        } catch (e) { this.toast(label + ": resume failed", "error"); }
+        // finally: reset on EVERY path (incl. the 401 early-return) so the button can't
+        // wedge on "Resuming…" if the login redirect is slow/blocked.
+        finally { this.agentResuming[j.id] = false; }
         await this.refresh();
       },
       // Forget = drop a stopped/ended session's record so it leaves Recent/resumable.
