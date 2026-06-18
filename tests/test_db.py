@@ -11,6 +11,7 @@ import json
 from unittest import mock
 
 import pytest
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -310,3 +311,131 @@ def test_retire_tolerates_rename_failure(tmp_path, caplog):
     finally:
         engine.dispose()
     assert "could not retire" in caplog.text
+
+
+def test_import_retires_empty_present_json_without_importing(tmp_path):
+    # Legacy files PRESENT but parse to empty dicts: the import transaction commits,
+    # nothing is imported (imported=False, no "imported ..." log), and the files are
+    # still retired so a later boot doesn't re-trigger. Covers bootstrap 120->126.
+    (tmp_path / "state.json").write_text(json.dumps({"schema_version": 1, "instances": {}}))
+    (tmp_path / "hosted_state.json").write_text(json.dumps({"schema_version": 1, "sessions": {}}))
+    engine = create_db_engine(tmp_path)
+    upgrade_to_head(engine)
+    factory = make_session_factory(engine)
+    try:
+        assert import_legacy_json(tmp_path, factory) is False
+    finally:
+        engine.dispose()
+    assert (tmp_path / "state.json.imported").exists()
+    assert (tmp_path / "hosted_state.json.imported").exists()
+    assert not (tmp_path / "state.json").exists()
+    assert not (tmp_path / "hosted_state.json").exists()
+
+
+# ----- engine: non-SQLite branch -----------------------------------------
+
+
+def test_create_db_engine_non_sqlite_skips_pragma_path(tmp_path, monkeypatch):
+    # A non-SQLite URL returns a plain engine via the bare create_engine(url, future=True)
+    # branch — no pragma listener, no dir creation. Patch create_engine to a sentinel so we
+    # never import a real driver (psycopg isn't installed). Covers engine.py line 73.
+    sentinel = object()
+    captured: dict[str, object] = {}
+
+    def fake_create_engine(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return sentinel
+
+    monkeypatch.setattr("clauster.db.engine.create_engine", fake_create_engine)
+    result = create_db_engine(tmp_path, "postgresql+psycopg://x/y")
+    assert result is sentinel  # returned unchanged: the SQLite pragma path was not taken
+    assert captured["url"] == "postgresql+psycopg://x/y"
+    assert "connect_args" not in captured["kwargs"]  # the SQLite-only check_same_thread arg
+
+
+# ----- packaged migration env: standalone + offline paths ----------------
+
+
+def _standalone_cfg(db_path):
+    """Build an alembic Config that locates the packaged env without an injected conn."""
+    cfg = Config(str(bootstrap._ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path.as_posix()}")
+    return cfg
+
+
+def test_env_standalone_online_builds_own_engine(tmp_path):
+    # No config.attributes["connection"]: env.run_migrations_online() falls through to
+    # engine_from_config and opens its own connection. Covers env.py lines 63-75.
+    from alembic import command
+
+    db_path = tmp_path / "standalone.db"
+    cfg = _standalone_cfg(db_path)
+    command.upgrade(cfg, "head")
+    engine = create_db_engine(tmp_path, f"sqlite:///{db_path.as_posix()}")
+    try:
+        with engine.connect() as conn:
+            names = set(
+                conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).scalars()
+            )
+        assert {"projects", "instances", "hosted_sessions"} <= names
+    finally:
+        engine.dispose()
+
+
+def test_env_standalone_online_honors_db_url_env(tmp_path, monkeypatch):
+    # CLAUSTER_DB_URL overrides the ini url in the standalone online path (env.py 64-66).
+    from alembic import command
+
+    db_path = tmp_path / "via_env.db"
+    monkeypatch.setenv("CLAUSTER_DB_URL", f"sqlite:///{db_path.as_posix()}")
+    cfg = Config(str(bootstrap._ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+    command.upgrade(cfg, "head")
+    assert db_path.exists()  # the env-supplied URL drove the engine, not the (unset) ini url
+
+
+def test_env_offline_mode_emits_sql(tmp_path, capsys):
+    # sql=True puts alembic in offline/--sql mode: env.run_migrations_offline() emits DDL
+    # to stdout with no DB connection. Covers env.py lines 30-41 and the offline branch (79).
+    from alembic import command
+
+    cfg = _standalone_cfg(tmp_path / "offline.db")
+    command.upgrade(cfg, "head", sql=True)
+    out = capsys.readouterr().out
+    assert "CREATE TABLE" in out
+    assert "projects" in out
+    assert not (tmp_path / "offline.db").exists()  # offline never touched a real DB
+
+
+def test_baseline_downgrade_drops_all_tables(tmp_path):
+    # Upgrade then downgrade-to-base against an injected connection drops every foundation
+    # table. Covers 0001_baseline.downgrade() (lines 70-72).
+    from alembic import command
+
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "head")
+            command.downgrade(cfg, "base")
+            names = set(
+                conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).scalars()
+            )
+        assert not ({"projects", "instances", "hosted_sessions"} & names)
+    finally:
+        engine.dispose()
+
+
+# ----- packaged migration packages import cleanly ------------------------
+
+
+def test_migration_packages_import():
+    import clauster.db.migrations as migrations_pkg
+    import clauster.db.migrations.versions as versions_pkg
+
+    assert migrations_pkg.__doc__
+    assert versions_pkg.__doc__

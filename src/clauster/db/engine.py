@@ -41,7 +41,11 @@ def resolve_url(state_dir: Path, database_url: str | None) -> str:
     if database_url:
         return database_url
     db_path = (state_dir.expanduser() / DB_FILENAME).resolve()
-    return f"sqlite:///{db_path}"
+    # as_posix() so the URL uses forward slashes on every platform: on Windows a raw
+    # str(path) is ``C:\...\clauster.db``, which yields a backslash URL that is both
+    # OS-inconsistent and awkward for SQLAlchemy's sqlite dialect. ``sqlite:///C:/...``
+    # is the portable form.
+    return f"sqlite:///{db_path.as_posix()}"
 
 
 def _is_sqlite(url: str) -> bool:
