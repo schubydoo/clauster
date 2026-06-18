@@ -65,6 +65,25 @@ def test_json_redacts_exception_traceback():
     assert "<redacted>" in obj["exc_info"]
 
 
+def test_text_redacts_exception_traceback():
+    try:
+        raise ValueError(f"boom with {_SECRET}")
+    except ValueError:
+        import sys
+
+        rec = _record("failed", exc_info=sys.exc_info())
+    out = RedactingTextFormatter("%(message)s").format(rec)
+    assert _SECRET not in out
+    assert "<redacted>" in out
+
+
+def test_redaction_strips_ansi_before_matching():
+    # An ANSI escape inside an id must not split it past the \b-anchored regex.
+    ansi_secret = "session_01ABCDEF\x1b[0mGHIJKLMNOPQRSTUV"
+    out = RedactingTextFormatter("%(message)s").format(_record("got %s", ansi_secret))
+    assert "GHIJKLMNOPQRSTUV" not in out  # the tail wasn't smuggled through
+
+
 def test_json_redacts_stack_info():
     rec = _record("with stack")
     rec.stack_info = f"Stack (most recent call last):\n  carrying {_SECRET}"

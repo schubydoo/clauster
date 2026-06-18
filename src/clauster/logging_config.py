@@ -12,13 +12,19 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Literal
 
 from . import redact
 
 
 def _redact(text: str) -> str:
-    """Strip secrets/ids from a log string (the same passes the live stream uses)."""
-    return redact.redact_secrets(redact.redact_ids(text))
+    r"""Strip secrets/ids from a log string (the same passes the live stream uses).
+
+    Runs against an ANSI-stripped view first — as ``redact.sanitize_line`` does — so a
+    colorised library log can't smuggle a secret past the ``\b``-anchored id/secret
+    regexes by splitting an identifier with an escape sequence.
+    """
+    return redact.redact_secrets(redact.redact_ids(redact.strip_ansi(text)))
 
 
 class RedactingTextFormatter(logging.Formatter):
@@ -35,7 +41,7 @@ class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         """Build the structured record, redacting the message and any traceback text."""
         payload: dict[str, object] = {
-            "time": self.formatTime(record),
+            "time": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S"),
             "level": record.levelname,
             # Logger names are static module paths today, but redact for symmetry with the
             # text formatter (which redacts the whole line) and to defend a future dynamic
@@ -53,7 +59,9 @@ class JsonFormatter(logging.Formatter):
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
-def setup_logging(log_format: str = "text", *, level: int = logging.INFO) -> None:
+def setup_logging(
+    log_format: Literal["text", "json"] = "text", *, level: int = logging.INFO
+) -> None:
     """Configure the root logger with a single redacting handler for ``log_format``.
 
     Idempotent: replaces any existing root handlers so a re-run (e.g. tests) doesn't
