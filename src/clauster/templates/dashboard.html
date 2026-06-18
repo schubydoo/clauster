@@ -688,7 +688,11 @@
       <!-- ===== Toasts ===== -->
       <div class="toast-stack" role="log" aria-live="polite" aria-label="Notifications">
         <template x-for="t in toasts" :key="t.id">
-          <div class="alert" :class="{'alert-success': t.type==='success', 'alert-danger': t.type==='error', 'alert-warning': t.type==='warning', 'alert-info': t.type==='info'}">
+          <!-- Errors get role="alert" (assertive) so a critical failure interrupts the
+               screen reader; success/info/warning stay role="none" and are announced
+               politely by the parent role="log" region above. -->
+          <div class="alert" :role="t.type === 'error' ? 'alert' : 'none'"
+               :class="{'alert-success': t.type==='success', 'alert-danger': t.type==='error', 'alert-warning': t.type==='warning', 'alert-info': t.type==='info'}">
             <div class="d-flex">
               <div x-text="t.msg"></div>
               <a href="#" class="btn-close ms-auto" @click.prevent="dismissToast(t.id)"></a>

@@ -272,6 +272,14 @@
         if (this.externalSessionsFlat().length) f.push("external");
         return f;
       },
+      // #357: if the active filter's session type has emptied out, its chip is gone
+      // from presentFilters() — leaving activeFilter pointing at an absent type means no
+      // chip reads as the current selection (every aria-pressed=false) and the remaining
+      // sessions hide behind an unreachable filter. Fall back to "all" so the selection
+      // is always a present, screen-reader-reachable chip. Driven from refresh().
+      ensureValidFilter() {
+        if (!this.presentFilters().includes(this.activeFilter)) this.activeFilter = "all";
+      },
       // #357: live sessions matching the active filter; 0 drives the "no matches" line
       // (e.g. the selected type empties out while still active).
       activeFilterCount() {
@@ -505,6 +513,9 @@
           // UI reflects the latest state without waiting for the next timer tick.
           if (this._refreshQueued) { this._refreshQueued = false; this.refresh(); }
         }
+        // Session sets just changed — re-validate the active filter so a type that
+        // emptied out (its chip now gone) can't strand the selection on an absent filter.
+        this.ensureValidFilter();
         // A single blip is normal; only surface a *persistent* outage so the user
         // knows the data is stale and we're retrying — never fail silently.
         if (ok) { this._refreshFails = 0; this.connLost = false; }
