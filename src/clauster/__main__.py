@@ -20,6 +20,7 @@ from . import __version__, claude_cli, environments, ops, usage
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_token
 from .config import ClausterConfig, load_config
+from .logging_config import setup_logging
 from .recap import RECAP_SUBCOMMAND
 
 # setproctitle is a required dependency (so the retitle works out of the box). The
@@ -454,10 +455,21 @@ def _run(config_path: str | None) -> int:
     )
     _warn_if_cookie_insecure(config)
     _set_process_title(config)
+    # Configure logging before serving (#361). log_config=None below stops uvicorn from
+    # reconfiguring logging, so its loggers propagate to the root handler set here and
+    # share the chosen text/JSON format + redaction.
+    setup_logging(config.log_format)
     app = create_app(config)
     # proxy_headers=False: keep request.client.host as the real socket peer so the
     # reverse-proxy IP allowlist can't be defeated via a spoofed X-Forwarded-For.
-    uvicorn.run(app, host=config.host, port=config.port, log_level="info", proxy_headers=False)
+    uvicorn.run(
+        app,
+        host=config.host,
+        port=config.port,
+        log_level="info",
+        log_config=None,
+        proxy_headers=False,
+    )
     return 0
 
 

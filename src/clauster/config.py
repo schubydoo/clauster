@@ -625,7 +625,10 @@ class ClausterConfig(BaseModel):
         description="ASGI `root_path` for serving under a reverse-proxy sub-path.",
     )
     log_format: Literal["text", "json"] = Field(
-        default="text", description="Application log format."
+        default="text",
+        description="Application log format. `text` (default) is the human single-line "
+        "format; `json` emits one structured JSON object per record. Both modes redact "
+        "session URLs / bearer ids before the line is written.",
     )
     instance_name: str | None = Field(
         default=None,
