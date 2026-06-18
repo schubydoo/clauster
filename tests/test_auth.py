@@ -392,6 +392,49 @@ def test_secret_env_too_short_rejected(tmp_path, monkeypatch):
         auth.load_or_create_secret(tmp_path)
 
 
+def test_secret_env_file_override(tmp_path, monkeypatch):
+    # CLAUSTER_SESSION_SECRET_FILE reads the secret from a file (trailing newline
+    # stripped) so it stays out of the process environment (#368).
+    value = "y" * 40  # >= 32 bytes
+    secret_file = tmp_path / "session_secret"
+    secret_file.write_text(value + "\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET_FILE", str(secret_file))
+    assert auth.load_or_create_secret(tmp_path) == value.encode()
+
+
+def test_secret_env_file_wins_over_plain(tmp_path, monkeypatch):
+    secret_file = tmp_path / "session_secret"
+    secret_file.write_text("f" * 40, encoding="utf-8")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET", "e" * 40)
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET_FILE", str(secret_file))
+    assert auth.load_or_create_secret(tmp_path) == ("f" * 40).encode()
+
+
+def test_secret_env_file_unreadable_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET_FILE", str(tmp_path / "missing"))
+    with pytest.raises(ValueError, match="unreadable file"):
+        auth.load_or_create_secret(tmp_path)
+
+
+def test_secret_env_file_empty_fails_closed(tmp_path, monkeypatch):
+    # A blank secret file would otherwise return "" and silently rotate the signing
+    # key by falling through to a fresh disk secret — must fail closed instead.
+    secret_file = tmp_path / "session_secret"
+    secret_file.write_text("\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET_FILE", str(secret_file))
+    with pytest.raises(ValueError, match="empty file"):
+        auth.load_or_create_secret(tmp_path)
+
+
+def test_secret_env_file_non_utf8_fails_closed(tmp_path, monkeypatch):
+    secret_file = tmp_path / "session_secret"
+    secret_file.write_bytes(b"\xff\xfe\x80sekret")
+    monkeypatch.setenv("CLAUSTER_SESSION_SECRET_FILE", str(secret_file))
+    with pytest.raises(ValueError, match="not valid UTF-8") as exc:
+        auth.load_or_create_secret(tmp_path)
+    assert "sekret" not in str(exc.value)
+
+
 def test_secret_truncated_on_disk_is_rejected(tmp_path, monkeypatch):
     # A partial/corrupt session.secret (<32 bytes, e.g. a crash mid-write) must not be
     # used as a short signing key — refuse to boot rather than load it. Patch sleep so

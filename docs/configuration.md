@@ -34,6 +34,27 @@ joined with underscores. For example:
     `clone.allowed_private_cidrs`) **cannot** be set via env — a single env var
     can't express them unambiguously; set those in the YAML file.
 
+**Secret files (`*_FILE`).** Every `CLAUSTER_<X>` variable also accepts a
+`CLAUSTER_<X>_FILE` form that reads the value from a file instead of the
+environment — for secrets that Docker / Podman / Kubernetes / Vault render to
+files under `/run/secrets` rather than env vars, keeping them out of the process
+environment. The file's contents win over the plain variable, and trailing
+whitespace (e.g. a trailing newline) is stripped. An unreadable `_FILE` path is a
+fatal misconfiguration (it does not silently fall back). The session secret has
+its own `CLAUSTER_SESSION_SECRET_FILE` (it is read outside the config schema):
+
+- `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH_FILE`
+- `auth.api_token_hash` → `CLAUSTER_AUTH_API_TOKEN_HASH_FILE`
+- session secret → `CLAUSTER_SESSION_SECRET_FILE`
+
+```yaml
+# docker-compose: render a secret to a file and point clauster at it
+environment:
+  CLAUSTER_AUTH_PASSWORD_HASH_FILE: /run/secrets/clauster_pw_hash
+secrets:
+  - clauster_pw_hash
+```
+
 **Schema is additive-only.** Old configs always validate against newer versions;
 unknown per-project keys are ignored.
 

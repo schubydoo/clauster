@@ -41,12 +41,44 @@ _DUMMY_HASH = PasswordHasher().hash("clauster-dummy-do-not-use")
 # ----- session secret -----------------------------------------------------
 
 
+def _session_secret_from_env() -> str | None:
+    """Return the session secret from the environment, honoring ``_FILE`` indirection.
+
+    ``CLAUSTER_SESSION_SECRET_FILE`` (file contents win, trailing whitespace stripped)
+    keeps the secret out of the process environment for Docker/K8s/Vault ``/run/secrets``
+    deploys; otherwise the plain ``CLAUSTER_SESSION_SECRET`` is used unchanged. An
+    unreadable ``_FILE`` path is a misconfiguration that fails closed rather than
+    silently falling back.
+    """
+    file_path = os.environ.get("CLAUSTER_SESSION_SECRET_FILE", "").strip()
+    if file_path:
+        try:
+            value = Path(file_path).read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            # The error embeds the offending bytes (a secret fragment) — keep them out
+            # of the message and the traceback (``from None``).
+            raise ValueError(
+                f"CLAUSTER_SESSION_SECRET_FILE file {file_path!r} is not valid UTF-8 text"
+            ) from None
+        except OSError as exc:
+            raise ValueError(
+                f"CLAUSTER_SESSION_SECRET_FILE points to an unreadable file {file_path!r}: {exc}"
+            ) from exc
+        # An empty file would otherwise return "" and silently fall through to a fresh
+        # disk secret — rotating every session key. Fail closed instead.
+        if not value:
+            raise ValueError(f"CLAUSTER_SESSION_SECRET_FILE points to an empty file {file_path!r}")
+        return value
+    return os.environ.get("CLAUSTER_SESSION_SECRET")
+
+
 def load_or_create_secret(state_dir: Path) -> bytes:
     """Return the session-signing secret.
 
-    ``CLAUSTER_SESSION_SECRET`` wins (lets ephemeral-FS deploys keep sessions
-    across restarts). Otherwise read/create ``state_dir/session.secret`` with
-    ``O_CREAT|O_EXCL`` at mode 0600 so it's never briefly world-readable.
+    ``CLAUSTER_SESSION_SECRET`` (or its ``CLAUSTER_SESSION_SECRET_FILE`` indirection)
+    wins (lets ephemeral-FS deploys keep sessions across restarts). Otherwise
+    read/create ``state_dir/session.secret`` with ``O_CREAT|O_EXCL`` at mode 0600 so
+    it's never briefly world-readable.
 
     Concurrent starts converge on the single ``O_EXCL`` winner's 32-byte secret and
     both the write and its parent-directory entry are ``fsync``-durable; a loser waits
@@ -54,7 +86,7 @@ def load_or_create_secret(state_dir: Path) -> bytes:
     a truncated key) rather than reading a half-written file and booting with a
     different/short signing key.
     """
-    env = os.environ.get("CLAUSTER_SESSION_SECRET")
+    env = _session_secret_from_env()
     if env:
         raw = env.encode("utf-8")
         if len(raw) < 32:
