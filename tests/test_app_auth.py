@@ -457,6 +457,20 @@ def test_throttle_shared_proxy_ip_skips_per_key_lock_uses_global_backoff():
     t.record_failure("proxy-ip", shared=True)
     allowed, retry_after = t.allowed("proxy-ip", shared=True)
     assert allowed is False and 0.0 < retry_after <= 60.0
+    assert "proxy-ip" not in t._failures  # per-key lock truly skipped for a shared key
+
+
+def test_throttle_paths_are_independent():
+    # A shared-proxy flood must NOT 429 a distinguishable direct client (no cross-spill),
+    # and a direct client's per-key lock must NOT touch the global counter.
+    t = LoginThrottle(max_failures=3, window_seconds=300, global_ceiling=2)
+    for _ in range(10):
+        t.record_failure("proxy-ip", shared=True)
+    assert t.allowed("1.2.3.4")[0] is True  # direct client unaffected by the shared flood
+    t2 = LoginThrottle(max_failures=2, window_seconds=300, global_ceiling=2)
+    for _ in range(2):
+        t2.record_failure("1.2.3.4")
+    assert t2._global == []  # a per-key failure never feeds the global ceiling
 
 
 def test_throttle_backoff_is_capped():

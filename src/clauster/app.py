@@ -93,10 +93,11 @@ class LoginThrottle:
     behind a trusted reverse proxy that asserts no user, every login shares the proxy's
     socket IP, so a per-IP lock would lock **everyone** out (one attacker DoSing all
     users). For that shared-IP case the caller passes ``shared=True``: the per-key lock
-    is skipped and only the **global backoff** applies — once failures across all clients
-    exceed ``global_ceiling`` in the window, attempts must wait an exponentially-growing
-    interval (surfaced as ``429`` + ``Retry-After``), degrading a flood to a delay rather
-    than a blanket lockout a legitimate user can never get past.
+    is skipped and only the **global backoff** applies — once shared-path failures exceed
+    ``global_ceiling`` in the window, attempts must wait an exponentially-growing interval
+    (surfaced as ``429`` + ``Retry-After``), degrading a flood to a delay rather than a
+    blanket lockout a legitimate user can never get past. The two paths are independent: a
+    shared-proxy flood never 429s a distinguishable direct client, and vice versa.
 
     In-process only: the counters reset on restart and are **not** shared across workers
     or replicas. For an internet-exposed deployment a fronting IdP/IAP (or the
@@ -121,20 +122,27 @@ class LoginThrottle:
         self._backoff_cap = backoff_cap_seconds
 
     def allowed(self, key: str | None, *, shared: bool = False) -> tuple[bool, float]:
-        """Return ``(allowed, retry_after_seconds)`` for a login attempt from ``key``."""
+        """Return ``(allowed, retry_after_seconds)`` for a login attempt from ``key``.
+
+        The two paths are independent: a ``shared`` proxy IP is governed only by the
+        global backoff, a distinguishable client only by its per-key window — so a
+        shared-proxy flood never spills over to 429 a direct client (or vice versa).
+        """
         now = time.monotonic()
-        self._global = [t for t in self._global if now - t < self._window]
-        # Global backoff: past the ceiling, require an exponentially-growing gap since the
-        # last failure (capped), so a shared-proxy-IP flood can't lock everyone out but is
-        # still throttled to a crawl.
-        over = len(self._global) - self._global_ceiling
-        if over > 0 and self._global:
-            backoff = min(self._backoff_cap, 2.0 ** min(over, 30))
-            wait = backoff - (now - self._global[-1])
-            if wait > 0:
-                return False, wait
-        # Per-key hard lock — skipped for a shared proxy IP (it would be a global lockout).
-        if key and not shared:
+        if shared:
+            # Global backoff: past the ceiling, require an exponentially-growing gap since
+            # the last failure (capped), so a shared-proxy-IP flood can't lock everyone out
+            # but is still throttled to a crawl.
+            self._global = [t for t in self._global if now - t < self._window]
+            over = len(self._global) - self._global_ceiling
+            if over > 0 and self._global:
+                backoff = min(self._backoff_cap, 2.0 ** min(over, 30))
+                wait = backoff - (now - self._global[-1])
+                if wait > 0:
+                    return False, wait
+            return True, 0.0
+        # Per-key hard lock for a distinguishable client.
+        if key:
             recent = [t for t in self._failures.get(key, []) if now - t < self._window]
             self._failures[key] = recent
             if len(recent) >= self._max:
@@ -142,10 +150,12 @@ class LoginThrottle:
         return True, 0.0
 
     def record_failure(self, key: str | None, *, shared: bool = False) -> None:
-        """Record one failed attempt (always counted globally; per-key unless shared)."""
+        """Record one failed attempt — globally for a shared proxy IP, else per-key."""
         now = time.monotonic()
-        self._global.append(now)
-        if key and not shared:
+        if shared:
+            self._global = [t for t in self._global if now - t < self._window]
+            self._global.append(now)
+        elif key:
             self._failures.setdefault(key, []).append(now)
 
     def reset(self, key: str | None) -> None:
@@ -450,7 +460,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             resp = templates.TemplateResponse(
                 request,
                 "login.html",
-                {"error": "Too many attempts — wait a few minutes."},
+                {"error": "Too many attempts — please try again later."},
                 status_code=429,
             )
             resp.headers["Retry-After"] = str(max(1, int(retry_after) + 1))
