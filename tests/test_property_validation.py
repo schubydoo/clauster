@@ -59,6 +59,10 @@ def test_valid_name_never_escapes_projects_root(name: str) -> None:
 def test_name_acceptance_matches_single_component_invariant(name: str) -> None:
     """Acceptance is exactly the single-safe-component regex — nothing wider."""
     accepted = is_valid_project_name(name)
+    # Deliberately circular against the *current* implementation: this pins the
+    # contract so a future refactor that reimplements is_valid_project_name
+    # without delegating to PROJECT_NAME_RE would diverge here and fail. The
+    # independent structural checks below are what verify the safety property.
     assert accepted == (PROJECT_NAME_RE.fullmatch(name) is not None)
     if accepted:
         # The defining safety property: a sole path segment, 1..64 chars, no
@@ -118,12 +122,10 @@ _BAD_SCHEMES = st.sampled_from(
 
 @_PROP
 @given(scheme=_BAD_SCHEMES, host=st.from_regex(r"[a-z]{1,12}\.example\.com", fullmatch=True))
-def test_non_allowlisted_scheme_always_rejected(
-    scheme: str, host: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_non_allowlisted_scheme_always_rejected(scheme: str, host: str) -> None:
     """Any scheme outside the allowlist raises InvalidCloneUrl (even to a public IP)."""
-    # Resolve to a public IP so the *only* possible rejection reason is the scheme.
-    _patch_resolve(monkeypatch, "93.184.216.34")
+    # No DNS stub needed: validate_clone_url checks the scheme allowlist before it
+    # ever resolves the host, so a bad scheme always raises before getaddrinfo runs.
     with pytest.raises(InvalidCloneUrl):
         validate_clone_url(f"{scheme}://{host}/repo.git", CloneConfig())
 
@@ -131,7 +133,9 @@ def test_non_allowlisted_scheme_always_rejected(
 # Generate addresses across the always-blocked / private space.
 _PRIVATE_IPS = st.one_of(
     st.ip_addresses(v=4).filter(
-        lambda a: a.is_private or a.is_loopback or a.is_link_local or a.is_reserved
+        lambda a: (
+            a.is_private or a.is_loopback or a.is_link_local or a.is_reserved or a.is_multicast
+        )  # _ip_blocked blocks multicast too
     ),
     st.sampled_from(
         [
@@ -140,6 +144,12 @@ _PRIVATE_IPS = st.one_of(
             ipaddress.ip_address("192.168.1.1"),
             ipaddress.ip_address("172.16.0.9"),
             ipaddress.ip_address("169.254.0.1"),  # link-local
+            # _EXTRA_PRIVATE_NETS ranges that is_private does NOT flag but
+            # provisioning._ip_blocked still blocks — generated explicitly so the
+            # property exercises them:
+            ipaddress.ip_address("100.64.0.1"),  # CGNAT / Tailscale (100.64/10)
+            ipaddress.ip_address("198.18.0.1"),  # benchmarking (198.18/15)
+            ipaddress.ip_address("192.0.0.1"),  # IETF protocol (192.0.0/24)
             ipaddress.ip_address("::1"),  # IPv6 loopback
             ipaddress.ip_address("fd00::1"),  # IPv6 ULA (private)
             ipaddress.ip_address("::ffff:127.0.0.1"),  # IPv4-mapped loopback
