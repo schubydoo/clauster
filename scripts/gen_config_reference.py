@@ -39,6 +39,7 @@ from clauster.config import (
     ReaperConfig,
     ReverseProxyConfig,
     UsageConfig,
+    WebhooksConfig,
 )
 
 DOCS_PAGE = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
@@ -59,6 +60,7 @@ SECTIONS: list[tuple[str, type[BaseModel]]] = [
     ("metrics", MetricsConfig),
     ("observability", ObservabilityConfig),
     ("notifications", NotificationsConfig),
+    ("webhooks", WebhooksConfig),
     ("claustrum", ClaustrumConfig),
 ]
 

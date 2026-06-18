@@ -339,6 +339,7 @@ dependencies = [
     { name = "alembic" },
     { name = "argon2-cffi" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "itsdangerous" },
     { name = "jinja2" },
     { name = "jinja2-fragments" },
@@ -357,7 +358,6 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "atheris", marker = "sys_platform == 'linux'" },
-    { name = "httpx" },
     { name = "hypothesis" },
     { name = "pre-commit" },
     { name = "pyright" },
@@ -389,7 +389,7 @@ requires-dist = [
     { name = "atheris", marker = "sys_platform == 'linux' and extra == 'dev'", specifier = ">=3.0.0" },
     { name = "atheris", marker = "sys_platform == 'linux' and extra == 'fuzz'", specifier = ">=3.0.0" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "itsdangerous", specifier = ">=2.2" },
     { name = "jinja2", specifier = ">=3.1" },

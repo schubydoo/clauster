@@ -119,6 +119,19 @@ usage:
 #   urls: []                       # Apprise URLs, e.g. ["discord://...", "tgram://..."]
 #   notify_on_crash: true          # alert when a bridge exits NOT via Stop
 
+# Outbound HTTP webhooks on bridge lifecycle transitions (spawn/ready/stop/crash).
+# Fail-open: a slow/broken endpoint is timeout-bounded and never affects the bridge
+# lifecycle. http/https URLs only (others rejected at startup).
+# webhooks:
+#   enabled: false
+#   urls: []                       # e.g. ["https://example.com/hooks/clauster"]
+#   timeout_seconds: 10.0          # per-POST timeout (>0)
+#   events:                        # which transitions to emit (absent key = enabled)
+#     spawn: true
+#     ready: true
+#     stop: true
+#     crash: true
+
 # Claustrum hosted live-view channel (EXPERIMENTAL). When enabled, Clauster
 # connect-or-spawns one claustrum daemon per deployment and hosts headless
 # stream-json sessions on it — dashboard panel with live stream, send, tool-

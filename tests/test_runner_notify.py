@@ -104,3 +104,101 @@ async def test_reconcile_to_crashed_then_notify(runner_config):
         runner._notify_crash(inst)
     await asyncio.gather(*runner._notify_tasks)
     assert len(rec.calls) == 1
+
+
+# ----- lifecycle webhooks (#371) -------------------------------------------
+
+
+class _RecordingWebhooks:
+    """Stand-in webhook emitter capturing aemit calls (active by default)."""
+
+    def __init__(self, active: bool = True) -> None:
+        self.active = active
+        self.calls: list[tuple[str, dict]] = []
+
+    def wants(self, event: str) -> bool:
+        return self.active
+
+    async def aemit(self, event: str, payload: dict) -> None:
+        self.calls.append((event, payload))
+
+
+class _AliveProc:
+    """A minimal subprocess.Popen stand-in whose poll() reports a live process."""
+
+    def poll(self):
+        return None
+
+
+async def test_webhook_emit_gated_by_wants(runner_config):
+    runner = _runner(runner_config)
+    runner._webhooks = _RecordingWebhooks(active=False)  # wants() → False
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    runner._emit_webhook("spawn", inst)
+    assert not runner._notify_tasks  # gated out before creating a task
+    assert runner._webhooks.calls == []
+
+
+async def test_webhook_spawn_payload(runner_config):
+    runner = _runner(runner_config)
+    rec = _RecordingWebhooks()
+    runner._webhooks = rec
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STARTING, resume_mode="pty"
+    )
+    runner._emit_webhook("spawn", inst)
+    await asyncio.gather(*runner._notify_tasks)
+    [(event, payload)] = rec.calls
+    assert event == "spawn"
+    # Assert the full payload contract, not just a couple of fields.
+    assert payload == {
+        "project": "alpha",
+        "label": "alpha",
+        "status": "starting",
+        "resume_mode": "pty",
+        "spawn_mode": inst.spawn_mode,
+        "session_id": inst.starter_session_id,
+    }
+
+
+async def test_webhook_ready_fires_on_transition_only(runner_config):
+    runner = _runner(runner_config)
+    rec = _RecordingWebhooks()
+    runner._webhooks = rec
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    runner._apply_pty_info(inst, {"state": "ready"}, _AliveProc())
+    assert inst.status is InstanceStatus.RUNNING
+    await asyncio.gather(*runner._notify_tasks)
+    assert [e for e, _ in rec.calls] == ["ready"]
+    # A second observe while already RUNNING must NOT re-emit (not every poll).
+    runner._apply_pty_info(inst, {"state": "ready"}, _AliveProc())
+    await asyncio.gather(*runner._notify_tasks)
+    assert [e for e, _ in rec.calls] == ["ready"]
+
+
+async def test_webhook_stop_fires(runner_config):
+    runner = _runner(runner_config)
+    rec = _RecordingWebhooks()
+    runner._webhooks = rec
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING
+    )  # no bridge_pid → the no-pid STOPPED path
+    await runner.stop("alpha")
+    await asyncio.gather(*runner._notify_tasks)
+    assert [e for e, _ in rec.calls] == ["stop"]  # exactly one stop, nothing else
+
+
+async def test_webhook_crash_fires_on_poll_once(runner_config, monkeypatch):
+    runner = _runner(runner_config)
+    rec = _RecordingWebhooks()
+    runner._webhooks = rec
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_pid=4242
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.procutil.reap_if_exited", lambda *a, **k: None)
+    monkeypatch.setattr("clauster.runner.inspector.list_working_sessions", lambda *a, **k: [])
+    await runner.poll_once()
+    assert runner._instances["alpha"].status is InstanceStatus.CRASHED
+    await asyncio.gather(*runner._notify_tasks)
+    assert [e for e, _ in rec.calls] == ["crash"]  # exactly one crash event

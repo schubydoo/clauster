@@ -82,8 +82,8 @@ unknown per-project keys are ignored.
 
 Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
 `clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications`,
-`claustrum` — each documented below (`auth.reverse_proxy` is nested under
-`auth`).
+`webhooks`, `claustrum` — each documented below (`auth.reverse_proxy` is nested
+under `auth`).
 
 ## `claude` — binary & bridge spawn (`ClaudeConfig`)
 
@@ -287,6 +287,46 @@ notifications:
 
 See the [Apprise URL list](https://github.com/caronc/apprise/wiki) for supported
 services.
+
+## `webhooks` — outbound lifecycle webhooks (`WebhooksConfig`)
+
+Fail-open HTTP webhooks: each configured URL receives a JSON `POST` on a bridge
+lifecycle transition (`spawn` / `ready` / `stop` / `crash`). Off by default. A slow
+or failing endpoint is bounded by `timeout_seconds` and its error is logged and
+swallowed — a webhook never blocks or breaks a spawn/stop. Only `http`/`https`
+URLs are accepted (others are rejected at startup); URLs come only from this config.
+Events fire for bridges Clauster spawns: a bridge **adopted** from an external
+session or **reattached** on restart emits no `spawn`/`ready`.
+
+<!-- BEGIN GEN: webhooks -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch for outbound webhooks. |
+| `urls` | list[str] | `[]` | HTTP(S) endpoint URLs that receive a JSON POST per lifecycle event. Only `http`/`https` schemes are accepted; others are rejected at startup. A secret embedded in a URL is the operator's responsibility to keep out of shared configs. |
+| `timeout_seconds` | float | `10.0` | Per-request POST timeout in seconds (>0). A slow endpoint can't stall a lifecycle transition beyond this. |
+<!-- END GEN: webhooks -->
+
+```yaml
+webhooks:
+  enabled: true
+  urls:
+    - "https://example.com/hooks/clauster"
+  timeout_seconds: 10.0
+  events:
+    spawn: true
+    ready: true
+    stop: true
+    crash: true
+```
+
+The `events` map (filtered from the generated table because it's a dict) selects
+which transitions emit: keys are `spawn`, `ready`, `stop`, `crash`; an **absent key
+defaults to enabled** (so `events: {}` emits all four, and you disable one with e.g.
+`crash: false`). An unsupported key is rejected at startup rather than silently
+ignored.
+
+Each POST body is `{"event": "<name>", "project": ..., "label": ..., "status": ...,
+"resume_mode": ..., "spawn_mode": ..., "session_id": ...}`.
 
 ## `claustrum` — hosted live-view channel (`ClaustrumConfig`)
 

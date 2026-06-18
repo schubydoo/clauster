@@ -549,6 +549,55 @@ class NotificationsConfig(BaseModel):
     )
 
 
+class WebhooksConfig(BaseModel):
+    """Outbound HTTP webhooks on bridge lifecycle transitions (the first extension seam).
+
+    Off by default. When enabled, each configured URL receives a JSON ``POST`` on a
+    lifecycle event (``spawn`` / ``ready`` / ``stop`` / ``crash``). **Fail-open:** a
+    slow or failing webhook is bounded by ``timeout_seconds`` and its error is logged
+    and swallowed — it never blocks or breaks a spawn/stop. URLs come only from this
+    config (an operator-trusted source), not from any runtime/user input.
+
+    Scope: events fire for bridges Clauster spawns and manages. A bridge **adopted**
+    from an external session, or **reattached** on a Clauster restart, does not emit
+    ``spawn``/``ready`` (it was not spawned here) — so ``ready`` is not a guarantee of
+    "every bridge that is RUNNING", just "every bridge Clauster brought to RUNNING".
+    """
+
+    enabled: bool = Field(default=False, description="Master switch for outbound webhooks.")
+    urls: list[str] = Field(
+        default_factory=list,
+        description="HTTP(S) endpoint URLs that receive a JSON POST per lifecycle event. "
+        "Only `http`/`https` schemes are accepted; others are rejected at startup. A "
+        "secret embedded in a URL is the operator's responsibility to keep out of shared "
+        "configs.",
+    )
+    timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="Per-request POST timeout in seconds (>0). A slow endpoint can't stall "
+        "a lifecycle transition beyond this.",
+    )
+    events: dict[str, bool] = Field(
+        default_factory=lambda: {"spawn": True, "ready": True, "stop": True, "crash": True},
+        description="Which lifecycle events to emit. Keys: `spawn`, `ready`, `stop`, "
+        "`crash`; an absent key defaults to enabled.",
+    )
+
+    @field_validator("events")
+    @classmethod
+    def _known_event_keys(cls, value: dict[str, bool]) -> dict[str, bool]:
+        """Reject an unknown event key so a typo (e.g. `spwan`) fails loudly, not silently."""
+        allowed = {"spawn", "ready", "stop", "crash"}
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(
+                f"webhooks.events has unsupported key(s) {sorted(unknown)}; "
+                f"allowed: {sorted(allowed)}"
+            )
+        return value
+
+
 class ClaustrumConfig(BaseModel):
     """Settings for the optional claustrum hosted live-view channel (CL-2).
 
@@ -654,6 +703,7 @@ class ClausterConfig(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    webhooks: WebhooksConfig = Field(default_factory=WebhooksConfig)
     claustrum: ClaustrumConfig = Field(default_factory=ClaustrumConfig)
 
     _source_path: Path | None = PrivateAttr(default=None)
