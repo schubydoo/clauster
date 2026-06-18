@@ -150,9 +150,15 @@ async def test_webhook_spawn_payload(runner_config):
     await asyncio.gather(*runner._notify_tasks)
     [(event, payload)] = rec.calls
     assert event == "spawn"
-    assert payload["project"] == "alpha"
-    assert payload["status"] == "starting"
-    assert payload["resume_mode"] == "pty"
+    # Assert the full payload contract, not just a couple of fields.
+    assert payload == {
+        "project": "alpha",
+        "label": "alpha",
+        "status": "starting",
+        "resume_mode": "pty",
+        "spawn_mode": inst.spawn_mode,
+        "session_id": inst.starter_session_id,
+    }
 
 
 async def test_webhook_ready_fires_on_transition_only(runner_config):
@@ -179,7 +185,7 @@ async def test_webhook_stop_fires(runner_config):
     )  # no bridge_pid → the no-pid STOPPED path
     await runner.stop("alpha")
     await asyncio.gather(*runner._notify_tasks)
-    assert any(e == "stop" for e, _ in rec.calls)
+    assert [e for e, _ in rec.calls] == ["stop"]  # exactly one stop, nothing else
 
 
 async def test_webhook_crash_fires_on_poll_once(runner_config, monkeypatch):
@@ -195,4 +201,4 @@ async def test_webhook_crash_fires_on_poll_once(runner_config, monkeypatch):
     await runner.poll_once()
     assert runner._instances["alpha"].status is InstanceStatus.CRASHED
     await asyncio.gather(*runner._notify_tasks)
-    assert any(e == "crash" for e, _ in rec.calls)
+    assert [e for e, _ in rec.calls] == ["crash"]  # exactly one crash event

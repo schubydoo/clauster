@@ -25,14 +25,17 @@ _log = logging.getLogger("clauster.webhooks")
 
 
 def _valid_webhook_url(url: object) -> bool:
-    """Whether ``url`` is a well-formed ``http``/``https`` URL with a host."""
+    """Whether ``url`` is a well-formed ``http``/``https`` URL with a real host."""
     if not isinstance(url, str):
         return False
     try:
         parsed = urlparse(url)
+        # `hostname` (not `netloc`) rejects a host-less authority like `http://:80/h`
+        # whose netloc is the truthy `:80`. Accessing it can also raise on a bad IPv6.
+        host = parsed.hostname
     except ValueError:
         return False
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    return parsed.scheme in ("http", "https") and bool(host)
 
 
 class WebhookEmitter:
@@ -71,9 +74,15 @@ class WebhookEmitter:
         return self.active and self._config.events.get(event, True)
 
     async def _post(self, client: httpx.AsyncClient, url: str, payload: dict) -> None:
-        """POST once, best-effort; log and swallow any error (fail-open)."""
+        """POST once, best-effort; log and swallow any error (fail-open).
+
+        httpx does not raise on a 4xx/5xx by default, so call ``raise_for_status`` to
+        surface a rejecting endpoint in the log instead of silently treating it as
+        delivered — still swallowed, so it can't reach the lifecycle.
+        """
         try:
-            await client.post(url, json=payload)
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
         except Exception as exc:  # noqa: BLE001 - a webhook error must never reach the lifecycle
             # Redact the url (it can carry a secret); the exception type/text is safe.
             _log.warning("webhook POST failed (url redacted): %s", exc)

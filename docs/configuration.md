@@ -319,6 +319,12 @@ webhooks:
     crash: true
 ```
 
+The `events` map (filtered from the generated table because it's a dict) selects
+which transitions emit: keys are `spawn`, `ready`, `stop`, `crash`; an **absent key
+defaults to enabled** (so `events: {}` emits all four, and you disable one with e.g.
+`crash: false`). An unsupported key is rejected at startup rather than silently
+ignored.
+
 Each POST body is `{"event": "<name>", "project": ..., "label": ..., "status": ...,
 "resume_mode": ..., "spawn_mode": ..., "session_id": ...}`.
 

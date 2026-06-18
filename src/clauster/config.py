@@ -584,6 +584,19 @@ class WebhooksConfig(BaseModel):
         "`crash`; an absent key defaults to enabled.",
     )
 
+    @field_validator("events")
+    @classmethod
+    def _known_event_keys(cls, value: dict[str, bool]) -> dict[str, bool]:
+        """Reject an unknown event key so a typo (e.g. `spwan`) fails loudly, not silently."""
+        allowed = {"spawn", "ready", "stop", "crash"}
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(
+                f"webhooks.events has unsupported key(s) {sorted(unknown)}; "
+                f"allowed: {sorted(allowed)}"
+            )
+        return value
+
 
 class ClaustrumConfig(BaseModel):
     """Settings for the optional claustrum hosted live-view channel (CL-2).

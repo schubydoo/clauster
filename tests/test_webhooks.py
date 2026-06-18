@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import httpx
+import pytest
+from pydantic import ValidationError
 
 from clauster import webhooks
 from clauster.config import WebhooksConfig
@@ -13,10 +15,22 @@ def _cfg(**kw) -> WebhooksConfig:
     return WebhooksConfig(**kw)
 
 
+class _FakeResponse:
+    """Minimal httpx.Response stand-in; raise_for_status raises on a >=400 status."""
+
+    def __init__(self, status_code: int = 200):
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPError(f"status {self.status_code}")
+
+
 class _RecordingClient:
     """A fake httpx.AsyncClient that records POSTs into a shared list."""
 
     posted: list[tuple[str, dict]] = []
+    status_code: int = 200
 
     def __init__(self, timeout=None):
         self.timeout = timeout
@@ -29,10 +43,12 @@ class _RecordingClient:
 
     async def post(self, url, json=None):
         type(self).posted.append((url, json))
+        return _FakeResponse(type(self).status_code)
 
 
-def _patch_client(monkeypatch) -> type[_RecordingClient]:
+def _patch_client(monkeypatch, *, status_code: int = 200) -> type[_RecordingClient]:
     _RecordingClient.posted = []
+    _RecordingClient.status_code = status_code
     monkeypatch.setattr(webhooks.httpx, "AsyncClient", _RecordingClient)
     return _RecordingClient
 
@@ -46,6 +62,7 @@ def test_valid_webhook_url():
     assert not _valid_webhook_url("ftp://example.com")  # wrong scheme
     assert not _valid_webhook_url("file:///etc/passwd")
     assert not _valid_webhook_url("https://")  # no host
+    assert not _valid_webhook_url("http://:80/h")  # host-less authority (netloc truthy, no host)
     assert not _valid_webhook_url("http://[::1")  # urlparse raises ValueError → rejected
     assert not _valid_webhook_url("not a url")
     assert not _valid_webhook_url(123)
@@ -79,6 +96,17 @@ def test_wants_respects_events_map():
     assert em.wants("crash") is False  # explicitly disabled
 
 
+def test_config_rejects_unknown_event_key():
+    # A typo'd event key fails loudly at load, not silently (CodeRabbit #371).
+    with pytest.raises(ValidationError, match="unsupported key"):
+        WebhooksConfig(events={"spwan": False})
+    # The valid keys still validate.
+    assert WebhooksConfig(events={"spawn": False, "crash": True}).events == {
+        "spawn": False,
+        "crash": True,
+    }
+
+
 # ----- emit ----------------------------------------------------------------
 
 
@@ -86,8 +114,18 @@ async def test_aemit_posts_event_to_each_url(monkeypatch):
     client = _patch_client(monkeypatch)
     em = WebhookEmitter(_cfg(enabled=True, urls=["https://a.test/h", "https://b.test/h"]))
     await em.aemit("ready", {"project": "alpha"})
+    assert len(client.posted) == 2  # one POST per url, no more
     assert {u for u, _ in client.posted} == {"https://a.test/h", "https://b.test/h"}
-    assert all(b["event"] == "ready" and b["project"] == "alpha" for _, b in client.posted)
+    for _, body in client.posted:
+        assert body == {"event": "ready", "project": "alpha"}  # event merged into the payload
+
+
+async def test_aemit_logs_and_swallows_http_error_status(monkeypatch):
+    # httpx doesn't raise on 4xx/5xx; raise_for_status surfaces it, but it's still swallowed.
+    client = _patch_client(monkeypatch, status_code=500)
+    em = WebhookEmitter(_cfg(enabled=True, urls=["https://a.test/h"]))
+    await em.aemit("crash", {})  # must not raise
+    assert len(client.posted) == 1  # the POST was attempted
 
 
 async def test_aemit_noop_when_event_disabled(monkeypatch):
