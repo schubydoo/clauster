@@ -20,7 +20,9 @@
   const ROOT = "{{ request.scope.root_path }}";
   const MAX_LOG_LINES = 1000;
   const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
-  const LOG_RECONNECT_MS = 1500;  // bridge-log tail: delay before auto-reconnecting a dropped-but-live tail
+  // Reconnect delay for the bridge-log tail. openHosted uses the same 1500ms inline (line ~1413);
+  // a single shared constant will land with the reconnect-backoff follow-up that touches both paths.
+  const LOG_RECONNECT_MS = 1500;
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
@@ -1641,7 +1643,9 @@
           // Only reconnect a tail whose bridge the snapshot still reports as live; a stopped /
           // crashed / gone bridge stays on the disconnect banner instead of looping forever. The
           // 4s /api/instances poll keeps statusOf() fresh, so this converges either way.
-          if (!["running", "starting"].includes(self.statusOf(name))) { s.reconnecting = false; s.lost = true; return; }
+          if (!["running", "starting"].includes(self.statusOf(name))) {
+            s.reconnecting = false; s.lost = true; return;
+          }
           s.lost = false; s.reconnecting = true;  // through the proxy → surfaces "reconnecting…"
           setTimeout(() => {
             const s2 = self.logs[name];
