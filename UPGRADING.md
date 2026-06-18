@@ -50,5 +50,12 @@ sudo systemctl restart clauster                     # picks up the new code
 `clauster doctor` will tell you whether `uv sync` / `migrate` are actually
 needed and whether the checkout is behind `origin`.
 
-> Running bridges are detached and survive a Clauster restart, so an upgrade
-> doesn't interrupt active sessions; the restart only refreshes the manager.
+> **Standard** bridges are detached and survive a Clauster restart, so the
+> upgrade only refreshes the manager and doesn't interrupt them.
+>
+> **pty (true-resume) bridges do *not* survive a `systemctl restart`** — the
+> default `KillMode=control-group` reaps the whole service cgroup, killing the
+> bridge. Its transcript is preserved (resume with `claude --continue`), but the
+> live session ends. If you run pty bridges, plan upgrades for a quiet window;
+> `clauster doctor` reports your setup and `clauster install-service` (re)generates
+> the service unit.
