@@ -84,7 +84,9 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   confirm in the UI.
 - **Open session in Claude** — a deep link to the primary session plus a scannable QR code
   that opens it in the Claude app (claude.ai/code or mobile), attached to the
-  running bridge.
+  running bridge. Bridges are **cloud-visible** like this; the experimental hosted
+  live-view channel is **local-only** — it streams in the dashboard but is never
+  attachable from the Claude app.
 - **External session surfacing** — sessions you started from a terminal or Desktop
   (not via Clauster) are discovered and shown with a distinct indicator.
 - **Create / clone projects** — make a new project or clone a git URL, with SSRF

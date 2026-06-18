@@ -124,6 +124,8 @@ usage:
 # stream-json sessions on it — dashboard panel with live stream, send, tool-
 # permission approve/deny, resume, and orphan recovery after a daemon restart.
 # Fail-closed: daemon trouble surfaces in /healthz, never touches bridges.
+# NOTE: hosted sessions are LOCAL live-view only — unlike bridges, they are never
+# attachable from claude.ai/code or the Claude mobile app.
 # claustrum:
 #   enabled: false
 #   binary: claustrum              # name on PATH or absolute path
