@@ -485,7 +485,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         per-project / batch endpoints. Empty when metrics are disabled (cache stays bare).
         """
         return [
-            (project, float(s["cpu_percent"]), int(s["rss_bytes"]))
+            (project, float(s.get("cpu_percent", 0.0)), int(s.get("rss_bytes", 0)))
             for project, s in runner.metrics_snapshots().items()
         ]
 

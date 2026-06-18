@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+
+import pytest
 
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import SessionRunner
@@ -102,3 +106,34 @@ async def test_metrics_task_not_started_when_disabled(runner_config, monkeypatch
         assert runner._metrics_task is None
     finally:
         await runner.shutdown()
+
+
+async def _raise_cancelled(_seconds):
+    raise asyncio.CancelledError
+
+
+async def test_refresh_forever_continues_after_unexpected_error(runner_config, monkeypatch):
+    # An unexpected error from _refresh_metrics_cache is caught by the loop and never
+    # propagated; the loop reaches its sleep (which we make exit the test).
+    runner = _runner(runner_config)
+
+    async def _boom():
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(runner, "_refresh_metrics_cache", _boom)
+    monkeypatch.setattr("clauster.runner.asyncio.sleep", _raise_cancelled)
+    with pytest.raises(asyncio.CancelledError):  # only the sleep's cancel escapes
+        await runner._metrics_refresh_forever()
+
+
+def test_warn_if_refresh_slow(runner_config, caplog):
+    # A refresh slower than poll_seconds warns; a fast one is silent (no spam).
+    runner = _runner(runner_config)
+    poll = runner._config.metrics.poll_seconds
+    with caplog.at_level(logging.WARNING, logger="clauster.runner"):
+        runner._warn_if_refresh_slow(poll + 100)
+    assert any("metrics refresh took" in r.message for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="clauster.runner"):
+        runner._warn_if_refresh_slow(0.0)
+    assert not caplog.records

@@ -189,8 +189,9 @@ class SessionRunner:
         return dict(self._crash_counts)
 
     def metrics_snapshot(self, name: str) -> dict | None:
-        """Return the last cached resource sample for ``name``, or None (#354)."""
-        return self._metrics_cache.get(name)
+        """Return a copy of the last cached resource sample for ``name``, or None (#354)."""
+        sample = self._metrics_cache.get(name)
+        return dict(sample) if sample is not None else None
 
     def metrics_snapshots(self) -> dict[str, dict]:
         """Return a copy of the per-project cached resource samples (#354 batch read)."""
@@ -230,15 +231,32 @@ class SessionRunner:
                 fresh[inst.project] = sample
         self._metrics_cache = fresh
 
+    def _warn_if_refresh_slow(self, elapsed: float) -> None:
+        """Warn when a refresh outran the poll period (samples are going stale, #354).
+
+        If sampling N bridges (each ~sample_interval_seconds) outgrows poll_seconds, the
+        effective refresh rate degrades silently — surface it instead.
+        """
+        poll = self._config.metrics.poll_seconds
+        if elapsed > poll:
+            _log.warning(
+                "metrics refresh took %.1fs, exceeding poll_seconds=%.1f — samples may "
+                "be stale; reduce running bridges or raise metrics.poll_seconds",
+                elapsed,
+                poll,
+            )
+
     async def _metrics_refresh_forever(self) -> None:
         """Refresh the metrics cache every ``metrics.poll_seconds`` until cancelled."""
         while True:
+            started = time.monotonic()
             try:
                 await self._refresh_metrics_cache()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 _log.exception("metrics cache refresh failed; continuing")
+            self._warn_if_refresh_slow(time.monotonic() - started)
             await asyncio.sleep(self._config.metrics.poll_seconds)
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
