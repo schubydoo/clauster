@@ -120,6 +120,9 @@
             <div class="list-group-item sess-row" :class="hostedRailClass(h)" x-show="activeFilter === 'all' || activeFilter === 'browser'">
               <div class="d-flex align-items-center flex-wrap gap-1">
                 <span class="badge bg-azure-lt mode-badge me-1">browser</span>
+                {# Unconditional, unlike a bridge row's `claude.ai` badge (x-show on
+                   bridge_session_id): a hosted session is local-only for its whole life,
+                   not a yet-to-register bridge. Don't gate this on state. #}
                 <span class="badge bg-secondary-lt me-1"
                       title="Hosted sessions stream live here only — unlike bridges, they are not attachable from claude.ai/code or the Claude mobile app">local live-view only</span>
                 <span class="badge me-1" :class="hostedStatusBadge(h.status)"><span class="status-dot" :class="hostedStatusDot(h.status)"></span><span class="text-capitalize" x-text="h.status"></span></span>
