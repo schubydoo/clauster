@@ -57,6 +57,27 @@ Store the resulting `$argon2id$…` string in `auth.password_hash` (or
 no password is configured / the attempt is empty, to avoid a "no password set"
 timing oracle.
 
+### Login throttle (brute-force friction)
+
+Failed logins are rate-limited in two layers, returning **`429` with a
+`Retry-After`** when blocked:
+
+- **Per-key** — a distinguishable client (its peer IP, or a reverse-proxy-asserted
+  user) is locked after 5 failures within 5 minutes.
+- **Global backoff** — behind a trusted reverse proxy that asserts *no* user,
+  every login shares the proxy's socket IP, so a per-IP lock would lock **everyone**
+  out (one attacker DoS-ing all users). In that shared-IP case the per-key lock is
+  skipped; instead, once failures across all clients cross a ceiling, attempts must
+  wait an exponentially-growing interval (capped). A flood degrades to a delay, not
+  a blanket lockout a legitimate user can never get past.
+
+!!! warning "In-process only — not an account-security boundary"
+    The throttle counters live in memory: they **reset on restart** and are **not
+    shared across workers or replicas**. This is brute-force *friction*, not a
+    durable lockout. For an internet-exposed deployment, put Clauster behind a
+    fronting **IdP / IAP** (or use the reverse-proxy auth) as the real access
+    control — see [Networking](networking.md).
+
 ### Sessions & cookies
 
 - Sessions are **signed cookies** (`itsdangerous`) with server-side revocation —
