@@ -90,8 +90,8 @@ def import_legacy_json(state_dir: Path, session_factory: sessionmaker[Session]) 
     are left intact and ``False`` is returned — boot continues on the empty DB.
     """
     state_dir = state_dir.expanduser()
-    state_path = state_dir / JsonStateStore._FILENAME
-    hosted_path = state_dir / JsonHostedStateStore._FILENAME
+    state_path = state_dir / JsonStateStore.FILENAME
+    hosted_path = state_dir / JsonHostedStateStore.FILENAME
     if not state_path.exists() and not hosted_path.exists():
         return False
 
@@ -101,7 +101,7 @@ def import_legacy_json(state_dir: Path, session_factory: sessionmaker[Session]) 
         with session_factory() as session, session.begin():
             if not _schema_is_empty(session):
                 # Already migrated or in use — never re-import on top of live rows.
-                # Rolls back the empty no-op transaction on block exit.
+                # The transaction is an empty no-op; it commits nothing on block exit.
                 return False
             instance_records = JsonStateStore(state_dir).load() if state_path.exists() else {}
             hosted_records = JsonHostedStateStore(state_dir).load() if hosted_path.exists() else {}

@@ -8,17 +8,19 @@ SQLite PRAGMAs, and the full-replace prune semantics the JSON callers rely on.
 from __future__ import annotations
 
 import json
+import logging
 from unittest import mock
 
 import pytest
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from clauster.db import bootstrap
 from clauster.db.bootstrap import MigrationError, import_legacy_json, upgrade_to_head
 from clauster.db.engine import (
     DB_FILENAME,
+    _arm_sqlite_pragmas,
     create_db_engine,
     make_session_factory,
     resolve_url,
@@ -47,6 +49,23 @@ def test_sqlite_pragmas_are_armed(tmp_path):
             assert conn.execute(text("PRAGMA busy_timeout")).scalar() == 5000
     finally:
         engine.dispose()
+
+
+def test_sqlite_wal_unavailable_warns(caplog):
+    """The connect hook warns when SQLite can't honor WAL (no silent durability loss).
+
+    An in-memory database can never use WAL — ``PRAGMA journal_mode=WAL`` returns
+    ``memory`` — which is the same downgrade a network/overlay filesystem produces,
+    so it exercises the warn branch without needing an exotic mount.
+    """
+    engine = create_engine("sqlite://", future=True, connect_args={"check_same_thread": False})
+    _arm_sqlite_pragmas(engine)
+    try:
+        with caplog.at_level(logging.WARNING, logger="clauster.db.engine"), engine.connect():
+            pass
+    finally:
+        engine.dispose()
+    assert any("WAL mode unavailable" in r.message for r in caplog.records)
 
 
 def test_create_engine_creates_state_dir_0700(tmp_path):

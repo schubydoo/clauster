@@ -14,12 +14,15 @@ multi-user work (#364) without a model change.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from ..atomicio import ensure_private_dir
+
+_log = logging.getLogger("clauster.db.engine")
 
 # The on-disk SQLite file name under ``state_dir`` when no URL is configured. Sits
 # beside ``state.json`` / ``hosted_state.json`` / ``session.secret`` in the 0700 dir.
@@ -88,7 +91,17 @@ def _arm_sqlite_pragmas(engine: Engine) -> None:
     def _set_sqlite_pragma(dbapi_connection: object, _record: object) -> None:
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
         try:
-            cursor.execute("PRAGMA journal_mode=WAL")
+            # SQLite silently refuses WAL on some filesystems (network/overlay mounts)
+            # and stays in rollback-journal mode while the statement still "succeeds".
+            # Surface that downgrade — the synchronous=NORMAL durability posture below
+            # assumes WAL — rather than letting it pass unnoticed (fail-closed, loudly).
+            mode = cursor.execute("PRAGMA journal_mode=WAL").fetchone()
+            if mode and str(mode[0]).lower() != "wal":
+                _log.warning(
+                    "SQLite WAL mode unavailable on this filesystem (got %r); "
+                    "crash durability may be reduced",
+                    mode[0],
+                )
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
             # NORMAL keeps WAL durable across app crashes (only a power loss can lose
