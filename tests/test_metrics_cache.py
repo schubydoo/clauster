@@ -59,6 +59,16 @@ async def test_refresh_drops_bridge_on_pid_reuse(runner_config):
     assert runner.metrics_snapshot("alpha") is None
 
 
+async def test_refresh_samples_when_pid_create_time_matches(runner_config):
+    # start set AND matching the live pid's create-time → the guard passes, bridge sampled.
+    from clauster import procutil
+
+    runner = _runner(runner_config)
+    _running(runner, start=procutil.proc_create_time(os.getpid()))
+    await runner._refresh_metrics_cache()
+    assert runner.metrics_snapshot("alpha") is not None
+
+
 async def test_refresh_drops_bridge_on_dead_pid(runner_config):
     runner = _runner(runner_config)
     _running(runner, pid=2_147_483_646)  # not a live pid → sample None
