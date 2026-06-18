@@ -47,7 +47,6 @@ from .clone_jobs import CloneJob, CloneJobManager
 from .config import ClausterConfig
 from .discovery import discover_projects, is_valid_project_name
 from .hosted import HostedManager, HostedSessionError
-from .hosted_state import HostedStateStore
 from .models import (
     BackgroundJob,
     ClaudeMdDoc,
@@ -192,6 +191,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             if daemon is not None:
                 await daemon.aclose()  # drop our connection; leave the daemon running
             await runner.shutdown()  # cancel poll task; leave bridges running
+            runner.persistence.dispose()  # close the DB engine's connection pool
 
     app = FastAPI(
         title="Clauster",
@@ -204,7 +204,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
     # Hosted-channel sessions (CL-4); always present. The store (CL-6) persists them
     # so a clauster restart can reattach the survivors via lifespan reattach_all.
-    app.state.hosted = HostedManager(HostedStateStore(config.state_dir))
+    # Reuse the runner's persistence container so the process shares one engine and
+    # one migration run (#362) — the store keeps the same load()/save() contract.
+    app.state.hosted = HostedManager(runner.persistence.hosted_state_store())
     clone_jobs = CloneJobManager()
     app.state.clone_jobs = clone_jobs
     # Drop a finished clone job after this grace so a client that disconnected

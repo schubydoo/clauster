@@ -21,6 +21,13 @@ a = Analysis(
     datas=[
         ("src/clauster/templates", "clauster/templates"),
         ("src/clauster/static", "clauster/static"),
+        # Alembic loads the migration env + revision scripts from the filesystem at
+        # startup (bootstrap.upgrade_to_head), so the whole migrations tree and the
+        # alembic.ini must ship as data — they are not importable modules Analysis
+        # would otherwise pick up. Mirror the in-package layout so
+        # ``Path(__file__).parent / "migrations"`` resolves under _MEIPASS.
+        ("src/clauster/db/migrations", "clauster/db/migrations"),
+        ("src/clauster/db/alembic.ini", "clauster/db"),
     ],
     hiddenimports=[
         "uvicorn.logging",

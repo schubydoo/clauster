@@ -74,7 +74,12 @@ def _check_boot(binary: Path) -> None:
     fails, so boot needs ``python3`` (POSIX) / ``python`` (Windows ``claude.cmd``)
     on PATH to execute the fake-claude fixture — both present on GitHub runners.
     """
-    with tempfile.TemporaryDirectory() as td:
+    # ignore_cleanup_errors: on Windows the boot opens a SQLite state DB
+    # (clauster.db + its -wal/-shm sidecars); the hard proc.terminate() below skips
+    # the app's clean engine-dispose, so the OS may still hold the file when this
+    # dir is torn down (WinError 32). Cleanup is irrelevant to the smoke check — the
+    # runner wipes temp between jobs — so don't let a teardown lock fail the test.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         tmp = Path(td)
         (tmp / "projects").mkdir()
         port = _free_port()
