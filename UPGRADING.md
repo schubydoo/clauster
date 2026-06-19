@@ -33,6 +33,13 @@ deployment it has nothing to do.)
 - **Back up first** (`clauster backup`): the database is now the live store, so a
   pre-upgrade snapshot is your rollback.
 
+**If the migration fails, or you need to roll back to 0.11:** the migration is
+fail-closed, so a failure leaves the service *down*, not half-migrated. The
+simplest recovery is to restore the pre-upgrade `clauster backup` tarball and
+reinstall the prior version. To revert by hand instead: stop clauster, delete
+`clauster.db`, rename `state.json.imported` / `hosted_state.json.imported` back
+(drop the `.imported` suffix), and reinstall the prior clauster version.
+
 ## PyPI install
 
 ```bash
@@ -61,7 +68,8 @@ path above, not an editable checkout.)
 cd /path/to/clauster
 git fetch && git checkout main && git pull          # pull the new code
 uv sync --extra dev   # ONLY if pyproject/uv.lock changed (deps); otherwise skip
-clauster migrate -c /path/to/clauster.yml   # legacy state.json helper only — the DB migrates automatically
+# clauster migrate -c /path/to/clauster.yml   # SKIP on 0.12+: the DB migrates automatically.
+#                                              # Run ONLY to fold in a pre-0.12 flat-file state.json.
 sudo systemctl restart clauster                     # picks up the new code
 ```
 
