@@ -20,10 +20,11 @@
   const ROOT = "{{ request.scope.root_path }}";
   const MAX_LOG_LINES = 1000;
   const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
-  // Reconnect delay + retry cap for the bridge-log tail; the hosted live-view (openHosted)
-  // shares LOG_RECONNECT_MS for its reconnect delay. Adding the same consecutive-failure cap
-  // to openHosted (it currently reconnects indefinitely while the session reads live) is tracked
-  // separately, not in this file.
+  // Reconnect delay + consecutive-failure cap shared by both live streams: the bridge-log tail
+  // (openLogs) and the hosted live-view (openHosted). Both auto-reconnect a dropped socket after
+  // LOG_RECONNECT_MS while the bridge/session still reads live, and both give up after
+  // MAX_LOG_RECONNECTS consecutive failures so a permanently-dead socket stops retrying. A streamed
+  // frame resets each stream's counter, so a genuinely-healthy stream reconnects without limit.
   const LOG_RECONNECT_MS = 1500;
   const MAX_LOG_RECONNECTS = 5;  // give up auto-reconnect after this many consecutive failures (CodeRabbit)
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
@@ -97,7 +98,7 @@
       hostedForm: { project: "", permission_mode: DEFAULT_PERMISSION_MODE, busy: false },
       hostedStopping: {},         // hosted id -> true while a stop is in flight
       hostedResuming: {},         // hosted id -> true while a resume is in flight
-      hostedView: {},             // hosted id -> { open, ws, token, lastSeq, events[], input, sending, connLost }
+      hostedView: {},             // hosted id -> { open, ws, token, lastSeq, events[], input, sending, connLost, attempts }
       _hostedSeq: 0,              // monotonic token per opened hosted live-view (retire check; see openHosted)
       errors: {},
       qrOpen: {},
@@ -1398,9 +1399,11 @@
         }
         const after = prev ? prev.lastSeq : 0;
         const token = ++this._hostedSeq;
+        // Carry the consecutive-reconnect counter forward across an auto-reconnect so the cap
+        // below bounds the whole retry burst, not each attempt in isolation (mirrors openLogs).
         const view = { open: true, ws: null, token, lastSeq: after, events: prev ? prev.events : [],
                        input: prev ? prev.input : "", sending: false, connLost: false,
-                       ended: false, endedReason: "" };
+                       ended: false, endedReason: "", attempts: prev ? prev.attempts : 0 };
         this.hostedView[id] = view;
         const self = this;
         // Resolve the LIVE view as the reactive proxy (or null if retired). Return the proxy
@@ -1417,7 +1420,9 @@
                     encodeURIComponent(id) + "?after=" + after;
         const ws = new WebSocket(url);
         ws.onmessage = (ev) => {
-          if (!liveView()) return;  // a retired socket → ignore (_renderHostedEvent re-reads the proxy)
+          const w = liveView();
+          if (!w) return;  // a retired socket → ignore (_renderHostedEvent re-reads the proxy)
+          w.attempts = 0;  // a frame arrived → reset the retry cap; a healthy stream reconnects without limit
           let e; try { e = JSON.parse(ev.data); } catch (_) { return; }
           self._renderHostedEvent(id, e);
         };
@@ -1434,6 +1439,17 @@
             self._markHostedEnded(id, h);
             return;
           }
+          // Cap consecutive failed reconnects: if the snapshot still reads "running" but the socket
+          // keeps closing (a stale poll after the session died, or a server that 1008s every attempt),
+          // give up after MAX_LOG_RECONNECTS instead of looping forever — mirrors openLogs. A streamed
+          // frame (onmessage) resets the counter, so a genuinely-healthy stream reconnects without limit.
+          // Give-up surfaces via _markHostedEnded (the "no longer live" banner) — the hosted analog of
+          // the bridge-log tail's give-up `lost` banner.
+          if (w.attempts >= MAX_LOG_RECONNECTS) {
+            self._markHostedEnded(id, h);
+            return;
+          }
+          w.attempts += 1;
           w.connLost = true;          // through the proxy → the "link dropped" banner repaints
           setTimeout(() => { const w2 = self.hostedView[id]; if (w2 && w2.token === token && w2.open) self.openHosted(id); }, LOG_RECONNECT_MS);
         };
