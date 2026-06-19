@@ -424,6 +424,27 @@ def _raise_not_found(_binary):
     raise ClaudeNotFound("nope")
 
 
+def test_dispatch_trusts_before_spawning_subprocess(tmp_path, monkeypatch):
+    # Ordering invariant (regression guard): the detached `claude --bg` cannot
+    # answer the one-time trust dialog, so the cwd MUST be trusted BEFORE the
+    # subprocess spawns — otherwise the worker wedges on the startup dialog. A
+    # refactor that reorders these would silently reintroduce that wedge, so we
+    # pin the relative order, not just that both happen.
+    calls: list[str] = []
+    monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
+    monkeypatch.setattr(supervisor, "trust_directory", lambda *a: calls.append("trust"))
+
+    def _run(argv, **kw):
+        calls.append("spawn")
+        return _FakeProc(stdout=_BANNER)
+
+    monkeypatch.setattr(supervisor.subprocess, "run", _run)
+
+    supervisor.dispatch_background_job(tmp_path)
+
+    assert calls == ["trust", "spawn"]  # trust strictly precedes the subprocess spawn
+
+
 def test_api_dispatch_agent_dispatches(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "dispatch_background_job", lambda *a, **k: "deadbeef")
     r = _client(write_config, tmp_path).post(
