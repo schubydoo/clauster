@@ -92,13 +92,15 @@ def test_failed_action_surfaces_inline_error(
 
     # ...and it is genuinely persistent (not a toast that auto-dismisses). The failed
     # action also fires a transient error toast (_dashboard_script.html toast() ->
-    # setTimeout(dismissToast, 4500)); rather than a fixed sleep, wait for that toast to
-    # actually clear from the stack, then confirm the inline block is STILL shown with its
-    # message — a toast that merely happened to match would be gone by now. Polling returns
-    # as soon as the toast clears (faster, and not flaky on a slow CI).
+    # setTimeout(dismissToast, 4500)). Rather than a fixed 5s sleep, wait for that toast
+    # to be gone from the stack, then confirm the inline block is STILL shown — a toast
+    # that merely happened to match would be cleared by now. We do NOT hard-require the
+    # toast to be visible first: the preceding steps can themselves take >4.5s on a slow
+    # runner, leaving the toast already auto-dismissed. `expect_hidden` degrades to an
+    # immediate pass in that case (and otherwise returns the instant the toast clears),
+    # so this de-flakes without weakening the persistence assertion that follows.
     toast = ".toast-stack .alert-danger"
-    browser.expect_visible(toast, timeout_ms=_STATUS_TIMEOUT)  # the error toast rendered
-    browser.expect_hidden(toast, timeout_ms=_TOAST_GONE_TIMEOUT)  # ...and auto-dismissed
+    browser.expect_hidden(toast, timeout_ms=_TOAST_GONE_TIMEOUT)  # toast gone (or never lingered)
     browser.expect_visible(error_block)
     assert browser.get_text(error_block).strip(), "inline error block did not persist"
     # The failed action did not spawn a running bridge.

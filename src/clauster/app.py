@@ -752,7 +752,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=422, detail="invalid project name")
         # The rollup walks on-disk transcripts; a broken directory or unreadable
         # file (OSError) must surface as a defined "couldn't read" status, not a
-        # bare 500. The badge is advisory, so a read failure degrades to 503.
+        # bare 500. The badge is advisory, so a read failure degrades to 503. Log
+        # the full error server-side (it can carry an absolute on-disk path) but
+        # return only the static prefix so the path never leaks to the browser.
         try:
             rollup = await asyncio.to_thread(
                 usage.aggregate_project_usage,
@@ -760,8 +762,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 project_name=name,
             )
         except OSError as exc:
+            logger.warning("usage read failed for %r: %s", name, exc)
             raise HTTPException(
-                status_code=503, detail=f"could not read usage transcripts: {exc}"
+                status_code=503, detail="could not read usage transcripts"
             ) from exc
         tot = rollup.totals
         return {

@@ -997,12 +997,16 @@ def test_project_usage_read_error_503(write_config, tmp_path, monkeypatch):
     from clauster import usage as usage_mod
 
     def _boom(*a, **k):
-        raise OSError("disk gone")
+        # Carry an absolute-path-shaped message so the leak guard is exercised:
+        # the path must be logged server-side, never echoed in the response.
+        raise OSError("[Errno 13] Permission denied: '/home/secret/projects/alpha'")
 
     monkeypatch.setattr(usage_mod, "aggregate_project_usage", _boom)
     r = _client(write_config, tmp_path).get("/api/projects/alpha/usage")
     assert r.status_code == 503
-    assert "could not read usage transcripts" in r.json()["detail"]
+    # Only the static prefix — no path, errno, or raw OSError text in the body.
+    assert r.json()["detail"] == "could not read usage transcripts"
+    assert "/home/secret" not in r.text and "Errno" not in r.text
 
 
 # ----- resume vanished-mid-op (gone-race) -------------------------------
