@@ -20,8 +20,10 @@
   const ROOT = "{{ request.scope.root_path }}";
   const MAX_LOG_LINES = 1000;
   const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
-  // Reconnect delay + retry cap for the bridge-log tail. openHosted uses the same 1500ms inline and
-  // (still) has no cap; unifying both into shared constants + real backoff is the remaining follow-up.
+  // Reconnect delay + retry cap for the bridge-log tail; the hosted live-view (openHosted)
+  // shares LOG_RECONNECT_MS for its reconnect delay. Adding the same consecutive-failure cap
+  // to openHosted (it currently reconnects indefinitely while the session reads live) is tracked
+  // separately, not in this file.
   const LOG_RECONNECT_MS = 1500;
   const MAX_LOG_RECONNECTS = 5;  // give up auto-reconnect after this many consecutive failures (CodeRabbit)
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
@@ -1416,7 +1418,7 @@
             return;
           }
           w.connLost = true;          // through the proxy → the "link dropped" banner repaints
-          setTimeout(() => { const w2 = self.hostedView[id]; if (w2 && w2.token === token && w2.open) self.openHosted(id); }, 1500);
+          setTimeout(() => { const w2 = self.hostedView[id]; if (w2 && w2.token === token && w2.open) self.openHosted(id); }, LOG_RECONNECT_MS);
         };
         this.hostedView[id].ws = ws;
       },
