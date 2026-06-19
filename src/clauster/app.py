@@ -45,7 +45,11 @@ from .claustrum_client import ClaustrumError
 from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJob, CloneJobManager
 from .config import ClausterConfig
-from .discovery import discover_projects, is_valid_project_name
+from .discovery import (
+    discover_projects_cached,
+    invalidate_discovery_cache,
+    is_valid_project_name,
+)
 from .hosted import HostedManager, HostedSessionError
 from .models import (
     BackgroundJob,
@@ -570,7 +574,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return resp
 
     async def list_projects() -> list[Project]:
-        projects = await asyncio.to_thread(discover_projects, config.projects_root)
+        projects = await asyncio.to_thread(discover_projects_cached, config.projects_root)
         # Surface the config bypass-ceiling per project so the UI can gate the option
         # (discovery has no config knowledge; the app layer owns this).
         for p in projects:
@@ -675,6 +679,28 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "ok": ok,
             "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
         }
+
+    @app.get("/api/projects/preflight")
+    async def api_projects_preflight() -> dict:
+        """Batch per-project preflight for first paint — ONE discovery scan, not N.
+
+        First paint needs every project's readiness pill; fetching them one-by-one
+        re-ran ``list_projects()`` per project (O(N²) discovery on load). This returns
+        the same ``{ok, checks}`` shape keyed by project name from a single scan, so
+        the dashboard fires one request instead of N. Declared before the
+        ``{name}/preflight`` route so the literal path wins the match. Read-only,
+        auth-gated. The per-project route stays for the fragment-inserted-row path.
+        """
+        result: dict[str, dict] = {}
+        for proj in await list_projects():
+            checks = ops.project_preflight_checks(proj)
+            result[proj.name] = {
+                "ok": all(c.status != ops.FAIL for c in checks),
+                "checks": [
+                    {"name": c.name, "status": c.status, "detail": c.detail} for c in checks
+                ],
+            }
+        return result
 
     @app.get("/api/projects/{name}/preflight")
     async def api_project_preflight(name: str) -> dict:
@@ -897,6 +923,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ProvisionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # The new directory may not bump projects_root's mtime at the cache's
+        # resolution; drop the cache so the project is visible to _project_by_name now.
+        invalidate_discovery_cache()
         return await _project_by_name(name)
 
     async def _run_clone(job: CloneJob, name: str, url: str, shallow: bool) -> None:
@@ -921,6 +950,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except Exception as exc:  # defensive: never leave a job stuck "running"
             clone_jobs.finish(job, error=f"unexpected error: {exc}")
         else:
+            # The cloned directory may not bump projects_root's mtime at the cache's
+            # resolution; drop the cache so the new project's row renders immediately.
+            invalidate_discovery_cache()
             clone_jobs.finish(job)
         loop.call_later(_CLONE_JOB_TTL, clone_jobs.discard, job.id)
 

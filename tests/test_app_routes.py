@@ -98,6 +98,34 @@ def test_project_preflight_shape_and_checks(write_config, tmp_path):
         assert c["status"] in {"ok", "warn", "fail"}
 
 
+# ----- batch preflight (first-paint, one discovery scan) ----------------
+
+
+def test_batch_preflight_shape_and_all_projects(write_config, tmp_path):
+    # First-paint batch returns {name: {ok, checks}} for every discovered project from
+    # ONE scan (replacing N per-project /preflight calls). Each entry carries the same
+    # {ok, checks:[{name,status,detail}]} contract the per-project route returns.
+    r = _client(write_config, tmp_path).get("/api/projects/preflight")
+    assert r.status_code == 200
+    body = r.json()
+    assert {"alpha", "beta", "gamma"} <= set(body)  # every discovered project present
+    entry = body["alpha"]
+    assert isinstance(entry["ok"], bool)
+    names = {c["name"] for c in entry["checks"]}
+    assert {"trust", "git"} <= names
+    for c in entry["checks"]:
+        assert set(c) == {"name", "status", "detail"}
+        assert c["status"] in {"ok", "warn", "fail"}
+
+
+def test_batch_preflight_literal_path_beats_name_route(write_config, tmp_path):
+    # The literal /api/projects/preflight route must win over /{name}/preflight: the
+    # batch returns a dict keyed by project name, never a single-project {project,...}.
+    body = _client(write_config, tmp_path).get("/api/projects/preflight").json()
+    assert "project" not in body  # not the per-project shape
+    assert isinstance(body.get("alpha"), dict)
+
+
 # ----- single-row fragment (reactive insertion, no full reload) ---------
 
 
