@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from clauster.config import load_config
@@ -127,6 +129,7 @@ def test_write_restores_on_post_write_parse_failure(write_config, monkeypatch) -
     assert path.read_text(encoding="utf-8") == original  # rolled back to the pre-write content
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes; Windows has no 0o600")
 def test_backup_inherits_source_mode_not_umask(write_config) -> None:
     # A hardened (0600) config holds secret hashes; its `.bak` must inherit that mode,
     # not widen to the process umask default (0644) and leak them to other local
