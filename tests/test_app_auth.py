@@ -444,6 +444,21 @@ def test_throttle_per_key_lock_after_max_failures():
     assert t.allowed("1.2.3.4")[0] is True  # success clears the lock
 
 
+def test_throttle_evicts_empty_key_after_window_expiry():
+    # A pruned-to-empty key must be dropped, not left as a permanent ``key: []`` —
+    # otherwise a failed-login flood from many distinct IPs leaks one entry per IP (#402).
+    t = LoginThrottle(max_failures=3, window_seconds=300)
+    now = time.monotonic()
+    t._failures["1.2.3.4"] = [now - (t._window + 100)]  # one expired timestamp
+    assert t.allowed("1.2.3.4") == (True, 0.0)  # gate check prunes the expired entry
+    assert "1.2.3.4" not in t._failures  # evicted, not leaked as key: []
+
+    # Eviction only drops empties — a key with a still-live timestamp is retained.
+    t._failures["5.6.7.8"] = [now - (t._window + 100), now]  # one expired, one live
+    assert t.allowed("5.6.7.8")[0] is True
+    assert t._failures.get("5.6.7.8") == [now]  # pruned to the live entry, key kept
+
+
 def test_throttle_shared_proxy_ip_skips_per_key_lock_uses_global_backoff():
     # A shared proxy IP: per-key lock would lock everyone out, so it's skipped — only the
     # global backoff applies once failures cross the ceiling.

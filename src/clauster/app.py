@@ -144,7 +144,12 @@ class LoginThrottle:
         # Per-key hard lock for a distinguishable client.
         if key:
             recent = [t for t in self._failures.get(key, []) if now - t < self._window]
-            self._failures[key] = recent
+            if recent:
+                self._failures[key] = recent
+            else:
+                # Evict instead of leaving a permanent ``key: []`` — otherwise a
+                # failed-login flood from many distinct IPs leaks one empty entry per IP.
+                self._failures.pop(key, None)
             if len(recent) >= self._max:
                 return False, float(self._window)
         return True, 0.0
