@@ -88,31 +88,34 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 # Origin gate already blocks cross-origin state changes, so this is a fallback
 # layer, not the primary control.
 #
-# Tradeoff — why the script/style sources are not fully locked down:
+# Tradeoff — why the script/style sources are not fully locked down (tracked by
+# #442 to drop these relaxations via nonces + the CSP-friendly Alpine build):
 #   * The dashboard, login and 404 pages all carry inline <script> blocks (the
 #     pre-paint theme setter + the whole Alpine dashboard logic), so dropping
 #     'unsafe-inline' from script-src would blank the UI unless every block were
-#     moved to nonced external files — out of scope here.
+#     moved to nonced external files — out of scope here, see #442.
 #   * The vendored Alpine build evaluates x-* expressions via `new Function()`,
 #     which CSP classifies as eval, so 'unsafe-eval' is required for the
 #     dashboard to render at all. (The CSP-friendly Alpine build forbids those
-#     expressions; swapping to it is a separate, larger change.)
+#     expressions; swapping to it is the separate, larger change tracked in #442.)
 #   * dashboard.html has an inline <style> block plus inline style="" attributes,
 #     so style-src keeps 'unsafe-inline'.
 # This is the tightest policy that still renders the shipped UI; it stops the
 # obvious injection sinks (frame-ancestors/object-src/base-uri/form-action) while
 # tolerating the self-hosted inline assets we actually ship.
 #
-# connect-src lists ws:/wss: explicitly: the live bridge-log + hosted-session
-# streams open same-origin WebSockets, and not every browser folds those under
-# 'self', so the schemes are spelled out to keep the streams working.
+# connect-src is just 'self': the live bridge-log + hosted-session streams open
+# same-origin WebSockets, and every browser this app targets matches same-origin
+# ws:/wss: under 'self'. A bare ws:/wss: scheme-source would instead permit a
+# WebSocket to ANY host — an exfiltration channel under XSS (made plausible by the
+# 'unsafe-inline' above) — so the schemes are deliberately NOT listed.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; "
     "font-src 'self'; "
-    "connect-src 'self' ws: wss:; "
+    "connect-src 'self'; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
     "form-action 'self'; "
@@ -508,7 +511,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         headers.setdefault("Referrer-Policy", "no-referrer")
         headers.setdefault("Content-Security-Policy", _CSP)
         if _cookie_secure(request):
-            headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+            # No includeSubDomains: it would pin every sibling subdomain of the
+            # serving host to HTTPS for a year, bricking a plain-HTTP service on a
+            # shared parent domain. Scope the policy to clauster's own host only.
+            headers.setdefault("Strict-Transport-Security", "max-age=31536000")
         return response
 
     @app.get("/login", response_class=HTMLResponse)

@@ -67,8 +67,10 @@ def test_csp_present_and_locked_down(runner_config):
     assert "base-uri 'self'" in csp
     assert "form-action 'self'" in csp
     assert "default-src 'self'" in csp
-    # Same-origin live WebSocket streams (bridge log + hosted) must stay allowed.
-    assert "connect-src 'self' ws: wss:" in csp
+    # connect-src is exactly 'self' — same-origin WebSocket streams match under it,
+    # and bare ws:/wss: scheme-sources (any-host exfiltration channel) are excluded.
+    assert "connect-src 'self';" in csp
+    assert "ws:" not in csp and "wss:" not in csp
     # The dashboard's inline scripts + Alpine's eval keep these relaxations; if
     # they ever tighten, the docstring tradeoff must be revisited deliberately.
     assert "script-src 'self' 'unsafe-inline' 'unsafe-eval'" in csp
@@ -124,5 +126,6 @@ def test_hsts_present_when_secure(runner_config):
     resp = client.get("/healthz")
     assert resp.status_code == 200
     hsts = resp.headers["Strict-Transport-Security"]
-    assert "max-age=31536000" in hsts
-    assert "includeSubDomains" in hsts
+    assert hsts == "max-age=31536000"
+    # No includeSubDomains: it must not reach sibling subdomains on a shared parent.
+    assert "includeSubDomains" not in hsts
