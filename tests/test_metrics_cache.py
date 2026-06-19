@@ -11,6 +11,7 @@ import pytest
 
 from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import SessionRunner
+from conftest import _raise_cancelled
 
 
 def _runner(runner_config) -> SessionRunner:
@@ -203,10 +204,6 @@ async def test_metrics_task_not_started_when_disabled(runner_config, monkeypatch
         assert runner._metrics_task is None
     finally:
         await runner.shutdown()
-
-
-async def _raise_cancelled(_seconds):
-    raise asyncio.CancelledError
 
 
 async def test_refresh_forever_continues_after_unexpected_error(runner_config, monkeypatch):

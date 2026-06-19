@@ -125,7 +125,7 @@
                    not a yet-to-register bridge. Don't gate this on state. #}
                 <span class="badge bg-secondary-lt me-1"
                       title="Hosted sessions stream live here only — unlike bridges, they are not attachable from claude.ai/code or the Claude mobile app">local live-view only</span>
-                <span class="badge me-1" :class="hostedStatusBadge(h.status)"><span class="status-dot" :class="hostedStatusDot(h.status)"></span><span class="text-capitalize" x-text="h.status"></span></span>
+                <span class="badge me-1" :class="hostedStatusBadge(h.status)"><span class="status-dot" :class="hostedStatusDot(h.status)" aria-hidden="true"></span><span class="text-capitalize" x-text="h.status"></span></span>
                 <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
                       title="Survived a daemon restart — Resume to recover or Kill to clean up">orphan</span>
                 <span class="fw-medium me-1" x-text="h.project"></span>
@@ -709,13 +709,16 @@
       <div class="toast-stack" role="log" aria-live="polite" aria-label="Notifications">
         <template x-for="t in toasts" :key="t.id">
           <!-- Errors get role="alert" (assertive) so a critical failure interrupts the
-               screen reader; success/info/warning stay role="none" and are announced
-               politely by the parent role="log" region above. -->
-          <div class="alert" :role="t.type === 'error' ? 'alert' : 'none'"
+               screen reader; success/info/warning carry no explicit role and are
+               announced politely by the parent role="log" region above. (A bare
+               role="none" would strip semantics from a region wrapping a focusable
+               control, so the non-error case omits the role entirely.) -->
+          <div class="alert" :role="t.type === 'error' ? 'alert' : null"
                :class="{'alert-success': t.type==='success', 'alert-danger': t.type==='error', 'alert-warning': t.type==='warning', 'alert-info': t.type==='info'}">
             <div class="d-flex">
               <div x-text="t.msg"></div>
-              <a href="#" class="btn-close ms-auto" @click.prevent="dismissToast(t.id)"></a>
+              <button type="button" class="btn-close ms-auto" aria-label="Dismiss notification"
+                      @click="dismissToast(t.id)"></button>
             </div>
           </div>
         </template>
