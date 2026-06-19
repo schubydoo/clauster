@@ -164,9 +164,10 @@ async def test_webhook_spawn_payload(runner_config):
 
 async def test_webhook_payload_hashes_session_id_never_leaks_raw(runner_config):
     # Item-8 (#408): a starter session id is bearer-equivalent (redaction strips it
-    # everywhere else), so the webhook egresses a hashed correlation token, never the
-    # raw session_<ULID>.
+    # everywhere else), so the webhook egresses an HMAC correlation token (keyed by the
+    # per-deployment secret), never the raw session_<ULID>.
     import hashlib
+    import hmac
 
     runner = _runner(runner_config)
     rec = _RecordingWebhooks()
@@ -177,10 +178,31 @@ async def test_webhook_payload_hashes_session_id_never_leaks_raw(runner_config):
     runner._emit_webhook("ready", inst)
     await asyncio.gather(*runner._notify_tasks)
     [(_event, payload)] = rec.calls
-    expected = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+    # HMAC keyed by the runner's session_ref secret — unverifiable without that key.
+    expected = hmac.new(
+        runner._session_ref_key(), sid.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:16]
     assert payload["session_ref"] == expected
+    # A bare SHA-256 of the id would be VERIFIABLE by anyone holding the plaintext;
+    # the HMAC must differ from it (proves the key is actually mixed in).
+    assert payload["session_ref"] != hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
     assert "session_id" not in payload  # the raw field is gone
     assert sid not in payload.values()  # and the raw value never appears anywhere
+
+
+def test_session_ref_key_fails_open_to_ephemeral_key(runner_config, monkeypatch):
+    # Item-8 (#408): a webhook is fire-and-forget — if the session secret can't be
+    # loaded (e.g. a misconfigured CLAUSTER_SESSION_SECRET), `_session_ref_key` must
+    # fall back to an ephemeral per-process key, never raise into the lifecycle.
+    runner = _runner(runner_config)
+
+    def _boom(_state_dir):
+        raise ValueError("CLAUSTER_SESSION_SECRET must be at least 32 bytes")
+
+    monkeypatch.setattr("clauster.runner.auth.load_or_create_secret", _boom)
+    key = runner._session_ref_key()
+    assert isinstance(key, bytes) and len(key) == 32  # ephemeral fallback, no raise
+    assert runner._session_ref_key() is key  # cached — loaded once, stable per process
 
 
 async def test_webhook_ready_fires_on_transition_only(runner_config):

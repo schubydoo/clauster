@@ -208,8 +208,13 @@ async def test_spawned_daemon_rejects_token(make_daemon, monkeypatch):
     assert "rejected our token" in (daemon.status()["error"] or "")
 
 
-async def test_empty_token_file_is_regenerated(make_daemon):
+async def test_empty_token_file_is_regenerated(make_daemon, monkeypatch):
     """An empty/blank persisted token is treated as absent and regenerated."""
+    # A seeded-blank file now hits the O_EXCL-loser wait-out-the-winner poll (it must
+    # confirm the blank isn't a winner mid-write before replacing); shrink the window
+    # so this test doesn't pay the full ~1s.
+    monkeypatch.setattr("clauster.claustrum_daemon._TOKEN_READ_ATTEMPTS", 3)
+    monkeypatch.setattr("clauster.claustrum_daemon._TOKEN_READ_DELAY", 0.0)
     daemon = make_daemon(token="")  # seed a blank token file
     await daemon.ensure()
     assert len((daemon.socket_path.parent / "token").read_text(encoding="utf-8")) == 64

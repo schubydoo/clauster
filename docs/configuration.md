@@ -327,10 +327,12 @@ ignored.
 
 Each POST body is `{"event": "<name>", "project": ..., "label": ..., "status": ...,
 "resume_mode": ..., "spawn_mode": ..., "session_ref": ...}`. `session_ref` is a
-stable, non-reversible hash (16 hex chars) of the bridge's starter session id —
-it lets a receiver correlate the lifecycle events of one session without egressing
-the raw `session_<ULID>`, which is bearer-equivalent and redacted elsewhere. It is
-`null` until the bridge reports a starter session.
+stable, non-reversible token (16 hex chars) derived from the bridge's starter
+session id via HMAC-SHA256 keyed by the deployment's session-signing secret — it
+lets a receiver correlate the lifecycle events of one session without egressing the
+raw `session_<ULID>`, which is bearer-equivalent and redacted elsewhere. Keying it
+with the secret means a receiver can't even verify a guessed session id against the
+token. It is `null` until the bridge reports a starter session.
 
 ## `claustrum` — hosted live-view channel (`ClaustrumConfig`)
 

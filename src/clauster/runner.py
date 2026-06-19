@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -26,7 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from . import bridge_log, inspector, metrics, pointers, procutil, redact
+from . import auth, bridge_log, inspector, metrics, pointers, procutil, redact
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
@@ -59,17 +61,21 @@ from .webhooks import WebhookEmitter
 _log = logging.getLogger("clauster.runner")
 
 
-def _hash_session_ref(session_id: str | None) -> str | None:
+def _hash_session_ref(session_id: str | None, secret: bytes) -> str | None:
     """Return a stable, non-reversible correlation token for a starter session id.
 
-    ``None`` in, ``None`` out. Otherwise a 16-hex-char (64-bit) SHA-256 prefix:
-    stable across an instance's lifecycle events so a webhook receiver can group
-    them, but it never carries the bearer-equivalent ``session_<ULID>`` itself
-    (which redaction strips from every other egress surface — see ``redact.py``).
+    ``None`` in, ``None`` out. Otherwise a 16-hex-char (64-bit) HMAC-SHA256 prefix
+    keyed by a per-deployment ``secret``: stable across an instance's lifecycle
+    events so a webhook receiver can group them, but it never carries the
+    bearer-equivalent ``session_<ULID>`` itself (which redaction strips from every
+    other egress surface — see ``redact.py``). Keying with the secret (rather than a
+    bare SHA-256) means a receiver can't even *verify* a guessed session id against
+    the token without the secret — matching how ``session_<ULID>`` is treated as a
+    bearer credential everywhere else.
     """
     if not session_id:
         return None
-    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    return hmac.new(secret, session_id.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
 
 class SpawnError(RuntimeError):
@@ -189,6 +195,11 @@ class SessionRunner:
         # Outbound lifecycle webhooks (#371). Fail-open and fire-and-forget, sharing the
         # GC-safety task set above; no-op unless enabled with a usable url.
         self._webhooks = WebhookEmitter(config.webhooks)
+        # Lazily-loaded per-deployment key for the webhook session_ref HMAC (#408).
+        # Loaded on first webhook emit, not at construction, so a bad
+        # CLAUSTER_SESSION_SECRET can't break runner construction or the bridge
+        # lifecycle (webhooks are fail-open by design).
+        self._session_ref_secret: bytes | None = None
 
     # ----- read API -------------------------------------------------------
 
@@ -1826,6 +1837,27 @@ class SessionRunner:
         self._notify_tasks.add(task)
         task.add_done_callback(self._notify_tasks.discard)
 
+    def _session_ref_key(self) -> bytes:
+        """Return the per-deployment HMAC key for ``session_ref``, loading it once.
+
+        Reuses the session-signing secret so the correlation token is unverifiable
+        without it. Fail-open: if the secret can't be loaded (e.g. a misconfigured
+        ``CLAUSTER_SESSION_SECRET``), fall back to a process-stable random key so the
+        webhook still emits a non-reversible token and the bridge lifecycle is never
+        affected — webhooks are best-effort by design.
+        """
+        if self._session_ref_secret is None:
+            try:
+                self._session_ref_secret = auth.load_or_create_secret(self._config.state_dir)
+            except Exception:
+                # Never let a secret-load error break a fire-and-forget webhook.
+                _log.warning(
+                    "webhook session_ref: session secret unavailable; using an "
+                    "ephemeral per-process key (correlation works within this run only)"
+                )
+                self._session_ref_secret = secrets.token_bytes(32)
+        return self._session_ref_secret
+
     def _emit_webhook(self, event: str, instance: RemoteControlInstance) -> None:
         """Fire a best-effort lifecycle webhook (off-loop; never blocks/raises, #371).
 
@@ -1848,8 +1880,9 @@ class SessionRunner:
             # webhook endpoint is the same leak that surface forbids, so we send a
             # hashed, non-reversible correlation token instead: a receiver can still
             # correlate the spawn/ready/stop/crash events of one session without ever
-            # holding the credential-equivalent value.
-            "session_ref": _hash_session_ref(instance.starter_session_id),
+            # holding the credential-equivalent value. Keyed with a per-deployment
+            # secret so it can't even be VERIFIED against a guessed session id.
+            "session_ref": _hash_session_ref(instance.starter_session_id, self._session_ref_key()),
         }
         task = asyncio.create_task(self._webhooks.aemit(event, payload))
         self._notify_tasks.add(task)

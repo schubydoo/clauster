@@ -103,7 +103,11 @@ class CloneJob:
                     sub.queue.get_nowait()  # drop the oldest to make room
                     sub.dropped += 1
                 except asyncio.QueueEmpty:  # pragma: no cover - full-then-empty race
-                    return
+                    # Queue drained out from under us — retry the put_nowait, which now
+                    # succeeds. `continue` (not `return`) so the terminal `done` frame
+                    # is never silently dropped (that would hang the watcher's read
+                    # loop, which exits only on `done`). Unreachable single-threaded.
+                    continue
 
     def progress_event(self) -> dict[str, Any]:
         """Return the current progress as a WS ``progress`` frame."""
