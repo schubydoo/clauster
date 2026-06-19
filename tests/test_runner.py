@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import subprocess
 import sys
 from typing import cast
@@ -24,6 +25,7 @@ from clauster.runner import (
     SessionRunner,
     UnknownProject,
 )
+from conftest import _raise_cancelled
 
 
 def _make_runner(runner_config) -> SessionRunner:
@@ -1262,11 +1264,7 @@ def test_read_sidecar_non_utf8_returns_none(tmp_path):
     assert SessionRunner._read_sidecar(sidecar) is None
 
 
-async def _raise_cancelled(_seconds):
-    raise asyncio.CancelledError
-
-
-async def test_poll_forever_continues_after_unexpected_error(runner_config, monkeypatch):
+async def test_poll_forever_continues_after_unexpected_error(runner_config, monkeypatch, caplog):
     # An unexpected error from poll_once is caught by the loop and never propagated, so
     # crash-detection/reconciliation survives a one-off failure; the loop reaches its
     # sleep (which we make exit the test). Mirrors the metrics loop's regression test.
@@ -1277,8 +1275,11 @@ async def test_poll_forever_continues_after_unexpected_error(runner_config, monk
 
     monkeypatch.setattr(runner, "poll_once", _boom)
     monkeypatch.setattr("clauster.runner.asyncio.sleep", _raise_cancelled)
-    with pytest.raises(asyncio.CancelledError):  # only the sleep's cancel escapes
-        await runner._poll_forever()
+    with caplog.at_level(logging.ERROR, logger="clauster.runner"):
+        with pytest.raises(asyncio.CancelledError):  # only the sleep's cancel escapes
+            await runner._poll_forever()
+    # The swallow path must stay observable — a refactor dropping the log is caught here.
+    assert any("poll_once failed; continuing" in r.message for r in caplog.records)
 
 
 async def test_poll_forever_propagates_cancel_from_poll(runner_config, monkeypatch):
