@@ -125,3 +125,24 @@ def test_write_restores_on_post_write_parse_failure(write_config, monkeypatch) -
     with pytest.raises(ValueError, match="simulated"):
         write_edits(path, {"usage.fx_rate": 5.0}, expected_hash=file_hash(path))
     assert path.read_text(encoding="utf-8") == original  # rolled back to the pre-write content
+
+
+def test_backup_inherits_source_mode_not_umask(write_config) -> None:
+    # A hardened (0600) config holds secret hashes; its `.bak` must inherit that mode,
+    # not widen to the process umask default (0644) and leak them to other local
+    # users (CFG-1). Force the wide umask so the prior `write_bytes` bug would manifest.
+    import os
+    import stat
+
+    path = write_config("usage:\n  fx_rate: 1.0\n")
+    os.chmod(path, 0o600)
+    old_umask = os.umask(0o022)
+    try:
+        write_edits(path, {"usage.fx_rate": 2.0}, expected_hash=file_hash(path))
+    finally:
+        os.umask(old_umask)
+
+    backups = list(path.parent.glob(path.name + ".bak-*"))
+    assert backups, "expected a backup file"
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600  # not the umask-wide 0o644
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600  # the rewritten config stays hardened
