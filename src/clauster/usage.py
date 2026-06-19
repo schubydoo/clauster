@@ -328,8 +328,15 @@ class _UsageCache:
         now = time.monotonic()
         with self._lock:
             entry = self._entries.get(key)
-            if entry is not None and now < entry[0] and entry[1] == stamp:
-                return copy.deepcopy(entry[2])
+            cached = (
+                entry[2] if entry is not None and now < entry[0] and entry[1] == stamp else None
+            )
+        if cached is not None:
+            # Deep-copy *outside* the lock: the stored rollup is never mutated (every
+            # caller gets its own copy), so holding the single shared lock across the
+            # copy would needlessly serialize the concurrent badge requests this cache
+            # exists to speed up.
+            return copy.deepcopy(cached)
         # Aggregate outside the lock — the per-line parse must not serialize
         # concurrent callers for *different* projects, and a duplicate parse on a
         # race is harmless. An OSError here propagates (matching the uncached path)
