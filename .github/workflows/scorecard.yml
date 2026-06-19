@@ -6,12 +6,13 @@ on:
     - cron: "18 7 * * 1"
   push:
     branches: [main]
-  # Re-score right after a release publishes. The push:main scan races ~18s
-  # ahead of release-please's publish, so it counts the prior release's signed
-  # assets; this trigger lets Signed-Releases see the new .sigstore.json +
-  # .intoto.jsonl as soon as they exist.
-  release:
-    types: [published]
+  # NOTE: deliberately NO `release: [published]` trigger. ossf/scorecard-action only
+  # runs on the default branch and hard-fails ("Only the default branch main is
+  # supported", .github#817) on a tag ref, so such a trigger only ever red-X'd every
+  # release without scoring anything. Signed-Releases is re-scored after a publish by
+  # the post-publish push to main from the packaging-bump PR merge (auto-merged, #480)
+  # plus the weekly cron above — any main-ref scan after publish reads the new signed
+  # assets via the releases API, so an immediate release-event scan was never needed.
 
 permissions:
   contents: read
