@@ -378,3 +378,74 @@ auth:
   password_hash: "$argon2id$v=19$..."   # from `clauster hash-password`
   cookie_secure: always                 # if no TLS-terminating proxy
 ```
+
+## In-app config editor
+
+The dashboard can edit `clauster.yml` directly, so you don't have to shell into
+the host for routine operational tweaks. The editor is backed by two auth-gated
+routes — `GET /api/config` (read the editable values + a content hash) and
+`PUT /api/config` (apply edits) — and is deliberately conservative: it edits a
+fixed allowlist, re-validates before writing, and never live-reloads.
+
+### What's editable — the Tier-A allowlist
+
+Only an explicit **Tier-A allowlist** of *operational* fields is editable from
+the browser. These are the day-to-day knobs that are safe to change at runtime:
+
+| Section | Editable fields |
+| --- | --- |
+| `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `resume_mode` |
+| `instance_defaults` | `spawn_mode`, `permission_mode`, `session_name_prefix`, `capacity`, `max_bridges` |
+| `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream` |
+| `reaper` | `ui_enabled` |
+| `usage` | `mode`, `currency`, `currency_symbol`, `fx_rate`, `token_total_includes_cache`, `show_cost` |
+| `metrics` | `enabled`, `normalize_cpu`, `show_disk`, `sample_interval_seconds`, `poll_seconds` |
+| `observability` | `prometheus_enabled` |
+| `notifications` | `enabled`, `notify_on_crash` |
+
+The allowlist is the source of truth in `src/clauster/config_editor.py`
+(`EDITABLE_FIELDS`); `GET /api/config` returns it so the UI only renders fields
+it can actually write.
+
+### Why everything else is excluded (the security boundary)
+
+The allowlist is a **structural** security boundary, not a UI hint. Anything that
+is a secret, a bind/exposure decision, an auth gate, a clone/supply-chain guard,
+or a structural setting is excluded — for example `auth.*` (passwords, tokens,
+the `enabled` master switch), `host`/`port`, `projects_root`, the `projects` map,
+`clone.*`, `webhooks.*`, and `claustrum.*`. Those stay file- or CLI-managed.
+
+The exclusion is enforced two ways:
+
+- **Never read back.** `GET /api/config` returns *only* the allowlisted values,
+  so a secret or bind value is never serialized to the browser in the first
+  place — redaction is structural, not a post-filter.
+- **Never written.** A `PUT` carrying any non-allowlisted key is rejected with a
+  `400` (it is never silently dropped), and the merged config is re-validated by
+  constructing the full `ClausterConfig` before anything touches disk — so an
+  edit that *would* open the dashboard (e.g. disabling auth on a non-loopback
+  bind) trips the same fail-closed auth validator that guards startup and is
+  refused with a `422`.
+
+To change an excluded field, edit `clauster.yml` on the host directly.
+
+### How a write is applied (backup, atomic write, lost-update guard)
+
+`PUT /api/config` is fail-closed and ordered so a bad edit never reaches disk:
+
+1. **Validate first.** A disallowed key (`400`) or a value that fails
+   re-validation (`422`) is rejected before any I/O.
+2. **Lost-update guard.** The `PUT` body must include the `hash` returned by the
+   `GET` it was based on. If the file changed on disk since then (an external
+   edit, or a concurrent save), the write is rejected with a `409` rather than
+   clobbering the newer content. The hash is compared against the exact bytes
+   read, so there is no time-of-check/time-of-use gap.
+3. **Backup + atomic replace.** The previous file is copied to a timestamped
+   `clauster.yml.bak-*` (the five most recent are kept) before the new content
+   is written to a unique same-directory temp file and `os.replace`d into place —
+   a reader never sees a half-written file. Edits are rendered onto a
+   comment-preserving round-trip, so your inline comments survive.
+
+The write does **not** live-reload: the running process keeps its startup config
+until it is restarted, and the `PUT` response sets `restart_required: true` to
+say so.
