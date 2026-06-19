@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal
+from xml.sax.saxutils import escape as _xml_escape
 
 from . import claude_cli, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
@@ -567,6 +568,19 @@ def default_service_path(kind: str) -> Path:
     raise ValueError(f"unknown service kind {kind!r}; expected one of {_SERVICE_KINDS}")
 
 
+def _bat_quote_safe(value: str) -> str:
+    """Return ``value`` for embedding in a ``"..."`` batch token, or raise on a quote.
+
+    A ``"`` is not a legal Windows path character, so its presence in a
+    python/workdir/config path is a sign of malformed input rather than a path we
+    should try to escape. Reject it loudly so a stray quote can never break out of
+    the surrounding ``"%s"`` and inject extra batch tokens.
+    """
+    if '"' in value:
+        raise ValueError(f"value contains an illegal double-quote for a batch path: {value!r}")
+    return value
+
+
 def render_service_unit(
     kind: str,
     *,
@@ -609,7 +623,15 @@ def render_service_unit(
         )
 
     if kind == "launchd":
-        arg_xml = "\n".join(f"      <string>{a}</string>" for a in [python, *cmd_args])
+        # Escape every operator-supplied path before it lands inside an XML
+        # <string>: an unescaped & or < in a python/config/workdir path would
+        # produce a malformed (or injected) plist. xml.sax.saxutils.escape covers
+        # & < > — the full set that is significant in element text.
+        arg_xml = "\n".join(
+            f"      <string>{_xml_escape(a)}</string>" for a in [python, *cmd_args]
+        )
+        wd_xml = _xml_escape(wd)
+        cfg_xml = _xml_escape(cfg)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -621,22 +643,28 @@ def render_service_unit(
             f"    <array>\n{arg_xml}\n    </array>\n"
             "    <key>RunAtLoad</key><true/>\n"
             "    <key>KeepAlive</key><true/>\n"
-            f"    <key>WorkingDirectory</key><string>{wd}</string>\n"
+            f"    <key>WorkingDirectory</key><string>{wd_xml}</string>\n"
             "    <key>EnvironmentVariables</key>\n"
-            f"    <dict><key>CLAUSTER_CONFIG</key><string>{cfg}</string></dict>\n"
+            f"    <dict><key>CLAUSTER_CONFIG</key><string>{cfg_xml}</string></dict>\n"
             "  </dict>\n"
             "</plist>\n"
         )
 
     # windows — nssm script (native Python services are awkward; nssm is the pragmatic path)
-    quoted = " ".join(f'"{a}"' for a in cmd_args)
+    # A double-quote is illegal in a Windows path; rejecting it (rather than escaping)
+    # keeps a stray " from breaking out of the "%s" quoting and injecting extra batch
+    # tokens. _bat_quote_safe raises on a " so the operator fixes the path.
+    python_q = _bat_quote_safe(python)
+    wd_q = _bat_quote_safe(wd)
+    cfg_q = _bat_quote_safe(cfg)
+    quoted = " ".join(f'"{_bat_quote_safe(a)}"' for a in cmd_args)
     return (
         "@echo off\n"
         "REM Install Clauster as a Windows service via nssm (https://nssm.cc).\n"
         "REM Run this script from an elevated prompt with nssm on PATH.\n"
-        f'nssm install Clauster "{python}" {quoted}\n'
-        f'nssm set Clauster AppDirectory "{wd}"\n'
-        f"nssm set Clauster AppEnvironmentExtra CLAUSTER_CONFIG={cfg}\n"
+        f'nssm install Clauster "{python_q}" {quoted}\n'
+        f'nssm set Clauster AppDirectory "{wd_q}"\n'
+        f"nssm set Clauster AppEnvironmentExtra CLAUSTER_CONFIG={cfg_q}\n"
         "nssm set Clauster Start SERVICE_AUTO_START\n"
         "nssm start Clauster\n"
     )

@@ -208,11 +208,126 @@ async def test_spawned_daemon_rejects_token(make_daemon, monkeypatch):
     assert "rejected our token" in (daemon.status()["error"] or "")
 
 
-async def test_empty_token_file_is_regenerated(make_daemon):
+async def test_empty_token_file_is_regenerated(make_daemon, monkeypatch):
     """An empty/blank persisted token is treated as absent and regenerated."""
+    # A seeded-blank file now hits the O_EXCL-loser wait-out-the-winner poll (it must
+    # confirm the blank isn't a winner mid-write before replacing); shrink the window
+    # so this test doesn't pay the full ~1s.
+    monkeypatch.setattr("clauster.claustrum_daemon._TOKEN_READ_ATTEMPTS", 3)
+    monkeypatch.setattr("clauster.claustrum_daemon._TOKEN_READ_DELAY", 0.0)
     daemon = make_daemon(token="")  # seed a blank token file
     await daemon.ensure()
     assert len((daemon.socket_path.parent / "token").read_text(encoding="utf-8")) == 64
+
+
+def test_read_or_create_token_creates_with_o_excl(make_daemon):
+    """Item-4 (#408): absent token → a fresh 64-char hex created at 0600."""
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    token = daemon._read_or_create_token()
+    assert len(token) == 64
+    assert daemon._token_path.read_text(encoding="utf-8") == token
+    assert stat.S_IMODE(daemon._token_path.stat().st_mode) == 0o600
+
+
+def test_read_or_create_token_adopts_existing_never_clobbers(make_daemon):
+    """An already-persisted token is returned verbatim — never truncated/rewritten.
+
+    The old exists()-then-O_TRUNC path could clobber a live daemon's token on a
+    two-instance/restart race. The O_EXCL path reads the winner instead, so a
+    pre-existing token is adopted byte-for-byte.
+    """
+    pre = "a" * 64
+    daemon = make_daemon(token=pre)  # fixture pre-seeds <state>/claustrum/token
+    daemon._prepare_dir()
+    assert daemon._read_or_create_token() == pre
+    assert daemon._token_path.read_text(encoding="utf-8") == pre  # not rewritten
+
+
+def test_read_or_create_token_loser_adopts_race_winner(make_daemon):
+    """A start that loses the O_EXCL race adopts the winner's already-written token."""
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    winner = "b" * 64
+    daemon._token_path.write_text(winner, encoding="utf-8")  # winner already won + wrote
+    assert daemon._read_or_create_token() == winner  # adopted, not clobbered
+    assert daemon._token_path.read_text(encoding="utf-8") == winner
+
+
+def test_read_or_create_token_waits_out_midwrite_winner_never_clobbers(make_daemon, monkeypatch):
+    """The blank-window race: a winner created the file but hasn't written yet.
+
+    This is the bug the O_EXCL alone did not fix — a loser that reads the blank file
+    ONCE and immediately replaces it clobbers the winner's freshly-created token.
+    The fix waits out the winner (poll loop) so a momentarily-blank file is treated
+    as 'winner mid-write', and the loser adopts the winner's token once it lands.
+    """
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    winner = "c" * 64
+    # The winner created the file EMPTY (O_EXCL) but its os.write hasn't landed yet.
+    daemon._token_path.write_text("", encoding="utf-8")
+
+    real_read = daemon._read_existing_token
+    polls = {"n": 0}
+
+    def _winner_writes_after_two_polls() -> str | None:
+        # First two reads still see the blank mid-write file; on the third the winner's
+        # bytes have landed. A single-read-then-replace implementation would have
+        # clobbered after read #1 — this asserts we wait and adopt instead.
+        polls["n"] += 1
+        if polls["n"] >= 3:
+            daemon._token_path.write_text(winner, encoding="utf-8")
+        return real_read()
+
+    monkeypatch.setattr(daemon, "_read_existing_token", _winner_writes_after_two_polls)
+    assert daemon._read_or_create_token() == winner  # adopted the winner, never replaced
+    assert daemon._token_path.read_text(encoding="utf-8") == winner
+
+
+def test_read_or_create_token_replaces_truly_abandoned_blank(make_daemon, monkeypatch):
+    """A file that stays blank for the whole wait is abandoned → atomically replaced."""
+    # Shrink the wait so the test doesn't sleep ~1s.
+    monkeypatch.setattr("clauster.claustrum_daemon._TOKEN_READ_ATTEMPTS", 3)
+    monkeypatch.setattr("clauster.claustrum_daemon._TOKEN_READ_DELAY", 0.0)
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    daemon._token_path.write_text("", encoding="utf-8")  # stale, never filled
+    token = daemon._read_or_create_token()
+    assert len(token) == 64  # a fresh token was generated
+    assert daemon._token_path.read_text(encoding="utf-8") == token  # replaced in place
+    assert stat.S_IMODE(daemon._token_path.stat().st_mode) == 0o600
+    # No orphaned temp file left behind.
+    assert not list(daemon._token_path.parent.glob("token.*.tmp"))
+
+
+def test_replace_blank_token_adopts_last_moment_winner(make_daemon):
+    """`_replace_blank_token` re-checks for a winner that landed during the wait."""
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    winner = "d" * 64
+    daemon._token_path.write_text(winner, encoding="utf-8")  # a winner already there
+    # Called directly: the last-moment re-read finds the winner and adopts it rather
+    # than overwriting, never touching a temp file.
+    assert daemon._replace_blank_token("e" * 64) == winner
+    assert daemon._token_path.read_text(encoding="utf-8") == winner
+    assert not list(daemon._token_path.parent.glob("token.*.tmp"))
+
+
+def test_replace_blank_token_cleans_up_temp_on_replace_failure(make_daemon, monkeypatch):
+    """A failure during the temp-write/replace must not orphan a `.tmp` file."""
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    daemon._token_path.write_text("", encoding="utf-8")  # blank → no winner to adopt
+
+    def _boom(*_a, **_k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("clauster.claustrum_daemon.os.replace", _boom)
+    with pytest.raises(OSError, match="replace failed"):
+        daemon._replace_blank_token("f" * 64)
+    # The orphaned temp file was cleaned up despite the failure.
+    assert not list(daemon._token_path.parent.glob("token.*.tmp"))
 
 
 async def test_custom_version_surfaced(make_daemon, monkeypatch):

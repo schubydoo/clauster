@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from clauster.clone_jobs import CloneJobManager, parse_progress
+from clauster.clone_jobs import _CLONE_QUEUE_MAXSIZE, CloneJobManager, parse_progress
 
 
 @pytest.mark.parametrize(
@@ -76,6 +76,53 @@ def test_broadcast_reaches_every_subscriber():
         with pytest.raises(asyncio.TimeoutError):  # q1 receives nothing within the window
             await asyncio.wait_for(q1.get(), timeout=0.1)
         assert (await asyncio.wait_for(q2.get(), timeout=1))["percent"] == 99
+
+    asyncio.run(_run())
+
+
+def test_progress_overflow_drops_and_marks_then_stays_bounded():
+    # Item-7 (#408): a wedged consumer must not let broadcast grow a queue without
+    # limit. Once the bounded queue fills, further progress frames are dropped; when the
+    # consumer next makes room, the watcher gets an honest "overflow" marker carrying
+    # the dropped count.
+    async def _run():
+        mgr = CloneJobManager()
+        job = mgr.create("proj")
+        queue = job.subscribe()
+        # Flood far past the bound WITHOUT draining → the queue caps, excess dropped.
+        for i in range(_CLONE_QUEUE_MAXSIZE + 50):
+            mgr.push_progress(job, f"Receiving objects: {i % 100}%")
+        assert queue.qsize() <= _CLONE_QUEUE_MAXSIZE  # never unbounded — the bound held
+        # The consumer finally reads one frame (making room), then a new frame arrives:
+        # offer() prepends the overflow marker honestly reporting how many were lost.
+        queue.get_nowait()  # free one slot
+        mgr.push_progress(job, "Receiving objects: 100%")
+        drained = []
+        while not queue.empty():
+            drained.append(queue.get_nowait())
+        overflow = [e for e in drained if e.get("type") == "overflow"]
+        assert overflow, "no overflow marker emitted after dropping frames"
+        assert overflow[0]["dropped"] >= 1
+
+    asyncio.run(_run())
+
+
+def test_terminal_done_force_delivered_even_when_queue_full():
+    # The consumer's read loop exits only on "done"; dropping it would hang the
+    # watcher forever. So even a full queue must receive the terminal frame (an old
+    # progress frame is evicted to make room).
+    async def _run():
+        mgr = CloneJobManager()
+        job = mgr.create("proj")
+        queue = job.subscribe()
+        for i in range(_CLONE_QUEUE_MAXSIZE + 10):  # fill + overflow, never drained
+            mgr.push_progress(job, f"Receiving objects: {i % 100}%")
+        mgr.finish(job)  # terminal frame must still land
+        # Scan everything the queue holds; a "done" frame MUST be present.
+        frames = []
+        while not queue.empty():
+            frames.append(queue.get_nowait())
+        assert any(f.get("type") == "done" for f in frames), "terminal frame was dropped"
 
     asyncio.run(_run())
 

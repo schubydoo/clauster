@@ -884,6 +884,32 @@ def test_metrics_token_grants_scrape_without_session(runner_config):
     assert "clauster_build_info" not in none.text
 
 
+def test_metrics_token_non_ascii_bearer_denied_not_500(runner_config):
+    # Item-1 (#408): a non-ASCII (>U+00FF) Bearer once raised TypeError in
+    # hmac.compare_digest(str, str) → a 500. Comparing on bytes makes it a clean
+    # denial (401/redirect), never a server error, and never reveals the payload.
+    from clauster.app import create_app
+    from clauster.runner import SessionRunner
+
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.observability.prometheus_enabled = True
+    config.observability.metrics_token = "scrape-me-please"  # noqa: S105 — test token
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+    # A bearer with a char above U+00FF (would crash str-vs-str compare_digest).
+    # httpx refuses to ASCII-encode a non-ASCII header, so send raw UTF-8 bytes —
+    # that is exactly what a hostile client would put on the wire.
+    resp = client.get(
+        "/metrics",
+        headers={"authorization": "Bearer tökéŁ€".encode()},
+        follow_redirects=False,
+    )
+    assert resp.status_code in {302, 303, 307, 401, 403}  # denied, NOT 500
+    assert "clauster_build_info" not in resp.text  # payload withheld
+
+
 def test_metrics_token_unset_keeps_endpoint_behind_guard(runner_config):
     from clauster.app import create_app
     from clauster.runner import SessionRunner
