@@ -57,7 +57,7 @@ dev = [
     # upper bound so a future wheel-gapped release can't silently float in via a lock
     # bump and re-break a leg — raise a ceiling deliberately when atheris re-widens.
     "atheris>=3.0.0,<3.2.0; sys_platform == 'linux' and python_version >= '3.12'",
-    "atheris>=3.0.0,<3.1.0; sys_platform == 'linux' and python_version < '3.12'",
+    "atheris>=3.1.0,<3.2.0; sys_platform == 'linux' and python_version < '3.12'",
     "pytest-cov>=5.0",
     "pytest-xdist>=3.6.1",
     "ruff>=0.8",
@@ -92,7 +92,7 @@ fuzz = [
     # Per-interpreter pin mirrors `dev` above (3.1.0 dropped cp311; 3.0.0 lacks cp314),
     # including the upper bounds that stop a future wheel-gapped release floating in.
     "atheris>=3.0.0,<3.2.0; sys_platform == 'linux' and python_version >= '3.12'",
-    "atheris>=3.0.0,<3.1.0; sys_platform == 'linux' and python_version < '3.12'",
+    "atheris>=3.1.0,<3.2.0; sys_platform == 'linux' and python_version < '3.12'",
 ]
 
 [project.scripts]
