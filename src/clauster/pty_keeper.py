@@ -293,8 +293,11 @@ def iter_keepers(log_dir: Path) -> list[KeeperInfo]:
                 state=state if isinstance(state, str) else None,
                 # A live PID alone isn't enough: confirm its cmdline is still our keeper,
                 # so a PID the keeper left behind and the OS recycled onto an unrelated
-                # process is never listed as a live orphan (#301 / RUNOPS-1).
-                alive=create_time is not None and procutil.is_keeper_process(keeper_pid),
+                # process is never listed as a live orphan (#301 / RUNOPS-1). The leading
+                # `keeper_pid is not None` also narrows the type for is_keeper_process.
+                alive=keeper_pid is not None
+                and create_time is not None
+                and procutil.is_keeper_process(keeper_pid),
                 keeper_create_time=create_time,
             )
         )
