@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.12.0](https://github.com/schubydoo/clauster/compare/v0.11.0...v0.12.0) (2026-06-19)
+
+
+### Features
+
+* **agents:** add a Resume action for ended background agents ([#336](https://github.com/schubydoo/clauster/issues/336)) ([#398](https://github.com/schubydoo/clauster/issues/398)) ([92e0735](https://github.com/schubydoo/clauster/commit/92e0735c6cb7d824ffafd9cfaabbd230ff36ba82))
+* **auth:** API-token (Bearer) auth primitive ([#360](https://github.com/schubydoo/clauster/issues/360)) ([#380](https://github.com/schubydoo/clauster/issues/380)) ([16e0819](https://github.com/schubydoo/clauster/commit/16e081979b22ebad7063467571e93d28f4f2388a))
+* **auth:** harden login lockout for the reverse-proxy case ([#358](https://github.com/schubydoo/clauster/issues/358)) ([#391](https://github.com/schubydoo/clauster/issues/391)) ([27ef771](https://github.com/schubydoo/clauster/commit/27ef771f9888764752fad872ebc78775357c8fa6))
+* **cli:** stop an orphaned pty keeper not on any card — clauster keepers ([#301](https://github.com/schubydoo/clauster/issues/301)) ([#397](https://github.com/schubydoo/clauster/issues/397)) ([a81181a](https://github.com/schubydoo/clauster/commit/a81181ada05d6dbb2982f28b540b15f26339dcee))
+* **config:** support CLAUSTER_*_FILE secret indirection ([#368](https://github.com/schubydoo/clauster/issues/368)) ([#385](https://github.com/schubydoo/clauster/issues/385)) ([613831d](https://github.com/schubydoo/clauster/commit/613831d6623f360215cc8aed75654a56373d6d81))
+* **config:** wire the session-name-prefix + capacity bridge knobs ([#294](https://github.com/schubydoo/clauster/issues/294)) ([521d523](https://github.com/schubydoo/clauster/commit/521d523485e9140cf0a329d8c699b6a723f42049))
+* **db:** persistence foundation — SQLAlchemy 2.0 + Alembic ([#362](https://github.com/schubydoo/clauster/issues/362)) ([#382](https://github.com/schubydoo/clauster/issues/382)) ([ba873f2](https://github.com/schubydoo/clauster/commit/ba873f2da74f0b3fc009d6c6cefe0e2ec5b3b998))
+* **fe1b:** per-project preflight readiness pill ([#335](https://github.com/schubydoo/clauster/issues/335)) ([0ddb104](https://github.com/schubydoo/clauster/commit/0ddb104ede3b96641d6c51e6e5c83ef20df20e05))
+* **fe3:** in-app config editor — safe-allowlist writes ([#299](https://github.com/schubydoo/clauster/issues/299)) ([#331](https://github.com/schubydoo/clauster/issues/331)) ([3fa5972](https://github.com/schubydoo/clauster/commit/3fa5972b04290509cd4284a877ff317cc2201947))
+* **fe4b:** adopt a standard external session into a managed bridge ([#330](https://github.com/schubydoo/clauster/issues/330)) ([#341](https://github.com/schubydoo/clauster/issues/341)) ([797c796](https://github.com/schubydoo/clauster/commit/797c796be2e37fef02bcbc74c3416b5a4f44e7d5))
+* **fe4:** rich external-session display ([#300](https://github.com/schubydoo/clauster/issues/300), display half) ([#329](https://github.com/schubydoo/clauster/issues/329)) ([c91ffda](https://github.com/schubydoo/clauster/commit/c91ffdab16ce85549272b074ee3d5309bf0651ee))
+* **fe:** gate the hosted launch mode on CLAUSTRUM_ENABLED ([#375](https://github.com/schubydoo/clauster/issues/375)) ([ea08db5](https://github.com/schubydoo/clauster/commit/ea08db55a5b59b64dcd3282f19d408308eac0c4d)), closes [#345](https://github.com/schubydoo/clauster/issues/345)
+* **install:** bump to 0.11.0 + complete Homebrew/Nix arches (macOS-x86_64, Linux-arm64) ([#289](https://github.com/schubydoo/clauster/issues/289)) ([2c5a610](https://github.com/schubydoo/clauster/commit/2c5a610f4eb82761764a389425a0e72c6cb64ddb))
+* **logging:** implement JSON logging gated on log_format ([#361](https://github.com/schubydoo/clauster/issues/361)) ([#393](https://github.com/schubydoo/clauster/issues/393)) ([fa6c962](https://github.com/schubydoo/clauster/commit/fa6c9620788f71fcf216b6c360bb33aab90dab2d))
+* **logs:** add retention/rotation for bridge debug logs ([#348](https://github.com/schubydoo/clauster/issues/348)) ([#387](https://github.com/schubydoo/clauster/issues/387)) ([664113e](https://github.com/schubydoo/clauster/commit/664113e8314949aed92cfa8eb8b6a3602eb98b84))
+* **metrics:** enrich /metrics + add a scrape token ([#352](https://github.com/schubydoo/clauster/issues/352)) ([#389](https://github.com/schubydoo/clauster/issues/389)) ([0d32ec7](https://github.com/schubydoo/clauster/commit/0d32ec771e967540a99edf827111149bb3346f18))
+* **security:** add HTTP security-headers middleware ([#439](https://github.com/schubydoo/clauster/issues/439)) ([7e89975](https://github.com/schubydoo/clauster/commit/7e89975bc576b3d2616f573b555d9fdf5d7c7a3e))
+* **ui:** surface cloud-visible (bridge) vs local-only (hosted) channel ([#343](https://github.com/schubydoo/clauster/issues/343)) ([#396](https://github.com/schubydoo/clauster/issues/396)) ([33e4180](https://github.com/schubydoo/clauster/commit/33e418054812c573851ce722426f795fb84bf218))
+* **webhooks:** outbound lifecycle webhooks — the first extension seam ([#371](https://github.com/schubydoo/clauster/issues/371)) ([#399](https://github.com/schubydoo/clauster/issues/399)) ([f773bc2](https://github.com/schubydoo/clauster/commit/f773bc2e33a34f7a5c76ebd8d0349119a56265b2))
+
+
+### Bug Fixes
+
+* **a11y:** announce live updates, honor reduced-motion, fix the Active-filter dead-end ([#384](https://github.com/schubydoo/clauster/issues/384)) ([4ecb50e](https://github.com/schubydoo/clauster/commit/4ecb50ee0b89082417411198f6b393167977e461))
+* **a11y:** toast label/role, hosted status dot, resume single-flight ([#447](https://github.com/schubydoo/clauster/issues/447)) ([a153e08](https://github.com/schubydoo/clauster/commit/a153e08106cfbbeece3938f7f4eac3f42bb60fb5))
+* **auth:** evict empty LoginThrottle per-key entries (unbounded growth) ([#436](https://github.com/schubydoo/clauster/issues/436)) ([756ddac](https://github.com/schubydoo/clauster/commit/756ddac9e3db76f07a247d8294edc95e2aff48fe)), closes [#402](https://github.com/schubydoo/clauster/issues/402)
+* **cli:** gate keeper classification + kill on the keeper cmdline, not the PID alone ([#470](https://github.com/schubydoo/clauster/issues/470)) ([730f472](https://github.com/schubydoo/clauster/commit/730f472fc91a133d0d73d9fec478bb0f358d929a))
+* **deps:** pin atheris per-interpreter so the 3.11 CI leg keeps a wheel ([#464](https://github.com/schubydoo/clauster/issues/464)) ([16fb12e](https://github.com/schubydoo/clauster/commit/16fb12e83990fdbc58484718d3cf4e1c0cf09a92))
+* **hosted:** size the subscriber queue to hold a full replay snapshot ([#437](https://github.com/schubydoo/clauster/issues/437)) ([6d39af8](https://github.com/schubydoo/clauster/commit/6d39af8bc5fb8c1f32ff8258ffc2c232c1287cbc))
+* **repo-config:** correct settings baseline (homepage + has_projects) ([#325](https://github.com/schubydoo/clauster/issues/325)) ([b5e74e4](https://github.com/schubydoo/clauster/commit/b5e74e497764aa107daff5cfedce92406f086936))
+* **repo-config:** verify admin-only merge flags via a token-split drift check ([#328](https://github.com/schubydoo/clauster/issues/328)) ([e3b43c1](https://github.com/schubydoo/clauster/commit/e3b43c13be69adf1a997052f1ce18ea5967ed403))
+* **runner:** guard _persist() against the OSError its store contract promises ([#435](https://github.com/schubydoo/clauster/issues/435)) ([c902de9](https://github.com/schubydoo/clauster/commit/c902de9602f74ce22d561bbe1df1eccfbca38cee)), closes [#420](https://github.com/schubydoo/clauster/issues/420)
+* **security:** config backup inherits the source file mode, not the umask default ([#469](https://github.com/schubydoo/clauster/issues/469)) ([2a93f9c](https://github.com/schubydoo/clauster/commit/2a93f9c4a8291800cb52c9516992a14627bc3b52))
+* **security:** low-severity hardening batch ([#452](https://github.com/schubydoo/clauster/issues/452)) ([088d1a9](https://github.com/schubydoo/clauster/commit/088d1a9354cc2c952dec628c73dfac5a728e0cfc))
+* **security:** Referrer-Policy same-origin — native login/logout forms keep their Origin ([#465](https://github.com/schubydoo/clauster/issues/465)) ([acf6ad8](https://github.com/schubydoo/clauster/commit/acf6ad8248ca2200ba0732f38b8941ed73e09429))
+* **ui:** auto-reconnect the bridge-log live tail instead of stranding it ([#419](https://github.com/schubydoo/clauster/issues/419)) ([260873b](https://github.com/schubydoo/clauster/commit/260873b214b1a7f9bfeced3d5d6e3f88f10e35c4))
+* **ui:** cap openHosted live-view reconnect attempts to match the bridge-log tail ([#444](https://github.com/schubydoo/clauster/issues/444)) ([0f85224](https://github.com/schubydoo/clauster/commit/0f8522455cc40675186a3ce6b1f71e00cf238334))
+* **ui:** clarify permission modes, the connect-URL gap, and config-restart impact ([#457](https://github.com/schubydoo/clauster/issues/457)) ([a94c429](https://github.com/schubydoo/clauster/commit/a94c42918f99c0d888084ecb6d6a13e0efcbadfa))
+* **ui:** decouple the Recent zone from the live-session filter ([#451](https://github.com/schubydoo/clauster/issues/451)) ([a61789c](https://github.com/schubydoo/clauster/commit/a61789cda07562a72a1cb0d8e59a25f5ec23f789))
+* **ui:** label the detached-row action by liveness, not always "Stop" ([#332](https://github.com/schubydoo/clauster/issues/332)) ([7d09545](https://github.com/schubydoo/clauster/commit/7d09545b37ec95ef34152acd1a81b5477b704791))
+* **ui:** only label the Recent group "resumable" when it actually is ([#334](https://github.com/schubydoo/clauster/issues/334)) ([a1168ee](https://github.com/schubydoo/clauster/commit/a1168ee3976a35efed7f3dd8c0d159f5aeead2ce))
+* **ui:** reset busy-flag in finally across action handlers (401 wedge) ([33104ac](https://github.com/schubydoo/clauster/commit/33104aca00188f633948c78796a0467b6e792543)), closes [#401](https://github.com/schubydoo/clauster/issues/401)
+* **ui:** stop the hosted live-view dropping frames + repaint through the proxy ([#315](https://github.com/schubydoo/clauster/issues/315)) ([57deda2](https://github.com/schubydoo/clauster/commit/57deda2dcf2a411eafd41b10f0db9f67d5e1715b))
+* **ui:** surface a crashed bridge's error_detail on the card ([#321](https://github.com/schubydoo/clauster/issues/321)) ([a659bda](https://github.com/schubydoo/clauster/commit/a659bdae3349e5e75e708160f6827897e3b5d276))
+
+
+### Performance
+
+* cache project discovery + batch first-paint preflight ([#440](https://github.com/schubydoo/clauster/issues/440)) ([baa96e2](https://github.com/schubydoo/clauster/commit/baa96e24429e42b2bcc2828230489b8b31f25c70))
+* **metrics:** serve per-bridge metrics from a server-side cache ([#354](https://github.com/schubydoo/clauster/issues/354)) ([#390](https://github.com/schubydoo/clauster/issues/390)) ([00a2f5b](https://github.com/schubydoo/clauster/commit/00a2f5bb0e219e029a5a4b635e06394c2c920164))
+* **runner:** sample bridge metrics concurrently ([ef2dd9d](https://github.com/schubydoo/clauster/commit/ef2dd9d19bb250822d765bc3e1282c90818cdaee)), closes [#407](https://github.com/schubydoo/clauster/issues/407)
+* **ui:** batch live-metrics poll via /api/metrics ([#438](https://github.com/schubydoo/clauster/issues/438)) ([b2ec58c](https://github.com/schubydoo/clauster/commit/b2ec58cd9753b89bcdcd1a00cc0a65bfb2dcdb6f))
+* **usage:** cache transcript rollup keyed on transcript-dir stamp ([#455](https://github.com/schubydoo/clauster/issues/455)) ([2c7f30d](https://github.com/schubydoo/clauster/commit/2c7f30d07ebdde6a374aec91a6d636d71aaf41d0))
+* **web:** gzip responses + immutable cache for versioned static assets ([#353](https://github.com/schubydoo/clauster/issues/353)) ([#386](https://github.com/schubydoo/clauster/issues/386)) ([a514e1e](https://github.com/schubydoo/clauster/commit/a514e1eff1285b43a280bf7e86c57fa5ad9be76c))
+
 ## [0.11.0](https://github.com/schubydoo/clauster/compare/v0.10.0...v0.11.0) (2026-06-15)
 
 
