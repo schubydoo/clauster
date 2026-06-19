@@ -8,10 +8,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from clauster import procutil, pty_keeper
 from clauster.__main__ import main
 
 _DEAD_PID = 2_147_483_646  # far above any real pid → proc_create_time is None
+
+
+@pytest.fixture(autouse=True)
+def _bypass_keeper_cmdline_gate(monkeypatch):
+    """Treat any live PID as a keeper so these tests can stand in os.getpid() / a plain
+    sleeper for a real ``clauster.pty_keeper``. They exercise liveness / orphan / kill
+    logic; the cmdline gate itself is covered in test_keeper_cmdline_gate.py (RUNOPS-1)."""
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
 
 
 def _sidecar(log_dir: Path, name: str, *, keeper_pid: int, seq: int = 0, **fields) -> Path:

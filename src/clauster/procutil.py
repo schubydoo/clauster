@@ -26,6 +26,10 @@ import psutil
 _BRIDGE_CMDLINE = ("remote-control",)
 _BRIDGE_BINARY_HINT = "claude"
 
+# The `-m` module name identifying a PTY keeper process (it wraps a pty bridge as
+# `python -m clauster.pty_keeper --sidecar P -- <bridge argv>`).
+_KEEPER_MODULE = "clauster.pty_keeper"
+
 # A proc_start we measured ourselves (a float create_time) is the SAME
 # measurement as the live process's create_time, so the same process matches it
 # near-exactly — only a hair of float jitter is plausible. A reused PID, having
@@ -102,6 +106,18 @@ def is_hosted_cmdline(cmdline: list[str]) -> bool:
         return False
     joined = " ".join(cmdline)
     return _BRIDGE_BINARY_HINT in joined and "stream-json" in joined
+
+
+def is_keeper_cmdline(cmdline: list[str]) -> bool:
+    """Whether a command line is a ``python -m clauster.pty_keeper`` PTY keeper.
+
+    The keeper wraps a pty bridge (``python -m clauster.pty_keeper --sidecar P -- <argv>``),
+    so the module name is a standalone argv element. Confirming it before trusting or
+    killing a sidecar's ``keeper_pid`` keeps the keeper path under the same cmdline-gate
+    discipline as bridges (:func:`is_bridge_cmdline`) and hosted agents
+    (:func:`is_hosted_cmdline`) — a recycled/unrelated PID never passes (#301 / RUNOPS-1).
+    """
+    return bool(cmdline) and _KEEPER_MODULE in cmdline
 
 
 def proc_create_time(pid: int) -> float | None:
@@ -206,6 +222,24 @@ def kill_if_match(pid: int, proc_start: str | float | None) -> bool:
         return False
     force_kill_tree(pid)
     return True
+
+
+def is_keeper_process(pid: int) -> bool:
+    """Whether ``pid`` is a live, non-zombie ``clauster.pty_keeper`` process.
+
+    The cmdline gate for the keeper path: orphan classification
+    (:func:`clauster.pty_keeper.iter_keepers`) and the hard-kill
+    (:func:`clauster.pty_keeper.stop_keeper`) both require it, so a PID the original
+    keeper left behind and the OS recycled onto an unrelated process is never listed as
+    a live orphan nor SIGKILLed (#301 / RUNOPS-1). Fails closed on any psutil error.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return is_keeper_cmdline(proc.cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
 
 
 def _expected_epoch(proc_start: str | float | None) -> float | None:
