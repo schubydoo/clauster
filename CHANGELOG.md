@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/schubydoo/clauster/compare/v0.12.0...v0.12.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* **ui:** make toast notifications opaque instead of ~50% transparent ([#484](https://github.com/schubydoo/clauster/issues/484)) ([76f63af](https://github.com/schubydoo/clauster/commit/76f63af29671e48783584bf35b61a8564e2cd26b))
+
 ## [0.12.0](https://github.com/schubydoo/clauster/compare/v0.11.0...v0.12.0) (2026-06-19)
 
 
