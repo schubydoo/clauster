@@ -560,6 +560,39 @@ def test_service_windows():
     assert "nssm install Clauster" in unit
 
 
+def test_service_launchd_escapes_xml_special_chars():
+    # Item-5 (#408): a path with XML-significant chars (& < >) must be escaped so the
+    # plist stays well-formed (and can't be injected). Parsing both proves it's valid
+    # XML and lets us assert the escaped values round-trip back to the originals.
+    import xml.dom.minidom
+
+    unit = render_service_unit(
+        "launchd",
+        python="/opt/py & co/python3",
+        config_path="/etc/clauster/<weird>&.yml",
+        workdir="/srv/a&b<c>",
+    )
+    # The literal special chars never appear unescaped inside the rendered document.
+    assert "/opt/py & co/python3" not in unit  # the raw '&' was escaped
+    assert "&amp;" in unit and "&lt;" in unit and "&gt;" in unit
+    # Valid XML (would raise on a stray & / unescaped <); the escaped values
+    # round-trip back to the originals when parsed. Parsing our OWN rendered output,
+    # not untrusted data, so S318 (defusedxml) does not apply.
+    doc = xml.dom.minidom.parseString(unit)  # noqa: S318
+    strings = [n.firstChild.data for n in doc.getElementsByTagName("string") if n.firstChild]
+    assert "/opt/py & co/python3" in strings
+    assert "/srv/a&b<c>" in strings
+
+
+def test_service_windows_rejects_quote_in_path():
+    # Item-5 (#408): a double-quote is illegal in a Windows path; reject it rather
+    # than let it break out of the "%s" quoting and inject extra batch tokens.
+    with pytest.raises(ValueError, match="illegal double-quote"):
+        render_service_unit("windows", python='C:\\p"x\\python.exe')
+    with pytest.raises(ValueError, match="illegal double-quote"):
+        render_service_unit("windows", python="C:\\py\\python.exe", workdir='C:\\bad"dir')
+
+
 def test_service_unknown_kind():
     with pytest.raises(ValueError):
         render_service_unit("upstart")
