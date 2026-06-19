@@ -88,6 +88,22 @@ hash is required.
 When a trusted proxy terminates TLS and reports `X-Forwarded-Proto=https`,
 `cookie_secure: auto` correctly marks the session cookie `Secure`.
 
+## Scraping `/metrics` from behind the auth gate
+
+The optional Prometheus `/metrics` endpoint
+(`observability.prometheus_enabled`) sits **behind the same auth guard** as the
+rest of the dashboard, so on a non-loopback, authenticated bind a scraper can't
+reach it without credentials. Two ways through:
+
+- **Scrape over loopback** — Prometheus on the same host scrapes
+  `http://127.0.0.1:7621/metrics`, where no auth is enforced.
+- **Set a scrape token** — `observability.metrics_token` lets a scraper present
+  `Authorization: Bearer <token>` to reach `/metrics` (only that route) without a
+  browser session. This is the path for an off-host Prometheus.
+
+The token journey, the full metric list, and a `prometheus.yml` snippet are in
+[Operations → Metrics](operations.md#metrics).
+
 ## Docker
 
 The container binds `0.0.0.0` internally, so it **requires enforced auth to

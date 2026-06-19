@@ -9,6 +9,10 @@ projects_root: /srv/projects       # required, must exist and be readable
 host: 127.0.0.1                    # non-loopback requires auth (see below)
 port: 7621
 state_dir: ~/.clauster             # state, logs, pid files
+# database_url: null               # SQLAlchemy URL for the persistence DB. Unset =
+                                   # a SQLite file clauster.db under state_dir. Set a
+                                   # Postgres DSN (e.g. postgresql+psycopg://...) for a
+                                   # shared/multi-user deployment.
 root_path: ""                      # subpath when behind a reverse proxy
 log_format: text                   # text | json (json for Docker/Loki)
 # instance_name: prod              # optional label; retitles the process to
@@ -52,6 +56,13 @@ auth:
                                    # reverse_proxy auth to actually be enforced
   password_required: false
   password_hash: null              # argon2id; generate via `clauster hash-password`
+  # api_token_hash: null           # SHA-256 hash (from `clauster hash-token`) of an
+                                   # inbound API bearer token. Enables
+                                   # `Authorization: Bearer <token>` auth for
+                                   # headless/API clients; satisfies the enforced-auth
+                                   # requirement for a non-loopback bind. Store only the
+                                   # hash — the raw token is shown once. Also settable via
+                                   # CLAUSTER_AUTH_API_TOKEN_HASH_FILE.
   cookie_secure: auto              # auto | always | never
   session_max_age_seconds: 604800  # 7 days
   allowed_origins: []              # extra WS/CSRF origins (e.g. your proxy domain)
@@ -107,9 +118,15 @@ usage:
 #   poll_seconds: 4.0              # dashboard refresh cadence
 
 # Read-only Prometheus /metrics exposition (build info, bridge counts by status,
-# project count). Off by default; when enabled it stays BEHIND the auth guard.
+# project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by
+# default; when enabled it stays BEHIND the auth guard unless metrics_token is set.
 # observability:
 #   prometheus_enabled: false
+#   metrics_token: null            # optional bearer token: a scraper presents
+#                                  # `Authorization: Bearer <token>` to reach /metrics
+#                                  # without a browser session (compared in constant
+#                                  # time). Supply via
+#                                  # CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE.
 
 # Outbound bridge-lifecycle notifications via Apprise. Requires the optional
 # extra: pip install 'clauster[notify]'. Best-effort + fail-closed — a notify

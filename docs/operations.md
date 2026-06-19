@@ -86,18 +86,59 @@ observability:
 ```
 
 When disabled, `/metrics` returns `404`. When enabled, it stays **behind the
-auth guard** like every other route — a scraper on a guarded deploy must satisfy
-auth (e.g. a bearer-token / basic-auth scrape config, or scrape over loopback).
+auth guard** like every other route — so by default a scraper must satisfy the
+deployment's auth, or scrape over loopback where no auth is enforced.
 See [Configuration → `observability`](configuration.md#observability-read-only-metrics-endpoint-observabilityconfig).
 
-The endpoint exposes a handful of point-in-time gauges derived from live runner
-state:
+The endpoint exposes point-in-time gauges (and one counter) derived from live
+runner state:
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
 | `clauster_build_info{version="…"}` | gauge | Always `1`; carries the running version as a label. |
 | `clauster_bridges{status="…"}` | gauge | Number of managed bridges per lifecycle status (`starting`, `running`, `stopped`, `crashed`, `error`). |
 | `clauster_projects` | gauge | Number of discovered projects. |
+| `clauster_bridge_crashes_total{project="…"}` | counter | Per-project bridge crashes since process start. |
+| `clauster_bridge_cpu_percent{project="…"}` | gauge | Per-bridge process-tree CPU percent (only while the metrics sampler is enabled). |
+| `clauster_bridge_rss_bytes{project="…"}` | gauge | Per-bridge process-tree resident memory (sampler-gated, as above). |
+| `clauster_hosted_sessions` | gauge | Live hosted (claustrum) sessions — only when `claustrum.enabled`. |
+| `clauster_claustrum_up` | gauge | `1` if the claustrum daemon is connected, else `0` — only when `claustrum.enabled`. |
+
+### Scrape token — let Prometheus in without a session
+
+A scraper like Prometheus can't log in through the password form. On a guarded
+deployment, set a **scrape token** so the scraper can reach `/metrics` directly:
+
+```yaml
+observability:
+  prometheus_enabled: true
+  metrics_token: "<a long random secret>"   # or via *_FILE, below
+```
+
+The scraper then presents it as a bearer token:
+
+```sh
+curl -s -H "Authorization: Bearer <token>" https://clauster.example.com/metrics
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: clauster
+    scheme: https
+    authorization:
+      type: Bearer
+      credentials: "<token>"
+    static_configs:
+      - targets: ["clauster.example.com"]
+```
+
+When `metrics_token` is set, **a valid token *or* a normal session** grants
+access — and only to `/metrics`, nowhere else. The token is compared in constant
+time. To keep it out of the config file, point
+`CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` at a file holding the token. When
+`metrics_token` is unset, `/metrics` stays fully behind the auth guard (so a
+scraper needs a session, or you scrape over loopback).
 
 Example scrape (authenticated, loopback):
 
@@ -161,6 +202,66 @@ Behaviour and caveats:
   [Configuration → `notifications`](configuration.md#notifications-outbound-alerts-via-apprise-notificationsconfig)).
 
 See [Configuration → `notifications`](configuration.md#notifications-outbound-alerts-via-apprise-notificationsconfig)
+for the full field reference.
+
+## Lifecycle webhooks
+
+Where `notifications` push a human-readable message to a chat app, **webhooks**
+deliver a machine-readable JSON `POST` to your own HTTP endpoint on every bridge
+lifecycle transition — for wiring Clauster into an automation, a queue, or your
+own dashboard. They are **off by default** and need no extra dependency.
+
+```yaml
+webhooks:
+  enabled: true
+  urls:
+    - "https://example.com/hooks/clauster"
+  timeout_seconds: 10.0   # per-POST timeout (>0)
+  events:                 # which transitions to emit (an absent key = enabled)
+    spawn: true
+    ready: true
+    stop: true
+    crash: true
+```
+
+Each emitted event is a single JSON `POST` body of the shape:
+
+```json
+{
+  "event": "ready",
+  "project": "my-project",
+  "label": "my-project",
+  "status": "running",
+  "resume_mode": "standard",
+  "spawn_mode": "same-dir",
+  "session_id": "…"
+}
+```
+
+The `event` is one of `spawn` / `ready` / `stop` / `crash`. `status` is the
+bridge's lifecycle status at emit time; `session_id` is the starter session id
+(may be `null` before a session attaches).
+
+Behaviour and caveats:
+
+- **Fail-open and best-effort.** A slow endpoint is bounded by `timeout_seconds`
+  and any error is logged and swallowed — a broken webhook never blocks or breaks
+  a spawn/stop. POSTs fire off the event loop and are not awaited on a lifecycle
+  path.
+- **`http`/`https` URLs only.** A non-`http(s)` or malformed URL is rejected at
+  startup (that target is disabled, not a failed spawn). A `4xx`/`5xx` from your
+  endpoint is logged but otherwise ignored — there is **no retry**.
+- **Adopted / reattached bridges don't emit `spawn`/`ready`.** Events fire for
+  bridges Clauster itself spawns and manages; a bridge adopted from an external
+  session, or reattached after a Clauster restart, was not spawned here — so
+  `ready` means "every bridge Clauster brought to RUNNING", not "every RUNNING
+  bridge".
+- **Secrets in URLs are yours to protect.** A token embedded in a webhook URL is
+  redacted from logs, but keep it out of any shared/committed config. The URL
+  comes only from this config (an operator-trusted source), never from runtime or
+  user input.
+
+See [Configuration → `webhooks`](configuration.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)
 for the full field reference.
 
 ## Reading the bridge debug log

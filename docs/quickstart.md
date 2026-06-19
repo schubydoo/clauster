@@ -54,6 +54,17 @@ clauster run -c clauster.yml
 Open **<http://127.0.0.1:7621>**. You'll see one card per child directory of
 `projects_root` — including `my-first-project`.
 
+!!! tip "Empty dashboard or a page that won't load?"
+    - **"No projects yet"** means `projects_root` resolved to a directory with no
+      child folders — create or clone one from the dashboard, or drop a directory
+      under `projects_root` and refresh. Re-run `clauster doctor` (step 4) to
+      confirm `projects_root` points where you think.
+    - **The page won't load from another machine** because, by default, Clauster
+      binds loopback (`127.0.0.1`) and is reachable only from the host itself. A
+      non-loopback bind (a LAN IP, `0.0.0.0`) is **refused unless auth is
+      enforced** — that is deliberate. To go beyond loopback, add auth and follow
+      [Networking](networking.md).
+
 ## 6. Start your first bridge
 
 On the project card, click **Start**.

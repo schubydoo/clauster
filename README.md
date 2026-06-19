@@ -151,6 +151,19 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   and stops Claude Code *background* sessions (`claude --bg`), backed by
   `GET/POST/DELETE /api/agents`. It rides Claude Code's **agent-view research
   preview**, so it's experimental and may change with the upstream CLI.
+- **Outbound notifications & webhooks** — get told when a bridge changes state.
+  `notifications` push a human message (Slack/Discord/Telegram/email via Apprise,
+  the `notify` extra) on a **crash**; `webhooks` deliver a JSON `POST` to your own
+  endpoint on every `spawn` / `ready` / `stop` / `crash` transition (no extra
+  dependency, `http(s)` only). Both are off by default and fail-open/closed so a
+  broken endpoint never affects a bridge. See
+  [Operations → Crash alerts](https://schubydoo.github.io/clauster/operations/#crash-alerts)
+  and [Lifecycle webhooks](https://schubydoo.github.io/clauster/operations/#lifecycle-webhooks).
+- **Prometheus `/metrics`** — opt into a read-only text-format scrape endpoint
+  (`observability.prometheus_enabled`) exposing build info, bridge counts by
+  status, a crash counter, and per-bridge CPU/RSS. It stays behind the auth guard
+  unless you set `observability.metrics_token` for token-based scraping. See
+  [Operations → Metrics](https://schubydoo.github.io/clauster/operations/#metrics).
 - **Hosted live-view channel (opt-in, experimental)** — an alternate substrate to
   the remote-control bridge. With `claustrum.enabled: true`, Clauster connect-or-spawns
   a single `claustrum` daemon per deployment and runs `claude` headless over its
@@ -186,6 +199,11 @@ https://github.com/schubydoo/clauster && scoop install clauster`), or
 on Clauster itself, use the dev quick-start below.
 
 ## Quick start (dev)
+
+> **Just running Clauster, not hacking on it?** Follow the canonical
+> [Quickstart guide](https://schubydoo.github.io/clauster/quickstart/) — it takes you
+> from nothing to your first attachable bridge in a few minutes. The steps below are
+> the **from-source** path for working on Clauster itself.
 
 ```sh
 uv sync --extra dev
