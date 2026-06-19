@@ -279,10 +279,12 @@ searches `$CLAUSTER_CONFIG`, then `./clauster.yml`, then
 ```text
 clauster run                  # start the server (default)
 clauster hash-password        # generate an argon2id hash for auth.password_hash
+clauster hash-token           # mint an API token + hash for auth.api_token_hash
 clauster doctor               # diagnose config / environment
 clauster backup | restore | migrate
 clauster install-service {systemd|launchd|windows}
 clauster reap-environments    # reap ghost bridge environments (dry-run by default)
+clauster keepers              # list or stop orphaned pty keepers
 clauster usage <transcript>   # token + approximate cost for a session transcript
 ```
 
