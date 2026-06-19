@@ -10,7 +10,7 @@
   <a href="https://github.com/schubydoo/clauster/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/schubydoo/clauster/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/schubydoo/clauster/actions/workflows/lint.yml"><img alt="Lint" src="https://github.com/schubydoo/clauster/actions/workflows/lint.yml/badge.svg"></a>
   <a href="https://codecov.io/gh/schubydoo/clauster"><img alt="codecov" src="https://codecov.io/gh/schubydoo/clauster/graph/badge.svg"></a>
-  <a href="https://coderabbit.ai"><img alt="Reviewed by CodeRabbit" src="https://img.shields.io/badge/CodeRabbit-reviewed-FF570A?logo=coderabbit&logoColor=white"></a>
+  <a href="https://greptile.com"><img alt="Reviewed by Greptile" src="https://img.shields.io/badge/Greptile-reviewed-7C3AED"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/schubydoo/clauster"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/schubydoo/clauster/badge"></a>
   <a href="https://www.bestpractices.dev/projects/13081"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/13081/badge"></a>
 </p>
@@ -102,6 +102,13 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   disk, redacted over the wire); `logs.redact_session_url` redacts on disk too.
 - **CLAUDE.md editor** — view/edit a project's `CLAUDE.md` from the dashboard
   (size-capped, lost-update-guarded, trust-gated, audit-logged).
+- **Config editor** — edit an allowlist of *operational* `clauster.yml` settings
+  from the dashboard (`GET`/`PUT /api/config`). Only a Tier-A allowlist is
+  exposed — auth, bind, secret, and structural fields are never editable or even
+  read back to the browser. Writes are lost-update-guarded (a content hash from
+  the read must still match on write), backed up, and applied atomically with
+  your comments preserved; the running process keeps its startup config until
+  restarted. See [docs/configuration.md](docs/configuration.md#in-app-config-editor).
 - **Per-project cost badge** — approximate USD + token totals rolled up from a
   project's session transcripts. Token counts are exact (read from the transcript
   `usage`); the dollar figure is a ballpark — a hand-maintained USD price table
