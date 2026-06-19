@@ -73,10 +73,14 @@ async def test_persist_tolerates_store_write_failure(runner_config, monkeypatch,
     assert any("could not persist" in r.message for r in caplog.records)
 
     # stop() persists intentional_stop=True BEFORE signalling — a save failure there
-    # must not abort the stop or drop the signal.
-    stopped = await runner.stop("alpha")
+    # must not abort the stop or drop the signal. Capture in a fresh block so the
+    # stop-path warning is asserted independently of the spawn-path one.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        stopped = await runner.stop("alpha")
     assert stopped.status is InstanceStatus.STOPPED
     assert stopped.intentional_stop is True
+    assert any("could not persist" in r.message for r in caplog.records)
 
 
 def _db_load(state_dir):
