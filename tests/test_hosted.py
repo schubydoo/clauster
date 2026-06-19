@@ -841,6 +841,40 @@ def test_subscriber_overflow_inserts_gap_marker():
     assert sub.dropped == 0
 
 
+async def test_subscribe_replay_keeps_newest_when_ring_exceeds_queue(fake_claustrum):
+    # Issue #422, the real scenario: a first-view reconnect (after=0) on a session that
+    # produced MORE events than the ring holds. The replay snapshot is a leading "gap"
+    # marker (for the evicted prefix) plus every retained event; _Subscriber.offer drops
+    # the NEW event on a full queue, so a queue smaller than the snapshot keeps the OLDEST
+    # and drops the freshest. The queue is sized to hold the whole snapshot (gap + full
+    # ring), so every retained event — the newest included — survives. With queue < ring
+    # (and even queue == ring, because the gap marker takes a slot) the newest was dropped.
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN, ring_size=4, queue_maxsize=2)
+        await session.start()
+        warm = session.subscribe()
+        for i in range(6):  # 6 > ring_size(4): the oldest events are evicted from the ring
+            await fake.emit(_PID, "stdout", (json.dumps({"type": "user", "n": i}) + "\n").encode())
+            await _drain_until(warm, "frame")  # drain as we emit so warm never overflows
+        retained = [e["event_seq"] for e in session._ring if e.get("type") == "frame"]
+
+        late = session.subscribe(after_seq=0)  # first-view replay of the whole ring
+        saw_gap = False
+        replay: list[int] = []
+        while not late.empty():
+            event = late.get_nowait()
+            if event.get("type") == "gap":
+                saw_gap = True
+            elif event.get("type") == "frame":
+                replay.append(event["event_seq"])
+        await session.stop()
+
+    assert saw_gap  # the evicted prefix is honestly reported
+    assert replay == retained  # every retained frame replayed — the newest NOT dropped
+    assert replay[-1] == retained[-1]  # explicitly: the freshest retained event survives
+
+
 # -- HostedManager ---------------------------------------------------------
 
 

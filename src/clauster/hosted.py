@@ -81,10 +81,12 @@ _STREAM_JSON_ARGS: tuple[str, ...] = (
 # we never auto-respond to a tool-permission request (fail closed).
 _AUTO_ACK_SUBTYPES: frozenset[str] = frozenset({"initialize", "mcp_message"})
 
-# Browser-facing ring depth (parsed events, not raw bytes) and per-subscriber
-# queue depth before a slow viewer starts dropping with an honest marker.
+# Browser-facing ring depth (parsed events, not raw bytes). The per-subscriber queue
+# default is sized to hold a full ring snapshot — the ring plus the one leading "gap"
+# marker subscribe() may prepend — so a first-view reconnect never drops the newest
+# events. HostedSession.__init__ raises any smaller queue to this floor (#422).
 _DEFAULT_RING_SIZE = 4096
-_DEFAULT_QUEUE_MAXSIZE = 2048
+_DEFAULT_QUEUE_MAXSIZE = _DEFAULT_RING_SIZE + 1
 
 # How long stop() waits for a clean exit after SIGINT before escalating to KILL.
 _STOP_GRACE_SECONDS = 5.0
@@ -151,7 +153,14 @@ class HostedSession:
         self._client = client
         self._process_id = process_id
         self._claude_binary = claude_binary
-        self._queue_maxsize = queue_maxsize
+        # Size the subscriber queue to hold a full replay snapshot without dropping the
+        # newest events. subscribe() offers up to ring_size retained events into a fresh
+        # queue, optionally preceded by one "gap" marker for an evicted prefix; and
+        # _Subscriber.offer drops the NEW event when the queue is full. A queue smaller
+        # than the snapshot would keep the OLDEST events and drop the freshest on a
+        # first-view reconnect — the inverse of a live view. The +1 reserves room for the
+        # leading gap marker, so even a full, already-evicted ring replays in full. (#422)
+        self._queue_maxsize = max(queue_maxsize, ring_size + 1)
         self._stop_grace = stop_grace if stop_grace is not None else _STOP_GRACE_SECONDS
         self.status = "starting"
         self.exit_code: int | None = None
