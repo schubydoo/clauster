@@ -167,3 +167,18 @@ jobs:
           else
             echo "PR already open for $branch — pushed the updated manifests to it."
           fi
+
+          # Enable native auto-merge (squash) so the deterministic, CI-verified bump
+          # lands hands-free once required checks pass — no manual merge per release.
+          # The PR still satisfies the full main ruleset (required checks + thread
+          # resolution); auto-merge removes the human click, not the gate. NOTE: the
+          # ruleset requires 0 approvals and Greptile isn't a required check, so this
+          # PR class merges with no human/reviewer eyes — a deliberate carve-out from
+          # the usual "wait for the reviewer" rule, accepted because the bump is
+          # machine-generated from the release's signed SHA256SUMS (fails closed), not
+          # hand-authored logic. To require a human, set the ruleset to 1 approval.
+          # Best-effort: a disabled repo "Allow auto-merge" setting or an unresolved
+          # review thread just leaves the PR for a manual merge, so never fail the job.
+          if ! gh pr merge --repo "$GITHUB_REPOSITORY" --auto --squash "$branch"; then
+            echo "::warning::could not enable auto-merge on $branch — merge it manually"
+          fi
