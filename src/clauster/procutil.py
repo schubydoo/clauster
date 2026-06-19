@@ -111,13 +111,17 @@ def is_hosted_cmdline(cmdline: list[str]) -> bool:
 def is_keeper_cmdline(cmdline: list[str]) -> bool:
     """Whether a command line is a ``python -m clauster.pty_keeper`` PTY keeper.
 
-    The keeper wraps a pty bridge (``python -m clauster.pty_keeper --sidecar P -- <argv>``),
-    so the module name is a standalone argv element. Confirming it before trusting or
-    killing a sidecar's ``keeper_pid`` keeps the keeper path under the same cmdline-gate
-    discipline as bridges (:func:`is_bridge_cmdline`) and hosted agents
-    (:func:`is_hosted_cmdline`) — a recycled/unrelated PID never passes (#301 / RUNOPS-1).
+    The keeper is launched as ``<python> -m clauster.pty_keeper --sidecar P -- <argv>``.
+    As :func:`is_bridge_cmdline` / :func:`is_hosted_cmdline` gate on the ``claude`` binary
+    before the distinguishing token, this requires BOTH the python interpreter (argv[0])
+    AND the module passed via ``-m`` — so an unrelated process that merely carries the
+    string as a data argument (a ``grep``, a ``python -c`` script) is never mistaken for a
+    keeper and killed in the TOCTOU window (#301 / RUNOPS-1).
     """
-    return bool(cmdline) and _KEEPER_MODULE in cmdline
+    if not cmdline or _KEEPER_MODULE not in cmdline:
+        return False
+    idx = cmdline.index(_KEEPER_MODULE)
+    return "python" in cmdline[0].lower() and idx > 0 and cmdline[idx - 1] == "-m"
 
 
 def proc_create_time(pid: int) -> float | None:

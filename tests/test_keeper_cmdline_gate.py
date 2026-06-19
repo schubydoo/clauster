@@ -20,8 +20,16 @@ def _sidecar(log_dir: Path, name: str, *, keeper_pid: int) -> Path:
 
 def test_is_keeper_cmdline_matches_only_the_keeper_module():
     assert procutil.is_keeper_cmdline(["python", "-m", "clauster.pty_keeper", "--sidecar", "x"])
+    assert procutil.is_keeper_cmdline(["/usr/bin/python3.11", "-m", "clauster.pty_keeper"])
     assert not procutil.is_keeper_cmdline(["python", "-c", "import time; time.sleep(60)"])
     assert not procutil.is_keeper_cmdline(["claude", "remote-control", "proj"])
+    # Carries the module name but isn't a `python -m` keeper → must NOT match:
+    assert not procutil.is_keeper_cmdline(
+        ["grep", "clauster.pty_keeper", "/var/log/foo"]
+    )  # not python
+    assert not procutil.is_keeper_cmdline(
+        ["python", "-c", "clauster.pty_keeper"]
+    )  # data arg, not -m
     assert not procutil.is_keeper_cmdline([])
 
 
