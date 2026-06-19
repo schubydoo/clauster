@@ -610,6 +610,7 @@
       // conversation in a NEW job (new id), so we refresh to surface the new row (#336).
       async resumeAgent(j) {
         const label = j.name || j.id;
+        if (this.agentResuming[j.id]) return;  // a resume is already in flight — ignore the double-click
         this.agentResuming[j.id] = true;
         try {
           const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id) + "/resume", { method: "POST" });
