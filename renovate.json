@@ -56,6 +56,11 @@
   ],
   "packageRules": [
     {
+      "description": "atheris is pinned per-interpreter by hand in pyproject.toml — its wheel coverage shifts per release (3.1.0 dropped the cp311 wheel), so an auto-bump re-breaks the Python 3.11 CI leg (see #464 / #466). Renovate must not touch it.",
+      "matchPackageNames": ["atheris"],
+      "enabled": false
+    },
+    {
       "description": "Vendored front-end assets require a manual dist re-vendor — never auto-merge; label for review.",
       "matchFileNames": ["src/clauster/static/vendor/versions.txt"],
       "automerge": false,
