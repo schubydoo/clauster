@@ -53,6 +53,32 @@ def _db_save(state_dir, records):
         persistence.state_store().save(records)
 
 
+async def test_persist_tolerates_store_write_failure(runner_config, monkeypatch, caplog):
+    # The state store is non-authoritative: a save OSError (disk full, revoked perms)
+    # must not turn a successful spawn/stop into a 500. It degrades to a stale on-disk
+    # record with a logged warning, and _last_saved is left unadvanced so the next
+    # persist retries — mirroring hosted._persist's best-effort contract (#420).
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+
+    def _boom(_subset):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner._state, "save", _boom)
+
+    with caplog.at_level("WARNING"):
+        inst = await runner.spawn("alpha")  # spawn persists AFTER launch → save raises → swallowed
+    assert inst.status is InstanceStatus.RUNNING  # spawn still succeeded, not a 500
+    assert runner._last_saved is None  # not marked saved → next persist retries
+    assert any("could not persist" in r.message for r in caplog.records)
+
+    # stop() persists intentional_stop=True BEFORE signalling — a save failure there
+    # must not abort the stop or drop the signal.
+    stopped = await runner.stop("alpha")
+    assert stopped.status is InstanceStatus.STOPPED
+    assert stopped.intentional_stop is True
+
+
 def _db_load(state_dir):
     """Return the persisted StateStore records on ``state_dir``, then dispose."""
     with _db_persistence(state_dir) as persistence:

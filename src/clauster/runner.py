@@ -337,11 +337,22 @@ class SessionRunner:
         return {**self._persisted, **live}
 
     async def _persist(self) -> None:
-        """Write the persisted subset off-loop, but only when it actually changed."""
+        """Write the persisted subset off-loop, but only when it actually changed.
+
+        Best-effort: the state store is non-authoritative, so a write failure (disk
+        full, revoked perms — surfaced as :class:`OSError` per the store contract)
+        degrades to a stale on-disk record, never a failed spawn/stop or a 500 on the
+        dashboard poll. ``_last_saved``/``_persisted`` are left unchanged on failure so
+        the next persist retries (mirrors :meth:`HostedManager._persist`).
+        """
         subset = self._persist_subset()
         if subset == self._last_saved:
             return
-        await asyncio.to_thread(self._state.save, subset)
+        try:
+            await asyncio.to_thread(self._state.save, subset)
+        except OSError as exc:
+            _log.warning("could not persist bridge state: %s", exc)
+            return
         self._last_saved = subset
         # Keep the merge base in sync with what's on disk so the next overlay builds
         # on the latest saved state (live modes that changed this round are retained).
