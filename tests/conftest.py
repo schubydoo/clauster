@@ -107,6 +107,15 @@ def runner_config(tmp_path: Path, projects_root: Path):
     return config, claude_json
 
 
+async def _raise_cancelled(_seconds: float) -> None:
+    """Stand in for ``asyncio.sleep`` to break an otherwise-infinite ``*_forever`` loop.
+
+    Patched over ``clauster.runner.asyncio.sleep`` so a single loop iteration runs and
+    then the cancel escapes — shared by the poll-loop and metrics-loop resilience tests.
+    """
+    raise asyncio.CancelledError
+
+
 async def wait_until(
     predicate: Callable[[], Any],
     *,

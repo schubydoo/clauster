@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import subprocess
 import sys
 from typing import cast
@@ -24,6 +25,7 @@ from clauster.runner import (
     SessionRunner,
     UnknownProject,
 )
+from conftest import _raise_cancelled
 
 
 def _make_runner(runner_config) -> SessionRunner:
@@ -1260,3 +1262,34 @@ def test_read_sidecar_non_utf8_returns_none(tmp_path):
     sidecar = tmp_path / "x.keeper.json"
     sidecar.write_bytes(b"\xff\xfe\x00not utf-8")
     assert SessionRunner._read_sidecar(sidecar) is None
+
+
+async def test_poll_forever_continues_after_unexpected_error(runner_config, monkeypatch, caplog):
+    # An unexpected error from poll_once is caught by the loop and never propagated, so
+    # crash-detection/reconciliation survives a one-off failure; the loop reaches its
+    # sleep (which we make exit the test). Mirrors the metrics loop's regression test.
+    runner = _make_runner(runner_config)
+
+    async def _boom():
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(runner, "poll_once", _boom)
+    monkeypatch.setattr("clauster.runner.asyncio.sleep", _raise_cancelled)
+    with caplog.at_level(logging.ERROR, logger="clauster.runner"):
+        with pytest.raises(asyncio.CancelledError):  # only the sleep's cancel escapes
+            await runner._poll_forever()
+    # The swallow path must stay observable — a refactor dropping the log is caught here.
+    assert any("poll_once failed; continuing" in r.message for r in caplog.records)
+
+
+async def test_poll_forever_propagates_cancel_from_poll(runner_config, monkeypatch):
+    # A CancelledError from poll_once itself is re-raised (not swallowed by the loop),
+    # so task cancellation stops the poll loop promptly. Mirrors the metrics loop test.
+    runner = _make_runner(runner_config)
+
+    async def _cancel():
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(runner, "poll_once", _cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await runner._poll_forever()

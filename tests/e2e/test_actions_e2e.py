@@ -23,7 +23,6 @@ See ``tests/E2E_CHECKLIST.md`` for the full manual list.
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -39,6 +38,11 @@ pytestmark = pytest.mark.e2e
 # then the dashboard's poll reconciles state — give the transitions generous headroom
 # (matches test_bridge_e2e).
 _STATUS_TIMEOUT = 20_000
+
+# The toast auto-dismisses 4.5s after it renders (toast() -> setTimeout(…, 4500)); poll a
+# touch past that so "toast gone" is real, not a race, while still returning the instant it
+# clears (so this is faster than the old fixed 5s sleep on a fast machine).
+_TOAST_GONE_TIMEOUT = 10_000
 
 # The fake's PTY-session id and the bearer token it logs only with FAKE_CLAUDE_LOG_EXTRA
 # set (see tests/fixtures/fake_claude/claude) — these MUST NOT survive into the streamed
@@ -86,11 +90,17 @@ def test_failed_action_surfaces_inline_error(
     browser.expect_visible(error_block, timeout_ms=_STATUS_TIMEOUT)
     assert browser.get_text(error_block).strip(), "inline error block rendered empty"
 
-    # ...and it is genuinely persistent (not a toast that auto-dismisses): wait past the
-    # 4.5s toast lifetime (templates/_dashboard_script.html toast() -> setTimeout 4500ms)
-    # and confirm the inline block is STILL shown with its message — a transient toast
-    # would be gone by now, so this can't pass on a toast that merely happened to match.
-    time.sleep(5.0)
+    # ...and it is genuinely persistent (not a toast that auto-dismisses). The failed
+    # action also fires a transient error toast (_dashboard_script.html toast() ->
+    # setTimeout(dismissToast, 4500)). Rather than a fixed 5s sleep, wait for that toast
+    # to be gone from the stack, then confirm the inline block is STILL shown — a toast
+    # that merely happened to match would be cleared by now. We do NOT hard-require the
+    # toast to be visible first: the preceding steps can themselves take >4.5s on a slow
+    # runner, leaving the toast already auto-dismissed. `expect_hidden` degrades to an
+    # immediate pass in that case (and otherwise returns the instant the toast clears),
+    # so this de-flakes without weakening the persistence assertion that follows.
+    toast = ".toast-stack .alert-danger"
+    browser.expect_hidden(toast, timeout_ms=_TOAST_GONE_TIMEOUT)  # toast gone (or never lingered)
     browser.expect_visible(error_block)
     assert browser.get_text(error_block).strip(), "inline error block did not persist"
     # The failed action did not spawn a running bridge.
