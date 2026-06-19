@@ -151,7 +151,14 @@ class HostedSession:
         self._client = client
         self._process_id = process_id
         self._claude_binary = claude_binary
-        self._queue_maxsize = queue_maxsize
+        # Size the subscriber queue to hold a full replay snapshot without dropping the
+        # newest events. subscribe() offers up to ring_size retained events into a fresh
+        # queue, optionally preceded by one "gap" marker for an evicted prefix; and
+        # _Subscriber.offer drops the NEW event when the queue is full. A queue smaller
+        # than the snapshot would keep the OLDEST events and drop the freshest on a
+        # first-view reconnect — the inverse of a live view. The +1 reserves room for the
+        # leading gap marker, so even a full, already-evicted ring replays in full. (#422)
+        self._queue_maxsize = max(queue_maxsize, ring_size + 1)
         self._stop_grace = stop_grace if stop_grace is not None else _STOP_GRACE_SECONDS
         self.status = "starting"
         self.exit_code: int | None = None
