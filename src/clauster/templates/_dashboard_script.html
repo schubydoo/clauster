@@ -142,7 +142,11 @@
         }
         this.trustState = { ...INITIAL_TRUST };
         await this.refresh();
-        for (const n of PROJECT_NAMES) { this.loadUsage(n); this.loadPreflight(n); }
+        // Preflight in ONE batched request (server does a single discovery scan) so
+        // first paint doesn't fire N per-project /preflight calls (was O(N²) on the
+        // server). Usage stays per-project but rides the cached discovery cheaply.
+        this.loadAllPreflight();
+        for (const n of PROJECT_NAMES) { this.loadUsage(n); }
         this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
         setInterval(() => this.refresh(), 4000);
         // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
@@ -746,6 +750,19 @@
           if (res.ok) this.preflight[name] = await res.json();
           else delete this.preflight[name];  // drop a stale cache on a non-OK response
         } catch (e) { delete this.preflight[name]; /* advisory — pill hides on failure */ }
+      },
+      // First-paint batch: one request returns {name: {ok, checks}} for every
+      // project from a single server-side discovery scan (avoids N per-project calls).
+      async loadAllPreflight() {
+        try {
+          const res = await fetch(ROOT + "/api/projects/preflight");
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) return;  // advisory — leave per-project pills hidden
+          const all = await res.json();
+          for (const n of PROJECT_NAMES) {
+            if (all[n]) this.preflight[n] = all[n];
+          }
+        } catch (e) { /* advisory — pills hide on failure */ }
       },
       // WARN-status checks for a project (the ones worth flagging before a clean launch).
       preflightWarnings(name) {

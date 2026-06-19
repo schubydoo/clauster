@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 
 from clauster.discovery import (
+    _DiscoveryCache,
     discover_projects,
+    discover_projects_cached,
+    invalidate_discovery_cache,
     is_valid_project_name,
     trust_state_for,
 )
@@ -65,3 +69,69 @@ def test_load_trusted_paths_non_utf8_returns_empty(tmp_path):
     claude_json = tmp_path / ".claude.json"
     claude_json.write_bytes(b"\xff\xfe\x00not utf-8")
     assert _load_trusted_paths(claude_json) == set()
+
+
+# ----- discovery cache (TTL + mtime invalidation) -----------------------
+
+
+def test_cache_hit_skips_rescan(projects_root, tmp_path):
+    # Within the TTL with an unchanged root + claude.json, a second call returns the
+    # SAME cached list object (no rescan) — the whole point of the cache.
+    cache = _DiscoveryCache(ttl_seconds=60.0)
+    claude_json = tmp_path / ".claude.json"
+    first = cache.get(projects_root, claude_json)
+    second = cache.get(projects_root, claude_json)
+    assert second is first  # identity: served from cache, not rescanned
+
+
+def test_cache_ttl_expiry_rescans(projects_root, tmp_path):
+    # Once the TTL lapses, the next call rescans and returns a fresh list object.
+    cache = _DiscoveryCache(ttl_seconds=0.0)  # everything is immediately stale
+    claude_json = tmp_path / ".claude.json"
+    first = cache.get(projects_root, claude_json)
+    second = cache.get(projects_root, claude_json)
+    assert second is not first  # TTL=0 forces a rescan every call
+    assert [p.name for p in second] == [p.name for p in first]
+
+
+def test_cache_invalidates_on_new_project_dir(projects_root, tmp_path):
+    # Adding a project changes projects_root's mtime -> the cache must rescan and
+    # surface the new directory rather than serving the stale list.
+    cache = _DiscoveryCache(ttl_seconds=60.0)
+    claude_json = tmp_path / ".claude.json"
+    before = {p.name for p in cache.get(projects_root, claude_json)}
+    assert "delta" not in before
+    (projects_root / "delta").mkdir()
+    # Force a distinct directory mtime even on a coarse-resolution filesystem.
+    future = os.stat(projects_root).st_mtime + 10
+    os.utime(projects_root, (future, future))
+    after = {p.name for p in cache.get(projects_root, claude_json)}
+    assert "delta" in after
+
+
+def test_cache_invalidates_on_claude_json_trust_change(projects_root, tmp_path):
+    # A trust write touches ~/.claude.json -> its mtime moves -> the cache rescans and
+    # reflects the new trust state (a bridge/trust state must not be served stale).
+    cache = _DiscoveryCache(ttl_seconds=60.0)
+    claude_json = tmp_path / ".claude.json"
+    claude_json.write_text("{}")
+    before = cache.get(projects_root, claude_json)
+    assert all(p.trust_state is TrustState.UNTRUSTED for p in before)
+    claude_json.write_text(
+        json.dumps({"projects": {str(projects_root): {"hasTrustDialogAccepted": True}}})
+    )
+    future = os.stat(claude_json).st_mtime + 10
+    os.utime(claude_json, (future, future))
+    after = cache.get(projects_root, claude_json)
+    assert all(p.trust_state is TrustState.TRUSTED for p in after)
+
+
+def test_module_cache_invalidate_forces_rescan(projects_root, tmp_path):
+    # The module-level helper + explicit invalidation: invalidate_discovery_cache()
+    # drops the cache so the next discover_projects_cached() rescans.
+    claude_json = tmp_path / ".claude.json"
+    invalidate_discovery_cache()
+    first = discover_projects_cached(projects_root, claude_json)
+    assert discover_projects_cached(projects_root, claude_json) is first  # cached
+    invalidate_discovery_cache()
+    assert discover_projects_cached(projects_root, claude_json) is not first  # rescanned

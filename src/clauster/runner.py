@@ -37,7 +37,11 @@ from .config import (
     SpawnMode,
 )
 from .db.persistence import Persistence
-from .discovery import discover_projects, is_valid_project_name
+from .discovery import (
+    discover_projects_cached,
+    invalidate_discovery_cache,
+    is_valid_project_name,
+)
 from .models import (
     Attribution,
     BridgePointer,
@@ -361,8 +365,12 @@ class SessionRunner:
     # ----- discovery helpers ---------------------------------------------
 
     def _discovered(self) -> dict[str, Project]:
+        # Cached (short TTL + mtime-invalidated): this runs on every poll_once and
+        # many lookup paths. A trust write invalidates the cache explicitly
+        # (trust_project), so the post-write re-read still reflects the new state.
         return {
-            p.name: p for p in discover_projects(self._config.projects_root, self._claude_json)
+            p.name: p
+            for p in discover_projects_cached(self._config.projects_root, self._claude_json)
         }
 
     def _resolve_project(self, name: str) -> Project:
@@ -380,6 +388,10 @@ class SessionRunner:
         """Accept the workspace-trust dialog for ``name`` and return its refreshed state."""
         proj = self._resolve_project(name)
         await asyncio.to_thread(trust_directory, proj.path, self._claude_json)
+        # The trust write mutates ~/.claude.json; drop the discovery cache so the
+        # re-read below (and the next poll) reflect the new trust state immediately,
+        # not after a coarse-mtime/TTL delay.
+        invalidate_discovery_cache()
         # Re-read so the returned Project reflects the new trust state.
         return self._discovered().get(name, proj)
 
