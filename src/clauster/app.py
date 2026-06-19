@@ -774,7 +774,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # return only the static prefix so the path never leaks to the browser.
         try:
             rollup = await asyncio.to_thread(
-                usage.aggregate_project_usage,
+                usage.aggregate_project_usage_cached,
                 config.projects_root / name,
                 project_name=name,
             )
