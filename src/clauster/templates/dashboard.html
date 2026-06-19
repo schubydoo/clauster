@@ -455,6 +455,24 @@
                   <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleQr(i.project)"
                           x-show="sessionUrlOf(i.project)" x-cloak title="Show a QR code to open on your phone">
                     <svg class="ico" aria-hidden="true"><use href="#ic-qr"/></svg></button>
+                  {# Running but no connect URL yet: explain the gap instead of silently
+                     dropping the headline "open on your phone" affordance (#427 UX-02).
+                     pty flag-form bridges never get a URL — say so; otherwise it's a
+                     transient capture gap — show a spinner placeholder. The two chips are
+                     VISUAL only (aria-hidden); the screen-reader announcement comes from a
+                     persistent aria-live region below, because a live region toggled in via
+                     x-show (display:none→visible) is silently skipped by NVDA/VoiceOver. #}
+                  <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-hidden="true"
+                        x-show="connectUrlUnavailable(i.project)" x-cloak
+                        title="This bridge mode (pty true-resume) has no web link — open Logs to drive it.">
+                    No web link — use Logs</span>
+                  <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-hidden="true"
+                        x-show="connectUrlMissing(i.project) && !connectUrlUnavailable(i.project)" x-cloak
+                        title="The connect link is being captured from the bridge…">
+                    <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing connect link…</span>
+                  {# Persistent live region — always mounted, empty when idle — so the
+                     announcement fires on a content change, not a display toggle (#427 UX-02). #}
+                  <span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.project)"></span>
                   <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleLogs(i.project)">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-logs"/></svg><span
                       x-text="logs[i.project] && logs[i.project].open ? 'Hide logs' : 'Logs'">Logs</span></button>
@@ -770,7 +788,19 @@
             </p>
             <div class="text-secondary" x-show="configEditor.loading" x-cloak>Loading…</div>
             <div class="alert alert-danger py-2" x-show="configEditor.error" x-cloak x-text="configEditor.error"></div>
-            <div class="alert alert-success py-2" data-test="cfg-saved" x-show="configEditor.saved" x-cloak>Saved — restart Clauster to apply.</div>
+            <div class="alert alert-success py-2" data-test="cfg-saved" x-show="configEditor.saved" x-cloak>
+              <div>Saved — restart Clauster to apply.
+                <a href="https://github.com/schubydoo/clauster#running" target="_blank" rel="noopener noreferrer"
+                   class="alert-link">How do I restart?</a></div>
+              {# A restart reaps the cgroup and kills live pty bridges + browser sessions —
+                 mirror the CLAUDE.md editor's live-session caveat so a save-then-restart
+                 doesn't silently end running work (#427 UX-03). #}
+              <div class="mt-1 fw-medium" data-test="cfg-restart-warn"
+                   x-show="restartImpactCount() > 0" x-cloak>
+                ⚠ <span x-text="restartImpactCount()"></span>
+                <span x-text="restartImpactCount() === 1 ? 'session' : 'sessions'">session</span>
+                running — a restart will end <span x-text="restartImpactCount() === 1 ? 'it' : 'them'">them</span>.</div>
+            </div>
 
             <!-- Filter + section jump-nav (sticky) -->
             <div class="cfg-nav" x-show="!configEditor.loading" x-cloak>
