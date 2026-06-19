@@ -56,7 +56,7 @@
   ],
   "packageRules": [
     {
-      "description": "atheris is pinned per-interpreter by hand in pyproject.toml — its wheel coverage shifts per release (3.1.0 dropped the cp311 wheel), so an auto-bump re-breaks the Python 3.11 CI leg (see #464 / #466). Renovate must not touch it.",
+      "description": "atheris is pinned per-interpreter by hand in pyproject.toml — its wheel coverage shifts per release (3.1.0 dropped the cp311 wheel), so an auto-bump re-breaks the Python 3.11 CI leg (see #464 / #466). Renovate must not touch it. Remove this rule once Python 3.11 is dropped from the support matrix.",
       "matchPackageNames": ["atheris"],
       "enabled": false
     },
