@@ -126,7 +126,13 @@ class _DiscoveryCache:
         self._entries: dict[tuple[str, str], tuple[float, float, float, list[Project]]] = {}
 
     def get(self, projects_root: Path, claude_json: Path) -> list[Project]:
-        """Return cached projects when fresh, else rescan, cache, and return."""
+        """Return cached projects when fresh, else rescan, cache, and return.
+
+        Hands back a fresh list of shallow ``Project`` copies on every call, so a
+        caller that mutates a returned project (e.g. the app layer stamping
+        ``allow_bypass_permissions``) never writes into the cached objects — the
+        cache stays a pure snapshot of the filesystem scan.
+        """
         key = (str(projects_root), str(claude_json))
         root_mtime = _path_mtime(projects_root)
         json_mtime = _path_mtime(claude_json)
@@ -139,13 +145,13 @@ class _DiscoveryCache:
                 and entry[1] == root_mtime
                 and entry[2] == json_mtime
             ):
-                return entry[3]
+                return [p.model_copy() for p in entry[3]]
         # Scan outside the lock — the fs work must not serialize concurrent callers
         # for *different* roots, and a duplicate scan on a race is harmless.
         projects = discover_projects(projects_root, claude_json)
         with self._lock:
             self._entries[key] = (now + self._ttl, root_mtime, json_mtime, projects)
-        return projects
+        return [p.model_copy() for p in projects]
 
     def clear(self) -> None:
         """Drop all cached entries (used by tests and after a mutating trust write)."""

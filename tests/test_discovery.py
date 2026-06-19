@@ -74,18 +74,43 @@ def test_load_trusted_paths_non_utf8_returns_empty(tmp_path):
 # ----- discovery cache (TTL + mtime invalidation) -----------------------
 
 
-def test_cache_hit_skips_rescan(projects_root, tmp_path):
-    # Within the TTL with an unchanged root + claude.json, a second call returns the
-    # SAME cached list object (no rescan) — the whole point of the cache.
+def test_cache_hit_skips_rescan(projects_root, tmp_path, monkeypatch):
+    # Within the TTL with an unchanged root + claude.json, a second call is served from
+    # the cache and does NOT re-run the underlying filesystem scan — the point of the cache.
+    import clauster.discovery as disc
+
+    calls = {"n": 0}
+    real_scan = disc.discover_projects
+
+    def _counting_scan(*a, **k):
+        calls["n"] += 1
+        return real_scan(*a, **k)
+
+    monkeypatch.setattr(disc, "discover_projects", _counting_scan)
     cache = _DiscoveryCache(ttl_seconds=60.0)
     claude_json = tmp_path / ".claude.json"
     first = cache.get(projects_root, claude_json)
     second = cache.get(projects_root, claude_json)
-    assert second is first  # identity: served from cache, not rescanned
+    assert calls["n"] == 1  # second call hit the cache — no rescan
+    assert [p.name for p in second] == [p.name for p in first]
+
+
+def test_cache_returns_copies_so_caller_mutation_never_reaches_cache(projects_root, tmp_path):
+    # The cache must hand back COPIES: an app-layer mutation on a returned Project
+    # (e.g. stamping allow_bypass_permissions) must not leak into the cached snapshot,
+    # so a later reader still sees the pure-filesystem model default.
+    cache = _DiscoveryCache(ttl_seconds=60.0)
+    claude_json = tmp_path / ".claude.json"
+    first = cache.get(projects_root, claude_json)
+    assert first[0].allow_bypass_permissions is False  # model default
+    first[0].allow_bypass_permissions = True  # caller mutates its own copy
+    second = cache.get(projects_root, claude_json)  # same cache entry (TTL fresh)
+    assert second[0] is not first[0]  # a fresh copy, not the mutated object
+    assert second[0].allow_bypass_permissions is False  # cache stayed pristine
 
 
 def test_cache_ttl_expiry_rescans(projects_root, tmp_path):
-    # Once the TTL lapses, the next call rescans and returns a fresh list object.
+    # Once the TTL lapses, the next call rescans and returns a fresh, equal list.
     cache = _DiscoveryCache(ttl_seconds=0.0)  # everything is immediately stale
     claude_json = tmp_path / ".claude.json"
     first = cache.get(projects_root, claude_json)
@@ -126,12 +151,24 @@ def test_cache_invalidates_on_claude_json_trust_change(projects_root, tmp_path):
     assert all(p.trust_state is TrustState.TRUSTED for p in after)
 
 
-def test_module_cache_invalidate_forces_rescan(projects_root, tmp_path):
-    # The module-level helper + explicit invalidation: invalidate_discovery_cache()
-    # drops the cache so the next discover_projects_cached() rescans.
+def test_module_cache_invalidate_forces_rescan(projects_root, tmp_path, monkeypatch):
+    # The module-level helper + explicit invalidation: a repeat call hits the cache
+    # (no rescan), and invalidate_discovery_cache() drops it so the next call rescans.
+    import clauster.discovery as disc
+
+    calls = {"n": 0}
+    real_scan = disc.discover_projects
+
+    def _counting_scan(*a, **k):
+        calls["n"] += 1
+        return real_scan(*a, **k)
+
+    monkeypatch.setattr(disc, "discover_projects", _counting_scan)
     claude_json = tmp_path / ".claude.json"
     invalidate_discovery_cache()
-    first = discover_projects_cached(projects_root, claude_json)
-    assert discover_projects_cached(projects_root, claude_json) is first  # cached
+    discover_projects_cached(projects_root, claude_json)
+    discover_projects_cached(projects_root, claude_json)
+    assert calls["n"] == 1  # second call served from cache
     invalidate_discovery_cache()
-    assert discover_projects_cached(projects_root, claude_json) is not first  # rescanned
+    discover_projects_cached(projects_root, claude_json)
+    assert calls["n"] == 2  # invalidation forced a fresh scan
