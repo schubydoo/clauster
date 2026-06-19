@@ -33,7 +33,7 @@ jobs:
       # build a different (or mismatched) commit than the gate saw.
       sha: ${{ steps.check.outputs.sha }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Nightly always builds main — pin it so a workflow_dispatch selected
           # from another ref can't sneak that ref's code into the build.
@@ -89,7 +89,7 @@ jobs:
       id-token: write # cosign keyless signing (OIDC)
       attestations: write # build provenance / SBOM attestations
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.gate.outputs.sha }} # the exact commit the gate froze
           persist-credentials: false
@@ -157,7 +157,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.gate.outputs.sha }} # the exact commit the gate froze
           persist-credentials: false

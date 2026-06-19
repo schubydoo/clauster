@@ -44,7 +44,7 @@ jobs:
       # exactly the commit validated here — no tag-repoint TOCTOU window.
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           fetch-depth: 0 # full history so the on-main ancestry check is reliable
@@ -98,7 +98,7 @@ jobs:
       contents: read
       id-token: write # OIDC for PyPI Trusted Publishing — no API token stored
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
@@ -141,7 +141,7 @@ jobs:
       id-token: write # cosign keyless signing (OIDC)
       attestations: write # build provenance / SBOM attestations
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           ref: ${{ needs.validate.outputs.sha }} # the exact commit validate froze
