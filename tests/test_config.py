@@ -249,6 +249,28 @@ def test_blank_api_token_hash_normalizes_to_none(write_config):
     assert config.auth.api_token_hash is None
 
 
+def test_short_metrics_token_rejected(write_config):
+    # Item-3 (#408): a SET-but-short metrics_token is a weak bearer a scraper would
+    # trust — reject it loudly so the operator picks a real one (≥16 chars).
+    with pytest.raises(ValueError, match="metrics_token must be at least 16"):
+        load_config(write_config("observability:\n  metrics_token: 'short'\n"))
+
+
+@pytest.mark.parametrize("blank", ["''", "'   '", '"\t"'])
+def test_blank_metrics_token_normalizes_to_none(write_config, blank):
+    # An empty / whitespace-only token stays unset (None): /metrics simply remains
+    # behind the auth guard. Only a SET-but-short token is rejected.
+    config = load_config(write_config(f"observability:\n  metrics_token: {blank}\n"))
+    assert config.observability.metrics_token is None
+
+
+def test_valid_metrics_token_accepted(write_config):
+    # A ≥16-char token loads unchanged.
+    token = "scrape-me-please-now"  # 20 chars
+    config = load_config(write_config(f"observability:\n  metrics_token: '{token}'\n"))
+    assert config.observability.metrics_token == token
+
+
 def test_env_override_scalar(write_config, monkeypatch):
     cfg_path = write_config()
     monkeypatch.setenv("CLAUSTER_PORT", "9999")
