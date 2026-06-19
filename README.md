@@ -319,11 +319,13 @@ validate against newer versions.
 
 ```text
 clauster run                  # start the server (default)
-clauster hash-password        # generate an argon2id hash for auth
+clauster hash-password        # generate an argon2id hash for auth.password_hash
+clauster hash-token           # mint an API token + hash for auth.api_token_hash
 clauster doctor               # diagnose config / environment
 clauster backup | restore | migrate
 clauster install-service {systemd|launchd|windows}
 clauster reap-environments    # reap ghost bridge environments (dry-run by default)
+clauster keepers              # list or stop orphaned pty keepers
 clauster usage <transcript>   # token + approximate cost for a session transcript
 ```
 
@@ -332,16 +334,16 @@ clauster usage <transcript>   # token + approximate cost for a session transcrip
 Planned work, roughly in priority order — the public-facing companion to the in-repo
 `scratch/TODO.md`.
 
-- **Public API** — promote the existing `/api/*` routes to a documented, versioned,
-  auth-gated contract (OpenAPI surface, API tokens distinct from the session cookie)
-  so third parties can build their own dashboards.
+- **Public API** — promote the existing `/api/*` routes to a documented, versioned
+  OpenAPI contract so third parties can build their own dashboards (Bearer API
+  tokens, distinct from the session cookie, already ship — see `clauster hash-token`).
 - **Session naming** — predictable/branded session display names instead of the
   random adjective-noun defaults; list active/resumable sessions in the UI.
 - **v0.3 — multi-user** — per-user accounts (OIDC via Authentik / Pocket-ID /
-  Keycloak / Zitadel), a real persistence layer (SQLAlchemy + Alembic), and GDPR
-  controller tooling (`clauster user export` / `delete`).
-- **v0.3 — operability** — a homepage-dashboard widget endpoint and i18n string
-  extraction (crash notifications and the `/metrics` Prometheus endpoint already
+  Keycloak / Zitadel) and GDPR controller tooling (`clauster user export` / `delete`),
+  on top of the SQLAlchemy + Alembic persistence layer that already ships.
+- **v0.3 — operability** — i18n string extraction (the homepage-dashboard widget
+  endpoint, crash notifications, and the `/metrics` Prometheus endpoint already
   shipped).
 
 *Shipped:* the in-repo [`docs/`](docs/index.md) pages (setup, networking, config
