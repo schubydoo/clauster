@@ -73,8 +73,9 @@ uv sync --extra dev   # ONLY if pyproject/uv.lock changed (deps); otherwise skip
 sudo systemctl restart clauster                     # picks up the new code
 ```
 
-`clauster doctor` will tell you whether `uv sync` / `migrate` are actually
-needed and whether the checkout is behind `origin`.
+`clauster doctor` will tell you whether `uv sync` is needed and whether the
+checkout is behind `origin`. (The database migrates automatically on startup;
+`clauster migrate` is only for folding in a pre-0.12 flat-file `state.json`.)
 
 > **Standard** bridges are detached and survive a Clauster restart, so the
 > upgrade only refreshes the manager and doesn't interrupt them.
