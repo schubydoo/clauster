@@ -236,6 +236,62 @@ def test_dashboard_ux_polish_followups(write_config):
     assert "hostedStatusDot(status) {" in page  # the helper is defined and shipped
 
 
+def test_dashboard_permission_effect_renders_inline(write_config):
+    # #427 UX-01: the riskiest per-launch choice (permission mode) explained its 6
+    # modes only in a hover title= — invisible on touch (phone-first product). The
+    # selected mode's plain-language effect now renders inline beneath the <select>,
+    # reusing the launch-mode m.sub pattern. Assert the helper ships + is bound, and
+    # the select is wired to it for screen readers.
+    page = _client(write_config).get("/").text
+    assert "permissionEffect(mode) {" in page  # the helper is defined and shipped
+    assert 'x-text="permissionEffect(lperm)"' in page  # bound to the selected mode
+    assert 'aria-describedby="perm-effect-alpha"' in page  # select points at the hint
+    assert 'id="perm-effect-alpha"' in page  # and the hint exists per project
+
+
+def test_dashboard_explains_missing_connect_url(write_config):
+    # #427 UX-02: a running desktop bridge whose session_url hasn't arrived (async
+    # capture gap) — or never will (pty flag-form) — used to show 'Running' with the
+    # 'Open in Claude' + QR affordances silently gone and unexplained. Now a disabled
+    # placeholder fills the gap: a spinner 'Preparing connect link…' for the transient
+    # case, 'No web link — use Logs' for pty. Assert the helpers ship + are bound.
+    page = _client(write_config).get("/").text
+    assert "connectUrlMissing(name) {" in page  # transient-or-permanent gap helper
+    assert "connectUrlUnavailable(name) {" in page  # pty (no URL ever) split
+    assert 'x-show="connectUrlUnavailable(i.project)"' in page  # pty placeholder gate
+    assert 'x-show="connectUrlMissing(i.project) && !connectUrlUnavailable(i.project)"' in page
+    assert "Preparing connect link" in page  # the transient spinner copy (visual chip)
+    # The visual chips are aria-hidden; the SR announcement is a PERSISTENT aria-live
+    # region (always mounted, content-toggled) — a live region shown in via x-show is
+    # silently skipped by NVDA/VoiceOver (Greptile P2). Assert that wiring.
+    assert "connectStatusText(name) {" in page  # the live-region text helper ships
+    assert (
+        '<span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.project)">'
+        in page
+    )
+    # The announced strings mirror the visible chip labels word-for-word, so the SR and
+    # sighted experiences match (pin them — they're otherwise unasserted and could drift).
+    assert '"No web link — use Logs"' in page  # pty SR text == pty chip label
+    assert '"Preparing connect link…"' in page  # transient SR text == spinner chip label
+
+
+def test_dashboard_warns_restart_ends_live_sessions(write_config):
+    # #427 UX-03: the config-save banner said 'restart Clauster to apply' with no
+    # affordance and no warning that a restart reaps the cgroup and ends live pty
+    # bridges + browser sessions. It now carries a 'How do I restart?' docs link and
+    # a conditional 'N session(s) running — a restart will end them' line (mirroring
+    # the CLAUDE.md editor's live-session caveat). Detached/external sessions are
+    # separate processes, so restartImpactCount() intentionally excludes them.
+    page = _client(write_config).get("/").text
+    assert "restartImpactCount() {" in page  # the count helper is defined and shipped
+    # Counts only "running"/"starting" sessions (not "stopping" — a bridge mid-Stop is
+    # on its way out, so the "N running" copy would overstate it; Greptile P2).
+    assert 'const liveStatuses = ["running", "starting"];' in page
+    assert 'data-test="cfg-restart-warn"' in page  # the warning element
+    assert 'x-show="restartImpactCount() > 0"' in page  # gated on live sessions
+    assert "How do I restart?" in page  # the docs affordance
+
+
 def test_dashboard_surfaces_crashed_instance_error_detail(write_config):
     # #313: a bridge that spawns then CRASHES has `error_detail` set (None on success), but the
     # card never rendered it — the failure reason was invisible (a silent dead card). The
