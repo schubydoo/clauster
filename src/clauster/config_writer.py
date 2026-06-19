@@ -97,7 +97,12 @@ def write_edits(
         mode = stat.S_IMODE(path.stat().st_mode)
         backup = path.with_name(path.name + f".bak-{stamp}")
         backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-        with os.fdopen(backup_fd, "wb") as fh:
+        try:
+            fh = os.fdopen(backup_fd, "wb")
+        except BaseException:  # fdopen didn't take ownership of the fd — close it ourselves
+            os.close(backup_fd)
+            raise
+        with fh:
             fh.write(original_bytes)
         os.chmod(backup, mode)  # exact source mode even where umask narrowed the create bits
         fd, tmp_name = tempfile.mkstemp(
