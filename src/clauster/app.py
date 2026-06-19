@@ -537,7 +537,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # the Alpine API uses cors fetch, which always carries the real Origin. On newer
         # Chrome this is deterministic (login/logout simply break). `same-origin` keeps
         # the real Origin on same-origin navigations while still suppressing the referrer
-        # cross-origin, preserving the privacy intent of #428. (See #454.)
+        # cross-origin, preserving the privacy intent of #428. (See #454.) Safe only
+        # while no secret travels in a same-origin URL — clauster credentials are all
+        # cookie/header-borne (session cookie, Bearer token, proxy HMAC), so a same-origin
+        # Referer carries no secret; revisit this if a token/session ever rides a URL.
         headers.setdefault("Referrer-Policy", "same-origin")
         headers.setdefault("Content-Security-Policy", _CSP)
         if _cookie_secure(request):
