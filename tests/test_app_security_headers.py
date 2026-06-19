@@ -46,7 +46,7 @@ def _login(client: TestClient) -> None:
     [
         ("X-Content-Type-Options", "nosniff"),
         ("X-Frame-Options", "DENY"),
-        ("Referrer-Policy", "no-referrer"),
+        ("Referrer-Policy", "same-origin"),
     ],
 )
 def test_static_headers_present(runner_config, header, value):
@@ -54,6 +54,22 @@ def test_static_headers_present(runner_config, header, value):
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.headers[header] == value
+
+
+def test_referrer_policy_is_same_origin_not_no_referrer(runner_config):
+    """Referrer-Policy must be same-origin, never no-referrer.
+
+    Under `no-referrer`, a spec-compliant browser serializes the Origin header of a
+    same-origin <form> POST navigation to the literal "null"; the CSRF Origin gate then
+    rejects it (not in the allowlist) and 403s the native login/logout forms — the only
+    non-fetch POSTs in the app. `same-origin` keeps the real Origin on same-origin
+    navigations while still suppressing the cross-origin referrer. Regression guard so a
+    future "tighten the privacy header" change can't silently re-break login/logout
+    (#454); the e2e login flow is the end-to-end guard.
+    """
+    client = _open_client(runner_config)
+    resp = client.get("/healthz")
+    assert resp.headers["Referrer-Policy"] == "same-origin"
 
 
 def test_csp_present_and_locked_down(runner_config):
