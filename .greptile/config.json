@@ -15,8 +15,8 @@
   ],
   "summarySection": { "included": true, "collapsible": true, "defaultOpen": true },
   "confidenceScoreSection": { "included": true, "collapsible": true, "defaultOpen": true },
-  "issuesTableSection": { "included": true, "collapsible": true, "defaultOpen": true },
-  "sequenceDiagramSection": { "included": true, "collapsible": true, "defaultOpen": true },
+  "issuesTableSection": { "included": true, "collapsible": true, "defaultOpen": false },
+  "sequenceDiagramSection": { "included": true, "collapsible": true, "defaultOpen": false },
   "instructions": "Question every \"temporary\" workaround that has outlived a presidential term.",
   "ignorePatterns": "src/clauster/static/vendor/**\n**/*.min.js\n**/*.min.css\nuv.lock\npackage-lock.json",
   "rules": [
