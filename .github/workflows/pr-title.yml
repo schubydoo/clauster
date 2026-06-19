@@ -3,6 +3,13 @@ name: PR Title
 # Validate that the pull-request title follows Conventional Commits. Because the
 # repo squash-merges, the PR title becomes the squashed commit subject — which
 # release-please parses to decide version bumps and CHANGELOG sections.
+#
+# Keep `synchronize` in the trigger list: `conventional PR title` is a REQUIRED
+# status check and required checks are evaluated per head-SHA. Dropping
+# `synchronize` would leave a fixup push's new head commit with no check run, so
+# the PR would sit "Expected — waiting for status" and never merge. The re-run on
+# each push is cheap (minutes are free on this public repo), so the check stays
+# satisfiable on every head SHA.
 
 on:
   pull_request:
@@ -23,9 +30,24 @@ jobs:
     permissions:
       pull-requests: read
     steps:
+      # Mint a short-lived RELEASE_PLEASE App installation token (≥5,000 REST
+      # req/hr, vs the 1,000/hr github-actions[bot] pool that fails spuriously
+      # under multi-PR bursts). Same-repo PRs only — fork PRs can't read the App
+      # secrets, so the step is skipped there and the action falls back to
+      # GITHUB_TOKEN (see the token select below). No new credential.
+      - name: Mint GitHub App token
+        id: app-token
+        if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          permission-pull-requests: read
       - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # App token on same-repo PRs; GITHUB_TOKEN fallback on forks (the mint
+          # step above is skipped, so steps.app-token.outputs.token is empty).
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
         with:
           types: |
             feat
