@@ -273,6 +273,75 @@ def test_proxy_untrusted_peer_rejected(runner_config, monkeypatch):
     assert resp.status_code == 401
 
 
+def test_throttle_ignores_forged_user_header_without_hmac(runner_config, monkeypatch):
+    # Item-2 (#408): on a trusted IP, a client can SET Remote-User but cannot forge a
+    # valid X-Proxy-Auth HMAC. Without the HMAC the throttle key must NOT trust the
+    # header — otherwise a fresh fabricated username per attempt mints a fresh per-key
+    # login budget and evades the limiter. So a flood of forged usernames from one
+    # trusted IP collapses to the shared-IP path and trips the global backoff (429).
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    config.auth.reverse_proxy.enabled = True
+    config.auth.reverse_proxy.trusted_ips = ["10.0.0.1"]
+    config.auth.reverse_proxy.shared_secret = "proxy-secret"
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+
+    saw_429 = False
+    for i in range(60):  # each attempt forges a DIFFERENT Remote-User (no valid HMAC)
+        resp = client.post(
+            "/login",
+            data={"password": "wrong"},
+            headers={"origin": ORIGIN, "Remote-User": f"forged-{i}"},
+            follow_redirects=False,
+        )
+        if resp.status_code == 429:
+            saw_429 = True
+            break
+        assert resp.status_code == 401  # bad password until the global backoff bites
+    assert saw_429, "forged-username flood evaded the throttle (per-key budget minted)"
+
+
+def test_throttle_trusts_user_only_with_valid_hmac(runner_config, monkeypatch):
+    # The flip side: a genuinely proxy-authenticated user (valid HMAC) DOES get a
+    # per-key budget — so one such user's failures don't lock out everyone behind the
+    # proxy. Two valid users on the same trusted IP throttle independently.
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    config.auth.reverse_proxy.enabled = True
+    config.auth.reverse_proxy.trusted_ips = ["10.0.0.1"]
+    config.auth.reverse_proxy.shared_secret = "proxy-secret"
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+
+    # alice fails enough to lock her own per-key budget (default max_failures small).
+    for _ in range(40):
+        t = int(time.time())
+        hdr = _proxy_header("proxy-secret", "alice", "POST", "/login", t)
+        client.post(
+            "/login",
+            data={"password": "wrong"},
+            headers={"origin": ORIGIN, "Remote-User": "alice", "X-Proxy-Auth": hdr},
+            follow_redirects=False,
+        )
+    # bob (a DIFFERENT valid proxy user, same IP) still has his own fresh budget.
+    t = int(time.time())
+    hdr = _proxy_header("proxy-secret", "bob", "POST", "/login", t)
+    bob = client.post(
+        "/login",
+        data={"password": PASSWORD},
+        headers={"origin": ORIGIN, "Remote-User": "bob", "X-Proxy-Auth": hdr},
+        follow_redirects=False,
+    )
+    assert bob.status_code == 303, "a distinct HMAC-verified user was wrongly throttled"
+
+
 def test_proxy_hmac_replay_on_other_endpoint_rejected(runner_config, monkeypatch):
     client = _proxy_client(runner_config)
     monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")

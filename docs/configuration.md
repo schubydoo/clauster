@@ -253,7 +253,7 @@ auth guard. See [Networking](networking.md) for scraping behind auth.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token` is set. |
-| `metrics_token` | str \| null | `null` | Optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — presented as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Compared in constant time. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` to keep it out of the config file. |
+| `metrics_token` | str \| null | `null` | Optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — presented as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Compared in constant time. Must be at least 16 characters when set. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` to keep it out of the config file. |
 <!-- END GEN: observability -->
 
 ## `notifications` — outbound alerts via Apprise (`NotificationsConfig`)
@@ -326,7 +326,11 @@ defaults to enabled** (so `events: {}` emits all four, and you disable one with 
 ignored.
 
 Each POST body is `{"event": "<name>", "project": ..., "label": ..., "status": ...,
-"resume_mode": ..., "spawn_mode": ..., "session_id": ...}`.
+"resume_mode": ..., "spawn_mode": ..., "session_ref": ...}`. `session_ref` is a
+stable, non-reversible hash (16 hex chars) of the bridge's starter session id —
+it lets a receiver correlate the lifecycle events of one session without egressing
+the raw `session_<ULID>`, which is bearer-equivalent and redacted elsewhere. It is
+`null` until the bridge reports a starter session.
 
 ## `claustrum` — hosted live-view channel (`ClaustrumConfig`)
 

@@ -70,6 +70,21 @@ async def test_refresh_samples_when_pid_create_time_matches(runner_config):
     assert runner.metrics_snapshot("alpha") is not None
 
 
+async def test_refresh_pid_reuse_guard_uses_tight_tolerance(runner_config):
+    # Item-6 (#408): bridge_proc_start is OUR OWN proc_create_time() of this pid, so a
+    # live match is near-exact. A recorded start off by 0.5s (inside the OLD loose 2.0s
+    # window, outside the tight _EXACT_PROC_START_TOLERANCE of 0.05s) must now be
+    # rejected as a recycled pid — the loose window let such a mismatch through.
+    from clauster import procutil
+
+    assert procutil._EXACT_PROC_START_TOLERANCE < 0.5 < 2.0  # the window the fix closed
+    runner = _runner(runner_config)
+    off = procutil.proc_create_time(os.getpid()) + 0.5
+    _running(runner, start=off)
+    await runner._refresh_metrics_cache()
+    assert runner.metrics_snapshot("alpha") is None  # tight guard drops it
+
+
 async def test_refresh_drops_bridge_on_dead_pid(runner_config):
     runner = _runner(runner_config)
     _running(runner, pid=2_147_483_646)  # not a live pid → sample None

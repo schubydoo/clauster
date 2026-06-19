@@ -28,11 +28,13 @@ POSIX-only: claustrum speaks ``AF_UNIX`` and self-daemonizes via ``setsid``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import secrets
 import shutil
 import stat
+import time
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +58,14 @@ _POLL_INTERVAL = 0.1
 # ``/healthz``). Kept short so a hung daemon can't stall a health check; a dead
 # socket fails the ping near-instantly regardless.
 _HEALTH_PING_TIMEOUT = 2.0
+
+# How long a loser of the token-file O_EXCL race waits for the winner to finish
+# writing its bytes before concluding the file is genuinely stale/blank
+# (100 * 10ms = 1s). Mirrors auth._read_existing_secret: a momentarily-empty file
+# is "winner mid-write", not "stale leftover" — never replace it until the wait
+# is exhausted, or two starts diverge onto different tokens.
+_TOKEN_READ_ATTEMPTS = 100
+_TOKEN_READ_DELAY = 0.01
 
 # Env vars that must NOT leak into a spawned ``claustrum``. ``CLAUDE_SSH_DAEMON_CHILD``
 # is claustrum's internal "I am the re-exec'd daemon child" sentinel — the SAME name
@@ -220,20 +230,94 @@ class ClaustrumDaemon:
 
         The token is what lets Clauster reconnect to a daemon that outlived it,
         so it is stored (0600) rather than regenerated each run.
+
+        Creation uses ``O_CREAT|O_EXCL`` (mirroring
+        :func:`auth.load_or_create_secret`): an ``exists()``-then-``O_TRUNC`` race
+        between two starts (or a restart that overlaps a live daemon) could
+        otherwise truncate the file mid-write and clobber the token the running
+        daemon still authenticates with. Only the ``O_EXCL`` winner writes; every
+        loser **waits out** the winner's write (a momentarily-blank file is the
+        winner mid-write, not stale) and adopts the winner's token, so all callers
+        converge on one value. A file that stays blank for the whole wait is a truly
+        abandoned/crashed create — only then is it atomically replaced.
         """
-        if self._token_path.exists():
-            token = self._token_path.read_text(encoding="utf-8").strip()
-            if token:
-                return token
+        existing = self._read_existing_token()
+        if existing is not None:
+            return existing
         token = secrets.token_hex(32)
         # Create with 0600 from the start so the token is never briefly world-readable.
-        fd = os.open(self._token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        try:
+            fd = os.open(self._token_path, flags, 0o600)
+        except FileExistsError:
+            # The file already exists: a racing start (or a daemon that outlived us)
+            # won the O_EXCL create. It may be MID-WRITE (created empty, bytes not yet
+            # flushed) — so wait out the winner before deciding the file is stale.
+            won = self._wait_for_winner_token()
+            if won is not None:
+                return won  # adopt the winner's token — never clobber a live credential
+            # Genuinely blank after the full wait: an abandoned/crashed create. Only
+            # now is an atomic replace safe.
+            return self._replace_blank_token(token)
         try:
             os.write(fd, token.encode("utf-8"))
         finally:
             os.close(fd)
         self._token_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
         return token
+
+    def _wait_for_winner_token(self) -> str | None:
+        """Poll for an O_EXCL winner's token, returning it once written (else None).
+
+        The winner creates the file empty then writes its bytes — a loser that raced
+        in can momentarily read a blank file. Retry over a bounded window (mirroring
+        ``auth._read_existing_secret``) so a winner mid-write is waited out rather than
+        mistaken for stale leftover. Returns None only if the file stays blank for the
+        whole window (a truly abandoned create).
+        """
+        for _ in range(_TOKEN_READ_ATTEMPTS):
+            token = self._read_existing_token()
+            if token is not None:
+                return token
+            time.sleep(_TOKEN_READ_DELAY)
+        return None
+
+    def _replace_blank_token(self, token: str) -> str:
+        """Atomically replace a confirmed-stale/blank token file with ``token`` (0600).
+
+        Only call this AFTER waiting out a possible mid-write winner
+        (:meth:`_wait_for_winner_token`). Write to a sibling temp file then
+        ``os.replace`` it into place: the rename is atomic, so a concurrent reader
+        sees either the old or the new file whole, never a half-written one. A
+        last-moment winner check still adopts a token that landed during the wait.
+        """
+        won = self._read_existing_token()
+        if won is not None:  # a winner filled it at the last moment — adopt it
+            return won
+        tmp = self._token_path.with_name(f"{self._token_path.name}.{secrets.token_hex(4)}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        fd = os.open(tmp, flags, 0o600)
+        try:
+            try:
+                os.write(fd, token.encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp, self._token_path)
+        except BaseException:
+            # Don't leave an orphaned .tmp behind on any failure mid-write/replace.
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+        self._token_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        return token
+
+    def _read_existing_token(self) -> str | None:
+        """Return the persisted token, or None when the file is absent or empty."""
+        try:
+            token = self._token_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None
+        return token or None
 
     def _resolve_binary(self) -> str:
         resolved = shutil.which(self._cfg.binary)

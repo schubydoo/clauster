@@ -150,15 +150,37 @@ async def test_webhook_spawn_payload(runner_config):
     await asyncio.gather(*runner._notify_tasks)
     [(event, payload)] = rec.calls
     assert event == "spawn"
-    # Assert the full payload contract, not just a couple of fields.
+    # Assert the full payload contract, not just a couple of fields. With no starter
+    # session yet, session_ref is None (None in -> None out).
     assert payload == {
         "project": "alpha",
         "label": "alpha",
         "status": "starting",
         "resume_mode": "pty",
         "spawn_mode": inst.spawn_mode,
-        "session_id": inst.starter_session_id,
+        "session_ref": None,
     }
+
+
+async def test_webhook_payload_hashes_session_id_never_leaks_raw(runner_config):
+    # Item-8 (#408): a starter session id is bearer-equivalent (redaction strips it
+    # everywhere else), so the webhook egresses a hashed correlation token, never the
+    # raw session_<ULID>.
+    import hashlib
+
+    runner = _runner(runner_config)
+    rec = _RecordingWebhooks()
+    runner._webhooks = rec
+    sid = "session_01TESTSTARTERAAAAAAAAAA"
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.RUNNING)
+    inst.starter_session_id = sid
+    runner._emit_webhook("ready", inst)
+    await asyncio.gather(*runner._notify_tasks)
+    [(_event, payload)] = rec.calls
+    expected = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+    assert payload["session_ref"] == expected
+    assert "session_id" not in payload  # the raw field is gone
+    assert sid not in payload.values()  # and the raw value never appears anywhere
 
 
 async def test_webhook_ready_fires_on_transition_only(runner_config):

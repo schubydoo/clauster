@@ -15,7 +15,17 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .claustrum_client import _Subscriber
+
 JobStatus = Literal["running", "done", "error"]
+
+# Per-watcher queue depth. A clone emits at most a handful of progress phases, each a
+# tiny frame, so this is generous headroom; the bound exists only so a wedged/slow
+# WebSocket consumer can't make ``broadcast`` grow a queue without limit. On overflow a
+# progress frame is dropped and the watcher gets an honest ``overflow`` marker; the
+# terminal ``done`` frame is force-delivered (evicting an old frame if needed) so the
+# consumer's read loop always sees it and exits rather than hanging forever.
+_CLONE_QUEUE_MAXSIZE = 256
 
 # A trailing "42%" anywhere in a git progress line.
 _PCT_RE = re.compile(r"(\d{1,3})%")
@@ -50,26 +60,50 @@ class CloneJob:
     phase: str = ""
     percent: int | None = None
     error_detail: str | None = None
-    # One queue per live watcher; events fan out to all so two tabs watching the
-    # same clone each get the full stream (a single shared queue would let them
-    # steal each other's frames).
-    _subscribers: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
+    # One bounded watcher per live viewer; events fan out to all so two tabs watching
+    # the same clone each get the full stream (a single shared queue would let them
+    # steal each other's frames). Bounded so a slow/wedged consumer can't grow a queue
+    # without limit; overflow drops a progress frame and marks the gap.
+    _subscribers: list[_Subscriber] = field(default_factory=list)
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
-        """Register a watcher and return its private event queue."""
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._subscribers.append(queue)
-        return queue
+        """Register a watcher and return its private (bounded) event queue."""
+        sub = _Subscriber(queue=asyncio.Queue(maxsize=_CLONE_QUEUE_MAXSIZE))
+        self._subscribers.append(sub)
+        return sub.queue
 
     def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
         """Drop a watcher's queue (called when its WebSocket closes)."""
-        if queue in self._subscribers:
-            self._subscribers.remove(queue)
+        self._subscribers = [s for s in self._subscribers if s.queue is not queue]
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        """Fan ``event`` out to every current watcher; never blocks the caller."""
-        for queue in self._subscribers:
-            queue.put_nowait(event)  # unbounded queue: short-lived, small frames
+        """Fan ``event`` out to every current watcher; never blocks the caller.
+
+        Progress frames are offered through the bounded drop-and-mark path. The
+        terminal ``done`` frame is force-delivered — the consumer's read loop exits
+        only on ``done``, so dropping it would hang the watcher forever; if a queue
+        is full we evict its oldest frame to make room.
+        """
+        terminal = event.get("type") == "done"
+        for sub in self._subscribers:
+            if terminal:
+                self._force_deliver(sub, event)
+            else:
+                sub.offer(event)  # bounded: drops + marks on overflow
+
+    @staticmethod
+    def _force_deliver(sub: _Subscriber, event: dict[str, Any]) -> None:
+        """Enqueue ``event`` even on a full queue by evicting the oldest frame."""
+        while True:
+            try:
+                sub.queue.put_nowait(event)
+                return
+            except asyncio.QueueFull:
+                try:
+                    sub.queue.get_nowait()  # drop the oldest to make room
+                    sub.dropped += 1
+                except asyncio.QueueEmpty:  # pragma: no cover - full-then-empty race
+                    return
 
     def progress_event(self) -> dict[str, Any]:
         """Return the current progress as a WS ``progress`` frame."""

@@ -14,6 +14,7 @@ iterate over a ``list(...)`` snapshot, never the live dict.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -56,6 +57,19 @@ from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
 from .webhooks import WebhookEmitter
 
 _log = logging.getLogger("clauster.runner")
+
+
+def _hash_session_ref(session_id: str | None) -> str | None:
+    """Return a stable, non-reversible correlation token for a starter session id.
+
+    ``None`` in, ``None`` out. Otherwise a 16-hex-char (64-bit) SHA-256 prefix:
+    stable across an instance's lifecycle events so a webhook receiver can group
+    them, but it never carries the bearer-equivalent ``session_<ULID>`` itself
+    (which redaction strips from every other egress surface — see ``redact.py``).
+    """
+    if not session_id:
+        return None
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
 
 
 class SpawnError(RuntimeError):
@@ -221,7 +235,13 @@ class SessionRunner:
         start = inst.bridge_proc_start
         if start is not None:
             cur = await asyncio.to_thread(procutil.proc_create_time, pid)
-            if cur is None or abs(cur - start) > 2.0:
+            # bridge_proc_start is OUR OWN proc_create_time() measurement of this
+            # same pid (set at spawn), so a live match is near-exact — use the tight
+            # _EXACT_PROC_START_TOLERANCE that procutil.is_live_process applies to a
+            # self-measured float, not the loose pointer-jiffies slack. The loose
+            # 2.0s left a wide window in which a recycled pid that started up to two
+            # seconds later still passed and got mis-attributed to the bridge.
+            if cur is None or abs(cur - start) > procutil._EXACT_PROC_START_TOLERANCE:
                 return None  # PID reused onto an unrelated process — skip
         return await asyncio.to_thread(
             metrics.sample_tree,
@@ -1821,7 +1841,15 @@ class SessionRunner:
             "status": instance.status.value,
             "resume_mode": instance.resume_mode,
             "spawn_mode": instance.spawn_mode,
-            "session_id": instance.starter_session_id,
+            # Item-8 (#408): the raw starter_session_id is a session_<ULID> that
+            # redaction treats as bearer-equivalent everywhere else (anyone holding
+            # it can open a New Session composer for the bridge) — see redact.py and
+            # the WS log-stream stripping. Egressing it raw to an arbitrary operator
+            # webhook endpoint is the same leak that surface forbids, so we send a
+            # hashed, non-reversible correlation token instead: a receiver can still
+            # correlate the spawn/ready/stop/crash events of one session without ever
+            # holding the credential-equivalent value.
+            "session_ref": _hash_session_ref(instance.starter_session_id),
         }
         task = asyncio.create_task(self._webhooks.aemit(event, payload))
         self._notify_tasks.add(task)

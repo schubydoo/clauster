@@ -435,21 +435,32 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     def _throttle_key(request: Request) -> tuple[str | None, bool]:
         # Returns (key, shared). Behind a trusted reverse proxy every login shares the
         # proxy's socket IP, so a per-IP limiter becomes global (one attacker locks
-        # everyone out). Key on the proxy-asserted user instead — the trusted proxy
-        # overwrites this header, so a client can't forge it. When no user is asserted,
-        # the key falls back to the shared proxy IP: mark it shared=True so the per-key
-        # hard lock is skipped and only the global backoff applies.
+        # everyone out). Key on the proxy-asserted user instead — but ONLY when the
+        # X-Proxy-Auth HMAC validates that user (the same gate _authenticate uses).
+        # The user_header alone is forgeable by any client that can reach a trusted
+        # IP, so trusting it bare would let an attacker mint a fresh per-key login
+        # budget per fabricated username and evade the limiter entirely. When no
+        # HMAC-verified user is present, fall back to the shared proxy IP: mark it
+        # shared=True so the per-key hard lock is skipped and only the global backoff
+        # applies.
         rp = config.auth.reverse_proxy
         ip = auth.peer_ip(request)
         if rp.enabled and auth.peer_trusted(ip, rp.trusted_ips):
-            user = request.headers.get(rp.user_header)
-            if user:
+            remote_user = request.headers.get(rp.user_header)
+            if remote_user and auth.verify_proxy_hmac(
+                rp.shared_secret,
+                request.headers.get(rp.shared_secret_header),
+                remote_user,
+                request.method,
+                request.url.path,
+                rp.hmac_window_seconds,
+            ):
                 # Namespaced so a proxy user can't collide with a raw IP key. This
                 # value only ever keys the rate limiter, never an HTTP response, so
                 # semgrep's flask format-string-response rule is a false positive
                 # on this non-route helper (bare nosemgrep: the line trips nothing
                 # else, and the precise rule id overflows the line-length limit).
-                return f"proxy-user:{user}", False  # nosemgrep
+                return f"proxy-user:{remote_user}", False  # nosemgrep
             return ip, True  # shared proxy IP — global backoff only, no per-key lockout
         return ip, False
 
@@ -462,7 +473,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if not token:
             return False
         presented = auth.parse_bearer(request.headers.get("authorization"))
-        return presented is not None and hmac.compare_digest(presented, token)
+        # Compare on bytes, not str: hmac.compare_digest raises TypeError on a
+        # non-ASCII (>U+00FF) operand, so a bearer with such a char would 500
+        # instead of a clean 401. .encode() makes any presented token a plain
+        # byte string the constant-time compare always accepts and rejects.
+        return presented is not None and hmac.compare_digest(
+            presented.encode("utf-8"), token.encode("utf-8")
+        )
 
     @app.middleware("http")
     async def guard(request: Request, call_next):

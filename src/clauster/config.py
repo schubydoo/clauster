@@ -498,6 +498,11 @@ class MetricsConfig(BaseModel):
     )
 
 
+# A set metrics_token below this length is too weak a bearer credential to trust on a
+# scrape endpoint; an unset (None/blank) token is fine and stays behind the auth guard.
+_METRICS_TOKEN_MIN_LEN = 16
+
+
 class ObservabilityConfig(BaseModel):
     """Read-only observability surfaces (a Prometheus ``/metrics`` exposition).
 
@@ -520,9 +525,26 @@ class ObservabilityConfig(BaseModel):
         description="Optional bearer token that lets a scraper (e.g. Prometheus) reach "
         "`/metrics` without a browser session — presented as `Authorization: Bearer "
         "<token>`. When set, a valid token OR a normal session grants access; when unset, "
-        "`/metrics` stays behind the auth guard. Compared in constant time. Supply via "
+        "`/metrics` stays behind the auth guard. Compared in constant time. Must be at "
+        "least 16 characters when set. Supply via "
         "`CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` to keep it out of the config file.",
     )
+
+    @field_validator("metrics_token", mode="before")
+    @classmethod
+    def _metrics_token_floor(cls, v: object) -> object:
+        # Empty / whitespace-only stays unset (None) — the endpoint simply remains
+        # behind the auth guard, no token path. But a SET-but-short token is a weak
+        # bearer credential a scraper would actually trust: reject it loudly so the
+        # operator picks a real one rather than shipping a guessable /metrics key.
+        if isinstance(v, str) and not v.strip():
+            return None
+        if isinstance(v, str) and len(v) < _METRICS_TOKEN_MIN_LEN:
+            raise ValueError(
+                f"metrics_token must be at least {_METRICS_TOKEN_MIN_LEN} characters; "
+                'generate one with `python -c "import secrets; print(secrets.token_urlsafe(24))"`.'
+            )
+        return v
 
 
 class NotificationsConfig(BaseModel):
