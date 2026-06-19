@@ -46,7 +46,18 @@ dev = [
     # harness import-smoke test (tests/test_fuzz_harness_smoke.py) actually runs
     # in the default suite on Linux instead of perpetually skipping; it
     # importorskips where atheris is absent.
-    "atheris>=3.0.0; sys_platform == 'linux'",
+    #
+    # Pinned PER INTERPRETER because atheris's wheel coverage shifts across
+    # releases and it ships no sdist for the latest: 3.1.0 has cp312/cp313/cp314
+    # wheels but dropped cp311, while 3.0.0 has the cp311 wheel (but no cp314). An
+    # unpinned `>=3.0.0` floats to 3.1.0 and then `uv sync` has nothing to install
+    # on the 3.11 leg (no wheel, no sdist) — failing CI. So gate by python_version
+    # to the newest atheris that has a wheel for each interpreter; the smoke test
+    # then runs on every Linux leg instead of skipping on 3.11. Both legs carry an
+    # upper bound so a future wheel-gapped release can't silently float in via a lock
+    # bump and re-break a leg — raise a ceiling deliberately when atheris re-widens.
+    "atheris>=3.0.0,<3.2.0; sys_platform == 'linux' and python_version >= '3.12'",
+    "atheris>=3.0.0,<3.1.0; sys_platform == 'linux' and python_version < '3.12'",
     "pytest-cov>=5.0",
     "pytest-xdist>=3.6.1",
     "ruff>=0.8",
@@ -78,7 +89,10 @@ fuzz = [
     # no Windows/macOS wheels, so an unmarked dep would break cross-platform
     # `uv lock` and the Windows/macOS cells. In CI the OSS-Fuzz base-builder-python
     # image (ClusterFuzzLite) already provides atheris, so build.sh doesn't need this.
-    "atheris>=3.0.0; sys_platform == 'linux'",
+    # Per-interpreter pin mirrors `dev` above (3.1.0 dropped cp311; 3.0.0 lacks cp314),
+    # including the upper bounds that stop a future wheel-gapped release floating in.
+    "atheris>=3.0.0,<3.2.0; sys_platform == 'linux' and python_version >= '3.12'",
+    "atheris>=3.0.0,<3.1.0; sys_platform == 'linux' and python_version < '3.12'",
 ]
 
 [project.scripts]
