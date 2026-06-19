@@ -709,16 +709,19 @@
       connectUrlUnavailable(name) {
         return this.connectUrlMissing(name) && this.resumeModeOf(name) === "pty";
       },
-      // Screen-reader text for the connect-link state, surfaced via a PERSISTENT
-      // aria-live region (empty when idle). A live region only announces content that
-      // changes INSIDE an already-rendered node — toggling the whole live element in
-      // via x-show (display:none→visible) is silently skipped by NVDA/VoiceOver — so the
-      // wrapper stays mounted and only this text changes.
+      // Screen-reader text for the connect-link state, surfaced via an aria-live region
+      // that stays mounted across the connect gap (empty when idle). A live region only
+      // announces content that changes INSIDE an already-rendered node — toggling the
+      // whole live element in via x-show (display:none→visible) is silently skipped by
+      // NVDA/VoiceOver — so the wrapper persists and only this text changes. (The region
+      // shares the row's filter x-show, so an off-filter desktop row stays silent — which
+      // is intended: a row the user has filtered out shouldn't announce.) Strings mirror
+      // the visible chip labels so the SR and sighted experiences match word-for-word.
       connectStatusText(name) {
         if (!this.connectUrlMissing(name)) return "";
         return this.connectUrlUnavailable(name)
-          ? "This session has no web link — open Logs to drive it."
-          : "Preparing the connect link…";
+          ? "No web link — use Logs"
+          : "Preparing connect link…";
       },
       envUrlOf(name) { return (this.instances[name] || {}).url || null; },
       errorOf(name) { return this.errors[name] || null; },

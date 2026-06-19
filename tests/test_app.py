@@ -269,6 +269,10 @@ def test_dashboard_explains_missing_connect_url(write_config):
         '<span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.project)">'
         in page
     )
+    # The announced strings mirror the visible chip labels word-for-word, so the SR and
+    # sighted experiences match (pin them — they're otherwise unasserted and could drift).
+    assert '"No web link — use Logs"' in page  # pty SR text == pty chip label
+    assert '"Preparing connect link…"' in page  # transient SR text == spinner chip label
 
 
 def test_dashboard_warns_restart_ends_live_sessions(write_config):
