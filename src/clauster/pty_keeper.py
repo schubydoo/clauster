@@ -291,7 +291,13 @@ def iter_keepers(log_dir: Path) -> list[KeeperInfo]:
                 bridge_pid=_int_or_none(data.get("bridge_pid")),
                 session_id=session_id if isinstance(session_id, str) else None,
                 state=state if isinstance(state, str) else None,
-                alive=create_time is not None,
+                # A live PID alone isn't enough: confirm its cmdline is still our keeper,
+                # so a PID the keeper left behind and the OS recycled onto an unrelated
+                # process is never listed as a live orphan (#301 / RUNOPS-1). The leading
+                # `keeper_pid is not None` also narrows the type for is_keeper_process.
+                alive=keeper_pid is not None
+                and create_time is not None
+                and procutil.is_keeper_process(keeper_pid),
                 keeper_create_time=create_time,
             )
         )
@@ -347,6 +353,11 @@ def stop_keeper(keeper_pid: int, *, expect_create_time: float | None = None) -> 
             return True  # exited during the grace window — nothing left to kill
         if abs(current - expect_create_time) > _KEEPER_START_TOLERANCE:
             return False  # PID reused onto another process — do not kill it
+    # Final cmdline re-verify right before the SIGKILL (TOCTOU): the PID must still be
+    # our keeper. If it exited and the OS recycled the PID onto an unrelated process
+    # during the grace window, never hard-kill that stranger (#301 / RUNOPS-1).
+    if not procutil.is_keeper_process(keeper_pid):
+        return True  # keeper already gone (or PID recycled to a non-keeper)
     procutil.force_kill_tree(keeper_pid)
     # SIGKILL is asynchronous: the process may still be running/zombie for a beat
     # after force_kill_tree returns, so poll briefly (reaping our own child if it is

@@ -26,6 +26,10 @@ import psutil
 _BRIDGE_CMDLINE = ("remote-control",)
 _BRIDGE_BINARY_HINT = "claude"
 
+# The `-m` module name identifying a PTY keeper process (it wraps a pty bridge as
+# `python -m clauster.pty_keeper --sidecar P -- <bridge argv>`).
+_KEEPER_MODULE = "clauster.pty_keeper"
+
 # A proc_start we measured ourselves (a float create_time) is the SAME
 # measurement as the live process's create_time, so the same process matches it
 # near-exactly — only a hair of float jitter is plausible. A reused PID, having
@@ -102,6 +106,22 @@ def is_hosted_cmdline(cmdline: list[str]) -> bool:
         return False
     joined = " ".join(cmdline)
     return _BRIDGE_BINARY_HINT in joined and "stream-json" in joined
+
+
+def is_keeper_cmdline(cmdline: list[str]) -> bool:
+    """Whether a command line is a ``python -m clauster.pty_keeper`` PTY keeper.
+
+    The keeper is launched as ``<python> -m clauster.pty_keeper --sidecar P -- <argv>``.
+    As :func:`is_bridge_cmdline` / :func:`is_hosted_cmdline` gate on the ``claude`` binary
+    before the distinguishing token, this requires BOTH the python interpreter (argv[0])
+    AND the module passed via ``-m`` — so an unrelated process that merely carries the
+    string as a data argument (a ``grep``, a ``python -c`` script) is never mistaken for a
+    keeper and killed in the TOCTOU window (#301 / RUNOPS-1).
+    """
+    if not cmdline or _KEEPER_MODULE not in cmdline:
+        return False
+    idx = cmdline.index(_KEEPER_MODULE)
+    return "python" in cmdline[0].lower() and idx > 0 and cmdline[idx - 1] == "-m"
 
 
 def proc_create_time(pid: int) -> float | None:
@@ -206,6 +226,24 @@ def kill_if_match(pid: int, proc_start: str | float | None) -> bool:
         return False
     force_kill_tree(pid)
     return True
+
+
+def is_keeper_process(pid: int) -> bool:
+    """Whether ``pid`` is a live, non-zombie ``clauster.pty_keeper`` process.
+
+    The cmdline gate for the keeper path: orphan classification
+    (:func:`clauster.pty_keeper.iter_keepers`) and the hard-kill
+    (:func:`clauster.pty_keeper.stop_keeper`) both require it, so a PID the original
+    keeper left behind and the OS recycled onto an unrelated process is never listed as
+    a live orphan nor SIGKILLed (#301 / RUNOPS-1). Fails closed on any psutil error.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return is_keeper_cmdline(proc.cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
 
 
 def _expected_epoch(proc_start: str | float | None) -> float | None:
