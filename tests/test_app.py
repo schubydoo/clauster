@@ -310,6 +310,30 @@ def test_dashboard_resume_controls_render(write_config):
     assert ">Start new session</button>" not in resp.text  # the start-new button is gone
 
 
+def test_recent_zone_rows_decoupled_from_live_filter(write_config):
+    # #421: the live-session filter chips are about LIVE/active sessions, so the Recent
+    # group's ended rows must NOT be gated on activeFilter — otherwise recentCount()
+    # (filter-unaware) counts a row the x-show hides ("Recent (1)" with the row invisible).
+    # Active-zone rows stay filtered; only the Recent zone is decoupled.
+    page = _client(write_config).get("/").text
+    assert "Recent / resumable" in page, (
+        "Anchor comment not found in rendered HTML — was the Recent zone comment changed?"
+    )
+    recent_start = page.index("Recent / resumable")
+    active, recent = page[:recent_start], page[recent_start:]
+
+    live_filter = re.compile(
+        r"activeFilter === 'all' \|\| activeFilter === '(?:browser|detached|desktop)'"
+    )
+    # Active zone keeps filtering (detached macro row + desktop bridge row).
+    assert live_filter.search(active)
+    # Recent zone has its ended rows rendered (detached macro + ended-bridge row)…
+    assert 'badge bg-purple-lt mode-badge me-1">detached' in recent  # detached_row(filtered=False)
+    assert "resume(i.project)" in recent  # ended-bridge row still present
+    # …but NONE of them carry the live-session-filter x-show.
+    assert not live_filter.search(recent)
+
+
 def test_trust_on_start_replaces_trust_button(write_config):
     # Trust-on-Start: there is NO standalone "Trust directory" button. Instead Start
     # gates on trust — an untrusted dir gets a confirm dialog (with a safety checkbox)
