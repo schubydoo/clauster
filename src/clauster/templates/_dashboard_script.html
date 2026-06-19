@@ -813,7 +813,7 @@
           if (m && m.running) this.metrics[n] = m;
         }
         for (const n of Object.keys(this.metrics)) {
-          if (!batch[n] || !batch[n].running) this.metrics[n] = null;
+          if (!batch[n]) this.metrics[n] = null;  // batch only carries running bridges
         }
       },
       metricsLabel(name) {
