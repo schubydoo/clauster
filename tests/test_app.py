@@ -260,7 +260,15 @@ def test_dashboard_explains_missing_connect_url(write_config):
     assert "connectUrlUnavailable(name) {" in page  # pty (no URL ever) split
     assert 'x-show="connectUrlUnavailable(i.project)"' in page  # pty placeholder gate
     assert 'x-show="connectUrlMissing(i.project) && !connectUrlUnavailable(i.project)"' in page
-    assert "Preparing connect link" in page  # the transient spinner copy
+    assert "Preparing connect link" in page  # the transient spinner copy (visual chip)
+    # The visual chips are aria-hidden; the SR announcement is a PERSISTENT aria-live
+    # region (always mounted, content-toggled) — a live region shown in via x-show is
+    # silently skipped by NVDA/VoiceOver (Greptile P2). Assert that wiring.
+    assert "connectStatusText(name) {" in page  # the live-region text helper ships
+    assert (
+        '<span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.project)">'
+        in page
+    )
 
 
 def test_dashboard_warns_restart_ends_live_sessions(write_config):
@@ -272,7 +280,9 @@ def test_dashboard_warns_restart_ends_live_sessions(write_config):
     # separate processes, so restartImpactCount() intentionally excludes them.
     page = _client(write_config).get("/").text
     assert "restartImpactCount() {" in page  # the count helper is defined and shipped
-    assert "return this.activeBridges().length + this.liveHosted().length;" in page
+    # Counts only "running"/"starting" sessions (not "stopping" — a bridge mid-Stop is
+    # on its way out, so the "N running" copy would overstate it; Greptile P2).
+    assert 'const liveStatuses = ["running", "starting"];' in page
     assert 'data-test="cfg-restart-warn"' in page  # the warning element
     assert 'x-show="restartImpactCount() > 0"' in page  # gated on live sessions
     assert "How do I restart?" in page  # the docs affordance

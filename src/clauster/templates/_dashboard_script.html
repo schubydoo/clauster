@@ -395,8 +395,14 @@
       // ENDS live, clauster-managed sessions (pty bridges + browser/hosted sessions).
       // Detached background agents and external sessions are separate processes, so they
       // aren't counted here. Drives the config-save "a restart will end them" warning (#427).
+      // Own "running"/"starting" filter rather than reusing activeBridges() (which also
+      // counts "stopping" bridges) — a bridge mid-Stop is on its way out, so counting it
+      // would overstate the "N session(s) running" copy.
       restartImpactCount() {
-        return this.activeBridges().length + this.liveHosted().length;
+        const liveStatuses = ["running", "starting"];
+        const bridges = Object.values(this.instances).filter((i) => liveStatuses.includes(i.status));
+        const hosted = this.hosted.filter((h) => liveStatuses.includes(h.status));
+        return bridges.length + hosted.length;
       },
       configDirty() {
         const c = this.configEditor;
@@ -689,18 +695,30 @@
       isBusy(name) { return this.statusOf(name) === "starting"; },
       isStopping(name) { return this.statusOf(name) === "stopping"; },
       sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
-      // A live bridge whose connect URL hasn't arrived (or never will). session_url
-      // is captured asynchronously after the bridge is Running; without this guard a
-      // green "Running" row shows no connect affordance and no explanation.
+      // A running bridge whose connect URL hasn't arrived (or never will). session_url
+      // is captured asynchronously only AFTER the bridge reaches "running", so gate on
+      // that — during "starting" no output has been produced yet, so "Preparing connect
+      // link…" (and, for pty, "No web link") would surface before it's true. Without this
+      // a green "Running" row shows no connect affordance and no explanation.
       connectUrlMissing(name) {
-        const s = this.statusOf(name);
-        return (s === "running" || s === "starting") && !this.sessionUrlOf(name);
+        return this.statusOf(name) === "running" && !this.sessionUrlOf(name);
       },
       // pty (flag-form) bridges genuinely never print a connect URL (claude >2.1.161
       // stopped emitting it) — so it's not a transient gap, it's permanent. Tell the
       // user to drive it from Logs rather than imply a link is still coming.
       connectUrlUnavailable(name) {
         return this.connectUrlMissing(name) && this.resumeModeOf(name) === "pty";
+      },
+      // Screen-reader text for the connect-link state, surfaced via a PERSISTENT
+      // aria-live region (empty when idle). A live region only announces content that
+      // changes INSIDE an already-rendered node — toggling the whole live element in
+      // via x-show (display:none→visible) is silently skipped by NVDA/VoiceOver — so the
+      // wrapper stays mounted and only this text changes.
+      connectStatusText(name) {
+        if (!this.connectUrlMissing(name)) return "";
+        return this.connectUrlUnavailable(name)
+          ? "This session has no web link — open Logs to drive it."
+          : "Preparing the connect link…";
       },
       envUrlOf(name) { return (this.instances[name] || {}).url || null; },
       errorOf(name) { return this.errors[name] || null; },

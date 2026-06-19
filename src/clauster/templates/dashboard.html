@@ -458,15 +458,21 @@
                   {# Running but no connect URL yet: explain the gap instead of silently
                      dropping the headline "open on your phone" affordance (#427 UX-02).
                      pty flag-form bridges never get a URL — say so; otherwise it's a
-                     transient capture gap — show a spinner placeholder. #}
-                  <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-disabled="true"
+                     transient capture gap — show a spinner placeholder. The two chips are
+                     VISUAL only (aria-hidden); the screen-reader announcement comes from a
+                     persistent aria-live region below, because a live region toggled in via
+                     x-show (display:none→visible) is silently skipped by NVDA/VoiceOver. #}
+                  <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-hidden="true"
                         x-show="connectUrlUnavailable(i.project)" x-cloak
                         title="This bridge mode (pty true-resume) has no web link — open Logs to drive it.">
                     No web link — use Logs</span>
-                  <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-disabled="true"
+                  <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-hidden="true"
                         x-show="connectUrlMissing(i.project) && !connectUrlUnavailable(i.project)" x-cloak
-                        aria-live="polite" title="The connect link is being captured from the bridge…">
+                        title="The connect link is being captured from the bridge…">
                     <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing connect link…</span>
+                  {# Persistent live region — always mounted, empty when idle — so the
+                     announcement fires on a content change, not a display toggle (#427 UX-02). #}
+                  <span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.project)"></span>
                   <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleLogs(i.project)">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-logs"/></svg><span
                       x-text="logs[i.project] && logs[i.project].open ? 'Hide logs' : 'Logs'">Logs</span></button>
