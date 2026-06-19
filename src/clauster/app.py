@@ -529,7 +529,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # setdefault: never clobber a header a downstream response set on purpose.
         headers.setdefault("X-Content-Type-Options", "nosniff")
         headers.setdefault("X-Frame-Options", "DENY")
-        headers.setdefault("Referrer-Policy", "no-referrer")
+        # same-origin, NOT no-referrer: under `no-referrer` a spec-compliant browser
+        # serializes the Origin header of a same-origin <form> POST *navigation* to the
+        # literal "null" (Fetch: a non-GET request from a no-referrer document gets a
+        # null origin). The CSRF gate (_origin_allowed) then rejects that as not-in-
+        # allowlist and 403s the native login/logout forms — the only non-fetch POSTs;
+        # the Alpine API uses cors fetch, which always carries the real Origin. On newer
+        # Chrome this is deterministic (login/logout simply break). `same-origin` keeps
+        # the real Origin on same-origin navigations while still suppressing the referrer
+        # cross-origin, preserving the privacy intent of #428. (See #454.) Safe only
+        # while no secret travels in a same-origin URL — clauster credentials are all
+        # cookie/header-borne (session cookie, Bearer token, proxy HMAC), so a same-origin
+        # Referer carries no secret; revisit this if a token/session ever rides a URL.
+        headers.setdefault("Referrer-Policy", "same-origin")
         headers.setdefault("Content-Security-Policy", _CSP)
         if _cookie_secure(request):
             # No includeSubDomains: it would pin every sibling subdomain of the

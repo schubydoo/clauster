@@ -42,11 +42,14 @@ def test_login_rejects_wrong_password_then_accepts_correct(
     browser.goto(f"{auth_server}/login")
     browser.fill("#password", "definitely-not-the-password")
     browser.click('button[type="submit"]')  # real CDP click submits the form
-    # Still gated: back on the login page with the rejection surfaced, and the
-    # dashboard grid not reachable.
-    browser.expect_url(re.compile(r"/login"))
-    browser.expect_visible("#password")
+    # Still gated: the rejection re-renders /login with the alert. Assert the alert
+    # FIRST — it appears only on the post-submit page, so polling for it waits out the
+    # form-POST navigation. #password and the /login URL are present on the pre-submit
+    # page too, so asserting either first could pass before the submit even lands and
+    # race the render (the #password-visibility flake in #454).
     browser.expect_text('[role="alert"]', "Incorrect password.")
+    browser.expect_visible("#password")
+    browser.expect_url(re.compile(r"/login"))
 
     browser.fill("#password", e2e_password)
     browser.click('button[type="submit"]')
