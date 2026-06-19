@@ -418,7 +418,8 @@ def test_dashboard_renders_pickers(write_config):
     html = client.get("/").text
     assert "x-model=\"spawnMode['alpha']\"" in html  # Spawn picker
     assert 'x-model="lperm"' in html  # Permissions picker (popover-local)
-    assert '<option value="default">default</option>' in html  # a Jinja-rendered perm option
+    # a Jinja-rendered perm option (value-stable; the label is plain-language copy)
+    assert '<option value="default">Ask each time (default)</option>' in html
     assert '<option value="worktree">worktree</option>' in html  # alpha is a git repo
 
 

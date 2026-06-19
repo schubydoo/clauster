@@ -391,6 +391,13 @@
         const el = document.getElementById("cfg-sec-" + section);
         if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
       },
+      // Config changes apply only after a Clauster restart — which reaps the cgroup and
+      // ENDS live, clauster-managed sessions (pty bridges + browser/hosted sessions).
+      // Detached background agents and external sessions are separate processes, so they
+      // aren't counted here. Drives the config-save "a restart will end them" warning (#427).
+      restartImpactCount() {
+        return this.activeBridges().length + this.liveHosted().length;
+      },
       configDirty() {
         const c = this.configEditor;
         return c.editable.some((p) => c.edits[p] !== c.fields[p]);
@@ -682,6 +689,19 @@
       isBusy(name) { return this.statusOf(name) === "starting"; },
       isStopping(name) { return this.statusOf(name) === "stopping"; },
       sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
+      // A live bridge whose connect URL hasn't arrived (or never will). session_url
+      // is captured asynchronously after the bridge is Running; without this guard a
+      // green "Running" row shows no connect affordance and no explanation.
+      connectUrlMissing(name) {
+        const s = this.statusOf(name);
+        return (s === "running" || s === "starting") && !this.sessionUrlOf(name);
+      },
+      // pty (flag-form) bridges genuinely never print a connect URL (claude >2.1.161
+      // stopped emitting it) — so it's not a transient gap, it's permanent. Tell the
+      // user to drive it from Logs rather than imply a link is still coming.
+      connectUrlUnavailable(name) {
+        return this.connectUrlMissing(name) && this.resumeModeOf(name) === "pty";
+      },
       envUrlOf(name) { return (this.instances[name] || {}).url || null; },
       errorOf(name) { return this.errors[name] || null; },
       // A stopped/crashed bridge that still has an environment can reconnect to it —
@@ -695,6 +715,20 @@
         return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
       },
       resumeModeOf(name) { return (this.instances[name] || {}).resume_mode || ""; },
+      // Plain-language effect of each permission mode — the same copy as the
+      // <select>'s title=, but surfaced inline so it's visible on touch (this is
+      // a phone-first product; hover tooltips never fire there). Keep in sync
+      // with the option labels in _project_row.html.
+      permissionEffect(mode) {
+        return {
+          default: "Asks before each tool use — the safe default.",
+          plan: "Read-only planning; makes no changes until you switch modes.",
+          acceptEdits: "Auto-accepts file edits; still asks for other tools.",
+          auto: "The model auto-approves what it judges safe; asks otherwise.",
+          dontAsk: "Never prompts — denies anything not pre-approved.",
+          bypassPermissions: "Skips every permission check — the agent may do anything.",
+        }[mode] || "";
+      },
       detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
       externalCount(name) {
         const s = this.externalSessions[name];

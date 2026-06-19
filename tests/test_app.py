@@ -236,6 +236,48 @@ def test_dashboard_ux_polish_followups(write_config):
     assert "hostedStatusDot(status) {" in page  # the helper is defined and shipped
 
 
+def test_dashboard_permission_effect_renders_inline(write_config):
+    # #427 UX-01: the riskiest per-launch choice (permission mode) explained its 6
+    # modes only in a hover title= — invisible on touch (phone-first product). The
+    # selected mode's plain-language effect now renders inline beneath the <select>,
+    # reusing the launch-mode m.sub pattern. Assert the helper ships + is bound, and
+    # the select is wired to it for screen readers.
+    page = _client(write_config).get("/").text
+    assert "permissionEffect(mode) {" in page  # the helper is defined and shipped
+    assert 'x-text="permissionEffect(lperm)"' in page  # bound to the selected mode
+    assert 'aria-describedby="perm-effect-alpha"' in page  # select points at the hint
+    assert 'id="perm-effect-alpha"' in page  # and the hint exists per project
+
+
+def test_dashboard_explains_missing_connect_url(write_config):
+    # #427 UX-02: a running desktop bridge whose session_url hasn't arrived (async
+    # capture gap) — or never will (pty flag-form) — used to show 'Running' with the
+    # 'Open in Claude' + QR affordances silently gone and unexplained. Now a disabled
+    # placeholder fills the gap: a spinner 'Preparing connect link…' for the transient
+    # case, 'No web link — use Logs' for pty. Assert the helpers ship + are bound.
+    page = _client(write_config).get("/").text
+    assert "connectUrlMissing(name) {" in page  # transient-or-permanent gap helper
+    assert "connectUrlUnavailable(name) {" in page  # pty (no URL ever) split
+    assert 'x-show="connectUrlUnavailable(i.project)"' in page  # pty placeholder gate
+    assert 'x-show="connectUrlMissing(i.project) && !connectUrlUnavailable(i.project)"' in page
+    assert "Preparing connect link" in page  # the transient spinner copy
+
+
+def test_dashboard_warns_restart_ends_live_sessions(write_config):
+    # #427 UX-03: the config-save banner said 'restart Clauster to apply' with no
+    # affordance and no warning that a restart reaps the cgroup and ends live pty
+    # bridges + browser sessions. It now carries a 'How do I restart?' docs link and
+    # a conditional 'N session(s) running — a restart will end them' line (mirroring
+    # the CLAUDE.md editor's live-session caveat). Detached/external sessions are
+    # separate processes, so restartImpactCount() intentionally excludes them.
+    page = _client(write_config).get("/").text
+    assert "restartImpactCount() {" in page  # the count helper is defined and shipped
+    assert "return this.activeBridges().length + this.liveHosted().length;" in page
+    assert 'data-test="cfg-restart-warn"' in page  # the warning element
+    assert 'x-show="restartImpactCount() > 0"' in page  # gated on live sessions
+    assert "How do I restart?" in page  # the docs affordance
+
+
 def test_dashboard_surfaces_crashed_instance_error_detail(write_config):
     # #313: a bridge that spawns then CRASHES has `error_detail` set (None on success), but the
     # card never rendered it — the failure reason was invisible (a silent dead card). The
