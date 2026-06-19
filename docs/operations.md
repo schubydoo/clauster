@@ -234,13 +234,19 @@ Each emitted event is a single JSON `POST` body of the shape:
   "status": "running",
   "resume_mode": "standard",
   "spawn_mode": "same-dir",
-  "session_id": "…"
+  "session_ref": "a1b2c3d4e5f60718"
 }
 ```
 
 The `event` is one of `spawn` / `ready` / `stop` / `crash`. `status` is the
-bridge's lifecycle status at emit time; `session_id` is the starter session id
-(may be `null` before a session attaches).
+bridge's lifecycle status at emit time. `session_ref` is a **stable,
+non-reversible correlation token** — a 16-hex-char (64-bit) HMAC-SHA256 prefix
+keyed by a per-deployment secret — so a receiver can group the
+`spawn` / `ready` / `stop` / `crash` events of one session without ever holding
+the raw session id. The raw `session_<ULID>` is deliberately **never** egressed:
+it is bearer-equivalent (anyone holding it can open a New Session composer for
+the bridge), so it is stripped from every egress surface. `session_ref` is
+`null` until a session attaches.
 
 Behaviour and caveats:
 
