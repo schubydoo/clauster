@@ -1,0 +1,34 @@
+{
+  "strictness": 1,
+  "fileChangeLimit": 100,
+  "triggerOnUpdates": true,
+  "statusCheck": true,
+  "statusCommentsEnabled": true,
+  "excludeAuthors": [
+    "dependabot[bot]",
+    "renovate[bot]",
+    "pre-commit-ci[bot]",
+    "github-actions[bot]",
+    "allcontributors[bot]",
+    "clauster-ci[bot]",
+    "coderabbitai[bot]"
+  ],
+  "summarySection": { "included": true, "collapsible": true, "defaultOpen": true },
+  "confidenceScoreSection": { "included": true, "collapsible": true, "defaultOpen": true },
+  "issuesTableSection": { "included": true, "collapsible": true, "defaultOpen": true },
+  "sequenceDiagramSection": { "included": true, "collapsible": true, "defaultOpen": true },
+  "instructions": "Question every \"temporary\" workaround that has outlived a presidential term.",
+  "ignorePatterns": "src/clauster/static/vendor/**\n**/*.min.js\n**/*.min.css\nuv.lock\npackage-lock.json",
+  "rules": [
+    {
+      "id": "jinja-autoescape-context",
+      "rule": "Jinja2 templates (autoescape on) driving Alpine.js. Values rendered with {{ }} are HTML-escaped by default — do not flag ordinary interpolation as XSS. Only raw or `| safe` output, or interpolation into event-handler attributes or inline <script>, is a genuine concern.",
+      "scope": ["src/clauster/templates/**"]
+    },
+    {
+      "id": "tests-testclient-lifespan",
+      "rule": "Tests use FastAPI's TestClient. WebSocket and background-task tests must wrap the client in `with _client(...)` so the app lifespan/startup runs.",
+      "scope": ["tests/**"]
+    }
+  ]
+}
