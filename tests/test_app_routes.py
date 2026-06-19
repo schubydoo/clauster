@@ -946,3 +946,85 @@ def test_widget_counts_reflect_seeded_instances(write_config, tmp_path):
     # Confirm the at-rest fields still hold under the seeded-instance scenario.
     assert body["projects_total"] == 3
     assert body["version"]
+
+
+# ----- session QR deep link (error branches; happy path is e2e) ---------
+
+
+def test_qr_unknown_instance_404(write_config, tmp_path):
+    # No managed instance by that id -> 404 (only the e2e happy path was covered).
+    r = _client(write_config, tmp_path).get("/api/instances/ghost/qr")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "no such instance: ghost"
+
+
+def test_qr_no_session_url_409(write_config, tmp_path):
+    # A registered instance that has neither a session_url (no starter_session_id)
+    # nor a url yet -> nothing to encode -> 409, not a broken/empty QR.
+    from clauster.models import RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    assert inst.session_url is None and inst.url is None  # precondition for the branch
+    client.app.state.runner._instances["alpha"] = inst
+    r = client.get("/api/instances/alpha/qr")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "no session URL available yet"
+
+
+def test_qr_renders_svg_when_url_present(write_config, tmp_path):
+    # Sanity-pin the success path at the route layer too: a `url` (the secondary
+    # deep link) is enough to encode even without a starter session.
+    from clauster.models import RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", url="https://claude.ai/code?environment=env_X"
+    )
+    client.app.state.runner._instances["alpha"] = inst
+    r = client.get("/api/instances/alpha/qr")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/svg+xml"
+    assert r.content.startswith(b"<?xml") or b"<svg" in r.content
+
+
+# ----- per-project usage read-error branch (degrade, never bare 500) ----
+
+
+def test_project_usage_read_error_503(write_config, tmp_path, monkeypatch):
+    # The rollup walks on-disk transcripts; an OSError mid-walk must surface as a
+    # defined 503 ("could not read usage transcripts"), never an unhandled 500.
+    from clauster import usage as usage_mod
+
+    def _boom(*a, **k):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(usage_mod, "aggregate_project_usage", _boom)
+    r = _client(write_config, tmp_path).get("/api/projects/alpha/usage")
+    assert r.status_code == 503
+    assert "could not read usage transcripts" in r.json()["detail"]
+
+
+# ----- resume vanished-mid-op (gone-race) -------------------------------
+
+
+def test_resume_instance_vanishes_mid_op_404(write_config, tmp_path, monkeypatch):
+    # Distinct from the synchronous unknown-id 404: here the route fetches a real
+    # (non-hosted) instance, but the row vanishes before/while the runner resumes
+    # it (concurrent stop/forget). runner.resume raises UnknownProject, which
+    # _spawn_or_http maps to a defined 404 rather than letting it leak as a 500.
+    from clauster.models import RemoteControlInstance
+    from clauster.runner import UnknownProject
+
+    client = _client(write_config, tmp_path)
+    client.app.state.runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha"
+    )
+
+    async def _gone(_name):
+        raise UnknownProject("no managed instance to resume: 'alpha'")
+
+    monkeypatch.setattr(client.app.state.runner, "resume", _gone)
+    r = client.post("/api/instances/alpha/resume")
+    assert r.status_code == 404
+    assert "no managed instance to resume" in r.json()["detail"]

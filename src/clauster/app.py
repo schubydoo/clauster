@@ -750,11 +750,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # Transcripts can be huge, so the parse runs off the event loop.
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
-        rollup = await asyncio.to_thread(
-            usage.aggregate_project_usage,
-            config.projects_root / name,
-            project_name=name,
-        )
+        # The rollup walks on-disk transcripts; a broken directory or unreadable
+        # file (OSError) must surface as a defined "couldn't read" status, not a
+        # bare 500. The badge is advisory, so a read failure degrades to 503.
+        try:
+            rollup = await asyncio.to_thread(
+                usage.aggregate_project_usage,
+                config.projects_root / name,
+                project_name=name,
+            )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"could not read usage transcripts: {exc}"
+            ) from exc
         tot = rollup.totals
         return {
             "project": name,
