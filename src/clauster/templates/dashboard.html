@@ -115,9 +115,13 @@
 {% include "_tabler_sprite.html" %}
 
 {# Active-session row macros — reused by both the live list and the Recent group so a
-   browser/detached row renders identically wherever it appears (live vs ended). #}
-{% macro hosted_row() %}
-            <div class="list-group-item sess-row" :class="hostedRailClass(h)" x-show="activeFilter === 'all' || activeFilter === 'browser'">
+   browser/detached row renders identically wherever it appears (live vs ended). The
+   `filtered` flag gates the live-session-filter `x-show`: the Active zone passes the
+   default (filtered=True) so the chips hide non-matching live rows, while the Recent
+   zone passes filtered=False so ended rows always show — the filter is about live
+   sessions, not ended ones, and recentCount() is filter-unaware (#421). #}
+{% macro hosted_row(filtered=True) %}
+            <div class="list-group-item sess-row" :class="hostedRailClass(h)"{% if filtered %} x-show="activeFilter === 'all' || activeFilter === 'browser'"{% endif %}>
               <div class="d-flex align-items-center flex-wrap gap-1">
                 <span class="badge bg-azure-lt mode-badge me-1">browser</span>
                 {# Unconditional, unlike a bridge row's `claude.ai` badge (x-show on
@@ -243,8 +247,8 @@
             </div>
 {% endmacro %}
 
-{% macro detached_row() %}
-            <div class="list-group-item sess-row" :class="agentRailClass(j)" x-show="activeFilter === 'all' || activeFilter === 'detached'">
+{% macro detached_row(filtered=True) %}
+            <div class="list-group-item sess-row" :class="agentRailClass(j)"{% if filtered %} x-show="activeFilter === 'all' || activeFilter === 'detached'"{% endif %}>
               <div class="d-flex align-items-center flex-wrap gap-1">
                 <span class="badge bg-purple-lt mode-badge me-1">detached</span>
                 <span class="badge me-1 text-capitalize" :class="agentBadgeClass(j.state)" x-text="j.state || '—'"></span>
@@ -514,10 +518,12 @@
         <div class="card mt-1" x-show="recentOpen" x-cloak>
           <div class="list-group list-group-flush">
             {% if claustrum_enabled %}
-            <template x-for="h in endedHosted()" :key="h.claustrum_process_id">{{ hosted_row() }}</template>
+            <template x-for="h in endedHosted()" :key="h.claustrum_process_id">{{ hosted_row(filtered=False) }}</template>
             {% endif %}
             <template x-for="i in endedBridges()" :key="i.project">
-              <div class="list-group-item sess-row" :class="bridgeRailClass(i.project)" x-show="activeFilter === 'all' || activeFilter === 'desktop'">
+              {# No live-session-filter x-show here: the Recent zone is decoupled from the
+                 chips so ended rows always show and match recentCount() (#421). #}
+              <div class="list-group-item sess-row" :class="bridgeRailClass(i.project)">
                 <div class="d-flex align-items-center flex-wrap gap-1">
                   <span class="badge bg-blue-lt mode-badge me-1">desktop</span>
                   <span class="badge" :class="statusBadgeClass(i.project)">
@@ -540,7 +546,7 @@
                 </div>
               </div>
             </template>
-            <template x-for="j in endedAgents()" :key="j.id">{{ detached_row() }}</template>
+            <template x-for="j in endedAgents()" :key="j.id">{{ detached_row(filtered=False) }}</template>
           </div>
         </div>
       </div>
