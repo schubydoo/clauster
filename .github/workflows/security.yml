@@ -78,6 +78,11 @@ jobs:
     name: secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Spelled out for parity with the other scanners (it would otherwise inherit
+    # the workflow-level contents:read) — checkout + the App token's contents
+    # read are all this job needs.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
