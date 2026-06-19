@@ -84,6 +84,41 @@ _SESSION_COOKIE = "clauster_session"
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 
+# Content-Security-Policy for every response (defence-in-depth; #428). The CSRF
+# Origin gate already blocks cross-origin state changes, so this is a fallback
+# layer, not the primary control.
+#
+# Tradeoff — why the script/style sources are not fully locked down:
+#   * The dashboard, login and 404 pages all carry inline <script> blocks (the
+#     pre-paint theme setter + the whole Alpine dashboard logic), so dropping
+#     'unsafe-inline' from script-src would blank the UI unless every block were
+#     moved to nonced external files — out of scope here.
+#   * The vendored Alpine build evaluates x-* expressions via `new Function()`,
+#     which CSP classifies as eval, so 'unsafe-eval' is required for the
+#     dashboard to render at all. (The CSP-friendly Alpine build forbids those
+#     expressions; swapping to it is a separate, larger change.)
+#   * dashboard.html has an inline <style> block plus inline style="" attributes,
+#     so style-src keeps 'unsafe-inline'.
+# This is the tightest policy that still renders the shipped UI; it stops the
+# obvious injection sinks (frame-ancestors/object-src/base-uri/form-action) while
+# tolerating the self-hosted inline assets we actually ship.
+#
+# connect-src lists ws:/wss: explicitly: the live bridge-log + hosted-session
+# streams open same-origin WebSockets, and not every browser folds those under
+# 'self', so the schemes are spelled out to keep the streams working.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self' ws: wss:; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "object-src 'none'"
+)
+
 
 class LoginThrottle:
     """In-process failed-login limiter: a per-key hard lock + a global backoff fallback.
@@ -450,6 +485,31 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 return JSONResponse({"detail": "authentication required"}, status_code=401)
             return RedirectResponse(f"{_root}/login", status_code=303)
         return await call_next(request)
+
+    # Registered AFTER `guard` on purpose: Starlette runs the last-added http
+    # middleware OUTERMOST, so this wraps the guard and stamps the headers even on
+    # the guard's own early 401/403/redirect responses (not just route responses).
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        """Stamp defence-in-depth security headers on every response (#428).
+
+        Runs for all responses — including the auth guard's 401/403/redirect —
+        so the headers are present even on rejected requests. The CSRF Origin
+        gate is still the primary control; these are a belt-and-suspenders layer.
+        HSTS is emitted only when the connection is HTTPS (reusing the same
+        ``_cookie_secure`` detection the session cookie uses), so a plain-HTTP
+        LAN deployment never pins a browser to a scheme it can't serve.
+        """
+        response = await call_next(request)
+        headers = response.headers
+        # setdefault: never clobber a header a downstream response set on purpose.
+        headers.setdefault("X-Content-Type-Options", "nosniff")
+        headers.setdefault("X-Frame-Options", "DENY")
+        headers.setdefault("Referrer-Policy", "no-referrer")
+        headers.setdefault("Content-Security-Policy", _CSP)
+        if _cookie_secure(request):
+            headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_form(request: Request) -> Response:
