@@ -9,7 +9,7 @@ upgrades are an external operation: update the package, then restart. Run
 Always **back up first** — it's a few seconds and makes any upgrade reversible:
 
 ```bash
-clauster backup ./clauster-backups/      # tar.gz of state_dir + config
+clauster backup -c /path/to/clauster.yml -o ./clauster-backups/   # tar.gz of state_dir + config
 ```
 
 The on-disk **database** schema is migrated **automatically and fail-closed** on
