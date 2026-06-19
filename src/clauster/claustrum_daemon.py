@@ -184,7 +184,10 @@ class ClaustrumDaemon:
         """Connect to a running daemon or spawn one (caller holds the lock)."""
         self._error = None
         self._prepare_dir()
-        self._token = token = self._read_or_create_token()
+        # Off-loop: _read_or_create_token can block up to ~1s on the O_EXCL-loser path
+        # (it polls for the winner's write). Running it inline would stall every live
+        # WebSocket / HTTP handler on the single event loop for that window.
+        self._token = token = await asyncio.to_thread(self._read_or_create_token)
 
         try:
             self._client = await self._connect(token)

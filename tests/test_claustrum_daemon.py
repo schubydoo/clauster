@@ -296,6 +296,35 @@ def test_read_or_create_token_replaces_truly_abandoned_blank(make_daemon, monkey
     assert not list(daemon._token_path.parent.glob("token.*.tmp"))
 
 
+def test_replace_blank_token_adopts_last_moment_winner(make_daemon):
+    """`_replace_blank_token` re-checks for a winner that landed during the wait."""
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    winner = "d" * 64
+    daemon._token_path.write_text(winner, encoding="utf-8")  # a winner already there
+    # Called directly: the last-moment re-read finds the winner and adopts it rather
+    # than overwriting, never touching a temp file.
+    assert daemon._replace_blank_token("e" * 64) == winner
+    assert daemon._token_path.read_text(encoding="utf-8") == winner
+    assert not list(daemon._token_path.parent.glob("token.*.tmp"))
+
+
+def test_replace_blank_token_cleans_up_temp_on_replace_failure(make_daemon, monkeypatch):
+    """A failure during the temp-write/replace must not orphan a `.tmp` file."""
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    daemon._token_path.write_text("", encoding="utf-8")  # blank → no winner to adopt
+
+    def _boom(*_a, **_k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("clauster.claustrum_daemon.os.replace", _boom)
+    with pytest.raises(OSError, match="replace failed"):
+        daemon._replace_blank_token("f" * 64)
+    # The orphaned temp file was cleaned up despite the failure.
+    assert not list(daemon._token_path.parent.glob("token.*.tmp"))
+
+
 async def test_custom_version_surfaced(make_daemon, monkeypatch):
     """server.version is reflected into the daemon status."""
     monkeypatch.setenv("FAKE_CLAUSTRUM_VERSION", "fake-9.9.9")
