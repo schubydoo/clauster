@@ -69,7 +69,14 @@ def test_referrer_policy_is_same_origin_not_no_referrer(runner_config):
     """
     client = _open_client(runner_config)
     resp = client.get("/healthz")
-    assert resp.headers["Referrer-Policy"] == "same-origin"
+    # The durable invariant: never the value that nulls a same-origin form-POST Origin.
+    # (`== "same-origin"` lives in the parametrized header test; this guards the *bad*
+    # value directly, so it still fires if the chosen-good value is ever swapped.)
+    assert resp.headers["Referrer-Policy"] != "no-referrer", (
+        "Referrer-Policy must never be no-referrer — it serializes a same-origin "
+        "form-POST Origin to the literal 'null', breaking the CSRF gate on /login and "
+        "/logout (see #454)."
+    )
 
 
 def test_csp_present_and_locked_down(runner_config):
