@@ -90,8 +90,21 @@ def write_edits(
         #    file (mkstemp — never a shared `clauster.yml.tmp` two writers could clobber).
         # Microsecond precision so two edits in the same second don't collide on one backup.
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S_%fZ")
-        path.with_name(path.name + f".bak-{stamp}").write_bytes(original_bytes)
+        # Capture the source mode BEFORE writing the backup and create the backup with it
+        # (umask only narrows the O_CREAT bits, never widens), so a hardened 0600 config —
+        # which holds auth.password_hash / api_token_hash — never leaks its secrets into a
+        # world-readable .bak. The atomic-replace temp below already preserves this mode.
         mode = stat.S_IMODE(path.stat().st_mode)
+        backup = path.with_name(path.name + f".bak-{stamp}")
+        backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        try:
+            fh = os.fdopen(backup_fd, "wb")
+        except BaseException:  # fdopen didn't take ownership of the fd — close it ourselves
+            os.close(backup_fd)
+            raise
+        with fh:
+            fh.write(original_bytes)
+        os.chmod(backup, mode)  # exact source mode even where umask narrowed the create bits
         fd, tmp_name = tempfile.mkstemp(
             dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
         )
