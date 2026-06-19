@@ -316,6 +316,9 @@ def test_recent_zone_rows_decoupled_from_live_filter(write_config):
     # (filter-unaware) counts a row the x-show hides ("Recent (1)" with the row invisible).
     # Active-zone rows stay filtered; only the Recent zone is decoupled.
     page = _client(write_config).get("/").text
+    assert "Recent / resumable" in page, (
+        "Anchor comment not found in rendered HTML — was the Recent zone comment changed?"
+    )
     recent_start = page.index("Recent / resumable")
     active, recent = page[:recent_start], page[recent_start:]
 
