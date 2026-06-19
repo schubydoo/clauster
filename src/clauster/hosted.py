@@ -81,10 +81,12 @@ _STREAM_JSON_ARGS: tuple[str, ...] = (
 # we never auto-respond to a tool-permission request (fail closed).
 _AUTO_ACK_SUBTYPES: frozenset[str] = frozenset({"initialize", "mcp_message"})
 
-# Browser-facing ring depth (parsed events, not raw bytes) and per-subscriber
-# queue depth before a slow viewer starts dropping with an honest marker.
+# Browser-facing ring depth (parsed events, not raw bytes). The per-subscriber queue
+# default is sized to hold a full ring snapshot — the ring plus the one leading "gap"
+# marker subscribe() may prepend — so a first-view reconnect never drops the newest
+# events. HostedSession.__init__ raises any smaller queue to this floor (#422).
 _DEFAULT_RING_SIZE = 4096
-_DEFAULT_QUEUE_MAXSIZE = 2048
+_DEFAULT_QUEUE_MAXSIZE = _DEFAULT_RING_SIZE + 1
 
 # How long stop() waits for a clean exit after SIGINT before escalating to KILL.
 _STOP_GRACE_SECONDS = 5.0
