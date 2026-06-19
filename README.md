@@ -155,8 +155,8 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   `notifications` push a human message (Slack/Discord/Telegram/email via Apprise,
   the `notify` extra) on a **crash**; `webhooks` deliver a JSON `POST` to your own
   endpoint on every `spawn` / `ready` / `stop` / `crash` transition (no extra
-  dependency, `http(s)` only). Both are off by default and fail-open/closed so a
-  broken endpoint never affects a bridge. See
+  dependency, `http(s)` only). Both are off by default, and a failing endpoint is
+  always logged-and-swallowed so it never affects a bridge's lifecycle. See
   [Operations → Crash alerts](https://schubydoo.github.io/clauster/operations/#crash-alerts)
   and [Lifecycle webhooks](https://schubydoo.github.io/clauster/operations/#lifecycle-webhooks).
 - **Prometheus `/metrics`** — opt into a read-only text-format scrape endpoint
