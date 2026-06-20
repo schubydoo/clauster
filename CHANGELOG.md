@@ -336,3 +336,9 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.1 (2026-06-20)
+
+### Fixes
+
+- Harden two untrusted-input readers against malformed input (both surfaced by new fuzz harnesses): the CSRF/CORS origin check no longer returns a 500 on an `Origin` header with an out-of-range or non-numeric port, and project discovery no longer crashes on a non-dict `~/.claude.json` — each now degrades safely ([#492](https://github.com/schubydoo/clauster/pull/492)).
+- Toast notifications now render fully opaque instead of ~50% transparent, so they stay readable over busy page content ([#484](https://github.com/schubydoo/clauster/pull/484)).
