@@ -512,11 +512,6 @@ class MetricsConfig(BaseModel):
     )
 
 
-# A set metrics_token below this length is too weak a bearer credential to trust on a
-# scrape endpoint; an unset (None/blank) token is fine and stays behind the auth guard.
-_METRICS_TOKEN_MIN_LEN = 16
-
-
 class ObservabilityConfig(BaseModel):
     """Read-only observability surfaces (a Prometheus ``/metrics`` exposition).
 
@@ -532,31 +527,35 @@ class ObservabilityConfig(BaseModel):
         description="Gate a text-format `/metrics` endpoint (build info, bridge counts "
         "by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum "
         "gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays "
-        "**behind** the auth guard unless `metrics_token` is set.",
+        "**behind** the auth guard unless `metrics_token_hash` is set.",
     )
-    metrics_token: str | None = Field(
+    metrics_token_hash: str | None = Field(
         default=None,
-        description="Optional bearer token that lets a scraper (e.g. Prometheus) reach "
-        "`/metrics` without a browser session — presented as `Authorization: Bearer "
-        "<token>`. When set, a valid token OR a normal session grants access; when unset, "
-        "`/metrics` stays behind the auth guard. Compared in constant time. Must be at "
-        "least 16 characters when set. Supply via "
-        "`CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` to keep it out of the config file.",
+        description="SHA-256 hash of an optional bearer token that lets a scraper (e.g. "
+        "Prometheus) reach `/metrics` without a browser session — the scraper presents "
+        "the raw token as `Authorization: Bearer <token>`. When set, a valid token OR a "
+        "normal session grants access; when unset, `/metrics` stays behind the auth "
+        "guard. Only the hash is stored (parity with `auth.api_token_hash`); the raw "
+        "token is shown once by `clauster hash-metrics-token`. Supply via "
+        "`CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE` to keep it out of the config "
+        "file.",
     )
 
-    @field_validator("metrics_token", mode="before")
+    @field_validator("metrics_token_hash", mode="before")
     @classmethod
-    def _metrics_token_floor(cls, v: object) -> object:
-        # Empty / whitespace-only stays unset (None) — the endpoint simply remains
-        # behind the auth guard, no token path. But a SET-but-short token is a weak
-        # bearer credential a scraper would actually trust: reject it loudly so the
-        # operator picks a real one rather than shipping a guessable /metrics key.
+    def _blank_metrics_hash_is_none(cls, v: object) -> object:
+        # Mirror auth.api_token_hash: a blank / whitespace-only hash can never match a
+        # presented token (it fails closed), so normalize it to None so only a REAL hash
+        # counts. A non-empty value that is NOT a 64-char lowercase hex digest can never
+        # match a token (``hash_token`` always returns SHA-256 hex) — reject it loudly so
+        # the operator fixes the config instead of shipping a /metrics token nothing can
+        # ever present successfully.
         if isinstance(v, str) and not v.strip():
             return None
-        if isinstance(v, str) and len(v) < _METRICS_TOKEN_MIN_LEN:
+        if isinstance(v, str) and not re.fullmatch(r"[0-9a-f]{64}", v):
             raise ValueError(
-                f"metrics_token must be at least {_METRICS_TOKEN_MIN_LEN} characters; "
-                'generate one with `python -c "import secrets; print(secrets.token_urlsafe(24))"`.'
+                "metrics_token_hash must be a 64-character lowercase hex string "
+                "(the SHA-256 output from `clauster hash-metrics-token`)"
             )
         return v
 

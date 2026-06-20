@@ -85,6 +85,47 @@ async def test_persist_tolerates_store_write_failure(runner_config, monkeypatch,
     assert any("could not persist" in r.message for r in caplog.records)
 
 
+async def test_persist_serializes_concurrent_callers(runner_config, monkeypatch):
+    # The startup-watch / stop / poll loop can each call _persist on the same event
+    # loop. The DB store's per-row prune raises StaleDataError if a racing writer
+    # already removed the row, so _persist must hold _persist_lock — making each save
+    # atomic. Prove it: a save that yields the loop mid-write must never overlap a
+    # second concurrent save (#471).
+    import time as _time
+
+    runner = _make_runner(runner_config)
+
+    in_flight = 0
+    max_overlap = 0
+    saves = 0
+
+    def _slow_save(_subset):
+        nonlocal in_flight, max_overlap, saves
+        in_flight += 1
+        max_overlap = max(max_overlap, in_flight)
+        saves += 1
+        try:
+            # asyncio.to_thread runs this on a worker thread; this sleep overlaps the
+            # event loop, so a second _persist would interleave here if the lock were
+            # absent — _slow_save would re-enter and in_flight would reach 2.
+            _time.sleep(0.02)
+        finally:
+            in_flight -= 1
+
+    monkeypatch.setattr(runner._state, "save", _slow_save)
+
+    # Each persist must compute a *distinct* subset that differs from _last_saved, or
+    # the no-change early-return short-circuits before the save. Drive that directly so
+    # the test doesn't fight _persist's own _persisted/_last_saved writeback.
+    subsets = iter([{"alpha": {"label": "one"}}, {"beta": {"label": "two"}}])
+    monkeypatch.setattr(runner, "_persist_subset", lambda: next(subsets))
+
+    await asyncio.gather(runner._persist(), runner._persist())
+
+    assert saves == 2  # both callers produced a distinct subset and actually saved
+    assert max_overlap == 1  # the lock kept the two saves from overlapping
+
+
 def _db_load(state_dir):
     """Return the persisted StateStore records on ``state_dir``, then dispose."""
     with _db_persistence(state_dir) as persistence:

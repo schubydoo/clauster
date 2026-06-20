@@ -187,6 +187,11 @@ class SessionRunner:
         self._state = self._persistence.state_store()
         self._persisted: dict[str, dict] = self._state.load()
         self._last_saved: dict[str, dict] | None = None
+        # Serialize concurrent persists (startup-watch / stop / poll loop can interleave
+        # on the event loop). The DB store's per-row prune raises StaleDataError when a
+        # racing writer already removed the row; one lock makes each save atomic (mirrors
+        # :attr:`HostedManager._persist_lock`).
+        self._persist_lock = asyncio.Lock()
         # Best-effort outbound notifications (Apprise; optional extra). No-op unless
         # enabled + configured + Apprise installed. Fire-and-forget crash alerts are
         # tracked here so the tasks aren't garbage-collected mid-flight.
@@ -379,19 +384,23 @@ class SessionRunner:
         degrades to a stale on-disk record, never a failed spawn/stop or a 500 on the
         dashboard poll. ``_last_saved``/``_persisted`` are left unchanged on failure so
         the next persist retries (mirrors :meth:`HostedManager._persist`).
+
+        Held under ``_persist_lock`` so interleaving callers can't race the store's
+        per-row prune into a :class:`StaleDataError` (#471).
         """
-        subset = self._persist_subset()
-        if subset == self._last_saved:
-            return
-        try:
-            await asyncio.to_thread(self._state.save, subset)
-        except OSError as exc:
-            _log.warning("could not persist bridge state: %s", exc)
-            return
-        self._last_saved = subset
-        # Keep the merge base in sync with what's on disk so the next overlay builds
-        # on the latest saved state (live modes that changed this round are retained).
-        self._persisted = subset
+        async with self._persist_lock:
+            subset = self._persist_subset()
+            if subset == self._last_saved:
+                return
+            try:
+                await asyncio.to_thread(self._state.save, subset)
+            except OSError as exc:
+                _log.warning("could not persist bridge state: %s", exc)
+                return
+            self._last_saved = subset
+            # Keep the merge base in sync with what's on disk so the next overlay builds
+            # on the latest saved state (live modes that changed this round are retained).
+            self._persisted = subset
 
     # ----- discovery helpers ---------------------------------------------
 

@@ -267,7 +267,10 @@ def _project_from_sidecar(filename: str) -> str | None:
 
 
 def _int_or_none(value: object) -> int | None:
-    return value if isinstance(value, int) else None
+    # ``bool`` is a subclass of ``int``, so a corrupt sidecar carrying e.g.
+    # ``"keeper_pid": true`` would otherwise resolve to PID 1. Exclude it,
+    # matching the convention in procutil.py.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def iter_keepers(log_dir: Path) -> list[KeeperInfo]:

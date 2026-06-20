@@ -45,6 +45,7 @@ its own `CLAUSTER_SESSION_SECRET_FILE` (it is read outside the config schema):
 
 - `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH_FILE`
 - `auth.api_token_hash` → `CLAUSTER_AUTH_API_TOKEN_HASH_FILE`
+- `observability.metrics_token_hash` → `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE`
 - session secret → `CLAUSTER_SESSION_SECRET_FILE`
 
 ```yaml
@@ -268,8 +269,8 @@ auth guard. See [Networking](networking.md) for scraping behind auth.
 <!-- BEGIN GEN: observability -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token` is set. |
-| `metrics_token` | str \| null | `null` | Optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — presented as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Compared in constant time. Must be at least 16 characters when set. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` to keep it out of the config file. |
+| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token_hash` is set. |
+| `metrics_token_hash` | str \| null | `null` | SHA-256 hash of an optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — the scraper presents the raw token as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Only the hash is stored (parity with `auth.api_token_hash`); the raw token is shown once by `clauster hash-metrics-token`. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE` to keep it out of the config file. |
 <!-- END GEN: observability -->
 
 ## `notifications` — outbound alerts via Apprise (`NotificationsConfig`)
