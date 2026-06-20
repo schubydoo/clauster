@@ -383,8 +383,11 @@ def test_bridge_env_overlay_appends_path_in_order(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("HOME", "/home/u")
     overlay = procutil.bridge_env_overlay(path_append=["~/.local/bin", "/opt/tools"])
-    # inherited PATH stays first; appends follow in order with ~ expanded.
-    assert overlay["PATH"] == os.pathsep.join(["/usr/bin", "/home/u/.local/bin", "/opt/tools"])
+    # inherited PATH stays first; appends follow in order with ~ expanded. Compute the
+    # expanded element via expanduser so this matches on Windows too (expanduser resolves
+    # ~ from USERPROFILE there, not the monkeypatched HOME).
+    local_bin = os.path.expanduser("~/.local/bin")
+    assert overlay["PATH"] == os.pathsep.join(["/usr/bin", local_bin, "/opt/tools"])
 
 
 def test_bridge_env_overlay_handles_empty_inherited_path(monkeypatch):

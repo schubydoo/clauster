@@ -52,7 +52,8 @@ def test_popen_appends_path_and_overlays_env(runner_config, monkeypatch, tmp_pat
     )
     env = _capture_env("popen", runner, monkeypatch, tmp_path)
     assert env is not None
-    assert env["PATH"] == os.pathsep.join(["/usr/bin", "/home/u/.local/bin", "/opt/tools"])
+    local_bin = os.path.expanduser("~/.local/bin")  # USERPROFILE-resolved on Windows
+    assert env["PATH"] == os.pathsep.join(["/usr/bin", local_bin, "/opt/tools"])
     assert env["FOO"] == "bar"
 
 
@@ -64,7 +65,8 @@ def test_popen_keeper_appends_path_and_overlays_env(runner_config, monkeypatch, 
     # The keeper inherits the extended env; inside it the bridge re-derives child_env
     # from this os.environ, so the pty bridge gets the same PATH/env as the standard path.
     assert env is not None
-    assert env["PATH"] == os.pathsep.join(["/usr/bin", "/home/u/.local/bin"])
+    local_bin = os.path.expanduser("~/.local/bin")  # USERPROFILE-resolved on Windows
+    assert env["PATH"] == os.pathsep.join(["/usr/bin", local_bin])
     assert env["FOO"] == "bar"
 
 
