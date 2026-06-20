@@ -31,16 +31,15 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Short-lived clauster-ci App token (secrets named RELEASE_PLEASE_APP_* for
-      # historical reasons — they are the clauster-ci App's credentials, reused by
+      # Short-lived clauster-ci App token (the CLAUSTER_CI_APP_* secrets, shared by
       # several workflows). The App identity is what lets the release PR's eventual
       # merge tag trigger release.yml, same mechanism as before the knope migration.
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
       # Full history + tags so knope can find the last release tag and compute the
