@@ -98,6 +98,20 @@ class ClaudeConfig(BaseModel):
         "PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the "
         "mode it launched with — editing this never re-modes a running or stopped bridge.",
     )
+    path_append: list[str] = Field(
+        default_factory=list,
+        description="Directories appended to the bridge subprocess `PATH` so a `claude` "
+        "session can resolve user-local tools (e.g. `~/.local/bin`) that a minimal service "
+        "`PATH` omits. `~` is expanded; entries are appended in order after the inherited "
+        "`PATH`, never replacing it. Applies to both standard and pty bridges.",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra environment variables overlaid on the bridge subprocess. Applied "
+        "AFTER Clauster's secret scrub, so a key matching a Clauster secret name "
+        "(`CLAUSTER_*` with SECRET/PASSWORD/TOKEN/HASH) is dropped and can never "
+        "re-introduce a scrubbed credential. Applies to both standard and pty bridges.",
+    )
 
 
 class InstanceDefaults(BaseModel):

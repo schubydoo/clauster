@@ -377,3 +377,43 @@ def test_is_secret_env_name_allows_non_secrets():
         "SECRET_SANTA",  # secret-shaped but not CLAUSTER_-prefixed: not ours to scrub
     ):
         assert procutil.is_secret_env_name(name) is False
+
+
+def test_bridge_env_overlay_appends_path_in_order(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/home/u")
+    overlay = procutil.bridge_env_overlay(path_append=["~/.local/bin", "/opt/tools"])
+    # inherited PATH stays first; appends follow in order with ~ expanded.
+    assert overlay["PATH"] == os.pathsep.join(["/usr/bin", "/home/u/.local/bin", "/opt/tools"])
+
+
+def test_bridge_env_overlay_handles_empty_inherited_path(monkeypatch):
+    monkeypatch.delenv("PATH", raising=False)
+    overlay = procutil.bridge_env_overlay(path_append=["/opt/tools"])
+    # no leading empty segment when there is no inherited PATH.
+    assert overlay["PATH"] == "/opt/tools"
+
+
+def test_bridge_env_overlay_overlays_env_map():
+    overlay = procutil.bridge_env_overlay(env={"FOO": "bar"})
+    assert overlay["FOO"] == "bar"
+    assert "PATH" not in overlay  # no path_append → PATH left to the inherited copy
+
+
+def test_bridge_env_overlay_no_inputs_is_empty():
+    assert procutil.bridge_env_overlay() == {}
+    assert procutil.bridge_env_overlay(path_append=[], env={}) == {}
+
+
+def test_bridge_env_overlay_drops_secret_env_through_child_env(monkeypatch):
+    # A config env map that names a Clauster secret must not re-introduce it: the
+    # overlay flows through child_env, which scrubs it on the way to the child.
+    monkeypatch.setenv("PATH", "/usr/bin")
+    overlay = procutil.bridge_env_overlay(
+        path_append=["/opt/tools"],
+        env={"FOO": "bar", "CLAUSTER_SESSION_SECRET": "must-not-leak"},
+    )
+    env = procutil.child_env(overlay)
+    assert env["FOO"] == "bar"
+    assert env["PATH"] == os.pathsep.join(["/usr/bin", "/opt/tools"])
+    assert "CLAUSTER_SESSION_SECRET" not in env  # scrubbed by child_env, never reaches the bridge

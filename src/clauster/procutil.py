@@ -341,3 +341,36 @@ def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     if extra:
         env.update({k: v for k, v in extra.items() if not is_secret_env_name(k)})
     return env
+
+
+def bridge_env_overlay(
+    path_append: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    *,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the env overlay for a bridge subprocess from operator-config knobs.
+
+    Returns an ``extra`` mapping to hand :func:`child_env`: the operator's
+    ``env`` map, any caller ``extra`` (e.g. resume-recap flags), and — when
+    ``path_append`` is set — a merged ``PATH`` = inherited ``PATH`` followed by
+    the ``~``-expanded append directories joined with ``os.pathsep``. Appending
+    (never replacing) keeps the base service toolchain resolvable.
+
+    Returning only the overlay (not the full env) lets the result flow through
+    :func:`child_env`, which scrubs Clauster secrets one more time — so an
+    operator ``env`` key matching a scrubbed secret name is dropped and can never
+    re-introduce a credential the firewall removed.
+    """
+    overlay: dict[str, str] = {}
+    if env:
+        overlay.update(env)
+    if extra:
+        overlay.update(extra)
+    if path_append:
+        expanded = [os.path.expanduser(p) for p in path_append if p]
+        if expanded:
+            inherited = os.environ.get("PATH", "")
+            parts = ([inherited] if inherited else []) + expanded
+            overlay["PATH"] = os.pathsep.join(parts)
+    return overlay
