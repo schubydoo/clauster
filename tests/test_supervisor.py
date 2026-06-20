@@ -668,6 +668,85 @@ def test_stop_invalid_job_id_raises(bad):
         supervisor.stop_background_job(bad)
 
 
+# ----- stuck-orphan forget fallback (#485) -----------------------------------
+
+
+def test_stop_dead_worker_rm_soft_fail_drops_local_job_dir(tmp_path, monkeypatch):
+    # An ended (no-live-worker) agent whose `claude rm` soft-fails: clauster drops the
+    # orphaned job dir itself so the row clears instead of sticking forever.
+    jobs = tmp_path / "jobs"
+    job_dir = _write_job(jobs, _JID, _state())
+    rm = _FakeProc(returncode=1, stderr="Couldn't confirm stopped — service may be restarting")
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[False], rm=rm)
+    res = supervisor.stop_background_job(_JID, roster_json=roster, jobs_dir=jobs)
+    assert kills == []  # no live worker → never signalled
+    assert res["removed"] is True  # the local fallback dropped the record
+    assert res["settled"] is False  # cloud dereg still unconfirmed — surfaced, not hidden
+    assert not job_dir.exists()
+    assert "stop not confirmed" in res["detail"]  # cloud-orphan caveat preserved
+
+
+def test_stop_live_worker_rm_soft_fail_does_not_force_remove(tmp_path, monkeypatch):
+    # A LIVE worker that settles but whose `claude rm` soft-fails must NOT have its dir
+    # yanked out from under it — the force-forget fallback is gated on a dead worker.
+    jobs = tmp_path / "jobs"
+    job_dir = _write_job(jobs, _JID, _state())
+    rm = _FakeProc(returncode=1, stderr="Couldn't confirm stopped — service may be restarting")
+    # alive_seq: validate live, re-validate exited (single SIGINT), then await-exit True.
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, False], rm=rm)
+    res = supervisor.stop_background_job(_JID, roster_json=roster, jobs_dir=jobs)
+    assert kills == [(4242, signal.SIGINT)]
+    assert res["settled"] is True
+    assert res["removed"] is False  # rm soft-failed and the fallback is gated off
+    assert job_dir.exists()  # the live worker's record is left intact
+
+
+def test_stop_dead_worker_rm_soft_fail_and_dir_fallback_also_fails(tmp_path, monkeypatch):
+    # Belt-and-suspenders: if the local dir fallback ALSO can't drop the record, the stop
+    # stays removed=False (surfaced, not silently flipped) so the caveat still reaches the UI.
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, _JID, _state())
+    rm = _FakeProc(returncode=1, stderr="Couldn't confirm stopped")
+    roster, _ = _stop_setup(monkeypatch, tmp_path, alive_seq=[False], rm=rm)
+    monkeypatch.setattr(supervisor, "_force_remove_job_dir", lambda *a: (False, "denied"))
+    res = supervisor.stop_background_job(_JID, roster_json=roster, jobs_dir=jobs)
+    assert res["removed"] is False and res["settled"] is False
+
+
+def test_force_remove_job_dir_already_gone_reads_removed(tmp_path):
+    removed, detail = supervisor._force_remove_job_dir(_JID, tmp_path / "jobs")
+    assert removed is True and "already gone" in detail
+
+
+def test_force_remove_job_dir_rejects_bad_id(tmp_path):
+    removed, detail = supervisor._force_remove_job_dir("../etc", tmp_path)
+    assert removed is False and detail == "invalid job id"
+
+
+def test_force_remove_job_dir_oserror_reported_not_swallowed(tmp_path, monkeypatch, caplog):
+    jobs = tmp_path / "jobs"
+    _write_job(jobs, _JID, _state())
+
+    def boom(_target):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(supervisor.shutil, "rmtree", boom)
+    with caplog.at_level(logging.WARNING, logger="clauster.supervisor"):
+        removed, detail = supervisor._force_remove_job_dir(_JID, jobs)
+    assert removed is False
+    assert "could not drop local job record" in detail
+    assert "could not force-remove orphaned job dir" in caplog.text
+
+
+def test_force_remove_job_dir_defaults_to_module_jobs_dir(tmp_path, monkeypatch):
+    jobs = tmp_path / "jobs"
+    job_dir = _write_job(jobs, _JID, _state())
+    monkeypatch.setattr(supervisor, "JOBS_DIR", jobs)
+    removed, detail = supervisor._force_remove_job_dir(_JID, None)  # None → module constant
+    assert removed is True and not job_dir.exists()
+    assert "dropped orphaned local job record" in detail
+
+
 def test_api_stop_agent_happy(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr(
         supervisor,
