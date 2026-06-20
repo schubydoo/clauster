@@ -1,8 +1,9 @@
 name: PR Title
 
 # Validate that the pull-request title follows Conventional Commits. Because the
-# repo squash-merges, the PR title becomes the squashed commit subject — which
-# release-please parses to decide version bumps and CHANGELOG sections.
+# repo squash-merges, the PR title becomes the squashed commit subject. (Versioning
+# and the CHANGELOG are driven by `.changeset/` fragments via knope, not the commit
+# type — see knope.toml — but a clean, conventional history is still required.)
 #
 # Keep `synchronize` in the trigger list: `conventional PR title` is a REQUIRED
 # status check and required checks are evaluated per head-SHA. Dropping
@@ -30,7 +31,7 @@ jobs:
     permissions:
       pull-requests: read
     steps:
-      # Mint a short-lived RELEASE_PLEASE App installation token (≥5,000 REST
+      # Mint a short-lived clauster-ci App installation token (≥5,000 REST
       # req/hr, vs the 1,000/hr github-actions[bot] pool that fails spuriously
       # under multi-PR bursts). Same-repo PRs only — fork PRs can't read the App
       # secrets, so the step is skipped there and the action falls back to

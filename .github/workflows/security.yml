@@ -88,7 +88,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Mint a RELEASE_PLEASE App token (≥5,000 REST req/hr) so the action's
+      # Mint a clauster-ci App token (≥5,000 REST req/hr) so the action's
       # GitHub API calls (e.g. the "Get user" license check) don't exhaust the
       # 1,000/hr github-actions[bot] pool under bursts. Same-repo runs only
       # (push/schedule, or a same-repo PR); fork PRs lack the App secrets, so the
@@ -202,7 +202,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      # Mint a RELEASE_PLEASE App token (≥5,000 REST req/hr) so zizmor's GitHub
+      # Mint a clauster-ci App token (≥5,000 REST req/hr) so zizmor's GitHub
       # API calls (e.g. the /advisories audit) don't exhaust the 1,000/hr
       # github-actions[bot] pool under bursts (observed: zizmor /advisories 403).
       # Same-repo runs only; fork PRs lack the App secrets, so the step is skipped
@@ -245,7 +245,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      # Mint a RELEASE_PLEASE App token (≥5,000 REST req/hr) so the action's
+      # Mint a clauster-ci App token (≥5,000 REST req/hr) so the action's
       # dependency-graph + PR-comment API calls don't exhaust the 1,000/hr
       # github-actions[bot] pool under bursts. This job is already PR-only; on a
       # fork PR the App secrets are unavailable, so the step is skipped and the

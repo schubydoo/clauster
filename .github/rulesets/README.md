@@ -21,7 +21,7 @@ It encodes the same contract the project has always enforced:
 `tags.json` is a second ruleset (`target: tag`) over `refs/tags/v*` that blocks
 **deletion** and **non-fast-forward** (moving) of release tags, with no bypass —
 so a published version tag can't be repointed or removed. Tag *creation* is not
-blocked, so release-please can still cut new `vX.Y.Z` tags.
+blocked, so knope can still cut new `vX.Y.Z` tags at release time.
 
 This pairs with **immutable releases** (enabled on the repo via
 `PUT /repos/{owner}/{repo}/immutable-releases`): once a release is published its

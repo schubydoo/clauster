@@ -115,10 +115,10 @@
       "groupName": "security tooling actions"
     },
     {
-      "description": "Group release-automation actions (release-please + amannn semantic PR title). Both feed the squash-merge -> release-please pipeline and tend to need joint review on majors.",
+      "description": "Group release-automation actions (knope + amannn semantic PR title). Both feed the changeset -> knope release pipeline and tend to need joint review on majors.",
       "matchManagers": ["github-actions"],
       "matchPackageNames": [
-        "googleapis/release-please-action",
+        "knope-dev/action",
         "amannn/action-semantic-pull-request"
       ],
       "groupName": "release automation actions"
