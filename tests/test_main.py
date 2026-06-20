@@ -110,6 +110,22 @@ def test_hash_token_prints_raw_to_stdout_and_hash_to_stderr(capsys):
     assert auth.verify_token(raw, auth.hash_token(raw)) is True
 
 
+# ----- hash-metrics-token (#473) ----------------------------------------
+
+
+def test_hash_metrics_token_prints_raw_to_stdout_and_hash_to_stderr(capsys):
+    assert cli.main(["hash-metrics-token"]) == 0
+    captured = capsys.readouterr()
+    # The raw token (and only it) is on stdout so the command can be piped cleanly.
+    raw = captured.out.strip()
+    assert raw.startswith("clauster_pat_")
+    assert raw not in captured.err  # raw secret is never echoed into the guidance
+    # The hash to paste into observability goes to stderr, and round-trips with the raw.
+    assert "metrics_token_hash:" in captured.err
+    assert auth.hash_token(raw) in captured.err
+    assert auth.verify_token(raw, auth.hash_token(raw)) is True
+
+
 # ----- doctor -----------------------------------------------------------
 
 

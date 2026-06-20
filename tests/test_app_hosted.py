@@ -316,6 +316,27 @@ def test_dashboard_shows_hosted_panel_when_enabled(write_config, projects_root, 
     assert ':class="hostedStatusDot(h.status)"' in body  # the hosted row wires the status-dot
 
 
+def test_hosted_status_badge_colors_match_bridge(write_config, projects_root, monkeypatch):
+    # #430: the hosted badge map must speak the same colour-to-meaning language as
+    # the bridge STATUS_BADGE in the shared Active list. The three divergent
+    # overrides (starting=blue, stopping=yellow, crashed=red) are unified onto the
+    # bridge's vocabulary (azure / orange / amber); crashed=amber also matches the
+    # hosted dot (bg-yellow), so the badge and dot agree within the row.
+    monkeypatch.setattr(app_module, "ClaustrumDaemon", _NoopDaemon)
+    config = load_config(write_config("claustrum:\n  enabled: true\n"))
+    app = create_app(config)
+    app.state.hosted = _StubManager()
+    with TestClient(app) as client:
+        body = client.get("/").text
+    badge = body.split("hostedStatusBadge(status)", 1)[1].split("},", 1)[0]
+    assert 'starting: "bg-azure-lt"' in badge
+    assert 'stopping: "bg-orange-lt"' in badge
+    assert 'crashed: "bg-yellow-lt"' in badge
+    # The old divergent overrides are gone from the hosted badge map.
+    for stale in ('starting: "bg-blue-lt"', 'stopping: "bg-yellow-lt"', 'crashed: "bg-red-lt"'):
+        assert stale not in badge
+
+
 # -- message ---------------------------------------------------------------
 
 
