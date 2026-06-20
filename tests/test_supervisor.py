@@ -686,6 +686,21 @@ def test_stop_dead_worker_rm_soft_fail_drops_local_job_dir(tmp_path, monkeypatch
     assert "stop not confirmed" in res["detail"]  # cloud-orphan caveat preserved
 
 
+def test_stop_dead_worker_rm_hard_error_does_not_force_remove(tmp_path, monkeypatch):
+    # A dead worker whose `claude rm` fails for a NON-soft-fail reason (hard error or
+    # timeout — where the supervisor may still be alive and mid-remove) must NOT have its
+    # dir force-dropped: the fallback is narrowed to the supervisor-down soft-fail so we
+    # never race a still-working supervisor that could rewrite the dir (#485).
+    jobs = tmp_path / "jobs"
+    job_dir = _write_job(jobs, _JID, _state())
+    rm = _FakeProc(returncode=1, stderr="boom: unexpected rm failure")  # no soft-fail phrase
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[False], rm=rm)
+    res = supervisor.stop_background_job(_JID, roster_json=roster, jobs_dir=jobs)
+    assert kills == []  # no live worker → never signalled
+    assert res["removed"] is False  # not a soft-fail → force-forget fallback gated off
+    assert job_dir.exists()  # record left intact (don't race a possibly-live supervisor)
+
+
 def test_stop_live_worker_rm_soft_fail_does_not_force_remove(tmp_path, monkeypatch):
     # A LIVE worker that settles but whose `claude rm` soft-fails must NOT have its dir
     # yanked out from under it — the force-forget fallback is gated on a dead worker.

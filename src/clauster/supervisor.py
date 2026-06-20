@@ -543,11 +543,14 @@ def stop_background_job(
     removed, detail = _remove_job(resolved, job_id)
     # Stuck-orphan fallback (#485): when `claude rm` soft-fails (transient supervisor
     # down) the on-disk job dir is never dropped, so the row can never be forgotten
-    # from the UI. We can drop that record ourselves — but ONLY when the worker is
-    # confirmed dead (pid is None: the liveness guard found no live worker). Fail
-    # closed: a still-live worker keeps the cloud-deregistering path and is NEVER
-    # force-forgotten by deleting its dir out from under it.
-    if not removed and pid is None:
+    # from the UI. We can drop that record ourselves — but ONLY when (a) the worker is
+    # confirmed dead (pid is None: the liveness guard found no live worker) AND (b) the
+    # failure was specifically the supervisor-down *soft-fail*, not a hard error or a
+    # timeout. A timeout can mean the supervisor is still alive and mid-remove, so it
+    # could rewrite the dir right after we delete it — narrow to the soft-fail so we
+    # never race a still-working supervisor. Fail closed: a still-live worker keeps the
+    # cloud-deregistering path and is NEVER force-forgotten by deleting its dir.
+    if not removed and pid is None and _RM_SOFT_FAIL in detail.lower():
         forced, forced_detail = _force_remove_job_dir(job_id, jobs_dir)
         if forced:
             removed = True
