@@ -80,6 +80,11 @@ logs:
   keep_rotated: 5
   redact_session_url: false        # false=hybrid (verbatim on disk, redacted over WS)
   strip_ansi_in_stream: true
+  # Bridge-log retention (pruned on each spawn; 0 = no limit for that knob).
+  # retention_max_age_days: 30     # drop a spawn's log set once its newest file
+                                   # is older than this many days (0 = keep forever)
+  # retention_max_files: 0         # keep only the N most recent log sets (0 = unlimited)
+  # retention_max_total_mb: 0      # cap the bridge-logs dir size in MB (0 = unlimited)
 
 # Project create/clone guards (clone URLs are user-supplied + hit the network).
 clone:
