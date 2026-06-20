@@ -1337,8 +1337,13 @@
       },
       // --- hosted live-view sessions (claustrum stream-json channel) ---
       hostedStatusBadge(status) {
-        const map = { running: "bg-green-lt", starting: "bg-blue-lt", stopping: "bg-yellow-lt",
-                      stopped: "bg-secondary-lt", crashed: "bg-red-lt", error: "bg-red-lt" };
+        // Mirror STATUS_BADGE so a hosted row speaks the same colour-to-meaning
+        // language as a bridge row in the shared Active list: starting=azure,
+        // stopping=orange, and crashed=amber (recoverable, Resume) — not red.
+        // Red stays reserved for error. crashed=bg-yellow-lt also matches the dot
+        // (bg-yellow) below, so the badge and dot agree within the row.
+        const map = { running: "bg-green-lt", starting: "bg-azure-lt", stopping: "bg-orange-lt",
+                      stopped: "bg-secondary-lt", crashed: "bg-yellow-lt", error: "bg-red-lt" };
         return Object.hasOwn(map, status) ? map[status] : "bg-secondary-lt";
       },
       // Status-dot colour for a hosted row — mirrors STATUS_DOT so browser/desktop/detached
