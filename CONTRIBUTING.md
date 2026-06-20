@@ -56,6 +56,8 @@ uv run clauster
 
   Use `default: minor` for a feature, `patch` for a fix, `major` for a breaking
   change, or `perf` / `security` / `build` for those sections (each a patch bump).
+  You don't need to add a PR link — knope appends `([#NNN])` for the PR that
+  introduces the changeset, at release time.
   Internal-only PRs (CI, refactor, tests, docs) need no changeset — add the
   `no-changelog` label to silence the advisory `Changeset check`. **Don't hand-edit
   `CHANGELOG.md` or bump the version in `pyproject.toml` / `src/clauster/__init__.py`**
