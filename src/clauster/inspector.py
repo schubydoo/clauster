@@ -53,7 +53,14 @@ def parse_agents_json(stdout: str) -> list[WorkingSession]:
     text = stdout.strip()
     if not text:
         return []
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except RecursionError as exc:
+        # Deeply-nested JSON overflows CPython's recursive scanner before json can
+        # raise JSONDecodeError; surface it as the same strict "unparseable" failure
+        # so callers already handling JSONDecodeError (e.g. the runner's best-effort
+        # cross-check, runner.py) degrade uniformly instead of a stray RecursionError.
+        raise json.JSONDecodeError("Exceeded maximum recursion depth", text, 0) from exc
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):

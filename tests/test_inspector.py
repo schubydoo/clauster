@@ -49,6 +49,19 @@ def test_parse_agents_json_tolerates_unexpected_shapes():
     assert inspector.parse_agents_json("{}") == []  # neither key present
 
 
+def test_parse_agents_json_deep_nesting_converts_to_jsondecode():
+    # Deeply-nested JSON overflows CPython's recursive scanner; parse_agents_json
+    # converts that RecursionError to JSONDecodeError so callers that already handle
+    # the strict-parse failure (e.g. the runner cross-check) degrade uniformly rather
+    # than on a stray RecursionError.
+    try:
+        inspector.parse_agents_json("[" * 100_000)
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("expected JSONDecodeError on deeply-nested JSON")
+
+
 def test_reconcile_attributes_by_resolved_cwd(tmp_path: Path):
     proj = tmp_path / "alpha"
     proj.mkdir()
