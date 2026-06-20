@@ -159,6 +159,26 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     assert "this._refreshQueued = false; this.refresh();" in page
 
 
+def test_dashboard_live_tail_banners_are_mutually_exclusive(write_config):
+    # #498: the reconnecting/lost live-tail banners must never stack. Even though the state
+    # machine sets one and clears the other on every transition, the info banner is gated on
+    # `!lost` too so a missed clear (an Alpine reactivity edge, cf. #310/#315) can't render BOTH.
+    page = _client(write_config).get("/").text
+    assert re.search(r"logs\[i\.project\]\.reconnecting\s*&&\s*!logs\[i\.project\]\.lost", page)
+
+
+def test_dashboard_disconnect_copy_is_liveness_aware(write_config):
+    # #498: don't claim "the bridge may have stopped" while the snapshot still reports the
+    # bridge running/starting — a live-tail WebSocket can drop while the bridge keeps running.
+    # The alarming copy is gated on NOT alive; a live bridge gets the transient-drop wording.
+    page = _client(write_config).get("/").text
+    assert "the bridge may have stopped" in page  # only when not alive
+    assert "the bridge is still running" in page  # transient tail drop, bridge alive
+    # The alarming copy must be liveness-gated, not unconditional.
+    assert re.search(r"!isRunning\(i\.project\)\s*&&\s*!isBusy\(i\.project\)", page)
+    assert re.search(r"isRunning\(i\.project\)\s*\|\|\s*isBusy\(i\.project\)", page)
+
+
 def test_dashboard_hosted_view_token_guard(write_config):
     # openHosted retires a prior socket and binds each socket's onmessage/onclose to its own
     # `view`, checked against the live hostedView[id]. That check must compare a per-view TOKEN,
