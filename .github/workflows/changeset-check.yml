@@ -1,0 +1,84 @@
+name: Changeset check
+
+# Advisory, NON-BLOCKING safety net for the changesets-only release model. clauster
+# releases are driven entirely by `.changeset/*.md` fragments (knope.toml,
+# ignore_conventional_commits) — a user-facing change with no fragment ships with
+# no changelog entry AND no version bump. This check nudges (a sticky PR comment +
+# a warning annotation) when a PR touches src/ without a changeset. It is NOT a
+# required check and never fails the job, so it can't block a merge; it only
+# reminds. Opt out per-PR with the `no-changelog` label (CI / refactor / tests).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: write # post/update the advisory sticky comment
+
+concurrency:
+  group: changeset-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changeset:
+    # Same-repo PRs only (fork PRs get a read-only token and can't comment), and
+    # never on knope's own release PR (it deletes changesets as it prepares).
+    if: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository
+          && github.head_ref != 'release' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const marker = '<!-- changeset-check -->';
+            try {
+              const labels = (pr.labels || []).map(l => l.name);
+              if (labels.includes('no-changelog')) {
+                core.info('no-changelog label set; skipping.');
+                return;
+              }
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                owner, repo, pull_number: pr.number, per_page: 100,
+              });
+              const hasChangeset = files.some(f => /^\.changeset\/.+\.md$/.test(f.filename));
+              const touchesSrc = files.some(f => f.filename.startsWith('src/'));
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pr.number, per_page: 100,
+              });
+              const existing = comments.find(c => (c.body || '').includes(marker));
+
+              if (touchesSrc && !hasChangeset) {
+                const body = [
+                  marker,
+                  '⚠️ **No changeset found.** This PR changes `src/` but adds no `.changeset/*.md` fragment.',
+                  '',
+                  'clauster releases are changesets-only: a user-facing change needs a fragment, or it ships with',
+                  '**no changelog entry and no version bump**. Add one — run `knope document-change`, or commit a',
+                  '`.changeset/<slug>.md` with front-matter `default: patch|minor|major|perf|security|build`',
+                  'and a one-line summary. Internal-only PRs (CI, refactor, tests) can add the',
+                  '**`no-changelog`** label instead.',
+                  '',
+                  '_Advisory only — this check never blocks the merge._',
+                ].join('\n');
+                if (existing) {
+                  await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+                } else {
+                  await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+                }
+                core.warning('PR changes src/ without a changeset — add one or apply the no-changelog label.');
+              } else if (existing) {
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: existing.id,
+                  body: `${marker}\n✅ Changeset present (or no \`src/\` change) — thanks!`,
+                });
+              }
+            } catch (err) {
+              // Advisory check: never fail the job on a comment/API hiccup.
+              core.warning(`changeset check skipped: ${err.message}`);
+            }

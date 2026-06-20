@@ -10,10 +10,10 @@
 # (its OpenAPI enabledForGitHubApps is false), and the default GITHUB_TOKEN is
 # App-backed — so it can never call it (403 "user doesn't have permission to update
 # head repository"). We instead use the repos.merge endpoint (enabledForGitHubApps
-# true), authorized by a short-lived clauster-ci App token (reuses the release-please
-# secrets — no new credential). An App token also re-triggers the updated PR's CI.
+# true), authorized by a short-lived clauster-ci App token (reuses the clauster-ci
+# App secrets — no new credential). An App token also re-triggers the updated PR's CI.
 #
-# Bot-authored PRs (release-please App, Renovate) are skipped via the
+# Bot-authored PRs (the clauster-ci release App, Renovate) are skipped via the
 # `user.type === "Bot"` check; fork PRs (head in another repo) and the excluded
 # labels are skipped too.
 name: Auto-update PRs
@@ -37,7 +37,7 @@ jobs:
     permissions:
       contents: read # job token only reads; the App token (below) does the writes
     steps:
-      - name: Mint a clauster-ci App token (reuses the release-please App secrets)
+      - name: Mint a clauster-ci App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -72,7 +72,7 @@ jobs:
             let updated = 0;
             for (const pr of prs) {
               if (pr.draft) continue;
-              if (pr.user?.type === "Bot") continue; // release-please + Renovate
+              if (pr.user?.type === "Bot") continue; // the release bot + Renovate
               if (pr.head?.repo?.full_name !== repoFullName) continue; // fork PR
               if (pr.labels.some((l) => EXCLUDE.has(l.name))) continue;
               try {

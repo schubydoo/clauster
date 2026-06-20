@@ -59,7 +59,7 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    # Bot PRs (Renovate, release-please) are reviewed, NOT ignored — on purpose. We
+    # Bot PRs (Renovate, the release bot) are reviewed, NOT ignored — on purpose. We
     # gate `main` on a required `CodeRabbit` status check (fail_commit_status below);
     # an *ignored* bot PR posts no status, so it would be unmergeable (admins are
     # enforced — no one could override). Reviewing them is cheap (deps / CHANGELOG /
