@@ -864,6 +864,20 @@ class SessionRunner:
         """
         return log_path.with_name(log_path.stem + ".stderr.log")
 
+    def _bridge_env_overlay(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        """Build the config-driven env overlay (``claude.path_append`` / ``claude.env``).
+
+        Returns an ``extra`` mapping for :func:`procutil.child_env`, merging the
+        operator's ``claude.env`` and a ``PATH`` extended by ``claude.path_append``
+        with any caller ``extra`` (e.g. resume-recap flags). Passing it through
+        ``child_env`` re-scrubs Clauster secrets, so config can never re-introduce
+        a scrubbed credential name.
+        """
+        claude = self._config.claude
+        return procutil.bridge_env_overlay(
+            path_append=claude.path_append, env=claude.env, extra=extra
+        )
+
     def _popen(
         self,
         cwd: Path,
@@ -896,7 +910,10 @@ class SessionRunner:
                 "CLAUSTER_RESUME_RECAP": "1",
                 "CLAUSTER_RESUME_RECAP_MAX_CHARS": str(self._config.claude.resume_recap_max_chars),
             }
-        popen_env = procutil.child_env(recap_env)
+        # Overlay the operator's PATH/env extensions (claude.path_append/claude.env)
+        # on top of the recap flags; child_env re-scrubs secrets so config can never
+        # re-introduce a scrubbed credential name.
+        popen_env = procutil.child_env(self._bridge_env_overlay(recap_env))
         # Capture stdout+stderr to a file so a failed start leaves a diagnosable
         # reason behind (the bridge logs the *why* there, not to --debug-file).
         # The detached child inherits its own dup of the fd, so the parent closes
@@ -1010,13 +1027,17 @@ class SessionRunner:
         keeper_log = sidecar.with_suffix(".log")  # the keeper's own stdout/stderr
         err_fh = keeper_log.open("wb")
         try:
+            # Overlay the operator's PATH/env extensions onto the KEEPER's env: the
+            # keeper inherits them into its own os.environ and re-emits them (still
+            # secret-scrubbed) when it spawns the bridge via child_env(), so the pty
+            # bridge gets the same extended PATH/env as the standard path.
             return subprocess.Popen(
                 cmd,
                 cwd=str(cwd),
                 stdin=subprocess.DEVNULL,
                 stdout=err_fh,
                 stderr=subprocess.STDOUT,
-                env=procutil.child_env(),  # the keeper spawns the bridge; keep secrets out
+                env=procutil.child_env(self._bridge_env_overlay()),
                 start_new_session=True,
             )
         finally:

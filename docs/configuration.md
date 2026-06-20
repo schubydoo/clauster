@@ -99,7 +99,23 @@ under `auth`).
 | `resume_recap` | bool | `false` | Install a `SessionStart` hook in the runtime user's `~/.claude/settings.json` that recaps the most recent prior transcript for the cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude settings and injects prior turns. |
 | `resume_recap_max_chars` | int | `8000` | Character budget (≥500) for the recap injection (most recent turns kept). |
 | `resume_mode` | `standard` \| `pty` | `standard` | Launch mode for **new** bridges. `pty` = native true-resume under a PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the mode it launched with — editing this never re-modes a running or stopped bridge. |
+| `path_append` | list[str] | `[]` | Directories appended to the bridge subprocess `PATH` so a `claude` session can resolve user-local tools (e.g. `~/.local/bin`) that a minimal service `PATH` omits. `~` is expanded; entries are appended in order after the inherited `PATH`, never replacing it. Applies to both standard and pty bridges. |
 <!-- END GEN: claude -->
+
+The `claude.env` map (filtered from the generated table because it's a dict) overlays
+extra environment variables onto the bridge subprocess (both standard and pty modes).
+It is applied **after** Clauster's secret scrub, so a key matching a Clauster secret name
+(`CLAUSTER_*` carrying `SECRET`/`PASSWORD`/`TOKEN`/`HASH`) is dropped and can never
+re-introduce a scrubbed credential. Pair it with `claude.path_append` to make user-local
+tools resolvable from a minimal service `PATH`:
+
+```yaml
+claude:
+  path_append:
+    - "~/.local/bin"
+  env:
+    FOO: "bar"
+```
 
 ## `instance_defaults` — new-bridge defaults (`InstanceDefaults`)
 
