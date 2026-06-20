@@ -107,15 +107,17 @@ runner state:
 ### Scrape token — let Prometheus in without a session
 
 A scraper like Prometheus can't log in through the password form. On a guarded
-deployment, set a **scrape token** so the scraper can reach `/metrics` directly:
+deployment, set a **scrape token** so the scraper can reach `/metrics` directly.
+Mint one with `clauster hash-metrics-token` — it prints the raw token once (give
+it to the scraper) and the hash to store at rest:
 
 ```yaml
 observability:
   prometheus_enabled: true
-  metrics_token: "<a long random secret>"   # or via *_FILE, below
+  metrics_token_hash: "<sha-256 hash from clauster hash-metrics-token>"  # or via *_FILE, below
 ```
 
-The scraper then presents it as a bearer token:
+The scraper then presents the raw token as a bearer token:
 
 ```sh
 curl -s -H "Authorization: Bearer <token>" https://clauster.example.com/metrics
@@ -133,11 +135,12 @@ scrape_configs:
       - targets: ["clauster.example.com"]
 ```
 
-When `metrics_token` is set, **a valid token *or* a normal session** grants
-access — and only to `/metrics`, nowhere else. The token is compared in constant
-time. To keep it out of the config file, point
-`CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` at a file holding the token. When
-`metrics_token` is unset, `/metrics` stays fully behind the auth guard (so a
+When `metrics_token_hash` is set, **a valid token *or* a normal session** grants
+access — and only to `/metrics`, nowhere else. Only the SHA-256 hash is stored at
+rest (parity with `auth.api_token_hash`), and the presented token's hash is
+compared in constant time. To keep the hash out of the config file, point
+`CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE` at a file holding it. When
+`metrics_token_hash` is unset, `/metrics` stays fully behind the auth guard (so a
 scraper needs a session, or you scrape over loopback).
 
 Example scrape (authenticated, loopback):
