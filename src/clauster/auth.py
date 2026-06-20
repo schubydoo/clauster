@@ -198,9 +198,9 @@ def mint_metrics_token() -> tuple[str, str]:
     only the hash is persisted (in ``observability.metrics_token_hash``). It shares
     the ``clauster_pat_`` prefix so log redaction (``redact._SECRET_RES``) and the
     same SHA-256 at-rest form apply uniformly to every clauster bearer credential.
+    Delegates to ``mint_token`` so the two stay in sync automatically.
     """
-    raw = _TOKEN_PREFIX + secrets.token_urlsafe(32)
-    return raw, hash_token(raw)
+    return mint_token()
 
 
 def hash_token(raw: str) -> str:
