@@ -1245,7 +1245,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         is a 200 whose `detail` flags the unconfirmed stop / possible cloud orphan.
         A session that was signalled but didn't settle in time raises StopError → 409
         (escalate from the CLI — we don't force-kill, which would orphan the cloud
-        session); `removed:false` (supervisor idle-exited) is reported in the body.
+        session). When `claude rm` soft-fails for a confirmed-dead worker, clauster
+        drops the orphaned job record itself so the row can still be forgotten (#485);
+        any residual `removed:false` is reported in the body.
         """
         if not supervisor.valid_job_id(job_id):
             raise HTTPException(status_code=422, detail="invalid job id")
