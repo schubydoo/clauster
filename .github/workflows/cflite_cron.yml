@@ -1,0 +1,87 @@
+# ClusterFuzzLite — weekly corpus PRUNE + COVERAGE report. The maintenance
+# counterpart to the daily cflite_batch.yml (which fuzzes + grows the corpus).
+#
+# - prune: the daily batch keeps APPENDING inputs to the persisted corpus; pruning
+#   minimizes it (drops inputs that add no coverage) so the storage-repo doesn't
+#   grow unboundedly. A replay can still surface a reproducible crash → SARIF.
+# - coverage: builds the harnesses with the `coverage` sanitizer, replays the whole
+#   persisted corpus, and pushes an HTML line-coverage report to the corpus repo's
+#   `gh-pages` branch — i.e. EXACTLY which clauster code the fuzzers reach. This is
+#   how we SEE whether the harness set has kept up with the code (an unfuzzed
+#   module shows as 0% — the signal that a new harness is owed). With the corpus
+#   repo private, view the report by cloning gh-pages (or enable private Pages):
+#   it lands at coverage/latest/report/linux/report.html.
+#
+# Both reuse the same private storage-repo + FUZZ_STORAGE_TOKEN PAT as the batch.
+# WEEKLY (not daily): a coverage build + full-corpus replay is far heavier than a
+# time-boxed fuzz run, and the corpus changes slowly. NOT a required check — it
+# signals, it never gates. If the PAT is rotated/expired these jobs keep passing
+# but silently stop pruning/reporting. See https://google.github.io/clusterfuzzlite/.
+name: ClusterFuzzLite cron (prune + coverage)
+
+on:
+  schedule:
+    - cron: "41 5 * * 0" # weekly, Sunday 05:41 UTC (offset from the daily batch + Monday scorecard)
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  prune:
+    name: prune corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 30 # ≈ fuzz-seconds × harness count + build, with headroom
+    permissions:
+      contents: read # checkout + build the harnesses
+      security-events: write # a replay can still surface a reproducible crash (SARIF)
+    concurrency:
+      group: ${{ github.workflow }}-prune
+      cancel-in-progress: true
+    steps:
+      - name: Build fuzzers (address)
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: address
+      - name: Prune the persisted corpus
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300
+          mode: prune
+          sanitizer: address
+          output-sarif: true
+          storage-repo: https://${{ secrets.FUZZ_STORAGE_TOKEN }}@github.com/schubydoo/clauster-fuzz-corpus.git
+          storage-repo-branch: main
+
+  coverage:
+    name: coverage report
+    runs-on: ubuntu-latest
+    timeout-minutes: 45 # the coverage build + full-corpus replay is the slow one
+    permissions:
+      contents: read # builds + replays only; the report is pushed via the storage PAT
+    concurrency:
+      group: ${{ github.workflow }}-coverage
+      cancel-in-progress: true
+    steps:
+      - name: Build fuzzers (coverage)
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: python
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: coverage
+      - name: Generate the coverage report
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300
+          mode: coverage
+          sanitizer: coverage
+          storage-repo: https://${{ secrets.FUZZ_STORAGE_TOKEN }}@github.com/schubydoo/clauster-fuzz-corpus.git
+          storage-repo-branch: main
+          storage-repo-branch-coverage: gh-pages
