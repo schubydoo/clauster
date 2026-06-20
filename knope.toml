@@ -42,6 +42,23 @@ ignore_conventional_commits = true   # fragments are the sole source of truth
 owner = "schubydoo"
 repo = "clauster"
 
+# --- changelog entry rendering ----------------------------------------------
+# Auto-append the PR number to each changelog entry. knope traces the changeset
+# file's commit to the PR that introduced it ($pr_number, knope 0.23.0+) — so
+# authors write a plain summary and the link is added at release time; nobody
+# types a number they don't have yet. Ordered most- to least-specific: knope uses
+# the first template whose variables ALL resolve for a given change, so a
+# headed/complex changeset keeps its `### + body` shape, a one-line changeset
+# renders as a bullet, and either drops the `(#NNN)` suffix when the change isn't
+# yet traceable to a committed PR (e.g. a local --dry-run).
+[release_notes]
+change_templates = [
+  "### $summary ([#$pr_number](https://github.com/schubydoo/clauster/pull/$pr_number))\n\n$details",
+  "### $summary\n\n$details",
+  "- $summary ([#$pr_number](https://github.com/schubydoo/clauster/pull/$pr_number))",
+  "- $summary",
+]
+
 # --- prepare-release: open/refresh the release PR (run on every push to main) -
 # PrepareRelease consumes the .changeset fragments, bumps pyproject.toml +
 # src/clauster/__init__.py + CHANGELOG.md, and stages them. We then resync
