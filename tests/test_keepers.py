@@ -71,9 +71,11 @@ def test_iter_keepers_tolerates_corrupt_sidecar(tmp_path):
     assert info.project == "bad" and info.keeper_pid is None and info.alive is False
 
 
-def test_iter_keepers_rejects_bool_pids(tmp_path):
-    # bool is an int subclass; a corrupt sidecar must not resolve True → PID 1 (#472).
-    _sidecar(tmp_path, "bools", keeper_pid=True, bridge_pid=True)
+@pytest.mark.parametrize("bad", [True, False])
+def test_iter_keepers_rejects_bool_pids(tmp_path, bad):
+    # bool is an int subclass; a corrupt sidecar must not resolve True → PID 1 or
+    # False → PID 0 (the kernel swapper), both unsafe to target (#472).
+    _sidecar(tmp_path, "bools", keeper_pid=bad, bridge_pid=bad)
     [info] = pty_keeper.iter_keepers(tmp_path)
     assert info.keeper_pid is None and info.bridge_pid is None and info.alive is False
 
