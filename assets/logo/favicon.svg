@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="clauster">
+  <title>clauster</title>
+  <desc>clauster favicon: steel-blue tile, four arched cells, one lit green.</desc>
+  <path fill="#517299" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z"/>
+  <g fill="#FFFFFF">
+    <path d="M17 31V24A6.5 6.5 0 0 1 30 24V31Z"/>
+    <path d="M34 31V24A6.5 6.5 0 0 1 47 24V31Z"/>
+    <path d="M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/>
+  </g>
+  <path fill="#00FF41" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/>
+</svg>

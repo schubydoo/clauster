@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clauster — brand</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --steel:#517299; --steel-700:#3f5a7a; --neon:#00FF41; --neon-ink:#15803d;
+    --ink:#0F172A; --paper:#FAFAFA; --card:#FFFFFF; --line:#E7E9EE; --muted:#64748B;
+    --black:#0A0A0A;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font-family:Inter,system-ui,sans-serif;color:var(--ink);background:var(--paper);-webkit-font-smoothing:antialiased;line-height:1.6}
+  .wrap{max-width:980px;margin:0 auto;padding:0 24px}
+  h1,h2,h3{font-weight:600;letter-spacing:-0.02em;line-height:1.2;margin:0}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:0.12em;color:var(--muted);font-weight:600}
+  section{padding:56px 0;border-top:1px solid var(--line)}
+  .mono{font-family:'JetBrains Mono',monospace}
+
+  /* hero */
+  .hero{background:var(--black);color:#fff;padding:84px 0 76px;border:0}
+  .hero .lock{display:flex;align-items:center;gap:20px;margin-bottom:26px}
+  .hero .lock svg{width:74px;height:74px}
+  .hero .name{font-size:52px;font-weight:600;letter-spacing:-0.03em}
+  .hero p{max-width:560px;color:#cbd5e1;font-size:18px;margin:0}
+  .hero .tag{display:inline-flex;align-items:center;gap:8px;margin-top:22px;font-size:13px;color:#94a3b8;background:#141414;border:1px solid #262626;border-radius:999px;padding:6px 14px}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--neon);box-shadow:0 0 8px var(--neon)}
+
+  /* concept */
+  .concept{display:grid;grid-template-columns:160px 1fr;gap:32px;align-items:center;margin-top:24px}
+  .concept svg{width:140px;height:140px}
+  .concept ul{margin:0;padding-left:18px}
+  .concept li{margin:8px 0}
+  .concept li b{font-weight:600}
+
+  /* variants */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-top:24px}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px 20px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;min-height:150px}
+  .tile.dark{background:var(--black);border-color:#1f1f1f}
+  .tile .cap{font-size:12px;color:var(--muted)}
+  .tile.dark .cap{color:#8a8f98}
+  .tile svg{display:block}
+
+  /* palette */
+  .swatches{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-top:24px}
+  .sw{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card)}
+  .sw .chip{height:84px}
+  .sw .meta{padding:12px 14px}
+  .sw .meta .n{font-weight:600;font-size:14px}
+  .sw .meta .h{font-size:12px;color:var(--muted)}
+
+  /* type */
+  .type{margin-top:24px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px}
+  .type .big{font-size:46px;font-weight:600;letter-spacing:-0.03em}
+  .type .row{display:flex;gap:28px;flex-wrap:wrap;margin-top:18px;color:var(--muted);font-size:14px}
+  .type .row b{color:var(--ink);font-weight:500}
+
+  /* code */
+  pre{background:#0d1117;color:#e6edf3;border-radius:12px;padding:20px;overflow:auto;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.65;margin-top:18px}
+  .files{margin-top:18px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .files div{display:flex;justify-content:space-between;padding:11px 16px;font-size:13px;border-top:1px solid var(--line)}
+  .files div:first-child{border-top:0}
+  .files .f{font-family:'JetBrains Mono',monospace;color:var(--steel-700)}
+  .files .d{color:var(--muted)}
+
+  footer{padding:40px 0 64px;color:var(--muted);font-size:13px;border-top:1px solid var(--line)}
+  .k{color:var(--neon-ink);font-weight:500}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="lock">
+      <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="clauster mark">
+        <path fill="#517299" fill-rule="evenodd" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z M17 31V24A6.5 6.5 0 0 1 30 24V31Z M34 31V24A6.5 6.5 0 0 1 47 24V31Z M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/>
+        <path fill="#00FF41" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/>
+      </svg>
+      <span class="name">clauster</span>
+    </div>
+    <p>A self-hosted dashboard for spawning and managing Claude Code <span class="mono" style="color:#e2e8f0">remote-control</span> bridges across a remote host — a cloister for your cluster of sessions.</p>
+    <span class="tag"><span class="dot"></span> brand identity · v1</span>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>The mark</h2>
+    <div class="concept">
+      <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="mark concept">
+        <path fill="#517299" fill-rule="evenodd" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z M17 31V24A6.5 6.5 0 0 1 30 24V31Z M34 31V24A6.5 6.5 0 0 1 47 24V31Z M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/>
+        <path fill="#00FF41" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/>
+      </svg>
+      <ul>
+        <li><b>Cloister.</b> A solid wall carved with four arched cells — the colonnade and cells of a monastic cloister, the namesake of <span class="mono">clauster</span>.</li>
+        <li><b>Cluster.</b> Four cells read as a cluster of units; the enclosing wall is the self-hosted boundary you own.</li>
+        <li><b>Live session.</b> One cell glows <span class="k">neon green</span> — an active bridge running inside the enclosure. Agent-neutral by design.</li>
+        <li><b>Negative space.</b> The cells are carved out, so the mark works on any background and stays crisp down to 16&nbsp;px.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Variants</h2>
+    <div class="grid">
+      <div class="tile">
+        <svg width="180" height="40" viewBox="0 0 320 72" xmlns="http://www.w3.org/2000/svg" aria-label="full logo">
+          <g transform="translate(61,12) scale(0.75)"><path fill="#517299" fill-rule="evenodd" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z M17 31V24A6.5 6.5 0 0 1 30 24V31Z M34 31V24A6.5 6.5 0 0 1 47 24V31Z M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/><path fill="#00FF41" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/></g>
+          <text x="123" y="48" font-family="Inter,sans-serif" font-size="34" font-weight="500" letter-spacing="-0.7" fill="#0F172A">clauster</text>
+        </svg>
+        <span class="cap">logo-full</span>
+      </div>
+      <div class="tile dark">
+        <svg width="180" height="40" viewBox="0 0 320 72" xmlns="http://www.w3.org/2000/svg" aria-label="white logo">
+          <g transform="translate(61,12) scale(0.75)"><path fill="#FFFFFF" fill-rule="evenodd" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z M17 31V24A6.5 6.5 0 0 1 30 24V31Z M34 31V24A6.5 6.5 0 0 1 47 24V31Z M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/><path fill="#FFFFFF" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/></g>
+          <text x="123" y="48" font-family="Inter,sans-serif" font-size="34" font-weight="500" letter-spacing="-0.7" fill="#FFFFFF">clauster</text>
+        </svg>
+        <span class="cap">logo-white</span>
+      </div>
+      <div class="tile">
+        <svg width="150" height="34" viewBox="0 0 180 40" xmlns="http://www.w3.org/2000/svg" aria-label="wordmark">
+          <text x="90" y="28" text-anchor="middle" font-family="Inter,sans-serif" font-size="28" font-weight="500" letter-spacing="-0.56" fill="#0F172A">clauster</text>
+        </svg>
+        <span class="cap">logo-wordmark</span>
+      </div>
+      <div class="tile">
+        <svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="mark">
+          <path fill="#517299" fill-rule="evenodd" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z M17 31V24A6.5 6.5 0 0 1 30 24V31Z M34 31V24A6.5 6.5 0 0 1 47 24V31Z M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/><path fill="#00FF41" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/>
+        </svg>
+        <span class="cap">logo-mark</span>
+      </div>
+      <div class="tile">
+        <svg width="72" height="72" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-label="app icon">
+          <g transform="scale(8)"><path fill="#517299" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z"/><g fill="#FFFFFF"><path d="M17 31V24A6.5 6.5 0 0 1 30 24V31Z"/><path d="M34 31V24A6.5 6.5 0 0 1 47 24V31Z"/><path d="M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/></g><path fill="#00FF41" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/></g>
+        </svg>
+        <span class="cap">logo-icon · 512</span>
+      </div>
+      <div class="tile dark">
+        <svg width="56" height="56" viewBox="0 0 320 72" xmlns="http://www.w3.org/2000/svg" aria-label="black logo on neutral" style="background:#fff;border-radius:8px;padding:6px">
+          <g transform="translate(61,12) scale(0.75)"><path fill="#000000" fill-rule="evenodd" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z M17 31V24A6.5 6.5 0 0 1 30 24V31Z M34 31V24A6.5 6.5 0 0 1 47 24V31Z M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/><path fill="#000000" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/></g>
+          <text x="123" y="48" font-family="Inter,sans-serif" font-size="34" font-weight="500" letter-spacing="-0.7" fill="#000000">clauster</text>
+        </svg>
+        <span class="cap">logo-black</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Palette</h2>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:#517299"></div><div class="meta"><div class="n">Steel blue</div><div class="h mono">#517299 · wall / primary</div></div></div>
+      <div class="sw"><div class="chip" style="background:#00FF41"></div><div class="meta"><div class="n">Neon green</div><div class="h mono">#00FF41 · live accent</div></div></div>
+      <div class="sw"><div class="chip" style="background:#15803d"></div><div class="meta"><div class="n">Green (on light)</div><div class="h mono">#15803D · accent alt</div></div></div>
+      <div class="sw"><div class="chip" style="background:#0F172A"></div><div class="meta"><div class="n">Ink</div><div class="h mono">#0F172A · wordmark</div></div></div>
+      <div class="sw"><div class="chip" style="background:#64748B"></div><div class="meta"><div class="n">Muted</div><div class="h mono">#64748B · secondary text</div></div></div>
+      <div class="sw"><div class="chip" style="background:#FAFAFA;border-bottom:1px solid var(--line)"></div><div class="meta"><div class="n">Paper</div><div class="h mono">#FAFAFA · light bg</div></div></div>
+      <div class="sw"><div class="chip" style="background:#0A0A0A"></div><div class="meta"><div class="n">Black</div><div class="h mono">#0A0A0A · dark bg</div></div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Typography</h2>
+    <div class="type">
+      <div class="big">clauster</div>
+      <div class="row">
+        <span><b>Typeface</b> — Inter</span>
+        <span><b>Weight</b> — 500 (medium)</span>
+        <span><b>Case</b> — lowercase</span>
+        <span><b>Tracking</b> — −0.02em</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Developer reference</h2>
+    <pre>// tailwind.config.js — theme.extend.colors
+clauster: {
+  steel:  '#517299',  // primary / mark wall
+  live:   '#00FF41',  // neon accent (dark bg)
+  liveink:'#15803d',  // accent on light bg
+  ink:    '#0F172A',  // wordmark / headings
+  muted:  '#64748B',  // secondary text
+  paper:  '#FAFAFA',
+  black:  '#0A0A0A',
+}</pre>
+    <div class="files">
+      <div><span class="f">logo-mark.svg</span><span class="d">64×64 — canonical mark (source of truth)</span></div>
+      <div><span class="f">logo-full.svg</span><span class="d">320×72 — mark + wordmark</span></div>
+      <div><span class="f">logo-wordmark.svg</span><span class="d">180×40 — text only</span></div>
+      <div><span class="f">logo-icon.svg</span><span class="d">512×512 — app icon (white cells)</span></div>
+      <div><span class="f">favicon.svg</span><span class="d">scalable — self-contained tile</span></div>
+      <div><span class="f">logo-white.svg</span><span class="d">320×72 — for dark backgrounds</span></div>
+      <div><span class="f">logo-black.svg</span><span class="d">320×72 — for light backgrounds</span></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">clauster · carved-cells identity · steel blue <span class="mono">#517299</span> + neon green <span class="mono">#00FF41</span></div>
+</footer>
+
+</body>
+</html>
