@@ -366,14 +366,21 @@ def normalize_origin(origin: str) -> str:
     allowlist.
     """
     cleaned = origin.strip().rstrip("/")
-    parts = urlsplit(cleaned)
-    if not parts.scheme or not parts.hostname:
+    try:
+        parts = urlsplit(cleaned)
+        scheme, host, port = parts.scheme, parts.hostname, parts.port
+    except ValueError:
+        # A malformed Origin — e.g. an out-of-range or non-numeric port, which
+        # urlsplit.port raises ValueError on — can't match a real allowlist entry.
+        # Return the cleaned form so the caller rejects it (403) instead of 500ing
+        # on an attacker-supplied header (the validate_clone_url .port class, #122).
         return cleaned.lower()
-    scheme, host = parts.scheme.lower(), parts.hostname.lower()
+    if not scheme or not host:
+        return cleaned.lower()
+    scheme, host = scheme.lower(), host.lower()
     if ":" in host:  # IPv6 literal — urlsplit dropped the surrounding brackets
         host = f"[{host}]"
     default = {"http": 80, "https": 443}.get(scheme)
-    port = parts.port
     if port is None or port == default:
         return f"{scheme}://{host}"
     return f"{scheme}://{host}:{port}"

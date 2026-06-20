@@ -46,7 +46,9 @@ def _load_trusted_paths(claude_json: Path) -> set[Path]:
         # UnicodeDecodeError (a ValueError) for a non-UTF-8 file degrades to the
         # same "nothing trusted" result as any other malformed claude.json.
         return set()
-    projects = data.get("projects")
+    # A valid-JSON-but-non-dict top level (e.g. `[]`, `"x"`, `5`) parses fine but
+    # has no `.get` — degrade it to "nothing trusted" like any other malformed file.
+    projects = data.get("projects") if isinstance(data, dict) else None
     if not isinstance(projects, dict):
         return set()
     trusted: set[Path] = set()
