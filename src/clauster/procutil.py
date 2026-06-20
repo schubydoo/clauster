@@ -353,9 +353,12 @@ def bridge_env_overlay(
 
     Returns an ``extra`` mapping to hand :func:`child_env`: the operator's
     ``env`` map, any caller ``extra`` (e.g. resume-recap flags), and — when
-    ``path_append`` is set — a merged ``PATH`` = inherited ``PATH`` followed by
-    the ``~``-expanded append directories joined with ``os.pathsep``. Appending
-    (never replacing) keeps the base service toolchain resolvable.
+    ``path_append`` is set — a merged ``PATH`` = base ``PATH`` followed by the
+    ``~``-expanded append directories joined with ``os.pathsep``. The base is the
+    operator's own ``env['PATH']`` when they set one, otherwise the inherited
+    service ``PATH`` — so ``path_append`` appends to (never silently discards) an
+    explicit operator override. Appending (never replacing) keeps the base service
+    toolchain resolvable.
 
     Returning only the overlay (not the full env) lets the result flow through
     :func:`child_env`, which scrubs Clauster secrets one more time — so an
@@ -370,7 +373,9 @@ def bridge_env_overlay(
     if path_append:
         expanded = [os.path.expanduser(p) for p in path_append if p]
         if expanded:
-            inherited = os.environ.get("PATH", "")
+            # Prefer an operator-supplied env['PATH'] as the base (popped so it
+            # isn't left stale), else the inherited service PATH.
+            inherited = overlay.pop("PATH", os.environ.get("PATH", ""))
             parts = ([inherited] if inherited else []) + expanded
             overlay["PATH"] = os.pathsep.join(parts)
     return overlay

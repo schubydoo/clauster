@@ -403,6 +403,14 @@ def test_bridge_env_overlay_overlays_env_map():
     assert "PATH" not in overlay  # no path_append → PATH left to the inherited copy
 
 
+def test_bridge_env_overlay_path_append_respects_operator_path(monkeypatch):
+    # An operator PATH set via env is the base for path_append, not silently discarded
+    # in favour of the inherited PATH (#497 greptile).
+    monkeypatch.setenv("PATH", "/usr/bin")
+    overlay = procutil.bridge_env_overlay(env={"PATH": "/custom/bin"}, path_append=["/opt/tools"])
+    assert overlay["PATH"] == os.pathsep.join(["/custom/bin", "/opt/tools"])
+
+
 def test_bridge_env_overlay_no_inputs_is_empty():
     assert procutil.bridge_env_overlay() == {}
     assert procutil.bridge_env_overlay(path_append=[], env={}) == {}
