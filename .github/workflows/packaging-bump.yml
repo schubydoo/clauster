@@ -57,13 +57,13 @@ jobs:
       # App token (NOT the default GITHUB_TOKEN): a PR opened by the default token
       # would not trigger downstream CI, and the default token can't push a branch
       # under branch protection. Re-minted per job (cheap). Requires secrets
-      # RELEASE_PLEASE_APP_ID + RELEASE_PLEASE_APP_PRIVATE_KEY.
+      # CLAUSTER_CI_APP_ID + CLAUSTER_CI_APP_PRIVATE_KEY.
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
 
