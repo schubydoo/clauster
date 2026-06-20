@@ -305,6 +305,14 @@ def test_normalize_origin_ipv6_rebracketed():
     assert auth.normalize_origin("https://[2001:DB8::1]:443") == "https://[2001:db8::1]"
 
 
+def test_normalize_origin_malformed_port_does_not_raise():
+    # urlsplit().port raises ValueError on an out-of-range / non-numeric port; the
+    # CSRF origin gate must return a non-matching value (-> 403), never let that
+    # escape and 500 on an attacker-supplied Origin header (the #122 .port class).
+    assert auth.normalize_origin("http://x:99999") == "http://x:99999"
+    assert auth.normalize_origin("http://x:notaport") == "http://x:notaport"
+
+
 def test_normalize_origin_malformed_passthrough():
     # An origin with no scheme/hostname (e.g. the literal "null" Origin, or a bare
     # token) can't be structured; it degrades to a lowercased, slash-trimmed
