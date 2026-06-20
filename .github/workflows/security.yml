@@ -100,8 +100,8 @@ jobs:
           || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: read
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
@@ -214,8 +214,8 @@ jobs:
           || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: read
       - name: Set up uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -255,8 +255,8 @@ jobs:
         if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: read
           permission-pull-requests: write
       - name: Dependency Review
