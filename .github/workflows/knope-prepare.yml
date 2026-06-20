@@ -48,7 +48,7 @@ jobs:
       # knope's `git push --force origin release` step pushes the release branch
       # using this persisted credential, so the branch + PR are the App's identity.
       - name: Check out full history
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
@@ -74,8 +74,10 @@ jobs:
       - name: Configure git identity (clauster-ci App)
         if: ${{ steps.changesets.outputs.has == 'true' }}
         run: |
+          # The <numeric-id>+ prefix links these commits to the clauster-ci App
+          # account in GitHub's UI (the bot user's id is stable).
           git config user.name "clauster-ci[bot]"
-          git config user.email "clauster-ci[bot]@users.noreply.github.com"
+          git config user.email "289303168+clauster-ci[bot]@users.noreply.github.com"
       # uv is needed for the `uv lock` step inside knope's prepare-release workflow
       # (keeps uv.lock's editable self-version in sync with the bump). This job can
       # push, so disable the setup-uv cache (cache-poisoning vector).
