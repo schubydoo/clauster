@@ -37,6 +37,11 @@ claude:
                                    # mode is fixed at launch, so editing this never changes
                                    # how an already-running or stopped bridge resumes. The
                                    # dashboard's per-launch Mode picker can override it per bridge.
+  # path_append:                   # dirs appended to the bridge subprocess PATH so a `claude`
+  #   - "~/.local/bin"             # session can resolve user-local tools a minimal service PATH
+  #                                # omits. `~` expanded; appended after (never replacing) PATH.
+  # env:                           # extra env for the bridge; applied after the secret scrub,
+  #   FOO: bar                     # so a key matching a Clauster secret name is dropped.
 
 instance_defaults:
   spawn_mode: same-dir             # same-dir | worktree (git repos) | session
@@ -80,6 +85,11 @@ logs:
   keep_rotated: 5
   redact_session_url: false        # false=hybrid (verbatim on disk, redacted over WS)
   strip_ansi_in_stream: true
+  # Bridge-log retention (pruned on each spawn; 0 = no limit for that knob).
+  # retention_max_age_days: 30     # drop a spawn's log set once its newest file
+                                   # is older than this many days (0 = keep forever)
+  # retention_max_files: 0         # keep only the N most recent log sets (0 = unlimited)
+  # retention_max_total_mb: 0      # cap the bridge-logs dir size in MB (0 = unlimited)
 
 # Project create/clone guards (clone URLs are user-supplied + hit the network).
 clone:
@@ -119,14 +129,15 @@ usage:
 
 # Read-only Prometheus /metrics exposition (build info, bridge counts by status,
 # project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by
-# default; when enabled it stays BEHIND the auth guard unless metrics_token is set.
+# default; when enabled it stays BEHIND the auth guard unless metrics_token_hash is set.
 # observability:
 #   prometheus_enabled: false
-#   metrics_token: null            # optional bearer token: a scraper presents
-#                                  # `Authorization: Bearer <token>` to reach /metrics
-#                                  # without a browser session (compared in constant
-#                                  # time). Supply via
-#                                  # CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE.
+#   metrics_token_hash: null       # SHA-256 hash (from `clauster hash-metrics-token`)
+#                                  # of an optional bearer token: a scraper presents the
+#                                  # raw `Authorization: Bearer <token>` to reach /metrics
+#                                  # without a browser session (only the hash is stored,
+#                                  # parity with auth.api_token_hash). Supply via
+#                                  # CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE.
 
 # Outbound bridge-lifecycle notifications via Apprise. Requires the optional
 # extra: pip install 'clauster[notify]'. Best-effort + fail-closed — a notify

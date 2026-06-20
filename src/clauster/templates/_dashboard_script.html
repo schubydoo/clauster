@@ -604,12 +604,21 @@
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
           const b = await res.json().catch(() => ({}));
           if (res.ok && b.settled === false) {
-            // settled:false means the cloud-deregistering stop wasn't confirmed; removed
-            // may also be false if `claude rm` soft-failed (supervisor idle-exited), so
-            // don't claim "removed locally" unless it actually was.
-            const status = b.removed ? "removed locally, but stop not confirmed"
-                                      : "stop not confirmed (local cleanup pending)";
-            this.toast(label + ": " + status + " — " + (b.detail || "re-check `claude agents` for a cloud orphan"), "warning");
+            // settled:false means the cloud-deregistering stop wasn't confirmed. On an
+            // ended (not-live) agent that's expected — there's no worker to deregister —
+            // so a successful local forget reads cleanly. Only warn about a possible cloud
+            // orphan when the agent was registered with claude.ai (bridge_session_id).
+            if (b.removed && !live && !j.bridge_session_id) {
+              this.toast(label + ": forgotten", "success");
+            } else if (b.removed) {
+              // removed but registered cloud-side (or was live): flag the unconfirmed dereg.
+              this.toast(label + ": removed locally, but cloud stop not confirmed — "
+                + (b.detail || "re-check `claude agents` for an orphan"), "warning");
+            } else {
+              // `claude rm` soft-failed and the local fallback couldn't drop it either.
+              this.toast(label + ": stop not confirmed (local cleanup pending) — "
+                + (b.detail || "re-check `claude agents` for a cloud orphan"), "warning");
+            }
           }
           else if (res.ok && b.removed) this.toast(label + ": stopped", "success");
           else if (res.ok) this.toast(label + ": stopped (cleanup pending — " + (b.detail || "supervisor restarting") + ")", "warning");
@@ -1337,8 +1346,13 @@
       },
       // --- hosted live-view sessions (claustrum stream-json channel) ---
       hostedStatusBadge(status) {
-        const map = { running: "bg-green-lt", starting: "bg-blue-lt", stopping: "bg-yellow-lt",
-                      stopped: "bg-secondary-lt", crashed: "bg-red-lt", error: "bg-red-lt" };
+        // Mirror STATUS_BADGE so a hosted row speaks the same colour-to-meaning
+        // language as a bridge row in the shared Active list: starting=azure,
+        // stopping=orange, and crashed=amber (recoverable, Resume) — not red.
+        // Red stays reserved for error. crashed=bg-yellow-lt also matches the dot
+        // (bg-yellow) below, so the badge and dot agree within the row.
+        const map = { running: "bg-green-lt", starting: "bg-azure-lt", stopping: "bg-orange-lt",
+                      stopped: "bg-secondary-lt", crashed: "bg-yellow-lt", error: "bg-red-lt" };
         return Object.hasOwn(map, status) ? map[status] : "bg-secondary-lt";
       },
       // Status-dot colour for a hosted row — mirrors STATUS_DOT so browser/desktop/detached

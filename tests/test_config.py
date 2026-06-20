@@ -249,26 +249,29 @@ def test_blank_api_token_hash_normalizes_to_none(write_config):
     assert config.auth.api_token_hash is None
 
 
-def test_short_metrics_token_rejected(write_config):
-    # Item-3 (#408): a SET-but-short metrics_token is a weak bearer a scraper would
-    # trust — reject it loudly so the operator picks a real one (≥16 chars).
-    with pytest.raises(ValueError, match="metrics_token must be at least 16"):
-        load_config(write_config("observability:\n  metrics_token: 'short'\n"))
+@pytest.mark.parametrize("bad", ["not_a_real_hash", "deadbeef", "DEADBEEF" * 8, "g" * 64])
+def test_malformed_metrics_token_hash_rejected(write_config, bad):
+    # Parity with api_token_hash (#473): the metrics scrape token is stored as a
+    # SHA-256 hash, so a non-empty value that is not a 64-char lowercase hex digest
+    # can never match a presented token. Reject it loudly so the operator fixes it.
+    with pytest.raises(ValueError, match="64-character lowercase hex"):
+        load_config(write_config(f"observability:\n  metrics_token_hash: '{bad}'\n"))
 
 
 @pytest.mark.parametrize("blank", ["''", "'   '", '"\t"'])
-def test_blank_metrics_token_normalizes_to_none(write_config, blank):
-    # An empty / whitespace-only token stays unset (None): /metrics simply remains
-    # behind the auth guard. Only a SET-but-short token is rejected.
-    config = load_config(write_config(f"observability:\n  metrics_token: {blank}\n"))
-    assert config.observability.metrics_token is None
+def test_blank_metrics_token_hash_normalizes_to_none(write_config, blank):
+    # An empty / whitespace-only hash stays unset (None): /metrics simply remains
+    # behind the auth guard, no token path.
+    config = load_config(write_config(f"observability:\n  metrics_token_hash: {blank}\n"))
+    assert config.observability.metrics_token_hash is None
 
 
-def test_valid_metrics_token_accepted(write_config):
-    # A ≥16-char token loads unchanged.
-    token = "scrape-me-please-now"  # 20 chars
-    config = load_config(write_config(f"observability:\n  metrics_token: '{token}'\n"))
-    assert config.observability.metrics_token == token
+def test_valid_metrics_token_hash_accepted(write_config):
+    # A 64-char lowercase hex digest loads unchanged.
+    config = load_config(
+        write_config(f"observability:\n  metrics_token_hash: '{_VALID_TOKEN_HASH}'\n")
+    )
+    assert config.observability.metrics_token_hash == _VALID_TOKEN_HASH
 
 
 def test_env_override_scalar(write_config, monkeypatch):

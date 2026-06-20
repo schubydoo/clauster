@@ -97,9 +97,10 @@ reach it without credentials. Two ways through:
 
 - **Scrape over loopback** — Prometheus on the same host scrapes
   `http://127.0.0.1:7621/metrics`, where no auth is enforced.
-- **Set a scrape token** — `observability.metrics_token` lets a scraper present
-  `Authorization: Bearer <token>` to reach `/metrics` (only that route) without a
-  browser session. This is the path for an off-host Prometheus.
+- **Set a scrape token** — `observability.metrics_token_hash` (mint with
+  `clauster hash-metrics-token`) lets a scraper present `Authorization: Bearer
+  <token>` to reach `/metrics` (only that route) without a browser session. This
+  is the path for an off-host Prometheus.
 
 The token journey, the full metric list, and a `prometheus.yml` snippet are in
 [Operations → Metrics](operations.md#metrics).

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import io
 import logging
 import sys
@@ -468,18 +467,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return path == "/healthz" or path == "/login" or path.startswith("/static/")
 
     def _metrics_token_ok(request: Request) -> bool:
-        """Whether the request carries the configured `/metrics` scrape token (#352)."""
-        token = config.observability.metrics_token
-        if not token:
-            return False
+        """Whether the request carries the configured `/metrics` scrape token (#352).
+
+        The token is stored as a SHA-256 hash at rest (parity with the API token,
+        #473); ``auth.verify_token`` fails closed when no hash is configured and
+        constant-time-compares the presented bearer's hash, so a non-ASCII bearer
+        yields a clean denial rather than a 500.
+        """
         presented = auth.parse_bearer(request.headers.get("authorization"))
-        # Compare on bytes, not str: hmac.compare_digest raises TypeError on a
-        # non-ASCII (>U+00FF) operand, so a bearer with such a char would 500
-        # instead of a clean 401. .encode() makes any presented token a plain
-        # byte string the constant-time compare always accepts and rejects.
-        return presented is not None and hmac.compare_digest(
-            presented.encode("utf-8"), token.encode("utf-8")
-        )
+        return auth.verify_token(presented, config.observability.metrics_token_hash)
 
     @app.middleware("http")
     async def guard(request: Request, call_next):
@@ -650,8 +646,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/metrics")
     async def prometheus_metrics() -> Response:
-        # Behind the auth guard unless observability.metrics_token is set (then a valid
-        # scrape token grants access without a session — see the guard).
+        # Behind the auth guard unless observability.metrics_token_hash is set (then a
+        # valid scrape token grants access without a session — see the guard).
         if not config.observability.prometheus_enabled:
             raise HTTPException(status_code=404, detail="metrics endpoint is disabled")
         projects = await list_projects()
@@ -1249,7 +1245,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         is a 200 whose `detail` flags the unconfirmed stop / possible cloud orphan.
         A session that was signalled but didn't settle in time raises StopError → 409
         (escalate from the CLI — we don't force-kill, which would orphan the cloud
-        session); `removed:false` (supervisor idle-exited) is reported in the body.
+        session). When `claude rm` soft-fails for a confirmed-dead worker, clauster
+        drops the orphaned job record itself so the row can still be forgotten (#485);
+        any residual `removed:false` is reported in the body.
         """
         if not supervisor.valid_job_id(job_id):
             raise HTTPException(status_code=422, detail="invalid job id")

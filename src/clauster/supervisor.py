@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -470,6 +471,7 @@ def stop_background_job(
     *,
     binary: str = "claude",
     roster_json: Path | None = None,
+    jobs_dir: Path | None = None,
     settle_timeout: float = _SETTLE_TIMEOUT,
 ) -> dict:
     """Stop a ``claude --bg`` session the cloud-deregistering way, then remove it.
@@ -489,8 +491,9 @@ def stop_background_job(
        :class:`StopError` if it does not. We do NOT escalate to SIGKILL —
        that would orphan the cloud session; escalation is the operator's call.
     4. ``claude rm <id>`` to drop the job dir. The transient supervisor may have
-       idle-exited, making rm soft-fail; that is reported (``removed=False``),
-       not raised — the process is already gone.
+       idle-exited, making rm soft-fail; when the worker is confirmed dead (no
+       live pid) clauster then drops the orphaned job dir itself so the row can
+       still be forgotten (#485). A LIVE worker is never force-forgotten this way.
 
     Returns ``{"id", "settled": bool, "removed": bool, "detail": str}``. ``settled``
     is True ONLY for a confirmed cloud-deregistering double-SIGINT-and-exit; a
@@ -538,6 +541,20 @@ def stop_background_job(
         )
 
     removed, detail = _remove_job(resolved, job_id)
+    # Stuck-orphan fallback (#485): when `claude rm` soft-fails (transient supervisor
+    # down) the on-disk job dir is never dropped, so the row can never be forgotten
+    # from the UI. We can drop that record ourselves — but ONLY when (a) the worker is
+    # confirmed dead (pid is None: the liveness guard found no live worker) AND (b) the
+    # failure was specifically the supervisor-down *soft-fail*, not a hard error or a
+    # timeout. A timeout can mean the supervisor is still alive and mid-remove, so it
+    # could rewrite the dir right after we delete it — narrow to the soft-fail so we
+    # never race a still-working supervisor. Fail closed: a still-live worker keeps the
+    # cloud-deregistering path and is NEVER force-forgotten by deleting its dir.
+    if not removed and pid is None and _RM_SOFT_FAIL in detail.lower():
+        forced, forced_detail = _force_remove_job_dir(job_id, jobs_dir)
+        if forced:
+            removed = True
+            detail = f"{detail}; {forced_detail}" if detail else forced_detail
     if not settled:
         note = "no live worker found — cloud stop not confirmed (re-check `claude agents`)"
         detail = f"{detail}; {note}" if detail else note
@@ -564,3 +581,30 @@ def _remove_job(resolved_binary: str, job_id: str) -> tuple[bool, str]:
     if _RM_SOFT_FAIL in (proc.stdout + proc.stderr).lower():
         return False, output or _RM_SOFT_FAIL
     return False, output or f"`claude rm` exit {proc.returncode}"
+
+
+def _force_remove_job_dir(job_id: str, jobs_dir: Path | None) -> tuple[bool, str]:
+    """Drop a confirmed-dead job's on-disk dir when ``claude rm`` soft-failed (#485).
+
+    Clauster lists these jobs by reading ``JOBS_DIR/<id>/state.json``; if ``claude
+    rm`` can't reach the supervisor, that dir lingers and the row can never be
+    forgotten. Deleting the dir clears the record. The caller gates this on the
+    worker being confirmed dead, so this never races a live worker's own state.
+
+    Fail-closed and quiet on the benign path: ``job_id`` is re-validated (it builds
+    a filesystem path), an already-gone dir reads as removed, and a permission/IO
+    error is reported (``False``) rather than swallowed. Returns ``(removed, detail)``.
+    """
+    if not valid_job_id(job_id):  # defence-in-depth: never build a path from an unvalidated id
+        return False, "invalid job id"
+    base = jobs_dir if jobs_dir is not None else JOBS_DIR
+    target = base / job_id
+    try:
+        shutil.rmtree(target)
+    except FileNotFoundError:
+        return True, "job record already gone"  # nothing left to forget — the goal
+    except OSError as exc:
+        _log.warning("could not force-remove orphaned job dir %s: %s", target, exc)
+        return False, f"could not drop local job record: {exc}"
+    _log.info("forgot orphaned background job %s (dropped local record, rm soft-failed)", job_id)
+    return True, "dropped orphaned local job record"
