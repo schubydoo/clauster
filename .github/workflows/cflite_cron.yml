@@ -30,7 +30,7 @@ jobs:
   prune:
     name: prune corpus
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # ≈ fuzz-seconds × harness count + build, with headroom
+    timeout-minutes: 55 # ≈ fuzz-seconds × harness count + build (re-check when adding harnesses)
     permissions:
       contents: read # checkout + build the harnesses
       security-events: write # a replay can still surface a reproducible crash (SARIF)
@@ -60,7 +60,7 @@ jobs:
   coverage:
     name: coverage report
     runs-on: ubuntu-latest
-    timeout-minutes: 45 # the coverage build + full-corpus replay is the slow one
+    timeout-minutes: 60 # coverage build + full-corpus replay over every harness — the slow one
     permissions:
       contents: read # builds + replays only; the report is pushed via the storage PAT
     concurrency:

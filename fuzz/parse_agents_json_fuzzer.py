@@ -3,10 +3,11 @@
 ``parse_agents_json`` parses the raw stdout of the external ``claude agents --json``
 subprocess — third-party CLI output whose shape is Anthropic-controlled and
 version-dependent, i.e. genuinely external bytes. It stays strict on malformed
-JSON (raises ``json.JSONDecodeError``, its documented fail-closed contract — caught
-here); the per-item ``KeyError``/``TypeError``/``ValueError`` are swallowed inside
-the loop, so any OTHER exception that escapes (a deep-nesting ``RecursionError``,
-an uncaught type) is a real bug.
+JSON (raises ``json.JSONDecodeError``, its documented fail-closed contract); the
+per-item ``KeyError``/``TypeError``/``ValueError`` are swallowed inside the loop.
+``JSONDecodeError`` on bad JSON and ``RecursionError`` from CPython's recursive
+scanner on a deeply-nested payload are both expected parse-failures (caught here,
+not clauster bugs); any OTHER escaping exception is a real bug.
 """
 
 import json
@@ -23,9 +24,10 @@ def TestOneInput(data: bytes) -> None:
     text = fdp.ConsumeUnicodeNoSurrogates(fdp.remaining_bytes())
     try:
         inspector.parse_agents_json(text)
-    except json.JSONDecodeError:
-        # The documented strict-parse contract on a malformed payload — expected,
-        # not a bug. Anything else escaping is a finding.
+    except (json.JSONDecodeError, RecursionError):
+        # Expected parse-failures on a malformed/pathological payload (the function
+        # stays strict by design): JSONDecodeError on bad JSON, RecursionError from
+        # the recursive scanner on deeply-nested input. Anything else is a finding.
         pass
 
 

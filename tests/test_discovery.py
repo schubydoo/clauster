@@ -72,13 +72,14 @@ def test_load_trusted_paths_non_utf8_returns_empty(tmp_path):
 
 
 def test_load_trusted_paths_non_dict_json_returns_empty(tmp_path):
-    # A valid-JSON-but-non-dict top level (e.g. `[]`, `"x"`, `5`) parses fine but
-    # has no `.get`; it must degrade to "nothing trusted" like any other malformed
-    # claude.json instead of raising AttributeError (the #122 class).
+    # A valid-JSON-but-non-dict top level (`[]`, `"x"`, `5`) has no `.get`, and a
+    # deeply-nested doc raises RecursionError before json can raise JSONDecodeError;
+    # both must degrade to "nothing trusted" like any other malformed claude.json
+    # (the #122 never-raise contract) instead of raising AttributeError/RecursionError.
     from clauster.discovery import _load_trusted_paths
 
     claude_json = tmp_path / ".claude.json"
-    for content in ("[]", '"x"', "5"):
+    for content in ("[]", '"x"', "5", "[" * 100_000):
         claude_json.write_text(content, encoding="utf-8")
         assert _load_trusted_paths(claude_json) == set()
 
