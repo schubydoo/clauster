@@ -45,6 +45,7 @@ its own `CLAUSTER_SESSION_SECRET_FILE` (it is read outside the config schema):
 
 - `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH_FILE`
 - `auth.api_token_hash` → `CLAUSTER_AUTH_API_TOKEN_HASH_FILE`
+- `observability.metrics_token_hash` → `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE`
 - session secret → `CLAUSTER_SESSION_SECRET_FILE`
 
 ```yaml
@@ -98,7 +99,23 @@ under `auth`).
 | `resume_recap` | bool | `false` | Install a `SessionStart` hook in the runtime user's `~/.claude/settings.json` that recaps the most recent prior transcript for the cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude settings and injects prior turns. |
 | `resume_recap_max_chars` | int | `8000` | Character budget (≥500) for the recap injection (most recent turns kept). |
 | `resume_mode` | `standard` \| `pty` | `standard` | Launch mode for **new** bridges. `pty` = native true-resume under a PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the mode it launched with — editing this never re-modes a running or stopped bridge. |
+| `path_append` | list[str] | `[]` | Directories appended to the bridge subprocess `PATH` so a `claude` session can resolve user-local tools (e.g. `~/.local/bin`) that a minimal service `PATH` omits. `~` is expanded; entries are appended in order after the inherited `PATH`, never replacing it. Applies to both standard and pty bridges. |
 <!-- END GEN: claude -->
+
+The `claude.env` map (filtered from the generated table because it's a dict) overlays
+extra environment variables onto the bridge subprocess (both standard and pty modes).
+It is applied **after** Clauster's secret scrub, so a key matching a Clauster secret name
+(`CLAUSTER_*` carrying `SECRET`/`PASSWORD`/`TOKEN`/`HASH`) is dropped and can never
+re-introduce a scrubbed credential. Pair it with `claude.path_append` to make user-local
+tools resolvable from a minimal service `PATH`:
+
+```yaml
+claude:
+  path_append:
+    - "~/.local/bin"
+  env:
+    FOO: "bar"
+```
 
 ## `instance_defaults` — new-bridge defaults (`InstanceDefaults`)
 
@@ -252,8 +269,8 @@ auth guard. See [Networking](networking.md) for scraping behind auth.
 <!-- BEGIN GEN: observability -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token` is set. |
-| `metrics_token` | str \| null | `null` | Optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — presented as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Compared in constant time. Must be at least 16 characters when set. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE` to keep it out of the config file. |
+| `prometheus_enabled` | bool | `false` | Gate a text-format `/metrics` endpoint (build info, bridge counts by status, project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by default; when off, `/metrics` returns 404. The endpoint stays **behind** the auth guard unless `metrics_token_hash` is set. |
+| `metrics_token_hash` | str \| null | `null` | SHA-256 hash of an optional bearer token that lets a scraper (e.g. Prometheus) reach `/metrics` without a browser session — the scraper presents the raw token as `Authorization: Bearer <token>`. When set, a valid token OR a normal session grants access; when unset, `/metrics` stays behind the auth guard. Only the hash is stored (parity with `auth.api_token_hash`); the raw token is shown once by `clauster hash-metrics-token`. Supply via `CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE` to keep it out of the config file. |
 <!-- END GEN: observability -->
 
 ## `notifications` — outbound alerts via Apprise (`NotificationsConfig`)

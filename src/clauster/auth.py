@@ -6,8 +6,9 @@ web wiring (middleware, routes, cookie handling) lives in ``app.py``.
 
 Four trust paths:
   - password login  -> signed-cookie session  (``issue_session`` / ``read_session``)
-  - API token        -> hashed bearer credential
-                        (``mint_token`` / ``hash_token`` / ``verify_token`` / ``parse_bearer``)
+  - API token        -> hashed bearer credential (also the ``/metrics`` scrape token)
+                        (``mint_token`` / ``mint_metrics_token`` / ``hash_token`` /
+                         ``verify_token`` / ``parse_bearer``)
   - reverse proxy    -> peer-IP allowlist + HMAC-signed header
                         (``peer_trusted`` / ``verify_proxy_hmac``)
   - cross-site guard -> strict Origin allowlist
@@ -188,6 +189,18 @@ def mint_token() -> tuple[str, str]:
     """
     raw = _TOKEN_PREFIX + secrets.token_urlsafe(32)
     return raw, hash_token(raw)
+
+
+def mint_metrics_token() -> tuple[str, str]:
+    """Return ``(raw_token, hash)`` for a fresh ``/metrics`` scrape token (#473).
+
+    Like ``mint_token``, the raw token is shown to the operator exactly once and
+    only the hash is persisted (in ``observability.metrics_token_hash``). It shares
+    the ``clauster_pat_`` prefix so log redaction (``redact._SECRET_RES``) and the
+    same SHA-256 at-rest form apply uniformly to every clauster bearer credential.
+    Delegates to ``mint_token`` so the two stay in sync automatically.
+    """
+    return mint_token()
 
 
 def hash_token(raw: str) -> str:
