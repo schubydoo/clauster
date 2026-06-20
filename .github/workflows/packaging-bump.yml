@@ -11,8 +11,8 @@ name: Packaging manifest bump
 # So on every published release we regenerate each manifest's version/url/hash from the
 # release's authoritative SHA256SUMS (via scripts/bump_packaging.py) and open a PR. We
 # DON'T push to main: main is branch-protected, and the bump is reviewable like any
-# other change. release-please is deliberately NOT the mechanism — it runs at PR-prep
-# time, before the binaries (and therefore the hashes) exist.
+# other change. The release tooling (knope) is deliberately NOT the mechanism — it
+# runs at release-prep time, before the binaries (and therefore the hashes) exist.
 #
 # A manifest not yet on main is skipped (the helper no-ops on absent files), so this can
 # merge ahead of the Homebrew/Nix packaging and light them up once they land.

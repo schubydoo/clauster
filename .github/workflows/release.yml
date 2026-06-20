@@ -1,9 +1,10 @@
 name: Release
 
-# Fires when Release Please pushes a tag (e.g. `v0.2.0`). Release Please itself
-# creates the GitHub Release + CHANGELOG; this workflow's job is to publish the
-# distribution. clauster ships to PyPI today; a multi-arch GHCR image can be
-# added here once a Dockerfile lands (see the commented stub at the bottom).
+# Fires when knope publishes a release tag (e.g. `v0.2.0`). knope itself creates
+# the GitHub Release + signed assets (the CHANGELOG was written earlier by the
+# prepare-release PR); this workflow's job is to publish the distribution.
+# clauster ships to PyPI today; a multi-arch GHCR image can be added here once a
+# Dockerfile lands (see the commented stub at the bottom).
 
 on:
   push:

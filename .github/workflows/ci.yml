@@ -152,9 +152,9 @@ jobs:
       # Token-based upload (no id-token perm). Non-blocking: Codecov isn't a
       # required check and upload flakiness must never fail CI. `!cancelled()` so
       # a FAILED pytest still uploads (pytest writes the reports before the gate),
-      # surfacing a coverage drop precisely when it matters. Skips release-please's
-      # bot PRs (code never moves; the status/comment is pure noise) — filtered on
-      # the PR author, mirroring the .coderabbit.yaml bot skip; the login is empty
+      # surfacing a coverage drop precisely when it matters. Skips the release
+      # bot's PRs (knope opens them as the clauster-ci App; code never moves, so the
+      # status/comment is pure noise) — filtered on the PR author; the login is empty
       # on push, so main-branch uploads are unaffected.
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}

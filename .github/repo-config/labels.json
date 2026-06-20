@@ -9,8 +9,6 @@
   { "name": "security", "color": "d93f0b", "description": "Security-related — Renovate vulnerability alerts use this" },
   { "name": "dependencies", "color": "ededed", "description": "Renovate-opened dependency update PRs (and the dashboard issue)" },
   { "name": "vendored-assets", "color": "ededed", "description": "Renovate heads-up to re-vendor self-hosted front-end assets (manual dist update)" },
-  { "name": "autorelease: pending", "color": "ededed", "description": "Release Please — release PR is open, awaiting merge" },
-  { "name": "autorelease: tagged", "color": "0e8a16", "description": "Release Please — release PR is merged and the tag has been pushed" },
-  { "name": "autorelease: snapshot", "color": "5319e7", "description": "Release Please — snapshot/prerelease (rare)" },
+  { "name": "no-changelog", "color": "ededed", "description": "Skip the advisory changeset check — internal-only PR (CI, refactor, tests, docs)" },
   { "name": "tracked", "color": "fa68de", "description": "Tracked as an issue on the GitHub Project board (open work)" }
 ]

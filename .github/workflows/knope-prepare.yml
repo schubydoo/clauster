@@ -1,0 +1,96 @@
+name: Prepare Release
+
+# knope's "release PR" half. On every push to main, if there are pending
+# `.changeset/` fragments, knope computes the next version, bumps pyproject.toml +
+# src/clauster/__init__.py + CHANGELOG.md, resyncs uv.lock, and opens/refreshes a
+# `release` PR titled `chore: prepare release X.Y.Z`. Merging that PR is the
+# approval gate; the merge then triggers knope-release.yml (which publishes).
+#
+# This replaces release-please's "open the next release PR" half. It is gated on
+# the PRESENCE OF CHANGESETS, not on a commit-message marker: a push that leaves
+# no fragments (an ordinary code merge with no changeset, OR the release-PR merge
+# itself, which consumes the fragments) simply has nothing to prepare and the
+# knope step is skipped. A genuine knope failure (auth, push, malformed changeset)
+# is NOT swallowed — the job fails loudly.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: knope-prepare-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # Short-lived clauster-ci App token (secrets named RELEASE_PLEASE_APP_* for
+      # historical reasons — they are the clauster-ci App's credentials, reused by
+      # several workflows). The App identity is what lets the release PR's eventual
+      # merge tag trigger release.yml, same mechanism as before the knope migration.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      # Full history + tags so knope can find the last release tag and compute the
+      # next version. persist-credentials: true (App token) is REQUIRED here —
+      # knope's `git push --force origin release` step pushes the release branch
+      # using this persisted credential, so the branch + PR are the App's identity.
+      - name: Check out full history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true # zizmor: ignore[artipacked] — knope pushes the release branch with this token
+      # Is there anything to release? With ignore_conventional_commits=true, knope
+      # releases iff a `.changeset/*.md` fragment is pending — so detecting one here
+      # lets the knope step run WITHOUT continue-on-error (a real failure fails the
+      # job) while an ordinary push with no fragment is a clean no-op.
+      - name: Detect pending changesets
+        id: changesets
+        run: |
+          set -euo pipefail
+          count=0
+          if [ -d .changeset ]; then
+            count=$(find .changeset -maxdepth 1 -name '*.md' ! -iname 'README.md' | wc -l)
+          fi
+          if [ "$count" -gt 0 ]; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "pending changeset fragments: $count"
+      - name: Configure git identity (clauster-ci App)
+        if: ${{ steps.changesets.outputs.has == 'true' }}
+        run: |
+          git config user.name "clauster-ci[bot]"
+          git config user.email "clauster-ci[bot]@users.noreply.github.com"
+      # uv is needed for the `uv lock` step inside knope's prepare-release workflow
+      # (keeps uv.lock's editable self-version in sync with the bump). This job can
+      # push, so disable the setup-uv cache (cache-poisoning vector).
+      - name: Set up uv
+        if: ${{ steps.changesets.outputs.has == 'true' }}
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false
+      - name: Install knope
+        if: ${{ steps.changesets.outputs.has == 'true' }}
+        uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
+        with:
+          version: 0.23.0
+      - name: Open or refresh the release PR
+        if: ${{ steps.changesets.outputs.has == 'true' }}
+        run: knope prepare-release --verbose
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

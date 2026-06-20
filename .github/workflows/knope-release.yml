@@ -1,0 +1,214 @@
+name: Release
+
+# knope's "publish" half. When the `chore: prepare release X.Y.Z` PR (opened by
+# knope-prepare.yml from the `release` branch) merges, this workflow builds the
+# standalone binaries, builds + Sigstore-signs the dists and binaries, generates
+# SLSA provenance, and stages the whole signed set into dist/release-assets/. Only
+# then does `knope release` run: with `assets` configured it creates the GitHub
+# Release as a DRAFT, uploads every asset, and un-drafts (publishes) — the git tag
+# is created at publish, so the release locks immutable WITH its assets (#98).
+# Publishing via the clauster-ci App token makes the resulting tag trigger
+# release.yml (PyPI + GHCR).
+#
+# Triggered on the release PR MERGING (pull_request: closed + merged + the head
+# branch is `release`), NOT on a commit-message marker — the repo squash-merges
+# and a squash subject is editable, so keying publish off it risked a silent
+# never-publish. The head_ref is reliable regardless of the squash subject. Because
+# the squash orphans the PR-head commit, we check out the squash commit on main
+# (merge_commit_sha) so knope tags the commit that actually landed.
+#
+# FAIL CLOSED: if any dist, target binary, signature, or the provenance bundle is
+# missing, the gate aborts BEFORE `knope release` — leaving no tag, no PyPI/Docker,
+# nothing published. A half-built release never reaches the publish step.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  # Manual fallback if a publish half-fails and is finished by hand. Gated to main
+  # below; dispatch from main once pyproject.toml already holds the version.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Releases must NOT be cancelled mid-flight.
+  group: knope-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # --- Build the standalone binaries (only on a merged `release` PR) ----------
+  # Reuses the validated build + smoke matrix (build-binaries.yml). When this job
+  # is skipped (any other closed PR), every downstream job is skipped too.
+  binaries:
+    if: >-
+      ${{ (github.event_name == 'pull_request'
+           && github.event.pull_request.merged == true
+           && github.head_ref == 'release')
+          || (github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-binaries.yml
+
+  # --- Sign + stage every asset, fail-closed, then publish via knope ----------
+  release:
+    needs: [binaries]
+    # Explicit (not just needs-skip-propagation): publish only if the binaries
+    # actually built. Guards against a future edit that adds `if: always()`.
+    if: ${{ needs.binaries.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # Sigstore keyless signing (OIDC)
+      attestations: write # actions/attest records SLSA build provenance
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      # Check out the squash commit that landed on main (merge_commit_sha), NOT the
+      # orphaned PR-head — knope must tag a commit that is actually on main. Full
+      # history + tags so knope can compare the bumped version against the last
+      # release tag and load the matching CHANGELOG section as the release notes.
+      - name: Check out the release commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up uv (build)
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: false # this job can push; avoid the cache-poisoning vector
+      - name: Build sdist + wheel
+        run: uv build
+      # Pull the binaries built by the `binaries` job into ./binaries (flattened):
+      # each artifact carries the renamed binary + its .sha256.
+      - name: Download the standalone binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: clauster-binary-*
+          path: binaries
+          merge-multiple: true
+      # Replace the per-target .sha256 files with a single SHA256SUMS over the
+      # binaries, and assert all five expected targets are present BEFORE signing —
+      # a missing target must abort, never silently ship a partial set.
+      - name: Collect binaries + checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd binaries
+          rm -f ./*.sha256
+          shopt -s nullglob
+          bins=(clauster-*)
+          for want in linux-x86_64 linux-arm64 macos-arm64 macos-x86_64 windows-x86_64; do
+            match=0
+            for b in "${bins[@]}"; do case "$b" in *"$want"*) match=1 ;; esac; done
+            [ "$match" -eq 1 ] || { echo "missing binary for target '$want'; aborting" >&2; exit 1; }
+          done
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${bins[@]}" > SHA256SUMS
+          else
+            shasum -a 256 "${bins[@]}" > SHA256SUMS
+          fi
+          echo "collected ${#bins[@]} binaries + SHA256SUMS"
+      # SLSA build provenance over the dists, binaries, and checksum manifest. MUST
+      # run BEFORE the signing step: the `binaries/clauster-*` glob would otherwise
+      # also match the `.sigstore.json` bundles Sigstore writes next to each binary,
+      # enumerating signature files as provenance subjects. Attesting first — while
+      # only the real artifacts exist — keeps the subject set to exactly the dists +
+      # binaries + SHA256SUMS.
+      - name: Generate SLSA build provenance
+        id: provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: "dist/*.tar.gz,dist/*.whl,binaries/clauster-*,binaries/SHA256SUMS"
+      # Sigstore-sign the dists, the binaries, and the checksum manifest. Sigstore
+      # v3 writes a .sigstore.json bundle next to each input and exits non-zero on
+      # failure, so a signing error aborts before publish.
+      - name: Sign artifacts with Sigstore
+        uses: sigstore/gh-action-sigstore-python@5b79a39c381910c090341a2c9b0bf022c8b387e1 # v3.4.0
+        with:
+          inputs: >-
+            ./dist/*.tar.gz
+            ./dist/*.whl
+            ./binaries/clauster-*
+            ./binaries/SHA256SUMS
+      # Stage the full signed set into dist/release-assets/ (knope's `assets` glob)
+      # and FAIL CLOSED if anything is missing — knope only errors on a globbed file
+      # that vanished, not on a target that never got built, so this gate is what
+      # guarantees the published release is complete.
+      - name: Stage signed assets + fail-closed gate
+        shell: bash
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Authoritative version from [project] (tomllib, not a column-0 grep that a
+          # [tool.*] version line could shadow).
+          ver_py='import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])'
+          VERSION="$(python3 -c "$ver_py")"
+          if [ -z "${VERSION}" ]; then
+            echo "could not read version from pyproject.toml; aborting" >&2; exit 1
+          fi
+          # Provenance: name it to match the other release artifacts. Scorecard's
+          # Signed-Releases provenance probe matches on the `.intoto.jsonl` SUFFIX,
+          # so the prefix is free; keep the `multiple` token (multi-subject bundle).
+          if [ -z "${PROVENANCE_BUNDLE:-}" ] || [ ! -s "${PROVENANCE_BUNDLE}" ]; then
+            echo "no SLSA provenance bundle produced; refusing to publish without provenance" >&2
+            exit 1
+          fi
+          provenance="dist/clauster-${VERSION}-multiple.intoto.jsonl"
+          cp "${PROVENANCE_BUNDLE}" "${provenance}"
+          # Build the asset set from the clean source dirs (dist/, binaries/), where
+          # the dist vs binary signatures don't glob-collide.
+          dists=(dist/*.tar.gz dist/*.whl)
+          dist_sigs=(dist/*.sigstore dist/*.sigstore.json)
+          bins=(binaries/clauster-*)
+          # Split the binary list: the glob also matches the per-binary .sigstore.json.
+          bin_files=(); bin_sigs=()
+          for f in "${bins[@]}"; do
+            case "$f" in *.sigstore|*.sigstore.json) bin_sigs+=("$f") ;; *) bin_files+=("$f") ;; esac
+          done
+          sums=(binaries/SHA256SUMS)
+          sums_sigs=(binaries/SHA256SUMS.sigstore.json)
+          # FAIL CLOSED — refuse to publish unless the full, signed set is present.
+          if [ ${#dists[@]} -lt 2 ]; then
+            echo "expected sdist + wheel; found ${#dists[@]}; aborting" >&2; exit 1
+          fi
+          if [ ${#dist_sigs[@]} -lt ${#dists[@]} ]; then
+            echo "dist signatures (${#dist_sigs[@]}) < dists (${#dists[@]}); refusing" >&2; exit 1
+          fi
+          if [ ${#bin_files[@]} -ne 5 ]; then
+            echo "expected 5 standalone binaries; found ${#bin_files[@]}; aborting" >&2; exit 1
+          fi
+          if [ ${#bin_sigs[@]} -lt ${#bin_files[@]} ]; then
+            echo "binary signatures (${#bin_sigs[@]}) < binaries (${#bin_files[@]}); refusing" >&2; exit 1
+          fi
+          if [ ${#sums_sigs[@]} -eq 0 ]; then
+            echo "SHA256SUMS not signed; refusing to publish" >&2; exit 1
+          fi
+          # Stage exactly the gated set; knope uploads everything under this dir.
+          mkdir -p dist/release-assets
+          cp "${dists[@]}" "${dist_sigs[@]}" "${bin_files[@]}" "${bin_sigs[@]}" \
+             "${sums[@]}" "${sums_sigs[@]}" "${provenance}" dist/release-assets/
+          echo "staged $(find dist/release-assets -type f | wc -l) assets for v${VERSION}"
+      - name: Install knope
+        uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
+        with:
+          version: 0.23.0
+      # knope creates the draft, uploads dist/release-assets/*, and publishes. The
+      # App token (not GITHUB_TOKEN) is what lets the published tag trigger
+      # release.yml. If the version already matches the latest release tag (e.g. a
+      # re-run after a successful publish), knope is a no-op for that package.
+      - name: Create + publish the GitHub release
+        run: knope release --verbose
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

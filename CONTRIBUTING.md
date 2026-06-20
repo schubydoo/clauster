@@ -39,8 +39,27 @@ uv run clauster
 - **Conventional Commits** — your PR **title** must follow
   [Conventional Commits](https://www.conventionalcommits.org/)
   (`feat:`, `fix:`, `docs:`, `chore:`, `ci:`, …). PRs are squash-merged, so the
-  title becomes the commit subject that release-please parses for versioning and
-  the changelog. CI enforces this.
+  title becomes the commit subject; CI enforces this. (Versioning and the changelog
+  are driven by changesets — see the next bullet — not the commit type.)
+- **Changeset** — any **user-facing** change needs a `.changeset/*.md` fragment.
+  clauster is changesets-only: fragments drive both the version bump and the
+  changelog, so a change with no fragment ships with no release note **and** no
+  version bump. Create one with `knope document-change`, or add a file by hand:
+
+  ```markdown
+  ---
+  default: patch
+  ---
+
+  A one-line summary of the change (becomes a changelog bullet).
+  ```
+
+  Use `default: minor` for a feature, `patch` for a fix, `major` for a breaking
+  change, or `perf` / `security` / `build` for those sections (each a patch bump).
+  Internal-only PRs (CI, refactor, tests, docs) need no changeset — add the
+  `no-changelog` label to silence the advisory `Changeset check`. **Don't hand-edit
+  `CHANGELOG.md` or bump the version in `pyproject.toml` / `src/clauster/__init__.py`**
+  — knope owns those, regenerating them in the release PR.
 
 CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.14
 (all merge-blocking; Linux additionally enforces the 96% coverage gate), plus
