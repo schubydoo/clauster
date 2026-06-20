@@ -858,16 +858,18 @@ def test_prometheus_no_cpu_rss_when_cache_empty(write_config, tmp_path):
 
 
 def test_metrics_token_grants_scrape_without_session(runner_config):
-    # With auth on and a metrics_token set, a valid Bearer token reaches /metrics with no
-    # session; a wrong/absent token is rejected; the existing gauges are unchanged.
+    # With auth on and a metrics_token_hash set (#473), the matching raw Bearer token
+    # reaches /metrics with no session; a wrong/absent token is rejected; the existing
+    # gauges are unchanged. Only the hash is stored at rest (parity with the API token).
     from clauster.app import create_app
+    from clauster.auth import hash_token
     from clauster.runner import SessionRunner
 
     config, claude_json = runner_config
     config.auth.enabled = True
     config.auth.password_required = True
     config.observability.prometheus_enabled = True
-    config.observability.metrics_token = "scrape-me"  # noqa: S105 — test token
+    config.observability.metrics_token_hash = hash_token("scrape-me")  # noqa: S106 — test token
     client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
 
     ok = client.get("/metrics", headers={"authorization": "Bearer scrape-me"})
@@ -886,16 +888,20 @@ def test_metrics_token_grants_scrape_without_session(runner_config):
 
 def test_metrics_token_non_ascii_bearer_denied_not_500(runner_config):
     # Item-1 (#408): a non-ASCII (>U+00FF) Bearer once raised TypeError in
-    # hmac.compare_digest(str, str) → a 500. Comparing on bytes makes it a clean
-    # denial (401/redirect), never a server error, and never reveals the payload.
+    # hmac.compare_digest(str, str) → a 500. Hashing the presented token before the
+    # constant-time compare (verify_token, #473) makes it a clean denial
+    # (401/redirect), never a server error, and never reveals the payload.
     from clauster.app import create_app
+    from clauster.auth import hash_token
     from clauster.runner import SessionRunner
 
     config, claude_json = runner_config
     config.auth.enabled = True
     config.auth.password_required = True
     config.observability.prometheus_enabled = True
-    config.observability.metrics_token = "scrape-me-please"  # noqa: S105 — test token
+    config.observability.metrics_token_hash = hash_token(  # noqa: S106 — test token
+        "scrape-me-please"
+    )
     client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
 
     # A bearer with a char above U+00FF (would crash str-vs-str compare_digest).

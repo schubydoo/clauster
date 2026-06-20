@@ -162,7 +162,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
 - **Prometheus `/metrics`** — opt into a read-only text-format scrape endpoint
   (`observability.prometheus_enabled`) exposing build info, bridge counts by
   status, a crash counter, and per-bridge CPU/RSS. It stays behind the auth guard
-  unless you set `observability.metrics_token` for token-based scraping. See
+  unless you set `observability.metrics_token_hash` for token-based scraping. See
   [Operations → Metrics](https://schubydoo.github.io/clauster/operations/#metrics).
 - **Hosted live-view channel (opt-in, experimental)** — an alternate substrate to
   the remote-control bridge. With `claustrum.enabled: true`, Clauster connect-or-spawns

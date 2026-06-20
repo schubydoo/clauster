@@ -119,14 +119,15 @@ usage:
 
 # Read-only Prometheus /metrics exposition (build info, bridge counts by status,
 # project count, per-bridge cpu/rss, crash counter, hosted/claustrum gauges). Off by
-# default; when enabled it stays BEHIND the auth guard unless metrics_token is set.
+# default; when enabled it stays BEHIND the auth guard unless metrics_token_hash is set.
 # observability:
 #   prometheus_enabled: false
-#   metrics_token: null            # optional bearer token: a scraper presents
-#                                  # `Authorization: Bearer <token>` to reach /metrics
-#                                  # without a browser session (compared in constant
-#                                  # time). Supply via
-#                                  # CLAUSTER_OBSERVABILITY_METRICS_TOKEN_FILE.
+#   metrics_token_hash: null       # SHA-256 hash (from `clauster hash-metrics-token`)
+#                                  # of an optional bearer token: a scraper presents the
+#                                  # raw `Authorization: Bearer <token>` to reach /metrics
+#                                  # without a browser session (only the hash is stored,
+#                                  # parity with auth.api_token_hash). Supply via
+#                                  # CLAUSTER_OBSERVABILITY_METRICS_TOKEN_HASH_FILE.
 
 # Outbound bridge-lifecycle notifications via Apprise. Requires the optional
 # extra: pip install 'clauster[notify]'. Best-effort + fail-closed — a notify
