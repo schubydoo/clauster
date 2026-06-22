@@ -7,13 +7,16 @@ claude-md resolver / read-error branches.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
-from clauster.config import load_config
+from clauster.config import ClausterConfig, load_config
+from clauster.runner import SessionRunner
+from helpers import RecordingEmitter, assert_stays_empty, wait_for_calls
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
@@ -281,6 +284,122 @@ def test_clone_route_existing_target_409(write_config, tmp_path):
         "/api/projects/clone", json={"name": "alpha", "url": "https://10.0.0.1/r.git"}
     )
     assert r.status_code == 409
+
+
+# ----- bg-settled webhook (#432) ----------------------------------------
+
+
+def _client_webhooks(write_config, tmp_path, event_line: str) -> TestClient:
+    extra = f"webhooks:\n  enabled: true\n  urls: ['https://hook.test/h']\n  events:\n{event_line}"
+    return TestClient(
+        create_app(
+            load_config(
+                write_config(
+                    f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{extra}"
+                )
+            )
+        )
+    )
+
+
+def test_bg_settled_webhook_fires_and_redacts_detail(write_config, tmp_path, monkeypatch):
+    # The supervisor stop is stubbed (no real `claude`); we test only the emission wiring.
+    def fake_stop(job_id, *, binary, **kw):
+        return {
+            "id": job_id,
+            "settled": True,
+            "removed": True,
+            "detail": "removed session_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        }
+
+    monkeypatch.setattr("clauster.supervisor.stop_background_job", fake_stop)
+
+    with _client_webhooks(write_config, tmp_path, "    bg-settled: true\n") as client:
+        rec = RecordingEmitter()
+        client.app.state.runner._webhooks = rec
+        resp = client.delete("/api/agents/abc12345")
+        assert resp.status_code == 200, resp.text
+        calls = wait_for_calls(rec)
+
+    assert len(calls) == 1
+    event, payload = calls[0]
+    assert event == "bg-settled"
+    assert payload["event_type"] == "bg-settled"
+    assert payload["id"] == "abc12345"
+    assert payload["settled"] is True and payload["removed"] is True
+    # The raw session id in detail is masked before egress.
+    assert "session_01ARZ3NDEKTSV4RRFFQ69G5FAV" not in (payload["detail"] or "")
+    assert "<redacted>" in (payload["detail"] or "")
+
+
+def test_bg_settled_webhook_silent_when_default_off(write_config, tmp_path, monkeypatch):
+    # webhooks enabled but bg-settled NOT opted in -> the real emitter's gate drops it.
+    def fake_stop(job_id, *, binary, **kw):
+        return {"id": job_id, "settled": False, "removed": True, "detail": None}
+
+    monkeypatch.setattr("clauster.supervisor.stop_background_job", fake_stop)
+
+    extra = "webhooks:\n  enabled: true\n  urls: ['https://hook.test/h']\n"
+    client = TestClient(
+        create_app(
+            load_config(
+                write_config(
+                    f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{extra}"
+                )
+            )
+        )
+    )
+    with client:
+        emitter = client.app.state.runner._webhooks
+        assert emitter.active and emitter.wants("bg-settled") is False
+        aemit_calls: list = []
+        orig = emitter.aemit
+
+        async def _spy(event, payload):
+            aemit_calls.append(event)
+            await orig(event, payload)
+
+        monkeypatch.setattr(emitter, "aemit", _spy)
+        resp = client.delete("/api/agents/abc12345")
+        assert resp.status_code == 200
+        # Negative assertion: confirm no emit fires across a window, failing fast if one does.
+        assert_stays_empty(aemit_calls)
+
+
+async def test_hosted_permission_needed_closure_emits_webhook(runner_config):
+    """create_app wires _on_hosted_permission_needed to fire the #432 webhook.
+
+    The hosted-layer tests inject a mock callback, so the real app-side closure —
+    which forwards the parked-prompt signal through runner.emit_event — is only
+    exercised here. Call the wired closure on the running loop and assert the
+    emitter records the redacted permission-needed payload.
+    """
+    config, claude_json = runner_config
+    cfg = ClausterConfig(
+        projects_root=config.projects_root,
+        state_dir=config.state_dir,
+        claude={"binary": config.claude.binary},
+    )
+    runner = SessionRunner(cfg, claude_json=claude_json)
+    rec = RecordingEmitter()
+    runner._webhooks = rec
+    app = create_app(cfg, runner)
+
+    callback = app.state.hosted._on_permission_needed
+    assert callback is not None
+    callback("0f1e2d3c", "can_use_tool")
+    await asyncio.gather(*runner._notify_tasks)
+
+    assert rec.calls == [
+        (
+            "permission-needed",
+            {
+                "event_type": "permission-needed",
+                "process_id": "0f1e2d3c",
+                "subtype": "can_use_tool",
+            },
+        )
+    ]
 
 
 # ----- per-project usage (cost badge) -----------------------------------
