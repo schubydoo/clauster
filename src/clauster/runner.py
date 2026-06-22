@@ -1992,9 +1992,10 @@ class SessionRunner:
                     project_name=project,
                     claude_projects_dir=self._claude_projects_dir,
                 )
-            except OSError as exc:
-                # An unreadable transcript / discovery walk must not drop the terminal
-                # row — record the event with a null cost rather than skip history.
+            except Exception as exc:  # noqa: BLE001 — cost is best-effort; the row is not
+                # ANY snapshot failure (an unreadable transcript / discovery walk → OSError,
+                # or a malformed-transcript parse → ValueError, etc.) must degrade only the
+                # cost to null — never drop the terminal row. The caller still appends it.
                 _log.warning("session-history cost snapshot failed for %s: %s", project, exc)
                 return None
 

@@ -231,6 +231,31 @@ async def test_terminal_event_records_row_when_project_path_lookup_fails(
     assert "session-history cost snapshot failed" in caplog.text
 
 
+async def test_terminal_event_records_row_when_cost_snapshot_raises_non_oserror(
+    runner_config, caplog, monkeypatch
+):
+    # The cost snapshot can raise a non-OSError (e.g. a transcript-parse ValueError). That
+    # must still degrade only the COST to null — the terminal row is recorded regardless.
+    runner = _runner(runner_config)
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("malformed transcript")
+
+    monkeypatch.setattr("clauster.runner.aggregate_project_usage_cached", _boom)
+    config, _ = runner_config
+    _write_transcript(runner._claude_projects_dir, config.projects_root / "alpha")
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STOPPED, resume_mode="standard"
+    )
+    runner._record_event("stop", inst)
+    await _drain(runner)
+
+    [event] = runner._history.history_for("alpha")  # the row IS recorded
+    assert event.kind == "ended"
+    assert event.cost_usd is None  # only the cost is dropped
+    assert "session-history cost snapshot failed" in caplog.text
+
+
 async def test_unresolved_resume_mode_falls_back_to_standard(runner_config):
     # mode is NOT NULL; a None resume_mode would make the INSERT drop the row. The
     # prologue falls back to "standard" so the row is always recorded with a valid mode.
