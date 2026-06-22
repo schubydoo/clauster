@@ -18,7 +18,17 @@ name: Repo Config Drift
 #   * Branch protection / rulesets are out of scope (owned by the repo ruleset).
 
 on:
+  # PR runs are limited to `opened` (no `synchronize`): this verifies REPO-level
+  # config (labels + read-visible settings), independent of any single PR's diff,
+  # so re-running it on every push to a PR branch is redundant — and
+  # pr-auto-update fans a main push out across every open PR (a synchronize
+  # storm), multiplying that redundant work. One run when a PR opens still gives
+  # early feedback on a `.github/repo-config/*` baseline edit; the push-to-main +
+  # weekly cron remain the real drift gate. (The drift job's API reads are minted
+  # onto the clauster-ci App pool below, so no path taxes the 1,000/hr
+  # github-actions[bot] REST pool.)
   pull_request:
+    types: [opened]
   push:
     branches: [main]
   schedule:
@@ -47,11 +57,35 @@ jobs:
         with:
           persist-credentials: false
 
+      # Mint a clauster-ci App token (≥5,000 REST req/hr) so the drift reads
+      # (`gh label list` → needs issues:read; `gh api repos/$REPO` → metadata)
+      # draw on the App pool, not the 1,000/hr github-actions[bot] pool. Biggest
+      # win is push-to-main: a merge storm fires one drift run per merge, all on
+      # the same pool. Same-repo runs only — a fork PR lacks the App secrets, so
+      # the step is skipped and GH_TOKEN falls back to the read-only default token
+      # below, which still reads public labels/settings.
+      - name: Mint GitHub App token
+        id: app-token
+        # Advisory job (never blocks): if the App's issues:read grant is ever
+        # missing the mint errors, so soft-fail and fall through to github.token
+        # below — drift still runs (on the default pool), rather than redding a
+        # non-required check.
+        continue-on-error: true
+        if: >-
+          ${{ github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-issues: read
+
       - name: Check labels + settings drift (advisory, never blocks)
         id: drift
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
