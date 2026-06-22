@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Defaults (opened, synchronize, reopened) PLUS `ready_for_review`: this job is
+    # the required `lint` check, and flipping a PR draft → ready is the issue #509
+    # recovery path that re-dispatches it on the current head SHA without a push.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read

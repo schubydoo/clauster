@@ -14,7 +14,10 @@ name: PR Title
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
+    # `ready_for_review` (non-default) is the issue #509 recovery path: flipping a
+    # PR draft → ready re-dispatches this required check on the current head SHA
+    # without a push, for the rare case a `synchronize` failed to dispatch it.
+    types: [opened, edited, reopened, synchronize, ready_for_review]
 
 permissions:
   contents: read

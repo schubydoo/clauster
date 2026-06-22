@@ -9,6 +9,11 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Defaults (opened, synchronize, reopened) PLUS `ready_for_review`: this
+    # workflow backs the required `security required checks passed` context, and
+    # flipping a PR draft → ready is the issue #509 recovery path that re-dispatches
+    # it on the current head SHA without a push.
+    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     - cron: "37 4 * * 1"
 
