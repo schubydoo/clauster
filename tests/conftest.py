@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -10,8 +11,34 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import settings
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# --- Hypothesis CI-determinism profiles (issue #450) ----------------------------------
+#
+# The strict 96% coverage gate runs against the property suite, so a flaky
+# property test would fail CI nondeterministically. Two safeguards keep it stable:
+#
+# * ``derandomize=True`` on the ``ci`` profile makes example generation a pure
+#   function of the test source — the same inputs run every time, so a green CI
+#   run is reproducible and a failure is never a one-off seed.
+# * ``database=None`` everywhere disables the on-disk example database. Persisting
+#   a ``.hypothesis/`` cache would make a re-run depend on a prior run's findings
+#   (and on CI there is no cache to replay from), so we never persist.
+#
+# Profile selection (explicit, not relying on Hypothesis' CI auto-detection,
+# which an explicit ``load_profile`` below would override anyway):
+#   * ``HYPOTHESIS_PROFILE`` env var wins if set (local repro of a CI failure);
+#   * else the ``ci`` profile on a detected CI runner (``CI`` env var, set by
+#     GitHub Actions and every other major CI);
+#   * else the ``dev`` profile (random but non-persistent) for local runs.
+# Both profiles set ``print_blob=True`` so a failure always prints a shareable
+# base64 reproduction blob, regardless of which profile happened to be active.
+settings.register_profile("ci", derandomize=True, database=None, print_blob=True)
+settings.register_profile("dev", database=None, print_blob=True)
+_HYP_PROFILE = os.getenv("HYPOTHESIS_PROFILE") or ("ci" if os.getenv("CI") else "dev")
+settings.load_profile(_HYP_PROFILE)
 
 # Make importable fixture modules (e.g. fake_claustrum) reachable by bare name.
 if str(FIXTURES) not in sys.path:
