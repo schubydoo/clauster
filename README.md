@@ -360,9 +360,9 @@ Planned work, roughly in priority order — the public-facing companion to the i
 - **v0.3 — multi-user** — per-user accounts (OIDC via Authentik / Pocket-ID /
   Keycloak / Zitadel) and GDPR controller tooling (`clauster user export` / `delete`),
   on top of the SQLAlchemy + Alembic persistence layer that already ships.
-- **v0.3 — operability** — i18n string extraction (the homepage-dashboard widget
-  endpoint, crash notifications, and the `/metrics` Prometheus endpoint already
-  shipped).
+
+The UI is English-only and not localized; there is no i18n string extraction
+planned (re-scope only if a real translation contributor appears).
 
 *Shipped:* the in-repo [`docs/`](docs/index.md) pages (setup, networking, config
 reference, security model) are published as a live docs site at
