@@ -1298,6 +1298,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # The job id is this deployment's own short handle (not a foreign secret, same
         # posture as /api/agents); `detail` can carry a `claude rm` path/stderr tail so
         # it is redacted before egress.
+        # Bind detail once: pyright narrows the local to str inside the truthiness
+        # guard, which a repeated result.get("detail") would not (Unknown | None).
+        detail = result.get("detail")
         runner.emit_event(
             "bg-settled",
             {
@@ -1305,7 +1308,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "id": result.get("id"),
                 "settled": result.get("settled"),
                 "removed": result.get("removed"),
-                "detail": redact_for_disk(result.get("detail")) if result.get("detail") else None,
+                "detail": redact_for_disk(detail) if detail else None,
             },
         )
         return result
