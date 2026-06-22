@@ -41,6 +41,24 @@ def test_version_exits_zero(capsys):
     assert "clauster" in capsys.readouterr().out
 
 
+def test_help_documents_config_search_order(capsys):
+    # `clauster --help` surfaces the auto-discovery order so needing -c isn't a
+    # surprise (issue #482); the three locations must appear in search order.
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["--help"])
+    assert ei.value.code == 0
+    out = capsys.readouterr().out
+    assert "$CLAUSTER_CONFIG" in out
+    assert "./clauster.yml" in out
+    assert "$CLAUSTER_HOME/clauster.yml" in out
+    # In search order: env override, then cwd, then CLAUSTER_HOME.
+    assert (
+        out.index("$CLAUSTER_CONFIG")
+        < out.index("./clauster.yml")
+        < out.index("$CLAUSTER_HOME/clauster.yml")
+    )
+
+
 # ----- run (default) ----------------------------------------------------
 
 
