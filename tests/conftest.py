@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
 import shutil
@@ -12,6 +13,34 @@ from typing import Any
 
 import pytest
 from hypothesis import settings
+
+# --- Live-account safety: pin HOME BEFORE any clauster import -------------------------
+#
+# The ``_isolate_clauster_home`` fixture below is function-scoped, so it cannot protect
+# paths that clauster resolves AT IMPORT TIME — those freeze on first import, which
+# happens at collection, before any fixture runs:
+#   * ``discovery.CLAUDE_JSON``        = Path("~/.claude.json").expanduser()
+#   * ``supervisor.JOBS_DIR`` / ``ROSTER_JSON`` under ``~/.claude/``
+#   * ``pointers.CLAUDE_PROJECTS_DIR`` under ``~/.claude/projects``
+# ``~/.claude.json`` is the developer's *live* remote-control account; a test that
+# imported and exercised ``discovery`` / ``supervisor`` could read or WRITE it,
+# corrupting the running service. Repointing HOME here, at conftest import (before any
+# clauster module loads), makes those constants expand under a throwaway dir. The
+# per-test fixture re-redirects to a fresh dir for runtime paths; this block is the
+# import-time backstop the fixture structurally cannot be.
+#
+# Capture the TRUE home before repointing and stash it, so the regression tests in
+# test_db_isolation.py can assert paths resolve off the real home (after this pin,
+# ``expanduser("~")`` everywhere — including at their own import — already yields the
+# temp dir, so they cannot recover the real home on their own).
+os.environ["CLAUSTER_TEST_REAL_HOME"] = os.path.expanduser("~")
+_SESSION_HOME = tempfile.mkdtemp(prefix="clauster-test-home-")
+os.environ["HOME"] = _SESSION_HOME
+os.environ["USERPROFILE"] = _SESSION_HOME  # Windows resolves ``~`` from USERPROFILE
+os.environ["CLAUSTER_HOME"] = str(Path(_SESSION_HOME) / ".clauster")
+os.environ.pop("CLAUSTER_CONFIG", None)
+os.environ.pop("CLAUSTER_STATE_DIR", None)
+atexit.register(lambda: shutil.rmtree(_SESSION_HOME, ignore_errors=True))
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 

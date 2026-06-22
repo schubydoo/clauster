@@ -17,10 +17,10 @@ from pathlib import Path
 from clauster.config import ClausterConfig
 from clauster.db.engine import DB_FILENAME, resolve_url
 
-# The developer's REAL home, captured at import time. conftest imports before this
-# module is collected, but the autouse fixture only mutates os.environ *inside* each
-# test (function scope), so at module-import the environment is still the real one.
-_REAL_HOME = Path(os.path.expanduser("~")).resolve()
+# The developer's REAL home. conftest pins HOME to a throwaway dir at its own import
+# (before this module is collected), so ``expanduser("~")`` here would already yield
+# that temp dir — conftest stashes the true home in CLAUSTER_TEST_REAL_HOME for us.
+_REAL_HOME = Path(os.environ.get("CLAUSTER_TEST_REAL_HOME") or os.path.expanduser("~")).resolve()
 
 
 def test_home_env_is_redirected_under_a_temp_dir():
@@ -61,3 +61,25 @@ def test_stray_real_env_overrides_are_dropped(monkeypatch):
     """CLAUSTER_CONFIG / CLAUSTER_STATE_DIR from the real env are removed per test."""
     assert "CLAUSTER_CONFIG" not in os.environ
     assert "CLAUSTER_STATE_DIR" not in os.environ
+
+
+def test_import_time_home_constants_resolve_off_the_real_home():
+    """Module-level ``~``-expanded paths must never point at the developer's real home.
+
+    These freeze at first import (collection time, before any function-scoped fixture),
+    so the session-wide HOME pin in conftest is the only thing keeping a test that
+    exercises discovery/supervisor from reading or writing the live ``~/.claude.json``
+    account. Guard each one so the import-time gap can't silently return.
+    """
+    from clauster import discovery, pointers, supervisor
+
+    constants = {
+        "discovery.CLAUDE_JSON": discovery.CLAUDE_JSON,
+        "supervisor.JOBS_DIR": supervisor.JOBS_DIR,
+        "supervisor.ROSTER_JSON": supervisor.ROSTER_JSON,
+        "pointers.CLAUDE_PROJECTS_DIR": pointers.CLAUDE_PROJECTS_DIR,
+    }
+    for name, path in constants.items():
+        resolved = Path(path).resolve()
+        assert resolved != _REAL_HOME, f"{name} resolves to the real home"
+        assert _REAL_HOME not in resolved.parents, f"{name} resolves under the real home"
