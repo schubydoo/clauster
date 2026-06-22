@@ -2054,6 +2054,26 @@ class SessionRunner:
         self._notify_tasks.add(task)
         task.add_done_callback(self._notify_tasks.discard)
 
+    def emit_event(self, event: str, payload: dict) -> None:
+        """Fire a non-bridge lifecycle webhook off-loop (fire-and-forget, fail-open, #432).
+
+        The runner owns the single :class:`WebhookEmitter`, so subsystems that don't
+        hold one (the bg-agent supervisor, the hosted manager, the clone manager) route
+        their lifecycle events through here. ``event`` is a #432 key — ``bg-settled`` /
+        ``permission-needed`` / ``clone-done`` — and ``payload`` is an already-redacted,
+        event-shaped dict (NOT the bridge ``RemoteControlInstance`` shape). No-op unless
+        webhooks are active and this event is enabled (these default OFF). The POST is
+        fire-and-forget and fail-open — it can never block or break the caller's path.
+
+        Must be called on the event loop (it schedules a task). Callers off the loop
+        (e.g. the threaded supervisor stop) marshal via ``loop.call_soon_threadsafe``.
+        """
+        if not self._webhooks.wants(event):
+            return
+        task = asyncio.create_task(self._webhooks.aemit(event, payload))
+        self._notify_tasks.add(task)
+        task.add_done_callback(self._notify_tasks.discard)
+
     # ----- lifecycle ------------------------------------------------------
 
     async def start_poll_loop(self) -> None:

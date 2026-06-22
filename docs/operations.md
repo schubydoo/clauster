@@ -210,7 +210,7 @@ for the full field reference.
 ## Lifecycle webhooks
 
 Where `notifications` push a human-readable message to a chat app, **webhooks**
-deliver a machine-readable JSON `POST` to your own HTTP endpoint on every bridge
+deliver a machine-readable JSON `POST` to your own HTTP endpoint on a Clauster
 lifecycle transition — for wiring Clauster into an automation, a queue, or your
 own dashboard. They are **off by default** and need no extra dependency.
 
@@ -220,14 +220,21 @@ webhooks:
   urls:
     - "https://example.com/hooks/clauster"
   timeout_seconds: 10.0   # per-POST timeout (>0)
-  events:                 # which transitions to emit (an absent key = enabled)
+  events:
+    # Bridge events: an absent key defaults to ENABLED.
     spawn: true
     ready: true
     stop: true
     crash: true
+    # Extended events: an absent key defaults to DISABLED — opt in explicitly.
+    bg-settled: true
+    permission-needed: true
+    clone-done: true
 ```
 
-Each emitted event is a single JSON `POST` body of the shape:
+### Bridge events (`spawn` / `ready` / `stop` / `crash`)
+
+Each bridge event is a single JSON `POST` body of the shape:
 
 ```json
 {
@@ -250,6 +257,61 @@ the raw session id. The raw `session_<ULID>` is deliberately **never** egressed:
 it is bearer-equivalent (anyone holding it can open a New Session composer for
 the bridge), so it is stripped from every egress surface. `session_ref` is
 `null` until a session attaches.
+
+### Extended events (`bg-settled` / `permission-needed` / `clone-done`)
+
+Beyond the four bridge events, Clauster emits three more lifecycle signals.
+**Each defaults to disabled** — set its key to `true` in `events` to turn it on.
+They do **not** reuse the bridge payload shape: each carries an `event_type`
+discriminator so a receiver can branch on the body without parsing `event`.
+
+- **`bg-settled`** — a `claude --bg` background (agent-view) job reached a
+  terminal state via the supervisor stop path.
+
+  ```json
+  {
+    "event": "bg-settled",
+    "event_type": "bg-settled",
+    "id": "a1b2c3d4",
+    "settled": true,
+    "removed": true,
+    "detail": null
+  }
+  ```
+
+  `settled` is `true` only for a confirmed cloud-deregistering stop; `removed`
+  reports whether the job row was dropped. `detail` (a human-readable note, or
+  `null`) is redacted before egress.
+
+- **`permission-needed`** — a hosted session parked a tool-permission prompt that
+  needs an explicit approve/deny. This is the highest-value **"come look"** signal,
+  which is why it defaults off (enabling it egresses an attention signal). It
+  carries only the session's process id and the request subtype — never the
+  prompt body, which can contain a tool path or argument.
+
+  ```json
+  {
+    "event": "permission-needed",
+    "event_type": "permission-needed",
+    "process_id": "0f1e2d3c4b5a6978",
+    "subtype": "can_use_tool"
+  }
+  ```
+
+- **`clone-done`** — a project clone finished.
+
+  ```json
+  {
+    "event": "clone-done",
+    "event_type": "clone-done",
+    "project": "my-project",
+    "status": "done",
+    "error": null
+  }
+  ```
+
+  `status` is `done` or `error`. The clone **URL is never sent** (it can carry
+  credentials); on a failure, `error` is the redacted failure detail.
 
 Behaviour and caveats:
 

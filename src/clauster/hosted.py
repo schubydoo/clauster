@@ -37,6 +37,7 @@ import json
 import logging
 import uuid
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -143,16 +144,25 @@ class HostedSession:
         ring_size: int = _DEFAULT_RING_SIZE,
         queue_maxsize: int = _DEFAULT_QUEUE_MAXSIZE,
         stop_grace: float | None = None,
+        on_permission_needed: Callable[[str, str], None] | None = None,
     ) -> None:
         """Configure the session; nothing spawns until :meth:`start`.
 
         ``stop_grace`` defaults to the module-level :data:`_STOP_GRACE_SECONDS`,
         resolved at construction (not import) so a test can shorten it via the
         global — including for sessions that :class:`HostedManager` builds internally.
+
+        ``on_permission_needed`` is an optional best-effort callback invoked with
+        ``(process_id, subtype)`` whenever a control request is *parked* (a tool-
+        permission prompt or unknown subtype that is never auto-answered) — the #432
+        "come look" hook. It must not raise and must not block: it is called inline on
+        the stream-pump path, so the wiring schedules a fire-and-forget webhook and
+        returns. ``None`` (the default, used in unit tests) disables it.
         """
         self._client = client
         self._process_id = process_id
         self._claude_binary = claude_binary
+        self._on_permission_needed = on_permission_needed
         # Size the subscriber queue to hold a full replay snapshot without dropping the
         # newest events. subscribe() offers up to ring_size retained events into a fresh
         # queue, optionally preceded by one "gap" marker for an evicted prefix; and
@@ -479,6 +489,24 @@ class HostedSession:
                 "request": _redact_obj(request),
             }
         )
+        self._notify_permission_needed(parked.subtype)
+
+    def _notify_permission_needed(self, subtype: str) -> None:
+        """Best-effort #432 "come look" callback on a parked permission prompt.
+
+        Runs inline on the stream pump, so it must never raise or block — it only
+        schedules a fire-and-forget webhook. We send the session's process id and the
+        request subtype (e.g. ``can_use_tool``), never the request body: the prompt's
+        tool input can carry a path or argument and the operator already sees the
+        redacted detail in the live view. Any callback error is logged and swallowed
+        so a webhook problem can't stall or kill the session's stream.
+        """
+        if self._on_permission_needed is None:
+            return
+        try:
+            self._on_permission_needed(self._process_id, subtype)
+        except Exception as exc:  # noqa: BLE001 - a notify error must never reach the pump
+            logger.warning("hosted: permission-needed callback failed: %s", exc)
 
     def _capture_session_uuid(self, frame: dict[str, Any]) -> None:
         """Latch the first ``session_id`` seen (drives ``--resume``); never overwrite it."""
@@ -562,16 +590,27 @@ class HostedManager:
     touches no bridge-lifecycle code. The dashboard unions both for display.
     """
 
-    def __init__(self, store: KeyedStore | None = None) -> None:
+    def __init__(
+        self,
+        store: KeyedStore | None = None,
+        *,
+        on_permission_needed: Callable[[str, str], None] | None = None,
+    ) -> None:
         """Create an empty manager (no sessions until :meth:`spawn`/:meth:`reattach_all`).
 
         ``store`` enables CL-6 restart resilience: spawn/stop persist the registry and
         :meth:`reattach_all` restores it on startup. ``None`` (the default, used in
         unit tests) keeps the manager purely in-memory — persistence calls no-op.
+
+        ``on_permission_needed`` is the optional best-effort #432 hook, forwarded to
+        every :class:`HostedSession` the manager builds (spawn, resume, reattach), so a
+        parked tool-permission prompt can fire a "come look" webhook. The app wires it
+        to the runner's emitter; it stays ``None`` in unit tests.
         """
         self._sessions: dict[str, HostedSession] = {}
         self._instances: dict[str, RemoteControlInstance] = {}
         self._store = store
+        self._on_permission_needed = on_permission_needed
         self._last_saved: dict[str, dict] | None = None
         # Serialize persist: spawn/stop/aclose/poll can race, and an older snapshot
         # finishing last would overwrite a newer file (dropping a session / regressing
@@ -640,7 +679,12 @@ class HostedManager:
         crash mid-resume). A spawn failure here registers nothing.
         """
         process_id = uuid.uuid4().hex
-        session = HostedSession(client, process_id, claude_binary)
+        session = HostedSession(
+            client,
+            process_id,
+            claude_binary,
+            on_permission_needed=self._on_permission_needed,
+        )
         await session.start(
             cwd=cwd, permission_mode=permission_mode, resume_uuid=resume_uuid, want_pid=True
         )
@@ -842,7 +886,12 @@ class HostedManager:
                 continue
             # reattach() never builds argv (it binds by process id), so the binary is
             # unused here — a respawn path (CL-7) re-resolves it from config.
-            session = HostedSession(client, process_id, "")
+            session = HostedSession(
+                client,
+                process_id,
+                "",
+                on_permission_needed=self._on_permission_needed,
+            )
             session.claude_session_uuid = fields.get("claude_session_uuid")
             try:
                 result = await session.reattach(int(fields.get("daemon_last_seq") or 0))
