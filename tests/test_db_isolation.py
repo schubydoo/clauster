@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from clauster.config import ClausterConfig
 from clauster.db.engine import DB_FILENAME, resolve_url
 
@@ -57,8 +59,31 @@ def test_default_config_state_dir_and_db_are_isolated():
     )
 
 
-def test_stray_real_env_overrides_are_dropped(monkeypatch):
-    """CLAUSTER_CONFIG / CLAUSTER_STATE_DIR from the real env are removed per test."""
+@pytest.fixture(scope="module", autouse=True)
+def _inject_stray_overrides():
+    """Simulate a developer's real env carrying CLAUSTER_CONFIG / CLAUSTER_STATE_DIR.
+
+    Without this the absence assertion below is tautological — it passes on any
+    machine where the vars aren't set, never exercising the autouse fixture's
+    ``delenv``. A module-scoped (broader than function) autouse fixture sets them in
+    the real environment *before* the per-test ``_isolate_clauster_home`` runs, so
+    every test in this module actually has something to strip; ``monkeypatch`` in
+    that fixture restores them after each test, so they're present again for the next.
+    """
+    os.environ["CLAUSTER_CONFIG"] = "/nonexistent/stray-config.yml"
+    os.environ["CLAUSTER_STATE_DIR"] = "/nonexistent/stray-state"
+    yield
+    os.environ.pop("CLAUSTER_CONFIG", None)
+    os.environ.pop("CLAUSTER_STATE_DIR", None)
+
+
+def test_stray_real_env_overrides_are_dropped():
+    """CLAUSTER_CONFIG / CLAUSTER_STATE_DIR set in the real env are removed per test.
+
+    They are injected module-wide by ``_inject_stray_overrides`` (and restored after
+    each test), so this absence proves the autouse fixture's ``delenv`` actually ran
+    rather than passing trivially on a clean environment.
+    """
     assert "CLAUSTER_CONFIG" not in os.environ
     assert "CLAUSTER_STATE_DIR" not in os.environ
 
