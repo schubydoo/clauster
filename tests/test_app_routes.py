@@ -8,6 +8,7 @@ claude-md resolver / read-error branches.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -281,6 +282,108 @@ def test_clone_route_existing_target_409(write_config, tmp_path):
         "/api/projects/clone", json={"name": "alpha", "url": "https://10.0.0.1/r.git"}
     )
     assert r.status_code == 409
+
+
+# ----- bg-settled webhook (#432) ----------------------------------------
+
+
+class _RecordingEmitter:
+    """Stub for runner._webhooks: records (event, payload); always wants()."""
+
+    def __init__(self) -> None:
+        self.active = True
+        self.calls: list[tuple[str, dict]] = []
+
+    def wants(self, event: str) -> bool:
+        return True
+
+    async def aemit(self, event: str, payload: dict) -> None:
+        self.calls.append((event, payload))
+
+
+def _client_webhooks(write_config, tmp_path, event_line: str) -> TestClient:
+    extra = f"webhooks:\n  enabled: true\n  urls: ['https://hook.test/h']\n  events:\n{event_line}"
+    return TestClient(
+        create_app(
+            load_config(
+                write_config(
+                    f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{extra}"
+                )
+            )
+        )
+    )
+
+
+def _wait_calls(rec: _RecordingEmitter, *, timeout: float = 2.0) -> list:
+    deadline = time.monotonic() + timeout
+    while not rec.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return rec.calls
+
+
+def test_bg_settled_webhook_fires_and_redacts_detail(write_config, tmp_path, monkeypatch):
+    # The supervisor stop is stubbed (no real `claude`); we test only the emission wiring.
+    def fake_stop(job_id, *, binary, **kw):
+        return {
+            "id": job_id,
+            "settled": True,
+            "removed": True,
+            "detail": "removed session_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        }
+
+    monkeypatch.setattr("clauster.supervisor.stop_background_job", fake_stop)
+
+    with _client_webhooks(write_config, tmp_path, "    bg-settled: true\n") as client:
+        rec = _RecordingEmitter()
+        client.app.state.runner._webhooks = rec
+        resp = client.delete("/api/agents/abc12345")
+        assert resp.status_code == 200, resp.text
+        calls = _wait_calls(rec)
+
+    assert len(calls) == 1
+    event, payload = calls[0]
+    assert event == "bg-settled"
+    assert payload["event_type"] == "bg-settled"
+    assert payload["id"] == "abc12345"
+    assert payload["settled"] is True and payload["removed"] is True
+    # The raw session id in detail is masked before egress.
+    assert "session_01ARZ3NDEKTSV4RRFFQ69G5FAV" not in (payload["detail"] or "")
+    assert "<redacted>" in (payload["detail"] or "")
+
+
+def test_bg_settled_webhook_silent_when_default_off(write_config, tmp_path, monkeypatch):
+    # webhooks enabled but bg-settled NOT opted in -> the real emitter's gate drops it.
+    def fake_stop(job_id, *, binary, **kw):
+        return {"id": job_id, "settled": False, "removed": True, "detail": None}
+
+    monkeypatch.setattr("clauster.supervisor.stop_background_job", fake_stop)
+
+    extra = "webhooks:\n  enabled: true\n  urls: ['https://hook.test/h']\n"
+    client = TestClient(
+        create_app(
+            load_config(
+                write_config(
+                    f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{extra}"
+                )
+            )
+        )
+    )
+    with client:
+        emitter = client.app.state.runner._webhooks
+        assert emitter.active and emitter.wants("bg-settled") is False
+        aemit_calls: list = []
+        orig = emitter.aemit
+
+        async def _spy(event, payload):
+            aemit_calls.append(event)
+            await orig(event, payload)
+
+        monkeypatch.setattr(emitter, "aemit", _spy)
+        resp = client.delete("/api/agents/abc12345")
+        assert resp.status_code == 200
+        time.sleep(0.1)
+
+    assert aemit_calls == []
 
 
 # ----- per-project usage (cost badge) -----------------------------------

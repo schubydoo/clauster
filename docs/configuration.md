@@ -330,26 +330,41 @@ webhooks:
     - "https://example.com/hooks/clauster"
   timeout_seconds: 10.0
   events:
+    # Bridge events — absent key defaults to enabled.
     spawn: true
     ready: true
     stop: true
     crash: true
+    # Extended events — absent key defaults to DISABLED; opt in explicitly.
+    bg-settled: true
+    permission-needed: true
+    clone-done: true
 ```
 
 The `events` map (filtered from the generated table because it's a dict) selects
-which transitions emit: keys are `spawn`, `ready`, `stop`, `crash`; an **absent key
-defaults to enabled** (so `events: {}` emits all four, and you disable one with e.g.
-`crash: false`). An unsupported key is rejected at startup rather than silently
-ignored.
+which transitions emit. The four **bridge** keys — `spawn`, `ready`, `stop`,
+`crash` — default to **enabled** when absent (so `events: {}` emits all four, and
+you disable one with e.g. `crash: false`). The three **extended** keys —
+`bg-settled` (a `claude --bg` job settled), `permission-needed` (a hosted session
+parked a tool-permission prompt), `clone-done` (a clone finished) — default to
+**disabled** when absent: you opt in to each, so a sensitive "come look" signal
+never starts egressing on upgrade alone. An unsupported key is rejected at startup
+rather than silently ignored.
 
-Each POST body is `{"event": "<name>", "project": ..., "label": ..., "status": ...,
-"resume_mode": ..., "spawn_mode": ..., "session_ref": ...}`. `session_ref` is a
-stable, non-reversible token (16 hex chars) derived from the bridge's starter
-session id via HMAC-SHA256 keyed by the deployment's session-signing secret — it
-lets a receiver correlate the lifecycle events of one session without egressing the
-raw `session_<ULID>`, which is bearer-equivalent and redacted elsewhere. Keying it
-with the secret means a receiver can't even verify a guessed session id against the
-token. It is `null` until the bridge reports a starter session.
+Each bridge-event POST body is `{"event": "<name>", "project": ..., "label": ...,
+"status": ..., "resume_mode": ..., "spawn_mode": ..., "session_ref": ...}`.
+`session_ref` is a stable, non-reversible token (16 hex chars) derived from the
+bridge's starter session id via HMAC-SHA256 keyed by the deployment's
+session-signing secret — it lets a receiver correlate the lifecycle events of one
+session without egressing the raw `session_<ULID>`, which is bearer-equivalent and
+redacted elsewhere. Keying it with the secret means a receiver can't even verify a
+guessed session id against the token. It is `null` until the bridge reports a
+starter session.
+
+The extended events carry an `event_type` discriminator instead and do **not**
+reuse the bridge shape — see [Lifecycle webhooks](operations.md#lifecycle-webhooks)
+for each body. Sensitive fields are redacted and credential-bearing values (the
+clone URL, the raw session id, the permission-prompt body) are never sent.
 
 ## `claustrum` — hosted live-view channel (`ClaustrumConfig`)
 

@@ -11,7 +11,9 @@ TestClient lifespan, so each test uses ``with _client(...)``.
 
 from __future__ import annotations
 
+import json
 import threading
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -22,9 +24,33 @@ from clauster.config import load_config
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
 
-def _client(write_config, tmp_path) -> TestClient:
-    cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n")
+def _client(write_config, tmp_path, *, extra: str = "") -> TestClient:
+    cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{extra}")
     return TestClient(create_app(load_config(cfg)))
+
+
+# webhooks enabled with the #432 clone-done event opted in (it defaults OFF).
+_WEBHOOKS_CLONE_DONE = (
+    "webhooks:\n"
+    "  enabled: true\n"
+    "  urls: ['https://hook.test/h']\n"
+    "  events:\n"
+    "    clone-done: true\n"
+)
+
+
+class _RecordingEmitter:
+    """Stub for runner._webhooks: records (event, payload) that pass wants()."""
+
+    def __init__(self) -> None:
+        self.active = True
+        self.calls: list[tuple[str, dict]] = []
+
+    def wants(self, event: str) -> bool:
+        return True
+
+    async def aemit(self, event: str, payload: dict) -> None:
+        self.calls.append((event, payload))
 
 
 def _drain_to_done(ws) -> list[dict]:
@@ -91,3 +117,104 @@ def test_clone_error_streams_terminal_error_frame(write_config, tmp_path, monkey
     assert frames[-1]["type"] == "done"
     assert frames[-1]["status"] == "error"
     assert frames[-1]["error"] == "clone failed: remote hung up"
+
+
+def _wait_for_calls(rec: _RecordingEmitter, *, timeout: float = 2.0) -> list[tuple[str, dict]]:
+    """Poll the recording emitter (the emit task runs on the app's loop thread)."""
+    deadline = time.monotonic() + timeout
+    while not rec.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return rec.calls
+
+
+def test_clone_done_webhook_fires_on_success(write_config, tmp_path, monkeypatch):
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+        return None
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    with _client(write_config, tmp_path, extra=_WEBHOOKS_CLONE_DONE) as client:
+        rec = _RecordingEmitter()
+        client.app.state.runner._webhooks = rec
+        resp = client.post(
+            "/api/projects/clone", json={"name": "cloned", "url": "https://example.com/r.git"}
+        )
+        job_id = resp.json()["job_id"]
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+            _drain_to_done(ws)
+        calls = _wait_for_calls(rec)
+
+    assert len(calls) == 1
+    event, payload = calls[0]
+    assert event == "clone-done"
+    assert payload == {
+        "event_type": "clone-done",
+        "project": "cloned",
+        "status": "done",
+        "error": None,
+    }
+
+
+def test_clone_done_webhook_redacts_error_and_omits_url(write_config, tmp_path, monkeypatch):
+    from clauster.app import ProvisionError
+
+    # A failure detail can echo a session/env id; it must be redacted before egress.
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+        raise ProvisionError("clone failed for session_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    with _client(write_config, tmp_path, extra=_WEBHOOKS_CLONE_DONE) as client:
+        rec = _RecordingEmitter()
+        client.app.state.runner._webhooks = rec
+        resp = client.post(
+            "/api/projects/clone", json={"name": "broken", "url": "https://example.com/r.git"}
+        )
+        job_id = resp.json()["job_id"]
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+            _drain_to_done(ws)
+        calls = _wait_for_calls(rec)
+
+    assert len(calls) == 1
+    _event, payload = calls[0]
+    assert payload["status"] == "error"
+    # The raw session id is masked; the clone url never appears at all.
+    assert "session_01ARZ3NDEKTSV4RRFFQ69G5FAV" not in (payload["error"] or "")
+    assert "<redacted>" in (payload["error"] or "")
+    assert "example.com" not in json.dumps(payload)
+
+
+def test_clone_done_webhook_silent_when_event_default_off(write_config, tmp_path, monkeypatch):
+    # webhooks enabled but clone-done NOT opted in -> the real emitter's wants() gate
+    # drops it: no aemit task is ever scheduled (default off).
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+        return None
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    enabled_no_event = "webhooks:\n  enabled: true\n  urls: ['https://hook.test/h']\n"
+    with _client(write_config, tmp_path, extra=enabled_no_event) as client:
+        # Real WebhookEmitter (active, clone-done absent -> wants() False). Spy on aemit:
+        # it must never be called for a default-off event.
+        emitter = client.app.state.runner._webhooks
+        assert emitter.active and emitter.wants("clone-done") is False
+        aemit_calls: list = []
+        orig_aemit = emitter.aemit
+
+        async def _spy(event, payload):
+            aemit_calls.append(event)
+            await orig_aemit(event, payload)
+
+        monkeypatch.setattr(emitter, "aemit", _spy)
+        resp = client.post(
+            "/api/projects/clone", json={"name": "cloned", "url": "https://example.com/r.git"}
+        )
+        job_id = resp.json()["job_id"]
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+            _drain_to_done(ws)
+        time.sleep(0.1)  # give any erroneous emit task a chance to run
+
+    assert aemit_calls == []

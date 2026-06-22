@@ -147,18 +147,25 @@ usage:
 #   urls: []                       # Apprise URLs, e.g. ["discord://...", "tgram://..."]
 #   notify_on_crash: true          # alert when a bridge exits NOT via Stop
 
-# Outbound HTTP webhooks on bridge lifecycle transitions (spawn/ready/stop/crash).
-# Fail-open: a slow/broken endpoint is timeout-bounded and never affects the bridge
-# lifecycle. http/https URLs only (others rejected at startup).
+# Outbound HTTP webhooks on Clauster lifecycle transitions. Fail-open: a slow/broken
+# endpoint is timeout-bounded and never affects the lifecycle. http/https URLs only
+# (others rejected at startup). Each POST body carries an `event` + `event_type`
+# discriminator; non-bridge events do not reuse the bridge payload shape.
 # webhooks:
 #   enabled: false
 #   urls: []                       # e.g. ["https://example.com/hooks/clauster"]
 #   timeout_seconds: 10.0          # per-POST timeout (>0)
-#   events:                        # which transitions to emit (absent key = enabled)
+#   events:
+#     # Bridge events (#371). Absent key = ENABLED (historical default).
 #     spawn: true
 #     ready: true
 #     stop: true
 #     crash: true
+#     # Extended events (#432). Absent key = DISABLED — opt in explicitly. One,
+#     # permission-needed, is a "come look" signal, so none start emitting on upgrade.
+#     bg-settled: false            # a `claude --bg` background job settled (stop/remove)
+#     permission-needed: false     # a hosted session parked a tool-permission prompt
+#     clone-done: false            # a project clone finished (status done|error)
 
 # Claustrum hosted live-view channel (EXPERIMENTAL). When enabled, Clauster
 # connect-or-spawns one claustrum daemon per deployment and hosts headless
