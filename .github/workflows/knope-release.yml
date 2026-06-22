@@ -72,6 +72,18 @@ jobs:
           app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
           private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
           permission-contents: write
+      # Fail LOUD on an empty mint: knope uses this token to create the GitHub
+      # Release and push the tag, and an App-identity tag is what lets the publish
+      # trigger downstream automation. An empty token would degrade to GITHUB_TOKEN
+      # (whose tag push does not re-trigger workflows) or fail confusingly. Surface
+      # it here. (See issue #509.)
+      - name: Verify App token was minted
+        if: ${{ steps.app-token.outputs.token == '' }}
+        run: |
+          echo "::error::clauster-ci App token mint produced an empty token; \
+          refusing to proceed. Check the CLAUSTER_CI_APP_ID / \
+          CLAUSTER_CI_APP_PRIVATE_KEY secrets and the clauster-ci App installation."
+          exit 1
       # Check out the squash commit that landed on main (merge_commit_sha), NOT the
       # orphaned PR-head — knope must tag a commit that is actually on main. Full
       # history + tags so knope can compare the bumped version against the last
