@@ -361,8 +361,8 @@ Planned work, roughly in priority order — the public-facing companion to the i
   Keycloak / Zitadel) and GDPR controller tooling (`clauster user export` / `delete`),
   on top of the SQLAlchemy + Alembic persistence layer that already ships.
 
-The UI is English-only and not localized; there is no i18n string extraction
-planned (re-scope only if a real translation contributor appears).
+Not planned: the UI is English-only and not localized — there is no i18n string
+extraction on the roadmap (re-scope only if a real translation contributor appears).
 
 *Shipped:* the in-repo [`docs/`](docs/index.md) pages (setup, networking, config
 reference, security model) are published as a live docs site at
