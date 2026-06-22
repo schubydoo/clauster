@@ -117,7 +117,16 @@ jobs:
     name: trivy filesystem scan
     # Skip on a docs-only PR — no dependency/source change to scan.
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # Also skip on the `synchronize` storm (pr-auto-update fans a main push across
+    # every open PR): this scan uploads via codeql-action/upload-sarif, which only
+    # accepts GITHUB_TOKEN (the 1,000/hr github-actions[bot] pool — codeql-action#2719
+    # rejects App tokens), so re-running it on every push amplifies pool pressure for
+    # no token win. Still runs on PR open/reopen/ready-for-review + push:main + the
+    # weekly cron. Safe: the ruleset's code_scanning rule requires only CodeQL, and
+    # `security required checks passed` (if: always()) counts a skipped job as passing.
+    if: >-
+      needs.changes.outputs.code == 'true'
+      && (github.event_name != 'pull_request' || github.event.action != 'synchronize')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -197,6 +206,11 @@ jobs:
 
   zizmor:
     name: workflow audit
+    # Skip on the `synchronize` storm — same rationale as trivy-fs: the SARIF upload
+    # is GITHUB_TOKEN-only (codeql-action#2719), so re-running every push just taxes
+    # the 1,000/hr pool. Runs on PR open/reopen/ready-for-review + push:main + weekly
+    # cron; `security required checks passed` (if: always()) counts a skip as passing.
+    if: github.event_name != 'pull_request' || github.event.action != 'synchronize'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
