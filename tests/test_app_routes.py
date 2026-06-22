@@ -7,13 +7,15 @@ claude-md resolver / read-error branches.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
-from clauster.config import load_config
+from clauster.config import ClausterConfig, load_config
+from clauster.runner import SessionRunner
 from helpers import RecordingEmitter, assert_stays_empty, wait_for_calls
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
@@ -362,6 +364,42 @@ def test_bg_settled_webhook_silent_when_default_off(write_config, tmp_path, monk
         assert resp.status_code == 200
         # Negative assertion: confirm no emit fires across a window, failing fast if one does.
         assert_stays_empty(aemit_calls)
+
+
+async def test_hosted_permission_needed_closure_emits_webhook(runner_config):
+    """create_app wires _on_hosted_permission_needed to fire the #432 webhook.
+
+    The hosted-layer tests inject a mock callback, so the real app-side closure —
+    which forwards the parked-prompt signal through runner.emit_event — is only
+    exercised here. Call the wired closure on the running loop and assert the
+    emitter records the redacted permission-needed payload.
+    """
+    config, claude_json = runner_config
+    cfg = ClausterConfig(
+        projects_root=config.projects_root,
+        state_dir=config.state_dir,
+        claude={"binary": config.claude.binary},
+    )
+    runner = SessionRunner(cfg, claude_json=claude_json)
+    rec = RecordingEmitter()
+    runner._webhooks = rec
+    app = create_app(cfg, runner)
+
+    callback = app.state.hosted._on_permission_needed
+    assert callback is not None
+    callback("0f1e2d3c", "can_use_tool")
+    await asyncio.gather(*runner._notify_tasks)
+
+    assert rec.calls == [
+        (
+            "permission-needed",
+            {
+                "event_type": "permission-needed",
+                "process_id": "0f1e2d3c",
+                "subtype": "can_use_tool",
+            },
+        )
+    ]
 
 
 # ----- per-project usage (cost badge) -----------------------------------
