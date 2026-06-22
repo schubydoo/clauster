@@ -30,8 +30,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Mint a clauster-ci App token (≥5,000 REST req/hr) so this check's GitHub
+      # API calls (pulls.listFiles + issues.listComments + create/update comment,
+      # which run on every PR synchronize) draw on the App pool instead of the
+      # 1,000/hr github-actions[bot] pool. Under a multi-PR update storm
+      # (pr-auto-update fans a main push out across every open PR, each emitting a
+      # synchronize) those per-PR calls add up fast and helped exhaust the pool.
+      # The job's `if:` already gates same-repo, so the App secrets are always
+      # present here; the `|| secrets.GITHUB_TOKEN` fallback is kept for parity
+      # with the other minting workflows.
+      - name: Mint GitHub App token
+        id: app-token
+        # Advisory, non-blocking job: soft-fail the mint so a transient App error
+        # (key rotation, permission change, API blip) degrades to the GITHUB_TOKEN
+        # fallback on the github-script step below, rather than redding a check that
+        # documents itself as never blocking a merge. (repo-config-drift's mint does
+        # the same.) A failed step yields empty outputs, so `||` selects GITHUB_TOKEN.
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
+          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           script: |
             const { owner, repo } = context.repo;
             const pr = context.payload.pull_request;
