@@ -8,13 +8,13 @@ claude-md resolver / read-error branches.
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
 from clauster.config import load_config
+from helpers import RecordingEmitter, assert_stays_empty, wait_for_calls
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
@@ -287,20 +287,6 @@ def test_clone_route_existing_target_409(write_config, tmp_path):
 # ----- bg-settled webhook (#432) ----------------------------------------
 
 
-class _RecordingEmitter:
-    """Stub for runner._webhooks: records (event, payload); always wants()."""
-
-    def __init__(self) -> None:
-        self.active = True
-        self.calls: list[tuple[str, dict]] = []
-
-    def wants(self, event: str) -> bool:
-        return True
-
-    async def aemit(self, event: str, payload: dict) -> None:
-        self.calls.append((event, payload))
-
-
 def _client_webhooks(write_config, tmp_path, event_line: str) -> TestClient:
     extra = f"webhooks:\n  enabled: true\n  urls: ['https://hook.test/h']\n  events:\n{event_line}"
     return TestClient(
@@ -312,13 +298,6 @@ def _client_webhooks(write_config, tmp_path, event_line: str) -> TestClient:
             )
         )
     )
-
-
-def _wait_calls(rec: _RecordingEmitter, *, timeout: float = 2.0) -> list:
-    deadline = time.monotonic() + timeout
-    while not rec.calls and time.monotonic() < deadline:
-        time.sleep(0.01)
-    return rec.calls
 
 
 def test_bg_settled_webhook_fires_and_redacts_detail(write_config, tmp_path, monkeypatch):
@@ -334,11 +313,11 @@ def test_bg_settled_webhook_fires_and_redacts_detail(write_config, tmp_path, mon
     monkeypatch.setattr("clauster.supervisor.stop_background_job", fake_stop)
 
     with _client_webhooks(write_config, tmp_path, "    bg-settled: true\n") as client:
-        rec = _RecordingEmitter()
+        rec = RecordingEmitter()
         client.app.state.runner._webhooks = rec
         resp = client.delete("/api/agents/abc12345")
         assert resp.status_code == 200, resp.text
-        calls = _wait_calls(rec)
+        calls = wait_for_calls(rec)
 
     assert len(calls) == 1
     event, payload = calls[0]
@@ -381,9 +360,8 @@ def test_bg_settled_webhook_silent_when_default_off(write_config, tmp_path, monk
         monkeypatch.setattr(emitter, "aemit", _spy)
         resp = client.delete("/api/agents/abc12345")
         assert resp.status_code == 200
-        time.sleep(0.1)
-
-    assert aemit_calls == []
+        # Negative assertion: confirm no emit fires across a window, failing fast if one does.
+        assert_stays_empty(aemit_calls)
 
 
 # ----- per-project usage (cost badge) -----------------------------------

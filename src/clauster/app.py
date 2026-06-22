@@ -1305,7 +1305,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "id": result.get("id"),
                 "settled": result.get("settled"),
                 "removed": result.get("removed"),
-                "detail": redact_for_disk(result["detail"]) if result.get("detail") else None,
+                "detail": redact_for_disk(result.get("detail")) if result.get("detail") else None,
             },
         )
         return result
