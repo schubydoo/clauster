@@ -1,16 +1,20 @@
-"""SQLAlchemy 2.0 declarative models for the persistence foundation (#362).
+"""SQLAlchemy 2.0 declarative models for the persistence layer (#362, #363).
 
-The foundation mirrors exactly what the two JSON stores held — nothing more. Each
-table's data columns are the JSON store's ``_PERSISTED_FIELDS`` whitelist, so the
-DB-backed stores round-trip the same ``dict[str, dict]`` the callers already use:
+The foundation tables mirror exactly what the two JSON stores held — nothing more.
+Each table's data columns are the JSON store's ``_PERSISTED_FIELDS`` whitelist, so
+the DB-backed stores round-trip the same ``dict[str, dict]`` the callers already use:
 
 * :class:`Project` — a project the runner has tracked (name is the natural key the
   ``state.json`` map was keyed by). Present so ``instances`` can carry a real
-  foreign key, the seam the session-history tables (#363) build on.
+  foreign key, the seam the session-history table (#363) builds on.
 * :class:`Instance` — per-project bridge intent the startup pointer-walk can't
   re-derive (``state.json`` ``instances`` map). One row per project.
 * :class:`HostedSession` — a hosted-channel session keyed by its
   ``claustrum_process_id`` (``hosted_state.json`` ``sessions`` map).
+* :class:`SessionEvent` — the append-only session lifecycle / event history (#363):
+  one row per ``spawned`` / ``ready`` / ``ended`` / ``crashed`` transition, with a
+  terminal-row cost/token snapshot. Survives a restart, so a per-project "last used
+  / total cost" is readable straight from the DB; unblocks #298 and #303.
 
 Only portable column types are used (no SQLite-only types), so the same metadata
 runs on Postgres for the multi-user work (#364). Timestamps are timezone-aware.
@@ -20,7 +24,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -66,6 +70,9 @@ class Project(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), primary_key=True)
 
     instances: Mapped[list[Instance]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    session_events: Mapped[list[SessionEvent]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
 
@@ -116,3 +123,58 @@ class HostedSession(Base, TimestampMixin):
     agent_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     started_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     intentional_stop: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class SessionEvent(Base, TimestampMixin):
+    """One append-only row per bridge/session lifecycle transition (#363).
+
+    The session-history table the Projects-zone "last used" sort (#298) and the
+    pty resume picker (#303) build on. Append-only: a session emits a ``spawned``
+    row at launch, a ``ready`` row when it registers, and a terminal ``ended`` or
+    ``crashed`` row when it stops. Launch/end timestamps, duration, mode, and a
+    per-project cost rollup are all derivable from the row stream — no row is
+    updated in place, so a query is a simple time-ordered scan.
+
+    Cost / token columns are populated **only on the terminal row** (``ended`` /
+    ``crashed``) and carry the project's cumulative end-of-session usage snapshot
+    (sourced from :mod:`clauster.usage`); they stay ``NULL`` on ``spawned`` /
+    ``ready`` rows. They are an approximate, informational dollar figure (the
+    price table is hand-maintained) — never an authoritative ledger.
+
+    Only portable column types are used (no SQLite-only types), so the same
+    metadata runs on Postgres for the multi-user work (#364).
+    """
+
+    __tablename__ = "session_events"
+    __table_args__ = (
+        # The two hot read shapes: per-project history ordered by time, and the
+        # global "most recent first" feed. Both filter/sort on ``at``; the
+        # composite index serves the per-project query and the standalone ``at``
+        # index serves the global one without a full-table scan.
+        Index("ix_session_events_project_at", "project_name", "at"),
+        Index("ix_session_events_at", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_name: Mapped[str] = mapped_column(
+        String(255), ForeignKey("projects.name", ondelete="CASCADE"), nullable=False
+    )
+    # "standard" / "pty" / "hosted" — the channel/resume axis the session ran on.
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    # "spawned" / "ready" / "ended" / "crashed" — the lifecycle transition kind.
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    # When the transition happened (tz-aware UTC). Distinct from ``created_at``
+    # (the row's insert time) so a backfilled or deferred write keeps event order.
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    # Non-reversible correlation token grouping one session's rows. Mirrors the
+    # webhook ``session_ref`` (a hashed starter-session id), so it never persists a
+    # bearer-equivalent session id. NULL when no session id was available yet.
+    session_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Cumulative end-of-session usage snapshot — terminal rows only, else NULL.
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_creation_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="session_events")
