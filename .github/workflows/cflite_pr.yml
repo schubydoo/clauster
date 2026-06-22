@@ -2,7 +2,7 @@
 # Informational/Phase-1: a short per-PR run on the `address` sanitizer; it is NOT
 # a required check, so a flaky finding never blocks a merge, but a reproducible
 # crash surfaces here (and as SARIF in the Security tab). Longer corpus-building
-# runs belong in a future scheduled cflite_batch.yml.
+# runs belong in the scheduled cflite_batch.yml.
 # Docs: https://google.github.io/clusterfuzzlite/
 name: ClusterFuzzLite PR fuzzing
 
