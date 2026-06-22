@@ -9,11 +9,16 @@ name: ClusterFuzzLite PR fuzzing
 on:
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - ".bestpractices.json"
-      - "LICENSE"
+    # Trimmed: fuzz only when fuzz-relevant code changes, and only on PR
+    # open/reopen/ready (not the per-push `synchronize` storm). The nightly
+    # cflite_batch is the deep fuzzer; this per-PR pass is a quick, non-required
+    # regression check, so once per PR is enough. Still feeds the OSSF Fuzzing check.
+    types: [opened, reopened, ready_for_review]
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - "pyproject.toml"
+      - "uv.lock"
 
 permissions: {}
 

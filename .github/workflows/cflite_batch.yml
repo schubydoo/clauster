@@ -21,7 +21,7 @@ name: ClusterFuzzLite batch fuzzing
 
 on:
   schedule:
-    - cron: "27 4 * * *" # daily, 04:27 UTC (off-peak; offset from the other crons)
+    - cron: "27 4 */2 * *" # every other day, 04:27 UTC (corpus changes slowly — ~halves fuzz spend vs daily; nightly depth + OSSF Fuzzing signal preserved)
   workflow_dispatch:
 
 permissions: {}
