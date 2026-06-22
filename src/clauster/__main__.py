@@ -2,8 +2,9 @@
 
 Subcommands: ``run`` (default), ``hash-password``, ``hash-token``,
 ``hash-metrics-token``, ``doctor``, ``backup``, ``restore``, ``migrate``,
-``install-service``, ``reap-environments``, ``keepers``, ``usage``. Bare ``clauster`` and
-``clauster -c <cfg>`` still mean ``run`` for backward compatibility.
+``install-service``, ``reap-environments``, ``keepers``, ``usage``.
+Bare ``clauster`` and ``clauster -c <cfg>`` still mean ``run`` for
+backward compatibility.
 """
 
 from __future__ import annotations
@@ -49,6 +50,16 @@ _COMMANDS = {
 }
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
+# Surfaced in `clauster --help` so needing `-c` isn't a surprise. Keep the order and
+# env-var names in lockstep with `clauster.config` (module docstring + `_candidate_paths`)
+# and docs/configuration.md, which are the canonical descriptions of the search order.
+_CONFIG_DISCOVERY_EPILOG = (
+    "config discovery (when -c/--config is omitted, the first existing file wins):\n"
+    "  1. $CLAUSTER_CONFIG\n"
+    "  2. ./clauster.yml\n"
+    "  3. $CLAUSTER_HOME/clauster.yml\n"
+)
+
 
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv``, dispatch to the requested subcommand, and return its exit code."""
@@ -58,7 +69,12 @@ def main(argv: list[str] | None = None) -> int:
     # (its bundled resume_recap.py lives in an ephemeral _MEIxxx dir). See clauster.recap.
     if argv and argv[0] == RECAP_SUBCOMMAND:
         return _recap_hook()
-    parser = argparse.ArgumentParser(prog="clauster", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="clauster",
+        description=__doc__,
+        epilog=_CONFIG_DISCOVERY_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--version", action="version", version=f"clauster {__version__}")
     sub = parser.add_subparsers(dest="command")
 
