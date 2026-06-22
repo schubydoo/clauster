@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
 import shutil
@@ -12,6 +13,34 @@ from typing import Any
 
 import pytest
 from hypothesis import settings
+
+# --- Live-account safety: pin HOME BEFORE any clauster import -------------------------
+#
+# The ``_isolate_clauster_home`` fixture below is function-scoped, so it cannot protect
+# paths that clauster resolves AT IMPORT TIME — those freeze on first import, which
+# happens at collection, before any fixture runs:
+#   * ``discovery.CLAUDE_JSON``        = Path("~/.claude.json").expanduser()
+#   * ``supervisor.JOBS_DIR`` / ``ROSTER_JSON`` under ``~/.claude/``
+#   * ``pointers.CLAUDE_PROJECTS_DIR`` under ``~/.claude/projects``
+# ``~/.claude.json`` is the developer's *live* remote-control account; a test that
+# imported and exercised ``discovery`` / ``supervisor`` could read or WRITE it,
+# corrupting the running service. Repointing HOME here, at conftest import (before any
+# clauster module loads), makes those constants expand under a throwaway dir. The
+# per-test fixture re-redirects to a fresh dir for runtime paths; this block is the
+# import-time backstop the fixture structurally cannot be.
+#
+# Capture the TRUE home before repointing and stash it, so the regression tests in
+# test_db_isolation.py can assert paths resolve off the real home (after this pin,
+# ``expanduser("~")`` everywhere — including at their own import — already yields the
+# temp dir, so they cannot recover the real home on their own).
+os.environ["CLAUSTER_TEST_REAL_HOME"] = os.path.expanduser("~")
+_SESSION_HOME = tempfile.mkdtemp(prefix="clauster-test-home-")
+os.environ["HOME"] = _SESSION_HOME
+os.environ["USERPROFILE"] = _SESSION_HOME  # Windows resolves ``~`` from USERPROFILE
+os.environ["CLAUSTER_HOME"] = str(Path(_SESSION_HOME) / ".clauster")
+os.environ.pop("CLAUSTER_CONFIG", None)
+os.environ.pop("CLAUSTER_STATE_DIR", None)
+atexit.register(lambda: shutil.rmtree(_SESSION_HOME, ignore_errors=True))
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -47,6 +76,50 @@ if str(FIXTURES) not in sys.path:
 # Windows CreateProcess can't launch the extensionless Python stubs, so on Windows
 # the fixtures expose a same-named `.cmd` wrapper that shells out to `python`.
 WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
+
+
+@pytest.fixture(autouse=True)
+def _isolate_clauster_home(tmp_path_factory, monkeypatch):
+    """Redirect the clauster home to a throwaway temp dir for *every* test.
+
+    Why this is autouse and unconditional: ``Config.state_dir`` defaults to
+    ``~/.clauster`` and is resolved through ``Path.expanduser()`` (config.py), so the
+    persistence DB lands at ``<HOME>/.clauster/clauster.db``. Startup then runs the
+    Alembic ``upgrade(..., "head")`` against that file (``db/bootstrap.py``). A test
+    that builds a default ``ClausterConfig`` — or goes through ``create_app`` /
+    ``load_config`` with a config that omits ``state_dir`` (e.g. the ``write_config``
+    fixture) — would therefore reach, and *migrate*, the developer's real
+    ``~/.clauster/clauster.db``. That actually corrupted a live database once, and
+    nothing in the suite previously isolated HOME, so the gap was silent.
+
+    The redirection levers, all set with ``monkeypatch`` so they touch only this
+    process's environment (never uv's cache or the real shell):
+
+    * ``HOME`` (and ``USERPROFILE`` for Windows) — the lever ``expanduser()`` reads,
+      so the default ``state_dir`` / SQLite DB and ``~/.claude.json`` (trust /
+      remote-control) all resolve under the temp dir.
+    * ``CLAUSTER_HOME`` — a config-discovery lever (``$CLAUSTER_HOME/clauster.yml``);
+      pointed at the temp ``.clauster`` so a stray real value can't pull in an
+      out-of-tree config.
+    * ``CLAUSTER_CONFIG`` / ``CLAUSTER_STATE_DIR`` — *removed* so a value present in
+      the developer's real environment can't make ``load_config()`` read a real
+      config file or override ``state_dir`` straight back onto a real path.
+
+    Additive by design: this runs first (autouse), so a test that sets its own
+    ``HOME`` / ``CLAUSTER_*`` later via the *same* function-scoped ``monkeypatch``
+    simply overrides these defaults for that test, then everything is undone at
+    teardown. It never points anything at the real home.
+    """
+    tmp_home = tmp_path_factory.mktemp("clauster-home")
+    monkeypatch.setenv("HOME", str(tmp_home))
+    # Windows resolves ``~`` from USERPROFILE, not HOME — keep them in lockstep so the
+    # isolation holds regardless of platform.
+    monkeypatch.setenv("USERPROFILE", str(tmp_home))
+    monkeypatch.setenv("CLAUSTER_HOME", str(tmp_home / ".clauster"))
+    # Drop any real-environment overrides that could redirect config/state back onto a
+    # real path even with HOME isolated. ``raising=False`` because they may be unset.
+    monkeypatch.delenv("CLAUSTER_CONFIG", raising=False)
+    monkeypatch.delenv("CLAUSTER_STATE_DIR", raising=False)
 
 
 @pytest.fixture
