@@ -1927,10 +1927,12 @@ class SessionRunner:
         without a running loop (a synchronous status-apply call), it falls back to a
         direct best-effort synchronous append so the row is still recorded.
 
-        The whole method is fail-closed: every error — the loop-owned prologue (which
-        touches the filesystem via ``_project_path``), the off-loop snapshot, and the
-        append — is logged and swallowed, on both the async and the synchronous path,
-        so a history hiccup can never raise into the spawn/stop/crash caller.
+        Fail-closed end-to-end: the cheap in-memory prologue, the off-loop cost
+        snapshot, and the append are all logged-and-swallowed, on both the async and
+        the synchronous path, so a history hiccup never raises into the spawn/stop/
+        crash caller. The cost-snapshot's project-path lookup + transcript read both
+        live inside ``_usage_snapshot`` so a filesystem hiccup degrades the *cost* to
+        null without dropping the row itself — the terminal row is always recorded.
         """
         kind = self._HISTORY_KIND.get(event)
         if kind is None:  # unknown event name — never persist a bogus kind
@@ -1955,14 +1957,15 @@ class SessionRunner:
         try:
             # "hosted" sessions run on the claustrum channel; otherwise the resume axis
             # (standard remote-control vs the pty keeper) is the mode worth recording.
-            mode = "hosted" if instance.channel == "hosted" else instance.resume_mode
+            # Fall back to "standard" if the resume axis is somehow unresolved: ``mode``
+            # is NOT NULL, so a None here would make the INSERT drop the row entirely.
+            mode = (
+                "hosted" if instance.channel == "hosted" else (instance.resume_mode or "standard")
+            )
             project = instance.project
             # Snapshot the loop-owned values now; the off-loop task only touches locals.
-            # ``_project_path`` walks the filesystem and can raise — it stays inside this
-            # guard so a discovery I/O error never reaches the lifecycle caller.
             session_ref = _hash_session_ref(instance.starter_session_id, self._session_ref_key())
             terminal = kind in ("ended", "crashed")
-            project_path = self._project_path(project) if terminal else None
         except Exception as exc:  # noqa: BLE001 — history must never break the lifecycle
             _log.warning(
                 "could not prepare session event (%s/%s): %s", instance.project, kind, exc
@@ -1970,18 +1973,28 @@ class SessionRunner:
             return
 
         def _usage_snapshot() -> ProjectUsage | None:
-            """Cost/token rollup for a terminal row, or None (non-terminal / unreadable)."""
-            if not (terminal and project_path is not None):
+            """Cost/token rollup for a terminal row, or None (non-terminal / unreadable).
+
+            The project-path lookup (``_project_path`` walks the filesystem) and the
+            transcript read both live here, so a discovery / transcript I/O error
+            degrades the *cost* to null — the terminal row is still written by the
+            caller. This is the documented "an unreadable transcript must not drop the
+            terminal row" invariant: only the cost is best-effort, never the row.
+            """
+            if not terminal:
                 return None
             try:
+                project_path = self._project_path(project)
+                if project_path is None:
+                    return None
                 return aggregate_project_usage_cached(
                     project_path,
                     project_name=project,
                     claude_projects_dir=self._claude_projects_dir,
                 )
             except OSError as exc:
-                # An unreadable transcript must not drop the terminal row — record the
-                # event with a null cost rather than skip the history entirely.
+                # An unreadable transcript / discovery walk must not drop the terminal
+                # row — record the event with a null cost rather than skip history.
                 _log.warning("session-history cost snapshot failed for %s: %s", project, exc)
                 return None
 

@@ -207,11 +207,12 @@ async def test_record_event_async_swallows_store_failure(runner_config, caplog):
     assert "could not record session event" in caplog.text
 
 
-async def test_record_event_async_swallows_prologue_failure(runner_config, caplog, monkeypatch):
-    # The loop-owned prologue touches the filesystem via _project_path (which can raise
-    # OSError on a discovery re-walk). On a terminal event that error must be caught in
-    # the synchronous prologue — never propagating into the stop/crash caller — and no
-    # background task should be scheduled.
+async def test_terminal_event_records_row_when_project_path_lookup_fails(
+    runner_config, caplog, monkeypatch
+):
+    # _project_path walks the filesystem and can raise OSError (a discovery re-walk on a
+    # vanished projects_root). That must degrade only the COST to null — the terminal row
+    # is still written, per the "an unreadable transcript must not drop the row" invariant.
     runner = _runner(runner_config)
 
     def _boom(_name):
@@ -222,8 +223,25 @@ async def test_record_event_async_swallows_prologue_failure(runner_config, caplo
         project="alpha", label="alpha", status=InstanceStatus.CRASHED, resume_mode="pty"
     )
     runner._record_event("crash", inst)  # must not raise
-    assert not runner._notify_tasks  # bailed before scheduling
-    assert "could not prepare session event" in caplog.text
+    await _drain(runner)
+
+    [event] = runner._history.history_for("alpha")  # the row IS recorded
+    assert event.kind == "crashed"
+    assert event.cost_usd is None  # only the cost is dropped
+    assert "session-history cost snapshot failed" in caplog.text
+
+
+async def test_unresolved_resume_mode_falls_back_to_standard(runner_config):
+    # mode is NOT NULL; a None resume_mode would make the INSERT drop the row. The
+    # prologue falls back to "standard" so the row is always recorded with a valid mode.
+    runner = _runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    inst.resume_mode = None  # type: ignore[assignment]  # simulate an unresolved axis
+    runner._record_event("spawn", inst)
+    await _drain(runner)
+
+    [event] = runner._history.history_for("alpha")
+    assert event.mode == "standard"
 
 
 async def test_emit_lifecycle_records_and_webhooks_together(runner_config):
