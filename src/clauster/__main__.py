@@ -2,8 +2,9 @@
 
 Subcommands: ``run`` (default), ``hash-password``, ``hash-token``,
 ``hash-metrics-token``, ``doctor``, ``backup``, ``restore``, ``migrate``,
-``install-service``, ``reap-environments``, ``keepers``, ``usage``. Bare ``clauster`` and
-``clauster -c <cfg>`` still mean ``run`` for backward compatibility.
+``install-service``, ``reap-environments``, ``keepers``, ``usage``.
+Bare ``clauster`` and ``clauster -c <cfg>`` still mean ``run`` for
+backward compatibility.
 """
 
 from __future__ import annotations
