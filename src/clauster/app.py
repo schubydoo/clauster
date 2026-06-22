@@ -69,7 +69,7 @@ from .provisioning import (
     create_project,
     validate_clone_url,
 )
-from .redact import sanitize_line
+from .redact import redact_for_disk, sanitize_line
 from .runner import (
     AdoptionUnavailable,
     InstanceStillLive,
@@ -318,11 +318,32 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.state.config = config
     app.state.runner = runner
     app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
+
     # Hosted-channel sessions (CL-4); always present. The store (CL-6) persists them
     # so a clauster restart can reattach the survivors via lifespan reattach_all.
     # Reuse the runner's persistence container so the process shares one engine and
     # one migration run (#362) — the store keeps the same load()/save() contract.
-    app.state.hosted = HostedManager(runner.persistence.hosted_state_store())
+    def _on_hosted_permission_needed(process_id: str, subtype: str) -> None:
+        """Fire the #432 `permission-needed` webhook when a hosted prompt parks.
+
+        Called inline on the hosted stream pump (the event loop). Forwards only the
+        session process id and the request subtype — never the prompt body, which can
+        carry a tool path/argument; the subtype is redacted defensively. Routes through
+        the runner's emitter so it stays fire-and-forget and fail-open (default OFF).
+        """
+        runner.emit_event(
+            "permission-needed",
+            {
+                "event_type": "permission-needed",
+                "process_id": process_id,
+                "subtype": sanitize_line(subtype) if subtype else None,
+            },
+        )
+
+    app.state.hosted = HostedManager(
+        runner.persistence.hosted_state_store(),
+        on_permission_needed=_on_hosted_permission_needed,
+    )
     clone_jobs = CloneJobManager()
     app.state.clone_jobs = clone_jobs
     # Drop a finished clone job after this grace so a client that disconnected
@@ -990,6 +1011,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # resolution; drop the cache so the new project's row renders immediately.
             invalidate_discovery_cache()
             clone_jobs.finish(job)
+        # Fire the #432 `clone-done` webhook off the runner's emitter (fire-and-forget,
+        # fail-open, default OFF). The error_detail is redacted before egress — a clone
+        # failure can echo a remote URL/host into its message. The clone url itself is
+        # never sent: it can carry credentials.
+        runner.emit_event(
+            "clone-done",
+            {
+                "event_type": "clone-done",
+                "project": name,
+                "status": job.status,
+                "error": redact_for_disk(job.error_detail) if job.error_detail else None,
+            },
+        )
         loop.call_later(_CLONE_JOB_TTL, clone_jobs.discard, job.id)
 
     @app.post("/api/projects/clone", status_code=202)
@@ -1252,13 +1286,32 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if not supervisor.valid_job_id(job_id):
             raise HTTPException(status_code=422, detail="invalid job id")
         try:
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 supervisor.stop_background_job, job_id, binary=config.claude.binary
             )
         except claude_cli.ClaudeNotFound as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except supervisor.StopError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # Fire the #432 `bg-settled` webhook (fire-and-forget, fail-open, default OFF):
+        # a background `claude --bg` job reached a terminal state via the supervisor.
+        # The job id is this deployment's own short handle (not a foreign secret, same
+        # posture as /api/agents); `detail` can carry a `claude rm` path/stderr tail so
+        # it is redacted before egress.
+        # Bind detail once: pyright narrows the local to str inside the truthiness
+        # guard, which a repeated result.get("detail") would not (Unknown | None).
+        detail = result.get("detail")
+        runner.emit_event(
+            "bg-settled",
+            {
+                "event_type": "bg-settled",
+                "id": result.get("id"),
+                "settled": result.get("settled"),
+                "removed": result.get("removed"),
+                "detail": redact_for_disk(detail) if detail else None,
+            },
+        )
+        return result
 
     @app.post("/api/agents/{job_id}/resume", status_code=201)
     async def api_resume_agent(job_id: str) -> dict:

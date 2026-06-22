@@ -584,19 +584,45 @@ class NotificationsConfig(BaseModel):
     )
 
 
+# The four original bridge-lifecycle events (#371). An absent key for one of these
+# defaults to ENABLED — the historical contract, preserved so an existing config that
+# only lists a subset keeps emitting the rest.
+_WEBHOOK_DEFAULT_ON_EVENTS = frozenset({"spawn", "ready", "stop", "crash"})
+
+# Lifecycle events added beyond the original bridge four (#432). These default to
+# DISABLED when absent: they can carry a "come look" signal (a parked permission
+# prompt) or fire from a subsystem the operator didn't opt into, so a config that
+# turns webhooks on must explicitly request each one rather than have it appear
+# silently on upgrade. Order is the documented event taxonomy, not significant.
+_WEBHOOK_DEFAULT_OFF_EVENTS = frozenset({"bg-settled", "permission-needed", "clone-done"})
+
+# Every accepted ``events`` key. A key outside this set is a typo and fails load.
+_WEBHOOK_KNOWN_EVENTS = _WEBHOOK_DEFAULT_ON_EVENTS | _WEBHOOK_DEFAULT_OFF_EVENTS
+
+
 class WebhooksConfig(BaseModel):
-    """Outbound HTTP webhooks on bridge lifecycle transitions (the first extension seam).
+    """Outbound HTTP webhooks on Clauster lifecycle transitions (the first extension seam).
 
     Off by default. When enabled, each configured URL receives a JSON ``POST`` on a
-    lifecycle event (``spawn`` / ``ready`` / ``stop`` / ``crash``). **Fail-open:** a
-    slow or failing webhook is bounded by ``timeout_seconds`` and its error is logged
-    and swallowed — it never blocks or breaks a spawn/stop. URLs come only from this
-    config (an operator-trusted source), not from any runtime/user input.
+    lifecycle event. The original four are bridge events (``spawn`` / ``ready`` /
+    ``stop`` / ``crash``); #432 adds ``bg-settled`` (a ``claude --bg`` background job
+    settled), ``permission-needed`` (a hosted session parked a tool-permission prompt
+    — the "come look" signal), and ``clone-done`` (a project clone finished). **Fail-
+    open:** a slow or failing webhook is bounded by ``timeout_seconds`` and its error
+    is logged and swallowed — it never blocks or breaks a lifecycle transition. URLs
+    come only from this config (an operator-trusted source), not from runtime/user
+    input.
 
-    Scope: events fire for bridges Clauster spawns and manages. A bridge **adopted**
-    from an external session, or **reattached** on a Clauster restart, does not emit
-    ``spawn``/``ready`` (it was not spawned here) — so ``ready`` is not a guarantee of
-    "every bridge that is RUNNING", just "every bridge Clauster brought to RUNNING".
+    Default policy differs by event age: the **original four default to enabled** when
+    their key is absent (the historical contract); the **three #432 events default to
+    disabled** when absent (an operator must opt in to each, so a sensitive "come look"
+    signal never starts egressing on upgrade alone).
+
+    Scope: bridge events fire for bridges Clauster spawns and manages. A bridge
+    **adopted** from an external session, or **reattached** on a Clauster restart, does
+    not emit ``spawn``/``ready`` (it was not spawned here) — so ``ready`` is not a
+    guarantee of "every bridge that is RUNNING", just "every bridge Clauster brought to
+    RUNNING".
     """
 
     enabled: bool = Field(default=False, description="Master switch for outbound webhooks.")
@@ -615,22 +641,34 @@ class WebhooksConfig(BaseModel):
     )
     events: dict[str, bool] = Field(
         default_factory=lambda: {"spawn": True, "ready": True, "stop": True, "crash": True},
-        description="Which lifecycle events to emit. Keys: `spawn`, `ready`, `stop`, "
-        "`crash`; an absent key defaults to enabled.",
+        description="Which lifecycle events to emit. Bridge keys `spawn`/`ready`/`stop`/"
+        "`crash` default to enabled when absent; the #432 keys `bg-settled`/"
+        "`permission-needed`/`clone-done` default to DISABLED when absent (opt in "
+        "explicitly).",
     )
 
     @field_validator("events")
     @classmethod
     def _known_event_keys(cls, value: dict[str, bool]) -> dict[str, bool]:
         """Reject an unknown event key so a typo (e.g. `spwan`) fails loudly, not silently."""
-        allowed = {"spawn", "ready", "stop", "crash"}
-        unknown = set(value) - allowed
+        unknown = set(value) - _WEBHOOK_KNOWN_EVENTS
         if unknown:
             raise ValueError(
                 f"webhooks.events has unsupported key(s) {sorted(unknown)}; "
-                f"allowed: {sorted(allowed)}"
+                f"allowed: {sorted(_WEBHOOK_KNOWN_EVENTS)}"
             )
         return value
+
+    def event_enabled(self, event: str) -> bool:
+        """Whether ``event`` should emit, applying the per-event absent-key default.
+
+        An explicit key in ``events`` always wins. When absent, an original bridge
+        event defaults to enabled and a #432 event defaults to disabled — so a new
+        "come look" signal never starts egressing without an explicit opt-in.
+        """
+        if event in self.events:
+            return self.events[event]
+        return event in _WEBHOOK_DEFAULT_ON_EVENTS
 
 
 class ClaustrumConfig(BaseModel):

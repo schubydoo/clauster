@@ -315,6 +315,88 @@ async def test_permission_request_is_parked_not_auto_answered(fake_claustrum):
         assert resolved["request_id"] == "perm-1" and resolved["behavior"] == "allow"
 
 
+# -- permission-needed callback (#432 webhook hook) ------------------------
+
+
+@asynccontextmanager
+async def _session_with_perm_cb(fake_factory, calls, *, stop_grace: float = 0.1):
+    """Like ``_session`` but wires an ``on_permission_needed`` callback recording calls."""
+    fake = await fake_factory()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(
+            client,
+            _PID,
+            _BIN,
+            stop_grace=stop_grace,
+            on_permission_needed=lambda pid, subtype: calls.append((pid, subtype)),
+        )
+        await session.start()
+        try:
+            yield fake, session
+        finally:
+            await session.stop()
+
+
+async def test_parked_permission_fires_on_permission_needed_callback(fake_claustrum):
+    calls: list[tuple[str, str]] = []
+    async with _session_with_perm_cb(fake_claustrum, calls) as (fake, session):
+        queue = session.subscribe()
+        frame = {
+            "request_id": "perm-cb-1",
+            "type": "control_request",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await _drain_until(queue, "control_request")
+        # The callback fired once with (process_id, subtype) — never the prompt body.
+        assert calls == [(_PID, "can_use_tool")]
+
+
+async def test_auto_acked_request_does_not_fire_callback(fake_claustrum):
+    # An MCP-handshake `initialize` is auto-acked (not parked), so no "come look" signal.
+    calls: list[tuple[str, str]] = []
+    async with _session_with_perm_cb(fake_claustrum, calls) as (fake, _session):
+        frame = {
+            "request_id": "init-cb",
+            "type": "control_request",
+            "request": {"subtype": "initialize"},
+        }
+        await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+        await wait_until(
+            lambda: any(
+                f.get("type") == "control_response" and f["response"]["request_id"] == "init-cb"
+                for f in _stdin_frames(fake)
+            )
+        )
+        assert calls == []
+
+
+async def test_permission_callback_error_is_swallowed(fake_claustrum):
+    # A throwing callback must never reach the stream pump (fail-open).
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+
+        def _boom(_pid, _subtype):
+            raise RuntimeError("notify boom")
+
+        session = HostedSession(client, _PID, _BIN, stop_grace=0.1, on_permission_needed=_boom)
+        await session.start()
+        try:
+            queue = session.subscribe()
+            frame = {
+                "request_id": "perm-boom",
+                "type": "control_request",
+                "request": {"subtype": "can_use_tool", "tool_name": "Bash"},
+            }
+            await fake.emit(_PID, "stdout", (json.dumps(frame) + "\n").encode())
+            # The request still parks and fans out despite the callback raising.
+            event = await _drain_until(queue, "control_request")
+            assert event["request_id"] == "perm-boom"
+            assert [r.request_id for r in session.pending_requests] == ["perm-boom"]
+        finally:
+            await session.stop()
+
+
 @pytest.mark.parametrize(
     "request_payload",
     [

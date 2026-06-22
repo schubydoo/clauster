@@ -246,3 +246,26 @@ async def test_webhook_crash_fires_on_poll_once(runner_config, monkeypatch):
     assert runner._instances["alpha"].status is InstanceStatus.CRASHED
     await asyncio.gather(*runner._notify_tasks)
     assert [e for e, _ in rec.calls] == ["crash"]  # exactly one crash event
+
+
+# ----- extended lifecycle events (#432) ------------------------------------
+
+
+async def test_emit_event_gated_by_wants(runner_config):
+    # A default-off #432 event (wants() → False) is dropped before a task is created.
+    runner = _runner(runner_config)
+    runner._webhooks = _RecordingWebhooks(active=False)
+    runner.emit_event("clone-done", {"event_type": "clone-done", "project": "alpha"})
+    assert not runner._notify_tasks
+    assert runner._webhooks.calls == []
+
+
+async def test_emit_event_fires_payload_verbatim(runner_config):
+    # When enabled, emit_event forwards the event + payload as-is (already redacted).
+    runner = _runner(runner_config)
+    rec = _RecordingWebhooks()
+    runner._webhooks = rec
+    payload = {"event_type": "clone-done", "project": "alpha", "status": "done", "error": None}
+    runner.emit_event("clone-done", payload)
+    await asyncio.gather(*runner._notify_tasks)
+    assert rec.calls == [("clone-done", payload)]

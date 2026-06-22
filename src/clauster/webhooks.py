@@ -1,10 +1,17 @@
-"""Outbound HTTP webhooks on bridge lifecycle transitions (#371) — the first seam.
+"""Outbound HTTP webhooks on Clauster lifecycle transitions (#371, #432) — the seam.
 
-When enabled, each configured URL receives a JSON ``POST`` on a lifecycle event
-(``spawn`` / ``ready`` / ``stop`` / ``crash``). The emitter is **fail-open**: a slow
-endpoint is bounded by the configured timeout, and any error is logged and swallowed
-— a broken webhook must never affect a bridge's lifecycle. The POST is async I/O, so
-callers fire it off the event loop and never await it on a lifecycle path.
+When enabled, each configured URL receives a JSON ``POST`` on a lifecycle event. The
+original four are bridge events (``spawn`` / ``ready`` / ``stop`` / ``crash``); #432
+adds ``bg-settled``, ``permission-needed``, and ``clone-done``. The emitter is
+**fail-open**: a slow endpoint is bounded by the configured timeout, and any error is
+logged and swallowed — a broken webhook must never affect a lifecycle transition. The
+POST is async I/O, so callers fire it off the event loop and never await it on a
+lifecycle path.
+
+Per-event default policy lives in :meth:`WebhooksConfig.event_enabled`: an absent
+bridge-event key defaults to enabled (the historical contract), an absent #432 key
+defaults to disabled (opt in explicitly), so a sensitive "come look" signal never
+starts egressing on upgrade alone.
 
 URLs come only from config (an operator-trusted source) and are scheme-checked
 (``http``/``https`` only) at construction, so a malformed URL disables that target
@@ -70,8 +77,12 @@ class WebhookEmitter:
         return bool(self._urls)
 
     def wants(self, event: str) -> bool:
-        """Whether ``event`` should be emitted (active and not disabled in ``events``)."""
-        return self.active and self._config.events.get(event, True)
+        """Whether ``event`` should be emitted (active and enabled per the default policy).
+
+        Delegates the absent-key default to :meth:`WebhooksConfig.event_enabled` — a
+        bridge event defaults on when unconfigured, a #432 event defaults off.
+        """
+        return self.active and self._config.event_enabled(event)
 
     async def _post(self, client: httpx.AsyncClient, url: str, payload: dict) -> None:
         """POST once, best-effort; log and swallow any error (fail-open).
