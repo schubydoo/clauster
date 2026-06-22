@@ -67,6 +67,19 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
+      # Fail LOUD on an empty mint: the bump branch is pushed and the PR is opened
+      # with this token (so its CI dispatches and it can land under branch
+      # protection). An empty token would push under GITHUB_TOKEN — whose commits do
+      # NOT trigger the bump PR's CI — or fail with a confusing auth error. Surface
+      # it here rather than downstream. (See issue #509.)
+      - name: Verify App token was minted
+        if: ${{ steps.app-token.outputs.token == '' }}
+        run: |
+          echo "::error::clauster-ci App token mint produced an empty token; \
+          refusing to proceed. Check the CLAUSTER_CI_APP_ID / \
+          CLAUSTER_CI_APP_PRIVATE_KEY secrets and the clauster-ci App installation."
+          exit 1
+
       - name: Check out repo
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

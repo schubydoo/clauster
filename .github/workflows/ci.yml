@@ -8,7 +8,13 @@ on:
     # toggling the `full-ci` label re-triggers CI and immediately flips the
     # matrix between the subset and the full grid — otherwise the label only
     # takes effect on the next push.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    #
+    # `ready_for_review` (also non-default) is the recovery path for issue #509:
+    # if a `synchronize` ever fails to dispatch this required check (e.g. a merge
+    # commit pushed under a non-trigger-capable token), marking the PR draft and
+    # back to ready re-evaluates the head SHA and (re)dispatches — a no-side-effect
+    # alternative to close+reopen.
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # Nightly full sweep on main: catches a portability/CVE/dep regression that a
   # trimmed internal-PR matrix would skip, without waiting for the next release.
   schedule:
