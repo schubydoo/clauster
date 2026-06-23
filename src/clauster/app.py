@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import secrets
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -92,39 +93,61 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 # Origin gate already blocks cross-origin state changes, so this is a fallback
 # layer, not the primary control.
 #
-# Tradeoff — why the script/style sources are not fully locked down (tracked by
-# #442 to drop these relaxations via nonces + the CSP-friendly Alpine build):
-#   * The dashboard, login and 404 pages all carry inline <script> blocks (the
-#     pre-paint theme setter + the whole Alpine dashboard logic), so dropping
-#     'unsafe-inline' from script-src would blank the UI unless every block were
-#     moved to nonced external files — out of scope here, see #442.
-#   * The vendored Alpine build evaluates x-* expressions via `new Function()`,
-#     which CSP classifies as eval, so 'unsafe-eval' is required for the
-#     dashboard to render at all. (The CSP-friendly Alpine build forbids those
-#     expressions; swapping to it is the separate, larger change tracked in #442.)
-#   * dashboard.html has an inline <style> block plus inline style="" attributes,
-#     so style-src keeps 'unsafe-inline'.
-# This is the tightest policy that still renders the shipped UI; it stops the
-# obvious injection sinks (frame-ancestors/object-src/base-uri/form-action) while
-# tolerating the self-hosted inline assets we actually ship.
+# script-src is nonce-gated (#442): each request gets a fresh
+# `secrets.token_urlsafe(16)` nonce (see the `security_headers` middleware), the
+# inline <script> blocks carry `nonce="{{ csp_nonce }}"`, and the header lists
+# `'nonce-<nonce>'` — so 'unsafe-inline' is dropped entirely. (CSP3: once a
+# `nonce-…` source is present, browsers IGNORE 'unsafe-inline', so leaving it in
+# would be dead config; dropping it is what blocks an injected inline <script>
+# that lacks the per-request nonce.) The external alpine.min.js is 'self'-allowed
+# and needs no nonce.
+#
+# Tradeoff — two relaxations remain, deliberately out of scope for the nonce-only
+# slice and tracked as the residual follow-up under #442:
+#   * 'unsafe-eval' stays: the vendored standard Alpine build evaluates x-*
+#     expressions via `new Function()`, which CSP classifies as eval, so it is
+#     required for the dashboard to render at all. Dropping it needs the
+#     CSP-friendly Alpine build (rewriting every inline x-* directive into
+#     Alpine.data() components + a build-tool swap) — an epic, not this slice.
+#   * style-src keeps 'unsafe-inline': the dashboard carries an inline <style>
+#     block plus inline style="" attributes, and a nonce does not cover style
+#     *attributes*, so they cannot be nonce-gated without removing them.
 #
 # connect-src is just 'self': the live bridge-log + hosted-session streams open
 # same-origin WebSockets, and every browser this app targets matches same-origin
 # ws:/wss: under 'self'. A bare ws:/wss: scheme-source would instead permit a
-# WebSocket to ANY host — an exfiltration channel under XSS (made plausible by the
-# 'unsafe-inline' above) — so the schemes are deliberately NOT listed.
-_CSP = (
-    "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-    "style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; "
-    "font-src 'self'; "
-    "connect-src 'self'; "
-    "frame-ancestors 'none'; "
-    "base-uri 'self'; "
-    "form-action 'self'; "
-    "object-src 'none'"
-)
+# WebSocket to ANY host — an exfiltration channel under XSS — so the schemes are
+# deliberately NOT listed.
+
+
+def _csp_with_nonce(nonce: str | None) -> str:
+    """Build the per-request Content-Security-Policy with a nonce-gated script-src.
+
+    ``nonce`` is the per-request ``secrets.token_urlsafe(16)`` value generated in
+    the ``security_headers`` middleware. When present, script-src lists
+    ``'nonce-<nonce>'`` so the inline <script> blocks that carry the matching
+    ``nonce="..."`` attribute execute. ``'unsafe-inline'`` is dropped entirely
+    (#442): it is dead config once a nonce source is present, and dropping it is
+    what blocks an injected inline script lacking the per-request nonce.
+
+    Fail-closed: when ``nonce is None`` (a defensive degraded path that should not
+    occur in normal request flow), script-src still omits ``'unsafe-inline'`` — a
+    degraded policy is *stricter*, never looser. ``'unsafe-eval'`` and style-src
+    ``'unsafe-inline'`` are intentionally retained (see the comment above).
+    """
+    nonce_src = f"'nonce-{nonce}' " if nonce else ""
+    return (
+        "default-src 'self'; "
+        f"script-src 'self' {nonce_src}'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "object-src 'none'"
+    )
 
 
 class LoginThrottle:
@@ -356,6 +379,26 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # Version-bust the vendored asset URLs so the immutable cache below is safe across
     # upgrades (templates link them as `...?v={{ asset_version }}`).
     templates.env.globals["asset_version"] = __version__
+
+    def _render(
+        request: Request,
+        name: str,
+        context: dict | None = None,
+        **kwargs,
+    ) -> Response:
+        """Render a template with the per-request CSP nonce injected (#442).
+
+        Every HTML render must carry ``csp_nonce`` so its inline <script> blocks
+        stamp ``nonce="{{ csp_nonce }}"`` and survive the nonce-gated script-src.
+        The nonce is *not* a Jinja global — that would freeze one value
+        process-wide (a security bug); it is pulled per request from
+        ``request.state.csp_nonce`` (set by the ``security_headers`` middleware).
+        ``**kwargs`` forwards extras like ``status_code`` to ``TemplateResponse``.
+        """
+        ctx = dict(context or {})
+        ctx["csp_nonce"] = getattr(request.state, "csp_nonce", None)
+        return templates.TemplateResponse(request, name, ctx, **kwargs)
+
     # Compress responses over the threshold — the ~665KB uncompressed Tabler/Alpine
     # bundle and the JSON poll responses both shrink ~4-5x for remote/proxied clients
     # that don't compress at the proxy (invisible on LAN). Below it, the gzip overhead
@@ -380,7 +423,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         path = request.scope["path"]
         is_api = path in ("/api", "/ws") or path.startswith(("/api/", "/ws/"))
         if exc.status_code == 404 and wants_html and not is_api:
-            return templates.TemplateResponse(request, "404.html", {}, status_code=404)
+            return _render(request, "404.html", {}, status_code=404)
         return JSONResponse(
             {"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers
         )
@@ -541,7 +584,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         HSTS is emitted only when the connection is HTTPS (reusing the same
         ``_cookie_secure`` detection the session cookie uses), so a plain-HTTP
         LAN deployment never pins a browser to a scheme it can't serve.
+
+        The per-request CSP nonce is generated *before* ``call_next`` so the
+        template render inside it can read ``request.state.csp_nonce`` and stamp
+        the matching ``nonce="..."`` on its inline <script> blocks; the header is
+        then built from the same value afterwards (#442). A fresh
+        ``secrets.token_urlsafe(16)`` per request — never a process-wide constant
+        — so a leaked nonce can't be replayed against a later response.
         """
+        request.state.csp_nonce = secrets.token_urlsafe(16)
         response = await call_next(request)
         headers = response.headers
         # setdefault: never clobber a header a downstream response set on purpose.
@@ -560,7 +611,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # cookie/header-borne (session cookie, Bearer token, proxy HMAC), so a same-origin
         # Referer carries no secret; revisit this if a token/session ever rides a URL.
         headers.setdefault("Referrer-Policy", "same-origin")
-        headers.setdefault("Content-Security-Policy", _CSP)
+        headers.setdefault(
+            "Content-Security-Policy",
+            _csp_with_nonce(getattr(request.state, "csp_nonce", None)),
+        )
         if _cookie_secure(request):
             # No includeSubDomains: it would pin every sibling subdomain of the
             # serving host to HTTPS for a year, bricking a plain-HTTP service on a
@@ -572,14 +626,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def login_form(request: Request) -> Response:
         if _authenticate(request)[0]:
             return RedirectResponse(f"{_root}/", status_code=303)
-        return templates.TemplateResponse(request, "login.html", {"error": None})
+        return _render(request, "login.html", {"error": None})
 
     @app.post("/login")
     async def login_submit(request: Request) -> Response:
         throttle_key, throttle_shared = _throttle_key(request)
         allowed, retry_after = _throttle.allowed(throttle_key, shared=throttle_shared)
         if not allowed:
-            resp = templates.TemplateResponse(
+            resp = _render(
                 request,
                 "login.html",
                 {"error": "Too many attempts — please try again later."},
@@ -602,9 +656,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
             return resp
         _throttle.record_failure(throttle_key, shared=throttle_shared)
-        return templates.TemplateResponse(
-            request, "login.html", {"error": "Incorrect password."}, status_code=401
-        )
+        return _render(request, "login.html", {"error": "Incorrect password."}, status_code=401)
 
     @app.post("/logout")
     async def logout(request: Request) -> Response:
@@ -818,7 +870,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         proj = next((p for p in await list_projects() if p.name == name), None)
         if proj is None:
             raise HTTPException(status_code=404, detail=f"project {name!r} not found")
-        return templates.TemplateResponse(
+        return _render(
             request,
             "_project_row.html",
             {"p": proj, "idx": 0, "pty_supported": sys.platform != "win32"},
@@ -1862,6 +1914,6 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> Response:
-        return templates.TemplateResponse(request, "dashboard.html", await _dashboard_context())
+        return _render(request, "dashboard.html", await _dashboard_context())
 
     return app

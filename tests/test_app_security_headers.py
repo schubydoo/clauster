@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
 from clauster import auth
-from clauster.app import _CSP, create_app
+from clauster.app import _csp_with_nonce, create_app
 from clauster.runner import SessionRunner
 
 PASSWORD = "hunter2"
 _PW_HASH = auth.hash_password(auth.make_hasher(), PASSWORD)
 ORIGIN = "http://testserver"  # TestClient's default origin
+
+# script-src must list 'self', a per-request nonce, and 'unsafe-eval' (Alpine), and
+# must NOT carry 'unsafe-inline' (dropped in #442 — dead config once a nonce is present).
+_SCRIPT_SRC_RE = re.compile(r"script-src 'self' 'nonce-[A-Za-z0-9_-]+' 'unsafe-eval'")
+# Pull the nonce token out of a CSP header.
+_CSP_NONCE_RE = re.compile(r"script-src 'self' 'nonce-([A-Za-z0-9_-]+)'")
+# Pull the nonce attribute off the first inline <script nonce="..."> in a body.
+_BODY_NONCE_RE = re.compile(r'<script\s+nonce="([A-Za-z0-9_-]+)"')
 
 
 def _open_client(runner_config) -> TestClient:
@@ -36,6 +46,17 @@ def _login(client: TestClient) -> None:
         follow_redirects=False,
     )
     assert resp.status_code == 303, resp.text
+
+
+def _assert_nonce_script_src(csp: str) -> None:
+    """script-src is nonce-gated: 'self' + a nonce + 'unsafe-eval', never 'unsafe-inline'."""
+    script_src = next(
+        (d for d in csp.split(";") if d.strip().startswith("script-src")), ""
+    ).strip()
+    assert _SCRIPT_SRC_RE.search(csp), csp
+    assert "'unsafe-inline'" not in script_src, (
+        f"script-src must NOT carry 'unsafe-inline' once a nonce is present: {script_src!r}"
+    )
 
 
 # ----- the headers are present on a normal response ------------------------
@@ -83,7 +104,10 @@ def test_csp_present_and_locked_down(runner_config):
     client = _open_client(runner_config)
     resp = client.get("/healthz")
     csp = resp.headers["Content-Security-Policy"]
-    assert csp == _CSP
+    # script-src is nonce-gated (#442): 'self' + a per-request nonce + 'unsafe-eval',
+    # and 'unsafe-inline' is gone (a nonce makes it dead config and blocks an injected
+    # inline script that lacks the per-request value).
+    _assert_nonce_script_src(csp)
     # The defence-in-depth essentials are spelled out.
     assert "frame-ancestors 'none'" in csp
     assert "object-src 'none'" in csp
@@ -94,10 +118,71 @@ def test_csp_present_and_locked_down(runner_config):
     # and bare ws:/wss: scheme-sources (any-host exfiltration channel) are excluded.
     assert "connect-src 'self';" in csp
     assert "ws:" not in csp and "wss:" not in csp
-    # The dashboard's inline scripts + Alpine's eval keep these relaxations; if
-    # they ever tighten, the docstring tradeoff must be revisited deliberately.
-    assert "script-src 'self' 'unsafe-inline' 'unsafe-eval'" in csp
+    # style-src keeps 'unsafe-inline' (the inline <style> + style="" attributes can't be
+    # nonced); 'unsafe-eval' stays for Alpine. Dropping either is the #442 follow-up.
     assert "style-src 'self' 'unsafe-inline'" in csp
+
+
+def test_csp_nonce_differs_per_request(runner_config):
+    """Two requests get DIFFERENT nonces — guards the frozen-process-wide-nonce footgun.
+
+    A nonce baked into a Jinja global (or any module constant) would be identical across
+    every response, defeating the protection. The nonce must be a per-request secret.
+    """
+    client = _open_client(runner_config)
+    first = client.get("/healthz").headers["Content-Security-Policy"]
+    second = client.get("/healthz").headers["Content-Security-Policy"]
+    n1 = _CSP_NONCE_RE.search(first)
+    n2 = _CSP_NONCE_RE.search(second)
+    assert n1 and n2, (first, second)
+    assert n1.group(1) != n2.group(1), "CSP nonce must be regenerated per request"
+
+
+@pytest.mark.parametrize("path", ["/", "/login"])
+def test_csp_nonce_round_trip(runner_config, path):
+    """The inline <script nonce="X"> in the body matches the nonce-X in the CSP header.
+
+    This is the load-bearing correctness check: it proves the per-request nonce flows
+    end to end (middleware → request.state → _render context → template) so the inline
+    scripts actually execute under the nonce-gated script-src. No JS execution needed —
+    a mismatch here is exactly what would silently blank the UI in a real browser.
+    """
+    client = _open_client(runner_config)
+    resp = client.get(path, headers={"accept": "text/html"})
+    assert resp.status_code == 200, resp.text
+    csp = resp.headers["Content-Security-Policy"]
+    header_nonce = _CSP_NONCE_RE.search(csp)
+    body_nonce = _BODY_NONCE_RE.search(resp.text)
+    assert header_nonce, csp
+    assert body_nonce, "no inline <script nonce=...> in the rendered body"
+    assert header_nonce.group(1) == body_nonce.group(1), (
+        f"CSP header nonce {header_nonce.group(1)!r} != body <script> nonce "
+        f"{body_nonce.group(1)!r} — the inline script would be blocked"
+    )
+
+
+def test_csp_nonce_round_trip_on_404(runner_config):
+    """The friendly HTML 404 page also round-trips its nonce (the 404 handler renders too)."""
+    client = _open_client(runner_config)
+    resp = client.get("/no-such-path", headers={"accept": "text/html"})
+    assert resp.status_code == 404
+    csp = resp.headers["Content-Security-Policy"]
+    header_nonce = _CSP_NONCE_RE.search(csp)
+    body_nonce = _BODY_NONCE_RE.search(resp.text)
+    assert header_nonce, csp
+    assert body_nonce, "no inline <script nonce=...> in the rendered 404 body"
+    assert header_nonce.group(1) == body_nonce.group(1)
+
+
+def test_csp_with_nonce_fail_closed_when_none():
+    """Defensive degraded path: a None nonce still drops 'unsafe-inline' (stricter, not looser)."""
+    csp = _csp_with_nonce(None)
+    script_src = next(
+        (d for d in csp.split(";") if d.strip().startswith("script-src")), ""
+    ).strip()
+    assert "'unsafe-inline'" not in script_src, script_src
+    assert "'nonce-" not in script_src
+    assert script_src == "script-src 'self' 'unsafe-eval'"
 
 
 def test_headers_on_dashboard_html(runner_config):
@@ -107,27 +192,27 @@ def test_headers_on_dashboard_html(runner_config):
     assert resp.status_code == 200
     assert "<html" in resp.text.lower()
     assert resp.headers["X-Frame-Options"] == "DENY"
-    assert resp.headers["Content-Security-Policy"] == _CSP
+    _assert_nonce_script_src(resp.headers["Content-Security-Policy"])
 
 
 def test_headers_on_rejected_response(runner_config):
-    """A 401 from the auth guard still carries the security headers."""
+    """A 401 from the auth guard still carries the security headers (nonce included)."""
     client = _password_client(runner_config)
     resp = client.get("/api/instances")
     assert resp.status_code == 401
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
-    assert resp.headers["Content-Security-Policy"] == _CSP
+    _assert_nonce_script_src(resp.headers["Content-Security-Policy"])
     assert resp.headers["X-Frame-Options"] == "DENY"
 
 
 def test_headers_on_csrf_403(runner_config):
-    """A 403 from the Origin/CSRF gate still carries the security headers."""
+    """A 403 from the Origin/CSRF gate still carries the security headers (nonce included)."""
     client = _password_client(runner_config)
     _login(client)
     resp = client.post("/api/instances", json={}, headers={"origin": "http://evil.test"})
     assert resp.status_code == 403
     assert resp.headers["X-Frame-Options"] == "DENY"
-    assert resp.headers["Content-Security-Policy"] == _CSP
+    _assert_nonce_script_src(resp.headers["Content-Security-Policy"])
 
 
 # ----- HSTS is emitted only over HTTPS -------------------------------------

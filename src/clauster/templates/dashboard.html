@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Clauster</title>
   <!-- Set theme before first paint to avoid a flash. Defaults to dark. -->
-  <script>
+  <script nonce="{{ csp_nonce }}">
     (function () {
       var t = localStorage.getItem("clauster-theme") || "dark";
       document.documentElement.setAttribute("data-bs-theme", t);
