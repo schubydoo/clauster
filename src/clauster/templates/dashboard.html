@@ -512,23 +512,30 @@
                   {# The reconnecting/lost banners are mutually exclusive: the state machine sets one
                      and clears the other on every transition, but gate the info banner on
                      `!lost` too so a missed clear (e.g. an Alpine reactivity edge, cf. #310/#315)
-                     can never stack BOTH banners at once — the warning always wins. #}
-                  <div class="alert alert-info py-1 px-2 mb-1 d-flex align-items-center"
+                     can never stack BOTH banners at once — the warning always wins.
+                     NB: keep `d-flex` OFF the x-show element. Tabler's `.d-flex` is
+                     `display:flex !important`, which overrides the inline `display:none` that
+                     x-show sets to hide — so a d-flex banner stays visible regardless of state
+                     (the false "Live tail dropped/disconnected" banners bug). Put the flex layout
+                     on an inner wrapper instead, like the connLost banner above does. #}
+                  <div class="alert alert-info py-1 px-2 mb-1"
                        role="status" aria-live="polite"
                        x-show="logs[i.project].reconnecting && !logs[i.project].lost" x-cloak>
-                    <span class="me-2">⏳ Live tail dropped — reconnecting…</span>
+                    <span>⏳ Live tail dropped — reconnecting…</span>
                   </div>
                   {# Liveness-aware copy: only claim the bridge "may have stopped" when the snapshot
                      says it isn't alive. A live-tail WebSocket can drop while the bridge keeps
                      running (an idle proxy reaping a quiet socket) — saying it died would falsely
                      alarm the operator, so word that case as a transient tail drop. The
                      running/starting test mirrors the reconnect liveness gate in openLogs. #}
-                  <div class="alert alert-warning py-1 px-2 mb-1 d-flex align-items-center"
+                  <div class="alert alert-warning py-1 px-2 mb-1"
                        role="alert"
                        x-show="logs[i.project].lost" x-cloak>
-                    <span class="me-2" x-show="!isRunning(i.project) && !isBusy(i.project)">⚠ Live tail disconnected — the bridge may have stopped.</span>
-                    <span class="me-2" x-show="isRunning(i.project) || isBusy(i.project)" x-cloak>⚠ Live tail disconnected — the bridge is still running; click Reconnect to resume the tail.</span>
-                    <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project)">Reconnect</button>
+                    <div class="d-flex align-items-center">
+                      <span class="me-2" x-show="!isRunning(i.project) && !isBusy(i.project)">⚠ Live tail disconnected — the bridge may have stopped.</span>
+                      <span class="me-2" x-show="isRunning(i.project) || isBusy(i.project)" x-cloak>⚠ Live tail disconnected — the bridge is still running; click Reconnect to resume the tail.</span>
+                      <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project)">Reconnect</button>
+                    </div>
                   </div>
                   {# bg-dark/text-white: terminal-style log view, intentionally dark in both
                      themes (a console reads as dark) — not a theming straggler to "fix". #}
