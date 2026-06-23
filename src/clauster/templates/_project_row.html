@@ -80,8 +80,8 @@
                       </p>
                       <!-- optional first prompt for Fire-and-forget -->
                       <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
-                        <label class="form-label small mb-1">First prompt <span class="text-secondary">(optional)</span></label>
-                        <input class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…" aria-label="First prompt for the session">
+                        <label class="form-label small mb-1" for="lprompt-{{ p.name }}">First prompt <span class="text-secondary">(optional)</span></label>
+                        <input id="lprompt-{{ p.name }}" class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…">
                       </div>
                       <!-- permissions — shown for EVERY mode; the key safety choice, and it
                            matters most for Fire-and-forget, which runs unattended. bypassPermissions
@@ -150,7 +150,7 @@
                       <button type="button" class="btn btn-primary w-100 mt-2"
                               :disabled="launching['{{ p.name }}']"
                               @click="launchRun('{{ p.name }}', lmode, lperm, lcloud, lprompt); lopen = false">
-                        <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="lperm"></span>
+                        <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="permLabel(lperm)"></span>
                       </button>
                     </div>
                   </div>

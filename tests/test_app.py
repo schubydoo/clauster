@@ -153,6 +153,17 @@ def test_session_url_scheme_guard_present(write_config):
     assert "^https?:" in page, "the sessionUrlOf http(s)-scheme guard is missing"
 
 
+def test_dashboard_friendly_labels_and_label_associations(write_config):
+    # Polish-2: no raw permission/filter enum tokens shown inline, and form controls are
+    # label-associated (a11y). No JS harness — guard the wiring by presence in the rendered page.
+    page = _client(write_config).get("/").text
+    assert 'x-text="permLabel(lperm)"' in page  # Run button shows a friendly permission label
+    assert 'x-text="filterLabel(f)"' in page  # Active-zone filter chips use friendly names
+    assert "permLabel(" in page  # the helper is wired (also used by the hosted row when enabled)
+    assert 'for="lprompt-' in page  # the "First prompt" input is label-associated
+    assert 'aria-labelledby="np-type-label"' in page  # New-project "Type" radio group is labelled
+
+
 def test_dashboard_log_ws_and_refresh_robustness(write_config):
     # Audit fixes (frontend, no JS unit harness — guard the wiring by presence):
     #  FIX 3 — the bridge-log tail AUTO-RECONNECTS a dropped-but-live socket (mirroring the hosted

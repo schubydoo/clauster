@@ -247,6 +247,20 @@ FIELD_CHOICE_LABELS: dict[str, dict[str, str]] = {
         "dontAsk": "Never prompt — deny unknowns",
         "bypassPermissions": "Skip all checks ⚠",
     },
+    "claude.resume_mode": {
+        "standard": "Standard (multi-session bridge)",
+        "pty": "True-resume (pty, single session)",
+    },
+    "instance_defaults.spawn_mode": {
+        "same-dir": "Same directory",
+        "worktree": "Git worktree",
+        "session": "Fresh session",
+    },
+    "usage.mode": {
+        "cost": "Cost ($)",
+        "tokens": "Tokens",
+        "off": "Off",
+    },
 }
 
 
