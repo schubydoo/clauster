@@ -17,7 +17,10 @@
               <svg class="ico text-secondary" style="flex:none" role="img" aria-label="Directory not yet trusted" x-cloak
                    x-show="trustState['{{ p.name }}'] !== 'trusted'"
                    title="Not yet trusted — you'll confirm trust when you launch a session here"><use href="#ic-trust"/></svg>
-              <span class="fw-bold text-truncate" style="font-size:1.02rem; max-width:16rem">{{ p.name }}</span>
+              {# DES-07: responsive name cap — clamp scales the truncation width with the viewport
+                 (narrow phone → ~10rem, wide desktop → 28rem) instead of a fixed 16rem; min-width:0
+                 lets text-truncate shrink inside the flex row. #}
+              <span class="fw-bold text-truncate" style="font-size:1.02rem; min-width:0; max-width:clamp(10rem, 40vw, 28rem)">{{ p.name }}</span>
               <!-- inline meta -->
               <span class="text-secondary small project-meta">
                 {% if p.is_git_repo %}<span title="This directory is a git repository"><svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Git</span>{% endif %}

@@ -137,6 +137,22 @@ def test_projects_show_more_toggle_appears_in_all_sorts(write_config):
     )
 
 
+def test_project_name_uses_responsive_width_cap(write_config):
+    # DES-07: the project name truncates at a viewport-relative width (clamp 10rem→28rem), not a
+    # fixed 16rem cap, so long names adapt to the screen. Guards against reverting to a fixed cap.
+    page = _client(write_config).get("/").text
+    assert "max-width:clamp(10rem, 40vw, 28rem)" in page
+
+
+def test_session_url_scheme_guard_present(write_config):
+    # FE-03: sessionUrlOf() must filter the session URL to http(s) before it's bound to :href in
+    # the Active list, so a non-http value can never reach the sink. No JS unit harness, so pin the
+    # guard by presence in the rendered inline script (mirrors test_dashboard_log_ws_and_refresh).
+    page = _client(write_config).get("/").text
+    assert "sessionUrlOf" in page
+    assert "^https?:" in page, "the sessionUrlOf http(s)-scheme guard is missing"
+
+
 def test_dashboard_log_ws_and_refresh_robustness(write_config):
     # Audit fixes (frontend, no JS unit harness — guard the wiring by presence):
     #  FIX 3 — the bridge-log tail AUTO-RECONNECTS a dropped-but-live socket (mirroring the hosted
