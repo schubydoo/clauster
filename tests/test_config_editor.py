@@ -85,6 +85,28 @@ def test_field_specs_carries_rich_ui_metadata() -> None:
     assert specs["instance_defaults.max_bridges"]["placeholder"]
 
 
+def test_field_specs_recap_limit_depends_on_recap_toggle() -> None:
+    # The recap size limit only applies when the recap toggle is on, so the editor greys it
+    # out when `claude.resume_recap` is off (same FIELD_DEPENDS mechanism as the metrics block).
+    specs = field_specs()
+    assert specs["claude.resume_recap_max_chars"]["depends_on"] == "claude.resume_recap"
+
+
+def test_field_specs_permission_mode_carries_friendly_choice_labels() -> None:
+    # The config dropdown shows the SAME friendly wording as the "Run Claude here" launch
+    # dropdown (the saved value is still the raw enum token), instead of bare tokens.
+    specs = field_specs()
+    perm = specs["instance_defaults.permission_mode"]
+    labels = perm["choice_labels"]
+    assert labels is not None
+    # Every enum value has a human label, keyed by the raw value that gets saved.
+    assert set(labels) == set(perm["choices"])
+    assert labels["default"] == "Ask each time (default)"
+    assert labels["dontAsk"] == "Never prompt — deny unknowns"
+    # A field with no custom label map carries None, so the template falls back to the value.
+    assert specs["instance_defaults.spawn_mode"]["choice_labels"] is None
+
+
 def test_classify_and_constraints_cover_edge_annotations() -> None:
     import types as _types
 

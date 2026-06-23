@@ -122,7 +122,7 @@ claude:
 <!-- BEGIN GEN: instance_defaults -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `spawn_mode` | `same-dir` \| `worktree` \| `session` | `same-dir` | Default spawn mode for new bridges. `worktree` requires a git repo. |
+| `spawn_mode` | `same-dir` \| `worktree` \| `session` | `same-dir` | Default spawn mode for new **bridge** sessions (the standard / pty launch flow) — where the session's working directory lives. `worktree` requires a git repo; `session` runs in a fresh sandbox. Bridge launches only — hosted (browser) sessions ignore this. |
 | `permission_mode` | `default` \| `plan` \| `acceptEdits` \| `auto` \| `dontAsk` \| `bypassPermissions` | `default` | Default permission mode for new bridges. |
 | `session_name_prefix` | str \| null | `null` | Optional prefix for auto-generated Remote Control session names (maps to `claude remote-control --remote-control-session-name-prefix`); applies to the standard multi-session bridge only. Unset → claude's default (the hostname). |
 | `capacity` | int | `32` | Max concurrent sessions a single standard bridge runs in `same-dir`/`worktree` spawn mode (≥1); passed to `claude remote-control --capacity`. Ignored for `session` spawn mode and the pty bridge (both single-session). |
@@ -254,7 +254,7 @@ runs.
 <!-- BEGIN GEN: metrics -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | Show the metrics line. When `false`, hides it **and** skips both the `/api/projects/{name}/metrics` fetch and the server-side sample. |
+| `enabled` | bool | `true` | Show the per-session resource metrics line — live CPU, memory, and disk I/O for each running bridge. When `false`, the line is hidden and Clauster skips the work behind it entirely: no `/api/projects/{name}/metrics` polling from the browser and no server-side resource sampling. |
 | `normalize_cpu` | bool | `false` | Divide summed CPU% by the host core count (0–100% of the machine) instead of the raw across-cores figure (which can exceed 100%). |
 | `show_disk` | bool | `true` | Toggle the disk read/write rate portion. |
 | `sample_interval_seconds` | float | `0.15` | Two-snapshot sampling window (>0, ≤2.0). Longer is steadier but each fetch blocks a worker thread for that long. |

@@ -119,7 +119,10 @@ class InstanceDefaults(BaseModel):
 
     spawn_mode: SpawnMode = Field(
         default="same-dir",
-        description="Default spawn mode for new bridges. `worktree` requires a git repo.",
+        description="Default spawn mode for new **bridge** sessions (the standard / pty launch "
+        "flow) — where the session's working directory lives. `worktree` requires a git repo; "
+        "`session` runs in a fresh sandbox. Bridge launches only — hosted (browser) sessions "
+        "ignore this.",
     )
     permission_mode: PermissionMode = Field(
         default="default", description="Default permission mode for new bridges."
@@ -489,8 +492,10 @@ class MetricsConfig(BaseModel):
 
     enabled: bool = Field(
         default=True,
-        description="Show the metrics line. When `false`, hides it **and** skips both "
-        "the `/api/projects/{name}/metrics` fetch and the server-side sample.",
+        description="Show the per-session resource metrics line — live CPU, memory, and disk "
+        "I/O for each running bridge. When `false`, the line is hidden and Clauster skips the "
+        "work behind it entirely: no `/api/projects/{name}/metrics` polling from the browser "
+        "and no server-side resource sampling.",
     )
     normalize_cpu: bool = Field(
         default=False,

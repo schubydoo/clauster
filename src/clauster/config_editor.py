@@ -227,11 +227,26 @@ FIELD_PLACEHOLDERS: dict[str, str] = {
 
 # Child field -> master switch: the child is disabled in the UI when the master is off.
 FIELD_DEPENDS: dict[str, str] = {
+    "claude.resume_recap_max_chars": "claude.resume_recap",
     "metrics.normalize_cpu": "metrics.enabled",
     "metrics.show_disk": "metrics.enabled",
     "metrics.sample_interval_seconds": "metrics.enabled",
     "metrics.poll_seconds": "metrics.enabled",
     "notifications.notify_on_crash": "notifications.enabled",
+}
+
+# Human labels for enum option VALUES (the saved value is unchanged). Lets the editor show the
+# same friendly wording as the "Run Claude here" launch dropdown instead of bare enum tokens.
+# Keyed by field path -> {value: label}.
+FIELD_CHOICE_LABELS: dict[str, dict[str, str]] = {
+    "instance_defaults.permission_mode": {
+        "default": "Ask each time (default)",
+        "plan": "Plan only (read-only)",
+        "acceptEdits": "Auto-accept edits",
+        "auto": "Auto-approve safe",
+        "dontAsk": "Never prompt — deny unknowns",
+        "bypassPermissions": "Skip all checks ⚠",
+    },
 }
 
 
@@ -270,6 +285,7 @@ def field_specs() -> dict[str, dict[str, Any]]:
             "label": FIELD_LABELS.get(path, _humanize(key)),
             "type": kind,
             "choices": choices,
+            "choice_labels": FIELD_CHOICE_LABELS.get(path),
             "description": info.description or "",
             "unit": FIELD_UNITS.get(path),
             "placeholder": FIELD_PLACEHOLDERS.get(path),
