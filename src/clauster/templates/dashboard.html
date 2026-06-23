@@ -619,7 +619,7 @@
           <input type="search" class="form-control form-control-sm proj-search" placeholder="Search projects…"
                  x-model="projectFilter" aria-label="Search projects">
           <button type="button" class="btn btn-sm btn-ghost-secondary" x-cloak
-                  x-show="PROJECT_NAMES.length > 6 && !projectFilter.trim() && projectSort === 'name'"
+                  x-show="PROJECT_NAMES.length > 6 && !projectFilter.trim()"
                   @click="showAllProjects = !showAllProjects"
                   x-text="showAllProjects ? 'Show fewer' : ('Show all ' + PROJECT_NAMES.length)"></button>
           <button type="button" class="btn btn-sm btn-primary" @click="toggleNewProject()">

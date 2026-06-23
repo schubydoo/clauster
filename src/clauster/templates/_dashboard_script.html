@@ -350,9 +350,16 @@
       projectVisible(name, idx) {
         if ((this.projectFilter || "").trim()) return this.matchesProject(name);
         if (this.runningCountFor(name) > 0) return true;
-        // A non-name sort implies "show the whole ordered list" — the 6-row cap only
-        // governs the default name order (where idx is the stable Jinja position).
-        if (this.projectSort !== "name") return true;
+        // The 6-row cap + Show-all toggle apply in EVERY sort. In name order the stable Jinja
+        // `idx` is the row's position. In a non-name sort the DOM order stays A–Z (idx is
+        // meaningless) and the visual order is the CSS-`order` rank, so cap by that rank instead
+        // — otherwise the cap would keep the first 6 *alphabetical* rows, not the first 6 by the
+        // chosen sort. While the ranks are still loading (async sortmeta) don't cap, so the list
+        // never flashes empty mid-fetch.
+        if (this.projectSort !== "name") {
+          if (!Object.keys(this.projectRanks || {}).length) return true;
+          return this.showAllProjects || this.projectOrderRank(name) < 6;
+        }
         return this.showAllProjects || idx < 6;
       },
       // Zone 1 sort (FE-2) — opt-in, explicit-only. Default 'name' keeps the current
@@ -362,6 +369,9 @@
       // the latest session history (a project you just finished sorts to the top).
       // Degrades to name order if the keys never load.
       async loadSortMeta() {
+        // Clear ranks up front so projectVisible's loading guard shows the FULL list (not the
+        // previous sort's capped six) for the duration of the async fetch; recompute refills them.
+        this.projectRanks = {};
         try {
           const res = await fetch(ROOT + "/api/projects/sortmeta");
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
