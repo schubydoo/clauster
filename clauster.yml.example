@@ -155,6 +155,7 @@ usage:
 #   enabled: false
 #   urls: []                       # e.g. ["https://example.com/hooks/clauster"]
 #   timeout_seconds: 10.0          # per-POST timeout (>0)
+#   block_private_targets: false   # opt-in SSRF guard: skip private/loopback/link-local IP-literal targets (default false; preserves LAN receivers)
 #   events:
 #     # Bridge events (#371). Absent key = ENABLED (historical default).
 #     spawn: true

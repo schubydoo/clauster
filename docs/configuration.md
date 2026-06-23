@@ -321,6 +321,7 @@ session or **reattached** on restart emits no `spawn`/`ready`.
 | `enabled` | bool | `false` | Master switch for outbound webhooks. |
 | `urls` | list[str] | `[]` | HTTP(S) endpoint URLs that receive a JSON POST per lifecycle event. Only `http`/`https` schemes are accepted; others are rejected at startup. A secret embedded in a URL is the operator's responsibility to keep out of shared configs. |
 | `timeout_seconds` | float | `10.0` | Per-request POST timeout in seconds (>0). A slow endpoint can't stall a lifecycle transition beyond this. |
+| `block_private_targets` | bool | `false` | Opt-in SSRF guard. When True, skip any webhook URL whose host is an internal/non-routable IP literal — loopback, link-local (incl. the 169.254.169.254 metadata IP), RFC1918 private, unspecified (0.0.0.0/::), reserved, multicast, IPv6 ULA (fc00::/7), and CGNAT (100.64/10) — including the non-canonical IPv4 encodings the resolver still honors (decimal-int, hex, short 127.1). Default False preserves the LAN-receiver use case. DNS hostnames are NOT resolved (rebinding) and exotic IPv6 embeddings (NAT64, IPv4-compatible) are not normalized — out of scope for this literal-IP seam. |
 <!-- END GEN: webhooks -->
 
 ```yaml

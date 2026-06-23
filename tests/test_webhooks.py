@@ -90,6 +90,102 @@ def test_enabled_with_good_url_is_active_and_filters_bad():
     assert em._urls == ["https://ok.test/h"]  # the bad one was dropped
 
 
+# ----- SSRF deny-list (block_private_targets, #474) ------------------------
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "10.0.0.1",
+        "172.16.0.1",
+        "192.168.1.1",
+        "169.254.169.254",  # cloud metadata
+        "[::1]",
+        "[fc00::1]",  # IPv6 ULA
+        "[::ffff:169.254.169.254]",  # IPv4-mapped IPv6 must not bypass the check
+        "2130706433",  # decimal-integer 127.0.0.1 (ipaddress rejects; getaddrinfo dials)
+        "0x7f000001",  # hex 127.0.0.1
+        "127.1",  # short-form 127.0.0.1
+        "2852039166",  # decimal-integer 169.254.169.254 (metadata)
+        "0.0.0.0",  # unspecified -> localhost on Linux
+        "[::]",  # IPv6 unspecified
+        "100.64.0.1",  # CGNAT — caught by the imported _EXTRA_PRIVATE_NETS
+        "198.18.0.1",  # RFC2544 benchmarking — extra-nets only (is_private False <3.11)
+        "192.0.0.1",  # RFC6890 IETF protocol — extra-nets only
+    ],
+)
+def test_block_private_targets_filters_private_literals(host):
+    em = WebhookEmitter(_cfg(enabled=True, block_private_targets=True, urls=[f"http://{host}/h"]))
+    assert em._urls == []  # the private/loopback/link-local target was dropped
+    assert em.active is False
+
+
+def test_block_private_targets_off_keeps_lan_receiver():
+    # Default OFF: behaviour is byte-identical — a LAN/private receiver stays usable.
+    em = WebhookEmitter(_cfg(enabled=True, urls=["http://10.0.0.1:9000/h"]))
+    assert em.active is True
+    assert em._urls == ["http://10.0.0.1:9000/h"]
+
+
+def test_block_private_targets_keeps_public_and_hostnames():
+    # ON: public IPs and DNS hostnames pass; only the private literal is dropped.
+    em = WebhookEmitter(
+        _cfg(
+            enabled=True,
+            block_private_targets=True,
+            urls=["http://10.0.0.1/h", "https://example.com/h", "http://internal.lan/h"],
+        )
+    )
+    assert em.active is True
+    assert em._urls == ["https://example.com/h", "http://internal.lan/h"]
+
+
+def test_is_private_host_predicate():
+    from clauster.webhooks import _is_private_host
+
+    blocked = (
+        "127.0.0.1",
+        "10.0.0.1",
+        "192.168.0.1",
+        "169.254.169.254",
+        "::1",
+        "fc00::1",
+        "2130706433",
+        "0x7f000001",
+        "127.1",
+        "2852039166",  # non-canonical IPv4 forms
+        "0.0.0.0",
+        "::",  # unspecified
+        "100.64.0.1",
+        "198.18.0.1",
+        "192.0.0.1",  # CGNAT + benchmarking + IETF-protocol (extra-nets ranges)
+    )
+    for h in blocked:
+        assert _is_private_host(h) is True, h
+    for h in ("8.8.8.8", "example.com", "internal.lan", "1.1.1.1", "12.34.56.78"):
+        assert _is_private_host(h) is False, h
+
+
+def test_target_allowed_rejects_malformed_when_blocking():
+    # A URL whose authority can't be parsed (bad IPv6) is rejected when the guard is on,
+    # and allowed when off (no parse attempted). Covers the urlparse-raises branch.
+    from clauster.webhooks import _target_allowed
+
+    assert _target_allowed("http://[::1", block_private=True) is False
+    assert _target_allowed("http://[::1", block_private=False) is True
+
+
+def test_block_private_targets_dns_limitation():
+    # DOCUMENTED limitation (see block_private_targets docstring): a DNS hostname is not
+    # resolved, so e.g. `localhost` (-> 127.0.0.1) passes the literal-IP guard. Closing
+    # the DNS class needs the clone guard's resolve-then-check model. Pinned so the
+    # behaviour is explicit, not accidental.
+    from clauster.webhooks import _is_private_host
+
+    assert _is_private_host("localhost") is False
+
+
 def test_wants_respects_events_map():
     em = WebhookEmitter(_cfg(enabled=True, urls=["https://ok.test/h"], events={"crash": False}))
     assert em.wants("ready") is True  # absent key defaults to enabled
