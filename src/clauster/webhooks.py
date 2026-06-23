@@ -21,12 +21,15 @@ rather than failing a spawn.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import socket
 from urllib.parse import urlparse
 
 import httpx
 
 from .config import WebhooksConfig
+from .provisioning import _EXTRA_PRIVATE_NETS
 
 _log = logging.getLogger("clauster.webhooks")
 
@@ -43,6 +46,64 @@ def _valid_webhook_url(url: object) -> bool:
     except ValueError:
         return False
     return parsed.scheme in ("http", "https") and bool(host)
+
+
+def _is_private_host(host: str) -> bool:
+    """Whether ``host`` is an internal / non-routable IP *literal* (any encoding).
+
+    Classifies the same internal ranges as the clone SSRF guard
+    (``provisioning._ip_blocked``): loopback, link-local (incl. the 169.254.169.254
+    metadata IP), RFC1918 private, unspecified (``0.0.0.0`` / ``::``), reserved,
+    multicast, IPv6 ULA, and the carrier/benchmark nets imported from
+    ``provisioning._EXTRA_PRIVATE_NETS`` (CGNAT ``100.64/10``) — shared so the two SSRF
+    guards can't drift. An IPv4-mapped IPv6 literal is normalized to its IPv4 form.
+
+    It also catches the *non-canonical* IPv4 encodings ``getaddrinfo`` (and so httpx)
+    still dials but ``ipaddress`` rejects — decimal-integer (``2130706433``), hex
+    (``0x7f000001``), short (``127.1``) — via ``socket.inet_aton``, so they can't slip
+    through to ``127.0.0.1`` / the metadata IP.
+
+    A genuine DNS hostname is not an IP literal and returns False. DNS names (rebinding)
+    and exotic IPv6 embeddings (NAT64, IPv4-compatible) are NOT resolved/normalized — out
+    of scope for this literal-IP seam (see :attr:`WebhooksConfig.block_private_targets`).
+    """
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Non-canonical IPv4 the resolver still honors (decimal-int / hex / octal / short
+        # form). ``ipaddress`` rejects these, but glibc/getaddrinfo — which httpx dials —
+        # accepts them, so classify via the same inet_aton or they bypass.
+        try:
+            ip = ipaddress.ip_address(socket.inet_aton(host))
+        except OSError:
+            return False  # genuine non-IP (a DNS hostname)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_unspecified
+        or ip.is_reserved
+        or ip.is_multicast
+        or any(ip in net for net in _EXTRA_PRIVATE_NETS)
+    )
+
+
+def _target_allowed(url: str, *, block_private: bool) -> bool:
+    """Whether ``url`` survives the opt-in SSRF guard.
+
+    With ``block_private`` off this is always True (byte-identical to the historical
+    behaviour). With it on, a URL whose host is a private/loopback/link-local IP literal
+    is rejected; public IPs and DNS hostnames pass.
+    """
+    if not block_private:
+        return True
+    try:
+        host = urlparse(url).hostname
+    except ValueError:
+        return False
+    return not (host and _is_private_host(host))
 
 
 class WebhookEmitter:
@@ -63,11 +124,18 @@ class WebhookEmitter:
             _log.warning("webhooks enabled but no urls configured; emitting nothing")
             return
         for url in config.urls:
-            if _valid_webhook_url(url):
-                self._urls.append(url)
-            else:
+            if not _valid_webhook_url(url):
                 # Don't log the URL itself — it can carry a token/secret.
                 _log.warning("webhooks: rejected a non-http(s)/malformed url (redacted); skipping")
+            elif not _target_allowed(url, block_private=config.block_private_targets):
+                # SSRF guard (block_private_targets): a private/loopback/link-local IP
+                # literal target is dropped. Redact — the URL can carry a secret.
+                _log.warning(
+                    "webhooks: rejected a private/loopback/link-local target "
+                    "(redacted, block_private_targets on); skipping"
+                )
+            else:
+                self._urls.append(url)
         if not self._urls:
             _log.warning("webhooks enabled but no usable urls; emitting nothing")
 
