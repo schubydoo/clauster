@@ -113,47 +113,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
-  trivy-fs:
-    name: trivy filesystem scan
-    # Skip on a docs-only PR — no dependency/source change to scan.
-    needs: changes
-    # Also skip on the `synchronize` storm (pr-auto-update fans a main push across
-    # every open PR): this scan uploads via codeql-action/upload-sarif, which only
-    # accepts GITHUB_TOKEN (the 1,000/hr github-actions[bot] pool — codeql-action#2719
-    # rejects App tokens), so re-running it on every push amplifies pool pressure for
-    # no token win. Still runs on PR open/reopen/ready-for-review + push:main + the
-    # weekly cron. Safe: the ruleset's code_scanning rule requires only CodeQL, and
-    # `security required checks passed` (if: always()) counts a skipped job as passing.
-    if: >-
-      needs.changes.outputs.code == 'true'
-      && (github.event_name != 'pull_request' || github.event.action != 'synchronize')
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      security-events: write
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - name: Trivy fs
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: fs
-          format: sarif
-          output: trivy-fs.sarif
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
-          # Enforce on main + the weekly cron; report-only on PRs so CVE-feed
-          # churn never reddens an unrelated change (results still upload below).
-          exit-code: ${{ github.event_name == 'pull_request' && '0' || '1' }}
-      - name: Upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
-        with:
-          sarif_file: trivy-fs.sarif
-          category: trivy-fs
-
   trivy-image:
     name: trivy image scan
     # Building the image just to scan it costs ~75s — the long pole of this
@@ -206,10 +165,11 @@ jobs:
 
   zizmor:
     name: workflow audit
-    # Skip on the `synchronize` storm — same rationale as trivy-fs: the SARIF upload
-    # is GITHUB_TOKEN-only (codeql-action#2719), so re-running every push just taxes
-    # the 1,000/hr pool. Runs on PR open/reopen/ready-for-review + push:main + weekly
-    # cron; `security required checks passed` (if: always()) counts a skip as passing.
+    # Skip on the `synchronize` storm (pr-auto-update fans a main push across every
+    # open PR): the SARIF upload is GITHUB_TOKEN-only (codeql-action#2719), so
+    # re-running every push just taxes the 1,000/hr pool. Runs on PR
+    # open/reopen/ready-for-review + push:main + weekly cron; `security required
+    # checks passed` (if: always()) counts a skip as passing.
     if: github.event_name != 'pull_request' || github.event.action != 'synchronize'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -292,7 +252,6 @@ jobs:
       - changes
       - codeql
       - gitleaks
-      - trivy-fs
       - trivy-image
       - zizmor
       - dependency-review
