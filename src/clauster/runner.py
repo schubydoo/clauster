@@ -1574,6 +1574,70 @@ class SessionRunner:
             keeper_pid=None,
         )
 
+    def _reattach_pty_from_sidecar(self, name: str, saved: dict) -> RemoteControlInstance | None:
+        """Reattach a self-spawned pty bridge from its keeper sidecar after a restart.
+
+        A pty (flag-form ``claude --remote-control``) bridge writes no Anthropic
+        ``bridge-pointer.json``, so the pointer-walk in :meth:`rediscover` can't see
+        it — but its keeper is detached and outlives the restart, recording the
+        keeper/bridge pids in the sidecar. Without this, rediscover falls through to
+        ``_stopped_from_persisted`` and the card reads STOPPED while a live keeper
+        leaks: uncontrollable (Stop/observe gone), and a Resume would spawn a *second*
+        keeper. Glob the project's sidecars newest-first and, when one names a still-
+        live keeper (``is_keeper_process`` — cmdline-gated against PID reuse) holding a
+        ready, live bridge (pid + proc-start matched), rebuild it as a managed RUNNING
+        instance so stop()/poll_once own it again.
+
+        Returns ``None`` when nothing is reattachable (no persisted record, not pty, or
+        no live keeper) — rediscover then resurrects the STOPPED card as before. Only a
+        sidecar in the ``"ready"`` state reattaches; a bridge still mid-startup falls
+        back to STOPPED (the orphan-keeper sweep can reap a genuinely stuck one).
+        """
+        if not saved:
+            return None
+        spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
+        if resume_mode != "pty":
+            return None
+        for sidecar in sorted(self._log_dir.glob(f"{name}-*.keeper.json"), reverse=True):
+            info = self._read_sidecar(sidecar)
+            if not info or info.get("state") != "ready":
+                continue
+            keeper_pid = info.get("keeper_pid")
+            bridge_pid = info.get("bridge_pid")
+            if not (
+                isinstance(keeper_pid, int)
+                and not isinstance(keeper_pid, bool)
+                and isinstance(bridge_pid, int)
+                and not isinstance(bridge_pid, bool)
+            ):
+                continue
+            ps = info.get("bridge_proc_start")
+            bridge_proc_start = (
+                float(ps) if isinstance(ps, (int, float)) and not isinstance(ps, bool) else None
+            )
+            # PID-reuse defense (mirrors _recover_keeper_pid): the keeper must still be
+            # a keeper by cmdline, AND the bridge must match pid + proc-start — so a
+            # recycled pid can never reattach an unrelated process tree.
+            if not procutil.is_keeper_process(keeper_pid):
+                continue
+            if not procutil.is_live_bridge(bridge_pid, bridge_proc_start):
+                continue
+            return RemoteControlInstance(
+                project=name,
+                label=saved.get("label") or name,
+                spawn_mode=spawn_mode,
+                permission_mode=permission_mode,
+                resume_mode=resume_mode,
+                status=InstanceStatus.RUNNING,
+                intentional_stop=False,
+                keeper_pid=keeper_pid,
+                bridge_pid=bridge_pid,
+                bridge_proc_start=bridge_proc_start,
+                starter_session_id=info.get("session_id") or None,
+                url=info.get("connect_url") or None,
+            )
+        return None
+
     async def rediscover(self) -> None:
         """Re-detect bridges after a restart: reattach live ones, resurrect dead ones.
 
@@ -1588,8 +1652,19 @@ class SessionRunner:
                 continue
             ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
             if ptr is None or not await asyncio.to_thread(pointers.is_live, ptr):
-                stopped = self._stopped_from_persisted(proj.name)
-                if stopped is not None:
+                # A pty (flag-form) bridge writes no Anthropic pointer, yet its
+                # detached keeper outlives the restart. Reattach it from the keeper
+                # sidecar so a live keeper is re-managed (Stop/observe restored)
+                # rather than leaking behind a STOPPED card; fall through to the
+                # STOPPED resurrection when no live keeper remains.
+                reattached = await asyncio.to_thread(
+                    self._reattach_pty_from_sidecar,
+                    proj.name,
+                    self._persisted.get(proj.name, {}),
+                )
+                if reattached is not None:
+                    self._instances[proj.name] = reattached
+                elif (stopped := self._stopped_from_persisted(proj.name)) is not None:
                     self._instances[proj.name] = stopped
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge
