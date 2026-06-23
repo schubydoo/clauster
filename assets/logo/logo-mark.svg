@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="clauster">
+  <title>clauster</title>
+  <desc>A cloister wall enclosing four arched cells, one lit green — a cluster of sessions.</desc>
+  <path fill="#517299" fill-rule="evenodd" d="M19 9H45A10 10 0 0 1 55 19V45A10 10 0 0 1 45 55H19A10 10 0 0 1 9 45V19A10 10 0 0 1 19 9Z M17 31V24A6.5 6.5 0 0 1 30 24V31Z M34 31V24A6.5 6.5 0 0 1 47 24V31Z M17 48V41A6.5 6.5 0 0 1 30 41V48Z"/>
+  <path fill="#00FF41" d="M34 48V41A6.5 6.5 0 0 1 47 41V48Z"/>
+</svg>

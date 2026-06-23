@@ -13,6 +13,13 @@
   </script>
   <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg?v={{ asset_version }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css?v={{ asset_version }}">
+  <style>
+    /* Brand lockup swaps with the theme; defaults to the white (dark-theme) logo
+       so an unset/unknown data-bs-theme shows one logo, never both. */
+    .brand-black { display: none; }
+    [data-bs-theme="light"] .brand-white { display: none; }
+    [data-bs-theme="light"] .brand-black { display: inline; }
+  </style>
 </head>
 <body class="d-flex flex-column">
   {% include "_tabler_sprite.html" %}
@@ -26,7 +33,10 @@
   <div class="page page-center">
     <div class="container container-tight py-4">
       <div class="text-center mb-4">
-        <span class="navbar-brand navbar-brand-autodark fs-1 fw-bold">Clauster</span>
+        <img src="{{ request.scope.root_path }}/static/logo-white-accent.svg?v={{ asset_version }}"
+             class="brand-white" height="52" alt="Clauster">
+        <img src="{{ request.scope.root_path }}/static/logo-black-accent.svg?v={{ asset_version }}"
+             class="brand-black" height="52" alt="Clauster">
       </div>
       <!-- CSRF is enforced centrally: the auth guard middleware (app.py) requires a
            trusted Origin/Referer on every unsafe method, including this POST. No
