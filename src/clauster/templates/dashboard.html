@@ -337,12 +337,12 @@
 <div class="page" x-data="dashboard()" x-init="init()">
   <header class="navbar navbar-expand-md sticky-top d-print-none">
     <div class="container-xl">
-      <span class="navbar-brand mb-0 d-inline-flex align-items-center">
-        <img src="{{ request.scope.root_path }}/static/logo-white.svg?v={{ asset_version }}"
-             class="brand-white" height="36" alt="Clauster">
-        <img src="{{ request.scope.root_path }}/static/logo-black.svg?v={{ asset_version }}"
-             class="brand-black" height="36" alt="Clauster">
-        <span class="text-secondary fs-5 fw-normal ms-2">v{{ version }}</span></span>
+      <span class="navbar-brand d-inline-flex align-items-center mb-0">
+        <img src="{{ request.scope.root_path }}/static/logo-white-accent.svg?v={{ asset_version }}"
+             class="brand-white" style="height:40px;width:auto" alt="Clauster">
+        <img src="{{ request.scope.root_path }}/static/logo-black-accent.svg?v={{ asset_version }}"
+             class="brand-black" style="height:40px;width:auto" alt="Clauster"></span>
+      <span class="text-secondary fs-5 fw-normal">v{{ version }}</span>
       <span class="text-secondary small d-none d-lg-inline ms-2 text-truncate">{{ projects_root }}</span>
       <div class="navbar-nav flex-row ms-auto align-items-center" style="gap:.5rem">
         <!-- Readiness promoted to a header pill: it gates whether anything will start,
