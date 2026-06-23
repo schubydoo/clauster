@@ -56,6 +56,7 @@ from .models import (
 from .notify import Notifier
 from .recap import ensure_recap_hook_installed
 from .trust import ensure_remote_control_enabled, is_trusted, trust_directory
+from .usage import ProjectUsage, aggregate_project_usage_cached
 from .webhooks import WebhookEmitter
 
 _log = logging.getLogger("clauster.runner")
@@ -181,10 +182,20 @@ class SessionRunner:
         self._recap_hook_ensured = False
         # ~/.claude/settings.json sits beside the ~/.claude.json we honor for trust.
         self._settings_json = self._claude_json.parent / ".claude" / "settings.json"
+        # ~/.claude/projects holds the per-session transcripts the cost/token rollup
+        # reads (#363 terminal-event snapshot). Anchored to the same claude home as
+        # the trust file, so a HOME-isolated test points it at its tmp dir, not the
+        # host's real transcripts.
+        self._claude_projects_dir = self._claude_json.parent / ".claude" / "projects"
         # Persistence of label / intentional_stop / spawn_mode (D14), now DB-backed
         # (#362) behind the same load()/save() dict contract the JSON store had.
         self._persistence = persistence or Persistence(config.state_dir, config.database_url)
         self._state = self._persistence.state_store()
+        # Append-only session lifecycle / event history (#363). Records spawn/ready/
+        # end/crash transitions for the Projects-zone "last used" sort (#298) and the
+        # pty resume picker (#303). Best-effort and fail-closed — a lost history row
+        # never affects a bridge's lifecycle.
+        self._history = self._persistence.session_history_store()
         self._persisted: dict[str, dict] = self._state.load()
         self._last_saved: dict[str, dict] | None = None
         # Serialize concurrent persists (startup-watch / stop / poll loop can interleave
@@ -613,7 +624,7 @@ class SessionRunner:
         )
         # One spawn-event chokepoint for both modes: the instance is registered, STARTING,
         # and its resume_mode is now resolved. A "ready" follows iff it reaches RUNNING.
-        self._emit_webhook("spawn", instance)
+        self._emit_lifecycle("spawn", instance)
         if instance.resume_mode == "pty":
             return await self._spawn_pty(instance, proj, name, log_path, permission_mode, resume)
 
@@ -1132,7 +1143,7 @@ class SessionRunner:
         else:
             instance.status = InstanceStatus.STARTING  # let the startup-watch promote it
         if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
-            self._emit_webhook("ready", instance)  # only on the transition, not every poll
+            self._emit_lifecycle("ready", instance)  # only on the transition, not every poll
 
     async def _spawn_pty(
         self,
@@ -1241,7 +1252,7 @@ class SessionRunner:
             # start" on a bridge that is simply still coming up.
             instance.status = InstanceStatus.STARTING
         if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
-            self._emit_webhook("ready", instance)  # only on the transition, not every poll
+            self._emit_lifecycle("ready", instance)  # only on the transition, not every poll
 
     async def _post_spawn_enrich(
         self, instance: RemoteControlInstance, project_path: Path
@@ -1414,7 +1425,7 @@ class SessionRunner:
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
             self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
-            self._emit_webhook("stop", instance)
+            self._emit_lifecycle("stop", instance)
             return instance
 
         # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
@@ -1428,7 +1439,7 @@ class SessionRunner:
             await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
         instance.status = InstanceStatus.STOPPED
         self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
-        self._emit_webhook("stop", instance)
+        self._emit_lifecycle("stop", instance)
         return instance
 
     async def forget(self, name: str) -> None:
@@ -1767,7 +1778,7 @@ class SessionRunner:
                     self._crash_counts.get(instance.project, 0) + 1
                 )
                 self._notify_crash(instance)
-                self._emit_webhook("crash", instance)
+                self._emit_lifecycle("crash", instance)
             if alive:
                 live_projects.add(instance.project)
                 # Keep the public bridge log redacted-current as the bridge writes.
@@ -1887,6 +1898,131 @@ class SessionRunner:
                 )
                 self._session_ref_secret = secrets.token_bytes(32)
         return self._session_ref_secret
+
+    def _emit_lifecycle(self, event: str, instance: RemoteControlInstance) -> None:
+        """Single chokepoint for a lifecycle transition: record history + fire webhook.
+
+        ``event`` is one of ``spawn`` / ``ready`` / ``stop`` / ``crash``. Both sinks
+        are best-effort and off the loop, so neither can affect the bridge lifecycle:
+        the history append is fail-closed (a lost row is logged, never raised) and the
+        webhook is fail-open (a broken endpoint is swallowed).
+        """
+        self._record_event(event, instance)
+        self._emit_webhook(event, instance)
+
+    # Maps the internal webhook event name to the persisted history ``kind``.
+    _HISTORY_KIND = {"spawn": "spawned", "ready": "ready", "stop": "ended", "crash": "crashed"}
+
+    def _record_event(self, event: str, instance: RemoteControlInstance) -> None:
+        """Append a session-history row for ``event`` off-loop (#363; best-effort).
+
+        Snapshots the loop-owned instance fields *here* (the worker thread must never
+        read ``self._instances``), then does the transcript parse + DB write in a
+        background task. A terminal (``stop`` / ``crash``) event carries the project's
+        cumulative end-of-session cost/token snapshot from :mod:`clauster.usage`;
+        non-terminal rows carry no cost. Any failure is swallowed by the store — a
+        lost history row never affects a spawn or stop.
+
+        Called from a lifecycle path that is normally on the event loop. If invoked
+        without a running loop (a synchronous status-apply call), it falls back to a
+        direct best-effort synchronous append so the row is still recorded.
+
+        Fail-closed end-to-end: the cheap in-memory prologue, the off-loop cost
+        snapshot, and the append are all logged-and-swallowed, on both the async and
+        the synchronous path, so a history hiccup never raises into the spawn/stop/
+        crash caller. The cost-snapshot's project-path lookup + transcript read both
+        live inside ``_usage_snapshot`` so a filesystem hiccup degrades the *cost* to
+        null without dropping the row itself — the terminal row is always recorded.
+        """
+        kind = self._HISTORY_KIND.get(event)
+        if kind is None:  # unknown event name — never persist a bogus kind
+            return
+
+        def _append(
+            project: str, mode: str, session_ref: str | None, usage: ProjectUsage | None
+        ) -> None:
+            totals = usage.totals if usage is not None else None
+            self._history.append(
+                project_name=project,
+                mode=mode,
+                kind=kind,
+                session_ref=session_ref,
+                cost_usd=usage.cost_usd() if usage is not None else None,
+                input_tokens=totals.input if totals is not None else None,
+                output_tokens=totals.output if totals is not None else None,
+                cache_creation_tokens=totals.cache_creation if totals is not None else None,
+                cache_read_tokens=totals.cache_read if totals is not None else None,
+            )
+
+        try:
+            # "hosted" sessions run on the claustrum channel; otherwise the resume axis
+            # (standard remote-control vs the pty keeper) is the mode worth recording.
+            # Fall back to "standard" if the resume axis is somehow unresolved: ``mode``
+            # is NOT NULL, so a None here would make the INSERT drop the row entirely.
+            mode = (
+                "hosted" if instance.channel == "hosted" else (instance.resume_mode or "standard")
+            )
+            project = instance.project
+            # Snapshot the loop-owned values now; the off-loop task only touches locals.
+            session_ref = _hash_session_ref(instance.starter_session_id, self._session_ref_key())
+            terminal = kind in ("ended", "crashed")
+        except Exception as exc:  # noqa: BLE001 — history must never break the lifecycle
+            _log.warning(
+                "could not prepare session event (%s/%s): %s", instance.project, kind, exc
+            )
+            return
+
+        def _usage_snapshot() -> ProjectUsage | None:
+            """Cost/token rollup for a terminal row, or None (non-terminal / unreadable).
+
+            The project-path lookup (``_project_path`` walks the filesystem) and the
+            transcript read both live here, so a discovery / transcript I/O error
+            degrades the *cost* to null — the terminal row is still written by the
+            caller. This is the documented "an unreadable transcript must not drop the
+            terminal row" invariant: only the cost is best-effort, never the row.
+            """
+            if not terminal:
+                return None
+            try:
+                project_path = self._project_path(project)
+                if project_path is None:
+                    return None
+                return aggregate_project_usage_cached(
+                    project_path,
+                    project_name=project,
+                    claude_projects_dir=self._claude_projects_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 — cost is best-effort; the row is not
+                # ANY snapshot failure (an unreadable transcript / discovery walk → OSError,
+                # or a malformed-transcript parse → ValueError, etc.) must degrade only the
+                # cost to null — never drop the terminal row. The caller still appends it.
+                _log.warning("session-history cost snapshot failed for %s: %s", project, exc)
+                return None
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop (a synchronous status-apply call path): do the snapshot +
+            # append inline. Best-effort — the store's append already fails closed, so a
+            # DB error is swallowed there; guard the snapshot's own non-OSError too.
+            try:
+                _append(project, mode, session_ref, _usage_snapshot())
+            except Exception as exc:  # noqa: BLE001 — history must never break the lifecycle
+                _log.warning("could not record session event (%s/%s): %s", project, kind, exc)
+            return
+
+        async def _write() -> None:
+            # Mirror the sync path's swallow-and-log so a parser/DB error surfaces as a
+            # tidy warning, not asyncio's "Task exception was never retrieved" noise.
+            try:
+                usage = await asyncio.to_thread(_usage_snapshot)
+                await asyncio.to_thread(_append, project, mode, session_ref, usage)
+            except Exception as exc:  # noqa: BLE001 — history must never break the lifecycle
+                _log.warning("could not record session event (%s/%s): %s", project, kind, exc)
+
+        task = asyncio.create_task(_write())
+        self._notify_tasks.add(task)
+        task.add_done_callback(self._notify_tasks.discard)
 
     def _emit_webhook(self, event: str, instance: RemoteControlInstance) -> None:
         """Fire a best-effort lifecycle webhook (off-loop; never blocks/raises, #371).

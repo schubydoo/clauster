@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .bootstrap import import_legacy_json, upgrade_to_head
 from .engine import create_db_engine, dispose_engine, make_session_factory
-from .stores import HostedStateStore, StateStore
+from .stores import HostedStateStore, SessionHistoryStore, StateStore
 
 
 class Persistence:
@@ -59,6 +59,10 @@ class Persistence:
     def hosted_state_store(self) -> HostedStateStore:
         """Return a DB-backed :class:`HostedStateStore` (hosted-channel sessions)."""
         return HostedStateStore(self._session_factory)
+
+    def session_history_store(self) -> SessionHistoryStore:
+        """Return a DB-backed :class:`SessionHistoryStore` (session-event history, #363)."""
+        return SessionHistoryStore(self._session_factory)
 
     def dispose(self) -> None:
         """Close the engine's connection pool (call on app shutdown)."""
