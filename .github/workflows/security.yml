@@ -53,6 +53,15 @@ jobs:
     # forever even with every required status check green. Re-analysing unchanged
     # code costs a little CI time, but minutes are free on this public repo and
     # this keeps the required code-scanning tool satisfiable on every PR.
+    #
+    # NB: this is the `pull_request` (merge-commit) analysis. A PARALLEL head-SHA
+    # analysis runs in codeql.yml on `push` to cure the "stuck PR" class — a base
+    # move recomputes `refs/pull/N/merge` but fires no `pull_request` event, so
+    # this merge-ref result goes stale and the PR sticks at BLOCKED. The two are
+    # intentional and NOT duplicates: they carry different refs (refs/pull/N/merge
+    # here vs refs/heads/<branch> there). Do NOT skip this on `synchronize` as
+    # "already covered by codeql.yml" without accepting the loss of the
+    # merge-commit PR-diff annotations (the more accurate of the two).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
