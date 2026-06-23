@@ -403,6 +403,182 @@ async def test_rediscover_recovers_keeper_pid_from_sidecar(runner_config, monkey
     assert inst.keeper_pid == 9999
 
 
+async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
+    runner_config, monkeypatch
+) -> None:
+    """A self-spawned pty bridge with no pointer but a live keeper reattaches as RUNNING.
+
+    The flag-form bridge writes no Anthropic ``bridge-pointer.json``, so rediscover keys
+    on the keeper sidecar instead: a live keeper (``is_keeper_process``) holding a ready,
+    live bridge is rebuilt as a managed RUNNING instance — not orphaned behind a STOPPED
+    card while the detached keeper leaks.
+    """
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "resume_mode": "pty", "intentional_stop": False}}
+    )
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 9999,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 12345.0,
+                "session_id": "session_x",
+                "connect_url": "https://claude.ai/code/session_x",
+                "state": "ready",
+            }
+        )
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: pid == 9999)
+    monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda pid, start, **k: pid == 4242)
+
+    await runner.rediscover()
+
+    inst = runner.get_instance("alpha")
+    assert inst.status is InstanceStatus.RUNNING  # re-managed, not orphaned
+    assert inst.resume_mode == "pty"
+    assert inst.keeper_pid == 9999  # so stop()/poll_once own the survivor
+    assert inst.bridge_pid == 4242
+    assert inst.intentional_stop is False
+    assert inst.url == "https://claude.ai/code/session_x"
+
+
+async def test_rediscover_pty_dead_keeper_falls_back_to_stopped(
+    runner_config, monkeypatch
+) -> None:
+    """A pty sidecar whose keeper pid is no longer a keeper (dead/recycled) → STOPPED.
+
+    The liveness guard fails closed: a stale sidecar must not reattach an unrelated
+    process, so rediscover resurrects the resumable STOPPED card instead.
+    """
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "resume_mode": "pty", "intentional_stop": False}}
+    )
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 9999,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 12345.0,
+                "state": "ready",
+            }
+        )
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: False)
+
+    await runner.rediscover()
+
+    inst = runner.get_instance("alpha")
+    assert inst.status is InstanceStatus.STOPPED
+    assert inst.resume_mode == "pty"  # resume affordance preserved
+    assert inst.keeper_pid is None
+
+
+async def test_rediscover_pty_unready_sidecar_falls_back_to_stopped(
+    runner_config, monkeypatch
+) -> None:
+    """A pty keeper still mid-startup (sidecar ``state != "ready"``) is not reattached.
+
+    Only a ``"ready"`` keeper reattaches as RUNNING even when the process looks alive;
+    a ``"starting"`` one falls back to STOPPED (the orphan sweep can reap a stuck one).
+    """
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "resume_mode": "pty", "intentional_stop": False}}
+    )
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 9999,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 12345.0,
+                "state": "starting",
+            }
+        )
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: True)
+    monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda pid, start, **k: True)
+
+    await runner.rediscover()
+
+    assert runner.get_instance("alpha").status is InstanceStatus.STOPPED
+
+
+async def test_rediscover_pty_reattach_rejects_stale_bridge_pid(
+    runner_config, monkeypatch
+) -> None:
+    """Reattach fails closed when the bridge pid no longer matches (PID reuse)."""
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "resume_mode": "pty", "intentional_stop": False}}
+    )
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 9999,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 12345.0,
+                "state": "ready",
+            }
+        )
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: True)
+    monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda pid, start, **k: False)
+
+    await runner.rediscover()
+
+    assert runner.get_instance("alpha").status is InstanceStatus.STOPPED
+
+
+async def test_rediscover_pty_reattach_skips_malformed_sidecar_pids(
+    runner_config, monkeypatch
+) -> None:
+    """A ready sidecar with a non-integer keeper/bridge pid is skipped (falls to STOPPED)."""
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "resume_mode": "pty", "intentional_stop": False}}
+    )
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps({"keeper_pid": 9999, "bridge_pid": None, "state": "ready"})
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: True)
+
+    await runner.rediscover()
+
+    assert runner.get_instance("alpha").status is InstanceStatus.STOPPED
+
+
 def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) -> None:
     """If the keeper outlives its bridge, _cleanup_keeper force-kills then reaps it."""
     runner, _ = _pty_runner(runner_config)
