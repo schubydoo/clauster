@@ -14,9 +14,11 @@
   <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg?v={{ asset_version }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css?v={{ asset_version }}">
   <style>
-    /* Brand lockup swaps with the theme: white wordmark on dark, black on light. */
-    [data-bs-theme="dark"] .brand-black { display: none; }
+    /* Brand lockup swaps with the theme; defaults to the white (dark-theme) logo
+       so an unset/unknown data-bs-theme shows one logo, never both. */
+    .brand-black { display: none; }
     [data-bs-theme="light"] .brand-white { display: none; }
+    [data-bs-theme="light"] .brand-black { display: inline; }
   </style>
 </head>
 <body class="d-flex flex-column">
