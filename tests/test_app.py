@@ -124,6 +124,19 @@ def test_no_xshow_element_carries_important_display_utility(write_config):
     )
 
 
+def test_projects_show_more_toggle_appears_in_all_sorts(write_config):
+    # The Projects-zone "Show all / Show fewer" toggle must appear in EVERY sort, not only A–Z.
+    # In a non-name sort the 6-row cap applies by the chosen sort rank; the toggle reveals the
+    # rest. Regression: the x-show used to carry `projectSort === 'name'`, so the toggle vanished
+    # whenever you sorted by last-used or cost.
+    page = _client(write_config).get("/").text
+    m = re.search(r'x-show="(PROJECT_NAMES\.length > 6[^"]*)"', page)
+    assert m is not None, "Projects show-more toggle button (x-show) not found"
+    assert "projectSort" not in m.group(1), (
+        "the show-more toggle is gated on the name sort; it must appear in all sorts"
+    )
+
+
 def test_dashboard_log_ws_and_refresh_robustness(write_config):
     # Audit fixes (frontend, no JS unit harness — guard the wiring by presence):
     #  FIX 3 — the bridge-log tail AUTO-RECONNECTS a dropped-but-live socket (mirroring the hosted
