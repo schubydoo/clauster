@@ -316,3 +316,45 @@ def test_record_event_sync_path_swallows_store_failure(runner_config, caplog):
     )
     runner._record_event("spawn", inst)  # must not raise
     assert "could not record session event" in caplog.text
+
+
+async def test_record_event_swallows_prologue_failure(runner_config, caplog, monkeypatch):
+    # The cheap in-memory prologue (mode/project/session_ref snapshot) is itself wrapped
+    # fail-closed: if it raises — here the session_ref HMAC-key load blows up — the row is
+    # dropped, the warning is logged, and no off-loop task is ever scheduled. A history
+    # hiccup must never surface into the spawn/stop/crash caller.
+    runner = _runner(runner_config)
+
+    def _boom() -> bytes:
+        raise RuntimeError("secret backend exploded")
+
+    monkeypatch.setattr(runner, "_session_ref_key", _boom)
+    inst = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STARTING, resume_mode="standard"
+    )
+    runner._record_event("spawn", inst)  # must not raise
+
+    assert not runner._notify_tasks  # bailed out before scheduling the off-loop write
+    assert runner._history.history_for("alpha") == []  # no row persisted
+    assert "could not prepare session event" in caplog.text
+
+
+async def test_terminal_event_records_null_cost_when_project_unknown(runner_config, caplog):
+    # _project_path returns None (not raises) for a project discovery can't resolve. That is
+    # the distinct "no path" branch — the cost degrades to null but the terminal row is still
+    # written, and the OSError cost-snapshot warning is NOT emitted (this is not a read error).
+    runner = _runner(runner_config)
+    inst = RemoteControlInstance(
+        project="ghost",  # never created under projects_root -> _project_path() is None
+        label="ghost",
+        status=InstanceStatus.STOPPED,
+        resume_mode="standard",
+    )
+    assert runner._project_path("ghost") is None  # precondition: unresolved, without raising
+    runner._record_event("stop", inst)
+    await _drain(runner)
+
+    [event] = runner._history.history_for("ghost")  # the terminal row IS recorded
+    assert event.kind == "ended"
+    assert event.cost_usd is None  # no path -> no snapshot -> null cost
+    assert "session-history cost snapshot failed" not in caplog.text  # not the OSError branch
