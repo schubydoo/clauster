@@ -336,6 +336,37 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.2 (2026-06-23)
+
+### Features
+
+- The Projects zone gains an optional sort control (Name / Last used / Cost). It defaults to the existing A–Z order and never reorders on its own — only when you pick a non-name sort does the list reorder (most-recent or highest-cost first, projects with no recorded history sinking to the bottom) and reveal every project. A new read-only `/api/projects/sortmeta` endpoint supplies the last-used and cost keys from the session-history rollup; the sort itself happens client-side and degrades silently to name order if the data can't be read. ([#528](https://github.com/schubydoo/clauster/pull/528))
+- Record bridge/session lifecycle events (spawned, ready, ended, crashed) with mode and an end-of-session cost/token snapshot to a persistent session-history table, with per-project "last used / total cost" rollups readable from the DB. ([#514](https://github.com/schubydoo/clauster/pull/514))
+- Expand the outbound webhook taxonomy beyond the four bridge events with `bg-settled` (a `claude --bg` background job settled), `permission-needed` (a hosted session parked a tool-permission prompt — the "come look" signal), and `clone-done` (a project clone finished). Each carries an `event_type` discriminator, is redacted before egress, and **defaults OFF** — opt in per-key under `webhooks.events`. ([#518](https://github.com/schubydoo/clauster/pull/518))
+- Webhooks gain an opt-in SSRF guard. Set `webhooks.block_private_targets: true` to skip any webhook URL whose host is an internal/non-routable IP literal — loopback, link-local (incl. the `169.254.169.254` cloud-metadata IP), RFC1918 private, unspecified (`0.0.0.0`/`::`), reserved, multicast, IPv6 ULA (`fc00::/7`), and carrier-grade NAT (`100.64/10`). It also catches the non-canonical IPv4 encodings the OS resolver still dials but `ipaddress` rejects (decimal-integer `2130706433`, hex, short `127.1`), and normalizes IPv4-mapped IPv6, so none of those slip past to loopback or the metadata endpoint. Defaults to **off**, so existing LAN/private receivers keep working unchanged. DNS hostnames are not resolved (rebinding) and exotic IPv6 embeddings (NAT64, IPv4-compatible) are not normalized — out of scope for this literal-IP seam. ([#529](https://github.com/schubydoo/clauster/pull/529))
+- New Clauster brand. A logo lockup (the carved-cells mark + `clauster` wordmark) now appears in the dashboard navbar and on the login and 404 pages, with a refreshed mark as the favicon. The lockup adapts to the theme — white on dark, black on light — and keeps the neon-green "live session" accent on both. The full logo kit (mark, wordmark, app icon, mono + accent variants, favicon) ships in `assets/logo/` alongside a brand showcase. ([#494](https://github.com/schubydoo/clauster/pull/494))
+- Extend the bridge subprocess `PATH`/env from `clauster.yml` via `claude.path_append` and `claude.env` (both standard and pty modes), so a `claude` session can resolve user-local tools a minimal service `PATH` omits. ([#504](https://github.com/schubydoo/clauster/pull/504))
+
+### Fixes
+
+- Unify the hosted-session status badge colours with the bridge map in the shared Active list: `starting` is azure, `stopping` is orange, and `crashed` is amber (recoverable, Resume) instead of red — and the crashed badge now matches its dot. ([#505](https://github.com/schubydoo/clauster/pull/505))
+- Serialize `SessionRunner` state persistence so a concurrent prune-races-upsert window can no longer surface a transient "could not persist bridge state" warning: the persist path now holds its own lock (mirroring the hosted manager), keeping each save atomic against interleaving startup-watch / stop / poll-loop writers. ([#501](https://github.com/schubydoo/clauster/pull/501))
+- Harden pty-keeper sidecar parsing so a malformed `keeper_pid`/`bridge_pid` of `true`/`false` no longer resolves to PID 1 (`bool` is an `int` subclass) and is now treated as absent. ([#500](https://github.com/schubydoo/clauster/pull/500))
+- Document the three `logs.retention_*` knobs in `clauster.yml.example`. ([#502](https://github.com/schubydoo/clauster/pull/502))
+- Forget now clears a dead background agent even when `claude rm` soft-fails: clauster drops the orphaned job record itself, gated on the worker being confirmed dead so a live worker is never force-forgotten. ([#506](https://github.com/schubydoo/clauster/pull/506))
+- Logs: the live-tail "reconnecting…" and "disconnected" banners are now mutually exclusive, and the disconnect banner no longer claims the bridge may have stopped while it is still running. ([#507](https://github.com/schubydoo/clauster/pull/507))
+- Surface the config-file search order in `clauster --help`: the epilog now lists `$CLAUSTER_CONFIG` → `./clauster.yml` → `$CLAUSTER_HOME/clauster.yml`, so the resolution order is discoverable from the CLI without digging through the docs. ([#522](https://github.com/schubydoo/clauster/pull/522))
+- A PTY-form bridge that survives a clauster restart is now reattached as a managed RUNNING instance instead of being orphaned as a STOPPED card or leaking an uncontrollable keeper process. ([#535](https://github.com/schubydoo/clauster/pull/535))
+
+### Security
+
+- Gate inline scripts with a per-request CSP nonce and drop `'unsafe-inline'` from `script-src` (`'unsafe-eval'` and `style-src 'unsafe-inline'` remain, tracked as the #442 follow-up). ([#532](https://github.com/schubydoo/clauster/pull/532))
+- Store the `/metrics` scrape token as a SHA-256 hash at rest (`observability.metrics_token_hash`), matching the API token; mint one with the new `clauster hash-metrics-token` command. ([#503](https://github.com/schubydoo/clauster/pull/503))
+
+### Build System & Dependencies
+
+- Add a `changeset-autodraft` workflow that auto-drafts a `.changeset/*.md` fragment on trusted, same-repo PRs that touch `src/` but lack one. ([#530](https://github.com/schubydoo/clauster/pull/530))
+
 ## 0.12.1 (2026-06-20)
 
 ### Fixes
