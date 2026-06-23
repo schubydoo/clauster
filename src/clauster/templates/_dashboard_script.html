@@ -763,7 +763,14 @@
       isRunning(name) { return this.statusOf(name) === "running"; },
       isBusy(name) { return this.statusOf(name) === "starting"; },
       isStopping(name) { return this.statusOf(name) === "stopping"; },
-      sessionUrlOf(name) { return (this.instances[name] || {}).session_url || null; },
+      // FE-03: `session_url` is BACKEND-derived (parsed from the claude remote-control bridge) —
+      // always an https claude.ai URL, never user input. It's bound to `:href` in the Active list,
+      // so ENFORCE the scheme here rather than merely trust it: a non-http(s) value can never
+      // become a `javascript:`/`data:` href sink. `rel="noopener" target="_blank"` covers the rest.
+      sessionUrlOf(name) {
+        const u = (this.instances[name] || {}).session_url;
+        return u && /^https?:\/\//i.test(u) ? u : null;
+      },
       // A running bridge whose connect URL hasn't arrived (or never will). session_url
       // is captured asynchronously only AFTER the bridge reaches "running", so gate on
       // that — during "starting" no output has been produced yet, so "Preparing connect
