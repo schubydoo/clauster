@@ -122,9 +122,15 @@
                             </select>
                           </div>
                           {% if pty_supported %}
-                          <div class="col-6 d-flex align-items-end"
+                          {# Keep d-flex OFF this x-show element — `.d-flex{display:flex!important}`
+                             overrides x-show's inline display:none and would pin this hint visible
+                             even in standard mode (same bug as the live-tail banners). Flex goes on
+                             the inner wrapper. #}
+                          <div class="col-6"
                                x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) === 'pty'" x-cloak>
-                            <p id="resume-hint-{{ p.name }}" class="form-hint text-secondary small mb-1">Runs as one session in the project directory.</p>
+                            <div class="d-flex align-items-end">
+                              <p id="resume-hint-{{ p.name }}" class="form-hint text-secondary small mb-1">Runs as one session in the project directory.</p>
+                            </div>
                           </div>
                           <div class="col-6">
                             <label class="form-label small mb-1" for="resume-{{ p.name }}">Mode</label>

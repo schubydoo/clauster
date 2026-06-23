@@ -99,6 +99,31 @@ def test_dashboard_active_zone_precedes_projects_in_dom(write_config):
     assert re.search(r"\border\s*:\s*-1\b", page) is None
 
 
+def test_no_xshow_element_carries_important_display_utility(write_config):
+    # Class-level regression guard for the false-banner bug. Alpine's `x-show` hides an element
+    # with an inline `display:none`, but Tabler's display utilities (`.d-flex`, `.d-none`,
+    # `.d-grid`, …) are all `display:… !important`, which OVERRIDES that inline hide — so any
+    # element carrying BOTH `x-show` and a `d-*` display class is pinned to the utility's display
+    # regardless of state. Put the display utility on an inner wrapper instead. Scanning the whole
+    # rendered dashboard keeps the entire class dead: this caught the live-tail "reconnecting" /
+    # "disconnected" banners AND the pty-mode resume hint, all of which stayed visible wrongly.
+    page = _client(write_config).get("/").text
+    # Match a full opening tag, allowing quoted attribute values to contain '>' (e.g. an x-show
+    # expression like `length > 6`), so the tag boundary isn't cut short mid-attribute.
+    tag_re = re.compile(r"""<[a-zA-Z](?:"[^"]*"|'[^']*'|[^>"'])*>""")
+    display_util = re.compile(r"\bd-(flex|inline-flex|block|inline-block|grid|none)\b")
+    offenders = [
+        tag.group(0)[:140]
+        for tag in tag_re.finditer(page)
+        if "x-show=" in tag.group(0) and display_util.search(tag.group(0))
+    ]
+    assert not offenders, (
+        "element(s) carry both x-show and an !important `d-*` display utility, which overrides "
+        "x-show's inline display:none and pins them visible regardless of state — move the "
+        "display utility onto an inner wrapper:\n" + "\n".join(offenders)
+    )
+
+
 def test_dashboard_log_ws_and_refresh_robustness(write_config):
     # Audit fixes (frontend, no JS unit harness — guard the wiring by presence):
     #  FIX 3 — the bridge-log tail AUTO-RECONNECTS a dropped-but-live socket (mirroring the hosted
