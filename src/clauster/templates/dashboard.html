@@ -602,10 +602,17 @@
         <h2>Projects</h2>
         <span class="zone-sub">a folder Claude works in — launch a session from any of them</span>
         <div class="zone-actions">
+          <select class="form-select form-select-sm w-auto" x-model="projectSort"
+                  @change="projectSort === 'name' ? recomputeProjectRanks() : loadSortMeta()" aria-label="Sort projects"
+                  title="Sort the project list (stays put until you choose a non-name sort)">
+            <option value="name">Name (A–Z)</option>
+            <option value="last-used">Last used</option>
+            <option value="cost">Cost</option>
+          </select>
           <input type="search" class="form-control form-control-sm proj-search" placeholder="Search projects…"
                  x-model="projectFilter" aria-label="Search projects">
           <button type="button" class="btn btn-sm btn-ghost-secondary" x-cloak
-                  x-show="PROJECT_NAMES.length > 6 && !projectFilter.trim()"
+                  x-show="PROJECT_NAMES.length > 6 && !projectFilter.trim() && projectSort === 'name'"
                   @click="showAllProjects = !showAllProjects"
                   x-text="showAllProjects ? 'Show fewer' : ('Show all ' + PROJECT_NAMES.length)"></button>
           <button type="button" class="btn btn-sm btn-primary" @click="toggleNewProject()">
@@ -680,7 +687,7 @@
       <!-- Project list (rows — same layout language as the Active-sessions list below) -->
       {% if projects %}
       <div class="card" id="project-grid">
-        <div class="list-group list-group-flush">
+        <div class="list-group list-group-flush" :style="projectSort !== 'name' ? 'display:flex; flex-direction:column' : ''">
         {% for p in projects %}
           {% set idx = loop.index0 %}
           {% include "_project_row.html" %}
