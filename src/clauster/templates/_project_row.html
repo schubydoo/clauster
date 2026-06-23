@@ -1,9 +1,15 @@
 {# One project row. Rendered by the dashboard grid loop AND by
    GET /api/projects/{name}/row for reactive insertion (no full-page reload). `idx` is
    the row's position for the search/cap visibility gate (0 from the fragment route, so a
-   freshly created project is always shown). #}
+   freshly created project is always shown).
+
+   The `:style` below reorders rows VISUALLY for a non-name sort via CSS `order` — it does
+   NOT change DOM/tab order (focus + screen-reader order stay A–Z), the deliberate trade for
+   an opt-in cosmetic sort. Don't turn this into a DOM reorder (the anti-pattern the Active
+   zone avoids). #}
           <div class="list-group-item" data-project="{{ p.name }}"
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
+               :style="projectSort !== 'name' ? ('order:' + projectOrderRank('{{ p.name }}')) : ''"
                x-data="{ lopen: false, lmode: DEFAULT_LAUNCH_MODE, lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', ladv: false }">
             <div class="d-flex align-items-center flex-wrap gap-2">
               <svg class="ico text-success" style="flex:none" role="img" aria-label="Directory trusted" x-cloak

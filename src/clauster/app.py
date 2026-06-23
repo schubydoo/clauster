@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -747,6 +748,41 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 ],
             }
         return result
+
+    @app.get("/api/projects/sortmeta")
+    async def api_projects_sortmeta() -> dict:
+        """Batch per-project sort keys (last-used + cost) for the Projects sort control.
+
+        Returns ``{name: {last_used: iso|null, cost_usd: float|null}}`` for every
+        discovered project, read from the session-history rollup. Powers the
+        dashboard's opt-in sort dropdown (name / last-used / cost); the client sorts
+        client-side, so this is advisory and read-only. Declared before the
+        ``{name}/…`` routes so the literal path wins the match. ``rollup_for`` already
+        returns an empty rollup on a DB error, so a sort never crashes the dashboard;
+        the try/except is just an outer net for an engine/IO fault. Invalid project
+        names are dropped before use.
+        """
+        names = [p.name for p in await list_projects() if is_valid_project_name(p.name)]
+
+        def _collect() -> dict[str, dict]:
+            store = runner.persistence.session_history_store()
+            out: dict[str, dict] = {}
+            for name in names:
+                roll = store.rollup_for(name)
+                out[name] = {
+                    "last_used": roll.last_used.isoformat() if roll.last_used else None,
+                    "cost_usd": roll.total_cost_usd,
+                }
+            return out
+
+        # Catch only infra (DB engine / IO): a programming bug should surface as a 500
+        # (the client falls back to name order on any non-OK response), not be masked as
+        # a silently-empty sort.
+        try:
+            return await asyncio.to_thread(_collect)
+        except (OSError, SQLAlchemyError) as exc:
+            logger.warning("projects sortmeta read failed, degrading to empty: %s", exc)
+            return {}
 
     @app.get("/api/projects/{name}/preflight")
     async def api_project_preflight(name: str) -> dict:

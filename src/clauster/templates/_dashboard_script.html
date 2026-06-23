@@ -114,6 +114,7 @@
       confirmNew: {},
       cmd: {},
       usage: {},
+      sortMeta: {},       // project name -> {last_used: iso|null, cost_usd: float|null}; Zone 1 sort (lazy)
       preflight: {},      // project name -> per-project preflight result ({ok, checks}); lazy-loaded
       preflightOpen: {},  // project name -> true while its preflight-warning detail is expanded
       metrics: {},        // project name -> live CPU/mem/disk sample (null when not running)
@@ -137,6 +138,8 @@
       activeFilter: "all",   // Zone 2 unified-list filter: all | browser | desktop | detached
       projectFilter: "",     // Zone 1 search box
       showAllProjects: false, // Zone 1: reveal projects beyond the cap
+      projectSort: "name",   // Zone 1 sort (FE-2): name (default, no reorder) | last-used | cost
+      projectRanks: {},      // project name -> CSS flex `order` int when a non-name sort is active
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -347,7 +350,54 @@
       projectVisible(name, idx) {
         if ((this.projectFilter || "").trim()) return this.matchesProject(name);
         if (this.runningCountFor(name) > 0) return true;
+        // A non-name sort implies "show the whole ordered list" — the 6-row cap only
+        // governs the default name order (where idx is the stable Jinja position).
+        if (this.projectSort !== "name") return true;
         return this.showAllProjects || idx < 6;
+      },
+      // Zone 1 sort (FE-2) — opt-in, explicit-only. Default 'name' keeps the current
+      // A–Z order with zero reorder; last-used/cost reorder via CSS `order` (no DOM
+      // moves, so x-show/idx stay intact) and reveal the full list. Lazily (re)fetched
+      // on each non-name sort selection — never on first paint — so the ranks reflect
+      // the latest session history (a project you just finished sorts to the top).
+      // Degrades to name order if the keys never load.
+      async loadSortMeta() {
+        try {
+          const res = await fetch(ROOT + "/api/projects/sortmeta");
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) return;  // advisory — sort silently falls back to name order
+          this.sortMeta = await res.json();
+          this.recomputeProjectRanks();
+        } catch (e) { /* advisory — sort stays on name order */ }
+      },
+      // Rebuild the name -> CSS-`order` map for the current sort. Assigns a whole object
+      // so Alpine's reactive Proxy sees the change (avoids the frame-drop class #310/#315).
+      recomputeProjectRanks() {
+        if (this.projectSort === "name") { this.projectRanks = {}; return; }
+        const meta = this.sortMeta || {};
+        const key = this.projectSort === "cost" ? "cost_usd" : "last_used";
+        const valOf = (n) => {
+          const m = meta[n];
+          if (!m) return null;
+          if (key === "last_used") return m.last_used ? Date.parse(m.last_used) : null;
+          return (typeof m.cost_usd === "number") ? m.cost_usd : null;
+        };
+        // Most-recent / highest-cost first; a null (no history) sinks to the bottom,
+        // ties broken by name so the order is deterministic.
+        const ranks = {};
+        [...PROJECT_NAMES].sort((a, b) => {
+          const va = valOf(a), vb = valOf(b);
+          if (va === vb) return a.localeCompare(b);
+          if (va === null) return 1;
+          if (vb === null) return -1;
+          return vb - va;
+        }).forEach((n, i) => { ranks[n] = i; });
+        this.projectRanks = ranks;
+      },
+      // CSS flex `order` for a row under the active sort (0 = first); unknown -> sink.
+      projectOrderRank(name) {
+        const r = this.projectRanks[name];
+        return (r === undefined || r === null) ? 9999 : r;
       },
       // --- toasts ---
       toast(msg, type = "info") {

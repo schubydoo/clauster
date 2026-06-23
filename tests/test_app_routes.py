@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -127,6 +128,65 @@ def test_batch_preflight_literal_path_beats_name_route(write_config, tmp_path):
     body = _client(write_config, tmp_path).get("/api/projects/preflight").json()
     assert "project" not in body  # not the per-project shape
     assert isinstance(body.get("alpha"), dict)
+
+
+# ----- projects sortmeta (batch sort keys for the Projects sort control, FE-2) ----
+
+
+def test_projects_sortmeta_shape_and_all_projects(write_config, tmp_path, monkeypatch):
+    # {name: {last_used, cost_usd}} for every discovered project, from the history
+    # rollup. alpha gets a known rollup; the others have no history -> null fields.
+    from datetime import datetime
+
+    from clauster.db import stores as stores_mod
+
+    when = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
+
+    def _rollup(self, name):
+        if name == "alpha":
+            return stores_mod.ProjectRollup(project_name=name, last_used=when, total_cost_usd=1.25)
+        return stores_mod.ProjectRollup(project_name=name)
+
+    monkeypatch.setattr(stores_mod.SessionHistoryStore, "rollup_for", _rollup)
+    r = _client(write_config, tmp_path).get("/api/projects/sortmeta")
+    assert r.status_code == 200
+    body = r.json()
+    assert {"alpha", "beta", "gamma"} <= set(body)  # every discovered project present
+    assert body["alpha"] == {"last_used": when.isoformat(), "cost_usd": 1.25}
+    assert body["beta"] == {"last_used": None, "cost_usd": None}  # no history -> nulls
+
+
+def test_projects_sortmeta_literal_path_beats_name_route(write_config, tmp_path):
+    # The literal /api/projects/sortmeta route must win over /{name}/...: returns a dict
+    # keyed by project name (rollup or null fields), never a single-project shape.
+    body = _client(write_config, tmp_path).get("/api/projects/sortmeta").json()
+    assert "project" not in body
+    assert isinstance(body.get("alpha"), dict)
+    assert set(body["alpha"]) == {"last_used", "cost_usd"}
+
+
+def test_projects_sortmeta_degrades_to_empty_on_error(write_config, tmp_path, monkeypatch):
+    # Advisory endpoint: an infra read error (DB engine / IO) must degrade to {} (the
+    # client falls back to name order), never 500 the dashboard.
+    from clauster.db import stores as stores_mod
+
+    def _boom(self, name):
+        raise OSError("db gone")
+
+    monkeypatch.setattr(stores_mod.SessionHistoryStore, "rollup_for", _boom)
+    r = _client(write_config, tmp_path).get("/api/projects/sortmeta")
+    assert r.status_code == 200
+    assert r.json() == {}
+
+
+def test_dashboard_renders_projects_sort_control(write_config, tmp_path):
+    # The Projects zone exposes the opt-in sort dropdown (name / last-used / cost) and
+    # the client defaults to 'name' (no reorder until the user chooses).
+    html = _client(write_config, tmp_path).get("/").text
+    assert 'aria-label="Sort projects"' in html
+    assert '<option value="last-used">' in html
+    assert '<option value="cost">' in html
+    assert 'projectSort: "name"' in html
 
 
 # ----- single-row fragment (reactive insertion, no full reload) ---------
