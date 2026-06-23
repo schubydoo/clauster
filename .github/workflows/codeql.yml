@@ -1,0 +1,76 @@
+# Durable code-scanning coverage bound to the PR branch's HEAD SHA.
+#
+# WHY THIS EXISTS — the "stuck PR" class
+# The `main` ruleset's `code_scanning` rule blocks a PR until CodeQL has a
+# current analysis that maps onto it. GitHub maps an `on: push` head-SHA analysis
+# onto any open PR on that branch (what this workflow provides); the merge-commit
+# analysis from the `pull_request` codeql job in security.yml is the other source.
+# That `pull_request` job only analyses the MERGE commit (`refs/pull/N/merge`),
+# which GitHub RECOMPUTES every time the base (main) moves. A base move fires no
+# `pull_request` event, so that merge-ref result is never refreshed —
+# it goes stale and the PR sticks at mergeStateStatus=BLOCKED ("waiting for
+# results from CodeQL …") even with every required status check green, Greptile
+# approved, and threads resolved. pr-auto-update normally papers over this by
+# pushing a merge commit (→ synchronize → CodeQL re-runs) on each main move, but
+# it CANNOT for the PRs it skips: bot/Renovate, `dependencies`-labelled, fork,
+# and already-current (204) PRs — those stay stuck.
+#
+# THE FIX
+# Running CodeQL on `push` binds a result to the branch's STABLE head SHA, which
+# the rule honours regardless of how the merge commit churns on base moves. This
+# satisfies the code_scanning rule without depending on pr-auto-update producing
+# a synchronize, so the skipped-PR classes above stop getting stuck too.
+#
+# SCOPE / SAFETY
+# - Additive: security.yml's `pull_request` codeql job (merge-ref + PR-diff-aware
+#   alerts) and the `security required checks passed` aggregator are UNCHANGED —
+#   this only adds head-SHA coverage, it does not touch the required-check wiring.
+# - `branches-ignore: [main]`: main's head SHA is already analysed by
+#   security.yml's `push: branches: [main]` codeql job, so excluding it here
+#   avoids a duplicate run; tag pushes (releases) are not matched by a
+#   branches-only filter, so the release path is untouched.
+# - `push` events are inherently fork-safe: a fork pushes to its OWN repo, so it
+#   can never trigger this workflow here. No secrets are used (CodeQL uploads via
+#   the built-in GITHUB_TOKEN — App installation tokens are rejected by
+#   upload-sarif, see github/codeql-action#2719).
+name: CodeQL (head SHA)
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: codeql analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write # upload-sarif → code scanning (GITHUB_TOKEN only)
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: ${{ matrix.language }}
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: "/language:${{ matrix.language }}"
