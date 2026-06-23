@@ -71,10 +71,6 @@ jobs:
           script: |
             const EXCLUDE = new Set([
               "dependencies",
-              "autorelease: pending",
-              "autorelease: tagged",
-              "autorelease: snapshot",
-              "autorelease: published",
             ]);
             const base = context.payload.repository.default_branch;
             const repoFullName = context.payload.repository.full_name;

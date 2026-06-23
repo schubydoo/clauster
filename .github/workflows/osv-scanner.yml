@@ -15,6 +15,11 @@ name: OSV-Scanner
 
 on:
   pull_request:
+    # Trimmed off the `synchronize` storm (pr-auto-update fans a main push across
+    # every open PR). This PR scan is report-only (fail-on-vuln:false) and overlaps
+    # dependency-review on manifest CVEs, so a per-push rerun adds little; push:main
+    # + the weekly cron remain the real gate.
+    types: [opened, reopened, ready_for_review]
   schedule:
     - cron: "27 5 * * 1" # weekly full scan, Monday 05:27 UTC
   push:
