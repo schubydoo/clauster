@@ -877,7 +877,7 @@
                         <select class="form-select form-select-sm" :id="'cfg-' + path"
                                 :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]">
                           <template x-for="opt in configEditor.specs[path].choices" :key="opt">
-                            <option :value="opt" x-text="opt"></option>
+                            <option :value="opt" x-text="(configEditor.specs[path].choice_labels && configEditor.specs[path].choice_labels[opt]) || opt"></option>
                           </template>
                         </select>
                       </template>
