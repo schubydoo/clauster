@@ -579,6 +579,42 @@ async def test_rediscover_pty_reattach_skips_malformed_sidecar_pids(
     assert runner.get_instance("alpha").status is InstanceStatus.STOPPED
 
 
+async def test_rediscover_pty_reattach_without_proc_start_uses_cmdline_liveness(
+    runner_config, monkeypatch
+) -> None:
+    """A ready sidecar missing bridge_proc_start still reattaches via cmdline+alive.
+
+    Documents the intentional PID-guard degradation (mirrors is_live_process and
+    _recover_keeper_pid): with no recorded proc-start the bridge is matched by pid +
+    cmdline only, and the instance carries bridge_proc_start=None rather than refusing
+    to reattach a live keeper. The keeper side is still gated by is_keeper_process.
+    """
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "resume_mode": "pty", "intentional_stop": False}}
+    )
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # sidecar with NO bridge_proc_start field
+    (log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps({"keeper_pid": 9999, "bridge_pid": 4242, "state": "ready"})
+    )
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: True)
+    # returns True ONLY when proc_start arrived as None -> proves the degraded path was taken
+    monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda pid, start, **k: start is None)
+
+    await runner.rediscover()
+
+    inst = runner.get_instance("alpha")
+    assert inst.status is InstanceStatus.RUNNING
+    assert inst.keeper_pid == 9999 and inst.bridge_pid == 4242
+    assert inst.bridge_proc_start is None  # matched by cmdline+alive, no proc-start recorded
+
+
 def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) -> None:
     """If the keeper outlives its bridge, _cleanup_keeper force-kills then reaps it."""
     runner, _ = _pty_runner(runner_config)
