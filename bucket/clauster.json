@@ -1,12 +1,12 @@
 {
-    "version": "0.12.2",
+    "version": "0.12.3",
     "description": "Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host.",
     "homepage": "https://github.com/schubydoo/clauster",
     "license": "Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/schubydoo/clauster/releases/download/v0.12.2/clauster-0.12.2-windows-x86_64.exe#/clauster.exe",
-            "hash": "dce09dd6392623f367e78853ad1ae660dcc7e237b142de1b523d79467ba16db9"
+            "url": "https://github.com/schubydoo/clauster/releases/download/v0.12.3/clauster-0.12.3-windows-x86_64.exe#/clauster.exe",
+            "hash": "cbc5a1c2b21aa300b7f98ac509acbc4a47493ecf73e00884792e21a9f13015ff"
         }
     },
     "bin": "clauster.exe",
