@@ -54,3 +54,13 @@ repos:
         language: system
         pass_filenames: false
         files: '^(src/clauster/config\.py|scripts/gen_config_reference\.py|docs/configuration\.md)$'
+
+      - id: changeset-summary-lint
+        name: changeset summary lint
+        # knope uses a changeset's first line as the entry summary; a summary that
+        # wraps mid-sentence renders a truncated `### heading` in the release notes
+        # (v0.12.3 #560/#561). Scans all fragments whenever a changeset changes.
+        entry: uv run python scripts/lint_changesets.py
+        language: system
+        pass_filenames: false
+        files: '^\.changeset/.+\.md$'

@@ -40,6 +40,11 @@ jobs:
         run: uv run ruff format --check .
       - name: pyright
         run: uv run pyright src/clauster
+      # Blocking: a malformed changeset (a summary that wraps mid-sentence) renders a
+      # truncated `###` heading in the GitHub release notes (v0.12.3 #560/#561). The
+      # local pre-commit hook catches it pre-push; this enforces it on every PR.
+      - name: changeset summary lint
+        run: uv run python scripts/lint_changesets.py
       # Node for markdownlint-cli2: pin the runtime (ubuntu-latest's bundled Node
       # drifts across image refreshes) and install the version-pinned, integrity-
       # checked package from the lockfile via `npm ci`. yamllint comes from
