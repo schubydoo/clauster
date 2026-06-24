@@ -150,13 +150,20 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
     flags = fcntl.fcntl(master, fcntl.F_GETFL)
     fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
+    # poll(), not select(): the stdlib select() call raises "filedescriptor out of range"
+    # once the master fd is >= FD_SETSIZE (1024) — a long-lived Clauster (many bridges/keepers,
+    # a busy host, or accumulated fds) can reach that and crash the keeper. poll() has no
+    # such ceiling. (This also fixed a -n0 full-suite test flake where the pty master fd
+    # crept past 1024.)
+    poller = select.poll()
+    poller.register(master, select.POLLIN)
+
     buf = bytearray()
     url_found = False
     url_deadline = time.monotonic() + _URL_TIMEOUT
     while proc.poll() is None:
         try:
-            ready, _, _ = select.select([master], [], [], 0.5)
-            if ready:
+            if poller.poll(500):  # ms; truthy when the master fd has data (no FD_SETSIZE limit)
                 chunk = os.read(master, 65536)
                 if chunk and not url_found:
                     buf.extend(chunk)
