@@ -271,7 +271,9 @@ def test_keeper_read_loop_uses_poll_not_select() -> None:
 
     src = inspect.getsource(pty_keeper.run_keeper)
     assert "select.select(" not in src, "keeper read loop uses select() (FD_SETSIZE-limited)"
-    assert ".poll(" in src
+    # Assert on poller.poll( specifically — a bare ".poll(" is already satisfied by the
+    # run_keeper proc.poll() liveness calls, so it would not catch a regression to select().
+    assert "poller.poll(" in src, "keeper read loop must wait on poller.poll(), not select()"
 
 
 def test_signal_stop_twice_sends_two_signals(monkeypatch) -> None:
