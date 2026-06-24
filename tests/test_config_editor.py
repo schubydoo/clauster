@@ -177,3 +177,49 @@ def test_validate_edits_accepts_enabling_claustrum(write_config) -> None:
     assert candidate["claustrum"]["spawn_timeout_seconds"] == 15
     with pytest.raises(ConfigValidationError):
         validate_edits(raw, {"claustrum.spawn_timeout_seconds": -5})  # gt=0
+
+
+def test_field_specs_recap_depends_on_launch_mode_value() -> None:
+    # #548: transcript recap only applies to the standard launch mode (pty true-resume carries
+    # its own context), so the editor value-gates it on launch_mode == "standard".
+    specs = field_specs()
+    recap = specs["claude.resume_recap"]
+    assert recap["depends_on"] == "claude.launch_mode"
+    assert recap["depends_on_value"] == "standard"
+    # Boolean-gated fields carry no value (None) — the frontend uses the falsy check for them.
+    assert specs["metrics.normalize_cpu"]["depends_on_value"] is None
+
+
+def test_field_specs_marks_deprecated_show_cost() -> None:
+    # #548: the deprecated alias is flagged in the API and gets a plain-text UI description
+    # instead of leaking the raw Pydantic "**Deprecated**" markdown docstring.
+    specs = field_specs()
+    show_cost = specs["usage.show_cost"]
+    assert show_cost["deprecated"] is True
+    assert "**" not in show_cost["description"]  # no raw markdown surfaced
+    assert "usage.mode" in show_cost["description"]
+    # A normal field is not flagged deprecated.
+    assert specs["usage.mode"]["deprecated"] is False
+
+
+def test_field_specs_exposes_log_retention_fields() -> None:
+    # #548: the actively-pruning retention knobs were invisible in the editor — now Tier-A.
+    specs = field_specs()
+    for path in (
+        "logs.retention_max_age_days",
+        "logs.retention_max_files",
+        "logs.retention_max_total_mb",
+    ):
+        assert path in EDITABLE_FIELDS
+        assert specs[path]["type"] == "int"
+    assert specs["logs.retention_max_age_days"]["unit"] == "days"
+    assert specs["logs.retention_max_total_mb"]["unit"] == "MB"
+
+
+def test_validate_edits_accepts_log_retention(write_config) -> None:
+    # Retention is operational (no secret) — it round-trips, and a negative value fails closed.
+    raw = _raw(write_config)
+    candidate = validate_edits(raw, {"logs.retention_max_age_days": 7})
+    assert candidate["logs"]["retention_max_age_days"] == 7
+    with pytest.raises(ConfigValidationError):
+        validate_edits(raw, {"logs.retention_max_age_days": -1})  # ge=0

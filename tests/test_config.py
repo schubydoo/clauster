@@ -346,18 +346,21 @@ def test_usage_mode_off_via_config(write_config):
     assert load_config(write_config("usage:\n  mode: off\n")).usage.mode == "off"
 
 
-def test_usage_show_cost_false_resolves_to_mode_off(write_config):
-    # Back-compat: show_cost was the old hide switch -> it must force mode "off".
-    config = load_config(write_config("usage:\n  show_cost: false\n"))
+def test_usage_show_cost_false_resolves_to_mode_off(write_config, caplog):
+    # Back-compat: show_cost=false with no explicit mode maps to "off" (deprecated path).
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config("usage:\n  show_cost: false\n"))
     assert config.usage.show_cost is False
     assert config.usage.mode == "off"
+    assert any("show_cost=false is deprecated" in r.message for r in caplog.records)
 
 
-def test_usage_show_cost_false_overrides_explicit_mode_with_warning(write_config, caplog):
+def test_usage_explicit_mode_wins_over_deprecated_show_cost(write_config, caplog):
+    # usage.mode is authoritative: an explicit mode beats the deprecated show_cost=false alias.
     with caplog.at_level(logging.WARNING, logger="clauster.config"):
         config = load_config(write_config("usage:\n  mode: tokens\n  show_cost: false\n"))
-    assert config.usage.mode == "off"  # show_cost=false wins
-    assert any("show_cost=false overrides" in r.message for r in caplog.records)
+    assert config.usage.mode == "tokens"  # mode wins
+    assert any("show_cost=false is ignored" in r.message for r in caplog.records)
 
 
 def test_usage_currency_default_usd(write_config):
@@ -426,6 +429,16 @@ def test_usage_effective_symbol_non_usd_falls_back_to_code(write_config):
     # No explicit symbol + non-USD currency -> the code is the prefix (not a bare "$").
     u = load_config(write_config("usage:\n  currency: GBP\n  fx_rate: 0.79\n")).usage
     assert u.effective_symbol == "GBP "
+
+
+def test_usage_currency_symbol_blank_normalized_to_default(write_config):
+    # An empty / whitespace-only symbol must fall back to the default, not render a blank badge.
+    empty = load_config(write_config("usage:\n  currency_symbol: ''\n")).usage
+    assert empty.currency_symbol is None
+    assert empty.effective_symbol == "$"
+    ws = load_config(write_config("usage:\n  currency_symbol: '   '\n")).usage
+    assert ws.currency_symbol is None
+    assert ws.effective_symbol == "$"
 
 
 def test_usage_foreign_currency_without_fx_rate_warns(write_config, caplog):

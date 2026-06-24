@@ -236,7 +236,7 @@ strict.
 | `currency_symbol` | str \| null | `null` | Symbol rendered in `cost` mode. Defaults to `$` when `currency` is `USD`, otherwise the currency code. |
 | `fx_rate` | float | `1.0` | **Static, user-supplied** multiplier applied to the USD cost before display (>0; no live FX lookup). Leave `1.0` for USD; a non-USD `currency` left at `1.0` logs a warning (it would label a USD figure with a foreign symbol). |
 | `token_total_includes_cache` | bool | `true` | Whether cache (creation + read) tokens count toward the displayed token total; they usually dominate, so set `false` for a leaner figure. The per-category breakdown is always in the tooltip. |
-| `show_cost` | bool | `true` | **Deprecated** back-compat alias: `show_cost: false` forces `mode: off`. |
+| `show_cost` | bool | `true` | **Deprecated** back-compat alias. `usage.mode` is authoritative; `show_cost: false` maps to `mode: off` only when `mode` is unset (mode wins if both are set). |
 <!-- END GEN: usage -->
 
 !!! info "Cost is approximate"

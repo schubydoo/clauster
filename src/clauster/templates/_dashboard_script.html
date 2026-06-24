@@ -442,10 +442,31 @@
           return ((s.label || "") + " " + (s.key || "") + " " + (s.description || "")).toLowerCase().includes(q);
         });
       },
-      // A child field is disabled while its master switch is off (visual dependency gating).
+      // A child field is gated off by a dependency: a boolean master switch that is off, or a
+      // value-gated master whose value != the required one (e.g. recap needs the standard mode).
       configFieldDisabled(path) {
-        const dep = this.configEditor.specs[path] && this.configEditor.specs[path].depends_on;
-        return !!dep && !this.configEditor.edits[dep];
+        const spec = this.configEditor.specs[path];
+        const dep = spec && spec.depends_on;
+        if (!dep) return false;
+        const depVal = spec.depends_on_value;
+        if (depVal !== null && depVal !== undefined) {
+          return this.configEditor.edits[dep] !== depVal;
+        }
+        return !this.configEditor.edits[dep];
+      },
+      // Hint shown when a field is gated off — "Turn on X" (boolean master) or
+      // "Set X to <value>" (value-gated master).
+      configDependHint(path) {
+        const spec = this.configEditor.specs[path];
+        if (!spec || !spec.depends_on) return "";
+        const master = this.configEditor.specs[spec.depends_on] || {};
+        const masterLabel = master.label || spec.depends_on;
+        const depVal = spec.depends_on_value;
+        if (depVal !== null && depVal !== undefined) {
+          const valLabel = (master.choice_labels && master.choice_labels[depVal]) || depVal;
+          return "Set “" + masterLabel + "” to “" + valLabel + "” to use this.";
+        }
+        return "Turn on “" + masterLabel + "” to use this.";
       },
       scrollToSection(section) {
         const el = document.getElementById("cfg-sec-" + section);
