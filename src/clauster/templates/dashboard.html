@@ -225,8 +225,8 @@
                               </template>
                               <template x-if="it.resolved">
                                 <span class="ms-auto small" :class="it.decision === 'allow' ? 'text-success' : 'text-secondary'">
-                                  <svg class="ico" aria-hidden="true" x-show="it.decision === 'allow'" x-cloak><use href="#ic-check"/></svg>
-                                  <svg class="ico" aria-hidden="true" x-show="it.decision === 'deny'" x-cloak><use href="#ic-x"/></svg>
+                                  <svg class="ico" aria-hidden="true" x-show="it.decision === 'allow'"><use href="#ic-check"/></svg>
+                                  <svg class="ico" aria-hidden="true" x-show="it.decision === 'deny'"><use href="#ic-x"/></svg>
                                   <span x-text="it.decision === 'allow' ? 'allowed' : (it.decision === 'deny' ? 'denied' : (it.decision === 'interrupted' ? '— session ended' : 'answered'))"></span>
                                 </span>
                               </template>
