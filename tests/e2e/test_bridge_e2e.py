@@ -95,7 +95,12 @@ def test_trust_on_start_starts_then_stops_bridge(
     # session deep link in the Active zone — no full-page reload.
     browser.expect_visible(trusted_shield)
     browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
-    browser.expect_text("section.zone-active", "desktop")
+    # The "desktop" mode badge confirms this is the bridge row (not another session type).
+    # .mode-badge uppercases its text via CSS, so get_text() reports "DESKTOP" — assert
+    # case-insensitively (mirrors test_observability_e2e). The "Running" wait above already
+    # gated on the row being rendered and the static badge stamps with it, so a one-shot
+    # read is race-free — the prior timeout-bump "de-flake" never matched at all.
+    assert "desktop" in browser.get_text("section.zone-active").lower()
     browser.expect_role_visible("link", "Open in Claude")
     stop_btn = "section.zone-active .btn-outline-danger"
     browser.expect_visible(stop_btn)
