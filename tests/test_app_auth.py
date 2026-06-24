@@ -365,6 +365,20 @@ def test_ws_rejected_without_auth(runner_config):
             pass
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/ws/bridge-log/alpha", "/ws/hosted/alpha", "/ws/clone-progress/alpha"],
+)
+def test_all_ws_endpoints_reject_unauthenticated(runner_config, path):
+    # #549 parity pin: EVERY WebSocket endpoint must gate on the same `auth.enabled` +
+    # `_ws_authorized` check before accept — a new handler (or a dropped gate on one of them)
+    # can't silently expose a live stream. Pinned so the hand-rolled per-handler gate can't drift.
+    client = _password_client(runner_config)
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(path, headers={"origin": ORIGIN}):
+            pass
+
+
 def test_ws_rejected_bad_origin(runner_config):
     client = _password_client(runner_config)
     _login(client)

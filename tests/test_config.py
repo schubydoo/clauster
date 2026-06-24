@@ -70,6 +70,21 @@ def test_valid_clone_cidr_accepted(write_config):
     assert config.clone.allowed_private_cidrs == ["192.168.0.0/16", "10.0.0.0/8"]
 
 
+def test_malformed_trusted_ip_rejected(write_config):
+    # #549: a malformed reverse-proxy trusted-IP entry fails fast at load rather than being
+    # silently skipped by auth.peer_trusted at runtime (a quiet no-op in an auth allowlist).
+    with pytest.raises(ValueError):
+        load_config(write_config('auth:\n  reverse_proxy:\n    trusted_ips: ["not-an-ip"]\n'))
+
+
+def test_valid_trusted_ips_accepted(write_config):
+    # Both a bare IP and a CIDR are accepted (auth.peer_trusted parses each via ip_network).
+    config = load_config(
+        write_config('auth:\n  reverse_proxy:\n    trusted_ips: ["10.0.0.5", "192.168.0.0/24"]\n')
+    )
+    assert config.auth.reverse_proxy.trusted_ips == ["10.0.0.5", "192.168.0.0/24"]
+
+
 def test_env_config_and_home_candidates(write_config, monkeypatch):
     # Setting CLAUSTER_CONFIG / CLAUSTER_HOME exercises both candidate-path branches.
     cfg_path = write_config()
