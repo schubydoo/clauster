@@ -336,6 +336,53 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.3 (2026-06-24)
+
+### Features
+
+#### Config editor: the **Claustrum (hosted live-view)** block is now editable in-app (#539). ([#563](https://github.com/schubydoo/clauster/pull/563))
+
+Previously `claustrum.enabled` could only be flipped by hand-editing `clauster.yml` and
+restarting, so a user with claustrum installed had no discoverable way to turn the hosted
+channel on. The editor now surfaces the `claustrum.enabled` master toggle plus its
+operational fields (`socket_path`, `spawn_timeout_seconds`, `keep_children`,
+`request_timeout_seconds`), which grey out when the channel is off (same depends-on
+mechanism as the metrics block). Like every config edit, saving prompts to restart Clauster
+to apply. `claustrum.binary` is intentionally left out — executable paths stay non-editable,
+matching `claude.binary`.
+
+### Fixes
+
+- Dashboard (hosted live view): the tool and permission-decision badges in the hosted transcript now use Tabler sprite icons instead of Unicode emoji (🔧 → `tool`, ✓/✕ → `check`/`x`), matching the sprite-icon system the rest of the UI uses. ([#558](https://github.com/schubydoo/clauster/pull/558))
+- Dashboard polish (#433): the project name now truncates at a **viewport-relative** width (≈10rem on a phone up to 28rem on a wide screen) instead of a fixed 16rem cap, so long names adapt to the screen (DES-07). The Active-list "Open in Claude" link now validates that the session URL is `http(s)` before binding it to the `href`, so a non-http value can never reach the link (FE-03 hardening). ([#546](https://github.com/schubydoo/clauster/pull/546))
+- Dashboard: de-jargon the (opt-in) Maintenance panel. "Reap ghost environments" → "Clean up leftover environments", with plainer copy explaining that these are cloud session environments left over after a session ends (the cloud `Default` and any environment still backing a live session are never touched), and the destructive action labelled "Permanently delete — this can't be undone" (the typed-`DELETE` confirm is unchanged). ([#554](https://github.com/schubydoo/clauster/pull/554))
+- Config editor: several correctness + UX papercuts. The usage badge mode (`usage.mode`) is now authoritative over the deprecated `usage.show_cost` alias — `show_cost` is flagged deprecated in the panel (with a plain-language note pointing at `usage.mode`) instead of leaking its raw docstring, and an explicit `usage.mode` wins if both are set. The transcript-recap toggle now greys out under the pty (true-resume) launch mode, where it has no effect. The bridge-log retention knobs (`logs.retention_max_age_days` / `_max_files` / `_max_total_mb`) are now editable in-app alongside the other log settings. And a blank `usage.currency_symbol` falls back to the default symbol instead of rendering an empty badge. ([#564](https://github.com/schubydoo/clauster/pull/564))
+- Security hardening (batch). The reverse-proxy `trusted_ips` allowlist is now validated as IP/CIDR at load — a malformed entry fails fast instead of silently never matching at runtime. The opt-in webhook SSRF guard (`webhooks.block_private_targets`) now **resolves DNS hostnames** and drops a URL whose name points at an internal IP, closing the hostname-bypass (a rebinding domain that re-resolves between the check and the POST remains an acknowledged TOCTOU residual). The clone `allow_private_hosts` description now states the field semantics rather than the default's effect. Internal hardening: direct unit tests for the hosted-stream redactor, a parity test pinning that every WebSocket endpoint enforces the same auth gate, and an inline note documenting why the session cookie's `SameSite=Lax` is safe (state changes are independently Origin-gated). ([#565](https://github.com/schubydoo/clauster/pull/565))
+- Config editor: the **Default permission mode** dropdown now shows the same friendly labels as the "Run Claude here" launch menu (e.g. "Ask each time (default)", "Plan only (read-only)") instead of bare enum tokens — the saved value is unchanged. The **recap size limit** now greys out when "Recap prior transcript on restart" is off, and the **"Where new sessions run"** and **"Enable metrics line"** descriptions were rewritten to say what they actually do (bridge launches only; the per-session CPU / memory / disk-I/O line). ([#544](https://github.com/schubydoo/clauster/pull/544))
+- Hosted sessions: fix `ProcessStream` subscriber leaks. `HostedSession.start()` and `reattach()` now drop their stream subscription if the spawn/reattach RPC fails or times out (the error path previously left an undrained subscriber on the stream), and the pump loop drops its subscription whenever it exits on its own — a natural agent exit or a daemon-loss error — rather than leaving it until a later `stop()`/`detach()`. ([#552](https://github.com/schubydoo/clauster/pull/552))
+- Dashboard: the live-tail "reconnecting…" and "disconnected" banners no longer appear falsely while the log is streaming. A `d-flex` utility class (`display:flex !important`) was overriding the inline `display:none` that `x-show` uses to hide them, so both banners stayed pinned visible whenever the log panel was open — regardless of the tail's actual state. The flex layout now lives on an inner wrapper, leaving `x-show` free to hide the banner. ([#538](https://github.com/schubydoo/clauster/pull/538))
+- Dashboard polish: the UI no longer shows raw enum tokens where a friendly label exists. The **Run** button and the hosted-session row now read "Auto-accept edits" / "Never prompt" etc. instead of `acceptEdits` / `dontAsk`; the Active-zone **filter chips** use the launch-menu product names (Desktop / Browser / Fire-and-forget) instead of internal tokens; and the config editor's **launch-mode, spawn-mode, and usage-mode** dropdowns get the same friendly labels as permission mode (the saved value is unchanged). Also fixes two accessibility gaps: the "First prompt" input and the New-project "Type" radio group are now properly associated with their labels for screen readers. ([#547](https://github.com/schubydoo/clauster/pull/547))
+- Projects zone: the "Show all / Show fewer" toggle now appears in **every** sort, not only A–Z. In a last-used or cost sort the 6-row cap now applies by the chosen sort order — showing the top 6 with the toggle revealing the rest — instead of silently showing the full list with no toggle. A project with a live session is still never hidden by the cap. ([#545](https://github.com/schubydoo/clauster/pull/545))
+- pty bridges: the keeper now waits on its PTY with `poll()` instead of `select()`. `select.select()` raises "filedescriptor out of range in select()" once the PTY master file descriptor reaches FD_SETSIZE (1024) — which a long-lived Clauster managing many bridges/keepers (or running on a busy host with many open fds) could hit, crashing the keeper's read loop. `poll()` has no such ceiling. ([#557](https://github.com/schubydoo/clauster/pull/557))
+- Security (redaction): the `sk-…` token pattern in the log/stream redactor now includes `_` in its character class, matching the GitHub/GitLab/clauster token patterns. Anthropic `sk-ant-…` keys can contain underscores — without this, such a key would not fully redact and could leak into the bridge debug log or the live-tail WebSocket stream. ([#551](https://github.com/schubydoo/clauster/pull/551))
+- Bridge runner: fix a race where `stop()` could orphan a bridge. `stop()` read `bridge_pid` without holding the per-project spawn lock, so a stop arriving while `spawn()` was suspended in `to_thread(_popen)` would see `bridge_pid=None`, mark the instance STOPPED, and return — leaving the freshly-spawned bridge running but untracked. `stop()` now takes the same lock `spawn()`/`forget()`/`resume()` use, so it waits for any in-flight spawn to publish its pid before reading it. ([#553](https://github.com/schubydoo/clauster/pull/553))
+
+#### Dashboard: unified the two pre-launch warning vocabularies (UX-07). Both the header ([#560](https://github.com/schubydoo/clauster/pull/560))
+
+system-wide pill and the per-project pill now read as "readiness checks" — the header
+tooltip says "System readiness … affects every launch on this host", the per-project
+pill drops the "preflight" jargon for "N check(s)" with a "for this project before
+launch" tooltip and a "Readiness checks for &lt;project&gt;" detail heading. One term,
+scoped by wording; internal names, API routes, and test hooks are unchanged.
+
+#### Renamed the confusing `claude.resume_mode` config key to `claude.launch_mode` (#540). The ([#561](https://github.com/schubydoo/clauster/pull/561))
+
+old name read like a resume on/off toggle, but the field actually picks the bridge launch
+mode (`standard` vs `pty`). Existing `clauster.yml` files keep working: the legacy
+`claude.resume_mode` key — and the `CLAUSTER_CLAUDE_RESUME_MODE` env var — are still
+accepted as deprecated aliases that map to `launch_mode` with a warning (if both the old
+and new key are set, the new one wins). Config-editor label and docs updated.
+
 ## 0.12.2 (2026-06-23)
 
 ### Features
