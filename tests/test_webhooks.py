@@ -128,8 +128,15 @@ def test_block_private_targets_off_keeps_lan_receiver():
     assert em._urls == ["http://10.0.0.1:9000/h"]
 
 
-def test_block_private_targets_keeps_public_and_hostnames():
-    # ON: public IPs and DNS hostnames pass; only the private literal is dropped.
+def test_block_private_targets_keeps_public_and_hostnames(monkeypatch):
+    # ON: public IPs and public-resolving DNS hostnames pass; only the private literal is
+    # dropped. getaddrinfo is stubbed so the test never depends on real DNS.
+    import socket as _socket
+
+    def _gai(host, *args, **kwargs):
+        return [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+    monkeypatch.setattr("clauster.webhooks.socket.getaddrinfo", _gai)
     em = WebhookEmitter(
         _cfg(
             enabled=True,
@@ -176,11 +183,37 @@ def test_target_allowed_rejects_malformed_when_blocking():
     assert _target_allowed("http://[::1", block_private=False) is True
 
 
-def test_block_private_targets_dns_limitation():
-    # DOCUMENTED limitation (see block_private_targets docstring): a DNS hostname is not
-    # resolved, so e.g. `localhost` (-> 127.0.0.1) passes the literal-IP guard. Closing
-    # the DNS class needs the clone guard's resolve-then-check model. Pinned so the
-    # behaviour is explicit, not accidental.
+def test_block_private_targets_resolves_dns_hostnames(monkeypatch):
+    # #549: a DNS hostname is now resolved at check time — a name pointing at a private IP is
+    # dropped, a name resolving public passes, and an unresolvable name is left for httpx
+    # (kept here; it can't reach a private host anyway, and the guard isn't a DNS dependency).
+    import socket as _socket
+
+    resolved = {"public.example": "93.184.216.34", "evil.test": "127.0.0.1"}
+
+    def _gai(host, *args, **kwargs):
+        if host in resolved:
+            return [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", (resolved[host], 0))]
+        raise _socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr("clauster.webhooks.socket.getaddrinfo", _gai)
+    em = WebhookEmitter(
+        _cfg(
+            enabled=True,
+            block_private_targets=True,
+            urls=[
+                "https://public.example/h",  # resolves public -> kept
+                "http://evil.test/h",  # resolves to 127.0.0.1 -> dropped
+                "http://nxdomain.invalid/h",  # unresolvable -> kept (httpx will fail to dial)
+            ],
+        )
+    )
+    assert em._urls == ["https://public.example/h", "http://nxdomain.invalid/h"]
+
+
+def test_is_private_host_literal_only_for_hostnames():
+    # _is_private_host stays a pure literal classifier — a bare hostname is not an IP, so it
+    # returns False here; DNS resolution lives in _target_allowed via _host_resolves_private.
     from clauster.webhooks import _is_private_host
 
     assert _is_private_host("localhost") is False

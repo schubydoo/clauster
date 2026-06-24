@@ -359,10 +359,27 @@ def test_proxy_hmac_replay_on_other_endpoint_rejected(runner_config, monkeypatch
 
 
 def test_ws_rejected_without_auth(runner_config):
-    client = _password_client(runner_config)
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/ws/bridge-log/alpha", headers={"origin": ORIGIN}):
-            pass
+    # `with` enters the TestClient so the app lifespan (startup) runs — required for WS tests
+    # so the gate is exercised against startup-seeded state, not a half-initialized app.
+    with _password_client(runner_config) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/ws/bridge-log/alpha", headers={"origin": ORIGIN}):
+                pass
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/ws/bridge-log/alpha", "/ws/hosted/alpha", "/ws/clone-progress/alpha"],
+)
+def test_all_ws_endpoints_reject_unauthenticated(runner_config, path):
+    # #549 parity pin: EVERY WebSocket endpoint must gate on the same `auth.enabled` +
+    # `_ws_authorized` check before accept — a new handler (or a dropped gate on one of them)
+    # can't silently expose a live stream. Pinned so the hand-rolled per-handler gate can't drift.
+    # `with` enters the TestClient so the app lifespan runs (tests-testclient-lifespan rule).
+    with _password_client(runner_config) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(path, headers={"origin": ORIGIN}):
+                pass
 
 
 def test_ws_rejected_bad_origin(runner_config):

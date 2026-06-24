@@ -206,7 +206,9 @@ class ReverseProxyConfig(BaseModel):
         description="Header carrying the HMAC signature.",
     )
     trusted_ips: list[str] = Field(
-        default_factory=list, description="Peer-IP allowlist for the proxy."
+        default_factory=list,
+        description="Peer-IP allowlist for the proxy. Each entry is an IP or CIDR, validated "
+        "at load (a malformed entry fails fast rather than silently never matching).",
     )
     shared_secret: str | None = Field(
         default=None, description="HMAC key the proxy signs `X-Proxy-Auth` with."
@@ -214,6 +216,16 @@ class ReverseProxyConfig(BaseModel):
     hmac_window_seconds: int = Field(
         default=60, ge=0, description="Clock-skew / replay window (≥0)."
     )
+
+    @field_validator("trusted_ips")
+    @classmethod
+    def _validate_trusted_ips(cls, v: list[str]) -> list[str]:
+        # Fail fast on a malformed IP/CIDR rather than letting `auth.peer_trusted` silently
+        # skip it at runtime — a quiet no-op entry in an auth allowlist is a footgun (the
+        # proxy peer it was meant to admit silently never matches).
+        for entry in v:
+            ipaddress.ip_network(entry, strict=False)
+        return v
 
 
 class AuthConfig(BaseModel):
@@ -313,7 +325,9 @@ class CloneConfig(BaseModel):
     )
     allow_private_hosts: bool = Field(
         default=False,
-        description="Block private/LAN IP targets by default (SSRF guard).",
+        description="When false (default), block clone URLs whose host is a private/LAN/"
+        "loopback IP (SSRF guard); when true, allow them — prefer `allowed_private_cidrs` for "
+        "a targeted opt-in over opening every private range.",
     )
     allowed_private_cidrs: list[str] = Field(
         default_factory=list,
@@ -678,7 +692,8 @@ class WebhooksConfig(BaseModel):
     RUNNING".
 
     ``block_private_targets`` (default off) is an opt-in SSRF guard that drops webhook
-    URLs whose host is a loopback/link-local/private IP literal; see its field description.
+    URLs whose host is a loopback/link-local/private IP literal — or a DNS name that
+    resolves to one; see its field description.
     """
 
     enabled: bool = Field(default=False, description="Master switch for outbound webhooks.")

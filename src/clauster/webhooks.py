@@ -48,35 +48,16 @@ def _valid_webhook_url(url: object) -> bool:
     return parsed.scheme in ("http", "https") and bool(host)
 
 
-def _is_private_host(host: str) -> bool:
-    """Whether ``host`` is an internal / non-routable IP *literal* (any encoding).
+def _ip_is_private(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether an IP address is internal / non-routable (the shared SSRF classifier).
 
     Classifies the same internal ranges as the clone SSRF guard
     (``provisioning._ip_blocked``): loopback, link-local (incl. the 169.254.169.254
     metadata IP), RFC1918 private, unspecified (``0.0.0.0`` / ``::``), reserved,
     multicast, IPv6 ULA, and the carrier/benchmark nets imported from
-    ``provisioning._EXTRA_PRIVATE_NETS`` (CGNAT ``100.64/10``) — shared so the two SSRF
-    guards can't drift. An IPv4-mapped IPv6 literal is normalized to its IPv4 form.
-
-    It also catches the *non-canonical* IPv4 encodings ``getaddrinfo`` (and so httpx)
-    still dials but ``ipaddress`` rejects — decimal-integer (``2130706433``), hex
-    (``0x7f000001``), short (``127.1``) — via ``socket.inet_aton``, so they can't slip
-    through to ``127.0.0.1`` / the metadata IP.
-
-    A genuine DNS hostname is not an IP literal and returns False. DNS names (rebinding)
-    and exotic IPv6 embeddings (NAT64, IPv4-compatible) are NOT resolved/normalized — out
-    of scope for this literal-IP seam (see :attr:`WebhooksConfig.block_private_targets`).
+    ``provisioning._EXTRA_PRIVATE_NETS`` (CGNAT ``100.64/10``). An IPv4-mapped IPv6
+    address is normalized to its IPv4 form first.
     """
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        # Non-canonical IPv4 the resolver still honors (decimal-int / hex / octal / short
-        # form). ``ipaddress`` rejects these, but glibc/getaddrinfo — which httpx dials —
-        # accepts them, so classify via the same inet_aton or they bypass.
-        try:
-            ip = ipaddress.ip_address(socket.inet_aton(host))
-        except OSError:
-            return False  # genuine non-IP (a DNS hostname)
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     return (
@@ -90,12 +71,61 @@ def _is_private_host(host: str) -> bool:
     )
 
 
+def _is_private_host(host: str) -> bool:
+    """Whether ``host`` is an internal / non-routable IP *literal* (any encoding).
+
+    It catches the *non-canonical* IPv4 encodings ``getaddrinfo`` (and so httpx) still
+    dials but ``ipaddress`` rejects — decimal-integer (``2130706433``), hex
+    (``0x7f000001``), short (``127.1``) — via ``socket.inet_aton``, so they can't slip
+    through to ``127.0.0.1`` / the metadata IP.
+
+    A genuine DNS hostname is not an IP literal and returns False here — it is resolved
+    separately by :func:`_host_resolves_private`. Exotic IPv6 embeddings (NAT64,
+    IPv4-compatible) are not normalized — out of scope for this literal-IP seam.
+    """
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Non-canonical IPv4 the resolver still honors (decimal-int / hex / octal / short
+        # form). ``ipaddress`` rejects these, but glibc/getaddrinfo — which httpx dials —
+        # accepts them, so classify via the same inet_aton or they bypass.
+        try:
+            ip = ipaddress.ip_address(socket.inet_aton(host))
+        except OSError:
+            return False  # genuine non-IP (a DNS hostname)
+    return _ip_is_private(ip)
+
+
+def _host_resolves_private(host: str) -> bool:
+    """Whether a DNS hostname resolves to any internal IP (best-effort, check-time).
+
+    Closes the simple bypass where a hostname points straight at a private IP. The
+    lookup is at config-filter time; a rebinding domain that re-resolves to a private IP
+    when httpx dials is an acknowledged TOCTOU residual (same class as the clone-URL
+    guard), out of scope here. An unresolvable host returns False — httpx can't dial it
+    either, so nothing egresses, and the guard never becomes a DNS-availability dependency.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError):
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if _ip_is_private(ip):
+            return True
+    return False
+
+
 def _target_allowed(url: str, *, block_private: bool) -> bool:
     """Whether ``url`` survives the opt-in SSRF guard.
 
     With ``block_private`` off this is always True (byte-identical to the historical
     behaviour). With it on, a URL whose host is a private/loopback/link-local IP literal
-    is rejected; public IPs and DNS hostnames pass.
+    — or a DNS name that resolves to one — is rejected; public IPs and public-resolving
+    hostnames pass.
     """
     if not block_private:
         return True
@@ -103,7 +133,13 @@ def _target_allowed(url: str, *, block_private: bool) -> bool:
         host = urlparse(url).hostname
     except ValueError:
         return False
-    return not (host and _is_private_host(host))
+    if not host:
+        return False
+    if _is_private_host(host):
+        return False
+    # Resolve a DNS hostname so a name pointing at a private IP can't bypass; an IP literal
+    # resolves to itself (already classified above), so this stays a no-op for it.
+    return not _host_resolves_private(host)
 
 
 class WebhookEmitter:

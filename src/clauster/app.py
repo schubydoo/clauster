@@ -650,6 +650,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 auth.issue_session(_serializer, _SESSION_USER, app.state.session_epoch),
                 max_age=config.auth.session_max_age_seconds,
                 httponly=True,
+                # SameSite=Lax (deliberate UX trade-off): a top-level cross-site GET carries
+                # the session so a bookmark / inbound link to the dashboard stays logged in.
+                # NOT a CSRF hole — every state-changing request is an unsafe method and is
+                # independently gated by the strict Origin allowlist (`_origin_allowed`); going
+                # Strict would log the user out on every inbound navigation for no real gain.
                 samesite="lax",
                 secure=_cookie_secure(request),
                 path=_root or "/",

@@ -172,7 +172,7 @@ projects:
 | `enabled` | bool | `false` | Enable trusted-reverse-proxy auth. |
 | `user_header` | str | `Remote-User` | Header carrying the authenticated user. |
 | `shared_secret_header` | str | `X-Proxy-Auth` | Header carrying the HMAC signature. |
-| `trusted_ips` | list[str] | `[]` | Peer-IP allowlist for the proxy. |
+| `trusted_ips` | list[str] | `[]` | Peer-IP allowlist for the proxy. Each entry is an IP or CIDR, validated at load (a malformed entry fails fast rather than silently never matching). |
 | `shared_secret` | str \| null | `null` | HMAC key the proxy signs `X-Proxy-Auth` with. |
 | `hmac_window_seconds` | int | `60` | Clock-skew / replay window (≥0). |
 <!-- END GEN: reverse_proxy -->
@@ -212,7 +212,7 @@ strict.
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Allow cloning/creating projects. |
 | `allowed_schemes` | list[str] | `["https", "ssh"]` | Permitted clone URL schemes. |
-| `allow_private_hosts` | bool | `false` | Block private/LAN IP targets by default (SSRF guard). |
+| `allow_private_hosts` | bool | `false` | When false (default), block clone URLs whose host is a private/LAN/loopback IP (SSRF guard); when true, allow them — prefer `allowed_private_cidrs` for a targeted opt-in over opening every private range. |
 | `allowed_private_cidrs` | list[str] | `[]` | Targeted LAN opt-in. Each entry is validated as a CIDR at load (a malformed entry fails fast rather than silently never matching). |
 | `timeout_seconds` | int | `300` | Clone timeout (≥1). |
 | `max_mb` | int | `2048` | Post-clone size cap (≥0; `0` = unlimited). |

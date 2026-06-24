@@ -21,6 +21,7 @@ from clauster.hosted import (
     HostedManager,
     HostedSession,
     HostedSessionError,
+    _redact_obj,
     build_hosted_argv,
 )
 from clauster.hosted_state import HostedStateStore
@@ -1728,3 +1729,32 @@ async def test_manager_resume_kills_orphan_survivor(fake_claustrum, monkeypatch)
         assert resumed.claude_session_uuid == inst.claude_session_uuid
         assert mgr.get_instance("01ORPHAN0000000000000000") is None  # dead row retired
         await mgr.aclose()
+
+
+def test_redact_obj_sanitizes_nested_string_leaves():
+    # Direct coverage for the structured-frame redactor (#549): every string leaf at any
+    # depth is sanitized; non-string scalars pass through with type + value intact.
+    frame = {
+        "type": "assistant",
+        "text": "worker cse_01XYZABCDEFGHIJ started",
+        "meta": {"session": "session_01ZZZZZZZZZZZZZZZZZZZZZZ", "n": 3, "ok": True},
+        "items": ["env_01BCDEFGHIJKLMNOPQRSTUVWX", 42, None],
+    }
+    out = _redact_obj(frame)
+    assert "cse_01" not in out["text"]
+    assert "session_01" not in out["meta"]["session"]
+    assert "env_01" not in out["items"][0]
+    # Non-string scalars are returned unchanged (type preserved).
+    assert out["meta"]["n"] == 3
+    assert out["meta"]["ok"] is True
+    assert out["items"][1] == 42
+    assert out["items"][2] is None
+
+
+def test_redact_obj_passes_through_bare_scalars():
+    # Only string leaves are sanitized; a bare non-str scalar is returned as-is, and a bare
+    # secret string is still masked.
+    assert _redact_obj(7) == 7
+    assert _redact_obj(True) is True
+    assert _redact_obj(None) is None
+    assert "sk-" not in _redact_obj("token sk-ABCDEFGHIJKLMNOPQRST rest")
