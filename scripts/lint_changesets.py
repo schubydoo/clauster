@@ -42,14 +42,17 @@ def _violation(path: str, body: str) -> str | None:
     if not content:
         return f"{path}: empty changeset body (needs a one-line summary)."
     first = content[0].rstrip()
-    multiline = len(content) > 1 and content[1].strip() != ""
+    # "Has details" = ANY non-blank line after the summary, even across a blank-line
+    # paragraph break: knope splits on the first newline, so a blank-separated body still
+    # renders line 1 as the heading. Checking only the adjacent line would miss that shape.
+    multiline = any(line.strip() for line in content[1:])
     if multiline and not first.endswith(_TERMINATORS):
         return (
             f"{path}: the summary (line 1) wraps mid-sentence -- knope uses line 1 as the "
             f"entry summary, so the release-notes heading would truncate here:\n"
             f'      "{first}"\n'
             f"    Fix: keep the summary on ONE line, or end line 1 as a complete sentence "
-            f"(. ! ?) before continuing details on the next line."
+            f"(. ! ? :) before continuing details on the next line."
         )
     return None
 
