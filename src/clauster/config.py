@@ -421,8 +421,9 @@ class UsageConfig(BaseModel):
     for a leaner "conversation size" figure. The per-category breakdown is always in
     the tooltip.
 
-    ``show_cost`` is a **deprecated** back-compat alias: ``show_cost: false`` forces
-    ``mode: "off"`` (its only historical effect was hiding the badge).
+    ``show_cost`` is a **deprecated** back-compat alias. ``usage.mode`` is authoritative;
+    ``show_cost: false`` is honored (mapped to ``mode: "off"``) only when ``mode`` is not
+    set explicitly — if both are given, ``mode`` wins.
     """
 
     mode: Literal["cost", "tokens", "off"] = Field(
@@ -456,7 +457,9 @@ class UsageConfig(BaseModel):
     )
     show_cost: bool = Field(
         default=True,
-        description="**Deprecated** back-compat alias: `show_cost: false` forces `mode: off`.",
+        description="**Deprecated** back-compat alias. `usage.mode` is authoritative; "
+        "`show_cost: false` maps to `mode: off` only when `mode` is unset "
+        "(mode wins if both are set).",
     )
 
     @field_validator("currency", mode="before")
@@ -465,6 +468,15 @@ class UsageConfig(BaseModel):
         # Normalize the code so "usd"/" USD " compare equal to "USD" — otherwise a
         # lowercase code spuriously trips the no-FX warning and the symbol fallback.
         return v.strip().upper() if isinstance(v, str) else v
+
+    @field_validator("currency_symbol", mode="before")
+    @classmethod
+    def _blank_symbol_to_none(cls, v: object) -> object:
+        # An empty / whitespace-only symbol renders a blank badge; treat it as unset so
+        # `effective_symbol` falls back to `$` (USD) or the currency code.
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -476,15 +488,24 @@ class UsageConfig(BaseModel):
 
     @model_validator(mode="after")
     def _resolve_mode_and_warn(self) -> UsageConfig:
-        # Back-compat: show_cost=false historically hid the whole badge -> mode off.
+        # `usage.mode` is authoritative. The deprecated `show_cost=false` is honored
+        # (mapped to `mode: off`) only when `mode` was not set explicitly; if both are
+        # given, mode wins. Mirrors the launch_mode/resume_mode alias precedence.
         if not self.show_cost:
-            if "mode" in self.model_fields_set and self.mode != "off":
+            if "mode" in self.model_fields_set:
+                if self.mode != "off":
+                    _log.warning(
+                        "usage.show_cost=false is ignored because usage.mode=%r is set "
+                        "explicitly (mode wins); show_cost is deprecated — remove it and "
+                        "set usage.mode='off' to hide the badge.",
+                        self.mode,
+                    )
+            else:
                 _log.warning(
-                    "usage.show_cost=false overrides usage.mode=%r (badge hidden); "
-                    "show_cost is deprecated — set usage.mode='off' instead.",
-                    self.mode,
+                    "usage.show_cost=false is deprecated; mapping it to usage.mode='off'. "
+                    "Set usage.mode='off' instead.",
                 )
-            self.mode = "off"
+                self.mode = "off"
         # A foreign currency with no FX rate paints a foreign symbol on a USD figure.
         if self.mode == "cost" and self.currency != "USD" and self.fx_rate == 1.0:
             _log.warning(

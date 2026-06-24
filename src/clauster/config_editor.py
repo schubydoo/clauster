@@ -48,6 +48,9 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "logs.keep_rotated",
     "logs.redact_session_url",
     "logs.strip_ansi_in_stream",
+    "logs.retention_max_age_days",
+    "logs.retention_max_files",
+    "logs.retention_max_total_mb",
     "reaper.ui_enabled",
     "usage.mode",
     "usage.currency",
@@ -202,6 +205,9 @@ FIELD_LABELS: dict[str, str] = {
     "logs.keep_rotated": "Rotated logs to keep",
     "logs.redact_session_url": "Redact session URL in logs",
     "logs.strip_ansi_in_stream": "Strip ANSI colours in stream",
+    "logs.retention_max_age_days": "Bridge-log retention (max age)",
+    "logs.retention_max_files": "Bridge-log retention (max sets)",
+    "logs.retention_max_total_mb": "Bridge-log retention (max total size)",
     "reaper.ui_enabled": "Show ghost-environment reaper",
     "usage.mode": "Usage badge mode",
     "usage.currency": "Currency code",
@@ -227,6 +233,8 @@ FIELD_UNITS: dict[str, str] = {
     "claustrum.spawn_timeout_seconds": "seconds",
     "claustrum.request_timeout_seconds": "seconds",
     "logs.bridge_log_max_size_mb": "MB",
+    "logs.retention_max_age_days": "days",
+    "logs.retention_max_total_mb": "MB",
     "metrics.sample_interval_seconds": "seconds",
     "metrics.poll_seconds": "seconds",
 }
@@ -251,6 +259,27 @@ FIELD_DEPENDS: dict[str, str] = {
     "metrics.sample_interval_seconds": "metrics.enabled",
     "metrics.poll_seconds": "metrics.enabled",
     "notifications.notify_on_crash": "notifications.enabled",
+}
+
+# Child -> (master field, the master VALUE that enables the child). Unlike FIELD_DEPENDS
+# (boolean master: the child is disabled when the master is falsy), the child here is disabled
+# unless the master EQUALS this value — for enum-gated fields (e.g. the transcript recap only
+# applies to the standard launch mode; pty true-resume already carries its own context).
+FIELD_DEPENDS_VALUE: dict[str, tuple[str, str]] = {
+    "claude.resume_recap": ("claude.launch_mode", "standard"),
+}
+
+# Fields kept only for back-compat — the API marks them deprecated (and the UI points at the
+# replacement) instead of surfacing the raw Pydantic deprecation docstring.
+DEPRECATED_FIELDS: frozenset[str] = frozenset({"usage.show_cost"})
+
+# Plain-text UI description overrides, keyed by dotted path. Used where the model's own
+# description is raw markdown unsuitable for the panel (e.g. a deprecation note).
+FIELD_DESCRIPTIONS: dict[str, str] = {
+    "usage.show_cost": (
+        "Deprecated. Use “Usage badge mode” → Off to hide the badge; usage.mode now takes "
+        "precedence and show_cost only applies when mode is unset."
+    ),
 }
 
 # Human labels for enum option VALUES (the saved value is unchanged). Lets the editor show the
@@ -310,6 +339,7 @@ def field_specs() -> dict[str, dict[str, Any]]:
         info = _resolve_field_info(path)
         kind, choices = _classify(info.annotation)
         default = info.default
+        dep_value = FIELD_DEPENDS_VALUE.get(path)
         spec: dict[str, Any] = {
             "key": key,
             "section": section,
@@ -318,10 +348,12 @@ def field_specs() -> dict[str, dict[str, Any]]:
             "type": kind,
             "choices": choices,
             "choice_labels": FIELD_CHOICE_LABELS.get(path),
-            "description": info.description or "",
+            "description": FIELD_DESCRIPTIONS.get(path, info.description or ""),
             "unit": FIELD_UNITS.get(path),
             "placeholder": FIELD_PLACEHOLDERS.get(path),
-            "depends_on": FIELD_DEPENDS.get(path),
+            "depends_on": FIELD_DEPENDS.get(path) or (dep_value[0] if dep_value else None),
+            "depends_on_value": dep_value[1] if dep_value else None,
+            "deprecated": path in DEPRECATED_FIELDS,
             "default": default if isinstance(default, (str, int, float, bool)) else None,
         }
         if kind in ("int", "float"):

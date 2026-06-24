@@ -177,3 +177,74 @@ def test_validate_edits_accepts_enabling_claustrum(write_config) -> None:
     assert candidate["claustrum"]["spawn_timeout_seconds"] == 15
     with pytest.raises(ConfigValidationError):
         validate_edits(raw, {"claustrum.spawn_timeout_seconds": -5})  # gt=0
+
+
+def test_depends_maps_are_disjoint() -> None:
+    # #548: FIELD_DEPENDS (boolean master) and FIELD_DEPENDS_VALUE (value-gated master) must stay
+    # disjoint. A path in both would emit a contradictory spec (a boolean master AND a required
+    # value); the frontend would then apply value-equality against a boolean and disable the field
+    # forever with no error. Pin the invariant so a future addition to both fails loudly here.
+    from clauster.config_editor import FIELD_DEPENDS, FIELD_DEPENDS_VALUE
+
+    assert set(FIELD_DEPENDS) & set(FIELD_DEPENDS_VALUE) == set()
+
+
+def test_field_specs_recap_depends_on_launch_mode_value() -> None:
+    # #548: transcript recap only applies to the standard launch mode (pty true-resume carries
+    # its own context), so the editor value-gates it on launch_mode == "standard".
+    specs = field_specs()
+    recap = specs["claude.resume_recap"]
+    assert recap["depends_on"] == "claude.launch_mode"
+    assert recap["depends_on_value"] == "standard"
+    # Boolean-gated fields carry no value (None) — the frontend uses the falsy check for them.
+    assert specs["metrics.normalize_cpu"]["depends_on_value"] is None
+
+
+def test_field_specs_marks_deprecated_show_cost() -> None:
+    # #548: the deprecated alias is flagged in the API and gets a plain-text UI description
+    # instead of leaking the raw Pydantic "**Deprecated**" markdown docstring.
+    specs = field_specs()
+    show_cost = specs["usage.show_cost"]
+    assert show_cost["deprecated"] is True
+    assert "**" not in show_cost["description"]  # no raw markdown surfaced
+    assert "usage.mode" in show_cost["description"]
+    # A normal field is not flagged deprecated.
+    assert specs["usage.mode"]["deprecated"] is False
+
+
+def test_field_specs_exposes_log_retention_fields() -> None:
+    # #548: the actively-pruning retention knobs were invisible in the editor — now Tier-A.
+    specs = field_specs()
+    for path in (
+        "logs.retention_max_age_days",
+        "logs.retention_max_files",
+        "logs.retention_max_total_mb",
+    ):
+        assert path in EDITABLE_FIELDS
+        assert specs[path]["type"] == "int"
+    assert specs["logs.retention_max_age_days"]["unit"] == "days"
+    assert specs["logs.retention_max_total_mb"]["unit"] == "MB"
+
+
+def test_validate_edits_accepts_log_retention(write_config) -> None:
+    # All three retention knobs are operational (no secret) — each round-trips explicitly, and a
+    # negative value fails closed on each (ge=0).
+    raw = _raw(write_config)
+    candidate = validate_edits(
+        raw,
+        {
+            "logs.retention_max_age_days": 7,
+            "logs.retention_max_files": 20,
+            "logs.retention_max_total_mb": 500,
+        },
+    )
+    assert candidate["logs"]["retention_max_age_days"] == 7
+    assert candidate["logs"]["retention_max_files"] == 20
+    assert candidate["logs"]["retention_max_total_mb"] == 500
+    for field in (
+        "logs.retention_max_age_days",
+        "logs.retention_max_files",
+        "logs.retention_max_total_mb",
+    ):
+        with pytest.raises(ConfigValidationError):
+            validate_edits(raw, {field: -1})  # ge=0 fails closed
