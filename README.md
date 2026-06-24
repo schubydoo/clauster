@@ -240,7 +240,7 @@ list.
    **QR code** — to pick the bridge up in `claude.ai/code` or the Claude mobile app.
    No SSH session.
 6. **Stop or resume.** **Stop** signals the bridge; **Resume** relaunches it (with
-   `claude.resume_recap` or `launch_mode: pty` it can carry the prior conversation
+   `claude.resume_recap` or `claude.launch_mode: pty` it can carry the prior conversation
    forward — see [Opt-in extras](#opt-in-extras)). A resumable bridge also offers
    **Start new session** for a deliberate fresh start.
 
