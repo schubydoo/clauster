@@ -363,6 +363,15 @@ def test_usage_explicit_mode_wins_over_deprecated_show_cost(write_config, caplog
     assert any("show_cost=false is ignored" in r.message for r in caplog.records)
 
 
+def test_usage_show_cost_false_and_explicit_mode_off_agree_silently(write_config, caplog):
+    # show_cost=false + an explicit mode=off agree, so no deprecation warning fires (covers the
+    # "both set, mode already off" branch — there is nothing to warn about).
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config("usage:\n  mode: off\n  show_cost: false\n"))
+    assert config.usage.mode == "off"
+    assert not any("show_cost" in r.message for r in caplog.records)
+
+
 def test_usage_currency_default_usd(write_config):
     assert load_config(write_config()).usage.currency == "USD"
 

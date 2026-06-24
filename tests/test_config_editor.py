@@ -179,6 +179,16 @@ def test_validate_edits_accepts_enabling_claustrum(write_config) -> None:
         validate_edits(raw, {"claustrum.spawn_timeout_seconds": -5})  # gt=0
 
 
+def test_depends_maps_are_disjoint() -> None:
+    # #548: FIELD_DEPENDS (boolean master) and FIELD_DEPENDS_VALUE (value-gated master) must stay
+    # disjoint. A path in both would emit a contradictory spec (a boolean master AND a required
+    # value); the frontend would then apply value-equality against a boolean and disable the field
+    # forever with no error. Pin the invariant so a future addition to both fails loudly here.
+    from clauster.config_editor import FIELD_DEPENDS, FIELD_DEPENDS_VALUE
+
+    assert set(FIELD_DEPENDS) & set(FIELD_DEPENDS_VALUE) == set()
+
+
 def test_field_specs_recap_depends_on_launch_mode_value() -> None:
     # #548: transcript recap only applies to the standard launch mode (pty true-resume carries
     # its own context), so the editor value-gates it on launch_mode == "standard".
