@@ -1409,38 +1409,47 @@ class SessionRunner:
 
     async def stop(self, name: str) -> RemoteControlInstance:
         """Signal a managed bridge to shut down and mark the stop as intentional."""
-        instance = self._instances.get(name)
-        if instance is None:
-            raise UnknownProject(f"no managed instance: {name!r}")
-        self._cancel_startup_watch(name)  # stop racing the watch over this instance's status
-        instance.intentional_stop = True  # mark intent BEFORE signalling (spec §3 feat 4)
-        await self._persist()  # persist the intent so a restart doesn't mislabel it CRASHED
+        # Serialize against an in-flight spawn() for this project. Without the lock, stop() can
+        # read bridge_pid=None while _spawn_locked is suspended in to_thread(_popen), mark the
+        # instance STOPPED, and return — orphaning the bridge spawn is about to start tracking.
+        # Taking the same per-project lock spawn()/forget()/resume() use makes stop() wait for an
+        # in-flight spawn to publish bridge_pid before reading it. No deadlock: stop() has no
+        # internal callers and nothing it awaits re-takes this lock. Look the instance up INSIDE
+        # the lock (like forget()) so a concurrent forget() can't de-register it between the
+        # lookup and the signalling.
+        async with self._spawn_lock_for(name):
+            instance = self._instances.get(name)
+            if instance is None:
+                raise UnknownProject(f"no managed instance: {name!r}")
+            self._cancel_startup_watch(name)  # stop racing the watch over this instance's status
+            instance.intentional_stop = True  # mark intent BEFORE signalling (spec §3 feat 4)
+            await self._persist()  # persist the intent so a restart doesn't mislabel it CRASHED
 
-        pid = instance.bridge_pid
-        # A pty bridge needs its keeper reaped even if the bridge pid is already
-        # gone (the keeper is Clauster's direct child); capture it up front.
-        keeper_pid = instance.keeper_pid
-        if pid is None:
+            pid = instance.bridge_pid
+            # A pty bridge needs its keeper reaped even if the bridge pid is already
+            # gone (the keeper is Clauster's direct child); capture it up front.
+            keeper_pid = instance.keeper_pid
+            if pid is None:
+                if keeper_pid is not None:
+                    await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
+                instance.status = InstanceStatus.STOPPED
+                self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
+                self._emit_lifecycle("stop", instance)
+                return instance
+
+            # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
+            if await asyncio.to_thread(procutil.is_live_bridge, pid, instance.bridge_proc_start):
+                # The flag-form (pty) bridge's TUI treats the first SIGINT as "press
+                # again to exit"; a second confirms. The subcommand bridge stops on one.
+                twice = instance.resume_mode == "pty"
+                await asyncio.to_thread(self._signal_stop, pid, twice=twice)
+                await self._await_exit(name, pid, instance.bridge_proc_start)
             if keeper_pid is not None:
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
             self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
             self._emit_lifecycle("stop", instance)
             return instance
-
-        # Re-validate identity immediately before signalling (TOCTOU / PID reuse).
-        if await asyncio.to_thread(procutil.is_live_bridge, pid, instance.bridge_proc_start):
-            # The flag-form (pty) bridge's TUI treats the first SIGINT as "press
-            # again to exit"; a second confirms. The subcommand bridge stops on one.
-            twice = instance.resume_mode == "pty"
-            await asyncio.to_thread(self._signal_stop, pid, twice=twice)
-            await self._await_exit(name, pid, instance.bridge_proc_start)
-        if keeper_pid is not None:
-            await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
-        instance.status = InstanceStatus.STOPPED
-        self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
-        self._emit_lifecycle("stop", instance)
-        return instance
 
     async def forget(self, name: str) -> None:
         """Drop a NON-LIVE bridge's record from memory and state.json (fail closed).
