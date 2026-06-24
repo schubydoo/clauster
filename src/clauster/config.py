@@ -981,8 +981,19 @@ def _apply_env_overrides(data: dict) -> dict:
             _set_nested(data, path, os.environ[env_name])
     for env_name, path in _LEGACY_ENV_ALIASES.items():
         new_env = "CLAUSTER_" + "_".join(path).upper()
-        # The new name wins: skip the legacy var entirely when the new one is set.
+        legacy_set = bool(env_name in os.environ or os.environ.get(f"{env_name}_FILE", "").strip())
+        # The new name wins: skip the legacy var when the new one is set — but if the operator
+        # set BOTH, warn that the legacy var is ignored (mirrors the YAML both-keys warning) so
+        # a stale env override is never silently dropped.
         if new_env in os.environ or os.environ.get(f"{new_env}_FILE", "").strip():
+            if legacy_set:
+                _log.warning(
+                    "config: both %s and the deprecated %s are set — using %s, ignoring %s.",
+                    new_env,
+                    env_name,
+                    new_env,
+                    env_name,
+                )
             continue
         file_path = os.environ.get(f"{env_name}_FILE", "").strip()
         if file_path:

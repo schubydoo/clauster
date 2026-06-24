@@ -539,8 +539,26 @@ def test_legacy_resume_mode_env_var_maps_to_launch_mode(write_config, monkeypatc
     assert any("CLAUSTER_CLAUDE_RESUME_MODE" in r.message for r in caplog.records)
 
 
-def test_new_launch_mode_env_var_wins_over_legacy(write_config, monkeypatch):
-    # When both env vars are set, the new name wins; the legacy alias is skipped entirely.
+def test_new_launch_mode_env_var_wins_over_legacy(write_config, monkeypatch, caplog):
+    # When both env vars are set, the new name wins AND we warn (mirrors the YAML both-keys
+    # path) so a stale legacy env override is never silently ignored.
+    import logging
+
     monkeypatch.setenv("CLAUSTER_CLAUDE_RESUME_MODE", "pty")
     monkeypatch.setenv("CLAUSTER_CLAUDE_LAUNCH_MODE", "standard")
-    assert load_config(write_config()).claude.launch_mode == "standard"
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config())
+    assert config.claude.launch_mode == "standard"
+    assert any(
+        "both" in r.message and "CLAUSTER_CLAUDE_RESUME_MODE" in r.message for r in caplog.records
+    )
+
+
+def test_legacy_resume_mode_file_env_alias_maps_to_launch_mode(
+    write_config, monkeypatch, tmp_path
+):
+    # The legacy alias also honors the CLAUSTER_<X>_FILE secret-indirection form.
+    secret = tmp_path / "mode"
+    secret.write_text("pty\n", encoding="utf-8")  # trailing newline is stripped by the reader
+    monkeypatch.setenv("CLAUSTER_CLAUDE_RESUME_MODE_FILE", str(secret))
+    assert load_config(write_config()).claude.launch_mode == "pty"
