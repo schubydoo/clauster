@@ -227,9 +227,24 @@ def test_field_specs_exposes_log_retention_fields() -> None:
 
 
 def test_validate_edits_accepts_log_retention(write_config) -> None:
-    # Retention is operational (no secret) — it round-trips, and a negative value fails closed.
+    # All three retention knobs are operational (no secret) — each round-trips explicitly, and a
+    # negative value fails closed on each (ge=0).
     raw = _raw(write_config)
-    candidate = validate_edits(raw, {"logs.retention_max_age_days": 7})
+    candidate = validate_edits(
+        raw,
+        {
+            "logs.retention_max_age_days": 7,
+            "logs.retention_max_files": 20,
+            "logs.retention_max_total_mb": 500,
+        },
+    )
     assert candidate["logs"]["retention_max_age_days"] == 7
-    with pytest.raises(ConfigValidationError):
-        validate_edits(raw, {"logs.retention_max_age_days": -1})  # ge=0
+    assert candidate["logs"]["retention_max_files"] == 20
+    assert candidate["logs"]["retention_max_total_mb"] == 500
+    for field in (
+        "logs.retention_max_age_days",
+        "logs.retention_max_files",
+        "logs.retention_max_total_mb",
+    ):
+        with pytest.raises(ConfigValidationError):
+            validate_edits(raw, {field: -1})  # ge=0 fails closed
