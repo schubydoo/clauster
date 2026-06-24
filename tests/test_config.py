@@ -554,6 +554,22 @@ def test_new_launch_mode_env_var_wins_over_legacy(write_config, monkeypatch, cap
     )
 
 
+def test_new_launch_mode_env_var_applies_without_deprecation_warning(
+    write_config, monkeypatch, caplog
+):
+    # The new env var alone applies cleanly: the legacy-alias loop sees the new var set and
+    # the old one unset, so it skips silently (no deprecation warning for a non-legacy user).
+    import logging
+
+    monkeypatch.setenv("CLAUSTER_CLAUDE_LAUNCH_MODE", "pty")
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config())
+    assert config.claude.launch_mode == "pty"
+    assert not any(
+        "deprecated" in r.message or "resume_mode" in r.message.lower() for r in caplog.records
+    )
+
+
 def test_legacy_resume_mode_file_env_alias_maps_to_launch_mode(
     write_config, monkeypatch, tmp_path
 ):
