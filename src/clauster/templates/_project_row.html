@@ -42,7 +42,7 @@
                       x-show="preflightWarnCount('{{ p.name }}') > 0"
                       @click="togglePreflight('{{ p.name }}')"
                       :aria-expanded="!!preflightOpen['{{ p.name }}']"
-                      :title="preflightWarnCount('{{ p.name }}') + ' readiness check(s) for this project before launch'">
+                      :title="preflightWarnCount('{{ p.name }}') + (preflightWarnCount('{{ p.name }}') === 1 ? ' readiness check' : ' readiness checks') + ' for this project before launch'">
                 <span aria-hidden="true">⚠</span> <span x-text="preflightWarnCount('{{ p.name }}')"></span> <span x-text="preflightWarnCount('{{ p.name }}') === 1 ? 'check' : 'checks'"></span>
               </button>
 

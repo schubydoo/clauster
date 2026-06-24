@@ -423,8 +423,10 @@ def test_readiness_vocab_is_unified_and_scoped(write_config):
     # header (global) readiness pill now carries the System-wide scope cue
     assert "System readiness" in page
     assert "affects every launch on this host" in page
-    # per-project pill: scoped tooltip + the per-project "Readiness checks" detail heading
-    assert "readiness check(s) for this project before launch" in page
+    # per-project pill: scoped tooltip (pluralized to match the pill, no literal "(s)")
+    # + the per-project "Readiness checks" detail heading
+    assert "=== 1 ? ' readiness check' : ' readiness checks'" in page
+    assert "for this project before launch" in page
     assert "Readiness checks for" in page
     # the detail group is programmatically labelled by its heading (a11y association)
     assert 'aria-labelledby="readiness-detail-head-alpha"' in page
