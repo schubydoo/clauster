@@ -1884,8 +1884,8 @@
       ghosts: [], total: 0, liveDirs: 0, busy: false, result: null, deleteTyped: "",
       toggle() { this.open = !this.open; if (this.open && !this.loaded) this.load(); },
       summary() {
-        if (!this.ghosts.length) return "No ghost environments — nothing to reap.";
-        return this.ghosts.length + " ghost(s) · " + this.liveDirs +
+        if (!this.ghosts.length) return "No leftover environments — nothing to clean up.";
+        return this.ghosts.length + " leftover · " + this.liveDirs +
           " live dir(s) kept · cloud Default never touched";
       },
       async load() {
