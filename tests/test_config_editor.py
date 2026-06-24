@@ -103,8 +103,20 @@ def test_field_specs_permission_mode_carries_friendly_choice_labels() -> None:
     assert set(labels) == set(perm["choices"])
     assert labels["default"] == "Ask each time (default)"
     assert labels["dontAsk"] == "Never prompt — deny unknowns"
-    # A field with no custom label map carries None, so the template falls back to the value.
-    assert specs["instance_defaults.spawn_mode"]["choice_labels"] is None
+    # A non-enum field has no label map (None), so the template falls back to the raw value.
+    assert specs["instance_defaults.session_name_prefix"]["choice_labels"] is None
+
+
+def test_field_specs_more_enum_dropdowns_carry_friendly_labels() -> None:
+    # Polish-2: resume_mode / spawn_mode / usage.mode now show friendly labels in the config panel
+    # too (the saved value is unchanged), matching the permission_mode treatment.
+    specs = field_specs()
+    rm = specs["claude.resume_mode"]["choice_labels"]
+    sm = specs["instance_defaults.spawn_mode"]["choice_labels"]
+    um = specs["usage.mode"]["choice_labels"]
+    assert rm is not None and set(rm) == set(specs["claude.resume_mode"]["choices"])
+    assert sm is not None and sm["worktree"] == "Git worktree"
+    assert um is not None and um["off"] == "Off"
 
 
 def test_classify_and_constraints_cover_edge_annotations() -> None:

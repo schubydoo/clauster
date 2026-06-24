@@ -826,6 +826,19 @@
           bypassPermissions: "Skips every permission check — the agent may do anything.",
         }[mode] || "";
       },
+      // Short permission-mode label for inline display (Run button, hosted row) — a concise form
+      // of the <select> option text so the UI never shows a raw enum token (acceptEdits, dontAsk…).
+      permLabel(mode) {
+        return {
+          default: "Ask each time", plan: "Plan only", acceptEdits: "Auto-accept edits",
+          auto: "Auto-approve safe", dontAsk: "Never prompt", bypassPermissions: "Skip all checks ⚠",
+        }[mode] || mode;
+      },
+      // Friendly session-type label for the Active-zone filter chips, matching the launch-modal
+      // product names (Desktop / Browser / Fire-and-forget) rather than the raw internal tokens.
+      filterLabel(f) {
+        return { all: "All", desktop: "Desktop", browser: "Browser", detached: "Fire-and-forget", external: "External" }[f] || f;
+      },
       detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
       externalCount(name) {
         const s = this.externalSessions[name];

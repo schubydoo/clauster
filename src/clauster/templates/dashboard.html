@@ -144,7 +144,7 @@
                 <span class="badge bg-orange-lt me-1" x-show="h.is_orphan" x-cloak
                       title="Survived a daemon restart — Resume to recover or Kill to clean up">orphan</span>
                 <span class="fw-medium me-1" x-text="h.project"></span>
-                <span class="text-secondary small me-1" x-text="h.permission_mode"></span>
+                <span class="text-secondary small me-1" x-text="permLabel(h.permission_mode)"></span>
                 {# `:disabled` is coerced with `!!` on every busy-state binding below. These
                    buttons live in an x-for clone and the busy maps (hostedStopping/hostedResuming/
                    agentStopping) start without the row's key. Alpine 3.15.x renders a bare
@@ -434,7 +434,7 @@
           <div class="btn-group btn-group-sm" role="group" aria-label="Filter sessions by where they run">
             <template x-for="f in presentFilters()" :key="f">
               <button type="button" class="btn" @click="activeFilter = f" :aria-pressed="activeFilter === f"
-                      :class="activeFilter === f ? 'btn-primary' : 'btn-ghost-secondary'" x-text="f"></button>
+                      :class="activeFilter === f ? 'btn-primary' : 'btn-ghost-secondary'" x-text="filterLabel(f)"></button>
             </template>
           </div>
         </div>
@@ -639,8 +639,8 @@
                        pattern="[a-zA-Z0-9_-]+" @input="np.error = null; np.warn = null" @keyup.enter="submitNew()">
               </div>
               <div class="col-md-7">
-                <label class="form-label">Type</label>
-                <div class="btn-group w-100" role="group">
+                <label class="form-label" id="np-type-label">Type</label>
+                <div class="btn-group w-100" role="group" aria-labelledby="np-type-label">
                   <input type="radio" class="btn-check" id="np-create" value="create" x-model="np.mode"
                          @change="np.error = null; np.warn = null">
                   <label class="btn" for="np-create">Create empty</label>
