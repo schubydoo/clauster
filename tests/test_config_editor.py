@@ -138,3 +138,42 @@ def test_file_hash_changes_with_content(write_config) -> None:
     h1 = file_hash(path)
     path.write_text(path.read_text(encoding="utf-8") + "# touched\n", encoding="utf-8")
     assert file_hash(path) != h1
+
+
+def test_field_specs_exposes_claustrum_block_with_depends() -> None:
+    # #539: the claustrum hosted-channel block is editable in-app — the master `enabled`
+    # toggle plus operational fields that grey out when it is off (same FIELD_DEPENDS
+    # mechanism as the metrics block). None are secrets, so all are Tier-A safe.
+    specs = field_specs()
+    claustrum = [p for p in EDITABLE_FIELDS if p.startswith("claustrum.")]
+    # `claustrum.binary` is intentionally NOT editable — binary/executable paths stay out of
+    # the editor (same boundary as `claude.binary`), so the editor can never repoint an exe.
+    assert claustrum == [
+        "claustrum.enabled",
+        "claustrum.socket_path",
+        "claustrum.spawn_timeout_seconds",
+        "claustrum.keep_children",
+        "claustrum.request_timeout_seconds",
+    ]
+    assert "claustrum.binary" not in EDITABLE_FIELDS
+    assert specs["claustrum.enabled"]["type"] == "bool"
+    assert specs["claustrum.enabled"]["section_label"] == "Claustrum (hosted live-view)"
+    assert specs["claustrum.enabled"]["depends_on"] is None  # the master switch itself
+    # The 4 operational fields all depend on the master toggle (greyed when the channel is off).
+    for path in claustrum[1:]:
+        assert specs[path]["depends_on"] == "claustrum.enabled"
+    assert specs["claustrum.spawn_timeout_seconds"]["unit"] == "seconds"
+    assert specs["claustrum.socket_path"]["placeholder"]
+
+
+def test_validate_edits_accepts_enabling_claustrum(write_config) -> None:
+    # The reported papercut (#539): claustrum.enabled now flips from the editor (Tier-A write),
+    # and an out-of-range operational value still fails closed.
+    raw = _raw(write_config)
+    candidate = validate_edits(
+        raw, {"claustrum.enabled": True, "claustrum.spawn_timeout_seconds": 15}
+    )
+    assert candidate["claustrum"]["enabled"] is True
+    assert candidate["claustrum"]["spawn_timeout_seconds"] == 15
+    with pytest.raises(ConfigValidationError):
+        validate_edits(raw, {"claustrum.spawn_timeout_seconds": -5})  # gt=0

@@ -39,6 +39,11 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "instance_defaults.session_name_prefix",
     "instance_defaults.capacity",
     "instance_defaults.max_bridges",
+    "claustrum.enabled",
+    "claustrum.socket_path",
+    "claustrum.spawn_timeout_seconds",
+    "claustrum.keep_children",
+    "claustrum.request_timeout_seconds",
     "logs.bridge_log_max_size_mb",
     "logs.keep_rotated",
     "logs.redact_session_url",
@@ -165,6 +170,7 @@ def _classify(annotation: Any) -> tuple[str, list[str] | None]:
 SECTION_LABELS: dict[str, str] = {
     "claude": "Claude",
     "instance_defaults": "Instance defaults",
+    "claustrum": "Claustrum (hosted live-view)",
     "logs": "Logs",
     "reaper": "Reaper",
     "usage": "Usage",
@@ -187,6 +193,11 @@ FIELD_LABELS: dict[str, str] = {
     "instance_defaults.session_name_prefix": "Session name prefix",
     "instance_defaults.capacity": "Sessions per standard bridge",
     "instance_defaults.max_bridges": "Max concurrent bridges",
+    "claustrum.enabled": "Enable hosted live-view channel",
+    "claustrum.socket_path": "Daemon socket path",
+    "claustrum.spawn_timeout_seconds": "Daemon spawn timeout",
+    "claustrum.keep_children": "Keep sessions on daemon restart",
+    "claustrum.request_timeout_seconds": "Daemon request timeout",
     "logs.bridge_log_max_size_mb": "Per-bridge log rotation size",
     "logs.keep_rotated": "Rotated logs to keep",
     "logs.redact_session_url": "Redact session URL in logs",
@@ -213,6 +224,8 @@ FIELD_UNITS: dict[str, str] = {
     "claude.agents_json_poll_interval_seconds": "seconds",
     "claude.startup_grace_seconds": "seconds",
     "claude.resume_recap_max_chars": "characters",
+    "claustrum.spawn_timeout_seconds": "seconds",
+    "claustrum.request_timeout_seconds": "seconds",
     "logs.bridge_log_max_size_mb": "MB",
     "metrics.sample_interval_seconds": "seconds",
     "metrics.poll_seconds": "seconds",
@@ -222,12 +235,17 @@ FIELD_UNITS: dict[str, str] = {
 FIELD_PLACEHOLDERS: dict[str, str] = {
     "instance_defaults.session_name_prefix": "Unset — uses a generated name",
     "instance_defaults.max_bridges": "Unset — no limit",
+    "claustrum.socket_path": "Unset — defaults to <state_dir>/claustrum/daemon.sock",
     "usage.currency_symbol": "Unset — defaults to $",
 }
 
 # Child field -> master switch: the child is disabled in the UI when the master is off.
 FIELD_DEPENDS: dict[str, str] = {
     "claude.resume_recap_max_chars": "claude.resume_recap",
+    "claustrum.socket_path": "claustrum.enabled",
+    "claustrum.spawn_timeout_seconds": "claustrum.enabled",
+    "claustrum.keep_children": "claustrum.enabled",
+    "claustrum.request_timeout_seconds": "claustrum.enabled",
     "metrics.normalize_cpu": "metrics.enabled",
     "metrics.show_disk": "metrics.enabled",
     "metrics.sample_interval_seconds": "metrics.enabled",

@@ -74,6 +74,21 @@ def test_put_config_invalid_value_422(write_config, tmp_path):
     assert res.status_code == 422
 
 
+def test_put_config_enables_claustrum(write_config, tmp_path):
+    # #539: the claustrum hosted channel is now flippable from the editor (it was yml-only).
+    client, path = _client_and_path(write_config, tmp_path)
+    body = client.get("/api/config").json()
+    assert body["fields"]["claustrum.enabled"] is False  # surfaced + off by default
+    res = client.put(
+        "/api/config", json={"edits": {"claustrum.enabled": True}, "hash": body["hash"]}
+    )
+    assert res.status_code == 200
+    assert (
+        res.json()["restart_required"] is True
+    )  # every save is restart-required (no live reload)
+    assert load_config(path).claustrum.enabled is True
+
+
 def test_put_config_requires_edits_and_hash_422(write_config, tmp_path):
     client, _ = _client_and_path(write_config, tmp_path)
     h = client.get("/api/config").json()["hash"]

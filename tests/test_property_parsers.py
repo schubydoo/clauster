@@ -239,7 +239,8 @@ def test_config_roundtrip_preserves_float_field(value: float, tmp_path: Path) ->
             "auth.password_hash",  # secret — never web-editable
             "host",  # bind — structural
             "projects_root",  # structural
-            "claustrum.enabled",  # supply-chain / launch surface
+            "claustrum.binary",  # security: resolved daemon binary stays out (claustrum.enabled
+            #                      itself IS now editable, #539 — but the executable path is not)
             "not.a.real.key",  # unknown path
             "claude.binary",  # security: resolved binary
         ]
