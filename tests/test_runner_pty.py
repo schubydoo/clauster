@@ -261,6 +261,21 @@ def test_keeper_fresh_start_no_url_becomes_ready(tmp_path, monkeypatch) -> None:
     assert "ready" in states  # promoted on liveness once it survives the URL timeout
 
 
+def test_keeper_read_loop_uses_poll_not_select() -> None:
+    # Regression: the keeper read loop must use poll(), not select.select(), which raises
+    # "filedescriptor out of range" once the PTY master fd >= FD_SETSIZE (1024) — crashing a
+    # long-lived keeper (and flaking the -n0 full suite as fds accumulated).
+    import inspect
+
+    from clauster import pty_keeper
+
+    src = inspect.getsource(pty_keeper.run_keeper)
+    assert "select.select(" not in src, "keeper read loop uses select() (FD_SETSIZE-limited)"
+    # Assert on poller.poll( specifically — a bare ".poll(" is already satisfied by the
+    # run_keeper proc.poll() liveness calls, so it would not catch a regression to select().
+    assert "poller.poll(" in src, "keeper read loop must wait on poller.poll(), not select()"
+
+
 def test_signal_stop_twice_sends_two_signals(monkeypatch) -> None:
     calls: list[int] = []
     monkeypatch.setattr("clauster.runner.os.kill", lambda pid, sig: calls.append(pid))
