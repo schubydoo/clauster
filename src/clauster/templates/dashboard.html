@@ -201,7 +201,7 @@
                           </div>
                         </template>
                         <template x-if="it.kind === 'tool'">
-                          <div><span class="badge bg-purple-lt me-1">🔧 <span x-text="it.name"></span></span><code class="small text-secondary" x-text="it.input"></code></div>
+                          <div><span class="badge bg-purple-lt me-1"><svg class="ico" aria-hidden="true"><use href="#ic-tool"/></svg> <span x-text="it.name"></span></span><code class="small text-secondary" x-text="it.input"></code></div>
                         </template>
                         <template x-if="it.kind === 'toolresult'">
                           <div class="text-secondary small ps-2" style="white-space: pre-wrap;" x-text="it.text"></div>
@@ -224,8 +224,11 @@
                                 </span>
                               </template>
                               <template x-if="it.resolved">
-                                <span class="ms-auto small" :class="it.decision === 'allow' ? 'text-success' : 'text-secondary'"
-                                      x-text="it.decision === 'allow' ? '✓ allowed' : (it.decision === 'deny' ? '✕ denied' : (it.decision === 'interrupted' ? '— session ended' : 'answered'))"></span>
+                                <span class="ms-auto small" :class="it.decision === 'allow' ? 'text-success' : 'text-secondary'">
+                                  <svg class="ico" aria-hidden="true" x-show="it.decision === 'allow'"><use href="#ic-check"/></svg>
+                                  <svg class="ico" aria-hidden="true" x-show="it.decision === 'deny'"><use href="#ic-x"/></svg>
+                                  <span x-text="it.decision === 'allow' ? 'allowed' : (it.decision === 'deny' ? 'denied' : (it.decision === 'interrupted' ? '— session ended' : 'answered'))"></span>
+                                </span>
                               </template>
                             </div>
                           </div>
