@@ -64,7 +64,9 @@ def test_preflight_pill_surfaces_for_unready_project(
 
     pill = '[data-project="alpha"] [data-test="preflight-pill"]'
     browser.expect_visible(pill)
-    assert "preflight" in browser.get_text(pill).lower()
+    # The pill reads "⚠ N check(s)" since UX-07 (#560) replaced the "preflight" jargon with the
+    # scoped "readiness checks" vocabulary; the data-test hook + internal name stay "preflight".
+    assert "check" in browser.get_text(pill).lower()
 
     # Collapsed until clicked, then the specific warning check(s) appear.
     detail = '[data-project="alpha"] [data-test="preflight-detail"]'
