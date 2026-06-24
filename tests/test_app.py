@@ -412,6 +412,29 @@ def test_dashboard_has_readiness_panel(write_config):
     assert "/api/doctor" in resp.text
 
 
+def test_readiness_vocab_is_unified_and_scoped(write_config):
+    # UX-07: both pre-launch warning systems share ONE user-facing term ("readiness
+    # checks"), distinguished by scope wording — the header pill is System-wide
+    # ("affects every launch"), the per-project pill is "for this project". The jargon
+    # word "preflight" is gone from visible copy; internal preflight* names/routes/
+    # test hooks (data-test="preflight-pill", preflightWarnCount, /api/.../preflight)
+    # intentionally stay, so this asserts the rendered COPY, not the identifiers.
+    page = _client(write_config).get("/").text
+    # header (global) readiness pill now carries the System-wide scope cue
+    assert "System readiness" in page
+    assert "affects every launch on this host" in page
+    # per-project pill: scoped tooltip (pluralized to match the pill, no literal "(s)")
+    # + the per-project "Readiness checks" detail heading
+    assert "=== 1 ? ' readiness check' : ' readiness checks'" in page
+    assert "for this project before launch" in page
+    assert "Readiness checks for" in page
+    # the detail group is programmatically labelled by its heading (a11y association)
+    assert 'aria-labelledby="readiness-detail-head-alpha"' in page
+    assert 'id="readiness-detail-head-alpha"' in page
+    # the pill's visible token is pluralized check/checks — the bare "preflight" text node is gone
+    assert "=== 1 ? 'check' : 'checks'" in page
+
+
 def test_dashboard_has_bg_agent_dispatch_and_stop_controls(write_config):
     # BG-4 (redesign): background agents are now launched as the "Fire-and-forget"
     # outcome in the per-project launch popover (_launchDetached -> POST /api/agents,
