@@ -39,6 +39,14 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_tabler_sprites_for_hosted_chrome_present(write_config):
+    # Icon pass (DES-04): the hosted-transcript chrome swaps structural emoji (🔧/✓/✕) for
+    # Tabler sprites — those symbols must exist in the sprite sheet for the `<use>` refs to render.
+    page = _client(write_config).get("/").text
+    for sym in ('id="ic-tool"', 'id="ic-check"', 'id="ic-x"'):
+        assert sym in page, f"missing Tabler sprite {sym}"
+
+
 def test_static_assets_carry_immutable_cache_control(write_config):
     # #353: vendored assets are cacheable forever (safe because URLs are version-busted).
     resp = _client(write_config).get("/static/alpine.min.js")
