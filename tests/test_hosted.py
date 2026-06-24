@@ -131,6 +131,72 @@ async def test_start_twice_is_rejected(fake_claustrum):
             await session.start()
 
 
+async def test_start_drops_stream_subscription_when_spawn_fails(fake_claustrum, monkeypatch):
+    # If the spawn RPC fails after we've already subscribed to the stream, start() must drop the
+    # subscription so it doesn't leak an undrained subscriber on the ProcessStream — the cleanup
+    # reattach() already does on a not-found process.
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        captured: list = []
+        orig_stream = client.stream
+
+        def _capture(pid):
+            stream = orig_stream(pid)
+            captured.append(stream)
+            return stream
+
+        async def _boom(*args, **kwargs):
+            raise ClaustrumError("spawn failed")
+
+        monkeypatch.setattr(client, "stream", _capture)
+        monkeypatch.setattr(client, "spawn", _boom)
+        with pytest.raises(ClaustrumError):
+            await session.start()
+        assert captured and not captured[0]._subscribers  # no leaked subscriber
+        assert session._stream is None and session._source is None
+
+
+async def test_reattach_drops_stream_subscription_when_rpc_fails(fake_claustrum, monkeypatch):
+    # Same leak guard as start(): if the reattach RPC fails after we've subscribed, reattach() must
+    # drop the subscription — reattach_all() discards the session on error, so nothing else would.
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        captured: list = []
+        orig_stream = client.stream
+
+        def _capture(pid):
+            stream = orig_stream(pid)
+            captured.append(stream)
+            return stream
+
+        async def _boom(*args, **kwargs):
+            raise ClaustrumError("reattach failed")
+
+        monkeypatch.setattr(client, "stream", _capture)
+        monkeypatch.setattr(client, "reattach", _boom)
+        with pytest.raises(ClaustrumError):
+            await session.reattach()
+        assert captured and not captured[0]._subscribers  # no leaked subscriber
+        assert session._stream is None and session._source is None
+
+
+async def test_pump_drops_stream_subscription_on_exit(fake_claustrum):
+    # When the pump exits on its own (here: a natural agent exit), its `finally` drops the stream
+    # subscription immediately rather than leaving it until a later stop()/detach().
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        session = HostedSession(client, _PID, _BIN)
+        await session.start()
+        stream = session._stream
+        assert len(stream._subscribers) == 1  # the pump's own source
+        await fake.emit_exit(_PID, 3)
+        await wait_until(lambda: session.status == "crashed")
+        await wait_until(lambda: not stream._subscribers)  # the finally dropped the subscription
+        await session.stop()  # idempotent: no double-unsubscribe
+
+
 async def test_want_pid_populates_agent_pid(fake_claustrum):
     fake = await fake_claustrum(support_want_pid=True)
     async with ClaustrumClient(fake.socket_path, fake.token) as client:

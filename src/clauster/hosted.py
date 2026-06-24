@@ -224,9 +224,16 @@ class HostedSession:
         )
         self._stream = self._client.stream(self._process_id)
         self._source = self._stream.subscribe()
-        result = await self._client.spawn(
-            self._process_id, argv[0], args=argv[1:], cwd=cwd, env=env, want_pid=want_pid
-        )
+        try:
+            result = await self._client.spawn(
+                self._process_id, argv[0], args=argv[1:], cwd=cwd, env=env, want_pid=want_pid
+            )
+        except BaseException:
+            # spawn RPC failed / timed out / was cancelled — drop the subscription we just made
+            # so we don't leak an undrained subscriber on the stream (mirrors reattach not-found).
+            self._stream.unsubscribe(self._source)
+            self._stream, self._source = None, None
+            raise
         pid = result.get("pid")
         self.agent_pid = pid if isinstance(pid, int) else None
         start_time = result.get("startTime")
@@ -250,7 +257,14 @@ class HostedSession:
             raise HostedSessionError("hosted session already started")
         self._stream = self._client.stream(self._process_id)
         self._source = self._stream.subscribe()
-        result = await self._client.reattach(self._process_id, from_seq)
+        try:
+            result = await self._client.reattach(self._process_id, from_seq)
+        except BaseException:
+            # reattach RPC failed / cancelled — drop the subscription we just made, mirroring
+            # start(); reattach_all() discards the session on error, so nothing else would.
+            self._stream.unsubscribe(self._source)
+            self._stream, self._source = None, None
+            raise
         if not result.get("found"):
             # Session gone while we were down — drop the subscription we just made.
             self._stream.unsubscribe(self._source)
@@ -441,6 +455,14 @@ class HostedSession:
             self.status = "error"
             self._resolve_parked()  # resolve any parked request so it isn't left stranded
             self._emit({"type": "lost", "reason": str(exc)})
+        finally:
+            # The pump owns the subscription it drains; drop it whenever the pump exits on its
+            # own (natural exit, daemon loss, or cancel) so a subscriber is never left on the
+            # stream until a later stop()/detach(). _teardown()'s unsubscribe is guarded on
+            # `self._source`, so this stays idempotent when both run.
+            if self._stream is not None and self._source is source:
+                self._stream.unsubscribe(source)
+                self._source = None
 
     async def _on_line(self, stream: Any, line: str) -> None:
         """Route one reassembled output line: stderr/non-JSON as text, else by frame type."""
