@@ -36,6 +36,7 @@ def test_redact_ids_masks_bare_uuid():
         "glpat-abcdef1234567890XY",  # GitLab PAT
         "AKIAIOSFODNN7EXAMPLE",  # AWS access key id
         "sk-abcdefghijklmnop0123456789",  # OpenAI/Anthropic-style
+        "sk-ant-api03-aB3_xY7zQ9rS2tU4vW6_zaBcDeFgHi",  # Anthropic key w/ underscores
         "xoxb-0123456789-abcdefABCDEF",  # Slack bot token
     ],
 )
