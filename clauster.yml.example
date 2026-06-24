@@ -29,7 +29,7 @@ claude:
   resume_recap: false              # opt-in: install a SessionStart hook that recaps the
                                    # prior transcript into a restarted bridge's context
   resume_recap_max_chars: 8000     # recap budget (most recent turns kept)
-  resume_mode: standard            # standard = headless `claude remote-control` server.
+  launch_mode: standard            # standard = headless `claude remote-control` server.
                                    # pty = run the `claude --remote-control` flag form under
                                    # a PTY keeper for true conversation resume on Restart
                                    # (single-session; POSIX only). Opt-in.

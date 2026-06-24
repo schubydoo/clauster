@@ -78,7 +78,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   window, not a phantom `Running`.
 - **Spawn controls** — pick the spawn mode (same-dir / worktree / session),
   permission mode, and resume mode (standard / pty true-resume, POSIX) per launch;
-  `claude.resume_mode` is the pre-selected default. `bypassPermissions` is
+  `claude.launch_mode` is the pre-selected default. `bypassPermissions` is
   double-gated: a per-project config ceiling
   (`projects.<name>.allow_bypass_permissions`) **and** a type-the-project-name
   confirm in the UI.
@@ -135,7 +135,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   With `claude.resume_recap` enabled, Clauster installs a `SessionStart` hook in the
   runtime user's Claude settings that recaps the most recent prior transcript for
   that directory back into the new session.
-- **Native true-resume / "PTY mode" (opt-in, POSIX)** — `claude.resume_mode: pty`
+- **Native true-resume / "PTY mode" (opt-in, POSIX)** — `claude.launch_mode: pty`
   runs the `claude --remote-control` flag form under a PTY *keeper* sidecar, which
   **genuinely restores prior conversation context** on Resume (`--continue`) rather
   than recapping it. The keeper outlives a Clauster restart and is stopped by signal.
@@ -240,7 +240,7 @@ list.
    **QR code** — to pick the bridge up in `claude.ai/code` or the Claude mobile app.
    No SSH session.
 6. **Stop or resume.** **Stop** signals the bridge; **Resume** relaunches it (with
-   `claude.resume_recap` or `resume_mode: pty` it can carry the prior conversation
+   `claude.resume_recap` or `launch_mode: pty` it can carry the prior conversation
    forward — see [Opt-in extras](#opt-in-extras)). A resumable bridge also offers
    **Start new session** for a deliberate fresh start.
 
@@ -327,7 +327,7 @@ validate against newer versions.
 | `auth.enabled` | `false` | master auth switch — must be on for password / proxy auth to apply |
 | `auth.password_required` | `false` | require login (`clauster hash-password` for the hash) |
 | `claude.resume_recap` | `false` | recap the prior transcript into a restarted bridge |
-| `claude.resume_mode` | `standard` | `pty` = native true-resume on Resume (POSIX); default for new bridges only — a bridge keeps the mode it launched with |
+| `claude.launch_mode` | `standard` | `pty` = native true-resume on Resume (POSIX); default for new bridges only — a bridge keeps the mode it launched with |
 | `reaper.ui_enabled` | `false` | expose the ghost-environment reaper in the dashboard |
 | `claustrum.enabled` | `false` | enable the hosted live-view channel (connect-or-spawn the `claustrum` daemon) |
 | `usage.mode` | `cost` | per-project badge contents: `cost` (≈USD + tokens) · `tokens` (count only) · `off` (hide + skip the usage fetch). `usage.show_cost: false` is a deprecated alias for `off` |
