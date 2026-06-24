@@ -178,11 +178,11 @@
       checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
       // --- launch popover + unified active list ---
       // Outcome-language launch choices — jargon (hosted/bridge/background) mapped to
-      // the plain result the user gets. The "cloud" checkbox folds into Fire-and-forget.
+      // the plain result the user gets. The "cloud" checkbox folds into Background.
       launchModes() {
         const modes = [
           { id: "desktop", label: "In claude.ai / Desktop", sub: "connect from your phone or the Claude app" },
-          { id: "detached", label: "Fire-and-forget", sub: "runs detached — check back later" },
+          { id: "detached", label: "Background", sub: "runs in the background — check back later" },
         ];
         // Hosted ("browser") needs claustrum; offering it on a default install pre-selects
         // a fail-closed mode (#345). Only surface it — first, and badged experimental —
@@ -235,17 +235,17 @@
           const body = { project: name };
           if (prompt && prompt.trim()) body.prompt = prompt.trim();
           if (cloud) body.rc_name = name;  // "also register on claude.ai"
-          if (perm) body.permission_mode = perm;  // fire-and-forget runs unattended — honor the choice
+          if (perm) body.permission_mode = perm;  // background runs unattended — honor the choice
           const res = await fetch(ROOT + "/api/agents", {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
           });
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
           const b = await res.json().catch(() => ({}));
           if (res.ok) {
-            // With claude.ai registration this isn't really "fire-and-forget" — it's a live,
-            // conversational session you drive from Desktop and can Stop here; say so.
+            // With claude.ai registration this isn't really a forget-about-it background run —
+            // it's a live, conversational session you drive from Desktop and can Stop here; say so.
             this.toast(cloud ? name + ": started — connect from claude.ai / Desktop"
-                             : name + ": started (fire-and-forget)", "success");
+                             : name + ": started (background)", "success");
             await this.refresh();
           }
           else { this.toast("start failed — " + (b.detail || res.status), "error"); }
@@ -860,9 +860,9 @@
         }[mode] || mode;
       },
       // Friendly session-type label for the Active-zone filter chips, matching the launch-modal
-      // product names (Desktop / Browser / Fire-and-forget) rather than the raw internal tokens.
+      // product names (Desktop / Browser / Background) rather than the raw internal tokens.
       filterLabel(f) {
-        return { all: "All", desktop: "Desktop", browser: "Browser", detached: "Fire-and-forget", external: "External" }[f] || f;
+        return { all: "All", desktop: "Desktop", browser: "Browser", detached: "Background", external: "External" }[f] || f;
       },
       detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
       externalCount(name) {

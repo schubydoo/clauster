@@ -482,13 +482,13 @@ def test_readiness_vocab_is_unified_and_scoped(write_config):
 
 
 def test_dashboard_has_bg_agent_dispatch_and_stop_controls(write_config):
-    # BG-4 (redesign): background agents are now launched as the "Fire-and-forget"
+    # BG-4 (redesign): background agents are now launched as the "Background"
     # outcome in the per-project launch popover (_launchDetached -> POST /api/agents,
     # with an optional "also register on claude.ai"), and stopped via the per-row
     # Stop button (stopAgent -> DELETE /api/agents/{id}) in the unified Active list.
     page = _client(write_config).get("/").text
-    assert "Fire-and-forget" in page  # the launch-mode label
-    assert "_launchDetached" in page  # routes the fire-and-forget launch
+    assert "Background" in page  # the launch-mode label
+    assert "_launchDetached" in page  # routes the background launch
     assert "also register on claude.ai" in page  # the claude.ai opt-in checkbox
     assert "stopAgent" in page and "agentStopping" in page  # per-row stop control
     assert "/api/agents" in page
@@ -546,7 +546,9 @@ def test_recent_zone_rows_decoupled_from_live_filter(write_config):
     # Active zone keeps filtering (detached macro row + desktop bridge row).
     assert live_filter.search(active)
     # Recent zone has its ended rows rendered (detached macro + ended-bridge row)…
-    assert 'badge bg-purple-lt mode-badge me-1">detached' in recent  # detached_row(filtered=False)
+    assert (
+        'badge bg-purple-lt mode-badge me-1">background' in recent
+    )  # detached_row(filtered=False)
     assert "resume(i.project)" in recent  # ended-bridge row still present
     # …but NONE of them carry the live-session-filter x-show.
     assert not live_filter.search(recent)

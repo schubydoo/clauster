@@ -261,7 +261,7 @@
 {% macro detached_row(filtered=True) %}
             <div class="list-group-item sess-row" :class="agentRailClass(j)"{% if filtered %} x-show="activeFilter === 'all' || activeFilter === 'detached'"{% endif %}>
               <div class="d-flex align-items-center flex-wrap gap-1">
-                <span class="badge bg-purple-lt mode-badge me-1">detached</span>
+                <span class="badge bg-purple-lt mode-badge me-1">background</span>
                 <span class="badge me-1 text-capitalize" :class="agentBadgeClass(j.state)" x-text="j.state || '—'"></span>
                 <span class="fw-medium me-1" x-text="j.name || j.intent || j.id"></span>
                 <span class="badge bg-azure-lt me-1" x-show="j.bridge_session_id" x-cloak
@@ -546,7 +546,7 @@
             </div>
           </template>
 
-          <!-- detached (fire-and-forget / background) sessions — live only -->
+          <!-- background (detached) sessions — live only -->
           <template x-for="j in liveAgents()" :key="j.id">{{ detached_row() }}</template>
 
           <!-- external (unmanaged) sessions — observe only, no controls -->
