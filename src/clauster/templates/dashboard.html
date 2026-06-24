@@ -359,8 +359,8 @@
                 :class="readinessBlockers().length ? 'btn-danger' : 'btn-outline-warning'"
                 @click="readiness.showPanel = !readiness.showPanel"
                 :title="readinessBlockers().length
-                  ? 'A check is blocking — sessions will not start until it is fixed'
-                  : 'Warnings only — sessions can still start; click to review'"
+                  ? 'System readiness — a check is blocking; no session will start until it is fixed (affects every launch on this host)'
+                  : 'System readiness — warnings only; sessions can still start (affects every launch on this host)'"
                 x-text="readinessBlockers().length
                   ? ('⚠ ' + readinessBlockers().length + ' blocking')
                   : ('⚠ ' + readinessWarnings().length + (readinessWarnings().length === 1 ? ' check' : ' checks'))"></button>
