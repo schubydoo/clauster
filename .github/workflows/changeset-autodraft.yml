@@ -54,6 +54,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read # read the diff + checkout base for context
+      issues: read # gate lists PR (issue) comments for the marker; explicit since we call the issues API
       pull-requests: write # post the one-time suggestion comment
       id-token: write # claude-code-action attests its run
     steps:
@@ -78,7 +79,11 @@ jobs:
               owner, repo, issue_number: pr.number, per_page: 100,
             });
             const MARKER = '<!-- changeset-autodraft-suggestion -->';
-            const alreadySuggested = comments.some(c => (c.body || '').includes(MARKER));
+            // Match only a BOT-authored comment carrying the marker, so a human quoting the
+            // bot's suggestion (which echoes the marker) can't trip the loop-breaker.
+            const alreadySuggested = comments.some(
+              c => c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
+            );
             const shouldSuggest =
               touchesSrc && !hasChangeset && !hasNoChangelogLabel && !alreadySuggested;
             core.info(`touchesSrc=${touchesSrc} hasChangeset=${hasChangeset} ` +
