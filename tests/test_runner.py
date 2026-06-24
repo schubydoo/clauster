@@ -531,6 +531,29 @@ async def test_stop_instance_without_pid_marks_stopped(runner_config):
     assert inst.status is InstanceStatus.STOPPED and inst.intentional_stop is True
 
 
+async def test_stop_serializes_on_spawn_lock(runner_config):
+    # Regression: stop() must take the per-project spawn lock so it can't read bridge_pid=None
+    # mid-spawn (while _spawn_locked is suspended in to_thread(_popen)) and orphan the bridge by
+    # marking it STOPPED. Hold the lock (standing in for an in-flight spawn) and assert stop()
+    # blocks until it's released — without the lock, stop() would complete immediately.
+    runner = _make_runner(runner_config)
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STARTING,
+        bridge_pid=None,
+    )
+    lock = runner._spawn_lock_for("alpha")
+    await lock.acquire()  # stand in for spawn() holding the lock during to_thread(_popen)
+    stop_task = asyncio.create_task(runner.stop("alpha"))
+    await asyncio.sleep(0.05)
+    assert not stop_task.done()  # blocked on the spawn lock
+    assert runner._instances["alpha"].status is InstanceStatus.STARTING  # not yet stopped
+    lock.release()  # spawn finished and released the lock
+    inst = await asyncio.wait_for(stop_task, timeout=1.0)
+    assert inst.status is InstanceStatus.STOPPED
+
+
 async def test_spawn_path_traversal_rejected(runner_config):
     runner = _make_runner(runner_config)
     # Invalid names never reach Popen (spec §9 path-traversal defense).
