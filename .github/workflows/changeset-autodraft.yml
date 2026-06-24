@@ -1,37 +1,32 @@
 name: changeset-autodraft
 
-# Auto-DRAFT a changeset fragment on PRs that touch src/ but lack one. The advisory
-# `changeset-check` workflow only NAGS; this one has the model WRITE a
-# `.changeset/<slug>.md` draft and a separate workflow step commits it to the PR head,
-# so the author just confirms (or corrects) the bump type instead of authoring it.
+# SUGGEST a changeset fragment (as a one-time PR COMMENT) on PRs that touch src/ but lack
+# one. The advisory `changeset-check` workflow NAGS (✅/❌ presence gate); this one has the
+# model DRAFT the fragment text and post it as a suggestion the author can copy in — it does
+# NOT auto-commit to the PR (#536: the auto-commit-to-PR-head behaviour was removed; the
+# author owns committing the fragment).
 #
-# SECURITY POSTURE (read before touching this file — it runs a WRITE-CAPABLE LLM):
+# SECURITY POSTURE (read before touching this file — it runs an LLM over the PR diff):
 #   * The job is gated to TRUSTED, NON-BOT, SAME-REPO PRs only:
 #       - same-repo head (head.repo.full_name == github.repository) — never a fork;
 #       - author_association OWNER/MEMBER/COLLABORATOR (mirrors claude.yml's trust gate);
 #       - user.type != 'Bot' (avoids release/Renovate self-loops);
 #       - head_ref != 'release' (never knope's release PR — it deletes changesets).
-#   * `pull_request`, NOT `pull_request_target` — no fork-head checkout under a write
-#     token. Forks fall back to the read-only `changeset-check` nag.
-#   * SPLIT write-from-commit (the key safety property — closes both review findings):
-#       - the LLM step has ONLY Read/Grep/Glob/Write + the read-only PR-diff MCP tools.
-#         use_commit_signing is OFF and it has NO git/Bash tools, so it CANNOT commit or
-#         push — it only WRITES a file into the checkout.
-#       - a separate Commit step does `git add .changeset/` (SCOPED — even if the model
-#         wrote outside .changeset/, nothing else can be committed) then commits + pushes
-#         via the App token. The push exit code is the verification: an empty/failed
-#         draft fails the job RED — there is no silent green no-op.
-#   * The App token (NOT OAuth, NOT GITHUB_TOKEN) does the push — only an App-token commit
-#     re-fires PR CI (GitHub suppresses GITHUB_TOKEN-pushed CI). The mint-then-verify
-#     guard fails loud on an empty token so the push can't silently fall back.
-#   * LOOP-BREAKER: the `gate` precheck (should_draft = touchesSrc && !hasChangeset &&
-#     !no-changelog) runs BEFORE the draft. Once the bot's commit adds a changeset, the
-#     next synchronize sees hasChangeset == true → should_draft == false → no re-draft.
-#   * GENERATE-ONCE CAN GO STALE: the draft is from the diff at first sight; later commits
-#     can drift it. Acceptable — it's marked DRAFT and the human confirms (CONTRIBUTING.md).
-#   * The draft/commit steps are NON-REQUIRED checks; a failure goes red but never blocks
-#     merge. (A first live smoke-test should confirm the model leaves the file uncommitted
-#     so the Commit step is the one that lands it.)
+#   * `pull_request`, NOT `pull_request_target` — no fork-head checkout under a write token.
+#     Forks fall back to the read-only `changeset-check` nag.
+#   * COMMENT-ONLY, split write-from-post (least privilege): the LLM step has ONLY
+#     Read/Grep/Glob/Write + read-only PR-diff MCP tools — no git/Bash, use_commit_signing
+#     off — so it CANNOT commit, push, or comment. It only WRITES `changeset-suggestion.md`
+#     into the runner workspace. A separate github-script step reads that file and posts the
+#     comment with the job's `GITHUB_TOKEN` (`pull-requests: write`). There is NO write to
+#     the PR head and NO App token — strictly less privilege than the old auto-commit path.
+#   * ONE-TIME (loop-breaker): the `gate` precheck sets should_suggest only when src/ is
+#     touched, no changeset is present, the `no-changelog` label is absent, AND no prior
+#     suggestion comment (hidden marker) exists. Because comment-only never adds a changeset,
+#     this marker — not a committed file — is what stops a re-comment on every synchronize.
+#   * GENERATE-ONCE CAN GO STALE: the suggestion reflects the diff at first sight; later
+#     commits can drift it. Acceptable — it's a suggestion the human reviews before committing.
+#   * Non-required check; a failure goes red but never blocks merge.
 
 on:
   pull_request:
@@ -41,15 +36,15 @@ permissions:
   contents: read
 
 concurrency:
-  # cancel-in-progress is SAFE here: if a rapid synchronize cancels a run mid-draft, the
-  # next run re-evaluates should_draft and re-drafts idempotently (the loop-breaker). Do
-  # NOT flip this to false — overlapping runs would race two pushes on the same head ref.
+  # cancel-in-progress is SAFE: a rapid synchronize that cancels a run mid-draft is re-
+  # evaluated by the next run's gate (the marker/idempotency check), so it re-suggests at
+  # most once. Do NOT flip to false — overlapping runs could double-post the suggestion.
   group: changeset-autodraft-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  autodraft:
-    name: draft a changeset
+  suggest:
+    name: suggest a changeset
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
       && github.head_ref != 'release'
@@ -58,37 +53,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read # job token only reads; the App token (below) does the write/push
-      pull-requests: read # gate step lists PR files
+      contents: read # read the diff + checkout base for context
+      pull-requests: write # post the one-time suggestion comment
       id-token: write # claude-code-action attests its run
     steps:
-      - name: Mint a clauster-ci App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.CLAUSTER_CI_APP_ID }}
-          private-key: ${{ secrets.CLAUSTER_CI_APP_PRIVATE_KEY }}
-          permission-contents: write # push the changeset commit (and re-fire PR CI)
-          permission-pull-requests: write # the action reads/operates on the PR
-      # Fail LOUD if the mint produced an empty token. Without this, the push below would
-      # silently fall back to GITHUB_TOKEN — whose commits do NOT re-trigger PR CI, so the
-      # drafted fragment would ship unvalidated and the loop-breaker would never re-run.
-      - name: Verify App token was minted
-        if: ${{ steps.app-token.outputs.token == '' }}
-        run: |
-          echo "::error::clauster-ci App token mint produced an empty token; \
-          refusing to proceed (a changeset commit pushed with GITHUB_TOKEN would not \
-          re-trigger PR CI). Check the CLAUSTER_CI_APP_ID / CLAUSTER_CI_APP_PRIVATE_KEY \
-          secrets and that the clauster-ci App is installed on this repo."
-          exit 1
-      # LOOP-BREAKER precheck — runs BEFORE the draft. should_draft = touchesSrc &&
-      # !hasChangeset && !no-changelog. Once the bot's commit adds a changeset, the next
-      # synchronize sees hasChangeset == true → should_draft == false → the draft is skipped.
-      - name: Decide whether to draft
+      # LOOP-BREAKER precheck. should_suggest = touchesSrc && !hasChangeset && !no-changelog
+      # && !alreadySuggested. The marker comment is the idempotency key (comment-only never
+      # adds a changeset, so hasChangeset alone can't stop a re-comment).
+      - name: Decide whether to suggest
         id: gate
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const { owner, repo } = context.repo;
             const pr = context.payload.pull_request;
@@ -99,34 +74,39 @@ jobs:
             });
             const hasChangeset = files.some(f => /^\.changeset\/.+\.md$/.test(f.filename));
             const touchesSrc = files.some(f => f.filename.startsWith('src/'));
-            const shouldDraft = touchesSrc && !hasChangeset && !hasNoChangelogLabel;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pr.number, per_page: 100,
+            });
+            const MARKER = '<!-- changeset-autodraft-suggestion -->';
+            const alreadySuggested = comments.some(c => (c.body || '').includes(MARKER));
+            const shouldSuggest =
+              touchesSrc && !hasChangeset && !hasNoChangelogLabel && !alreadySuggested;
             core.info(`touchesSrc=${touchesSrc} hasChangeset=${hasChangeset} ` +
-                      `noChangelogLabel=${hasNoChangelogLabel} → shouldDraft=${shouldDraft}`);
-            core.setOutput('should_draft', String(shouldDraft));
-      # Check out the PR HEAD BRANCH with the App token so the Commit step can push back to
-      # it (re-firing CI). Same-repo only (the job `if` excludes forks), so this is never a
-      # fork-head checkout under a write token.
-      - name: Check out the PR head
-        if: steps.gate.outputs.should_draft == 'true'
+                      `noChangelogLabel=${hasNoChangelogLabel} alreadySuggested=${alreadySuggested} ` +
+                      `→ shouldSuggest=${shouldSuggest}`);
+            core.setOutput('should_suggest', String(shouldSuggest));
+      # Read-only base checkout: gives the LLM the repo to read src/ for context and a
+      # workspace to write the scratch suggestion file. persist-credentials:false + base ref
+      # (not the PR head) → no write token on any checked-out tree.
+      - name: Check out (base, read-only)
+        if: steps.gate.outputs.should_suggest == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.head_ref }}
-          token: ${{ steps.app-token.outputs.token }}
-          fetch-depth: 1
-          persist-credentials: true
-      - name: Draft a changeset (write only — does NOT commit)
+          persist-credentials: false
+      - name: Draft a changeset suggestion (write a scratch file — does NOT commit or comment)
         id: claude
-        if: steps.gate.outputs.should_draft == 'true'
+        if: steps.gate.outputs.should_suggest == 'true'
         uses: anthropics/claude-code-action@2fee15510437d71399d9139ed60433470484a8fb # v1.0.153
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ steps.app-token.outputs.token }} # read-only PR-diff MCP tools
+          github_token: ${{ secrets.GITHUB_TOKEN }} # read-only PR-diff MCP tools (same-repo)
           use_commit_signing: false
           prompt: |
             Automation task: this PR changes files under `src/` but has no
             `.changeset/*.md` fragment. clauster is changesets-only — without a fragment
-            the change ships with no changelog entry and no version bump. WRITE one
-            changeset fragment; a workflow step commits it, so you only write the file.
+            the change ships with no changelog entry and no version bump. DRAFT one changeset
+            fragment and write it to a scratch file; a later workflow step posts it to the PR
+            as a suggestion comment (it is NOT committed), so you only write the file.
 
             Steps:
 
@@ -142,9 +122,9 @@ jobs:
                   - `build`    — build system / dependency change (patch bump).
                When unsure, DEFAULT TO `patch`. Do not invent any other type.
 
-            3. Write exactly ONE new file `.changeset/<kebab-slug>.md` (a short hyphenated
-               summary slug). Its contents must be EXACTLY — front-matter `---`, the type,
-               a closing `---`, a blank line, then ONE present-tense sentence:
+            3. Write a single file `changeset-suggestion.md` in the repository root. Its
+               contents must be EXACTLY — front-matter `---`, the type, a closing `---`, a
+               blank line, then ONE present-tense sentence:
 
                    ---
                    default: <type>
@@ -152,35 +132,56 @@ jobs:
 
                    <one present-tense sentence summarizing the user-facing change.>
 
-               Do NOT put a PR number in the file — knope appends it at release time. Do
-               NOT write a hash followed by digits anywhere (GitHub renders it as a link to
-               an unrelated issue/PR); describe instead.
+               Do NOT put a PR number in the file — knope appends it at release time. Do NOT
+               write a hash followed by digits anywhere (GitHub renders it as a link to an
+               unrelated issue/PR); describe instead.
 
-            4. Write ONLY that one file under `.changeset/`. Do NOT modify any other file,
-               and do NOT commit or push — a workflow step commits your file. (You have no
-               git tools; just write the file and finish.)
-          # Least-privilege tools: read the diff + write the one changeset file. NO git /
-          # Bash / commit tools and use_commit_signing is off, so the model CANNOT commit
-          # or push — the Commit step below does that, scoped to .changeset/ and verified.
+            4. Write ONLY that one `changeset-suggestion.md` file. Do NOT modify any other
+               file, do NOT create anything under `.changeset/`, and do NOT commit, push, or
+               comment — a workflow step posts your suggestion. (You have no git tools.)
+          # Least-privilege tools: read the diff + write the one scratch file. NO git / Bash /
+          # comment tools and use_commit_signing is off, so the model CANNOT commit, push, or
+          # post a comment — the github-script step below posts the controlled comment.
           claude_args: |
             --allowedTools "Read,Grep,Glob,Write,mcp__github__get_pull_request,mcp__github__get_pull_request_diff"
-      # Commit the drafted file — SCOPED + VERIFIED. `git add .changeset/` stages ONLY the
-      # changeset dir, so even if the model wrote elsewhere nothing else is committed. If
-      # nothing new was written, the job fails RED (no silent no-op). The push (App token,
-      # persisted by the checkout) re-fires PR CI; its exit code is the verification.
-      - name: Commit the drafted changeset
-        id: commit
-        if: steps.gate.outputs.should_draft == 'true'
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-        run: |
-          set -euo pipefail
-          git config user.name "clauster-ci[bot]"
-          git config user.email "clauster-ci[bot]@users.noreply.github.com"
-          git add .changeset/
-          if git diff --cached --quiet; then
-            echo "::error::changeset-autodraft: the model wrote no .changeset/ file; nothing to commit."
-            exit 1
-          fi
-          git commit -m "chore(changeset): draft a changeset (DRAFT — confirm the bump type)"
-          git push origin "HEAD:${HEAD_REF}"
+      # Post the drafted suggestion as a one-time PR comment (with the hidden marker the gate
+      # checks). If the model wrote nothing, fail RED — no silent green no-op.
+      - name: Post the suggestion as a PR comment
+        if: steps.gate.outputs.should_suggest == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            let fragment = '';
+            try {
+              fragment = fs.readFileSync('changeset-suggestion.md', 'utf8').trim();
+            } catch (e) {
+              core.setFailed('changeset-autodraft: no changeset-suggestion.md was written; nothing to post.');
+              return;
+            }
+            if (!fragment) {
+              core.setFailed('changeset-autodraft: the drafted suggestion was empty; nothing to post.');
+              return;
+            }
+            const MARKER = '<!-- changeset-autodraft-suggestion -->';
+            const body = [
+              MARKER,
+              '### 📝 Suggested changeset',
+              '',
+              'This PR touches `src/` but has no `.changeset/*.md` fragment, so it would ship ' +
+                'with **no changelog entry and no version bump**. Here is a suggested fragment — ' +
+                'review the bump type, then save it as `.changeset/<short-slug>.md` and commit it ' +
+                '(or add the `no-changelog` label if a changelog entry is intentionally not wanted):',
+              '',
+              '```markdown',
+              fragment,
+              '```',
+              '',
+              '_Suggestion only — not auto-committed. `changeset-check` confirms once a fragment is present._',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
