@@ -1,5 +1,5 @@
 ---
-default: patch
+default: minor
 ---
 
 Config editor: the **Claustrum (hosted live-view)** block is now editable in-app (#539).

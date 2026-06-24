@@ -159,7 +159,7 @@ def test_field_specs_exposes_claustrum_block_with_depends() -> None:
     assert specs["claustrum.enabled"]["type"] == "bool"
     assert specs["claustrum.enabled"]["section_label"] == "Claustrum (hosted live-view)"
     assert specs["claustrum.enabled"]["depends_on"] is None  # the master switch itself
-    # The 5 operational fields all depend on the master toggle (greyed when the channel is off).
+    # The 4 operational fields all depend on the master toggle (greyed when the channel is off).
     for path in claustrum[1:]:
         assert specs[path]["depends_on"] == "claustrum.enabled"
     assert specs["claustrum.spawn_timeout_seconds"]["unit"] == "seconds"
