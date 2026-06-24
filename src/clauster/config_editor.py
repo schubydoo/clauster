@@ -33,7 +33,7 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "claude.auto_enable_remote_control",
     "claude.resume_recap",
     "claude.resume_recap_max_chars",
-    "claude.resume_mode",
+    "claude.launch_mode",
     "instance_defaults.spawn_mode",
     "instance_defaults.permission_mode",
     "instance_defaults.session_name_prefix",
@@ -181,7 +181,7 @@ FIELD_LABELS: dict[str, str] = {
     "claude.auto_enable_remote_control": "Auto-acknowledge remote control",
     "claude.resume_recap": "Recap prior transcript on restart",
     "claude.resume_recap_max_chars": "Recap size limit",
-    "claude.resume_mode": "Launch mode for new bridges",
+    "claude.launch_mode": "Launch mode for new bridges",
     "instance_defaults.spawn_mode": "Where new sessions run",
     "instance_defaults.permission_mode": "Default permission mode",
     "instance_defaults.session_name_prefix": "Session name prefix",
@@ -247,7 +247,7 @@ FIELD_CHOICE_LABELS: dict[str, dict[str, str]] = {
         "dontAsk": "Never prompt — deny unknowns",
         "bypassPermissions": "Skip all checks ⚠",
     },
-    "claude.resume_mode": {
+    "claude.launch_mode": {
         "standard": "Standard (multi-session bridge)",
         "pty": "True-resume (pty, single session)",
     },

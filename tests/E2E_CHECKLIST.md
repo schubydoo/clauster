@@ -56,7 +56,7 @@ restarts — the dashboard JS/CSS are cached static assets.
 - [ ] **Spawn controls** — spawn-mode + permission-mode + **resume-mode (Mode)**
       pickers render and pass through. **`[auto]`** for the pickers rendering and the
       chosen spawn + permission values reaching the bridge argv. The Mode picker
-      (standard / pty) defaults to `claude.resume_mode`; choosing **pty** with a
+      (standard / pty) defaults to `claude.launch_mode`; choosing **pty** with a
       `standard` config default starts a pty bridge (the `↻ true-resume` badge appears),
       and choosing **standard** with a `pty` default starts a subcommand bridge. The
       Mode picker is hidden on Windows (pty is POSIX-only).
@@ -175,7 +175,7 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
       (parsed from the raw copy) and the WS stream is unchanged. **`[auto]`** (runner
       integration test). **Scope:** the bridge debug log only — the pty keeper sidecar +
       `state.json` still record ids as perms-protected operational state (follow-up #8c).
-- [ ] **PTY true-resume mode** `[auto]` — set `claude.resume_mode: pty` (POSIX only). Start a
+- [ ] **PTY true-resume mode** `[auto]` — set `claude.launch_mode: pty` (POSIX only). Start a
       bridge: it spawns the `claude --remote-control` flag form under a PTY keeper and
       reaches RUNNING with a `claude.ai/code/session_…` link.
       - A **`↻ true-resume`** badge shows on the card (purple); hovering it explains
@@ -201,7 +201,7 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
       - The keeper is reparented to init, so the bridge survives a Clauster restart, and
         on restart the card **rediscovers the pty bridge** (still RUNNING, badge present)
         and **Stop still reaps the keeper** (keeper_pid recovered from the sidecar).
-      - **Mode is fixed per bridge:** after starting a bridge, edit `claude.resume_mode`
+      - **Mode is fixed per bridge:** after starting a bridge, edit `claude.launch_mode`
         in `clauster.yml` to the *other* value and restart Clauster. The rediscovered
         bridge keeps the mode it launched with — Stop and Resume agree (a `standard`
         bridge is not silently resumed as pty, nor vice-versa).

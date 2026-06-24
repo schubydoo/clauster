@@ -85,7 +85,7 @@ The default. `runner.py`'s `SessionRunner` spawns the headless
 
 ### pty (`claude --remote-control` under a keeper)
 
-Opt-in via `claude.resume_mode: pty`, POSIX only (falls back to standard on
+Opt-in via `claude.launch_mode: pty`, POSIX only (falls back to standard on
 Windows). `pty_keeper.py` runs the `claude --remote-control` **flag form** under
 a PTY keeper sidecar:
 
@@ -95,7 +95,7 @@ a PTY keeper sidecar:
 - The keeper **owns the PTY** and outlives a Clauster restart; it is stopped by
   signal.
 
-The mode is recorded on a bridge's instance **at launch** — `claude.resume_mode`
+The mode is recorded on a bridge's instance **at launch** — `claude.launch_mode`
 seeds new bridges only and never re-modes a running or stopped one. Stop and
 resume always honour the recorded mode.
 

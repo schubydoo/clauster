@@ -1228,8 +1228,8 @@ async def test_resume_keeps_recorded_mode_when_config_flips(runner_config, monke
     assert first.status is InstanceStatus.RUNNING
     await runner.stop("alpha")
 
-    # Simulate editing clauster.yml -> resume_mode: pty underneath the stopped bridge.
-    runner._config.claude.resume_mode = "pty"
+    # Simulate editing clauster.yml -> launch_mode: pty underneath the stopped bridge.
+    runner._config.claude.launch_mode = "pty"
 
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
 

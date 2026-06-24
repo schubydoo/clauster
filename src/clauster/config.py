@@ -92,11 +92,12 @@ class ClaudeConfig(BaseModel):
         ge=500,
         description="Character budget (≥500) for the recap injection (most recent turns kept).",
     )
-    resume_mode: ResumeMode = Field(
+    launch_mode: ResumeMode = Field(
         default="standard",
         description="Launch mode for **new** bridges. `pty` = native true-resume under a "
         "PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the "
-        "mode it launched with — editing this never re-modes a running or stopped bridge.",
+        "mode it launched with — editing this never re-modes a running or stopped bridge. "
+        "(Renamed from `resume_mode`, still accepted as a deprecated alias.)",
     )
     path_append: list[str] = Field(
         default_factory=list,
@@ -112,6 +113,32 @@ class ClaudeConfig(BaseModel):
         "(`CLAUSTER_*` with SECRET/PASSWORD/TOKEN/HASH) is dropped and can never "
         "re-introduce a scrubbed credential. Applies to both standard and pty bridges.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_resume_mode(cls, data: object) -> object:
+        """Accept the legacy `resume_mode` key as an alias for the renamed `launch_mode`.
+
+        `claude.resume_mode` was renamed to `claude.launch_mode` (the old name read like a
+        resume on/off toggle, #540). Existing `clauster.yml` files keep working: the legacy
+        key maps to `launch_mode` with a deprecation warning. If both are set, `launch_mode`
+        wins and the legacy key is ignored (also warned) rather than silently picking one.
+        """
+        if isinstance(data, dict) and "resume_mode" in data:
+            data = dict(data)
+            legacy = data.pop("resume_mode")
+            if "launch_mode" in data:
+                _log.warning(
+                    "config: both `claude.launch_mode` and the deprecated `claude.resume_mode` "
+                    "are set — using `launch_mode`, ignoring `resume_mode`. Remove `resume_mode`."
+                )
+            else:
+                data["launch_mode"] = legacy
+                _log.warning(
+                    "config: `claude.resume_mode` was renamed to `claude.launch_mode`; the old "
+                    "key still works but is deprecated. Please rename it in your clauster.yml."
+                )
+        return data
 
 
 class InstanceDefaults(BaseModel):
@@ -934,6 +961,14 @@ def _read_secret_file(file_var: str, file_path: str) -> str:
     return value
 
 
+# Legacy env-var aliases for renamed config keys: old name -> new dotted path. The new
+# name always wins; the legacy var is honored (with a deprecation warning) only when the
+# new one is unset, so a renamed key never silently loses its env override.
+_LEGACY_ENV_ALIASES: dict[str, tuple[str, ...]] = {
+    "CLAUSTER_CLAUDE_RESUME_MODE": ("claude", "launch_mode"),  # renamed in #540
+}
+
+
 def _apply_env_overrides(data: dict) -> dict:
     for env_name, path in _scalar_env_map(ClausterConfig).items():
         # Secret indirection: for any CLAUSTER_<X>, a CLAUSTER_<X>_FILE wins and reads
@@ -944,6 +979,24 @@ def _apply_env_overrides(data: dict) -> dict:
             _set_nested(data, path, _read_secret_file(f"{env_name}_FILE", file_path))
         elif env_name in os.environ:
             _set_nested(data, path, os.environ[env_name])
+    for env_name, path in _LEGACY_ENV_ALIASES.items():
+        new_env = "CLAUSTER_" + "_".join(path).upper()
+        # The new name wins: skip the legacy var entirely when the new one is set.
+        if new_env in os.environ or os.environ.get(f"{new_env}_FILE", "").strip():
+            continue
+        file_path = os.environ.get(f"{env_name}_FILE", "").strip()
+        if file_path:
+            value: str | None = _read_secret_file(f"{env_name}_FILE", file_path)
+        elif env_name in os.environ:
+            value = os.environ[env_name]
+        else:
+            continue
+        _log.warning(
+            "config: env var %s is deprecated; use %s. Honoring the old name for now.",
+            env_name,
+            new_env,
+        )
+        _set_nested(data, path, value)
     return data
 
 

@@ -14,7 +14,7 @@ Releases.
 
 A "bridge" is a `claude` process that Clauster launches in a project directory
 and exposes to the Claude remote-control controller. Clauster supports two
-launch modes, selected per instance via `claude.resume_mode`. They are **not
+launch modes, selected per instance via `claude.launch_mode`. They are **not
 interchangeable** — each has its own argv and readiness logic.
 
 | | **standard** (default) | **pty** (opt-in, POSIX) |
@@ -25,7 +25,7 @@ interchangeable** — each has its own argv and readiness logic.
 | Process model | headless server | runs under a **PTY keeper** sidecar that owns the PTY |
 | Platform | all | POSIX only — falls back to standard on Windows |
 
-The mode is recorded on a bridge **at launch**: editing `claude.resume_mode`
+The mode is recorded on a bridge **at launch**: editing `claude.launch_mode`
 seeds the mode for *new* bridges only and never re-modes a running or stopped
 one (stop/resume always honour the recorded mode).
 
@@ -70,7 +70,7 @@ mode, this *recaps* the prior conversation rather than truly restoring it.
 ### Opt-in extras
 
 - Conversation recap on restart (`claude.resume_recap`).
-- Native true-resume PTY mode (`claude.resume_mode: pty`).
+- Native true-resume PTY mode (`claude.launch_mode: pty`).
 - Ghost-environment reaper (CLI always available; dashboard gated by
   `reaper.ui_enabled`).
 - Background agents (**experimental**) — list / dispatch / stop `claude --bg`

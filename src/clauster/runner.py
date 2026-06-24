@@ -463,7 +463,7 @@ class SessionRunner:
         set up, launches the process, and watches it until it reaches RUNNING or ERROR.
 
         ``resume_mode`` ("standard"/"pty") picks the launch mode for *this* bridge,
-        overriding the ``claude.resume_mode`` config default (the per-launch picker).
+        overriding the ``claude.launch_mode`` config default (the per-launch picker).
         When the effective mode is ``"pty"`` (POSIX only), the bridge is the
         ``claude --remote-control`` flag form run under a :mod:`clauster.pty_keeper`
         for true conversation resume; ``resume=True`` (set by :meth:`resume`) adds
@@ -971,7 +971,7 @@ class SessionRunner:
         *requested* mode (the per-launch picker) wins for a fresh start; else when
         *prior* is given (a resume of an existing instance) its recorded
         ``resume_mode`` wins, so ``stop()`` and ``resume()`` can never disagree
-        about the same bridge; else the global ``claude.resume_mode`` seeds a
+        about the same bridge; else the global ``claude.launch_mode`` seeds a
         brand-new bridge. Without honoring *prior*, editing the config under a
         running/stopped bridge would silently flip its mode on the next resume
         while stop still treated it as the old mode. Windows always falls back to
@@ -983,7 +983,7 @@ class SessionRunner:
             return requested == "pty"
         if prior is not None:
             return prior.resume_mode == "pty"
-        return self._config.claude.resume_mode == "pty"
+        return self._config.claude.launch_mode == "pty"
 
     @staticmethod
     def _sidecar_path_for(log_path: Path) -> Path:
@@ -1536,7 +1536,7 @@ class SessionRunner:
 
         A hand-edited or corrupt ``state.json`` that holds an unknown mode must not
         fail the (Literal-typed) model and abort startup — fall back to the
-        configured defaults instead. ``resume_mode`` lives on ``ClaudeConfig``, the
+        configured defaults instead. ``launch_mode`` lives on ``ClaudeConfig``, the
         other two on ``InstanceDefaults``.
         """
         defaults = self._config.instance_defaults
@@ -1546,7 +1546,7 @@ class SessionRunner:
         return (
             sm if sm in SPAWN_MODES else defaults.spawn_mode,
             pm if pm in PERMISSION_MODES else defaults.permission_mode,
-            rm if rm in RESUME_MODES else self._config.claude.resume_mode,
+            rm if rm in RESUME_MODES else self._config.claude.launch_mode,
         )
 
     def _stopped_from_persisted(self, name: str) -> RemoteControlInstance | None:
