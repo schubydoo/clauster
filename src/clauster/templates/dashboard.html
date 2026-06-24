@@ -730,10 +730,10 @@
         </button>
         <div class="card mt-2" x-show="open" x-cloak>
           <div class="card-body">
-            <h3 class="card-title">Reap ghost environments</h3>
-            <p class="text-secondary small">Server-side session environments with no live session clutter the
-              claude.ai/code "New session" selector. The cloud <code>Default</code> and any environment backing a
-              live session are never reaped.</p>
+            <h3 class="card-title">Clean up leftover environments</h3>
+            <p class="text-secondary small">When a session ends, its cloud environment can linger in the
+              claude.ai/code "New session" list with nothing running in it. Remove those here. The cloud
+              <code>Default</code> — and any environment still backing a live session — is never touched.</p>
             <p class="text-secondary" x-show="loading" x-cloak>Scanning…</p>
             <div class="alert alert-danger" x-show="error" x-cloak x-text="error"></div>
             <template x-if="!loading && loaded && !error">
@@ -752,7 +752,7 @@
                   <button class="btn btn-warning" @click="archive()" :disabled="busy"
                           x-text="busy ? 'Working…' : ('Archive ' + ghosts.length + ' (reversible)')">Archive</button>
                   <div class="mt-2">
-                    <label class="form-label" for="force-delete-confirm">force-delete (irreversible) — type <code>DELETE</code>:</label>
+                    <label class="form-label" for="force-delete-confirm">Permanently delete — this can't be undone. Type <code>DELETE</code> to confirm:</label>
                     <div class="input-group" style="max-width:320px">
                       <input id="force-delete-confirm" type="text" class="form-control" x-model="deleteTyped" placeholder="DELETE" autocomplete="off">
                       <button class="btn btn-danger" @click="del()" :disabled="busy || deleteTyped !== 'DELETE'">Permanently delete</button>

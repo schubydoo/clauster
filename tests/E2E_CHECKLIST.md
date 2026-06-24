@@ -140,7 +140,7 @@ restarts — the dashboard JS/CSS are cached static assets.
 These are off by default. Set the flag, restart, hard-refresh, then verify.
 
 - [ ] **Ghost-environment reaper UI** — set `reaper.ui_enabled: true`.
-      - Panel "👻 Reap ghost environments" appears above the grid.
+      - Panel "Clean up leftover environments" appears above the grid.
       - Ghost list renders (id / directory / name); summary line counts ghosts,
         live dirs kept, and notes cloud `Default` is never touched.
       - **Archive (reversible)** button styled as a warning action.

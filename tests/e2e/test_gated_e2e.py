@@ -43,7 +43,7 @@ _BYPASS_OPTION = 'option[value="bypassPermissions"]'
 _GATE_TIMEOUT = 20_000
 
 # The Maintenance block (x-data="reaper()") only renders when reaper.ui_enabled is set;
-# its toggle reveals the panel whose <h3> title is "Reap ghost environments".
+# its toggle reveals the panel whose <h3> title is "Clean up leftover environments".
 _REAPER_BLOCK = 'div[x-data="reaper()"]'
 _REAPER_TOGGLE = f"{_REAPER_BLOCK} > button"
 _REAPER_TITLE = f"{_REAPER_BLOCK} h3.card-title"
@@ -132,7 +132,7 @@ def test_reaper_panel_present_when_enabled(browser: AgentBrowser, reaper_server:
     browser.expect_visible(_REAPER_TOGGLE)
     # The title is collapsed behind the Maintenance toggle; open it.
     browser.click(_REAPER_TOGGLE)
-    browser.expect_text(_REAPER_TITLE, "Reap ghost environments")
+    browser.expect_text(_REAPER_TITLE, "Clean up leftover environments")
     # The gate is open: the endpoint no longer 404s (it fails later on absent cloud
     # credentials, which is out of scope for this gating row).
     assert _ghosts_status(reaper_server) != 404

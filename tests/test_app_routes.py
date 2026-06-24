@@ -561,6 +561,16 @@ def test_reaper_disabled_by_default_404(write_config, tmp_path):
     )
 
 
+def test_reaper_panel_uses_plain_copy(write_config, tmp_path):
+    # UX-09: the maintenance panel is de-jargoned — plain "Clean up leftover environments" /
+    # "Permanently delete" copy, not the old "Reap ghost environments" / "force-delete" jargon.
+    page = _reaper_client(write_config, tmp_path).get("/").text
+    assert "Clean up leftover environments" in page
+    assert "Permanently delete" in page
+    assert "Reap ghost environments" not in page
+    assert "force-delete (irreversible)" not in page
+
+
 def test_reaper_preview_lists_only_ghosts(write_config, tmp_path, monkeypatch):
     _setup_reaper(monkeypatch, _make_envs(), {"/live/dir"}, [])
     body = _reaper_client(write_config, tmp_path).get("/api/environments/ghosts").json()
