@@ -192,25 +192,60 @@ def test_await_ready_pty_returns_on_ready_without_url(runner_config, tmp_path) -
     assert info.get("state") == "ready"  # returns promptly on "ready", not only connect_url
 
 
-@_POSIX_ONLY
-def test_keeper_marks_ready_on_resume_without_url(tmp_path, monkeypatch) -> None:
-    # A --continue resume that never prints a connect URL must still reach "ready"
-    # (it reconnected) instead of being stuck "starting" -> a false ERROR upstream.
+def _states_until_keeper_ready(tmp_path, monkeypatch, argv) -> list:
+    """Run ``run_keeper`` until it publishes "ready", then reap the bridge so it returns.
+
+    Deterministic — the bridge BLOCKS until killed, so "ready" (published once the URL
+    timeout lapses while the bridge is alive) is always observed before the bridge can
+    exit. There is no wall-clock margin to lose under load: the old form let a short-lived
+    `sleep(0.6)` bridge race the keeper's ~0.5s select loop, which flaked the suite under
+    contention. run_keeper stays on the MAIN thread (it calls ``signal.signal``); a watcher
+    thread reaps the bridge by the pid the sidecar publishes once "ready" lands.
+    """
+    import contextlib
+    import os
     import signal as _signal
+    import threading
 
     from clauster import pty_keeper
 
     states: list = []
-    monkeypatch.setattr(
-        pty_keeper, "_write_sidecar", lambda _sc, base: states.append(base.get("state"))
-    )
+    pid_box: list = []
+    ready = threading.Event()
+
+    def _capture(_sc, base):
+        states.append(base.get("state"))
+        if base.get("bridge_pid"):
+            pid_box[:] = [base["bridge_pid"]]
+        if base.get("state") == "ready":
+            ready.set()
+
+    monkeypatch.setattr(pty_keeper, "_write_sidecar", _capture)
     monkeypatch.setattr(pty_keeper, "_URL_TIMEOUT", 0.2)
-    argv = [sys.executable, "-c", "import time; time.sleep(0.6)", "--continue"]
+
+    def _reap_when_ready() -> None:
+        ready.wait(timeout=10)  # fires in ~0.5s in practice; bound the wait either way
+        if pid_box:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid_box[0], _signal.SIGKILL)
+
+    watcher = threading.Thread(target=_reap_when_ready, daemon=True)
+    watcher.start()
     prev = _signal.getsignal(_signal.SIGHUP)
     try:
         pty_keeper.run_keeper(argv, tmp_path / "sc.json")
     finally:
         _signal.signal(_signal.SIGHUP, prev)  # keeper sets SIG_IGN; restore for other tests
+    watcher.join(timeout=5)
+    return states
+
+
+@_POSIX_ONLY
+def test_keeper_marks_ready_on_resume_without_url(tmp_path, monkeypatch) -> None:
+    # A --continue resume that never prints a connect URL must still reach "ready"
+    # (it reconnected) instead of being stuck "starting" -> a false ERROR upstream.
+    argv = [sys.executable, "-c", "import time; time.sleep(30)", "--continue"]
+    states = _states_until_keeper_ready(tmp_path, monkeypatch, argv)
     assert "ready" in states  # marked ready on the resume timeout, not stuck "starting"
 
 
@@ -221,21 +256,8 @@ def test_keeper_fresh_start_no_url_becomes_ready(tmp_path, monkeypatch) -> None:
     # printing the claude.ai/code/session_… line, so gating readiness on the URL would
     # leave a healthy bridge stuck -> upstream false-ERROR -> the "external session
     # active" misclassification. Mirrors the resume case above.
-    import signal as _signal
-
-    from clauster import pty_keeper
-
-    states: list = []
-    monkeypatch.setattr(
-        pty_keeper, "_write_sidecar", lambda _sc, base: states.append(base.get("state"))
-    )
-    monkeypatch.setattr(pty_keeper, "_URL_TIMEOUT", 0.2)
-    argv = [sys.executable, "-c", "import time; time.sleep(0.6)"]
-    prev = _signal.getsignal(_signal.SIGHUP)
-    try:
-        pty_keeper.run_keeper(argv, tmp_path / "sc.json")
-    finally:
-        _signal.signal(_signal.SIGHUP, prev)
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    states = _states_until_keeper_ready(tmp_path, monkeypatch, argv)
     assert "ready" in states  # promoted on liveness once it survives the URL timeout
 
 
