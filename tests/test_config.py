@@ -499,3 +499,82 @@ def test_instance_name_env_override(write_config, monkeypatch):
     # top-level scalar -> CLAUSTER_INSTANCE_NAME works for free (handy for systemd).
     monkeypatch.setenv("CLAUSTER_INSTANCE_NAME", "prod")
     assert load_config(write_config()).instance_name == "prod"
+
+
+def test_legacy_resume_mode_yaml_key_maps_to_launch_mode(write_config, caplog):
+    # #540: `claude.resume_mode` was renamed to `claude.launch_mode`. Old clauster.yml
+    # files keep working: the legacy key loads, maps to launch_mode, and warns (not silent).
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config("claude:\n  resume_mode: pty\n"))
+    assert config.claude.launch_mode == "pty"
+    assert any(
+        "resume_mode" in r.message and "launch_mode" in r.message for r in caplog.records
+    ), "expected a deprecation warning naming both keys"
+
+
+def test_launch_mode_wins_when_both_keys_set(write_config, caplog):
+    # Both keys set: the new launch_mode wins and the legacy key is ignored (with a warning),
+    # rather than silently picking one.
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(
+            write_config("claude:\n  resume_mode: pty\n  launch_mode: standard\n")
+        )
+    assert config.claude.launch_mode == "standard"
+    assert any("both" in r.message and "resume_mode" in r.message for r in caplog.records)
+
+
+def test_legacy_resume_mode_env_var_maps_to_launch_mode(write_config, monkeypatch, caplog):
+    # The renamed key never silently loses its env override: the old CLAUSTER_CLAUDE_RESUME_MODE
+    # still applies to launch_mode, with a deprecation warning.
+    import logging
+
+    monkeypatch.setenv("CLAUSTER_CLAUDE_RESUME_MODE", "pty")
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config())
+    assert config.claude.launch_mode == "pty"
+    assert any("CLAUSTER_CLAUDE_RESUME_MODE" in r.message for r in caplog.records)
+
+
+def test_new_launch_mode_env_var_wins_over_legacy(write_config, monkeypatch, caplog):
+    # When both env vars are set, the new name wins AND we warn (mirrors the YAML both-keys
+    # path) so a stale legacy env override is never silently ignored.
+    import logging
+
+    monkeypatch.setenv("CLAUSTER_CLAUDE_RESUME_MODE", "pty")
+    monkeypatch.setenv("CLAUSTER_CLAUDE_LAUNCH_MODE", "standard")
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config())
+    assert config.claude.launch_mode == "standard"
+    assert any(
+        "both" in r.message and "CLAUSTER_CLAUDE_RESUME_MODE" in r.message for r in caplog.records
+    )
+
+
+def test_new_launch_mode_env_var_applies_without_deprecation_warning(
+    write_config, monkeypatch, caplog
+):
+    # The new env var alone applies cleanly: the legacy-alias loop sees the new var set and
+    # the old one unset, so it skips silently (no deprecation warning for a non-legacy user).
+    import logging
+
+    monkeypatch.setenv("CLAUSTER_CLAUDE_LAUNCH_MODE", "pty")
+    with caplog.at_level(logging.WARNING, logger="clauster.config"):
+        config = load_config(write_config())
+    assert config.claude.launch_mode == "pty"
+    assert not any(
+        "deprecated" in r.message or "resume_mode" in r.message.lower() for r in caplog.records
+    )
+
+
+def test_legacy_resume_mode_file_env_alias_maps_to_launch_mode(
+    write_config, monkeypatch, tmp_path
+):
+    # The legacy alias also honors the CLAUSTER_<X>_FILE secret-indirection form.
+    secret = tmp_path / "mode"
+    secret.write_text("pty\n", encoding="utf-8")  # trailing newline is stripped by the reader
+    monkeypatch.setenv("CLAUSTER_CLAUDE_RESUME_MODE_FILE", str(secret))
+    assert load_config(write_config()).claude.launch_mode == "pty"

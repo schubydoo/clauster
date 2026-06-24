@@ -25,11 +25,11 @@ joined with underscores. For example:
 
 - `auth.enabled` → `CLAUSTER_AUTH_ENABLED`
 - `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH`
-- `claude.resume_mode` → `CLAUSTER_CLAUDE_RESUME_MODE` *(full dotted path — see note)*
+- `claude.launch_mode` → `CLAUSTER_CLAUDE_LAUNCH_MODE` *(full dotted path — see note)*
 
 !!! note "Env mapping is by leaf path"
     The mapping recurses nested models and uses the *full dotted path*, so
-    `claude.resume_mode` maps to `CLAUSTER_CLAUDE_RESUME_MODE`. `dict`/`list`
+    `claude.launch_mode` maps to `CLAUSTER_CLAUDE_LAUNCH_MODE`. `dict`/`list`
     leaves (e.g. `projects`, `reverse_proxy.trusted_ips`,
     `clone.allowed_private_cidrs`) **cannot** be set via env — a single env var
     can't express them unambiguously; set those in the YAML file.
@@ -98,7 +98,7 @@ under `auth`).
 | `auto_enable_remote_control` | bool | `true` | Before the first spawn, mark remote control acknowledged (`hasUsedRemoteControl` / `remoteDialogSeen`) in `~/.claude.json` so a detached-stdin bridge isn't stuck on the one-time "Enable Remote Control? (y/n)" prompt. Set `false` to manage it yourself. |
 | `resume_recap` | bool | `false` | Install a `SessionStart` hook in the runtime user's `~/.claude/settings.json` that recaps the most recent prior transcript for the cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude settings and injects prior turns. |
 | `resume_recap_max_chars` | int | `8000` | Character budget (≥500) for the recap injection (most recent turns kept). |
-| `resume_mode` | `standard` \| `pty` | `standard` | Launch mode for **new** bridges. `pty` = native true-resume under a PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the mode it launched with — editing this never re-modes a running or stopped bridge. |
+| `launch_mode` | `standard` \| `pty` | `standard` | Launch mode for **new** bridges. `pty` = native true-resume under a PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the mode it launched with — editing this never re-modes a running or stopped bridge. (Renamed from `resume_mode`, still accepted as a deprecated alias.) |
 | `path_append` | list[str] | `[]` | Directories appended to the bridge subprocess `PATH` so a `claude` session can resolve user-local tools (e.g. `~/.local/bin`) that a minimal service `PATH` omits. `~` is expanded; entries are appended in order after the inherited `PATH`, never replacing it. Applies to both standard and pty bridges. |
 <!-- END GEN: claude -->
 
@@ -433,7 +433,7 @@ the browser. These are the day-to-day knobs that are safe to change at runtime:
 
 | Section | Editable fields |
 | --- | --- |
-| `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `resume_mode` |
+| `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode` |
 | `instance_defaults` | `spawn_mode`, `permission_mode`, `session_name_prefix`, `capacity`, `max_bridges` |
 | `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream` |
 | `reaper` | `ui_enabled` |

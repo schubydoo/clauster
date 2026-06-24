@@ -1891,7 +1891,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "reaper_ui_enabled": config.reaper.ui_enabled,
             "default_spawn_mode": config.instance_defaults.spawn_mode,
             "default_permission_mode": config.instance_defaults.permission_mode,
-            "default_resume_mode": config.claude.resume_mode,
+            "default_resume_mode": config.claude.launch_mode,
             # pty (true-resume) is POSIX-only; hide the option on Windows hosts.
             "pty_supported": sys.platform != "win32",
             # Usage badge: mode ("cost"|"tokens"|"off"), the currency code + its

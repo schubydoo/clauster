@@ -1,4 +1,4 @@
-"""Runner wiring for pty / true-resume mode (`claude.resume_mode: pty`)."""
+"""Runner wiring for pty / true-resume mode (`claude.launch_mode: pty`)."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def _pty_runner(runner_config) -> tuple[SessionRunner, Path]:
     pty_config = ClausterConfig(
         projects_root=config.projects_root,
         state_dir=config.state_dir,
-        claude={"binary": config.claude.binary, "resume_mode": "pty"},
+        claude={"binary": config.claude.binary, "launch_mode": "pty"},
     )
     return SessionRunner(pty_config, claude_json=claude_json), claude_json
 

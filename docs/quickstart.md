@@ -93,7 +93,7 @@ stay visible on the card.
 - **Stop** ends the bridge.
 - **Resume** brings a stopped bridge back. In the default *standard* mode a
   resume starts a fresh context; opt into *true resume* with
-  `claude.resume_mode: pty` (POSIX), or recap the prior conversation with
+  `claude.launch_mode: pty` (POSIX), or recap the prior conversation with
   `claude.resume_recap`. See [the two bridge modes](index.md#the-two-bridge-modes).
 - **Start new session** forces a deliberate fresh start on a resumable bridge.
 
