@@ -635,6 +635,27 @@ def test_service_interpreter_fallback_keeps_module_flag(monkeypatch):
     assert "ExecStart=/usr/bin/python3 -m clauster run -c" in unit
 
 
+def test_service_frozen_wins_over_console_script(monkeypatch):
+    # #587: the frozen binary is the authoritative running clauster — it must take
+    # precedence over any (possibly different) `clauster` found on PATH.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "/opt/clauster/clauster")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/clauster")
+    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml")
+    assert "ExecStart=/opt/clauster/clauster run -c" in unit
+    assert "/usr/bin/clauster" not in unit
+
+
+def test_service_relative_console_script_falls_back_to_interpreter(monkeypatch):
+    # A relative `which` result (PATH contains a relative entry) would emit a
+    # relative ExecStart the service manager rejects — fall back to `-m clauster`.
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr("shutil.which", lambda name: "bin/clauster")
+    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml")
+    assert "ExecStart=/usr/bin/python3 -m clauster run -c" in unit
+
+
 def test_service_unknown_kind():
     with pytest.raises(ValueError):
         render_service_unit("upstart")

@@ -591,7 +591,10 @@ def _service_launch_command(python: str | None) -> tuple[str, list[str]]:
 
     - a frozen / standalone binary (PyInstaller) — ``sys.executable`` *is* clauster;
     - otherwise a ``clauster`` console script resolvable on PATH (uv tool / pipx /
-      pip) — a stable entry point that needs no interpreter path.
+      pip) — a stable entry point that needs no interpreter path. This trusts the
+      caller's PATH; only an *absolute* resolution is accepted, since a relative
+      ``ExecStart``/``ProgramArguments[0]`` would fail the service manager's
+      absolute-path requirement rather than launch.
 
     Only a bare interpreter (dev / ``python -m clauster``) keeps ``-m clauster``.
     Prepending it to the clauster binary produced ``clauster -m clauster run``,
@@ -603,7 +606,7 @@ def _service_launch_command(python: str | None) -> tuple[str, list[str]]:
         # PyInstaller: sys.executable is the clauster binary, not an interpreter.
         return sys.executable, []
     script = shutil.which("clauster")
-    if script:
+    if script and os.path.isabs(script):
         return script, []
     return sys.executable, ["-m", "clauster"]
 
