@@ -593,6 +593,48 @@ def test_service_windows_rejects_quote_in_path():
         render_service_unit("windows", python="C:\\py\\python.exe", workdir='C:\\bad"dir')
 
 
+def test_service_frozen_binary_drops_module_flag(monkeypatch):
+    # #587: for a frozen/standalone binary sys.executable IS clauster, so the unit
+    # must invoke it directly. Prepending `-m clauster` produced `clauster -m clauster
+    # run`, which clauster's own argparse rejects — the service never started.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "/home/u/.local/bin/clauster")
+    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml")
+    assert "ExecStart=/home/u/.local/bin/clauster run -c /etc/clauster/clauster.yml" in unit
+    assert "-m clauster" not in unit
+
+
+def test_service_frozen_binary_drops_module_flag_all_kinds(monkeypatch):
+    # The argv builder is shared across kinds, so launchd and windows must drop the
+    # `-m clauster` prefix for a frozen binary too — not just systemd.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "/opt/clauster/clauster")
+    for kind in ("systemd", "launchd", "windows"):
+        unit = render_service_unit(kind, config_path="/etc/clauster/clauster.yml")
+        assert "-m clauster" not in unit
+        assert "/opt/clauster/clauster" in unit
+
+
+def test_service_console_script_drops_module_flag(monkeypatch):
+    # #587: a `clauster` console script on PATH (uv tool / pipx / pip) is a stable
+    # entry point — invoke it directly rather than `<venv-python> -m clauster`.
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr("shutil.which", lambda name: "/home/u/.local/bin/clauster")
+    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml")
+    assert "ExecStart=/home/u/.local/bin/clauster run -c" in unit
+    assert "-m clauster" not in unit
+
+
+def test_service_interpreter_fallback_keeps_module_flag(monkeypatch):
+    # Dev / `python -m clauster`: no frozen binary and no console script on PATH, so
+    # the bare interpreter still needs the `-m clauster` module form.
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml")
+    assert "ExecStart=/usr/bin/python3 -m clauster run -c" in unit
+
+
 def test_service_unknown_kind():
     with pytest.raises(ValueError):
         render_service_unit("upstart")
