@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -1139,6 +1140,20 @@ async def test_rediscover_standard_rebinds_newest_debug_log(runner_config, monke
     assert inst.status is InstanceStatus.RUNNING
     assert inst.bridge_debug_log_path == new  # newest bare .log, not a sibling
     assert inst.bridge_raw_log_path == new  # redaction off → raw == debug
+
+
+def test_latest_debug_log_for_tolerates_oserror(runner_config, monkeypatch):
+    """A filesystem error while resolving the newest log degrades to None, never raises —
+    so a transient FS fault (or a file pruned mid-iteration) can't crash startup rediscover;
+    the tail simply stays unbound instead (#584)."""
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.log").write_text("x\n")
+    # stat() raises while picking the newest by mtime (e.g. the file vanished after the glob).
+    monkeypatch.setattr(Path, "stat", lambda self: (_ for _ in ()).throw(OSError("gone")))
+    assert runner._latest_debug_log_for("alpha") is None
 
 
 async def test_adopt_leaves_log_path_unset(runner_config, monkeypatch):
