@@ -144,3 +144,54 @@ def test_reconcile_missing_kind_still_joins(tmp_path: Path):
     del item["kind"]
     result = inspector.reconcile(inspector.parse_agents_json(json.dumps([item])), {proj: "alpha"})
     assert result[0].attribution is Attribution.TRACKED
+
+
+def test_reconcile_hosted_by_pid(tmp_path: Path):
+    # A Clauster hosted session is identified by its CT-1 agent pid → HOSTED, not
+    # EXTERNAL (#592). Its workspace has no managed bridge, so cwd alone wouldn't help.
+    proj = tmp_path / "ws"
+    sessions = inspector.parse_agents_json(json.dumps([_agent(46620, str(proj), "u-hosted")]))
+    result = inspector.reconcile(sessions, {}, hosted_pids={46620: "host-1"})
+    assert result[0].attribution is Attribution.HOSTED
+    assert result[0].parent_instance == "host-1"
+
+
+def test_reconcile_hosted_pid_match_overrides_kind(tmp_path: Path):
+    # pid is authoritative identity: a hosted session is claimed before the kind gate,
+    # so even a non-bridge kind reads as HOSTED rather than slipping to UNTRACKED.
+    sessions = inspector.parse_agents_json(
+        json.dumps([_agent(7, "/anywhere", "u-h", kind="background", state="working")])
+    )
+    result = inspector.reconcile(sessions, {}, hosted_pids={7: "host-2"})
+    assert result[0].attribution is Attribution.HOSTED
+    assert result[0].parent_instance == "host-2"
+
+
+def test_reconcile_hosted_by_cwd_fallback(tmp_path: Path):
+    # Pre-CT-1 daemon: no agent pid to match, so a hosted session attributes by its
+    # workspace cwd instead of falling through to EXTERNAL.
+    proj = tmp_path / "ws"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(50, str(proj), "u-h")]))
+    result = inspector.reconcile(sessions, {}, hosted_cwds={proj: "host-3"})
+    assert result[0].attribution is Attribution.HOSTED
+    assert result[0].parent_instance == "host-3"
+
+
+def test_reconcile_managed_bridge_wins_over_hosted_cwd(tmp_path: Path):
+    # A real bridge at a cwd that also appears in hosted_cwds stays TRACKED — the
+    # managed-bridge join is checked before the hosted cwd fallback.
+    proj = tmp_path / "ws"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(60, str(proj), "u-b")]))
+    result = inspector.reconcile(sessions, {proj: "bridge-1"}, hosted_cwds={proj: "host-4"})
+    assert result[0].attribution is Attribution.TRACKED
+    assert result[0].parent_instance == "bridge-1"
+
+
+def test_reconcile_hosted_args_default_to_external(tmp_path: Path):
+    # Without hosted info, a session at an unmanaged cwd is still EXTERNAL (the new
+    # parameters are optional and don't change pre-existing attribution).
+    sessions = inspector.parse_agents_json(json.dumps([_agent(70, "/elsewhere", "u-e")]))
+    result = inspector.reconcile(sessions, {})
+    assert result[0].attribution is Attribution.EXTERNAL
