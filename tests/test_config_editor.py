@@ -184,19 +184,23 @@ def test_depends_maps_are_disjoint() -> None:
     # disjoint. A path in both would emit a contradictory spec (a boolean master AND a required
     # value); the frontend would then apply value-equality against a boolean and disable the field
     # forever with no error. Pin the invariant so a future addition to both fails loudly here.
+    # (FIELD_DEPENDS_VALUE is currently empty post-#586, so this holds vacuously — the guard
+    # stays to catch a future collision if value-gated fields return.)
     from clauster.config_editor import FIELD_DEPENDS, FIELD_DEPENDS_VALUE
 
     assert set(FIELD_DEPENDS) & set(FIELD_DEPENDS_VALUE) == set()
 
 
-def test_field_specs_recap_depends_on_launch_mode_value() -> None:
-    # #548: transcript recap only applies to the standard launch mode (pty true-resume carries
-    # its own context), so the editor value-gates it on launch_mode == "standard".
+def test_field_specs_recap_is_always_editable() -> None:
+    # #586: launch mode is chosen PER-SPAWN, so the recap toggle must NOT be locked to the
+    # config's default launch mode (the #548 launch_mode value-gate was removed). Recap is now
+    # always editable, with an informational "standard bridges only" note instead of a lock.
     specs = field_specs()
     recap = specs["claude.resume_recap"]
-    assert recap["depends_on"] == "claude.launch_mode"
-    assert recap["depends_on_value"] == "standard"
-    # Boolean-gated fields carry no value (None) — the frontend uses the falsy check for them.
+    assert recap["depends_on"] is None
+    assert recap["depends_on_value"] is None
+    assert "standard" in recap["description"].lower()
+    # Boolean-gated fields still carry no value (None) — the frontend uses the falsy check.
     assert specs["metrics.normalize_cpu"]["depends_on_value"] is None
 
 

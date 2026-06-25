@@ -263,11 +263,14 @@ FIELD_DEPENDS: dict[str, str] = {
 
 # Child -> (master field, the master VALUE that enables the child). Unlike FIELD_DEPENDS
 # (boolean master: the child is disabled when the master is falsy), the child here is disabled
-# unless the master EQUALS this value — for enum-gated fields (e.g. the transcript recap only
-# applies to the standard launch mode; pty true-resume already carries its own context).
-FIELD_DEPENDS_VALUE: dict[str, tuple[str, str]] = {
-    "claude.resume_recap": ("claude.launch_mode", "standard"),
-}
+# unless the master EQUALS this value — for genuinely enum-gated fields.
+#
+# Currently EMPTY. The only entry (recap value-gated on launch_mode == "standard", added in
+# #548) was removed in #586: launch mode is chosen PER-SPAWN, so locking the recap toggle to
+# the config *default* launch mode was wrong (and rendered stale-disabled on first load). Recap
+# is now always editable with an informational note instead (see FIELD_DESCRIPTIONS). The
+# mechanism is kept for any future field that is genuinely gated on a specific master value.
+FIELD_DEPENDS_VALUE: dict[str, tuple[str, str]] = {}
 
 # Fields kept only for back-compat — the API marks them deprecated (and the UI points at the
 # replacement) instead of surfacing the raw Pydantic deprecation docstring.
@@ -276,6 +279,13 @@ DEPRECATED_FIELDS: frozenset[str] = frozenset({"usage.show_cost"})
 # Plain-text UI description overrides, keyed by dotted path. Used where the model's own
 # description is raw markdown unsuitable for the panel (e.g. a deprecation note).
 FIELD_DESCRIPTIONS: dict[str, str] = {
+    "claude.resume_recap": (
+        "Applies to standard bridges only — pty bridges resume natively (via --continue), so "
+        "recap does nothing for a pty launch. Opt-in: installs a SessionStart hook in the "
+        "runtime user's ~/.claude/settings.json that recaps the most recent prior transcript "
+        "for the cwd into a restarted standard bridge (edits the user's Claude settings and "
+        "injects prior turns)."
+    ),
     "usage.show_cost": (
         "Deprecated. Use “Usage badge mode” → Off to hide the badge; usage.mode now takes "
         "precedence and show_cost only applies when mode is unset."

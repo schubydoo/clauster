@@ -443,7 +443,8 @@
         });
       },
       // A child field is gated off by a dependency: a boolean master switch that is off, or a
-      // value-gated master whose value != the required one (e.g. recap needs the standard mode).
+      // value-gated master whose value != the required one (spec.depends_on_value — none set
+      // currently; the recap value-gate was removed in #586).
       configFieldDisabled(path) {
         const spec = this.configEditor.specs[path];
         const dep = spec && spec.depends_on;
