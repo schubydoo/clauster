@@ -82,7 +82,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   double-gated: a per-project config ceiling
   (`projects.<name>.allow_bypass_permissions`) **and** a type-the-project-name
   confirm in the UI.
-- **Open session in Claude** — a deep link to the primary session plus a scannable QR code
+- **Open in Claude** — a deep link to the primary session plus a scannable QR code
   that opens it in the Claude app (claude.ai/code or mobile), attached to the
   running bridge. Bridges are **cloud-visible**; the experimental hosted
   live-view channel is **local-only** — it streams in the dashboard but is never
@@ -235,17 +235,18 @@ list.
    new enough, and **logged in** (the bridge inherits this login), and that
    `projects_root` / the state dir are usable — fix any ✗ before spawning.
 3. **Open the dashboard** at <http://127.0.0.1:7621>. You'll see one card per project.
-4. **Start a bridge.** On a project's card, click **Start**. Clauster launches
-   `claude remote-control` in that directory and the card flips to *Running* with a
-   live status badge. (Pick a spawn / permission mode first if you like — the
-   defaults are safe.)
-5. **Attach from anywhere.** Use the card's **Open session in Claude** link — or scan its
+4. **Launch a bridge.** On a project's card, click **Run Claude here ▾**, choose
+   **In claude.ai / Desktop**, pick a permission mode, then **Run**. Clauster
+   launches `claude remote-control` in that directory and the card flips to
+   *Running* with a live status badge. (The spawn-mode and permission defaults are
+   safe out of the box.)
+5. **Attach from anywhere.** Use the card's **Open in Claude** link — or scan its
    **QR code** — to pick the bridge up in `claude.ai/code` or the Claude mobile app.
    No SSH session.
 6. **Stop or resume.** **Stop** signals the bridge; **Resume** relaunches it (with
    `claude.resume_recap` or `claude.launch_mode: pty` it can carry the prior conversation
-   forward — see [Opt-in extras](#opt-in-extras)). A resumable bridge also offers
-   **Start new session** for a deliberate fresh start.
+   forward — see [Opt-in extras](#opt-in-extras)). For a deliberate fresh start,
+   **Forget** the stopped session and launch again with **Run Claude here**.
 
 > Exposing this beyond loopback (e.g. on your LAN)? Read
 > [Auth & networking](#auth--networking) first — a non-loopback bind requires
