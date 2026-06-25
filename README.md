@@ -148,14 +148,17 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   first-party API in the browser. Archive is reversible; force-delete requires
   typing `DELETE`.
 - **Background agents (experimental)** — a dashboard panel that lists, dispatches,
-  and stops Claude Code *background* sessions (`claude --bg`), backed by
-  `GET/POST/DELETE /api/agents`. It rides Claude Code's **agent-view research
+  stops, and resumes Claude Code *background* sessions (`claude --bg`), backed by
+  `GET/POST/DELETE /api/agents` plus `POST /api/agents/{job_id}/resume`. It rides
+  Claude Code's **agent-view research
   preview**, so it's experimental and may change with the upstream CLI.
 - **Outbound notifications & webhooks** — get told when a bridge changes state.
   `notifications` push a human message (Slack/Discord/Telegram/email via Apprise,
   the `notify` extra) on a **crash**; `webhooks` deliver a JSON `POST` to your own
   endpoint on every `spawn` / `ready` / `stop` / `crash` transition (no extra
-  dependency, `http(s)` only). Both are off by default, and a failing endpoint is
+  dependency, `http(s)` only), plus three opt-in events — `bg-settled`,
+  `permission-needed`, `clone-done` (default off; enable per-event under
+  `webhooks.events`). Both are off by default, and a failing endpoint is
   always logged-and-swallowed so it never affects a bridge's lifecycle. See
   [Operations → Crash alerts](https://schubydoo.github.io/clauster/operations/#crash-alerts)
   and [Lifecycle webhooks](https://schubydoo.github.io/clauster/operations/#lifecycle-webhooks).
@@ -339,6 +342,7 @@ validate against newer versions.
 clauster run                  # start the server (default)
 clauster hash-password        # generate an argon2id hash for auth.password_hash
 clauster hash-token           # mint an API token + hash for auth.api_token_hash
+clauster hash-metrics-token   # mint a /metrics scrape token + hash for observability.metrics_token_hash
 clauster doctor               # diagnose config / environment
 clauster backup | restore | migrate
 clauster install-service {systemd|launchd|windows}

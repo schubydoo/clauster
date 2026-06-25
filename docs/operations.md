@@ -152,7 +152,7 @@ curl -s http://127.0.0.1:7621/metrics
 ```text
 # HELP clauster_build_info Build information for the running Clauster.
 # TYPE clauster_build_info gauge
-clauster_build_info{version="0.11.0"} 1
+clauster_build_info{version="0.12.4"} 1
 # HELP clauster_bridges Number of managed bridges by lifecycle status.
 # TYPE clauster_bridges gauge
 clauster_bridges{status="running"} 2
@@ -424,8 +424,10 @@ else under it — together with the active config into a single archive:
 clauster backup -c /etc/clauster/clauster.yml -o /var/backups/
 ```
 
-Restore it with `clauster restore <archive>` (it can restore state alone or also
-write the config back out).
+Restore it with `clauster restore <archive> --state-dir ~/.clauster` (the
+`--state-dir` target is required — point it at your configured `state_dir`,
+`~/.clauster` by default). Add `--config-out /etc/clauster/clauster.yml` to also
+write the config back out, and `--force` to overwrite a non-empty target.
 
 The database schema is migrated automatically: on every start Clauster brings
 `clauster.db` to the latest [Alembic](https://alembic.sqlalchemy.org/) revision
@@ -455,31 +457,40 @@ clauster keepers -c /etc/clauster/clauster.yml --kill 12345 # stop one by keeper
 keeper still attached to a card. On success it stops the keeper (and its bridge
 subtree) and removes the stale sidecar.
 
-### Recovering from a corrupted or partially-written state file
+### Recovering from a corrupted state database
 
-Clauster writes its on-disk state safely. `state.json` is written
-**atomically** (write a temp file, then `os.replace`); the workspace-trust
-writes to `~/.claude.json` are atomic **and** additionally keep a one-time
-`.bak`. Either way a reader never sees a half-written file and an interrupted
-write can't truncate the live one — a power loss or `OOM`-kill mid-write leaves
-the **previous** intact file in place, not a corrupt one. (The atomic write is
-the corruption guard; the `.bak` on `~/.claude.json` is a separate convenience,
-and `state.json` keeps no routine backup of its own.)
+Runtime state lives in the SQLite `clauster.db` under your `state_dir` (the live
+store for bridge and hosted-session records). Its durability guard is the
+fail-closed schema migration: on every start Clauster brings `clauster.db` to the
+latest Alembic revision before serving, in a single transaction, and **refuses to
+start** if that migration fails rather than running against a half-migrated
+database (see Routine backup, above). The workspace-trust writes to
+`~/.claude.json` are atomic **and** additionally keep a one-time `.bak`.
 
-If `state.json` is ever unreadable anyway (manual edit, disk fault):
+> **Legacy note.** Pre-0.12 installs kept state in a JSON `state.json`, written
+> atomically (write a temp file, then `os.replace`). On a current install that
+> file is imported into `clauster.db` once on first boot and renamed
+> `state.json.imported` — it is never read or written again, so moving it aside
+> does nothing.
+
+If `clauster.db` is ever unreadable (disk fault, a failed migration that refuses
+to start):
 
 1. **Stop Clauster** so nothing is writing.
    - Running pty bridges survive a `KillMode=process` stop (see above), so this
      is safe to do.
-2. **Restore from a backup** — `clauster restore <archive>` — or, if you have no
-   backup, **move the bad file aside** and let Clauster start with empty state:
+2. **Restore from a backup** — `clauster restore <archive> --state-dir
+   ~/.clauster` (the `--state-dir` target is required — use your configured
+   `state_dir`; add `--config-out PATH` to also restore the config, `--force` to
+   overwrite a non-empty target). If you have no backup, **move the bad database
+   aside** and let Clauster start with empty state:
 
    ```sh
-   mv ~/.clauster/state.json ~/.clauster/state.json.corrupt
+   mv ~/.clauster/clauster.db ~/.clauster/clauster.db.corrupt
    ```
 
    Clauster starts fresh and **rediscovers** still-running bridges on startup
-   (it matches live processes), so a lost `state.json` is not a lost session —
+   (it matches live processes), so a lost database is not a lost session —
    you primarily lose recorded metadata, not the bridges themselves.
 3. **For `~/.claude.json`** (workspace trust / remote-control acknowledgement):
    the trust writer keeps a one-time `~/.claude.json.bak` taken before its first

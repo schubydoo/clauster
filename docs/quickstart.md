@@ -67,13 +67,20 @@ Open **<http://127.0.0.1:7621>**. You'll see one card per child directory of
 
 ## 6. Start your first bridge
 
-On the project card, click **Start**.
+On the project card, click **Run Claude here**, choose **In claude.ai /
+Desktop** (the bridge this quickstart walks through), pick a permission mode,
+then click **Run ·** `<permission>` (the button names the mode you picked).
 
 - If the directory isn't trusted yet, Clauster shows a **just-in-time trust
   confirm**. Accepting writes the Claude workspace-trust flag for that directory
   *before* the bridge spawns; a trusted directory shows a green shield and starts
   with no prompt. (Trust is Claude's own safety gate — see [Security](security.md).)
 - The card moves to **starting**, then **running** once the bridge registers.
+- The same popover offers an experimental **Here in the browser** option (only
+  when the hosted channel is enabled — `claustrum.enabled`, default off). Those
+  sessions are local live-view only and, unlike a bridge, are never attachable
+  from `claude.ai/code` — see [Architecture](architecture.md) and
+  [Configuration](configuration.md).
 
 !!! note "First-ever spawn"
     Before the first spawn, Clauster marks remote control acknowledged in your
@@ -83,7 +90,7 @@ On the project card, click **Start**.
 
 ## 7. Pick it up from anywhere
 
-On the running card, use **Open session in Claude** (or scan the **QR code**) to
+On the running card, use **Open in Claude** (or scan the **QR code**) to
 attach the bridge from `claude.ai/code` or the Claude mobile app — no SSH session
 required. Drive the session there; the live debug-log tail and resource metrics
 stay visible on the card.
@@ -95,7 +102,8 @@ stay visible on the card.
   resume starts a fresh context; opt into *true resume* with
   `claude.launch_mode: pty` (POSIX), or recap the prior conversation with
   `claude.resume_recap`. See [the two bridge modes](index.md#the-two-bridge-modes).
-- **Start new session** forces a deliberate fresh start on a resumable bridge.
+- To start fresh, **Forget** the stopped session (drops it from Recent) and
+  launch again with **Run Claude here**.
 
 ## Next steps
 

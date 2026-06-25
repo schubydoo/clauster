@@ -16,8 +16,14 @@ Binding to anything else (a LAN IP, `0.0.0.0`, a public address) is a
 enforced*. "Enforced" means:
 
 ```text
-auth.enabled == true  AND  (auth.password_required  OR  auth.reverse_proxy.enabled)
+auth.enabled == true  AND  (auth.password_required  OR  auth.reverse_proxy.enabled  OR  auth.api_token_hash)
 ```
+
+Any one of the three methods satisfies the requirement. `password_required`
+gates the browser login, `reverse_proxy.enabled` trusts a proxy-terminated
+identity, and `api_token_hash` (Bearer-token auth for headless/API clients,
+minted with `clauster hash-token`) lets a caller present `Authorization: Bearer
+<token>` instead of a browser session.
 
 The explicit `auth.allow_unauthenticated_network` opt-out lets you bypass that
 requirement on a trusted LAN — the config validator permits it, and
@@ -25,14 +31,15 @@ requirement on a trusted LAN — the config validator permits it, and
 
 ## The auth / networking matrix
 
-| `host` | `auth.enabled` | method (`password_required` or `reverse_proxy.enabled`) | `allow_unauthenticated_network` | Result |
+| `host` | `auth.enabled` | method (`password_required`, `reverse_proxy.enabled`, or `api_token_hash`) | `allow_unauthenticated_network` | Result |
 | --- | --- | --- | --- | --- |
 | loopback | any | any | any | ✅ Starts (loopback never needs auth) |
 | non-loopback | `false` | — | `false` | ❌ **Refused** — silent open door |
-| non-loopback | `true` | none set | `false` | ❌ **Refused** — switch on but nothing enforces it |
+| non-loopback | `true` | none of the three set | `false` | ❌ **Refused** — switch on but nothing enforces it |
 | non-loopback | `false`/`true` | password set but `enabled: false` | `false` | ❌ **Refused** — password without the master switch is a no-op |
 | non-loopback | `true` | `password_required` (+ hash) | any | ✅ Starts (password login) |
 | non-loopback | `true` | `reverse_proxy.enabled` | any | ✅ Starts (proxy trust) |
+| non-loopback | `true` | `api_token_hash` set | any | ✅ Starts (Bearer-token auth) |
 | non-loopback | any | any | `true` | ⚠️ Starts (explicit unauthenticated opt-out; doctor warns) |
 
 A second validator independently refuses to start when `password_required` is

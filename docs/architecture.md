@@ -11,7 +11,7 @@ Key modules under `src/clauster/`:
 | Module | Responsibility |
 | --- | --- |
 | `app.py` | FastAPI app factory; routes, middleware, cookie/session/WS wiring. |
-| `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`). |
+| `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`). |
 | `runner.py` | `SessionRunner` — spawn / stop / observe **standard** `claude remote-control` bridges. |
 | `pty_keeper.py` | Sidecar that owns a true-resume (**pty**) bridge's PTY. |
 | `discovery.py` | Project discovery under `projects_root`; `~/.claude.json` paths. |
@@ -24,12 +24,13 @@ Key modules under `src/clauster/`:
 | `procutil.py` | `psutil`-based process introspection: liveness with PID-reuse defense (create-time + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery. |
 | `auth.py` | Auth foundation (fail-closed; pure functions, no FastAPI import). |
 | `config.py` | Config load, env-override, and validation (`ClausterConfig`). |
-| `db/` | Persistence layer: `engine.py` (resolves the DB URL — SQLite `clauster.db` under `state_dir` by default, or a configured `database_url`), `models.py`/`stores.py` (SQLAlchemy schema + record stores), `bootstrap.py` (startup Alembic-to-head + one-time legacy-JSON import, both fail-closed), and the packaged Alembic `migrations/`. |
+| `db/` | Persistence layer: `engine.py` (resolves the DB URL — SQLite `clauster.db` under `state_dir` by default, or a configured `database_url`), `models.py`/`stores.py` (SQLAlchemy schema + record stores), `bootstrap.py` (startup Alembic-to-head + one-time legacy-JSON import, both fail-closed), and the packaged Alembic `migrations/`; the `stores.py` layer includes an append-only `session_events` lifecycle history (`SessionHistoryStore`) that backs the Projects last-used / cost sort. |
 | `state.py` | Legacy `state.json` store — now an import source only (the live store is `clauster.db`). |
 | `models.py` | Domain models. |
 | `metrics.py` | Per-bridge resource sampling (CPU / memory / disk). |
 | `usage.py` | Token + approximate-cost rollup from session transcripts. |
 | `notify.py` | Outbound lifecycle notifications via Apprise (optional `notify` extra). |
+| `webhooks.py` | Outbound HTTP lifecycle webhooks (opt-in extension seam) — POST on spawn/ready/stop/crash plus bg-settled/permission-needed/clone-done, fail-open, with an opt-in SSRF deny-list. |
 | `prometheus.py` | Text exposition for the opt-in read-only `/metrics` endpoint. |
 | `environments.py` | Server-side bridge-environment listing + reaper logic. |
 | `supervisor.py` | Read / dispatch / stop Claude Code agent-view background sessions (`claude --bg`); backs the background-agents panel + `/api/agents`. |
