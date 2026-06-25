@@ -581,6 +581,36 @@ def _bat_quote_safe(value: str) -> str:
     return value
 
 
+def _service_launch_command(python: str | None) -> tuple[str, list[str]]:
+    """Return the (executable, leading-args) a service unit uses to launch clauster.
+
+    An explicit *python* is treated as an interpreter and invoked with the
+    ``-m clauster`` module form (the back-compatible behavior). When *python* is
+    None, detect how clauster is actually installed and drop that prefix for
+    anything that is already the clauster entry point:
+
+    - a frozen / standalone binary (PyInstaller) — ``sys.executable`` *is* clauster;
+    - otherwise a ``clauster`` console script resolvable on PATH (uv tool / pipx /
+      pip) — a stable entry point that needs no interpreter path. This trusts the
+      caller's PATH; only an *absolute* resolution is accepted, since a relative
+      ``ExecStart``/``ProgramArguments[0]`` would fail the service manager's
+      absolute-path requirement rather than launch.
+
+    Only a bare interpreter (dev / ``python -m clauster``) keeps ``-m clauster``.
+    Prepending it to the clauster binary produced ``clauster -m clauster run``,
+    which clauster's own argparse rejects, so a frozen install's unit never started.
+    """
+    if python is not None:
+        return python, ["-m", "clauster"]
+    if getattr(sys, "frozen", False):
+        # PyInstaller: sys.executable is the clauster binary, not an interpreter.
+        return sys.executable, []
+    script = shutil.which("clauster")
+    if script and os.path.isabs(script):
+        return script, []
+    return sys.executable, ["-m", "clauster"]
+
+
 def render_service_unit(
     kind: str,
     *,
@@ -592,10 +622,10 @@ def render_service_unit(
     """Render a service definition (systemd/launchd/windows) for the given kind."""
     if kind not in _SERVICE_KINDS:
         raise ValueError(f"unknown service kind {kind!r}; expected one of {_SERVICE_KINDS}")
-    python = python or sys.executable
+    exe, launch = _service_launch_command(python)
     cfg = config_path or "/etc/clauster/clauster.yml"
     wd = workdir or str(Path(cfg).expanduser().parent)
-    cmd_args = ["-m", "clauster", "run", "-c", cfg]
+    cmd_args = [*launch, "run", "-c", cfg]
 
     if kind == "systemd":
         u = f"User={user}\n" if user else ""
@@ -608,7 +638,7 @@ def render_service_unit(
             "[Service]\n"
             "Type=simple\n"
             f"{u}"
-            f"ExecStart={python} {args}\n"
+            f"ExecStart={exe} {args}\n"
             f"WorkingDirectory={wd}\n"
             f"Environment=CLAUSTER_CONFIG={cfg}\n"
             "Restart=on-failure\n"
@@ -627,9 +657,7 @@ def render_service_unit(
         # <string>: an unescaped & or < in a python/config/workdir path would
         # produce a malformed (or injected) plist. xml.sax.saxutils.escape covers
         # & < > — the full set that is significant in element text.
-        arg_xml = "\n".join(
-            f"      <string>{_xml_escape(a)}</string>" for a in [python, *cmd_args]
-        )
+        arg_xml = "\n".join(f"      <string>{_xml_escape(a)}</string>" for a in [exe, *cmd_args])
         wd_xml = _xml_escape(wd)
         cfg_xml = _xml_escape(cfg)
         return (
@@ -654,7 +682,7 @@ def render_service_unit(
     # A double-quote is illegal in a Windows path; rejecting it (rather than escaping)
     # keeps a stray " from breaking out of the "%s" quoting and injecting extra batch
     # tokens. _bat_quote_safe raises on a " so the operator fixes the path.
-    python_q = _bat_quote_safe(python)
+    exe_q = _bat_quote_safe(exe)
     wd_q = _bat_quote_safe(wd)
     cfg_q = _bat_quote_safe(cfg)
     quoted = " ".join(f'"{_bat_quote_safe(a)}"' for a in cmd_args)
@@ -662,7 +690,7 @@ def render_service_unit(
         "@echo off\n"
         "REM Install Clauster as a Windows service via nssm (https://nssm.cc).\n"
         "REM Run this script from an elevated prompt with nssm on PATH.\n"
-        f'nssm install Clauster "{python_q}" {quoted}\n'
+        f'nssm install Clauster "{exe_q}" {quoted}\n'
         f'nssm set Clauster AppDirectory "{wd_q}"\n'
         f"nssm set Clauster AppEnvironmentExtra CLAUSTER_CONFIG={cfg_q}\n"
         "nssm set Clauster Start SERVICE_AUTO_START\n"
