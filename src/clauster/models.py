@@ -128,9 +128,10 @@ class ClaudeMdDoc(BaseModel):
 
 
 class Attribution(StrEnum):
-    """How a working session relates to a managed bridge (tracked/untracked/external)."""
+    """How a working session relates to a managed session (tracked/hosted/untracked/external)."""
 
     TRACKED = "tracked"
+    HOSTED = "hosted"  # owned by Clauster's hosted (claustrum) registry, not a bridge (#592)
     UNTRACKED = "untracked"
     EXTERNAL = "external"
 
@@ -150,7 +151,7 @@ class WorkingSession(BaseModel):
     state: str = ""  # agent-view lifecycle (working/blocked/done/failed/stopped); "" pre-2.1.139
     started_at: int  # epoch ms (NOT an ISO string)
     local_uuid: str  # the JSON `sessionId` (RFC 4122), never the API ULID
-    parent_instance: str | None = None  # derived by matching cwd to a managed bridge
+    parent_instance: str | None = None  # the owning managed bridge (cwd join) or hosted id (#592)
     attribution: Attribution = Attribution.UNTRACKED
 
     @classmethod

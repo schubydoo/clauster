@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -216,6 +217,11 @@ class SessionRunner:
         # CLAUSTER_SESSION_SECRET can't break runner construction or the bridge
         # lifecycle (webhooks are fail-open by design).
         self._session_ref_secret: bytes | None = None
+        # Live hosted-session view for the agents --json cross-check (#592). The app
+        # wires this to HostedManager.list_instances once both are built; it stays None
+        # in unit tests and whenever the hosted channel is unused — poll_once then sees
+        # no hosted sessions to claim and attributes exactly as before.
+        self._hosted_instances: Callable[[], list[RemoteControlInstance]] | None = None
 
     # ----- read API -------------------------------------------------------
 
@@ -232,6 +238,17 @@ class SessionRunner:
     def list_instances(self) -> list[RemoteControlInstance]:
         """Return a snapshot list of all managed bridge instances."""
         return list(self._instances.values())
+
+    def set_hosted_provider(
+        self, provider: Callable[[], list[RemoteControlInstance]] | None
+    ) -> None:
+        """Register the hosted-session snapshot used to attribute hosted sessions (#592).
+
+        The app passes ``HostedManager.list_instances`` after both are built so the
+        poll loop's ``agents --json`` cross-check can recognize Clauster's own hosted
+        sessions instead of mislabeling them EXTERNAL/unmanaged. ``None`` clears it.
+        """
+        self._hosted_instances = provider
 
     def crash_counts(self) -> dict[str, int]:
         """Return a copy of the per-project bridge-crash tally since process start (#352)."""
@@ -1896,7 +1913,39 @@ class SessionRunner:
             for i in self._instances.values()
             if i.project in discovered and i.project in live_projects
         }
-        self._sessions = inspector.reconcile(sessions, managed)
+        # Clauster's own hosted (claustrum) sessions run no bridge process, so the
+        # cross-check would otherwise see their live `claude` pid and label it
+        # EXTERNAL/unmanaged (#592). Claim them by the CT-1 agent_pid (authoritative)
+        # and, for a pre-CT-1 daemon with no pid, by their workspace cwd. Only RUNNING/
+        # STARTING rows are claimed: a stopped row's pid could be reused by an unrelated
+        # process, and a stopped session has no live process to attribute anyway.
+        hosted_pids: dict[int, str] = {}
+        hosted_cwds: dict[Path, str] = {}
+        if self._hosted_instances is not None:
+            for inst in self._hosted_instances():
+                hid = inst.claustrum_process_id
+                if hid is None:
+                    continue
+                # Claim a row only when it can have a live process: RUNNING/STARTING, or an
+                # orphan (CL-8) — a CRASHED row whose agent survived a daemon restart and
+                # whose live pid must be claimed too, or the survivor reads as EXTERNAL. A
+                # genuinely dead row is skipped so a reused pid/cwd isn't mis-claimed.
+                if inst.status not in (InstanceStatus.RUNNING, InstanceStatus.STARTING) and (
+                    not inst.is_orphan
+                ):
+                    continue
+                if inst.agent_pid is not None:
+                    hosted_pids[inst.agent_pid] = hid
+                else:
+                    # Pre-CT-1 daemon only: with no pid to match, fall back to the
+                    # workspace cwd. Skipped when a pid IS known — a cwd claim there would
+                    # also swallow a genuine EXTERNAL bridge co-located at the project path
+                    # (hiding it from adoption + the phantom-prune), the very stale-card
+                    # symptom #592 set out to remove.
+                    proj = discovered.get(inst.project)
+                    if proj is not None:
+                        hosted_cwds[Path(proj.path)] = hid
+        self._sessions = inspector.reconcile(sessions, managed, hosted_pids, hosted_cwds)
         # Drop a non-live managed instance whose project has a live EXTERNAL session:
         # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record
         # is a phantom. Showing it as a Stopped/Resume card is misleading and invites a

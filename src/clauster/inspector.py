@@ -87,7 +87,10 @@ def parse_agents_json(stdout: str) -> list[WorkingSession]:
 
 
 def reconcile(
-    sessions: list[WorkingSession], managed_cwds: dict[Path, str]
+    sessions: list[WorkingSession],
+    managed_cwds: dict[Path, str],
+    hosted_pids: dict[int, str] | None = None,
+    hosted_cwds: dict[Path, str] | None = None,
 ) -> list[WorkingSession]:
     """Attribute each working session to a managed bridge by resolved cwd.
 
@@ -97,9 +100,25 @@ def reconcile(
     join: a `claude --bg` session sharing a managed cwd must not read as the
     bridge's session (TRACKED = false liveness) nor as an unmanaged bridge
     (EXTERNAL phantom-deletes a stopped record) — it stays UNTRACKED.
+
+    Clauster's own hosted (claustrum) sessions are spawned by it but run no bridge
+    process, so they would otherwise fall through to EXTERNAL/unmanaged (#592).
+    ``hosted_pids`` (agent pid → hosted id) and ``hosted_cwds`` (resolved cwd →
+    hosted id) reclassify them as HOSTED: pid is the authoritative identity (a
+    claustrum CT-1 ``agent_pid``) and is checked before the kind gate so a hosted
+    session reads as HOSTED under any kind; cwd is the pre-CT-1 fallback (no pid to
+    match) and joins only on a bridge kind, after the managed-bridge join so a real
+    bridge at a shared cwd still wins.
     """
     resolved = {p.resolve(): inst_id for p, inst_id in managed_cwds.items()}
+    hosted_pids = hosted_pids or {}
+    hosted_by_cwd = {p.resolve(): hid for p, hid in (hosted_cwds or {}).items()}
     for s in sessions:
+        hosted_id = hosted_pids.get(s.pid)
+        if hosted_id is not None:
+            s.parent_instance = hosted_id
+            s.attribution = Attribution.HOSTED
+            continue
         if s.kind not in _BRIDGE_KINDS:
             s.attribution = Attribution.UNTRACKED
             continue
@@ -107,6 +126,11 @@ def reconcile(
         if inst_id is not None:
             s.parent_instance = inst_id
             s.attribution = Attribution.TRACKED
-        else:
-            s.attribution = Attribution.EXTERNAL
+            continue
+        hosted_id = hosted_by_cwd.get(s.cwd.resolve())
+        if hosted_id is not None:
+            s.parent_instance = hosted_id
+            s.attribution = Attribution.HOSTED
+            continue
+        s.attribution = Attribution.EXTERNAL
     return sessions
