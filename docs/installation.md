@@ -327,6 +327,8 @@ User=clauster
 ExecStart=/path/to/python -m clauster run -c /etc/clauster/clauster.yml
 WorkingDirectory=/etc/clauster
 Environment=CLAUSTER_CONFIG=/etc/clauster/clauster.yml
+# Spawned bridges inherit this PATH (see note below); ~/.local/bin covers uv-installed tools.
+Environment="PATH=/home/clauster/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 Restart=on-failure
 RestartSec=5
 # Leave detached pty (true-resume) bridges running across a restart (see below).
@@ -349,6 +351,17 @@ WantedBy=multi-user.target
     daemon-reload`; `clauster doctor` warns when the loaded `clauster.service`
     still uses a reaping `KillMode`. (A bridge truly lost to a crash or reboot is
     still recoverable with `claude --continue`.)
+
+!!! note "Bridges inherit the unit's `PATH`"
+    Under systemd a service gets a minimal default `PATH`, and Clauster propagates
+    its environment to every `claude` bridge it spawns — so without a `PATH` in the
+    unit, an agent inside a bridge can't resolve user-local tools (`uv`, `ruff`,
+    `pytest`, …) that work fine in your interactive shell. The generated unit bakes
+    the run-as user's `~/.local/bin` plus the standard system dirs (resolved from
+    the `--user` you pass, so regenerate if you change it). For **shell-managed**
+    toolchains a static directory can't cover — nvm/pyenv `node`, `cargo`, Go —
+    extend it with [`claude.path_append` / `claude.env`](configuration.md#claude-binary-bridge-spawn-claudeconfig)
+    in `clauster.yml`; those append to (never replace) this baked `PATH`.
 
 !!! note "Auth + sandboxing"
     A non-loopback bind **refuses to start without enforced auth** — set the

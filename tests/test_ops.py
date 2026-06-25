@@ -544,6 +544,12 @@ def test_service_systemd():
     # KillMode=process so detached pty (true-resume) bridges survive a restart
     # instead of being reaped with the service cgroup (the default control-group).
     assert "KillMode=process" in unit
+    # #590: bake a PATH so spawned bridges (which inherit it via child_env) resolve
+    # ~/.local/bin tools; comment points operators at the path_append / env knobs. The
+    # assignment is quoted so a space in the home dir can't truncate the value.
+    assert 'Environment="PATH=' in unit
+    assert "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin" in unit
+    assert "claude.path_append" in unit
 
 
 def test_service_launchd():
@@ -551,6 +557,56 @@ def test_service_launchd():
         "launchd", python="/usr/bin/python3", config_path="/etc/clauster/clauster.yml"
     )
     assert "<plist" in unit and "org.clauster.daemon" in unit and "RunAtLoad" in unit
+    # #590: the EnvironmentVariables dict carries a PATH so bridges resolve ~/.local/bin.
+    assert "<key>PATH</key>" in unit
+    assert "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin" in unit
+
+
+def test_service_path_falls_back_to_home_for_unknown_user(monkeypatch):
+    # #590: rendering for a user not present on the host (e.g. created post-render)
+    # falls back to <root>/<user>/.local/bin rather than failing the passwd lookup.
+    # Pin the platform so the home root is deterministic across CI runners (macOS
+    # would otherwise use /Users).
+    monkeypatch.setattr(sys, "platform", "linux")
+    unit = render_service_unit(
+        "systemd", config_path="/etc/clauster/clauster.yml", user="no_such_user_zzz"
+    )
+    assert 'Environment="PATH=/home/no_such_user_zzz/.local/bin:' in unit
+
+
+def test_service_path_fallback_uses_users_root_on_macos(monkeypatch):
+    # #590: on a macOS host the home-root guess for a not-yet-created user is /Users,
+    # not /home, so a rendered launchd unit points at the right ~/.local/bin. The bogus
+    # username misses the passwd lookup on every runner, so the platform branch decides.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    unit = render_service_unit(
+        "launchd", config_path="/etc/clauster/clauster.yml", user="no_such_user_zzz"
+    )
+    assert "/Users/no_such_user_zzz/.local/bin:" in unit
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd is POSIX-only")
+def test_service_path_uses_passwd_home_when_user_exists(monkeypatch):
+    # #590: when the run-as user exists, resolve their real home via the passwd db.
+    import pwd as _pwd
+
+    fake = _pwd.struct_passwd(("svc", "x", 0, 0, "svc", "/opt/svc-home", "/bin/sh"))
+    monkeypatch.setattr(_pwd, "getpwnam", lambda name: fake)
+    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml", user="svc")
+    assert 'Environment="PATH=/opt/svc-home/.local/bin:' in unit
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd is POSIX-only")
+def test_service_systemd_path_quoted_for_space_in_home(monkeypatch):
+    # #590 (greptile P2): a home dir with a space must not truncate the PATH. systemd
+    # splits an unquoted Environment= value on whitespace, so the assignment is quoted.
+    import pwd as _pwd
+
+    fake = _pwd.struct_passwd(("svc", "x", 0, 0, "svc", "/home/john doe", "/bin/sh"))
+    monkeypatch.setattr(_pwd, "getpwnam", lambda name: fake)
+    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml", user="svc")
+    # The whole assignment is wrapped in double quotes, keeping the space intact.
+    assert 'Environment="PATH=/home/john doe/.local/bin:' in unit
 
 
 def test_service_windows():
