@@ -111,7 +111,6 @@
       bypassTyped: {},
       confirmTrust: {},
       trustConfirmed: {},   // the "I trust…" checkbox in the trust-on-start dialog
-      confirmNew: {},
       cmd: {},
       usage: {},
       sortMeta: {},       // project name -> {last_used: iso|null, cost_usd: float|null}; Zone 1 sort (lazy)
@@ -1079,22 +1078,6 @@
         this.confirmTrust[name] = false;
         this.trustConfirmed[name] = false;
       },
-      // "Start new session" on a resumable bridge: a fresh start (resume=false)
-      // is deliberately distinct from Resume, so warn first — a new session won't
-      // restore the prior one and Resume may no longer reach it (pty Resume
-      // continues the most-recent transcript, which a fresh session displaces).
-      startNew(name) {
-        this.errors[name] = null;
-        this.confirmNew[name] = true;
-      },
-      confirmNewStart(name) {
-        this.confirmNew[name] = false;
-        // Route back through start() so the bypassPermissions gate still applies.
-        this.start(name);
-      },
-      cancelNew(name) {
-        this.confirmNew[name] = false;
-      },
       confirmBypassStart(name) {
         if ((this.bypassTyped[name] || "") !== name) {
           this.errors[name] = "Type the project name exactly to confirm bypass.";
@@ -1340,9 +1323,9 @@
       async _spawn(name) {
         this.errors[name] = null;
         // Pick the launch mode BEFORE the optimistic overwrite below. A resumable
-        // card hides the Mode picker, so on "Start new session" we keep the stopped
-        // bridge's own recorded mode rather than silently dropping to the global
-        // default; a brand-new card (no instance) uses the visible picker.
+        // card hides the Mode picker, so relaunching a stopped bridge keeps its own
+        // recorded mode rather than silently dropping to the global default; a
+        // brand-new card (no instance) uses the visible picker.
         const existing = this.instances[name];
         const mode = (existing && existing.resume_mode) || this.resumeMode[name];
         this.instances[name] = { project: name, status: "starting" };

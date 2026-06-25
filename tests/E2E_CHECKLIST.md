@@ -189,13 +189,6 @@ These are off by default. Set the flag, restart, hard-refresh, then verify.
         conversation** (the agent recalls the codeword with no tools), true resume not just
         the recap, continuing the prior transcript rather than a fresh `.jsonl` — stays
         **manual** (the fake bridge has no conversation to restore).
-      - Beside **Resume** the card also shows **Start new session**. Clicking it raises a
-        warning (a new session won't restore the prior one and Resume may no longer reach
-        it); confirming launches a **fresh** bridge (no `--continue`, the codeword is NOT
-        recalled). Cancel leaves the stopped bridge resumable. The fresh session **keeps the
-        bridge's recorded mode** (a stopped pty bridge starts a new *pty* session, not a
-        silent drop to the `standard` config default — its Mode picker is hidden, so `_spawn`
-        posts the instance's own `resume_mode`), even across a page reload.
       - It is **single-session** (no multi-chat capacity) — the card reflects that.
       - **Stop** cleanly ends both the bridge and its keeper (no stray processes).
       - The keeper is reparented to init, so the bridge survives a Clauster restart, and
