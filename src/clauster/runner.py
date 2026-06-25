@@ -1937,11 +1937,12 @@ class SessionRunner:
                 if inst.agent_pid is not None:
                     hosted_pids[inst.agent_pid] = hid
                 else:
-                    # Pre-CT-1 daemon only: with no pid to match, fall back to the
-                    # workspace cwd. Skipped when a pid IS known — a cwd claim there would
-                    # also swallow a genuine EXTERNAL bridge co-located at the project path
-                    # (hiding it from adoption + the phantom-prune), the very stale-card
-                    # symptom #592 set out to remove.
+                    # Pre-CT-1 daemon: with no pid to match, fall back to the workspace
+                    # cwd. Reached only by RUNNING/STARTING pre-CT-1 rows — an orphan always
+                    # carries a pid (HostedManager._is_orphan requires it), so it never lands
+                    # here. Skipped when a pid IS known: a cwd claim there would also swallow
+                    # a genuine EXTERNAL bridge co-located at the project path (hiding it from
+                    # adoption + the phantom-prune), the very stale-card symptom #592 removes.
                     proj = discovered.get(inst.project)
                     if proj is not None:
                         hosted_cwds[Path(proj.path)] = hid

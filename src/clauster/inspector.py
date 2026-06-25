@@ -111,10 +111,14 @@ def reconcile(
     bridge at a shared cwd still wins.
     """
     resolved = {p.resolve(): inst_id for p, inst_id in managed_cwds.items()}
-    hosted_pids = hosted_pids or {}
-    hosted_by_cwd = {p.resolve(): hid for p, hid in (hosted_cwds or {}).items()}
+    # `is None` (not `or {}`): the contract is about an omitted arg, not an empty one,
+    # and a fresh local avoids rebinding the parameter.
+    hosted_by_pid = hosted_pids if hosted_pids is not None else {}
+    hosted_by_cwd = {
+        p.resolve(): hid for p, hid in (hosted_cwds if hosted_cwds is not None else {}).items()
+    }
     for s in sessions:
-        hosted_id = hosted_pids.get(s.pid)
+        hosted_id = hosted_by_pid.get(s.pid)
         if hosted_id is not None:
             s.parent_instance = hosted_id
             s.attribution = Attribution.HOSTED
