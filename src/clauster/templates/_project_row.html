@@ -70,23 +70,23 @@
                           </span>
                         </label>
                       </template>
-                      <!-- cloud option folds into Fire-and-forget -->
+                      <!-- cloud option folds into Background -->
                       <label class="form-check small mt-1 ms-1" x-show="lmode === 'detached'" x-cloak>
                         <input type="checkbox" class="form-check-input" x-model="lcloud">
                         <span class="form-check-label">also register on claude.ai</span>
                       </label>
-                      <!-- With claude.ai on, "fire-and-forget" undersells it: the session is live
-                           and conversational. Say what you can actually do with it. -->
+                      <!-- With claude.ai on, a Background run is actually live and
+                           conversational. Say what you can actually do with it. -->
                       <p class="form-hint text-secondary small mt-1 ms-1 mb-0" x-show="lmode === 'detached' && lcloud" x-cloak>
                         Connectable from claude.ai / Desktop — converse with it, and Stop it here when done.
                       </p>
-                      <!-- optional first prompt for Fire-and-forget -->
+                      <!-- optional first prompt for Background -->
                       <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
                         <label class="form-label small mb-1" for="lprompt-{{ p.name }}">First prompt <span class="text-secondary">(optional)</span></label>
                         <input id="lprompt-{{ p.name }}" class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…">
                       </div>
                       <!-- permissions — shown for EVERY mode; the key safety choice, and it
-                           matters most for Fire-and-forget, which runs unattended. bypassPermissions
+                           matters most for Background, which runs unattended. bypassPermissions
                            is offered only where the per-project config ceiling allows it. -->
                       <div class="mt-2">
                         <label class="form-label small mb-1" for="perm-{{ p.name }}">Permissions</label>
