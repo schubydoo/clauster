@@ -336,6 +336,16 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.4 (2026-06-25)
+
+### Fixes
+
+- Fix the live bridge-log tail going dead after a service restart + bridge reattach (the upgrade path). A reattached bridge was rebuilt without its `bridge_debug_log_path`, so `/ws/bridge-log/{instance_id}` closed every connection immediately — the tail flickered through a few reconnect attempts and then gave up with "Live tail disconnected", leaving the operator blind to a bridge that was actually alive. Both reattach paths now re-bind the tail to the log the bridge is still writing: a pty survivor derives it from its keeper sidecar's shared spawn-set stem, and a standard survivor recovers the newest debug log it wrote. The Reconnect button also resets the consecutive-failure counter on a manual retry so it can no longer be a no-op once auto-reconnect has capped out. ([#595](https://github.com/schubydoo/clauster/pull/595))
+- Fix `clauster install-service` so a frozen/standalone binary (or `clauster` console-script) install no longer emits a service unit with an invalid `clauster -m clauster run` command — the unit now invokes the clauster entry point directly across systemd, launchd, and Windows/nssm, and only a bare `python -m clauster` interpreter keeps the module prefix. ([#588](https://github.com/schubydoo/clauster/pull/588))
+- Fix `clauster install-service` so the generated systemd and launchd units bake a `PATH` (the run-as user's `~/.local/bin` plus the standard system dirs) instead of leaving the service with a minimal default. Clauster propagates its environment to every spawned bridge, so previously a bridge agent couldn't resolve user-local tools (`uv`/`ruff`/`pytest`, etc.) that work fine in an interactive shell. A unit comment now points operators at `claude.path_append` / `claude.env` for shell-managed toolchains (nvm/pyenv/cargo/go). ([#593](https://github.com/schubydoo/clauster/pull/593))
+- Fix the hosted live-view rendering each assistant reply twice. One assistant turn emits both the streamed `assistant` frame and a trailing `result` frame whose `result` field repeats the same text, and the live-view rendered both — the message as white paragraphs and the result echo as a green run-on block. The `result` frame now collapses a successful turn to a "turn complete" marker and surfaces text only on the error path (where `result` carries content no assistant frame emits, e.g. "Not logged in · Please run /login"). ([#596](https://github.com/schubydoo/clauster/pull/596))
+- Fix clauster-spawned hosted (claustrum) sessions being misclassified as `EXTERNAL`/"unmanaged" by the `claude agents --json` cross-check, which also left a stale Active card alongside the Stopped one after Stop — the poll loop now recognizes the hosted registry (by claustrum agent pid, with a workspace-cwd fallback for pre-CT-1 daemons, plus CL-8 orphan survivors) and attributes those sessions to Clauster instead of surfacing them as external. ([#594](https://github.com/schubydoo/clauster/pull/594))
+
 ## 0.12.3 (2026-06-24)
 
 ### Features
