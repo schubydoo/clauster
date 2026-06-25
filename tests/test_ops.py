@@ -545,8 +545,9 @@ def test_service_systemd():
     # instead of being reaped with the service cgroup (the default control-group).
     assert "KillMode=process" in unit
     # #590: bake a PATH so spawned bridges (which inherit it via child_env) resolve
-    # ~/.local/bin tools; comment points operators at the path_append / env knobs.
-    assert "Environment=PATH=" in unit
+    # ~/.local/bin tools; comment points operators at the path_append / env knobs. The
+    # assignment is quoted so a space in the home dir can't truncate the value.
+    assert 'Environment="PATH=' in unit
     assert "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin" in unit
     assert "claude.path_append" in unit
 
@@ -570,7 +571,7 @@ def test_service_path_falls_back_to_home_for_unknown_user(monkeypatch):
     unit = render_service_unit(
         "systemd", config_path="/etc/clauster/clauster.yml", user="no_such_user_zzz"
     )
-    assert "Environment=PATH=/home/no_such_user_zzz/.local/bin:" in unit
+    assert 'Environment="PATH=/home/no_such_user_zzz/.local/bin:' in unit
 
 
 def test_service_path_fallback_uses_users_root_on_macos(monkeypatch):
@@ -592,7 +593,20 @@ def test_service_path_uses_passwd_home_when_user_exists(monkeypatch):
     fake = _pwd.struct_passwd(("svc", "x", 0, 0, "svc", "/opt/svc-home", "/bin/sh"))
     monkeypatch.setattr(_pwd, "getpwnam", lambda name: fake)
     unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml", user="svc")
-    assert "Environment=PATH=/opt/svc-home/.local/bin:" in unit
+    assert 'Environment="PATH=/opt/svc-home/.local/bin:' in unit
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd is POSIX-only")
+def test_service_systemd_path_quoted_for_space_in_home(monkeypatch):
+    # #590 (greptile P2): a home dir with a space must not truncate the PATH. systemd
+    # splits an unquoted Environment= value on whitespace, so the assignment is quoted.
+    import pwd as _pwd
+
+    fake = _pwd.struct_passwd(("svc", "x", 0, 0, "svc", "/home/john doe", "/bin/sh"))
+    monkeypatch.setattr(_pwd, "getpwnam", lambda name: fake)
+    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml", user="svc")
+    # The whole assignment is wrapped in double quotes, keeping the space intact.
+    assert 'Environment="PATH=/home/john doe/.local/bin:' in unit
 
 
 def test_service_windows():

@@ -684,7 +684,10 @@ def render_service_unit(
             "# every bridge it spawns (procutil.child_env), so set it here. ~/.local/bin\n"
             "# covers uv-installed tools; for shell-managed toolchains (nvm/pyenv/cargo/go)\n"
             "# extend it via claude.path_append / claude.env in clauster.yml.\n"
-            f"Environment=PATH={path}\n"
+            # Quote the assignment: systemd splits an unquoted Environment= value on
+            # whitespace, so a home dir with a space (/home/john doe/.local/bin) would
+            # otherwise be truncated. Double quotes are stripped and the span kept whole.
+            f'Environment="PATH={path}"\n'
             "Restart=on-failure\n"
             "RestartSec=5\n"
             "# Signal only the main process on stop/restart. Detached pty (true-resume)\n"
