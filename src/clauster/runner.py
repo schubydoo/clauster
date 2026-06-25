@@ -737,29 +737,34 @@ class SessionRunner:
         Used to re-bind a rediscovered *standard* survivor's live tail to the log it was
         already writing before the restart — the timestamped path is otherwise lost on a
         cold start (unlike pty, there's no keeper sidecar to derive it from). The live
-        survivor is by definition the most recent spawn, so its log is the newest set;
-        pick by mtime. Best-effort: returns None when the dir/glob can't be read or no log
-        remains (retention may have pruned a long-idle bridge's set).
+        survivor is by definition the most recently *spawned* bridge, so order by the
+        ``<ms>-<seq>`` the filename already encodes (``_unique_log_path``) — NOT by mtime: the
+        filename is the spawn order we actually want, and reading it avoids a ``stat()`` per
+        candidate (no TOCTOU against log retention, which prunes on this same thread). Returns
+        None when the dir/glob can't be read or no log remains (retention may have pruned a
+        long-idle bridge's set).
 
         The candidate stem is anchored to this project's exact ``<name>-<ms>-<seq>.log`` shape
         — NOT the glob prefix. ``PROJECT_NAME_RE`` allows ``-`` (``discovery.py``), so the bare
         ``glob(f"{name}-*.log")`` also matches a *sibling* project's logs (``app`` ⇒
         ``app-2-…log`` / ``app-staging-…log``); binding to one of those would leak another
         project's tail — its verbatim ``--debug-file`` (session URL / env id) when on-disk
-        redaction is off. Anchoring on the trailing ``<ms>-<seq>`` digit run rejects siblings
-        while keeping this set, and only the bare ``.log`` matches (never its
+        redaction is off. Anchoring on the two trailing digit groups (``<ms>`` then ``<seq>``)
+        rejects siblings while keeping this set, and only the bare ``.log`` matches (never its
         `.raw/.stderr/.keeper` spawn-set kin).
         """
-        stem_re = re.compile(rf"{re.escape(name)}-\d+-\d+\.log")
+        stem_re = re.compile(rf"{re.escape(name)}-(\d+)-(\d+)\.log")
         try:
-            candidates = [
-                p for p in self._log_dir.glob(f"{name}-*.log") if stem_re.fullmatch(p.name)
+            matches = [
+                (int(m.group(1)), int(m.group(2)), p)
+                for p in self._log_dir.glob(f"{name}-*.log")
+                if (m := stem_re.fullmatch(p.name))
             ]
-            if not candidates:
-                return None
-            return max(candidates, key=lambda p: p.stat().st_mtime)
         except OSError:
             return None
+        if not matches:
+            return None
+        return max(matches, key=lambda t: (t[0], t[1]))[2]
 
     def _prune_logs(self, protected: set[str]) -> None:
         """Apply the ``logs.retention_*`` policy to the bridge-log dir (best-effort).
@@ -1669,6 +1674,15 @@ class SessionRunner:
             # stays None and `/ws/bridge-log` 1008s every connect → the live tail flickers
             # and gives up after a reattach even though the bridge is alive (#584).
             log_path = sidecar.with_name(f"{self._log_set_key(sidecar.name)}.log")
+            raw_path = self._raw_log_path_for(log_path)
+            # Bind the tail only if the parse-source the WS will actually read exists. The
+            # bridge pre-creates it at spawn and is still writing it, so it normally does —
+            # but if retention pruned a long-idle bridge's set, leave both None so
+            # `/ws/bridge-log` 1008s and the operator sees the "disconnected" banner (a
+            # prompt to act) rather than a silently-empty live panel. This keeps the pty
+            # path symmetric with the standard path's `_latest_debug_log_for` (#584).
+            tail_source = raw_path if raw_path.exists() else None
+            log_path = log_path if tail_source is not None else None
             return RemoteControlInstance(
                 project=name,
                 label=saved.get("label") or name,
@@ -1681,7 +1695,7 @@ class SessionRunner:
                 bridge_pid=bridge_pid,
                 bridge_proc_start=bridge_proc_start,
                 bridge_debug_log_path=log_path,
-                bridge_raw_log_path=self._raw_log_path_for(log_path),
+                bridge_raw_log_path=tail_source,
                 starter_session_id=info.get("session_id") or None,
                 url=info.get("connect_url") or None,
             )
