@@ -114,6 +114,10 @@ Origin/CSRF gate above; they are belt-and-suspenders, not the access control.
   `frame-ancestors 'none'` and `object-src 'none'` round out the clickjacking /
   plugin surface. (If the nonce is ever absent on a degraded path the policy
   stays *stricter*, never looser — `'unsafe-inline'` is omitted regardless.)
+  One deliberate asymmetry: `style-src` **keeps** `'unsafe-inline'` — inline
+  `<style>` blocks and `style="…"` attributes can't be nonce-gated without
+  removing them — so the style channel is intentionally looser than the
+  nonce-gated script channel.
 - **`X-Frame-Options: DENY`** — refuses framing outright (a legacy companion to
   `frame-ancestors 'none'`).
 - **`X-Content-Type-Options: nosniff`** — stops MIME-type sniffing.
