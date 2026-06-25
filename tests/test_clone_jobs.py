@@ -59,6 +59,28 @@ def test_manager_finish_error():
     asyncio.run(_run())
 
 
+def test_terminal_event_redacts_error_detail():
+    # #574: a failed clone's error_detail (git stderr tail) is redacted on the WS egress to
+    # match the redacted clone-done webhook path (#432) — a secret-shaped token / id never
+    # reaches the progress WS raw. Redacting in terminal_event() covers every consumer.
+    from clauster.redact import redact_for_disk
+
+    mgr = CloneJobManager()
+    job = mgr.create("proj")
+    job.status = "error"
+    # A secret-shaped session id AND a bare UUID — both must be stripped from the frame.
+    job.error_detail = (
+        "git clone failed for session_0123456789abcdef0123456789abcdef "
+        "(ref 3f2504e0-4f89-41d3-9a0c-0305e82c3301) denied"
+    )
+    frame = job.terminal_event()
+    # The frame carries the redacted form, never the raw value.
+    assert frame["error"] == redact_for_disk(job.error_detail)
+    assert frame["error"] != job.error_detail  # redaction fired
+    assert "session_0123456789abcdef0123456789abcdef" not in frame["error"]
+    assert "3f2504e0-4f89-41d3-9a0c-0305e82c3301" not in frame["error"]
+
+
 def test_broadcast_reaches_every_subscriber():
     async def _run():
         mgr = CloneJobManager()
