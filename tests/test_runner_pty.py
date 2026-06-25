@@ -484,6 +484,11 @@ async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
     assert inst.bridge_pid == 4242
     assert inst.intentional_stop is False
     assert inst.url == "https://claude.ai/code/session_x"
+    # Re-bind the live tail: the bridge's log path is derived from the matched sidecar's
+    # shared spawn-set stem, so `/ws/bridge-log` resolves a real path after a reattach
+    # instead of 1008-ing the tail to death (#584).
+    assert inst.bridge_debug_log_path == log_dir / "alpha-1700000000000-0.log"
+    assert inst.bridge_raw_log_path == log_dir / "alpha-1700000000000-0.log"
 
 
 async def test_rediscover_pty_dead_keeper_falls_back_to_stopped(

@@ -49,3 +49,18 @@ def test_ws_unknown_instance_closed(runner_config):
             raise AssertionError("expected the socket to be closed")
         except starlette.websockets.WebSocketDisconnect:
             pass
+
+
+def test_ws_live_instance_without_log_path_closed(runner_config):
+    """A RUNNING instance whose tail source is None closes the socket — this is exactly
+    the #584 failure: a reattached bridge left without a `bridge_debug_log_path` 1008s
+    every connect, so the live tail flickers and gives up. The reattach paths now bind a
+    real path (see test_runner_pty / test_runner); this pins the handler's contract."""
+    inst = _running("alpha", bridge_debug_log_path=None)
+    with _client_with(runner_config, inst) as client:
+        try:
+            with client.websocket_connect("/ws/bridge-log/alpha") as ws:
+                ws.receive_text()
+            raise AssertionError("expected the socket to be closed")
+        except starlette.websockets.WebSocketDisconnect:
+            pass

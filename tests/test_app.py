@@ -232,6 +232,18 @@ def test_dashboard_log_ws_and_refresh_robustness(write_config):
     assert "this._refreshQueued = false; this.refresh();" in page
 
 
+def test_dashboard_reconnect_button_resets_retry_cap(write_config):
+    # #584: once auto-reconnect hits MAX_LOG_RECONNECTS the tail gives up ("lost"). The
+    # operator's Reconnect button must NOT carry that capped `attempts` forward, or the very
+    # first onclose re-trips the cap and the button is a dead no-op. The button passes
+    # `manual=true`, and openLogs resets attempts to 0 for a manual retry (carries it only on
+    # the auto-reconnect re-entry, so the cap still bounds an unattended retry burst).
+    page = _client(write_config).get("/").text
+    assert re.search(r"openLogs\(i\.project,\s*true\)", page)  # the Reconnect button
+    assert re.search(r"openLogs\(name,\s*manual\s*=\s*false\)", page)  # default = auto-reconnect
+    assert re.search(r"attempts:\s*\(prev\s*&&\s*!manual\)\s*\?\s*prev\.attempts\s*:\s*0", page)
+
+
 def test_dashboard_live_tail_banners_are_mutually_exclusive(write_config):
     # #498: the reconnecting/lost live-tail banners must never stack. Even though the state
     # machine sets one and clears the other on every transition, the info banner is gated on
