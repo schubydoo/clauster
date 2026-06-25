@@ -19,6 +19,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -746,6 +747,41 @@ class SessionRunner:
             if filename.endswith(suf):
                 return filename[: -len(suf)]
         return filename
+
+    def _latest_debug_log_for(self, name: str) -> Path | None:
+        """Newest public debug log (`<name>-<ms>-<seq>.log`) Clauster wrote for a project.
+
+        Used to re-bind a rediscovered *standard* survivor's live tail to the log it was
+        already writing before the restart — the timestamped path is otherwise lost on a
+        cold start (unlike pty, there's no keeper sidecar to derive it from). The live
+        survivor is by definition the most recently *spawned* bridge, so order by the
+        ``<ms>-<seq>`` the filename already encodes (``_unique_log_path``) — NOT by mtime: the
+        filename is the spawn order we actually want, and reading it avoids a ``stat()`` per
+        candidate (no TOCTOU against log retention, which prunes on this same thread). Returns
+        None when the dir/glob can't be read or no log remains (retention may have pruned a
+        long-idle bridge's set).
+
+        The candidate stem is anchored to this project's exact ``<name>-<ms>-<seq>.log`` shape
+        — NOT the glob prefix. ``PROJECT_NAME_RE`` allows ``-`` (``discovery.py``), so the bare
+        ``glob(f"{name}-*.log")`` also matches a *sibling* project's logs (``app`` ⇒
+        ``app-2-…log`` / ``app-staging-…log``); binding to one of those would leak another
+        project's tail — its verbatim ``--debug-file`` (session URL / env id) when on-disk
+        redaction is off. Anchoring on the two trailing digit groups (``<ms>`` then ``<seq>``)
+        rejects siblings while keeping this set, and only the bare ``.log`` matches (never its
+        `.raw/.stderr/.keeper` spawn-set kin).
+        """
+        stem_re = re.compile(rf"{re.escape(name)}-(\d+)-(\d+)\.log")
+        try:
+            matches = [
+                (int(m.group(1)), int(m.group(2)), p)
+                for p in self._log_dir.glob(f"{name}-*.log")
+                if (m := stem_re.fullmatch(p.name))
+            ]
+        except OSError:
+            return None
+        if not matches:
+            return None
+        return max(matches, key=lambda t: (t[0], t[1]))[2]
 
     def _prune_logs(self, protected: set[str]) -> None:
         """Apply the ``logs.retention_*`` policy to the bridge-log dir (best-effort).
@@ -1648,6 +1684,22 @@ class SessionRunner:
                 continue
             if not procutil.is_live_bridge(bridge_pid, bridge_proc_start):
                 continue
+            # Re-bind the live tail to the log this bridge is still writing. The sidecar
+            # shares its spawn-set stem with the bridge's log (`_sidecar_path_for` is just
+            # `<stem>.keeper.json`), so the timestamped — otherwise unrecoverable — log path
+            # is derivable from the matched sidecar. Without this, `bridge_debug_log_path`
+            # stays None and `/ws/bridge-log` 1008s every connect → the live tail flickers
+            # and gives up after a reattach even though the bridge is alive (#584).
+            log_path = sidecar.with_name(f"{self._log_set_key(sidecar.name)}.log")
+            raw_path = self._raw_log_path_for(log_path)
+            # Bind the tail only if the parse-source the WS will actually read exists. The
+            # bridge pre-creates it at spawn and is still writing it, so it normally does —
+            # but if retention pruned a long-idle bridge's set, leave both None so
+            # `/ws/bridge-log` 1008s and the operator sees the "disconnected" banner (a
+            # prompt to act) rather than a silently-empty live panel. This keeps the pty
+            # path symmetric with the standard path's `_latest_debug_log_for` (#584).
+            tail_source = raw_path if raw_path.exists() else None
+            log_path = log_path if tail_source is not None else None
             return RemoteControlInstance(
                 project=name,
                 label=saved.get("label") or name,
@@ -1659,6 +1711,8 @@ class SessionRunner:
                 keeper_pid=keeper_pid,
                 bridge_pid=bridge_pid,
                 bridge_proc_start=bridge_proc_start,
+                bridge_debug_log_path=log_path,
+                bridge_raw_log_path=tail_source,
                 starter_session_id=info.get("session_id") or None,
                 url=info.get("connect_url") or None,
             )
@@ -1714,6 +1768,9 @@ class SessionRunner:
                 if resume_mode == "pty"
                 else None
             )
+            # Re-bind the live tail to the log this survivor was already writing before the
+            # restart, so `/ws/bridge-log` resolves a real path instead of 1008-ing (#584).
+            log_path = await asyncio.to_thread(self._latest_debug_log_for, proj.name)
             self._instances[proj.name] = self._instance_from_pointer(
                 proj.name,
                 ptr,
@@ -1723,6 +1780,10 @@ class SessionRunner:
                 resume_mode=resume_mode,
                 bridge_proc_start=bridge_proc_start,
                 keeper_pid=keeper_pid,
+                bridge_debug_log_path=log_path,
+                bridge_raw_log_path=(
+                    self._raw_log_path_for(log_path) if log_path is not None else None
+                ),
             )
         await self._persist()
 
@@ -1737,6 +1798,8 @@ class SessionRunner:
         resume_mode: ResumeMode,
         bridge_proc_start: float | None,
         keeper_pid: int | None,
+        bridge_debug_log_path: Path | None = None,
+        bridge_raw_log_path: Path | None = None,
     ) -> RemoteControlInstance:
         """Build a RUNNING managed instance from a live Anthropic-written pointer.
 
@@ -1746,6 +1809,11 @@ class SessionRunner:
         (startup reattach of survivors) and :meth:`adopt` (runtime take-over of a
         standard external session) so both synthesize an identical managed shape. A
         bridge found alive is by definition NOT intentionally stopped.
+
+        ``bridge_debug_log_path`` / ``bridge_raw_log_path`` re-bind the live tail to the
+        log a *Clauster-spawned* survivor was already writing (rediscover passes the
+        recovered set); they stay None for :meth:`adopt`, whose external bridge Clauster
+        never spawned and has no log of (#584).
         """
         return RemoteControlInstance(
             project=name,
@@ -1758,6 +1826,8 @@ class SessionRunner:
             status=InstanceStatus.RUNNING,
             bridge_pid=ptr.pid,
             bridge_proc_start=bridge_proc_start,
+            bridge_debug_log_path=bridge_debug_log_path,
+            bridge_raw_log_path=bridge_raw_log_path,
             environment_id=ptr.environment_id,
             starter_session_id=ptr.session_id,
             url=f"https://claude.ai/code?environment={ptr.environment_id}",
