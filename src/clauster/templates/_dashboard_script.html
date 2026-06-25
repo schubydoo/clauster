@@ -443,8 +443,12 @@
         });
       },
       // A child field is gated off by a dependency: a boolean master switch that is off, or a
-      // value-gated master whose value != the required one (spec.depends_on_value — none set
-      // currently; the recap value-gate was removed in #586).
+      // value-gated master whose value != the required one (spec.depends_on_value).
+      // FIELD_DEPENDS_VALUE is currently EMPTY — the recap value-gate was removed in #586.
+      // WARNING if you re-add a value-gated field: the `depVal` branch below compares
+      // edits[master], so the master MUST be pre-populated in `edits` before first render —
+      // else `undefined !== <value>` greys the child on load even when the live config
+      // satisfies the gate (exactly the #586 stale-on-first-render bug this PR fixed).
       configFieldDisabled(path) {
         const spec = this.configEditor.specs[path];
         const dep = spec && spec.depends_on;
