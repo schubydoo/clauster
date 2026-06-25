@@ -617,22 +617,37 @@ def test_service_frozen_binary_drops_module_flag_all_kinds(monkeypatch):
 
 def test_service_console_script_drops_module_flag(monkeypatch):
     # #587: a `clauster` console script on PATH (uv tool / pipx / pip) is a stable
-    # entry point — invoke it directly rather than `<venv-python> -m clauster`.
+    # entry point — invoke it directly rather than `<venv-python> -m clauster`, across
+    # all three renderers. The absolute-path guard uses the *host's* path rules, so
+    # pick a path absolute on this host (a POSIX `/path` is not absolute on Windows).
+    script = (
+        "C:\\Tools\\clauster.exe"
+        if sys.platform.startswith("win")
+        else "/home/u/.local/bin/clauster"
+    )
     monkeypatch.setattr(sys, "frozen", False, raising=False)
-    monkeypatch.setattr("shutil.which", lambda name: "/home/u/.local/bin/clauster")
-    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml")
-    assert "ExecStart=/home/u/.local/bin/clauster run -c" in unit
-    assert "-m clauster" not in unit
+    monkeypatch.setattr("shutil.which", lambda name: script)
+    for kind in ("systemd", "launchd", "windows"):
+        unit = render_service_unit(kind, config_path="/etc/clauster/clauster.yml")
+        assert script in unit
+        assert "-m clauster" not in unit
 
 
 def test_service_interpreter_fallback_keeps_module_flag(monkeypatch):
     # Dev / `python -m clauster`: no frozen binary and no console script on PATH, so
-    # the bare interpreter still needs the `-m clauster` module form.
+    # the bare interpreter still needs the `-m clauster` module form. The literal
+    # `-m clauster` substring is systemd-specific (space-joined argv); for every kind
+    # the interpreter must be the launch token rather than a direct clauster call.
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
     monkeypatch.setattr("shutil.which", lambda name: None)
-    unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml")
-    assert "ExecStart=/usr/bin/python3 -m clauster run -c" in unit
+    units = {
+        kind: render_service_unit(kind, config_path="/etc/clauster/clauster.yml")
+        for kind in ("systemd", "launchd", "windows")
+    }
+    for unit in units.values():
+        assert "/usr/bin/python3" in unit
+    assert "ExecStart=/usr/bin/python3 -m clauster run -c" in units["systemd"]
 
 
 def test_service_frozen_wins_over_console_script(monkeypatch):
@@ -654,6 +669,38 @@ def test_service_relative_console_script_falls_back_to_interpreter(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: "bin/clauster")
     unit = render_service_unit("systemd", config_path="/etc/clauster/clauster.yml")
     assert "ExecStart=/usr/bin/python3 -m clauster run -c" in unit
+
+
+def test_service_launch_command_branches(monkeypatch):
+    # Branch selection lives in this kind-agnostic helper; the rendered unit for
+    # every service kind flows from the (exe, args) it returns. Asserting the tuple
+    # directly is platform-robust (no per-kind/host string-format coupling).
+    from clauster.ops import _service_launch_command
+
+    # Explicit interpreter override → module form (back-compat).
+    assert _service_launch_command("/usr/bin/python3") == ("/usr/bin/python3", ["-m", "clauster"])
+
+    # Frozen binary → sys.executable directly, no module prefix.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "/opt/clauster/clauster")
+    assert _service_launch_command(None) == ("/opt/clauster/clauster", [])
+
+    # Console script resolvable + absolute (host rules) → invoke it directly.
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    abs_script = (
+        "C:\\Tools\\clauster.exe" if sys.platform.startswith("win") else "/usr/local/bin/clauster"
+    )
+    monkeypatch.setattr("shutil.which", lambda name: abs_script)
+    assert _service_launch_command(None) == (abs_script, [])
+
+    # Relative `which` result → rejected; fall back to the interpreter module form.
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr("shutil.which", lambda name: "bin/clauster")
+    assert _service_launch_command(None) == ("/usr/bin/python3", ["-m", "clauster"])
+
+    # No console script at all → interpreter module form.
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert _service_launch_command(None) == ("/usr/bin/python3", ["-m", "clauster"])
 
 
 def test_service_unknown_kind():
