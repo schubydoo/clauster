@@ -677,6 +677,9 @@
               </div>
               <div class="progress">
                 <div class="progress-bar" role="progressbar"
+                     aria-valuemin="0" aria-valuemax="100"
+                     :aria-valuenow="np.progress.percent !== null ? np.progress.percent : false"
+                     :aria-valuetext="np.progress.percent === null ? (np.progress.phase || 'Cloning…') : false"
                      :class="np.progress.percent === null ? 'progress-bar-indeterminate' : ''"
                      :style="np.progress.percent !== null ? ('width: ' + np.progress.percent + '%') : ''"></div>
               </div>
