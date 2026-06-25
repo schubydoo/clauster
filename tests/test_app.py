@@ -154,6 +154,12 @@ def test_hosted_result_frame_does_not_double_render_assistant_reply(write_config
     # "success" even on auth failure (hosted-protocol empirical, ARM 1).
     assert "frame.is_error" in body, "result text echo must be gated on is_error"
     assert 'kind: "marker"' in body, "a successful result must collapse to a marker"
+    # The error path must emit a kind:"error" item — a renderer that exists. Without this
+    # assertion, flipping the error branch to a marker (or any kind with no template) would
+    # silently swallow auth-failure text and the test would still pass.
+    assert 'kind: "error"' in body, (
+        "the error path must emit a kind:error item so failure text stays visible"
+    )
     # …and the now-unreachable green `text-success` result renderer is gone from markup.
     assert "it.kind === 'result'" not in page, (
         "the green `text-success` result renderer is unreachable now — remove it (#591)"
