@@ -48,13 +48,19 @@ def test_manager_lifecycle_and_queue():
 
 def test_manager_finish_error():
     async def _run():
+        from clauster.redact import redact_for_disk
+
         mgr = CloneJobManager()
         job = mgr.create("proj")
         queue = job.subscribe()
-        mgr.finish(job, error="git clone failed: boom")
+        error_msg = "git clone failed: boom"
+        mgr.finish(job, error=error_msg)
         evt = await asyncio.wait_for(queue.get(), timeout=1)
-        assert evt == {"type": "done", "status": "error", "error": "git clone failed: boom"}
-        assert job.status == "error" and job.error_detail == "git clone failed: boom"
+        # The WS frame carries the redacted form (a no-op for this secret-free literal); the
+        # raw value stays on job.error_detail. Assert against redact_for_disk so a future
+        # secret-bearing test string can't yield a false-positive (#574, per Greptile).
+        assert evt == {"type": "done", "status": "error", "error": redact_for_disk(error_msg)}
+        assert job.status == "error" and job.error_detail == error_msg
 
     asyncio.run(_run())
 
