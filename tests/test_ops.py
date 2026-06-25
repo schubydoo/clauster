@@ -561,9 +561,12 @@ def test_service_launchd():
     assert "/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin" in unit
 
 
-def test_service_path_falls_back_to_home_for_unknown_user():
+def test_service_path_falls_back_to_home_for_unknown_user(monkeypatch):
     # #590: rendering for a user not present on the host (e.g. created post-render)
-    # falls back to /home/<user>/.local/bin rather than failing the passwd lookup.
+    # falls back to <root>/<user>/.local/bin rather than failing the passwd lookup.
+    # Pin the platform so the home root is deterministic across CI runners (macOS
+    # would otherwise use /Users).
+    monkeypatch.setattr(sys, "platform", "linux")
     unit = render_service_unit(
         "systemd", config_path="/etc/clauster/clauster.yml", user="no_such_user_zzz"
     )
@@ -572,15 +575,16 @@ def test_service_path_falls_back_to_home_for_unknown_user():
 
 def test_service_path_fallback_uses_users_root_on_macos(monkeypatch):
     # #590: on a macOS host the home-root guess for a not-yet-created user is /Users,
-    # not /home, so a rendered launchd unit points at the right ~/.local/bin.
-    import pwd as _pwd
-
+    # not /home, so a rendered launchd unit points at the right ~/.local/bin. The bogus
+    # username misses the passwd lookup on every runner, so the platform branch decides.
     monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(_pwd, "getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
-    unit = render_service_unit("launchd", config_path="/etc/clauster/clauster.yml", user="svc")
-    assert "/Users/svc/.local/bin:" in unit
+    unit = render_service_unit(
+        "launchd", config_path="/etc/clauster/clauster.yml", user="no_such_user_zzz"
+    )
+    assert "/Users/no_such_user_zzz/.local/bin:" in unit
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd is POSIX-only")
 def test_service_path_uses_passwd_home_when_user_exists(monkeypatch):
     # #590: when the run-as user exists, resolve their real home via the passwd db.
     import pwd as _pwd

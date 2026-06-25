@@ -616,26 +616,28 @@ def _service_launch_command(python: str | None) -> tuple[str, list[str]]:
 _SYSTEM_PATH_DIRS = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 
 
-def _home_for_user(user: str | None) -> Path:
+def _home_for_user(user: str | None) -> str:
     """Best-effort home dir for the service's run-as user (for ``~/.local/bin``).
 
-    Resolve a named *user* via the passwd db when it exists on the rendering host
-    (the normal case — install-service runs on the target host). Fall back to
-    ``/home/<user>`` if the lookup fails (rendering for a user not yet created, or a
-    non-POSIX host). With no *user*, the service runs as the invoking user, so use
-    their home.
+    Returns a plain string, not a ``Path``: these are POSIX-only systemd/launchd
+    units, and ``Path``'s string form is platform-dependent (it would emit
+    backslashes if this ever ran on Windows). Resolve a named *user* via the passwd
+    db when it exists on the rendering host (the normal case — install-service runs
+    on the target host). Fall back to ``<root>/<user>`` if the lookup fails
+    (rendering for a user not yet created, or a non-POSIX host). With no *user*, the
+    service runs as the invoking user, so use their home.
     """
     if user:
         try:
             import pwd
 
-            return Path(pwd.getpwnam(user).pw_dir)
+            return pwd.getpwnam(user).pw_dir
         except (KeyError, ImportError, OSError):
             # Lookup miss (user not yet created / non-POSIX host): guess the home root
             # from the rendering host's platform — macOS homes live under /Users.
             base = "/Users" if sys.platform == "darwin" else "/home"
-            return Path(f"{base}/{user}")
-    return Path.home()
+            return f"{base}/{user}"
+    return os.path.expanduser("~")
 
 
 def _service_path(user: str | None) -> str:
