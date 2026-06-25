@@ -1723,8 +1723,20 @@
         const t = frame.type;
         if (t === "system") return [{ kind: "marker", text: "· " + (frame.subtype || "system") + " ·" }];
         if (t === "result") {
-          const txt = (typeof frame.result === "string" && frame.result) ? frame.result : "(turn complete)";
-          return [{ kind: "result", text: txt }];
+          // The result frame echoes the final assistant text the `assistant` frame
+          // already rendered — re-rendering it double-printed every reply (#591). Keep
+          // it only for the error path, where `result` carries text no assistant frame
+          // emits (e.g. "Not logged in · Please run /login"); a success collapses to a
+          // turn-boundary marker. `is_error` is the SDK's canonical error flag on the
+          // result message and the ONLY reliable gate — subtype reads "success" even on
+          // auth failure, so we key off is_error. A falsy is_error always means `result`
+          // is the assistant-text duplicate (rate-limit / quota / teardown errors all set
+          // is_error: true), so collapsing it never drops a user-facing error.
+          if (frame.is_error) {
+            const txt = (typeof frame.result === "string" && frame.result) ? frame.result : "turn failed";
+            return [{ kind: "error", text: txt }];
+          }
+          return [{ kind: "marker", text: "· turn complete ·" }];
         }
         if (t === "assistant" || t === "user") {
           const content = (frame.message || {}).content;

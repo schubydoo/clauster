@@ -132,6 +132,40 @@ def test_no_xshow_element_carries_important_display_utility(write_config):
     )
 
 
+def test_hosted_result_frame_does_not_double_render_assistant_reply(write_config):
+    # #591: with --include-partial-messages a single assistant turn emits the streamed
+    # `assistant` frame AND a trailing `result` frame whose `result` field repeats the
+    # same text. The live-view used to render both — the assistant message (white,
+    # pre-wrap) and the result echo (green, run-on) — so every reply printed twice. The
+    # result branch of _hostedFrameToItems must collapse a SUCCESSFUL turn to a
+    # turn-boundary marker (no text echo) and surface text only on the error path, where
+    # `result` carries content no assistant frame emits ("Not logged in · Please run
+    # /login"). Pure-JS mapping, no JS harness in CI → guard the source text.
+    page = _client(write_config).get("/").text
+    branch = re.search(r'if \(t === "result"\) \{(.*?)if \(t === "assistant"', page, re.DOTALL)
+    assert branch is not None, "result branch of _hostedFrameToItems not found"
+    body = branch.group(1)
+    # The success path must NOT re-emit the assistant text as its own renderable item.
+    assert 'kind: "result"' not in body, (
+        "result frame still emits a `result` item — that re-renders the assistant reply "
+        "a second time (#591); a successful turn must collapse to a marker instead"
+    )
+    # Text survives only on the error path, gated on is_error — NOT subtype, which is
+    # "success" even on auth failure (hosted-protocol empirical, ARM 1).
+    assert "frame.is_error" in body, "result text echo must be gated on is_error"
+    assert 'kind: "marker"' in body, "a successful result must collapse to a marker"
+    # The error path must emit a kind:"error" item — a renderer that exists. Without this
+    # assertion, flipping the error branch to a marker (or any kind with no template) would
+    # silently swallow auth-failure text and the test would still pass.
+    assert 'kind: "error"' in body, (
+        "the error path must emit a kind:error item so failure text stays visible"
+    )
+    # …and the now-unreachable green `text-success` result renderer is gone from markup.
+    assert "it.kind === 'result'" not in page, (
+        "the green `text-success` result renderer is unreachable now — remove it (#591)"
+    )
+
+
 def test_projects_show_more_toggle_appears_in_all_sorts(write_config):
     # The Projects-zone "Show all / Show fewer" toggle must appear in EVERY sort, not only A–Z.
     # In a non-name sort the 6-row cap applies by the chosen sort rank; the toggle reveals the
