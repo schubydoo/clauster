@@ -1801,7 +1801,12 @@
         const s = this.logs[name];
         if (s && s.open) { this.closeLogs(name); } else { this.openLogs(name); }
       },
-      openLogs(name) {
+      openLogs(name, manual = false) {
+        // `manual` = an operator click on Reconnect (vs. the auto-reconnect re-entry below).
+        // A manual retry resets the consecutive-failure counter so the give-up cap can't make
+        // the Reconnect button a no-op: once auto-reconnect hits MAX_LOG_RECONNECTS the carried
+        // `attempts` would otherwise re-trip the cap on the very first onclose, so the button
+        // looked dead even after the bridge's tail was reachable again (#584).
         // Idempotent + state-bound: retire any prior state first, then bind THIS socket's
         // handlers to its own `state` object (identity-checked against the live this.logs[name]).
         // So a reconnect (the Reconnect button re-calls this) can't leave two tails streaming
@@ -1825,7 +1830,7 @@
         const state = { open: true, ws: null, token,
                         lines: prev ? prev.lines : [], pending: prev ? prev.pending : [],
                         paused: prev ? prev.paused : false, lost: false, reconnecting: false,
-                        attempts: prev ? prev.attempts : 0 };
+                        attempts: (prev && !manual) ? prev.attempts : 0 };
         this.logs[name] = state;
         const self = this;
         // Resolve the LIVE tail as the reactive proxy (or null if retired). The token compare

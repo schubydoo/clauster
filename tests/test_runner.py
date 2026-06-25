@@ -6,6 +6,7 @@ import json
 import logging
 import subprocess
 import sys
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -1314,6 +1315,93 @@ async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     assert set(insts) == {"alpha"}  # no phantom from a persisted-but-dead entry
     assert insts["alpha"].label == "my-alpha"  # persisted label overlaid
     assert insts["alpha"].intentional_stop is False  # a live bridge is not "stopped"
+
+
+async def test_rediscover_standard_rebinds_newest_debug_log(runner_config, monkeypatch):
+    """A rediscovered standard survivor re-binds its live tail to the newest log it wrote.
+
+    Without this the tail source is None after a restart and `/ws/bridge-log` 1008s every
+    connect — the bridge is alive but the operator is blind to its logs (#584). The live
+    survivor is the most recent spawn, so the highest `<ms>-<seq>` the filename encodes (not
+    its `.raw/.stderr/.keeper` siblings) is the source.
+    """
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    old = log_dir / "alpha-1700000000000-0.log"
+    new = log_dir / "alpha-1700000000001-1.log"  # higher <ms>-<seq> → the live survivor
+    for p in (old, new):
+        p.write_text("hello\n")
+    # Sibling spawn-set files of the newest spawn must never be chosen as the tail source.
+    for sib in (
+        "alpha-1700000000001-1.raw.log",
+        "alpha-1700000000001-1.stderr.log",
+        "alpha-1700000000001-1.keeper.json",
+    ):
+        (log_dir / sib).write_text("x")
+    # A SIBLING PROJECT whose name shares alpha's prefix (PROJECT_NAME_RE allows `-`): its log
+    # matches the bare `alpha-*.log` glob, and binding to it would leak another project's tail.
+    # Give it the highest <ms>-<seq> so a prefix-only match would wrongly win (#584 review).
+    (log_dir / "alpha-2-1700000000009-1.log").write_text("NOT alpha's log\n")
+
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
+    monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
+
+    await runner.rediscover()
+    inst = runner.get_instance("alpha")
+    assert inst.status is InstanceStatus.RUNNING
+    assert inst.bridge_debug_log_path == new  # highest <ms>-<seq>, not a sibling
+    assert inst.bridge_raw_log_path == new  # redaction off → raw == debug
+
+
+def test_latest_debug_log_for_tolerates_oserror(runner_config, monkeypatch):
+    """A filesystem error listing the log dir degrades to None, never raises — so a transient
+    FS fault can't crash startup rediscover; the tail simply stays unbound instead (#584)."""
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    def boom(self, pattern):
+        raise OSError("log dir unreadable")
+
+    monkeypatch.setattr(Path, "glob", boom)
+    assert runner._latest_debug_log_for("alpha") is None
+
+
+def test_latest_debug_log_for_returns_none_when_no_match(runner_config):
+    """No anchored `<name>-<ms>-<seq>.log` for the project → None (so the tail stays unbound
+    and `/ws/bridge-log` 1008s, rather than binding a sibling's log). Covers a dir holding
+    only a prefix-sharing sibling project and the project's own non-tail spawn-set kin."""
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-2-1700000000000-0.log").write_text("sibling project\n")
+    (log_dir / "alpha-1700000000000-0.raw.log").write_text("not the public tail\n")
+    assert runner._latest_debug_log_for("alpha") is None
+
+
+async def test_adopt_leaves_log_path_unset(runner_config, monkeypatch):
+    """Adopting an EXTERNAL standard bridge leaves the tail source None — Clauster never
+    spawned it, so there is no Clauster-written log to bind (unlike a rediscovered
+    survivor). Guards against the #584 fix wrongly grafting a stale log onto an adoptee."""
+    runner = _make_runner(runner_config)
+    log_dir = runner_config[0].state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.log").write_text("not mine\n")  # an unrelated bridge's log
+    monkeypatch.setattr(
+        "clauster.pointers.pointer_for_project",
+        lambda path: _FakePtr() if path.name == "alpha" else None,
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+
+    inst = await runner.adopt("alpha")
+    assert inst.bridge_debug_log_path is None
+    assert inst.bridge_raw_log_path is None
 
 
 async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkeypatch):

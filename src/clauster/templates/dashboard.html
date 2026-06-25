@@ -534,7 +534,7 @@
                     <div class="d-flex align-items-center">
                       <span class="me-2" x-show="!isRunning(i.project) && !isBusy(i.project)">⚠ Live tail disconnected — the bridge may have stopped.</span>
                       <span class="me-2" x-show="isRunning(i.project) || isBusy(i.project)" x-cloak>⚠ Live tail disconnected — the bridge is still running; click Reconnect to resume the tail.</span>
-                      <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project)">Reconnect</button>
+                      <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project, true)">Reconnect</button>
                     </div>
                   </div>
                   {# bg-dark/text-white: terminal-style log view, intentionally dark in both

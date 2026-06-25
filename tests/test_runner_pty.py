@@ -470,6 +470,8 @@ async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
             }
         )
     )
+    # The bridge's parse-source the WS reads — present, as a live bridge's would be.
+    (log_dir / "alpha-1700000000000-0.log").write_text("bridge output\n")
     runner = SessionRunner(config, claude_json=claude_json)
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
     monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: pid == 9999)
@@ -484,6 +486,47 @@ async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
     assert inst.bridge_pid == 4242
     assert inst.intentional_stop is False
     assert inst.url == "https://claude.ai/code/session_x"
+    # Re-bind the live tail: the bridge's log path is derived from the matched sidecar's
+    # shared spawn-set stem, so `/ws/bridge-log` resolves a real path after a reattach
+    # instead of 1008-ing the tail to death (#584).
+    assert inst.bridge_debug_log_path == log_dir / "alpha-1700000000000-0.log"
+    assert inst.bridge_raw_log_path == log_dir / "alpha-1700000000000-0.log"
+
+
+async def test_rediscover_pty_missing_log_leaves_tail_unbound(runner_config, monkeypatch):
+    """If retention pruned the reattached pty bridge's log set, the tail source is left None
+    (not a dangling path), so `/ws/bridge-log` 1008s and the operator sees the "disconnected"
+    banner — a prompt to act — rather than a silently-empty live panel (#584 review)."""
+    from clauster.state import StateStore
+
+    config, claude_json = runner_config
+    StateStore(config.state_dir).save(
+        {"alpha": {"label": "alpha", "resume_mode": "pty", "intentional_stop": False}}
+    )
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 9999,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 12345.0,
+                "state": "ready",
+            }
+        )
+    )
+    # Note: the `<stem>.log` parse-source is deliberately absent (pruned).
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
+    monkeypatch.setattr("clauster.procutil.is_keeper_process", lambda pid: pid == 9999)
+    monkeypatch.setattr("clauster.procutil.is_live_bridge", lambda pid, start, **k: pid == 4242)
+
+    await runner.rediscover()
+
+    inst = runner.get_instance("alpha")
+    assert inst.status is InstanceStatus.RUNNING  # still re-managed (Stop/observe restored)
+    assert inst.bridge_debug_log_path is None  # no dangling path → WS 1008s, banner shows
+    assert inst.bridge_raw_log_path is None
 
 
 async def test_rediscover_pty_dead_keeper_falls_back_to_stopped(
