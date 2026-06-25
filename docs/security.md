@@ -97,6 +97,39 @@ Failed logins are rate-limited in two layers, returning **`429` with a
 WebSocket connections are **authenticated before accept** and origin-checked.
 Add the proxy domain or any extra trusted origins to `auth.allowed_origins`.
 
+## HTTP security headers
+
+A `security_headers` middleware (`app.py`) stamps a set of defence-in-depth
+headers on **every** response — including the auth guard's own 401/403/redirect
+replies, not just route responses. They layer *behind* the primary
+Origin/CSRF gate above; they are belt-and-suspenders, not the access control.
+
+- **Content-Security-Policy** — a per-request, **nonce-gated** policy. The
+  baseline is `default-src 'self'`; `script-src` lists a fresh per-request
+  `'nonce-<value>'` (a `secrets.token_urlsafe(16)`, never a process-wide
+  constant) so only the inline `<script>` blocks carrying the matching
+  `nonce="…"` attribute run. `'unsafe-inline'` is **dropped** from `script-src`
+  entirely — that is what blocks an injected inline script that lacks the
+  nonce — while `'unsafe-eval'` is intentionally **retained** for Alpine.
+  `frame-ancestors 'none'` and `object-src 'none'` round out the clickjacking /
+  plugin surface. (If the nonce is ever absent on a degraded path the policy
+  stays *stricter*, never looser — `'unsafe-inline'` is omitted regardless.)
+- **`X-Frame-Options: DENY`** — refuses framing outright (a legacy companion to
+  `frame-ancestors 'none'`).
+- **`X-Content-Type-Options: nosniff`** — stops MIME-type sniffing.
+- **`Referrer-Policy: same-origin`** — deliberately `same-origin`, **not**
+  `no-referrer`. Under `no-referrer` a spec-compliant browser serializes the
+  `Origin` of a same-origin native `<form>` POST navigation as the literal
+  `null`, which the CSRF `Origin` gate then rejects — silently `403`-ing the
+  login/logout forms. `same-origin` keeps the real `Origin` on same-origin
+  navigations while still suppressing the referrer cross-origin. (Safe only
+  while no secret rides a same-origin URL — Clauster credentials are all
+  cookie/header-borne.)
+- **`Strict-Transport-Security`** — emitted **only over HTTPS** (reusing the
+  same secure-cookie detection), so a plain-HTTP LAN deployment never pins a
+  browser to a scheme it can't serve. No `includeSubDomains`, to avoid bricking
+  a sibling subdomain on a shared parent domain.
+
 ## Exposing beyond the LAN
 
 Clauster defaults to a loopback bind and assumes **trusted host-local
@@ -230,6 +263,16 @@ blocked by default (`allow_private_hosts: false`), a size cap, and a timeout.
 Targeted LAN access is an explicit `allowed_private_cidrs` opt-in — each entry is
 validated as a CIDR at load so a malformed allow-list entry fails fast instead of
 silently never matching.
+
+Outbound lifecycle webhooks (`webhooks.py`) are the host's **other** egress
+path, so they carry their own opt-in SSRF deny-list. Set
+`webhooks.block_private_targets: true` (default `false`) to drop any webhook URL
+whose host is — or resolves to — a loopback / link-local / private / CGNAT /
+metadata IP, using the **same** private-range classifier as the clone guard
+(it imports `provisioning._EXTRA_PRIVATE_NETS`). Default-off preserves the
+LAN-receiver use case. See
+[`webhooks`](configuration.md#webhooks--outbound-lifecycle-webhooks-webhooksconfig)
+in the configuration reference for the field.
 
 ## bypassPermissions footgun gate
 

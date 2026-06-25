@@ -719,14 +719,16 @@ class WebhooksConfig(BaseModel):
     )
     block_private_targets: bool = Field(
         default=False,
-        description="Opt-in SSRF guard. When True, skip any webhook URL whose host is an "
-        "internal/non-routable IP literal — loopback, link-local (incl. the 169.254.169.254 "
-        "metadata IP), RFC1918 private, unspecified (0.0.0.0/::), reserved, multicast, IPv6 "
-        "ULA (fc00::/7), and CGNAT (100.64/10) — including the non-canonical IPv4 encodings "
-        "the resolver still honors (decimal-int, hex, short 127.1). Default False preserves "
-        "the LAN-receiver use case. DNS hostnames are NOT resolved (rebinding) and exotic "
-        "IPv6 embeddings (NAT64, IPv4-compatible) are not normalized — out of scope for this "
-        "literal-IP seam.",
+        description="Opt-in SSRF guard. When True, skip any webhook URL whose host is — or "
+        "resolves to — an internal/non-routable IP: loopback, link-local (incl. the "
+        "169.254.169.254 metadata IP), RFC1918 private, unspecified (0.0.0.0/::), reserved, "
+        "multicast, IPv6 ULA (fc00::/7), and CGNAT (100.64/10) — including the non-canonical "
+        "IPv4 encodings the resolver still honors (decimal-int, hex, short 127.1). A DNS "
+        "hostname is resolved best-effort at filter time so a name pointing straight at a "
+        "private IP can't bypass the guard; a rebinding domain that re-resolves at dial time "
+        "is an acknowledged TOCTOU residual (same class as the clone-URL guard). Exotic IPv6 "
+        "embeddings (NAT64, IPv4-compatible) are not normalized. Default False preserves the "
+        "LAN-receiver use case.",
     )
 
     @field_validator("events")

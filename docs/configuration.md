@@ -328,7 +328,7 @@ session or **reattached** on restart emits no `spawn`/`ready`.
 | `enabled` | bool | `false` | Master switch for outbound webhooks. |
 | `urls` | list[str] | `[]` | HTTP(S) endpoint URLs that receive a JSON POST per lifecycle event. Only `http`/`https` schemes are accepted; others are rejected at startup. A secret embedded in a URL is the operator's responsibility to keep out of shared configs. |
 | `timeout_seconds` | float | `10.0` | Per-request POST timeout in seconds (>0). A slow endpoint can't stall a lifecycle transition beyond this. |
-| `block_private_targets` | bool | `false` | Opt-in SSRF guard. When True, skip any webhook URL whose host is an internal/non-routable IP literal — loopback, link-local (incl. the 169.254.169.254 metadata IP), RFC1918 private, unspecified (0.0.0.0/::), reserved, multicast, IPv6 ULA (fc00::/7), and CGNAT (100.64/10) — including the non-canonical IPv4 encodings the resolver still honors (decimal-int, hex, short 127.1). Default False preserves the LAN-receiver use case. DNS hostnames are NOT resolved (rebinding) and exotic IPv6 embeddings (NAT64, IPv4-compatible) are not normalized — out of scope for this literal-IP seam. |
+| `block_private_targets` | bool | `false` | Opt-in SSRF guard. When True, skip any webhook URL whose host is — or resolves to — an internal/non-routable IP: loopback, link-local (incl. the 169.254.169.254 metadata IP), RFC1918 private, unspecified (0.0.0.0/::), reserved, multicast, IPv6 ULA (fc00::/7), and CGNAT (100.64/10) — including the non-canonical IPv4 encodings the resolver still honors (decimal-int, hex, short 127.1). A DNS hostname is resolved best-effort at filter time so a name pointing straight at a private IP can't bypass the guard; a rebinding domain that re-resolves at dial time is an acknowledged TOCTOU residual (same class as the clone-URL guard). Exotic IPv6 embeddings (NAT64, IPv4-compatible) are not normalized. Default False preserves the LAN-receiver use case. |
 <!-- END GEN: webhooks -->
 
 ```yaml
@@ -442,7 +442,8 @@ the browser. These are the day-to-day knobs that are safe to change at runtime:
 | --- | --- |
 | `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode` |
 | `instance_defaults` | `spawn_mode`, `permission_mode`, `session_name_prefix`, `capacity`, `max_bridges` |
-| `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream` |
+| `claustrum` | `enabled`, `socket_path`, `spawn_timeout_seconds`, `keep_children`, `request_timeout_seconds` |
+| `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream`, `retention_max_age_days`, `retention_max_files`, `retention_max_total_mb` |
 | `reaper` | `ui_enabled` |
 | `usage` | `mode`, `currency`, `currency_symbol`, `fx_rate`, `token_total_includes_cache`, `show_cost` |
 | `metrics` | `enabled`, `normalize_cpu`, `show_disk`, `sample_interval_seconds`, `poll_seconds` |
@@ -459,7 +460,10 @@ The allowlist is a **structural** security boundary, not a UI hint. Anything tha
 is a secret, a bind/exposure decision, an auth gate, a clone/supply-chain guard,
 or a structural setting is excluded — for example `auth.*` (passwords, tokens,
 the `enabled` master switch), `host`/`port`, `projects_root`, the `projects` map,
-`clone.*`, `webhooks.*`, and `claustrum.*`. Those stay file- or CLI-managed.
+`clone.*`, `webhooks.*`, and the binary paths (`claude.binary`/`claustrum.binary`).
+Those stay file- or CLI-managed. (The rest of the `claustrum` block — `enabled`,
+`socket_path`, the timeouts — *is* editable, restart-required; see the table
+above.)
 
 The exclusion is enforced two ways:
 

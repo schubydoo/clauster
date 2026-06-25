@@ -303,8 +303,10 @@ credentials:
 # 1. Put the config where the unit expects it (default: /etc/clauster/clauster.yml)
 sudo install -Dm600 clauster.yml /etc/clauster/clauster.yml
 
-# 2. Generate the unit with the SAME clauster you installed (so ExecStart points at
-#    the right interpreter), run-as the clauster user, and write it into place
+# 2. Generate the unit with the SAME clauster you installed (so ExecStart resolves to
+#    the right clauster entry point — the binary/console-script for a uv/pip/pipx/binary
+#    install, or `python -m clauster` only for a bare dev interpreter), run-as the
+#    clauster user, and write it into place
 clauster install-service systemd --user clauster | sudo tee /etc/systemd/system/clauster.service
 
 # 3. Enable + start; follow the logs with journalctl
@@ -324,7 +326,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=clauster
-ExecStart=/path/to/python -m clauster run -c /etc/clauster/clauster.yml
+ExecStart=/home/clauster/.local/bin/clauster run -c /etc/clauster/clauster.yml
 WorkingDirectory=/etc/clauster
 Environment=CLAUSTER_CONFIG=/etc/clauster/clauster.yml
 # Spawned bridges inherit this PATH (see note below); ~/.local/bin covers uv-installed tools.
@@ -337,6 +339,11 @@ KillMode=process
 [Install]
 WantedBy=multi-user.target
 ```
+
+`install-service` auto-detects how Clauster is installed and bakes the entry point
+straight into `ExecStart`: a frozen standalone binary or a `clauster` console
+script (uv tool / pip / pipx) is invoked directly, as shown above. Only a bare dev
+interpreter falls back to the `python -m clauster run …` form.
 
 !!! note "`KillMode=process` keeps bridges alive across a restart"
     Clauster's spawned bridges run inside the service's cgroup, so systemd's

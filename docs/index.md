@@ -2,9 +2,9 @@
 
 **Clauster** is a self-hosted FastAPI + Alpine/Tabler web app that spawns and
 manages `claude` remote-control bridges on a remote host, driven entirely from
-the browser. Point it at a directory of projects, click **Start** on a project
-card, and pick the bridge up from `claude.ai/code` or the Claude mobile app — no
-SSH session required.
+the browser. Point it at a directory of projects, click **Run Claude here** on a
+project card and choose **In claude.ai / Desktop**, then pick the bridge up from
+`claude.ai/code` or the Claude mobile app — no SSH session required.
 
 It is published to PyPI as [`clauster`](https://pypi.org/project/clauster/),
 shipped as a signed GHCR container image, and released as Sigstore-signed GitHub
@@ -39,10 +39,10 @@ mode, this *recaps* the prior conversation rather than truly restoring it.
 ### Projects & bridges
 
 - One card per child directory of your `projects_root`.
-- Start / Stop / Resume a bridge from the card; **Start new session** for a
-  deliberate fresh start on a resumable bridge.
-- Per-card **Open session in Claude** link and **QR code** to attach from
-  anywhere.
+- **Run Claude here** (launch) / Stop / Resume a bridge from the card. For a
+  deliberate fresh start, **Forget** a stopped session (drops it from Recent),
+  then relaunch.
+- Per-card **Open in Claude** link and **QR code** to attach from anywhere.
 - Spawn modes (`same-dir`, `worktree`, `session`) and permission modes
   (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`).
 - Create or clone projects into `projects_root` with progress streamed over a
@@ -76,6 +76,11 @@ mode, this *recaps* the prior conversation rather than truly restoring it.
 - Background agents (**experimental**) — list / dispatch / stop `claude --bg`
   sessions from a dashboard panel (`/api/agents`); rides Claude Code's agent-view
   research preview, so it may change with the upstream CLI.
+- Hosted **Here in the browser** channel (**experimental**) — when the claustrum
+  channel is enabled (`claustrum.enabled`, default off), the launch popover gains
+  a third option whose sessions are local live-view only: streamed in the
+  dashboard but, unlike bridges, never attachable from `claude.ai/code`. See
+  [Architecture](architecture.md) and [Configuration](configuration.md).
 
 ## Where to next
 
