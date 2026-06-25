@@ -1176,6 +1176,64 @@ async def test_poll_does_not_claim_stopped_hosted_row(runner_config, monkeypatch
     assert runner._sessions[0].attribution is Attribution.EXTERNAL
 
 
+async def test_poll_skips_hosted_row_without_process_id(runner_config, monkeypatch):
+    # A hosted row with no claustrum_process_id can't be a claim key — it's skipped, and
+    # a live session at the same cwd is left to attribute normally (EXTERNAL here).
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    runner.set_hosted_provider(
+        lambda: [
+            RemoteControlInstance(
+                project="alpha",
+                label="hosted:alpha",
+                channel="hosted",
+                status=InstanceStatus.RUNNING,
+                claustrum_process_id=None,
+                agent_pid=42,
+            )
+        ]
+    )
+    sess = WorkingSession(
+        pid=42,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=42,
+        local_uuid="u",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    await runner.poll_once()
+    assert runner._sessions[0].attribution is Attribution.EXTERNAL
+
+
+async def test_poll_hosted_cwd_fallback_skips_undiscovered_project(runner_config, monkeypatch):
+    # Pre-CT-1 hosted row whose project isn't discovered: the cwd fallback finds no path,
+    # so nothing is claimed and an unrelated live session stays EXTERNAL (no crash).
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    runner.set_hosted_provider(
+        lambda: [
+            RemoteControlInstance(
+                project="ghost-project",  # not under projects_root
+                label="hosted:ghost",
+                channel="hosted",
+                status=InstanceStatus.RUNNING,
+                claustrum_process_id="host-6",
+                agent_pid=None,
+            )
+        ]
+    )
+    sess = WorkingSession(
+        pid=77,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=77,
+        local_uuid="u",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    await runner.poll_once()
+    assert runner._sessions[0].attribution is Attribution.EXTERNAL
+
+
 async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
     runner_config, monkeypatch
 ):
