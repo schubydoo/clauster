@@ -611,6 +611,42 @@ def _service_launch_command(python: str | None) -> tuple[str, list[str]]:
     return sys.executable, ["-m", "clauster"]
 
 
+# Standard system bin dirs systemd/launchd would otherwise leave as the whole PATH.
+# Prepending ~/.local/bin is what lets a spawned bridge resolve uv-installed tools.
+_SYSTEM_PATH_DIRS = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+
+
+def _home_for_user(user: str | None) -> Path:
+    """Best-effort home dir for the service's run-as user (for ``~/.local/bin``).
+
+    Resolve a named *user* via the passwd db when it exists on the rendering host
+    (the normal case — install-service runs on the target host). Fall back to
+    ``/home/<user>`` if the lookup fails (rendering for a user not yet created, or a
+    non-POSIX host). With no *user*, the service runs as the invoking user, so use
+    their home.
+    """
+    if user:
+        try:
+            import pwd
+
+            return Path(pwd.getpwnam(user).pw_dir)
+        except (KeyError, ImportError, OSError):
+            # Lookup miss (user not yet created / non-POSIX host): guess the home root
+            # from the rendering host's platform — macOS homes live under /Users.
+            base = "/Users" if sys.platform == "darwin" else "/home"
+            return Path(f"{base}/{user}")
+    return Path.home()
+
+
+def _service_path(user: str | None) -> str:
+    """Build the PATH baked into a generated unit.
+
+    The run-as user's ``~/.local/bin`` comes first, then the standard system bin
+    dirs. Bridges inherit this via ``child_env()``.
+    """
+    return f"{_home_for_user(user)}/.local/bin:{_SYSTEM_PATH_DIRS}"
+
+
 def render_service_unit(
     kind: str,
     *,
@@ -630,6 +666,7 @@ def render_service_unit(
     if kind == "systemd":
         u = f"User={user}\n" if user else ""
         args = " ".join(cmd_args)
+        path = _service_path(user)
         return (
             "[Unit]\n"
             "Description=Clauster — browser-driven claude remote-control manager\n"
@@ -641,6 +678,11 @@ def render_service_unit(
             f"ExecStart={exe} {args}\n"
             f"WorkingDirectory={wd}\n"
             f"Environment=CLAUSTER_CONFIG={cfg}\n"
+            "# systemd gives a service a minimal PATH; clauster propagates this PATH to\n"
+            "# every bridge it spawns (procutil.child_env), so set it here. ~/.local/bin\n"
+            "# covers uv-installed tools; for shell-managed toolchains (nvm/pyenv/cargo/go)\n"
+            "# extend it via claude.path_append / claude.env in clauster.yml.\n"
+            f"Environment=PATH={path}\n"
             "Restart=on-failure\n"
             "RestartSec=5\n"
             "# Signal only the main process on stop/restart. Detached pty (true-resume)\n"
@@ -660,6 +702,11 @@ def render_service_unit(
         arg_xml = "\n".join(f"      <string>{_xml_escape(a)}</string>" for a in [exe, *cmd_args])
         wd_xml = _xml_escape(wd)
         cfg_xml = _xml_escape(cfg)
+        # launchd, like systemd, starts the daemon with a minimal PATH; clauster
+        # propagates it to every spawned bridge (procutil.child_env). Bake ~/.local/bin
+        # in so bridges resolve uv-installed tools; for shell-managed toolchains
+        # (nvm/pyenv/cargo/go) extend via claude.path_append / claude.env in clauster.yml.
+        path_xml = _xml_escape(_service_path(user))
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -673,7 +720,10 @@ def render_service_unit(
             "    <key>KeepAlive</key><true/>\n"
             f"    <key>WorkingDirectory</key><string>{wd_xml}</string>\n"
             "    <key>EnvironmentVariables</key>\n"
-            f"    <dict><key>CLAUSTER_CONFIG</key><string>{cfg_xml}</string></dict>\n"
+            "    <dict>\n"
+            f"      <key>CLAUSTER_CONFIG</key><string>{cfg_xml}</string>\n"
+            f"      <key>PATH</key><string>{path_xml}</string>\n"
+            "    </dict>\n"
             "  </dict>\n"
             "</plist>\n"
         )
