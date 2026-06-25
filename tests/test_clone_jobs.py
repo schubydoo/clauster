@@ -48,15 +48,43 @@ def test_manager_lifecycle_and_queue():
 
 def test_manager_finish_error():
     async def _run():
+        from clauster.redact import redact_for_disk
+
         mgr = CloneJobManager()
         job = mgr.create("proj")
         queue = job.subscribe()
-        mgr.finish(job, error="git clone failed: boom")
+        error_msg = "git clone failed: boom"
+        mgr.finish(job, error=error_msg)
         evt = await asyncio.wait_for(queue.get(), timeout=1)
-        assert evt == {"type": "done", "status": "error", "error": "git clone failed: boom"}
-        assert job.status == "error" and job.error_detail == "git clone failed: boom"
+        # The WS frame carries the redacted form (a no-op for this secret-free literal); the
+        # raw value stays on job.error_detail. Assert against redact_for_disk so a future
+        # secret-bearing test string can't yield a false-positive (#574, per Greptile).
+        assert evt == {"type": "done", "status": "error", "error": redact_for_disk(error_msg)}
+        assert job.status == "error" and job.error_detail == error_msg
 
     asyncio.run(_run())
+
+
+def test_terminal_event_redacts_error_detail():
+    # #574: a failed clone's error_detail (git stderr tail) is redacted on the WS egress to
+    # match the redacted clone-done webhook path (#432) — a secret-shaped token / id never
+    # reaches the progress WS raw. Redacting in terminal_event() covers every consumer.
+    from clauster.redact import redact_for_disk
+
+    mgr = CloneJobManager()
+    job = mgr.create("proj")
+    job.status = "error"
+    # A secret-shaped session id AND a bare UUID — both must be stripped from the frame.
+    job.error_detail = (
+        "git clone failed for session_0123456789abcdef0123456789abcdef "
+        "(ref 3f2504e0-4f89-41d3-9a0c-0305e82c3301) denied"
+    )
+    frame = job.terminal_event()
+    # The frame carries the redacted form, never the raw value.
+    assert frame["error"] == redact_for_disk(job.error_detail)
+    assert frame["error"] != job.error_detail  # redaction fired
+    assert "session_0123456789abcdef0123456789abcdef" not in frame["error"]
+    assert "3f2504e0-4f89-41d3-9a0c-0305e82c3301" not in frame["error"]
 
 
 def test_broadcast_reaches_every_subscriber():

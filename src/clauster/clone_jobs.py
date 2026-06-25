@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .claustrum_client import _Subscriber
+from .redact import redact_for_disk
 
 JobStatus = Literal["running", "done", "error"]
 
@@ -114,8 +115,17 @@ class CloneJob:
         return {"type": "progress", "phase": self.phase, "percent": self.percent}
 
     def terminal_event(self) -> dict[str, Any]:
-        """Return the final WS frame describing how the job ended."""
-        return {"type": "done", "status": self.status, "error": self.error_detail}
+        """Return the final WS frame describing how the job ended.
+
+        ``error`` (a tail of git stderr) is run through :func:`redact_for_disk`, the
+        same redaction the clone-done webhook applies (#432), so the progress-WS egress
+        is symmetric — a secret-shaped token / id never leaves here raw. Redacting here
+        (rather than at each call site) covers every consumer of this frame (#574).
+        """
+        # The None-guard is required, not cosmetic: redact_for_disk is typed `str` and
+        # raises on None, and a successful clone's terminal frame has error_detail=None.
+        error = redact_for_disk(self.error_detail) if self.error_detail else None
+        return {"type": "done", "status": self.status, "error": error}
 
 
 class CloneJobManager:
