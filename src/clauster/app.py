@@ -368,6 +368,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         runner.persistence.hosted_state_store(),
         on_permission_needed=_on_hosted_permission_needed,
     )
+    # Let the poll loop's `agents --json` cross-check recognize our own hosted
+    # sessions (claustrum channel) so it never mislabels them EXTERNAL/unmanaged (#592).
+    runner.set_hosted_provider(app.state.hosted.list_instances)
     clone_jobs = CloneJobManager()
     app.state.clone_jobs = clone_jobs
     # Drop a finished clone job after this grace so a client that disconnected
