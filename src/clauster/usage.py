@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import redact
 from .pointers import CLAUDE_PROJECTS_DIR, sanitize_cwd
 
 # aggregate_project_usage re-streams every line of every transcript on each call,
@@ -233,6 +234,144 @@ def transcript_paths_for(
         return sorted(p for p in transcript_dir.glob("*.jsonl") if p.is_file())
     except OSError:
         return []
+
+
+def _render_content(content: object) -> str:
+    """Flatten a message ``content`` to plain text for the read-only viewer.
+
+    A turn's ``message.content`` is either a plain string or a list of typed
+    blocks. We surface the text blocks (``{"type": "text", "text": …}`` or a
+    bare string element) and, for this first text-turns-only cut, summarize a
+    non-text block (``tool_use``/``tool_result``/image/…) as a one-line
+    ``[<type>]`` placeholder rather than dumping its raw payload — never raising
+    on an unexpected shape. The returned text is **not** yet redacted; the
+    caller passes it through :func:`redact.sanitize_line` before it leaves this
+    module.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        # An unexpected (non-str, non-list) shape (None, or a bare dict the bridge
+        # doesn't write today): never dump its raw payload — surface a generic
+        # ``[content]`` placeholder, consistent with the block-level summarization
+        # below. A malformed record must summarize, not abort the page.
+        return "" if content is None else "[content]"
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+        else:
+            # Summarize a non-text block (tool_use, tool_result, image, thinking,
+            # …) as a typed placeholder; the raw payload is intentionally omitted
+            # in this first cut (issue #431: "text turns first").
+            label = btype if isinstance(btype, str) and btype else "block"
+            parts.append(f"[{label}]")
+    return "\n".join(parts)
+
+
+def read_transcript_turns(path: Path) -> list[dict]:
+    """Stream a transcript JSONL into a list of redacted, render-ready turns.
+
+    Each turn is ``{role, content, model, timestamp}`` where ``content`` is the
+    message text flattened by :func:`_render_content` and then passed through
+    :func:`redact.sanitize_line` — so a session/env identifier or an obvious
+    secret shape can never reach the browser. ``role``/``content``/``model`` come
+    from ``record["message"]`` and ``timestamp`` from the record (mirroring
+    :func:`parse_transcript`).
+
+    Tolerant like :func:`parse_transcript`: blank and malformed lines, and
+    records without a ``message`` dict, are skipped rather than raising. The
+    transcript can be huge, so it is streamed line by line (never loaded whole);
+    being pure and blocking, the caller runs it off the event loop.
+    """
+    turns: list[dict] = []
+    try:
+        # errors="replace": see parse_transcript — transcripts come from the
+        # external claude bridge and can carry invalid UTF-8; a replaced char
+        # either parses or trips the per-line JSON skip, never crashing the page.
+        fh = open(path, encoding="utf-8", errors="replace")
+    except (FileNotFoundError, OSError) as exc:
+        raise FileNotFoundError(f"transcript not found: {path}") from exc
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # skip a corrupt line rather than abort the whole page
+            if not isinstance(record, dict):
+                continue
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if not isinstance(role, str) or not role:
+                continue  # a turn without a role isn't a renderable message
+            text = _render_content(message.get("content"))
+            model = message.get("model")
+            timestamp = record.get("timestamp")
+            turns.append(
+                {
+                    # Every rendered field that can carry user/model free text is
+                    # sanitized before it leaves this reader (D11 redaction order).
+                    "role": redact.sanitize_line(role),
+                    "content": redact.sanitize_line(text),
+                    "model": redact.sanitize_line(model) if isinstance(model, str) else None,
+                    "timestamp": timestamp if isinstance(timestamp, str) else None,
+                }
+            )
+    return turns
+
+
+def resolve_session_transcript(
+    project_path: Path,
+    session: str,
+    claude_projects_dir: Path = CLAUDE_PROJECTS_DIR,
+) -> Path | None:
+    """Resolve a session id to its transcript file *strictly inside* the project dir.
+
+    ``session`` is the transcript filename stem (the per-session uuid). This
+    fails closed against path traversal: it rejects an empty stem, any path
+    separator or ``..`` component, and confirms the resolved path's parent is the
+    project's own transcript directory before returning it — so a crafted
+    ``session`` can never escape to read an arbitrary file. Returns ``None`` when
+    the session is unsafe or no matching transcript exists (the caller maps that
+    to a 404), never raising.
+    """
+    # Reject anything that isn't a bare filename stem outright: separators,
+    # parent refs, NUL, or an absolute/drive-qualified value. We never join an
+    # attacker-influenced separator into the path.
+    if (
+        not session
+        or session in (".", "..")
+        or "/" in session
+        or "\\" in session
+        or "\x00" in session
+    ):
+        return None
+    transcript_dir = (Path(claude_projects_dir) / sanitize_cwd(Path(project_path))).resolve()
+    candidate = (transcript_dir / f"{session}.jsonl").resolve()
+    # Defense in depth: even after the component checks above, confirm the
+    # resolved file sits directly in the expected dir (parent identity), so a
+    # symlink or surprise normalization can't smuggle it elsewhere.
+    if candidate.parent != transcript_dir:
+        return None
+    try:
+        if not candidate.is_file():
+            return None
+    except OSError:
+        return None
+    return candidate
 
 
 def aggregate_project_usage(

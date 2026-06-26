@@ -19,6 +19,8 @@ from clauster.usage import (
     cost_usd,
     invalidate_usage_cache,
     parse_transcript,
+    read_transcript_turns,
+    resolve_session_transcript,
     transcript_paths_for,
 )
 
@@ -563,3 +565,190 @@ def test_cached_stamp_skips_unstattable_file(tmp_path, monkeypatch, _clean_usage
     monkeypatch.setattr(Path, "stat", _boom_stat)
     # The stamp degrades to (0, 0, -1) for the unstattable file (no crash).
     assert usage_mod._transcript_dir_stamp(project, claude_dir) == (0, 0, -1)
+
+
+# ----- transcript turn reader (read-only viewer, #431) -----------------
+
+TURNS_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "transcripts" / "turns-session.jsonl"
+)
+
+
+def test_read_transcript_turns_shape_and_skips():
+    # The realistic fixture has 4 renderable turns; a summary (no message), a
+    # non-JSON line, and a role-less record are all skipped (tolerant like parse).
+    turns = read_transcript_turns(TURNS_FIXTURE)
+    assert len(turns) == 4
+    assert all(set(t) == {"role", "content", "model", "timestamp"} for t in turns)
+    assert [t["role"] for t in turns] == ["user", "assistant", "user", "assistant"]
+    # role/content/model from message; timestamp from the record.
+    assert turns[1]["model"] == "claude-opus-4-8"
+    assert turns[1]["timestamp"] == "2026-06-25T10:00:05Z"
+    assert turns[0]["model"] is None  # user turn carries no model
+
+
+def test_read_transcript_turns_renders_block_list():
+    # A list-of-blocks content surfaces text blocks and summarizes non-text blocks
+    # (tool_use/tool_result) as a typed placeholder — never the raw payload.
+    turns = read_transcript_turns(TURNS_FIXTURE)
+    assistant = turns[1]["content"]
+    assert "Sure — here is the plan." in assistant
+    assert "[tool_use]" in assistant
+    user_blocks = turns[2]["content"]
+    assert "[tool_result]" in user_blocks
+
+
+def test_read_transcript_turns_redacts_planted_secrets():
+    # THE security gate: planted session id / sk- key / AKIA id in turn text must
+    # be redacted (sanitize_line applied) before the reader returns them.
+    turns = read_transcript_turns(TURNS_FIXTURE)
+    blob = "\n".join(t["content"] for t in turns)
+    assert "DEADBEEF012345" not in blob
+    assert "sk-ABCDEF0123456789ghij" not in blob
+    assert "AKIAIOSFODNN7EXAMPLE" not in blob
+    assert "<redacted>" in blob
+
+
+def test_read_transcript_turns_tolerates_malformed(tmp_path):
+    # Blank lines, corrupt JSON, a bare-list record, and a non-dict message are all
+    # skipped rather than raising — the page never aborts on one bad line.
+    p = tmp_path / "messy.jsonl"
+    p.write_text(
+        "\n"
+        + '{"message": {"role": "user", "content": "hello"}}\n'
+        + "{not json}\n"
+        + "[1, 2, 3]\n"
+        + '{"message": "a string, not a dict"}\n'
+        + '{"message": {"role": "assistant", "content": null}}\n'
+    )
+    turns = read_transcript_turns(p)
+    assert [t["role"] for t in turns] == ["user", "assistant"]
+    assert turns[1]["content"] == ""  # None content renders empty, no crash
+
+
+def test_read_transcript_turns_missing_file_raises_filenotfound(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        read_transcript_turns(tmp_path / "nope.jsonl")
+
+
+def test_read_transcript_turns_render_content_unexpected_shape(tmp_path):
+    # A content that is neither str nor list (an int, or a bare dict) is summarized
+    # as a generic [content] placeholder — never dumped raw and never raised.
+    p = tmp_path / "weird.jsonl"
+    p.write_text(
+        json.dumps({"message": {"role": "user", "content": 42}})
+        + "\n"
+        + json.dumps({"message": {"role": "user", "content": {"secret": "payload"}}})
+        + "\n"
+    )
+    turns = read_transcript_turns(p)
+    assert turns[0]["content"] == "[content]"
+    # The raw dict payload is never surfaced — only the placeholder.
+    assert turns[1]["content"] == "[content]"
+    assert "payload" not in turns[1]["content"]
+
+
+def test_read_transcript_turns_render_content_mixed_block_elements(tmp_path):
+    # A block list with a bare string element and a non-dict element (a number):
+    # the string is surfaced, the non-dict element is skipped — no crash.
+    p = tmp_path / "blocks.jsonl"
+    content = ["plain text element", 99, {"type": "text", "text": "typed"}, {"no": "type"}]
+    p.write_text(json.dumps({"message": {"role": "user", "content": content}}) + "\n")
+    [turn] = read_transcript_turns(p)
+    assert "plain text element" in turn["content"]
+    assert "typed" in turn["content"]
+    assert "[block]" in turn["content"]  # a dict block with no "type" -> generic label
+    assert "99" not in turn["content"]  # the non-dict element is skipped, not stringified
+
+
+def test_resolve_session_transcript_happy_path(tmp_path):
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    d = _project_transcript_dir(claude_dir, project)
+    (d / "abc123.jsonl").write_text("")
+    resolved = resolve_session_transcript(project, "abc123", claude_dir)
+    assert resolved is not None
+    assert resolved.name == "abc123.jsonl"
+    assert resolved.parent == d.resolve()
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        "",
+        ".",
+        "..",
+        "../secret",
+        "sub/abc",
+        "a\\b",
+        "abc\x00d",
+        "/etc/passwd",
+    ],
+)
+def test_resolve_session_transcript_rejects_unsafe(tmp_path, session):
+    # Path-traversal / separator / NUL / absolute inputs all fail closed to None —
+    # never escaping the project's transcript dir.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    _project_transcript_dir(claude_dir, project)
+    assert resolve_session_transcript(project, session, claude_dir) is None
+
+
+def test_resolve_session_transcript_unknown_session_is_none(tmp_path):
+    # A safe stem with no matching file resolves to None (caller maps to 404).
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    _project_transcript_dir(claude_dir, project)
+    assert resolve_session_transcript(project, "ghost", claude_dir) is None
+
+
+def test_resolve_session_transcript_traversal_cannot_escape(tmp_path):
+    # Plant a file OUTSIDE the transcript dir and prove a crafted session can't
+    # reach it: even if a separator slipped past, the parent-identity check fails.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    d = _project_transcript_dir(claude_dir, project)
+    outside = d.parent / "outside.jsonl"
+    outside.write_text("secret")
+    # The component guard rejects the separator outright -> None (no escape).
+    assert resolve_session_transcript(project, "../outside", claude_dir) is None
+
+
+def test_resolve_session_transcript_parent_identity_mismatch(tmp_path, monkeypatch):
+    # Defense-in-depth: if the resolved candidate's parent isn't the expected dir
+    # (e.g. a symlinked transcript dir that normalizes elsewhere), fail closed even
+    # though the bare-stem component guard passed. Force the mismatch by making
+    # resolve() return a path in a different directory.
+    import clauster.usage as usage_mod
+
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    _project_transcript_dir(claude_dir, project)
+    elsewhere = tmp_path / "elsewhere" / "abc.jsonl"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text("")
+    real_resolve = Path.resolve
+
+    def _fake_resolve(self, *a, **k):
+        # Redirect only the candidate file to a foreign directory; leave the dir.
+        if self.name == "abc.jsonl":
+            return elsewhere
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(usage_mod.Path, "resolve", _fake_resolve)
+    assert resolve_session_transcript(project, "abc", claude_dir) is None
+
+
+def test_resolve_session_transcript_is_file_oserror_is_none(tmp_path, monkeypatch):
+    # An OSError from the is_file() probe (a racing permission/IO fault) fails closed
+    # to None rather than propagating — the route maps that to a clean 404.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    d = _project_transcript_dir(claude_dir, project)
+    (d / "abc.jsonl").write_text("")
+
+    def _boom_is_file(self):
+        raise OSError("io error")
+
+    monkeypatch.setattr(Path, "is_file", _boom_is_file)
+    assert resolve_session_transcript(project, "abc", claude_dir) is None
