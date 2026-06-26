@@ -661,6 +661,22 @@ def test_read_transcript_turns_render_content_mixed_block_elements(tmp_path):
     assert "99" not in turn["content"]  # the non-dict element is skipped, not stringified
 
 
+def test_read_transcript_turns_text_block_with_non_string_text_is_skipped(tmp_path):
+    # A {"type": "text"} block whose `text` is missing or non-string is skipped (not
+    # appended, never raised) — covers the `isinstance(text, str)` False branch in
+    # _render_content (the 269->260 partial codecov flagged).
+    p = tmp_path / "badtext.jsonl"
+    content = [
+        {"type": "text", "text": "kept"},
+        {"type": "text"},  # no text field
+        {"type": "text", "text": None},  # non-string text
+        {"type": "text", "text": 42},  # non-string text
+    ]
+    p.write_text(json.dumps({"message": {"role": "assistant", "content": content}}) + "\n")
+    [turn] = read_transcript_turns(p)
+    assert turn["content"] == "kept"  # only the valid text block survives
+
+
 def test_resolve_session_transcript_happy_path(tmp_path):
     claude_dir = tmp_path / "claude_projects"
     project = Path("/srv/projects/my_proj")

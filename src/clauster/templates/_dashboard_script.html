@@ -607,7 +607,11 @@
       },
       closeTranscripts() {
         const t = this.transcripts;
-        t.open = false;
+        // Void any in-flight load (bump gen) so its response + gen-guarded finally can't write
+        // into — or leave a lock set on — a modal that's been closed/reopened. Then clear both
+        // loading flags so the next open isn't blocked by the single-flight guard.
+        t.gen = (t.gen || 0) + 1;
+        t.open = false; t.loading = false; t.loadingMore = false;
         document.body.style.overflow = "";  // release the scroll lock
         if (t.trigger && t.trigger.focus) t.trigger.focus();  // restore focus to the opener
       },
@@ -636,7 +640,10 @@
         const t = this.transcripts;
         t.gen = (t.gen || 0) + 1;
         const myGen = t.gen;
-        t.session = session; t.error = ""; t.loading = true;
+        // Clear loadingMore too: if a previous session's "Load more" was in flight when the
+        // user switched sessions, its gen-guarded finally was skipped, leaving the lock set —
+        // which would silently dead-button this session's "Load more".
+        t.session = session; t.error = ""; t.loading = true; t.loadingMore = false;
         t.turns = []; t.total = 0; t.nextCursor = null;
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
@@ -674,7 +681,7 @@
       backToTranscriptList() {
         const t = this.transcripts;
         t.gen = (t.gen || 0) + 1;  // void any in-flight turn fetch
-        t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null; t.error = "";
+        t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loadingMore = false;
       },
       async refresh() {
         // Single-flight: setInterval can fire a new tick while a slow refresh is still
