@@ -216,6 +216,16 @@ class ReverseProxyConfig(BaseModel):
     hmac_window_seconds: int = Field(
         default=60, ge=0, description="Clock-skew / replay window (≥0)."
     )
+    require_hmac: bool = Field(
+        default=True,
+        description="When true (default, higher assurance), a request from a `trusted_ips` "
+        "peer must also carry a valid HMAC in `shared_secret_header` to authenticate. Set "
+        "false ONLY behind a forward-auth proxy (Authelia, authentik, Caddy `forward_auth`, "
+        "Traefik, oauth2-proxy) that asserts `user_header` but signs no HMAC: clauster then "
+        "trusts `user_header` from a trusted peer alone — so the proxy MUST strip that header "
+        "from inbound client requests and be the sole route to clauster, since anyone able to "
+        "reach a `trusted_ips` peer can forge the user.",
+    )
 
     @field_validator("trusted_ips")
     @classmethod
@@ -226,6 +236,31 @@ class ReverseProxyConfig(BaseModel):
         for entry in v:
             ipaddress.ip_network(entry, strict=False)
         return v
+
+    @model_validator(mode="after")
+    def _require_secret_or_trusted_ips(self) -> ReverseProxyConfig:
+        # Fail closed on an un-runnable proxy config rather than silently authenticating
+        # nobody. `trusted_ips` is the FIRST gate for BOTH modes: every enforcement point
+        # checks `peer_trusted(peer_ip, trusted_ips)` before anything else, and that is
+        # always False with an empty list — so an empty allowlist makes proxy auth admit no
+        # one regardless of mode. HMAC mode additionally needs a `shared_secret` to verify
+        # the signature the proxy adds on top of the peer-IP gate.
+        if not self.enabled:
+            return self
+        if not self.trusted_ips:
+            raise ValueError(
+                "reverse_proxy.enabled is true but trusted_ips is empty — the peer-IP "
+                "allowlist is the first gate for both HMAC and header-only modes "
+                "(peer_trusted() is always False with an empty list, so proxy auth would "
+                "admit no one). Pin the proxy's IP/CIDR in trusted_ips."
+            )
+        if self.require_hmac and not self.shared_secret:
+            raise ValueError(
+                "reverse_proxy.require_hmac is true but no shared_secret is set — HMAC mode "
+                "needs the key the proxy signs with. Set shared_secret, or set "
+                "require_hmac: false for a forward-auth (header-only) proxy."
+            )
+        return self
 
 
 class AuthConfig(BaseModel):

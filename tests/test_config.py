@@ -85,6 +85,75 @@ def test_valid_trusted_ips_accepted(write_config):
     assert config.auth.reverse_proxy.trusted_ips == ["10.0.0.5", "192.168.0.0/24"]
 
 
+def test_require_hmac_defaults_true(write_config):
+    # #367: the forward-auth toggle defaults to the higher-assurance HMAC-required mode,
+    # so existing configs that never mention require_hmac keep today's behaviour.
+    config = load_config(
+        write_config(
+            "auth:\n  enabled: true\n  reverse_proxy:\n    enabled: true\n"
+            '    shared_secret: "k"\n    trusted_ips: ["10.0.0.1"]\n'
+        )
+    )
+    assert config.auth.reverse_proxy.require_hmac is True
+
+
+def test_hmac_mode_without_shared_secret_rejected(write_config):
+    # #367: HMAC mode (default) is un-runnable without the key the proxy signs with —
+    # fail closed at load rather than authenticate nobody.
+    with pytest.raises(ValueError, match="shared_secret"):
+        load_config(
+            write_config(
+                "auth:\n  enabled: true\n  reverse_proxy:\n    enabled: true\n"
+                '    trusted_ips: ["10.0.0.1"]\n'
+            )
+        )
+
+
+def test_hmac_mode_requires_trusted_ips(write_config):
+    # #367: HMAC mode also gates on peer_trusted(peer_ip, trusted_ips) before checking the
+    # signature, so an empty trusted_ips allowlist makes the proxy path admit no one even
+    # with a valid shared_secret — fail closed at load rather than start silently inoperable.
+    with pytest.raises(ValueError, match="trusted_ips"):
+        load_config(
+            write_config(
+                "auth:\n  enabled: true\n  reverse_proxy:\n    enabled: true\n"
+                '    shared_secret: "k"\n'
+            )
+        )
+
+
+def test_header_only_mode_requires_trusted_ips(write_config):
+    # #367: header-only forward-auth drops the HMAC requirement but the bare user_header is
+    # forgeable — an empty trusted_ips allowlist in this mode is a footgun, so reject it.
+    with pytest.raises(ValueError, match="trusted_ips"):
+        load_config(
+            write_config(
+                "auth:\n  enabled: true\n  reverse_proxy:\n"
+                "    enabled: true\n    require_hmac: false\n"
+            )
+        )
+
+
+def test_header_only_mode_no_shared_secret_needed(write_config):
+    # #367: with require_hmac false + a trusted_ips allowlist, no shared_secret is required.
+    config = load_config(
+        write_config(
+            "auth:\n  enabled: true\n  reverse_proxy:\n"
+            "    enabled: true\n    require_hmac: false\n"
+            '    trusted_ips: ["10.0.0.1"]\n'
+        )
+    )
+    assert config.auth.reverse_proxy.require_hmac is False
+    assert config.auth.reverse_proxy.shared_secret is None
+
+
+def test_disabled_reverse_proxy_skips_validation(write_config):
+    # The cross-field validator only fires when enabled — a disabled block with neither
+    # secret nor trusted_ips loads fine (the fields are inert).
+    config = load_config(write_config("auth:\n  reverse_proxy:\n    require_hmac: false\n"))
+    assert config.auth.reverse_proxy.enabled is False
+
+
 def test_env_config_and_home_candidates(write_config, monkeypatch):
     # Setting CLAUSTER_CONFIG / CLAUSTER_HOME exercises both candidate-path branches.
     cfg_path = write_config()
@@ -167,7 +236,8 @@ _HASH = (
     "extra",
     [
         # reverse-proxy auth only counts when auth.enabled is set (it's the runtime gate).
-        "host: 0.0.0.0\nauth:\n  enabled: true\n  reverse_proxy:\n    enabled: true\n",
+        "host: 0.0.0.0\nauth:\n  enabled: true\n  reverse_proxy:\n    enabled: true\n"
+        '    shared_secret: "k"\n    trusted_ips: ["10.0.0.1"]\n',
         "host: 0.0.0.0\nauth:\n  enabled: true\n  password_required: true\n"
         f"  password_hash: '{_HASH}'\n",
         "host: 0.0.0.0\nauth:\n  allow_unauthenticated_network: true\n",
@@ -185,7 +255,8 @@ def test_non_loopback_allowed_with_auth(write_config, extra):
         # false default, so the runtime guard would serve the dashboard unauthenticated.
         # The validator must refuse rather than start a silently-open non-loopback bind.
         f"host: 0.0.0.0\nauth:\n  password_required: true\n  password_hash: '{_HASH}'\n",
-        "host: 0.0.0.0\nauth:\n  reverse_proxy:\n    enabled: true\n",
+        "host: 0.0.0.0\nauth:\n  reverse_proxy:\n    enabled: true\n"
+        '    shared_secret: "k"\n    trusted_ips: ["10.0.0.1"]\n',
     ],
 )
 def test_non_loopback_rejected_when_auth_not_enabled(write_config, extra):

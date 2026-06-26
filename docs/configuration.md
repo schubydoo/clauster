@@ -182,6 +182,7 @@ projects:
 | `trusted_ips` | list[str] | `[]` | Peer-IP allowlist for the proxy. Each entry is an IP or CIDR, validated at load (a malformed entry fails fast rather than silently never matching). |
 | `shared_secret` | str \| null | `null` | HMAC key the proxy signs `X-Proxy-Auth` with. |
 | `hmac_window_seconds` | int | `60` | Clock-skew / replay window (≥0). |
+| `require_hmac` | bool | `true` | When true (default, higher assurance), a request from a `trusted_ips` peer must also carry a valid HMAC in `shared_secret_header` to authenticate. Set false ONLY behind a forward-auth proxy (Authelia, authentik, Caddy `forward_auth`, Traefik, oauth2-proxy) that asserts `user_header` but signs no HMAC: clauster then trusts `user_header` from a trusted peer alone — so the proxy MUST strip that header from inbound client requests and be the sole route to clauster, since anyone able to reach a `trusted_ips` peer can forge the user. |
 <!-- END GEN: reverse_proxy -->
 
 !!! danger "Two fail-closed validators"

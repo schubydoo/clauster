@@ -454,16 +454,26 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         rp = config.auth.reverse_proxy
         if rp.enabled and auth.peer_trusted(auth.peer_ip(scope), rp.trusted_ips):
             remote_user = scope.headers.get(rp.user_header)
-            sig = scope.headers.get(rp.shared_secret_header)
-            method = getattr(scope, "method", "GET")  # WS handshake => GET
-            if auth.verify_proxy_hmac(
-                rp.shared_secret,
-                sig,
-                remote_user,
-                method,
-                scope.url.path,
-                rp.hmac_window_seconds,
-            ):
+            if rp.require_hmac:
+                sig = scope.headers.get(rp.shared_secret_header)
+                method = getattr(scope, "method", "GET")  # WS handshake => GET
+                if auth.verify_proxy_hmac(
+                    rp.shared_secret,
+                    sig,
+                    remote_user,
+                    method,
+                    scope.url.path,
+                    rp.hmac_window_seconds,
+                ):
+                    return remote_user, True, False
+            elif remote_user:
+                # Forward-auth (header-only) mode (#367): a trusted forward-auth proxy
+                # (Authelia/authentik/Caddy/Traefik/oauth2-proxy) asserts the user but
+                # signs no HMAC. We already proved the peer is in `trusted_ips`, so a
+                # present user_header authenticates. via_proxy=True keeps the CSRF Origin
+                # exemption (no ambient cookie a cross-site page could ride). The header is
+                # only as trustworthy as the proxy's must-strip-inbound discipline — see the
+                # require_hmac config doc and docs/networking.md.
                 return remote_user, True, False
         # API token (#360): an Authorization: Bearer credential, hashed at rest.
         # A token is one more enforced-auth METHOD behind the same auth.enabled
@@ -509,18 +519,26 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # budget per fabricated username and evade the limiter entirely. When no
         # HMAC-verified user is present, fall back to the shared proxy IP: mark it
         # shared=True so the per-key hard lock is skipped and only the global backoff
-        # applies.
+        # applies. In header-only forward-auth mode (#367, require_hmac=False) the
+        # user_header is unsigned and therefore forgeable, so we NEVER key on it — the
+        # `require_hmac` gate below makes a per-user key structurally unreachable in that
+        # mode (verify_proxy_hmac would already fail with no secret, but the explicit gate
+        # is defense-in-depth so a future change to the HMAC helper can't reopen the hole).
         rp = config.auth.reverse_proxy
         ip = auth.peer_ip(request)
         if rp.enabled and auth.peer_trusted(ip, rp.trusted_ips):
             remote_user = request.headers.get(rp.user_header)
-            if remote_user and auth.verify_proxy_hmac(
-                rp.shared_secret,
-                request.headers.get(rp.shared_secret_header),
-                remote_user,
-                request.method,
-                request.url.path,
-                rp.hmac_window_seconds,
+            if (
+                remote_user
+                and rp.require_hmac
+                and auth.verify_proxy_hmac(
+                    rp.shared_secret,
+                    request.headers.get(rp.shared_secret_header),
+                    remote_user,
+                    request.method,
+                    request.url.path,
+                    rp.hmac_window_seconds,
+                )
             ):
                 # Namespaced so a proxy user can't collide with a raw IP key. This
                 # value only ever keys the rate limiter, never an HTTP response, so

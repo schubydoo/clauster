@@ -305,6 +305,102 @@ def test_throttle_ignores_forged_user_header_without_hmac(runner_config, monkeyp
     assert saw_429, "forged-username flood evaded the throttle (per-key budget minted)"
 
 
+# ----- forward-auth (header-only) mode (#367) ------------------------------
+
+
+def _forward_auth_client(runner_config):
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.reverse_proxy.enabled = True
+    config.auth.reverse_proxy.require_hmac = False  # forward-auth: trust user_header alone
+    config.auth.reverse_proxy.trusted_ips = ["10.0.0.1"]
+    config.auth.allowed_origins = [ORIGIN]
+    return TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+
+
+def test_forward_auth_trusted_peer_bare_header_allows(runner_config, monkeypatch):
+    # Header-only mode: a trusted peer carrying user_header (no HMAC) authenticates.
+    client = _forward_auth_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    resp = client.get("/api/instances", headers={"Remote-User": "alice"})
+    assert resp.status_code == 200
+
+
+def test_forward_auth_untrusted_peer_bare_header_rejected(runner_config, monkeypatch):
+    # Same header, but from a NON-trusted peer IP: must still be rejected (401).
+    client = _forward_auth_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "9.9.9.9")
+    resp = client.get("/api/instances", headers={"Remote-User": "alice"})
+    assert resp.status_code == 401
+
+
+def test_forward_auth_trusted_peer_no_header_rejected(runner_config, monkeypatch):
+    # Trusted peer but no user_header present: nothing to authenticate as -> 401.
+    client = _forward_auth_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    assert client.get("/api/instances").status_code == 401
+
+
+def test_forward_auth_exempts_csrf_origin_for_unsafe_method(runner_config, monkeypatch):
+    # via_proxy stays True in header-only mode, so a state-changing POST from a trusted
+    # peer is exempt from the Origin/CSRF gate (no ambient cookie to ride) — parity with
+    # the HMAC path. A cross-site Origin would otherwise 403 a cookie/session request.
+    client = _forward_auth_client(runner_config)
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    resp = client.request(
+        "POST",
+        "/api/instances",
+        json={},
+        headers={"Remote-User": "alice", "origin": "https://evil.example"},
+    )
+    assert resp.status_code != 403  # CSRF Origin gate exempted; not an origin failure
+
+
+def test_hmac_mode_unchanged_when_require_hmac_default(runner_config, monkeypatch):
+    # Regression: the default (require_hmac=True) still demands a valid HMAC — a bare
+    # user_header from a trusted peer is NOT accepted in HMAC mode.
+    client = _proxy_client(runner_config)  # default require_hmac=True
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+    bare = client.get("/api/instances", headers={"Remote-User": "alice"})
+    assert bare.status_code == 401  # no HMAC -> rejected, exactly as before #367
+    # ...and a valid HMAC still authenticates (path byte-for-byte unchanged).
+    t = int(time.time())
+    hdr = _proxy_header("proxy-secret", "alice", "GET", "/api/instances", t)
+    ok = client.get("/api/instances", headers={"Remote-User": "alice", "X-Proxy-Auth": hdr})
+    assert ok.status_code == 200
+
+
+def test_forward_auth_throttle_ignores_forged_user_header(runner_config, monkeypatch):
+    # SECURITY-CRITICAL (#367): in header-only mode the user_header is unsigned and
+    # forgeable. The throttle MUST NOT mint a per-key login budget per fabricated
+    # username — a forged-username flood from one trusted IP must collapse to the shared
+    # IP path and trip the global backoff (429).
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = [ORIGIN]
+    config.auth.reverse_proxy.enabled = True
+    config.auth.reverse_proxy.require_hmac = False
+    config.auth.reverse_proxy.trusted_ips = ["10.0.0.1"]
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    monkeypatch.setattr("clauster.auth.peer_ip", lambda scope: "10.0.0.1")
+
+    saw_429 = False
+    for i in range(60):  # each attempt forges a DIFFERENT Remote-User (no HMAC at all)
+        resp = client.post(
+            "/login",
+            data={"password": "wrong"},
+            headers={"origin": ORIGIN, "Remote-User": f"forged-{i}"},
+            follow_redirects=False,
+        )
+        if resp.status_code == 429:
+            saw_429 = True
+            break
+        assert resp.status_code == 401
+    assert saw_429, "forged-username flood evaded the throttle in header-only mode"
+
+
 def test_throttle_trusts_user_only_with_valid_hmac(runner_config, monkeypatch):
     # The flip side: a genuinely proxy-authenticated user (valid HMAC) DOES get a
     # per-key budget — so one such user's failures don't lock out everyone behind the
