@@ -39,6 +39,20 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_clone_progressbar_exposes_aria_value_attributes(write_config):
+    # #607 (a11y): the New-project clone bar is a real ARIA progressbar. It carries
+    # role + min/max always, binds aria-valuenow during the determinate phase, and
+    # surfaces aria-valuetext (the phase label) during the indeterminate phase — so
+    # assistive tech announces progress instead of a silent role="progressbar".
+    page = _client(write_config).get("/").text
+    assert 'role="progressbar"' in page
+    assert 'aria-valuemin="0"' in page
+    assert 'aria-valuemax="100"' in page
+    # value + text are Alpine-bound, so they ship as `:attr` bindings in the source.
+    assert ":aria-valuenow=" in page
+    assert ":aria-valuetext=" in page
+
+
 def test_tabler_sprites_for_hosted_chrome_present(write_config):
     # Icon pass (DES-04): the hosted-transcript chrome swaps structural emoji (🔧/✓/✕) for
     # Tabler sprites — those symbols must exist in the sprite sheet for the `<use>` refs to render.
