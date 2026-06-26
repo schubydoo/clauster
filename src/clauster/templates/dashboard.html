@@ -110,6 +110,10 @@
     [data-test="cfg-modal"] .modal-body { padding-top: 0; }
     [data-test="cfg-modal"] .cfg-intro { padding-top: var(--tblr-modal-padding, 1.5rem); }
 
+    /* #431: transcript turn content is plain (redacted) text — preserve its line
+       breaks and wrap long lines so a turn never blows out the modal width. */
+    .transcript-content { white-space: pre-wrap; overflow-wrap: anywhere; }
+
     /* #357: honor the OS "reduce motion" preference for first-party + Alpine
        x-transition motion (Tabler ships its own rules for vendored components). */
     @media (prefers-reduced-motion: reduce) {
@@ -927,6 +931,101 @@
                 <span x-text="configEditor.saving ? 'Saving…' : 'Save changes'">Save changes</span>
               </button>
             </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Read-only transcript viewer modal (#431) — lists a project's sessions, then
+       paginates one session's turns. All turn content is rendered via x-text (the
+       text is server-redacted but still untrusted agent/user output; binding it as
+       HTML would be stored XSS). Mirrors the config-editor modal's structure, focus
+       trap, and scroll-lock. -->
+  <template x-if="transcripts.open">
+    <div class="modal modal-blur d-block" tabindex="-1" data-test="transcript-modal"
+         style="background: rgba(0,0,0,.4)"
+         @keydown.escape.window="closeTranscripts()" @keydown.tab="trapTranscriptTab($event)"
+         @click.self="closeTranscripts()">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
+           aria-labelledby="transcript-title">
+        <div class="modal-content" x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())">
+          <div class="modal-header">
+            <h3 class="modal-title" id="transcript-title">
+              Transcripts — <span x-text="transcripts.project"></span>
+            </h3>
+            <button type="button" class="btn-close" aria-label="Close" @click="closeTranscripts()"></button>
+          </div>
+          <div class="modal-body">
+            <!-- shared loading / error states (mirror the usage + config fetchers) -->
+            <div class="text-secondary" x-show="transcripts.loading" x-cloak>Loading…</div>
+            <div class="alert alert-danger py-2" data-test="transcript-error"
+                 x-show="transcripts.error" x-cloak x-text="transcripts.error"></div>
+
+            <!-- session picker: shown until a session is selected -->
+            <div x-show="!transcripts.loading && !transcripts.error && !transcripts.session" x-cloak>
+              <div class="text-secondary small" data-test="transcript-empty"
+                   x-show="transcripts.sessions.length === 0">
+                No transcripts for this project yet.
+              </div>
+              <div class="list-group" x-show="transcripts.sessions.length > 0" role="list">
+                <template x-for="s in transcripts.sessions" :key="s.session">
+                  <button type="button" class="list-group-item list-group-item-action"
+                          data-test="transcript-session" @click="openTranscriptSession(s.session)">
+                    <div class="d-flex justify-content-between align-items-center gap-2">
+                      <code class="text-truncate" x-text="s.session"></code>
+                      <span class="badge bg-secondary-lt"
+                            x-text="s.turn_count + (s.turn_count === 1 ? ' turn' : ' turns')"></span>
+                    </div>
+                    <div class="text-secondary small" x-text="transcriptWhen(s.mtime)"></div>
+                  </button>
+                </template>
+              </div>
+            </div>
+
+            <!-- turn view: shown once a session is selected -->
+            <div x-show="!transcripts.loading && transcripts.session" x-cloak>
+              <button type="button" class="btn btn-ghost-secondary btn-sm mb-2"
+                      data-test="transcript-back" @click="backToTranscriptList()">← All sessions</button>
+              <div class="text-secondary small mb-2">
+                <code x-text="transcripts.session"></code>
+                · <span x-text="transcripts.total"></span>
+                <span x-text="transcripts.total === 1 ? 'turn' : 'turns'">turns</span>
+              </div>
+              <div class="text-secondary small" data-test="transcript-no-turns"
+                   x-show="transcripts.turns.length === 0 && !transcripts.error">
+                This session has no turns.
+              </div>
+              <div class="d-flex flex-column gap-2">
+                <template x-for="(t, i) in transcripts.turns" :key="i">
+                  <div class="card" data-test="transcript-turn"
+                       :class="t.role === 'assistant' ? 'border-azure' : 'border-secondary'">
+                    <div class="card-body p-2">
+                      <div class="d-flex justify-content-between align-items-baseline gap-2 mb-1">
+                        <span class="badge"
+                              :class="t.role === 'assistant' ? 'bg-azure-lt' : 'bg-secondary-lt'"
+                              x-text="t.role"></span>
+                        <span class="text-secondary small">
+                          <span x-show="t.model" x-cloak x-text="t.model"></span>
+                          <span x-show="t.timestamp" x-cloak x-text="t.timestamp"></span>
+                        </span>
+                      </div>
+                      {# x-text, NEVER x-html: turn content is untrusted (server-redacted) output. #}
+                      <div class="transcript-content small" x-text="t.content"></div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+              <div class="text-center mt-3" x-show="transcripts.nextCursor !== null" x-cloak>
+                <button type="button" class="btn btn-sm" data-test="transcript-load-more"
+                        :disabled="transcripts.loadingMore" @click="loadMoreTranscriptTurns()">
+                  <span x-text="transcripts.loadingMore ? 'Loading…' : 'Load more'">Load more</span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn" @click="closeTranscripts()">Close</button>
           </div>
         </div>
       </div>

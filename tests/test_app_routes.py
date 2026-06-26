@@ -229,16 +229,17 @@ def test_card_renders_known_project(write_config, tmp_path):
 
 
 def test_card_reflects_project_shape(write_config, tmp_path):
-    # Per-project Jinja conditionals render: the CLAUDE.md meta indicator (the
-    # ic-page icon) only appears where a CLAUDE.md is present; the Git meta
-    # indicator only appears for a git repo. Fixtures: alpha=git, beta=CLAUDE.md,
-    # gamma=plain.
+    # Per-project Jinja conditionals render: the CLAUDE.md meta indicator only
+    # appears where a CLAUDE.md is present; the Git meta indicator only appears for
+    # a git repo. Fixtures: alpha=git, beta=CLAUDE.md, gamma=plain. The CLAUDE.md
+    # badge is matched by its unique title/label (the ic-page icon is no longer
+    # exclusive to it — the #431 transcript trigger reuses the same file-text glyph).
     client = _client(write_config, tmp_path)
     alpha = client.get("/api/projects/alpha/row").text
     beta = client.get("/api/projects/beta/row").text
     gamma = client.get("/api/projects/gamma/row").text
-    assert '<use href="#ic-page"' in beta  # beta ships CLAUDE.md
-    assert '<use href="#ic-page"' not in gamma  # gamma doesn't
+    assert 'title="A CLAUDE.md file is present"' in beta  # beta ships CLAUDE.md
+    assert 'title="A CLAUDE.md file is present"' not in gamma  # gamma doesn't
     assert '<use href="#ic-git"' in alpha  # alpha is a git repo
     assert '<use href="#ic-git"' not in gamma  # gamma isn't
 
