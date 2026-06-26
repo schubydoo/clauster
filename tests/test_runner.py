@@ -772,6 +772,70 @@ def test_external_sessions_empty_when_none(runner_config):
     assert runner.external_sessions_by_project() == {}
 
 
+def test_tracked_sessions_by_instance_groups_and_orders(runner_config):
+    """A standard bridge's N live sessions group under its instance, ordered stably (#570)."""
+    runner = _make_runner(runner_config)
+
+    def session(pid, parent, started_at, uuid, attribution=Attribution.TRACKED):
+        return WorkingSession(
+            pid=pid,
+            cwd=Path("/tmp") / (parent or "x"),
+            kind="interactive",
+            started_at=started_at,
+            local_uuid=uuid,
+            parent_instance=parent,
+            attribution=attribution,
+        )
+
+    runner._sessions = [
+        session(3, "alpha", 300, "uuid-c"),
+        session(1, "alpha", 100, "uuid-a"),
+        session(2, "alpha", 200, "uuid-b"),
+        session(9, "beta", 50, "uuid-z"),
+        # excluded: not tracked, or tracked-but-unattributed
+        session(4, "alpha", 400, "uuid-d", attribution=Attribution.EXTERNAL),
+        session(5, None, 500, "uuid-e"),
+    ]
+
+    grouped = runner.tracked_sessions_by_instance()
+    assert set(grouped) == {"alpha", "beta"}
+    # ordered by (started_at, local_uuid) — stable across polls
+    assert [s.local_uuid for s in grouped["alpha"]] == ["uuid-a", "uuid-b", "uuid-c"]
+    assert [s.pid for s in grouped["beta"]] == [9]
+
+
+def test_tracked_sessions_stable_order_on_tie(runner_config):
+    """Equal started_at falls back to local_uuid so the render order never flickers (#570)."""
+    runner = _make_runner(runner_config)
+    runner._sessions = [
+        WorkingSession(
+            pid=2,
+            cwd=Path("/tmp/a"),
+            kind="interactive",
+            started_at=100,
+            local_uuid="uuid-b",
+            parent_instance="alpha",
+            attribution=Attribution.TRACKED,
+        ),
+        WorkingSession(
+            pid=1,
+            cwd=Path("/tmp/a"),
+            kind="interactive",
+            started_at=100,
+            local_uuid="uuid-a",
+            parent_instance="alpha",
+            attribution=Attribution.TRACKED,
+        ),
+    ]
+    grouped = runner.tracked_sessions_by_instance()
+    assert [s.local_uuid for s in grouped["alpha"]] == ["uuid-a", "uuid-b"]
+
+
+def test_tracked_sessions_empty_when_none(runner_config):
+    runner = _make_runner(runner_config)
+    assert runner.tracked_sessions_by_instance() == {}
+
+
 # -- external-session adoption (FE-4b, #330) ---------------------------------
 
 

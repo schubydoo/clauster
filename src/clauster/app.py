@@ -1355,6 +1355,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """External (unmanaged) working sessions grouped by project name (bug #4)."""
         return runner.external_sessions_by_project()
 
+    @app.get("/api/sessions/tracked")
+    async def api_sessions_tracked() -> dict[str, list[WorkingSession]]:
+        """Live working sessions owned by each managed bridge, keyed by instance (#570).
+
+        A standard ``claude remote-control`` bridge is multi-session; this exposes
+        every live session under it (not just the starter) so the dashboard can list
+        them. Driven by the same ``agents --json`` reconcile join as ``/api/sessions``
+        — no new poll. pty (single-session) bridges simply map to their one session.
+        """
+        return runner.tracked_sessions_by_instance()
+
     @app.get("/api/sessions/adoptable")
     async def api_sessions_adoptable() -> list[str]:
         """Project names whose live external session is a standard bridge safe to adopt (#330).
