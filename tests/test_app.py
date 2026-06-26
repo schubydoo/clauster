@@ -636,5 +636,6 @@ def test_dashboard_transcript_content_uses_x_text_not_x_html(write_config):
     # (a literal "x-html" inside prose/comments isn't, so match the binding, not the word).
     assert "x-html=" not in page and "x-html =" not in page
     # role / model / timestamp are likewise x-text-bound, never interpolated as HTML.
-    assert 'x-text="t.role"' in page
+    # (The role badge renders "you" for user turns, so match the x-text binding by prefix.)
+    assert 'x-text="t.role' in page
     assert 'x-text="t.model"' in page
