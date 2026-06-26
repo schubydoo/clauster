@@ -279,6 +279,23 @@ def test_clone_url_host_resolving_to_no_addresses_rejected(monkeypatch):
         validate_clone_url("https://empty.example/r.git", _cfg())
 
 
+def test_clone_url_blocks_zoned_ipv6_link_local_from_resolver(monkeypatch):
+    # A real resolver returns IPv6 link-local addresses with a zone id appended
+    # (e.g. "fe80::1%eth0"). validate_clone_url strips the "%zone" suffix before parsing,
+    # and getaddrinfo IPv6 sockaddrs are 4-tuples (host, port, flowinfo, scope_id) — both
+    # an SSRF-relevant edge that the IPv4 private-host tests don't reach. Assert such a
+    # result is still classified and BLOCKED end-to-end (not slipped through or surfaced
+    # as a raw ValueError -> 500). NB: on Python >= 3.9 ip_address() also accepts the
+    # zoned form and classifies it the same, so this guards the full resolve->classify
+    # path for zoned link-local input, not the strip in isolation.
+    monkeypatch.setattr(
+        "clauster.provisioning.socket.getaddrinfo",
+        lambda *a, **k: [(10, 1, 6, "", ("fe80::1%eth0", 443, 0, 2))],
+    )
+    with pytest.raises(BlockedCloneHost):
+        validate_clone_url("https://zoned.example/r.git", _cfg())
+
+
 # ----- clone (fake git) -------------------------------------------------
 
 
