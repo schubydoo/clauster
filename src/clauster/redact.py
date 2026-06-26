@@ -106,8 +106,13 @@ def redact_screen_text(rows: list[str]) -> list[str]:
     The live pty-screen view (#534) feeds pyte-RENDERED rows here, never raw bytes —
     pyte has already consumed every escape sequence, so this applies only the id +
     secret masks. It deliberately does NOT :func:`strip_ansi`: there are no escapes
-    left to strip, and a fixed-width terminal row must keep its width (and the list its
-    row count) so the client renders the right geometry.
+    left to strip.
+
+    Row COUNT is preserved (the mask runs per row), but a row's LENGTH can change — a
+    mask is the fixed ``<redacted>`` token, so a long secret shrinks the row while a
+    short ``env_``/``session_`` id can lengthen it. Re-fitting rows to the exact
+    terminal width is the caller's job (:meth:`clauster.pty_screen.PtyScreen.frame`
+    re-fits each row to the screen width), not this text-only helper's.
 
     Best-effort defense-in-depth, like the rest of this module: a secret that wraps
     across the fixed column width, or a novel high-entropy value, can still slip through

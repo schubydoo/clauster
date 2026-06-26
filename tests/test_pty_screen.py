@@ -56,6 +56,21 @@ def test_default_geometry_is_120x40():
     assert len(frame["rows"]) == 40
 
 
+def test_every_frame_row_is_exactly_cols_wide_after_redaction():
+    # Redaction can SHORTEN a row (long secret -> 10-char `<redacted>`) or LENGTHEN it
+    # (short id -> `env_<redacted>`); frame() re-fits each row to exactly `cols` so the
+    # client's fixed grid never wraps. Truncation only trims the right edge (no span
+    # exposed). Both directions are exercised here.
+    scr = PtyScreen(cols=24, rows=3)
+    scr.feed(b"sk-abcdef0123456789 tail")  # long secret -> row shrinks
+    scr.feed(b"\r\nenv_ABCDEF")  # short id -> `env_<redacted>` lengthens past width
+    frame = scr.frame()
+    assert all(len(row) == 24 for row in frame["rows"])  # exact width, every row
+    joined = "".join(frame["rows"])
+    assert "sk-abcdef0123456789" not in joined and "env_ABCDEF" not in joined
+    assert "<redacted>" in joined
+
+
 def test_no_control_bytes_ever_reach_rows():
     # Lock the cells-only invariant against a future pyte change: a corpus of adversarial
     # control/escape sequences (7-bit + 8-bit C1 OSC, DCS, APC, CSI, lone ESC, NUL/BEL/DEL)

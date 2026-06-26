@@ -75,10 +75,18 @@ class PtyScreen:
         Shape: ``{"rows": [<redacted line>, ...], "cursor": {"x": int, "y": int},
         "cols": int, "rows_count": int}``. No raw ANSI and no terminal title ever appear:
         the rows are pyte-rendered plaintext run through :func:`redact_screen_text`.
+
+        Each row is re-fit to exactly ``cols`` characters AFTER redaction — masking can
+        shorten or lengthen a row (see :func:`redact_screen_text`), and the client draws a
+        fixed ``cols`` x ``rows_count`` grid, so an off-width row would corrupt the
+        geometry (a too-long row wraps). Truncation only trims the right edge, so it can
+        never expose a redacted span.
         """
         cursor = self._screen.cursor
+        redacted = redact_screen_text(list(self._screen.display))
+        rows = [row[: self.cols].ljust(self.cols) for row in redacted]
         return {
-            "rows": redact_screen_text(list(self._screen.display)),
+            "rows": rows,
             "cursor": {"x": cursor.x, "y": cursor.y},
             "cols": self.cols,
             "rows_count": self.rows,
