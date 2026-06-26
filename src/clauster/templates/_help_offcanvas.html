@@ -42,15 +42,17 @@
     </p>
 
     <h3 class="h4 mt-4">Launch modes</h3>
-    <p class="text-secondary small mb-2">How a session is started decides what it can resume.</p>
+    <p class="text-secondary small mb-2">"Run Claude here" offers a few ways to start a session.</p>
     <ul class="text-secondary">
-      <li><strong>Standard</strong> — the multi-session bridge. Best when you want several
-        sessions per project; resume is best-effort.</li>
-      <li><strong>PTY (true resume)</strong> — a single session per project under a PTY keeper,
-        with true <code>--continue</code> resume. Note a service restart ends a live PTY
-        session.</li>
-      <li><strong>Browser (hosted)</strong> — when enabled, streams a live view in this tab
-        only; it is not attachable from the desktop or mobile apps.</li>
+      <li><strong>In claude.ai / Desktop</strong> — a remote-control bridge you drive from the
+        Claude app on your phone or desktop. Under <em>Advanced</em> you can pick the resume
+        behavior: <strong>standard</strong> (multi-session; resume reconnects but doesn't replay
+        the prior conversation) or <strong>pty</strong> (single session, true
+        <code>--continue</code> resume — a service restart ends a live pty session).</li>
+      <li><strong>Here in the browser</strong> — when the hosted channel is enabled, watch the
+        session work live and approve tools inline in this tab (not attachable from the apps).</li>
+      <li><strong>Background</strong> — runs unattended; check back later. It appears as a row in
+        <em>Active sessions</em> with a "background" badge.</li>
     </ul>
 
     <h3 class="h4 mt-4">Permission modes</h3>
@@ -81,9 +83,8 @@
     <ul class="text-secondary">
       <li><strong>Configuration editor</strong> (pencil icon) — edit operational settings;
         changes apply after a restart.</li>
-      <li><strong>Background agents</strong> — the panel for agent-view background sessions
-        started on this host.</li>
       <li><strong>Theme toggle</strong> — switch between dark and light.</li>
+      <li><strong>Log out</strong> — end your dashboard session (when auth is enabled).</li>
     </ul>
 
     <p class="text-secondary small mt-4 mb-0">
