@@ -36,6 +36,13 @@ _AXE_SCRIPT = Path(__file__).resolve().parent / "vendor" / "axe.min.js"
 # init script (AGENT_BROWSER_INIT_SCRIPTS is comma-separated) so it runs before app code.
 _DIALOG_SCRIPT = Path(__file__).resolve().parent / "auto_accept_dialogs.js"
 
+# Unlike the a11y-only axe script (whose absence fails loudly as `axe is not defined`),
+# a missing dialog script would make every confirm-guarded click fail with an opaque
+# agent-browser error. It is committed + load-bearing, so fail loudly on a broken checkout
+# instead of silently dropping it.
+if not _DIALOG_SCRIPT.exists():  # pragma: no cover - guards a broken/partial checkout
+    raise FileNotFoundError(f"E2E dialog init script missing: {_DIALOG_SCRIPT}")
+
 # Poll cadence for the expect_* helpers; the per-call timeout is the caller's (the
 # suite's _STATUS_TIMEOUT / _GATE_TIMEOUT constants), defaulting to 5s.
 _DEFAULT_TIMEOUT_MS = 5_000
