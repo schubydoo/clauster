@@ -37,7 +37,8 @@ def test_keeper_launch_cmd_includes_screen_sidecar_only_when_given() -> None:
     on = SessionRunner._keeper_launch_cmd(
         Path("/s.json"), Path("/cwd"), ["claude", "x"], Path("/s.screen.json")
     )
-    assert on[on.index("--screen-sidecar") + 1] == "/s.screen.json"
+    # str(Path(...)) so the expected value is OS-portable (backslash path on Windows CI).
+    assert on[on.index("--screen-sidecar") + 1] == str(Path("/s.screen.json"))
     # the bridge argv stays intact after the `--` separator in both cases
     assert on[on.index("--") + 1 :] == ["claude", "x"]
     assert off[off.index("--") + 1 :] == ["claude", "x"]
