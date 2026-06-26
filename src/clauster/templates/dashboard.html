@@ -376,6 +376,10 @@
           <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
           <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
         </button>
+        {# In-app help (#571): only the `?` trigger sits inline in the navbar — the
+           panel is emitted at end-of-body (a `.navbar-expand-*` descendant `.offcanvas`
+           is flattened to static by Tabler's responsive CSS, which would kill the overlay). #}
+        {% with help_part = "trigger" %}{% include "_help_offcanvas.html" %}{% endwith %}
         {% if auth_enabled %}
         <form method="post" action="{{ request.scope.root_path }}/logout"> <!-- nosemgrep -->
           <button class="btn btn-sm" type="submit">Log out</button>
@@ -1074,6 +1078,10 @@
     </div>
   </template>
 </div>
+
+{# In-app help (#571) offcanvas panel + controller — emitted OUTSIDE the navbar and the
+   dashboard() Alpine scope (the controller is independent vanilla JS). #}
+{% with help_part = "panel" %}{% include "_help_offcanvas.html" %}{% endwith %}
 
 {% include "_dashboard_script.html" %}
 </body>
