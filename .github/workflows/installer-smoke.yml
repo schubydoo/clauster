@@ -9,6 +9,10 @@ name: Installer smoke
 on:
   workflow_dispatch:
   pull_request:
+    # ready_for_review fires on the draft→ready flip; keep opened/synchronize/
+    # reopened so normal PRs + fixup pushes keep smoking installers — setting
+    # any types: replaces the implicit defaults (#623).
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - install.sh
       - install.ps1
@@ -28,6 +32,7 @@ concurrency:
 jobs:
   sh:
     name: install.sh (${{ matrix.os }})
+    if: github.event.pull_request.draft != true # draft PRs skip; ready_for_review re-fires (#623)
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +56,7 @@ jobs:
 
   ps1:
     name: install.ps1 (windows)
+    if: github.event.pull_request.draft != true # draft PRs skip; ready_for_review re-fires (#623)
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -74,6 +80,7 @@ jobs:
 
   brew:
     name: Homebrew (${{ matrix.os }})
+    if: github.event.pull_request.draft != true # draft PRs skip; ready_for_review re-fires (#623)
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +107,7 @@ jobs:
 
   nix:
     name: Nix flake (${{ matrix.os }})
+    if: github.event.pull_request.draft != true # draft PRs skip; ready_for_review re-fires (#623)
     strategy:
       fail-fast: false
       matrix:

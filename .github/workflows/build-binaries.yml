@@ -17,6 +17,10 @@ on:
   # smoke scripts, this workflow, or the dependency set) — keeps the 5-target build off
   # the critical path for ordinary code PRs.
   pull_request:
+    # ready_for_review fires the build on the draft→ready flip; keep opened/
+    # synchronize/reopened so normal PRs + fixup pushes keep building — setting
+    # any types: replaces the implicit defaults (#623).
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - clauster.spec
       - pyinstaller_entry.py
@@ -36,6 +40,8 @@ concurrency:
 jobs:
   build:
     name: build ${{ matrix.target }}
+    # Draft PRs skip the 5-target build; ready_for_review re-fires it (#623).
+    if: github.event.pull_request.draft != true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
