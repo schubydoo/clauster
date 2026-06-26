@@ -109,6 +109,19 @@ def test_hmac_mode_without_shared_secret_rejected(write_config):
         )
 
 
+def test_hmac_mode_requires_trusted_ips(write_config):
+    # #367: HMAC mode also gates on peer_trusted(peer_ip, trusted_ips) before checking the
+    # signature, so an empty trusted_ips allowlist makes the proxy path admit no one even
+    # with a valid shared_secret — fail closed at load rather than start silently inoperable.
+    with pytest.raises(ValueError, match="trusted_ips"):
+        load_config(
+            write_config(
+                "auth:\n  enabled: true\n  reverse_proxy:\n    enabled: true\n"
+                '    shared_secret: "k"\n'
+            )
+        )
+
+
 def test_header_only_mode_requires_trusted_ips(write_config):
     # #367: header-only forward-auth drops the HMAC requirement but the bare user_header is
     # forgeable — an empty trusted_ips allowlist in this mode is a footgun, so reject it.

@@ -240,24 +240,25 @@ class ReverseProxyConfig(BaseModel):
     @model_validator(mode="after")
     def _require_secret_or_trusted_ips(self) -> ReverseProxyConfig:
         # Fail closed on an un-runnable proxy config rather than silently authenticating
-        # nobody (or, worse, everybody). HMAC mode needs a `shared_secret` to verify
-        # against; header-only mode drops the HMAC requirement but MUST still pin a
-        # `trusted_ips` allowlist — without it `peer_trusted` is always False and the mode
-        # admits no one, but an empty allowlist in header-only mode is the dangerous knob to
-        # leave un-validated, so we require the operator to name the peer explicitly.
+        # nobody. `trusted_ips` is the FIRST gate for BOTH modes: every enforcement point
+        # checks `peer_trusted(peer_ip, trusted_ips)` before anything else, and that is
+        # always False with an empty list — so an empty allowlist makes proxy auth admit no
+        # one regardless of mode. HMAC mode additionally needs a `shared_secret` to verify
+        # the signature the proxy adds on top of the peer-IP gate.
         if not self.enabled:
             return self
+        if not self.trusted_ips:
+            raise ValueError(
+                "reverse_proxy.enabled is true but trusted_ips is empty — the peer-IP "
+                "allowlist is the first gate for both HMAC and header-only modes "
+                "(peer_trusted() is always False with an empty list, so proxy auth would "
+                "admit no one). Pin the proxy's IP/CIDR in trusted_ips."
+            )
         if self.require_hmac and not self.shared_secret:
             raise ValueError(
                 "reverse_proxy.require_hmac is true but no shared_secret is set — HMAC mode "
                 "needs the key the proxy signs with. Set shared_secret, or set "
                 "require_hmac: false for a forward-auth (header-only) proxy."
-            )
-        if not self.require_hmac and not self.trusted_ips:
-            raise ValueError(
-                "reverse_proxy.require_hmac is false (header-only forward-auth) but "
-                "trusted_ips is empty — the bare user_header is forgeable by anyone who can "
-                "reach the bind, so a trusted_ips allowlist is mandatory in this mode."
             )
         return self
 
