@@ -3,11 +3,12 @@
 Coverage-guided fuzz harnesses for clauster's untrusted-input parsers. They run
 in CI via [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) two ways:
 per-PR over the changed code (`.github/workflows/cflite_pr.yml`, `address`
-sanitizer, ~180s) and a daily scheduled batch over **every** harness
+sanitizer, ~180s) and an every-other-day scheduled batch over **every** harness
 (`.github/workflows/cflite_batch.yml`, 300s each) whose corpus **persists across
-runs** in a private storage repo, so coverage compounds over time. Both are
-informational — never block a merge; a reproducible crash surfaces as SARIF in
-the Security tab. Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
+runs** in a private storage repo, so coverage compounds over time. A weekly cron
+(`.github/workflows/cflite_cron.yml`) prunes that corpus and publishes a coverage
+report. All are informational — never block a merge; a reproducible crash surfaces
+as SARIF in the Security tab. Build config lives in [`.clusterfuzzlite/`](../.clusterfuzzlite/).
 
 ## Harnesses
 
@@ -44,3 +45,21 @@ Drop a `*_fuzzer.py` file here with a `TestOneInput(data: bytes)` entry point (s
 the existing ones). `build.sh` discovers `fuzz/*_fuzzer.py` automatically — no
 workflow change needed. Good targets: pure functions that accept untrusted/
 structured input and are expected never to crash.
+
+## Seed corpora & dictionaries
+
+A harness whose interesting branches are gated on **literal tokens** (the
+redaction id/secret prefixes, the `[bridge:init]`-style markers) won't reach them
+from Atheris' random `FuzzedDataProvider` bytes alone — it sits at a 0-element
+corpus, fuzzing only the no-match path. Bootstrap it with either or both, picked
+up automatically by `build.sh`:
+
+- **Seed corpus** — representative inputs in `fuzz/seeds/<harness_name>/` (one file
+  per input). `build.sh` zips them to `$OUT/<harness_name>_seed_corpus.zip`.
+- **Dictionary** — literal tokens in `fuzz/dicts/<harness_name>.dict` (libFuzzer
+  format: `"token"` per line, `\xNN` escapes). `build.sh` copies it to
+  `$OUT/<harness_name>.dict`, which the fuzzer auto-loads as `-dict=`.
+
+`redact_fuzzer` and `parse_markers_fuzzer` ship both (their regexes need structured
+tokens the random fuzzer never synthesises); the others grow a corpus fine from
+structural input and need neither.

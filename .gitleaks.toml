@@ -1,0 +1,17 @@
+# gitleaks config for the `secret scan` job (.github/workflows/security.yml).
+#
+# Keep the full default ruleset, but allowlist the fuzz harness fixtures: the
+# redaction fuzzer's seed corpus + dictionary deliberately contain secret-SHAPED
+# strings (a fake `AKIA…` AWS key id, `ghp_…`/`glpat-…`/`xoxb-…` token shapes, a
+# `Bearer …` header) — that is their whole purpose, to exercise the matchers in
+# `src/clauster/redact.py`. They are NOT real credentials. Scoped to the two
+# fixture dirs only, so a real secret committed anywhere else is still caught.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fuzz seed corpora + dictionaries: intentional fake secret-shaped inputs for the redaction fuzzers, not real secrets."
+paths = [
+  '''fuzz/seeds/.*''',
+  '''fuzz/dicts/.*''',
+]

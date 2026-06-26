@@ -1,0 +1,36 @@
+# libFuzzer dictionary for redact_fuzzer (redact.sanitize_line).
+# These are the literal tokens that gate the interesting branches — the
+# bearer-equivalent id prefixes, the secret shapes, and ANSI introducers.
+# Atheris' FuzzedDataProvider almost never synthesises them from random bytes,
+# so without this dict (and the seed corpus) the harness only ever exercises the
+# no-match path. See fuzz/README.md.
+"session_"
+"env_"
+"cse_"
+"ghp_"
+"gho_"
+"ghu_"
+"ghs_"
+"ghr_"
+"github_pat_"
+"glpat-"
+"AKIA"
+"sk-"
+"xoxb-"
+"xoxp-"
+"xoxa-"
+"xoxr-"
+"xoxs-"
+"clauster_pat_"
+"Bearer "
+# full-shape samples (a complete id/secret in one splice)
+"session_DEADBEEF01"
+"env_01HXYZABCDEF"
+"AKIA0123456789ABCDEF"
+# ANSI / CSI / OSC introducers
+"\x1b["
+"\x1b[0m"
+"\x1b[31m"
+"\x1b]"
+"\x07"
+"-"
