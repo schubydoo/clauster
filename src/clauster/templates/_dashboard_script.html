@@ -85,6 +85,13 @@
         error: "", saved: false, trigger: null, gen: 0,
       },
       configQuery: "",
+      // --- read-only transcript viewer (#431) ---
+      transcripts: {
+        open: false, loading: false, loadingMore: false,
+        project: "", sessions: [],
+        session: "", turns: [], total: 0, nextCursor: null,
+        error: "", trigger: null, gen: 0,
+      },
       agents: [],
       agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
@@ -571,6 +578,110 @@
           }
         } catch (e) { c.error = "Save failed."; }
         finally { c.saving = false; }
+      },
+      // --- read-only transcript viewer (#431) ---
+      // Coarse relative timestamp from an mtime (epoch SECONDS, as the API returns
+      // st_mtime). A glance, not a clock — mirrors externalWhen's bucketing.
+      transcriptWhen(mtime) {
+        const t = Number(mtime) * 1000;
+        if (!t || isNaN(t)) return "";
+        const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        if (secs < 60) return "just now";
+        const mins = Math.floor(secs / 60);
+        if (mins < 60) return mins + "m ago";
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return hrs + "h ago";
+        return Math.floor(hrs / 24) + "d ago";
+      },
+      // Manual focus trap (no @alpinejs/focus plugin): wrap Tab at the dialog edges.
+      // Identical idiom to trapConfigTab — display:none branches are excluded so the
+      // trap never leaks past a hidden control.
+      trapTranscriptTab(e) {
+        const sel = 'a[href],button:not([disabled]),input:not([disabled]),' +
+          'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+        const f = [...e.currentTarget.querySelectorAll(sel)].filter((el) => el.offsetParent !== null);
+        if (!f.length) return;
+        const first = f[0], last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+        else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+      },
+      closeTranscripts() {
+        const t = this.transcripts;
+        // Void any in-flight load (bump gen) so its response + gen-guarded finally can't write
+        // into — or leave a lock set on — a modal that's been closed/reopened. Then clear both
+        // loading flags so the next open isn't blocked by the single-flight guard.
+        t.gen = (t.gen || 0) + 1;
+        t.open = false; t.loading = false; t.loadingMore = false;
+        document.body.style.overflow = "";  // release the scroll lock
+        if (t.trigger && t.trigger.focus) t.trigger.focus();  // restore focus to the opener
+      },
+      // Open the viewer and load the project's session list (newest-first).
+      async openTranscripts(name) {
+        const t = this.transcripts;
+        if (t.open || t.loading) return;  // single-flight: ignore re-entry while loading/open
+        t.gen = (t.gen || 0) + 1;  // bump generation so a stale in-flight load is ignored on reopen
+        const myGen = t.gen;
+        t.trigger = document.activeElement;  // remember the opener to restore focus on close
+        t.open = true; t.project = name; t.error = ""; t.loading = true;
+        t.sessions = []; t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null;
+        document.body.style.overflow = "hidden";  // lock background scroll while modal is up
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/transcripts");
+          if (t.gen !== myGen) return;  // reopened mid-load — drop this response
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) { t.error = "Failed to load transcripts."; return; }
+          const d = await res.json();
+          t.sessions = Array.isArray(d.sessions) ? d.sessions : [];
+        } catch (e) { t.error = "Failed to load transcripts."; }
+        finally { if (t.gen === myGen) t.loading = false; }
+      },
+      // Select a session and load its first page of turns (newest-first).
+      async openTranscriptSession(session) {
+        const t = this.transcripts;
+        t.gen = (t.gen || 0) + 1;
+        const myGen = t.gen;
+        // Clear loadingMore too: if a previous session's "Load more" was in flight when the
+        // user switched sessions, its gen-guarded finally was skipped, leaving the lock set —
+        // which would silently dead-button this session's "Load more".
+        t.session = session; t.error = ""; t.loading = true; t.loadingMore = false;
+        t.turns = []; t.total = 0; t.nextCursor = null;
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
+            "/transcripts/" + encodeURIComponent(session));
+          if (t.gen !== myGen) return;
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) { t.error = "Failed to load transcript."; return; }
+          const d = await res.json();
+          t.turns = Array.isArray(d.turns) ? d.turns : [];
+          t.total = d.total || 0;
+          t.nextCursor = (d.next_cursor === undefined) ? null : d.next_cursor;
+        } catch (e) { t.error = "Failed to load transcript."; }
+        finally { if (t.gen === myGen) t.loading = false; }
+      },
+      // Append the next page using next_cursor; the control is hidden when it's null.
+      async loadMoreTranscriptTurns() {
+        const t = this.transcripts;
+        if (t.loadingMore || t.nextCursor === null) return;  // single-flight + nothing-to-load guard
+        const myGen = t.gen;
+        const cursor = t.nextCursor;
+        t.loadingMore = true; t.error = "";
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
+            "/transcripts/" + encodeURIComponent(t.session) + "?cursor=" + encodeURIComponent(cursor));
+          if (t.gen !== myGen) return;  // session changed/closed mid-fetch — drop this page
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) { t.error = "Failed to load more turns."; return; }
+          const d = await res.json();
+          if (Array.isArray(d.turns)) t.turns.push(...d.turns);
+          t.nextCursor = (d.next_cursor === undefined) ? null : d.next_cursor;
+        } catch (e) { t.error = "Failed to load more turns."; }
+        finally { if (t.gen === myGen) t.loadingMore = false; }
+      },
+      // Return to the session list (clear the selected session + its turns).
+      backToTranscriptList() {
+        const t = this.transcripts;
+        t.gen = (t.gen || 0) + 1;  // void any in-flight turn fetch
+        t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loadingMore = false;
       },
       async refresh() {
         // Single-flight: setInterval can fire a new tick while a slow refresh is still

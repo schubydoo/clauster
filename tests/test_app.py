@@ -610,3 +610,46 @@ def test_dashboard_renders_resume_mode_picker(write_config):
         assert "!== 'pty'" in resp.text  # Spawn selector gated off in pty mode
         assert 'id="resume-hint-alpha"' in resp.text  # hint element rendered
         assert 'aria-describedby="resume-hint-alpha"' in resp.text  # a11y wiring
+
+
+def test_dashboard_transcript_viewer_trigger_and_modal_render(write_config):
+    # #431 frontend: every project row carries a "View transcript" trigger wired to
+    # openTranscripts, and the read-only viewer modal ships with its session-list +
+    # turn-page chrome and the Alpine fetch methods that hit the transcripts API.
+    page = _client(write_config).get("/").text
+    # Per-project trigger (rendered once per row — alpha/beta/gamma).
+    assert 'data-test="transcript-trigger"' in page
+    assert "openTranscripts('alpha')" in page
+    assert "</svg>Transcript" in page  # the trigger's visible label
+    # The viewer modal + its session/turn affordances.
+    assert 'data-test="transcript-modal"' in page
+    assert 'data-test="transcript-session"' in page  # session-list rows
+    assert 'data-test="transcript-turn"' in page  # rendered turn cards
+    assert 'data-test="transcript-load-more"' in page  # pagination control
+    assert 'data-test="transcript-empty"' in page  # empty state
+    assert 'data-test="transcript-error"' in page  # error state
+    # "Load more" is hidden when next_cursor is exhausted (null).
+    assert "transcripts.nextCursor !== null" in page
+    # Alpine fetch wiring: the methods + the transcripts API path ship in the page.
+    assert "async openTranscripts(name)" in page
+    assert "async openTranscriptSession(session)" in page
+    assert "async loadMoreTranscriptTurns()" in page
+    assert '"/transcripts"' in page  # session-list endpoint suffix
+    assert '"/transcripts/"' in page  # per-session endpoint suffix
+    # 401 → bounce to login (copied from the usage/config fetchers).
+    assert page.count('window.location.assign(ROOT + "/login")') >= 1
+
+
+def test_dashboard_transcript_content_uses_x_text_not_x_html(write_config):
+    # CRITICAL safety (#431): turn content is server-redacted but still untrusted
+    # agent/user output — rendering it as HTML would be stored XSS. The turn body MUST
+    # use x-text, and the dashboard must carry no x-html anywhere near the turn render.
+    page = _client(write_config).get("/").text
+    assert 'x-text="t.content"' in page  # turn body bound via x-text
+    # No x-html DIRECTIVE anywhere on the page — the attribute form is the XSS sink
+    # (a literal "x-html" inside prose/comments isn't, so match the binding, not the word).
+    assert "x-html=" not in page and "x-html =" not in page
+    # role / model / timestamp are likewise x-text-bound, never interpolated as HTML.
+    # (The role badge renders "you" for user turns, so match the x-text binding by prefix.)
+    assert 'x-text="t.role' in page
+    assert 'x-text="t.model"' in page

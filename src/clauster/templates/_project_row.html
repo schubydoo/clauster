@@ -33,6 +33,16 @@
                     :title="runningCountFor('{{ p.name }}') + ' live session(s) — see Active sessions below'"
                     x-text="'● ' + runningCountFor('{{ p.name }}') + ' running'"></span>
 
+              <!-- read-only transcript viewer trigger (#431): opens the session-history
+                   modal for this project. A ghost chip next to the usage/readiness affordances
+                   — not display:none-gated by a `d-*` !important class on an x-show element. -->
+              <button type="button" class="btn btn-ghost-secondary btn-sm py-0 px-1" data-test="transcript-trigger"
+                      @click="openTranscripts('{{ p.name }}')"
+                      title="View this project's read-only session transcripts"
+                      aria-label="View transcripts for {{ p.name }}">
+                <svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>Transcript
+              </button>
+
               <!-- per-project readiness pill (FE-1b): an attention chip, shown only when a
                    per-project precondition warns (untrusted dir, non-git for worktree mode);
                    click to expand the specific checks. Silent when the project is launch-ready.

@@ -934,6 +934,102 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             },
         }
 
+    @app.get("/api/projects/{name}/transcripts")
+    async def api_project_transcripts(name: str) -> dict:
+        """List a project's session transcripts for the read-only viewer (issue #431).
+
+        Returns ``{project, sessions: [{session, mtime, turn_count}]}`` newest-first
+        (by mtime). ``session`` is the transcript filename stem (the per-session
+        uuid). Mirrors :func:`api_project_usage`: the name is validated for
+        path-component safety (422), the on-disk walk runs off the event loop, and a
+        broken directory or unreadable file (``OSError``) degrades to a defined 503 —
+        never a bare 500 and never echoing the on-disk path to the browser. We
+        deliberately skip a discovery scan (an unknown-but-safe name simply has no
+        transcripts and lists empty).
+        """
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+
+        def _list() -> list[dict]:
+            project_path = config.projects_root / name
+            out: list[dict] = []
+            for path in usage.transcript_paths_for(project_path):
+                try:
+                    mtime = path.stat().st_mtime
+                    # turn_count needs the per-line scan; the reader streams the file
+                    # (never loaded whole) and is already redaction-safe.
+                    turn_count = len(usage.read_transcript_turns(path))
+                except FileNotFoundError:
+                    # A session removed mid-walk (racing cleanup) is skipped, not fatal.
+                    continue
+                out.append({"session": path.stem, "mtime": mtime, "turn_count": turn_count})
+            out.sort(key=lambda s: s["mtime"], reverse=True)  # newest first
+            return out
+
+        # An OSError walking transcripts must surface as a defined "couldn't read"
+        # 503, not a 500. Log the full error server-side (it can carry an absolute
+        # on-disk path) but return only the static prefix so the path never leaks.
+        try:
+            sessions = await asyncio.to_thread(_list)
+        except OSError as exc:
+            logger.warning("transcript list failed for %r: %s", name, exc)
+            raise HTTPException(status_code=503, detail="could not read transcripts") from exc
+        return {"project": name, "sessions": sessions}
+
+    @app.get("/api/projects/{name}/transcripts/{session}")
+    async def api_project_transcript_session(
+        name: str, session: str, cursor: int = 0, limit: int = 50
+    ) -> dict:
+        """Return a newest-first page of one session's turns (issue #431).
+
+        Turns are ``{role, content, model, timestamp}`` already redacted by
+        :func:`usage.read_transcript_turns` (every rendered field passes through
+        ``redact.sanitize_line`` before it leaves the reader). The page is
+        newest-first; ``cursor`` is an opaque offset into the reversed turn list and
+        ``next_cursor`` is the offset to fetch the following page (``None`` at the
+        end). BOTH ``name`` and ``session`` are validated path-safe: the name via the
+        project-name regex (422), and ``session`` via
+        :func:`usage.resolve_session_transcript`, which fails closed against ``..`` /
+        separators and confirms the resolved file sits strictly inside the project's
+        transcript dir (a bad/unknown session → 404, never a directory escape). An
+        unreadable transcript (``OSError``) degrades to a defined 503 with no path in
+        the body — never a bare 500.
+        """
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        # Clamp paging args defensively: a negative cursor/limit or an absurd limit
+        # must not let a client over-read or index from the tail.
+        cursor = max(cursor, 0)
+        limit = max(1, min(limit, 500))
+
+        def _read() -> dict:
+            project_path = config.projects_root / name
+            path = usage.resolve_session_transcript(project_path, session)
+            if path is None:
+                # Fail closed: unsafe or unknown session is a 404, never a path escape.
+                raise HTTPException(status_code=404, detail="transcript not found")
+            turns = usage.read_transcript_turns(path)
+            turns.reverse()  # newest-first page order
+            page = turns[cursor : cursor + limit]
+            end = cursor + limit
+            next_cursor = end if end < len(turns) else None
+            return {
+                "project": name,
+                "session": session,
+                "turns": page,
+                "next_cursor": next_cursor,
+                "total": len(turns),
+            }
+
+        try:
+            return await asyncio.to_thread(_read)
+        except HTTPException:
+            # Re-raise the in-thread 404 unchanged (don't fold it into the 503 below).
+            raise
+        except (FileNotFoundError, OSError) as exc:
+            logger.warning("transcript read failed for %r/%r: %s", name, session, exc)
+            raise HTTPException(status_code=503, detail="could not read transcript") from exc
+
     @app.get("/api/projects/{name}/metrics")
     async def api_project_metrics(name: str) -> dict:
         # Live CPU/memory/disk for a project's running bridge (dashboard badge). Served

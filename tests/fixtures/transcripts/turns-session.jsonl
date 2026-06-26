@@ -1,0 +1,7 @@
+{"type": "user", "timestamp": "2026-06-25T10:00:00Z", "message": {"role": "user", "content": "Hi, can you read my config?"}}
+{"type": "assistant", "timestamp": "2026-06-25T10:00:05Z", "message": {"role": "assistant", "model": "claude-opus-4-8", "content": [{"type": "text", "text": "Sure — here is the plan."}, {"type": "tool_use", "id": "toolu_01", "name": "Read", "input": {"file_path": "/etc/config"}}]}}
+{"type": "user", "timestamp": "2026-06-25T10:00:10Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "ok"}, {"type": "text", "text": "my token is session_DEADBEEF012345 and key sk-ABCDEF0123456789ghij please mask it"}]}}
+{"type": "assistant", "timestamp": "2026-06-25T10:00:15Z", "message": {"role": "assistant", "model": "claude-opus-4-8", "content": "Done. I will not echo your AKIAIOSFODNN7EXAMPLE credentials."}}
+{"type": "summary", "timestamp": "2026-06-25T10:00:20Z", "summary": "no message field here, should be skipped"}
+not even json — skip me
+{"type": "assistant", "timestamp": "2026-06-25T10:00:25Z", "message": {"model": "claude-opus-4-8", "content": "no role -> skipped"}}

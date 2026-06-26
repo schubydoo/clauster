@@ -12,6 +12,7 @@ import os
 from datetime import UTC
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
@@ -228,16 +229,17 @@ def test_card_renders_known_project(write_config, tmp_path):
 
 
 def test_card_reflects_project_shape(write_config, tmp_path):
-    # Per-project Jinja conditionals render: the CLAUDE.md meta indicator (the
-    # ic-page icon) only appears where a CLAUDE.md is present; the Git meta
-    # indicator only appears for a git repo. Fixtures: alpha=git, beta=CLAUDE.md,
-    # gamma=plain.
+    # Per-project Jinja conditionals render: the CLAUDE.md meta indicator only
+    # appears where a CLAUDE.md is present; the Git meta indicator only appears for
+    # a git repo. Fixtures: alpha=git, beta=CLAUDE.md, gamma=plain. The CLAUDE.md
+    # badge is matched by its unique title/label (the ic-page icon is no longer
+    # exclusive to it — the #431 transcript trigger reuses the same file-text glyph).
     client = _client(write_config, tmp_path)
     alpha = client.get("/api/projects/alpha/row").text
     beta = client.get("/api/projects/beta/row").text
     gamma = client.get("/api/projects/gamma/row").text
-    assert '<use href="#ic-page"' in beta  # beta ships CLAUDE.md
-    assert '<use href="#ic-page"' not in gamma  # gamma doesn't
+    assert 'title="A CLAUDE.md file is present"' in beta  # beta ships CLAUDE.md
+    assert 'title="A CLAUDE.md file is present"' not in gamma  # gamma doesn't
     assert '<use href="#ic-git"' in alpha  # alpha is a git repo
     assert '<use href="#ic-git"' not in gamma  # gamma isn't
 
@@ -522,6 +524,198 @@ def test_project_usage_empty_project_zero(write_config, tmp_path):
     assert body["cost_usd"] == 0.0
     assert body["by_model"] == {}
     assert body["approximate"] is True
+
+
+# ----- read-only transcript viewer (#431) ------------------------------
+
+TURNS_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "transcripts" / "turns-session.jsonl"
+)
+
+
+def _plant_transcripts(monkeypatch, tmp_path, project_name="gamma", sessions=None):
+    """Redirect the transcript dir to a tmp dir and plant session transcripts.
+
+    Mirrors how Claude stores per-session JSONLs under
+    ``<claude_projects_dir>/<sanitized-cwd>/<session>.jsonl``. The route calls
+    ``usage.transcript_paths_for`` / ``usage.resolve_session_transcript`` WITHOUT a
+    ``claude_projects_dir`` arg, so they use the import-time default
+    (``~/.claude/projects`` — the live account dir we must never touch). We rebind
+    those two readers to inject the tmp ``claude_dir`` instead, so the test stays
+    fully off the real home. The route resolves ``config.projects_root / name``
+    (projects_root == tmp_path). Returns the planted transcript dir.
+    """
+    from clauster import usage as usage_mod
+    from clauster.pointers import sanitize_cwd
+
+    claude_dir = tmp_path / "claude_projects"
+    _real_paths_for = usage_mod.transcript_paths_for
+    _real_resolve = usage_mod.resolve_session_transcript
+    monkeypatch.setattr(
+        usage_mod,
+        "transcript_paths_for",
+        lambda project_path, claude_projects_dir=claude_dir: _real_paths_for(
+            project_path, claude_projects_dir
+        ),
+    )
+    monkeypatch.setattr(
+        usage_mod,
+        "resolve_session_transcript",
+        lambda project_path, session, claude_projects_dir=claude_dir: _real_resolve(
+            project_path, session, claude_projects_dir
+        ),
+    )
+    project_path = tmp_path / project_name  # projects_root is tmp_path
+    tdir = claude_dir / sanitize_cwd(project_path)
+    tdir.mkdir(parents=True, exist_ok=True)
+    for session in sessions or {}:
+        (tdir / f"{session}.jsonl").write_bytes(TURNS_FIXTURE.read_bytes())
+    return tdir
+
+
+def test_transcripts_list_invalid_name_422(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/bad.name/transcripts")
+    assert r.status_code == 422
+
+
+def test_transcripts_list_empty_project(write_config, tmp_path, monkeypatch):
+    _plant_transcripts(monkeypatch, tmp_path, sessions=[])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"project": "gamma", "sessions": []}
+
+
+def test_transcripts_list_newest_first_with_counts(write_config, tmp_path, monkeypatch):
+    tdir = _plant_transcripts(monkeypatch, tmp_path, sessions=["s-old", "s-new"])
+    # Make s-new strictly newer so the newest-first ordering is deterministic.
+    os.utime(tdir / "s-old.jsonl", (1_000_000, 1_000_000))
+    os.utime(tdir / "s-new.jsonl", (2_000_000, 2_000_000))
+    body = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts").json()
+    sessions = body["sessions"]
+    assert [s["session"] for s in sessions] == ["s-new", "s-old"]  # newest first
+    assert all(s["turn_count"] == 4 for s in sessions)  # fixture has 4 renderable turns
+    assert all(set(s) == {"session", "mtime", "turn_count"} for s in sessions)
+
+
+def test_transcripts_list_skips_session_vanished_mid_walk(write_config, tmp_path, monkeypatch):
+    # A transcript listed but removed before its turn-read (racing session cleanup)
+    # is skipped, not fatal: the list still returns the surviving sessions.
+    from clauster import usage as usage_mod
+
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["keep", "vanish"])
+    real_read = usage_mod.read_transcript_turns
+
+    def _read(path):
+        if path.stem == "vanish":
+            raise FileNotFoundError("gone")
+        return real_read(path)
+
+    monkeypatch.setattr(usage_mod, "read_transcript_turns", _read)
+    body = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts").json()
+    assert [s["session"] for s in body["sessions"]] == ["keep"]
+
+
+def test_transcripts_list_read_error_503_no_path_leak(write_config, tmp_path, monkeypatch):
+    from clauster import usage as usage_mod
+
+    def _boom(*a, **k):
+        raise OSError("[Errno 13] Permission denied: '/home/secret/projects/gamma'")
+
+    monkeypatch.setattr(usage_mod, "transcript_paths_for", _boom)
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts")
+    assert r.status_code == 503
+    assert r.json()["detail"] == "could not read transcripts"
+    assert "/home/secret" not in r.text and "Errno" not in r.text
+
+
+def test_transcript_session_invalid_name_422(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/bad.name/transcripts/s1")
+    assert r.status_code == 422
+
+
+def test_transcript_session_returns_redacted_turns(write_config, tmp_path, monkeypatch):
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["session"] == "sess1"
+    assert body["total"] == 4
+    # Newest-first: the last assistant turn leads the page.
+    assert body["turns"][0]["role"] == "assistant"
+    assert {"role", "content", "model", "timestamp"} == set(body["turns"][0])
+
+
+def test_transcript_session_redacts_planted_secret(write_config, tmp_path, monkeypatch):
+    # THE security gate at the ROUTE boundary: a planted session id / sk- key / AKIA
+    # id in transcript text must never reach the HTTP response — sanitize_line applied.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1")
+    assert r.status_code == 200
+    assert "DEADBEEF012345" not in r.text
+    assert "sk-ABCDEF0123456789ghij" not in r.text
+    assert "AKIAIOSFODNN7EXAMPLE" not in r.text
+    assert "<redacted>" in r.text
+
+
+def test_transcript_session_pagination_cursor_advances(write_config, tmp_path, monkeypatch):
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    # 4 turns, limit 2 -> first page of 2 with a next_cursor, second page exhausts it.
+    first = client.get("/api/projects/gamma/transcripts/sess1?limit=2").json()
+    assert len(first["turns"]) == 2
+    assert first["next_cursor"] == 2
+    second = client.get(
+        f"/api/projects/gamma/transcripts/sess1?limit=2&cursor={first['next_cursor']}"
+    ).json()
+    assert len(second["turns"]) == 2
+    assert second["next_cursor"] is None  # exhausted
+    # The two pages are disjoint and cover all turns newest-first.
+    assert first["turns"] + second["turns"] != first["turns"]  # advanced, not repeated
+
+
+@pytest.mark.parametrize("session", ["..", "../escape", "a%2Fb", "..%2F..%2Fx"])
+def test_transcript_session_traversal_router_rejects_404(
+    write_config, tmp_path, monkeypatch, session
+):
+    # First line of defense: a traversal/slash session is unroutable (the literal
+    # path has too many/normalized segments), so Starlette 404s before our handler.
+    # The security outcome is the same — no escape, no 500. (%2F decodes to "/".)
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get(f"/api/projects/gamma/transcripts/{session}")
+    assert r.status_code == 404
+
+
+@pytest.mark.parametrize("session", ["a%5Cb", "foo..bar"])
+def test_transcript_session_guard_rejects_unsafe_404(write_config, tmp_path, monkeypatch, session):
+    # Defense-in-depth: a session that DOES reach the handler but is unsafe (a
+    # backslash separator) or simply has no matching file -> resolve_session_transcript
+    # fails closed and the route returns our defined 404, never a path escape or 500.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get(f"/api/projects/gamma/transcripts/{session}")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "transcript not found"
+
+
+def test_transcript_session_unknown_404(write_config, tmp_path, monkeypatch):
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/ghost")
+    assert r.status_code == 404
+
+
+def test_transcript_session_read_error_503_no_path_leak(write_config, tmp_path, monkeypatch):
+    from clauster import usage as usage_mod
+
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+
+    def _boom(path):
+        raise OSError("[Errno 13] Permission denied: '/home/secret/sess1.jsonl'")
+
+    monkeypatch.setattr(usage_mod, "read_transcript_turns", _boom)
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1")
+    assert r.status_code == 503
+    assert r.json()["detail"] == "could not read transcript"
+    assert "/home/secret" not in r.text and "Errno" not in r.text
 
 
 # ----- ghost-environment reaper (opt-in dashboard surface) --------------
