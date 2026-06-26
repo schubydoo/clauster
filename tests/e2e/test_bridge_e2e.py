@@ -183,3 +183,40 @@ def test_pty_mode_start_then_resume_adds_continue(
     assert "--remote-control" in resume_argv  # resume stays on the flag form...
     assert "remote-control" not in resume_argv  # ...never the subcommand form
     assert "--continue" in resume_argv  # true-resume restores the prior session
+
+
+def test_background_launch_option_labeled_and_reveals_subfields(
+    browser: AgentBrowser, open_server: str
+) -> None:
+    """The detached/background launch mode reads "Background" (UX-04, #567) and choosing
+    it reveals its sub-fields — no spawn, so a read-only server is enough.
+
+    Guards the rename's only surface with no other test: the launch picker. The radio's
+    internal value stays ``detached`` (the routing token), only the visible label moved
+    Fire-and-forget → Background, and the ``lmode === 'detached'`` sub-UI (the claude.ai
+    opt-in + the optional first-prompt box) gates on that unchanged token.
+    """
+    browser.goto(open_server)
+    browser.expect_visible('[data-project="alpha"]')
+
+    # Open the per-project launch popover.
+    browser.click('[data-project="alpha"] .launch-anchor button')
+    browser.expect_visible('[data-project="alpha"] .launch-pop')
+
+    # The picker offers the mode under the unchanged internal value "detached".
+    bg_radio = '[data-project="alpha"] input[name="lm-alpha"][value="detached"]'
+    browser.expect_visible(bg_radio)
+
+    # Default mode is desktop, so the detached sub-fields start hidden.
+    first_prompt = "#lprompt-alpha"
+    cloud_optin = '[data-project="alpha"] input[x-model="lcloud"]'
+    browser.expect_hidden(first_prompt)
+
+    # Selecting it marks its option (.is-sel) and reveals the sub-fields. Assert the
+    # SELECTED option's own label reads "Background" (not just that the word appears
+    # somewhere in the popover), so a future relabel of *this* option is caught.
+    browser.check(bg_radio)
+    selected_label = '[data-project="alpha"] label.launch-opt.is-sel .fw-medium'
+    browser.expect_text(selected_label, "Background")
+    browser.expect_visible(first_prompt)
+    browser.expect_visible(cloud_optin)
