@@ -1,0 +1,1 @@
+[bridge:api] POST /v1/environments/bridge -> 200 environment_id=env_01HXYZABCDEF12

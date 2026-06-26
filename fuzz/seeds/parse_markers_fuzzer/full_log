@@ -1,0 +1,4 @@
+[bridge:init] bridgeId=12345678-90ab-cdef-1234-567890abcdef dir=/srv
+[bridge:api] POST /v1/environments/bridge -> 200 environment_id=env_01HXYZABCDEF12
+[bridge:init] Created initial session session_01HSTARTER0001
+[bridge:work] Starting poll loop spawnMode=same-dir environmentId=env_01HXYZABCDEF12

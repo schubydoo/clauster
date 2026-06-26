@@ -1,0 +1,1 @@
+[bridge:work] Starting poll loop spawnMode=same-dir maxSessions=32 environmentId=env_01ABCDEF
