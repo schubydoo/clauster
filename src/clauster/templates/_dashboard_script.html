@@ -1111,11 +1111,13 @@
         return u ? u.split("-")[0] : ("pid " + s.pid);
       },
       // Per-session deep link into the Claude web app. Only the local sessionId is known
-      // here; build the documented /code/<sessionId> form and validate the host so a
-      // malformed/absent id never produces a broken or attacker-controlled link.
+      // here; gate on the exact RFC-4122 UUID shape the docs guarantee so a malformed or
+      // truncated id from the CLI yields null (no Open link) rather than a dead
+      // claude.ai/code/<garbage> link. The host is hardcoded — no redirect/injection surface.
       bridgeSessionUrl(s) {
         const u = s.local_uuid || "";
-        return /^[A-Za-z0-9._-]+$/.test(u) ? "https://claude.ai/code/" + u : null;
+        const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+        return UUID.test(u) ? "https://claude.ai/code/" + u : null;
       },
       async loadUsage(name) {
         if (USAGE_MODE === "off") return;  // badge disabled — don't even fetch usage
