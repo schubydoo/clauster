@@ -34,6 +34,49 @@ def test_sessions_empty_initially(runner_config):
         assert resp.json() == {}
 
 
+def test_tracked_sessions_empty_initially(runner_config):
+    with _client(runner_config) as client:
+        resp = client.get("/api/sessions/tracked")
+        assert resp.status_code == 200
+        assert resp.json() == {}
+
+
+def test_tracked_sessions_endpoint_groups_by_instance(runner_config):
+    """/api/sessions/tracked returns each bridge's live sessions, keyed by instance (#570)."""
+    from pathlib import Path
+
+    from clauster.models import Attribution, WorkingSession
+
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._sessions = [
+        WorkingSession(
+            pid=11,
+            cwd=Path("/tmp/a"),
+            kind="interactive",
+            started_at=100,
+            local_uuid="11111111-aaaa",
+            parent_instance="alpha",
+            attribution=Attribution.TRACKED,
+        ),
+        WorkingSession(
+            pid=12,
+            cwd=Path("/tmp/a"),
+            kind="interactive",
+            started_at=200,
+            local_uuid="22222222-bbbb",
+            parent_instance="alpha",
+            attribution=Attribution.TRACKED,
+        ),
+    ]
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.get("/api/sessions/tracked")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body) == {"alpha"}
+        assert [s["local_uuid"] for s in body["alpha"]] == ["11111111-aaaa", "22222222-bbbb"]
+
+
 def test_spawn_and_stop_via_api(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     with _client(runner_config) as client:
