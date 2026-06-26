@@ -353,6 +353,20 @@ def test_write_screen_frame_records_render_failure(tmp_path: Path) -> None:
     assert info["state"] == "error" and "render" in info["error"] and info["screen"] is None
 
 
+def test_write_screen_frame_tolerates_unserializable_frame(tmp_path: Path) -> None:
+    """A frame json can't serialize (a non-OSError from _write_sidecar) must never crash."""
+    from clauster import pty_keeper
+
+    class _BadFrame:
+        def frame(self):  # noqa: ANN202 — test stub
+            return {"rows": [object()]}  # not JSON-serializable -> json.dumps raises TypeError
+
+    path = tmp_path / "s.json"
+    # Must not raise even though _write_sidecar's json.dumps fails on a non-OSError.
+    seq = pty_keeper._write_screen_frame(path, _BadFrame(), 0, "live")
+    assert seq == 1  # the seq still advances; the failed write is swallowed
+
+
 def test_run_keeper_screen_throttle_skips_within_interval(
     tmp_path: Path, monkeypatch, _restore_sighup
 ) -> None:

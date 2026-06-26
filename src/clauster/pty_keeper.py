@@ -111,7 +111,13 @@ def _write_screen_frame(path: Path, screen: PtyScreen, seq: int, state: str) -> 
         payload["screen"] = screen.frame()
     except Exception as exc:  # noqa: BLE001 — a render hiccup must never affect the bridge
         payload.update(screen=None, state="error", error=f"screen render: {exc}")
-    _write_sidecar(path, payload)
+    try:
+        _write_sidecar(path, payload)
+    except Exception:  # noqa: BLE001,S110 — a serialize/write failure must never crash the keeper
+        # _write_sidecar only catches OSError; a non-OSError (e.g. a json.dumps TypeError from
+        # a future non-serializable frame) would otherwise escape this best-effort write into
+        # the drain loop's unguarded throttle/exit calls and hang the bridge (cardinal invariant).
+        pass
     return seq
 
 
