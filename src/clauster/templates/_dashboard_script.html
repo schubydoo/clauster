@@ -2199,6 +2199,12 @@
           const url = proto + "://" + location.host + ROOT + "/ws/pty-screen/" + encodeURIComponent(name);
           const ws = new WebSocket(url);
           _ptyScreens[name] = { term, ws, token };
+          ws.onopen = () => {
+            // Advance "connecting" -> "connected" on handshake so an idle session (no immediate
+            // frame to push) doesn't sit on "connecting"; onmessage then sets the real frame state.
+            const s = live();
+            if (s && s.status === "connecting") s.status = "connected";
+          };
           ws.onmessage = (ev) => {
             const s = live();
             if (!s) return;  // a retired view → ignore
