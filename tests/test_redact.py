@@ -108,6 +108,25 @@ def test_redact_for_disk_masks_session_url_and_secrets_over_a_chunk():
     assert "claude.ai/code/session_<redacted>" in out
 
 
+def test_redact_screen_text_masks_ids_and_secrets_per_row():
+    # The pty-screen view (#534) feeds already-rendered plaintext rows; redaction runs
+    # per row and the id/secret masks fire just like the streamed-line path.
+    rows = [
+        "user@host:~$ echo env_01ABCDEFGHIJKLMNOP",
+        "token sk-abcdef0123456789 ok",
+        "plain row, nothing to hide",
+    ]
+    out = redact.redact_screen_text(rows)
+    assert len(out) == len(rows)  # row count preserved (fixed terminal geometry)
+    assert "env_01ABCDEFGHIJKLMNOP" not in out[0] and "env_<redacted>" in out[0]
+    assert "sk-abcdef0123456789" not in out[1] and "<redacted>" in out[1]
+    assert out[2] == rows[2]  # a benign row passes through verbatim
+
+
+def test_redact_screen_text_empty_screen_is_empty():
+    assert redact.redact_screen_text([]) == []
+
+
 def test_sanitize_redacts_secret_split_by_ansi_even_when_strip_disabled():
     # ANSI bytes interleaved inside an identifier must NOT let it bypass redaction
     # when strip_ansi_in_stream is disabled. Redaction runs against a stripped view;

@@ -98,3 +98,25 @@ def redact_for_disk(text: str) -> str:
     equivalent session/env identifier or an obvious secret.
     """
     return redact_secrets(redact_ids(strip_ansi(text)))
+
+
+def redact_screen_text(rows: list[str]) -> list[str]:
+    r"""Redact a rendered terminal screen (already-plaintext cells) row by row.
+
+    The live pty-screen view (#534) feeds pyte-RENDERED rows here, never raw bytes —
+    pyte has already consumed every escape sequence, so this applies only the id +
+    secret masks. It deliberately does NOT :func:`strip_ansi`: there are no escapes
+    left to strip.
+
+    Row COUNT is preserved (the mask runs per row), but a row's LENGTH can change — a
+    mask is the fixed ``<redacted>`` token, so a long secret shrinks the row while a
+    short ``env_``/``session_`` id can lengthen it. Re-fitting rows to the exact
+    terminal width is the caller's job (:meth:`clauster.pty_screen.PtyScreen.frame`
+    re-fits each row to the screen width), not this text-only helper's.
+
+    Best-effort defense-in-depth, like the rest of this module: a secret that wraps
+    across the fixed column width, or a novel high-entropy value, can still slip through
+    (see the ``_SECRET_RES`` note). AUTH-gating the pty-screen endpoint is the *primary*
+    control; this only narrows the obvious-secret surface a live screen exposes.
+    """
+    return [redact_secrets(redact_ids(row)) for row in rows]
