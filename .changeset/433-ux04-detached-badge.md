@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Dashboard: the detached / background session type is now named "Background" consistently across every surface — the launch-picker option and filter chip (previously "Fire-and-forget") and the card mode badge (previously `detached`) — so one session type reads as one name. "Background" stays accurate whether or not the claude.ai cloud channel is on, unlike "fire-and-forget" which undersold a live, reattachable session (UX-04).
+Rename the detached/background session type to "Background" consistently across the launch-picker, filter chip, and card badge (previously "Fire-and-forget" / `detached`), so one session type reads as one name everywhere (UX-04).
