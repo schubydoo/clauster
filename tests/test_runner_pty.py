@@ -130,6 +130,35 @@ async def test_spawn_explicit_pty_overrides_standard_config(runner_config) -> No
         await runner.stop("alpha")
 
 
+@_POSIX_ONLY
+async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monkeypatch) -> None:
+    """A keeper that fails to launch (OSError) marks the instance ERROR and persists it."""
+    from clauster.models import Project, RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+
+    persisted = []
+
+    async def _spy_persist() -> None:
+        persisted.append(True)
+
+    monkeypatch.setattr(runner, "_persist", _spy_persist)
+
+    def boom(*a, **k):
+        raise OSError("openpty: too many open files")
+
+    monkeypatch.setattr(runner, "_popen_keeper", boom)
+
+    proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
+    inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
+    log_path = tmp_path / "alpha.log"
+
+    out = await runner._spawn_pty(inst, proj, "alpha", log_path, "default", resume=False)
+
+    assert out.status is InstanceStatus.ERROR
+    assert persisted == [True]  # the ERROR state was persisted, not swallowed
+
+
 class _FakeProc:
     def __init__(self, alive: bool) -> None:
         self._alive = alive

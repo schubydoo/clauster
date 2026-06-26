@@ -183,6 +183,15 @@ def test_target_allowed_rejects_malformed_when_blocking():
     assert _target_allowed("http://[::1", block_private=False) is True
 
 
+def test_target_allowed_rejects_empty_host():
+    # A URL that parses cleanly but has no host (authority-less) can't be classified,
+    # so it's rejected when the guard is on. Covers the `if not host` fail-closed branch.
+    from clauster.webhooks import _target_allowed
+
+    assert _target_allowed("http:///x", block_private=True) is False
+    assert _target_allowed("file:///x", block_private=True) is False
+
+
 def test_block_private_targets_resolves_dns_hostnames(monkeypatch):
     # #549: a DNS hostname is now resolved at check time — a name pointing at a private IP is
     # dropped, a name resolving public passes, and an unresolvable name is left for httpx

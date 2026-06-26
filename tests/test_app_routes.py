@@ -42,6 +42,32 @@ def test_create_missing_name_422(write_config, tmp_path):
     )
 
 
+def test_create_project_provision_error_maps_400(write_config, tmp_path, monkeypatch):
+    from clauster.provisioning import ProvisionError
+
+    def boom(*a, **k):
+        raise ProvisionError("disk on fire")
+
+    monkeypatch.setattr("clauster.app.create_project", boom)
+    with _client(write_config, tmp_path) as client:
+        r = client.post("/api/projects", json={"name": "proj"})
+    assert r.status_code == 400
+    assert "disk on fire" in r.json()["detail"]
+
+
+def test_create_project_git_unavailable_maps_503(write_config, tmp_path, monkeypatch):
+    from clauster.provisioning import GitUnavailable
+
+    def boom(*a, **k):
+        raise GitUnavailable("git not found")
+
+    monkeypatch.setattr("clauster.app.create_project", boom)
+    with _client(write_config, tmp_path) as client:
+        r = client.post("/api/projects", json={"name": "proj"})
+    assert r.status_code == 503
+    assert "git not found" in r.json()["detail"]
+
+
 def test_clone_missing_name_422(write_config, tmp_path):
     r = _client(write_config, tmp_path).post(
         "/api/projects/clone", json={"url": "https://x/r.git"}
@@ -254,6 +280,21 @@ def test_claude_md_put_base_sha_not_string_422(write_config, tmp_path):
         "/api/projects/alpha/claude-md", json={"content": "x", "base_sha256": 123}
     )
     assert r.status_code == 422
+
+
+def test_put_claude_md_untrusted_returns_403(write_config, tmp_path, monkeypatch):
+    # An untrusted project dir refuses the write: write_claude_md raises
+    # ClaudeMdNotTrusted, which the route surfaces as 403 (not a swallowed 200).
+    from clauster.claude_md import ClaudeMdNotTrusted
+
+    def boom(*a, **k):
+        raise ClaudeMdNotTrusted("/p is not a trusted directory")
+
+    monkeypatch.setattr("clauster.app.write_claude_md", boom)
+    with _client(write_config, tmp_path) as client:
+        r = client.put("/api/projects/alpha/claude-md", json={"content": "x"})
+    assert r.status_code == 403
+    assert "not a trusted directory" in r.json()["detail"]
 
 
 def test_claude_md_get_non_utf8_is_422(write_config, projects_root, tmp_path):
