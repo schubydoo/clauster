@@ -58,8 +58,14 @@
 
               <!-- right cluster: Run Claude here + overflow -->
               <span class="ms-auto d-flex align-items-center gap-1">
+                {# FE-578: surface a launch precondition INSIDE the popover; Run stays ENABLED
+                   (disabling it would hide the spawn picker / trust confirm that resolve it).
+                   On open we coerce a non-git+worktree default to a valid mode; the note below
+                   the Spawn picker explains it. #}
                 <span class="launch-anchor">
-                  <button type="button" class="btn btn-primary" @click="lopen = !lopen" :aria-expanded="lopen">
+                  <button type="button" class="btn btn-primary" data-test="run-launch"
+                          @click="lopen = !lopen; if (lopen) coerceSpawnMode('{{ p.name }}', {{ p.is_git_repo | tojson }})"
+                          :aria-expanded="lopen">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run Claude here
                     <span class="ms-1" x-text="lopen ? '▴' : '▾'">▾</span>
                   </button>
@@ -135,6 +141,12 @@
                               {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
                               <option value="session">session</option>
                             </select>
+                            {# #578: surface (don't disable) — a non-git dir can't worktree, so
+                               note it here and coerceSpawnMode() falls back to same-dir on open.
+                               x-text (auto-escaped, never x-html); no d-* class on this x-show el. #}
+                            <p class="form-hint text-warning small mt-1 mb-0" x-cloak
+                               x-show="spawnModeNote({{ p.is_git_repo | tojson }})"
+                               x-text="spawnModeNote({{ p.is_git_repo | tojson }})"></p>
                           </div>
                           {% if pty_supported %}
                           {# Keep d-flex OFF this x-show element — `.d-flex{display:flex!important}`

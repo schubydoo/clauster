@@ -429,6 +429,49 @@ def test_dashboard_renders_pickers(write_config):
 _BYPASS_OPTION = '<option value="bypassPermissions"'
 
 
+# ----- #578: surface a launch precondition INSIDE the popover (Run stays enabled) -----
+#
+# Decision (maintainer): do NOT disable "Run Claude here" on a readiness blocker — that
+# would hide the spawn picker / trust-on-start confirm that resolve it (a dead-end). The
+# one launch-refused case (a non-git dir whose default spawn mode is worktree) is instead
+# coerced to a valid mode on popover open and surfaced with a note. Reactive Alpine over
+# the server-rendered `is_git_repo` flag, so assert on the binding markup (the contract).
+
+
+def test_run_button_enabled_and_coerces_spawn_on_open(write_config):
+    # Run is NOT disabled by any readiness blocker; opening it calls coerceSpawnMode(name,
+    # isGit) so a non-git+worktree default falls back to a valid mode. Per row from is_git_repo.
+    html = _client(write_config).get("/").text
+    assert 'data-test="run-launch"' in html
+    assert "coerceSpawnMode('alpha', true)" in html  # alpha is a git repo
+    assert "coerceSpawnMode('beta', false)" in html  # beta is not
+    # The old disable-the-button approach is gone — the readiness-gated helper no longer exists.
+    assert "runBlockReason" not in html
+
+
+def test_spawn_mode_coerce_and_note_helpers(write_config):
+    # coerceSpawnMode falls a non-git+worktree default back to same-dir; spawnModeNote surfaces
+    # it. Neither references trustState — untrusted is handled by the trust-on-start confirm.
+    html = _client(write_config).get("/").text
+    assert "coerceSpawnMode(name, isGit)" in html
+    assert '!isGit && (this.spawnMode[name] || DEFAULT_SPAWN_MODE) === "worktree"' in html
+    assert 'this.spawnMode[name] = "same-dir"' in html
+    assert "spawnModeNote(isGit)" in html
+    assert '!isGit && DEFAULT_SPAWN_MODE === "worktree"' in html
+    start = html.index("coerceSpawnMode(name, isGit)")
+    end = html.index("displayTokens", start)
+    assert "trustState" not in html[start:end]
+
+
+def test_spawn_mode_note_binding_renders_per_row(write_config):
+    # The note rides x-text/x-show on spawnModeNote(<is_git_repo>) per row — visible only when
+    # the helper returns a string (non-git + worktree default), never x-html.
+    html = _client(write_config).get("/").text
+    assert "spawnModeNote(false)" in html  # beta (non-git) carries the note binding
+    assert "spawnModeNote(true)" in html  # alpha (git) -> note suppressed at runtime
+    assert "x-html" not in html
+
+
 def test_bypass_option_hidden_without_ceiling(write_config):
     client = _client(write_config)
     assert _BYPASS_OPTION not in client.get("/").text
