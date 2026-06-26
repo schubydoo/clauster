@@ -1057,6 +1057,25 @@
       },
       preflightWarnCount(name) { return this.preflightWarnings(name).length; },
       togglePreflight(name) { this.preflightOpen[name] = !this.preflightOpen[name]; },
+      // Readiness at the point of action (#578): surface a launch precondition INSIDE the
+      // launch popover and keep "Run Claude here" ENABLED — disabling it would hide the very
+      // controls (spawn picker, trust-on-start confirm) that resolve the precondition, a
+      // dead-end. The one launch-refused case with no in-popover option is a non-git dir whose
+      // default spawn mode is worktree (`--spawn worktree` is rejected server-side as
+      // InvalidSpawnOption — no worktree without a git repo; the worktree <option> is also
+      // git-gated out of the picker). So on popover open we COERCE that case back to a valid
+      // mode, and show a note. Untrusted dirs are handled inline by the trust-on-start confirm.
+      // `isGit` is the server-rendered per-row git flag.
+      coerceSpawnMode(name, isGit) {
+        if (!isGit && (this.spawnMode[name] || DEFAULT_SPAWN_MODE) === "worktree") {
+          this.spawnMode[name] = "same-dir";  // non-git can't worktree → fall back to a valid mode
+        }
+      },
+      spawnModeNote(isGit) {
+        return (!isGit && DEFAULT_SPAWN_MODE === "worktree")
+          ? "Not a git repository — the worktree spawn mode isn't available here."
+          : "";
+      },
       // Tokens counted toward the displayed total: all categories, or input+output
       // only when usage.token_total_includes_cache is false (cache usually dominates).
       displayTokens(u) {
