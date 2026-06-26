@@ -30,6 +30,12 @@ _BIN = "agent-browser"
 # ``axe.run`` in-page. Committed so the suite needs no network.
 _AXE_SCRIPT = Path(__file__).resolve().parent / "vendor" / "axe.min.js"
 
+# Auto-accept native dialogs (window.confirm/alert/prompt). The dashboard guards
+# destructive actions with window.confirm (e.g. the Stop button, #577) and agent-browser
+# has no dialog API, so without this a confirm()-ing click fails. Registered as a second
+# init script (AGENT_BROWSER_INIT_SCRIPTS is comma-separated) so it runs before app code.
+_DIALOG_SCRIPT = Path(__file__).resolve().parent / "auto_accept_dialogs.js"
+
 # Poll cadence for the expect_* helpers; the per-call timeout is the caller's (the
 # suite's _STATUS_TIMEOUT / _GATE_TIMEOUT constants), defaulting to 5s.
 _DEFAULT_TIMEOUT_MS = 5_000
@@ -47,14 +53,17 @@ class AgentBrowser:
     def _run(self, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
         """Run one ``agent-browser`` subcommand and capture its output.
 
-        Injects ``AGENT_BROWSER_INIT_SCRIPTS`` so the vendored axe-core is registered
-        as a page init script before the first navigation (every subcommand inherits
-        it, including ``open``) — that makes ``window.axe`` available for the a11y
-        smoke tests without any network fetch. Harmless for the non-a11y subcommands.
+        Injects ``AGENT_BROWSER_INIT_SCRIPTS`` (comma-separated) so two page init
+        scripts are registered before the first navigation (every subcommand inherits
+        them, including ``open``): the vendored axe-core (``window.axe`` for the a11y
+        smoke tests, no network fetch) and the dialog auto-accepter (so a
+        ``window.confirm``-guarded destructive action can be driven). Harmless for the
+        subcommands that use neither.
         """
         env = dict(os.environ)
-        if _AXE_SCRIPT.exists():
-            env["AGENT_BROWSER_INIT_SCRIPTS"] = str(_AXE_SCRIPT)
+        init_scripts = [s for s in (_AXE_SCRIPT, _DIALOG_SCRIPT) if s.exists()]
+        if init_scripts:
+            env["AGENT_BROWSER_INIT_SCRIPTS"] = ",".join(str(s) for s in init_scripts)
         return subprocess.run(
             [_BIN, *args],
             capture_output=True,
