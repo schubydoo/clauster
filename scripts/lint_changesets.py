@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Lint ``.changeset/*.md`` fragments so a wrapped summary can't truncate in release notes.
+"""Lint ``.changeset/*.md`` fragments so every entry renders as a clean changelog bullet.
 
-knope renders each changeset by taking its FIRST line as the entry summary and the rest as
-details, then picking the first matching ``change_templates`` entry (knope.toml). A
-multi-line body therefore renders as a ``### heading`` block whose heading is *line 1 only*
--- so a changeset whose first sentence wraps across lines ships a heading truncated
-mid-sentence in the release notes (v0.12.3's #560/#561 did exactly this).
+knope renders each changeset by taking its FIRST line as the entry summary; ANY further
+content -- a second line, or a blank-line-separated paragraph like an "Upgrade note" --
+makes knope render the entry as a ``#### heading`` block (the summary as the heading, the
+rest as body) instead of a bullet. A lone ``####`` heading dropped into the middle of a
+bulleted "Features"/"Fixes" list breaks the changelog: that is exactly what #617's
+multi-paragraph changeset did to the v0.12.5 release notes (#599), and v0.12.3's #560/#561
+hit the related mid-sentence-truncation flavour of the same single-line-summary rule.
 
-Rule: if a changeset body spans more than one line, the FIRST line must end with
-sentence-terminating punctuation (``. ! ? :``) -- i.e. be a complete summary. A single-line
-body (renders as a bullet) and a multi-line body whose first line is a full sentence
-(renders as a clean heading) both pass.
+Rule: a changeset body must be a SINGLE line -- it then always renders as a clean bullet.
+Fold any details / "Upgrade note" into that one sentence; never span lines or add a second
+paragraph. (Earlier this allowed a multi-line body whose line 1 was a complete sentence,
+on the theory the heading was "clean" -- but a heading among bullets is itself the breakage,
+so multi-line is now rejected outright.)
 
 Exit 0 when every fragment is well-formed, 1 (with a per-file reason) otherwise. Stdlib only.
 """
@@ -20,7 +23,6 @@ from __future__ import annotations
 import glob
 
 _CHANGESET_GLOB = ".changeset/*.md"
-_TERMINATORS = (".", "!", "?", ":")
 
 
 def _body_after_frontmatter(text: str) -> str:
@@ -42,17 +44,19 @@ def _violation(path: str, body: str) -> str | None:
     if not content:
         return f"{path}: empty changeset body (needs a one-line summary)."
     first = content[0].rstrip()
-    # "Has details" = ANY non-blank line after the summary, even across a blank-line
-    # paragraph break: knope splits on the first newline, so a blank-separated body still
-    # renders line 1 as the heading. Checking only the adjacent line would miss that shape.
-    multiline = any(line.strip() for line in content[1:])
-    if multiline and not first.endswith(_TERMINATORS):
+    # Reject ANY content after the summary line -- even across a blank-line paragraph
+    # break (an "Upgrade note", a second sentence on its own line). knope splits on the
+    # first newline and renders such a body as a `#### heading` block, not a bullet, which
+    # breaks the uniform bulleted changelog (#599). A single-line body always renders as a
+    # clean bullet.
+    if any(line.strip() for line in content[1:]):
         return (
-            f"{path}: the summary (line 1) wraps mid-sentence -- knope uses line 1 as the "
-            f"entry summary, so the release-notes heading would truncate here:\n"
+            f"{path}: changeset body spans multiple lines -- knope renders that as a "
+            f"`#### heading` block, not a bullet, which breaks the changelog (#599). "
+            f"Summary (line 1):\n"
             f'      "{first}"\n'
-            f"    Fix: keep the summary on ONE line, or end line 1 as a complete sentence "
-            f"(. ! ? :) before continuing details on the next line."
+            f"    Fix: keep the WHOLE entry on ONE line so it renders as a clean bullet; "
+            f"fold any details / 'Upgrade note' into that single sentence."
         )
     return None
 
