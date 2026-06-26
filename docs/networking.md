@@ -142,17 +142,18 @@ to clauster. Clauster trusts it because Caddy is the only `trusted_ips` peer.
 
 ```caddyfile
 clauster.example.com {
+    # Defence-in-depth: strip any client-supplied identity headers before
+    # forward_auth runs, so only Authelia's values reach clauster.
+    request_header -Remote-User
+    request_header -Remote-Groups
+    request_header -Remote-Email
     forward_auth authelia:9091 {
         uri /api/verify?rd=https://auth.example.com
-        # Authelia returns the authenticated user in Remote-User; copy it upstream.
+        # Authelia returns the authenticated user in Remote-User; copy_headers
+        # writes it onto the upstream request, so clauster sees Authelia's value.
         copy_headers Remote-User Remote-Groups Remote-Email
     }
-    reverse_proxy clauster:7621 {
-        # Defence-in-depth: blank any client-supplied Remote-User so only Authelia's
-        # value (set via copy_headers above) reaches clauster.
-        header_up Remote-User ""
-        header_up +Remote-User {http.reverse_proxy.header.Remote-User}
-    }
+    reverse_proxy clauster:7621
 }
 ```
 
