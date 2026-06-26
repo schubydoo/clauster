@@ -424,7 +424,13 @@
       toast(msg, type = "info") {
         const id = ++this._toastSeq;
         this.toasts.push({ id, msg, type });
-        setTimeout(() => this.dismissToast(id), 4500);
+        // Error toasts persist until dismissed (the stack has a close button) — several
+        // failures surface only as a toast, so a 4.5s auto-dismiss would lose the only
+        // record. Non-error toasts still auto-dismiss after 4.5s.
+        if (type !== "error") setTimeout(() => this.dismissToast(id), 4500);
+        // Bound the stack: since error toasts no longer self-evict, a repeatedly failing
+        // action could otherwise pile up unbounded (and spam role=alert). Keep the newest few.
+        if (this.toasts.length > 6) this.toasts = this.toasts.slice(-6);
       },
       dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
       // --- config editor (FE-3) ---
@@ -1640,6 +1646,10 @@
         await this.refresh();
       },
       async stop(name) {
+        // Confirm like every sibling destructive action (forget/stopAgent/stopHosted/
+        // killHosted) — the desktop bridge is the default session type yet was the only
+        // unguarded Stop. Recoverable via Resume, so a plain confirm (not a warning).
+        if (!window.confirm("Stop the session in \"" + name + "\"?")) return;
         this.closeLogs(name);
         this.errors[name] = null;  // clear any stale inline error from a prior failed action
         const prev = this.instances[name];

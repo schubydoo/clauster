@@ -466,6 +466,19 @@ def test_dashboard_warns_restart_ends_live_sessions(write_config):
     assert "https://schubydoo.github.io/clauster/operations/#restart" in page
 
 
+def test_desktop_stop_confirms_and_error_toasts_stick(write_config):
+    # #577: two error-UX consistency papercuts.
+    # A) the desktop-bridge Stop was the only destructive action with no window.confirm
+    #    (siblings forget/stopAgent/stopHosted/killHosted all confirm) — add one.
+    # B) every toast auto-dismissed after 4.5s, so an "error" toast (sometimes a
+    #    failure's only record) vanished — errors now persist until dismissed.
+    page = _client(write_config).get("/").text
+    # A: stop() confirms before the optimistic DELETE.
+    assert 'window.confirm("Stop the session in ' in page
+    # B: only non-error toasts get the 4.5s auto-dismiss timer.
+    assert 'if (type !== "error") setTimeout(' in page
+
+
 def test_dashboard_surfaces_crashed_instance_error_detail(write_config):
     # #313: a bridge that spawns then CRASHES has `error_detail` set (None on success), but the
     # card never rendered it — the failure reason was invisible (a silent dead card). The
