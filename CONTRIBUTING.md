@@ -58,6 +58,8 @@ uv run clauster
   change, or `perf` / `security` / `build` for those sections (each a patch bump).
   You don't need to add a PR link — knope appends `([#NNN])` for the PR that
   introduces the changeset, at release time.
+  Keep the summary to a single concise line that gets straight to the point;
+  it renders as one changelog bullet, and a multi-line body breaks the heading format.
   Internal-only PRs (CI, refactor, tests, docs) need no changeset — add the
   `no-changelog` label to silence the advisory `Changeset check`. **Don't hand-edit
   `CHANGELOG.md` or bump the version in `pyproject.toml` / `src/clauster/__init__.py`**
