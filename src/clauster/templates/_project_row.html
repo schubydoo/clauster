@@ -58,8 +58,23 @@
 
               <!-- right cluster: Run Claude here + overflow -->
               <span class="ms-auto d-flex align-items-center gap-1">
-                <span class="launch-anchor">
-                  <button type="button" class="btn btn-primary" @click="lopen = !lopen" :aria-expanded="lopen">
+                {# FE-578: gate "Run Claude here" on a HARD readiness blocker (a launch that
+                   would be refused outright — non-git + worktree spawn mode), surfacing the
+                   reason at the point of action instead of only the navbar/readiness pill.
+                   The native `disabled` + `aria-disabled` keep the button out of the tab order
+                   and announce the state; the reason rides `:title` on the wrapping anchor (a
+                   disabled <button> has pointer-events:none, so its own title wouldn't show on
+                   hover — the wrapper still does). Recoverable preconditions (untrusted dir)
+                   are NOT gated here — the launch flow already recovers them inline. The reason
+                   is `runBlockReason()` output rendered via :title (auto-escaped), never x-html. #}
+                <span class="launch-anchor"
+                      :title="runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }}) || null">
+                  <button type="button" class="btn btn-primary" data-test="run-launch"
+                          @click="if (!runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }})) lopen = !lopen"
+                          :disabled="!!runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }})"
+                          :aria-disabled="!!runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }})"
+                          :title="runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }}) || 'Launch a Claude session in this project'"
+                          :aria-expanded="lopen">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run Claude here
                     <span class="ms-1" x-text="lopen ? '▴' : '▾'">▾</span>
                   </button>

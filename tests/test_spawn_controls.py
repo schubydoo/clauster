@@ -429,6 +429,56 @@ def test_dashboard_renders_pickers(write_config):
 _BYPASS_OPTION = '<option value="bypassPermissions"'
 
 
+# ----- #578: gate "Run Claude here" on a hard readiness blocker --------
+#
+# A hard, no-inline-recovery blocker (non-git + worktree spawn mode) must disable the
+# per-project "Run Claude here" control and surface the reason at the point of action,
+# not only in the navbar/readiness pill. The gating is reactive Alpine over the
+# server-rendered `is_git_repo` flag + the live `spawnMode`, so assert on the binding
+# markup (the value-stable contract), mirroring test_dashboard_renders_pickers.
+_RUN_BLOCK = "runBlockReason"
+_WORKTREE_DEFAULT = "instance_defaults:\n  spawn_mode: worktree\n"
+
+
+def test_run_button_carries_block_binding(write_config):
+    # Every project row binds the launch control's disabled/title/aria-disabled to the
+    # hard-blocker helper, parameterized by its server-rendered git flag.
+    html = _client(write_config).get("/").text
+    assert 'data-test="run-launch"' in html
+    # alpha is a git repo -> the helper is called with `true`; beta is not -> `false`.
+    assert "runBlockReason('alpha', true)" in html
+    assert "runBlockReason('beta', false)" in html
+    # The reason rides :title (and :disabled / :aria-disabled), never x-html.
+    assert ':disabled="!!runBlockReason(' in html
+    assert ':aria-disabled="!!runBlockReason(' in html
+
+
+def test_run_helper_blocks_non_git_worktree_only(write_config):
+    # The helper itself is the single source of truth for "is this launch refused?".
+    # Pin its decision table so a copy/scope change is caught: worktree + non-git blocks;
+    # everything else (git repo, or a non-worktree mode) is launchable.
+    html = _client(write_config).get("/").text
+    assert _RUN_BLOCK in html
+    # The blocking branch keys on worktree spawn mode AND a non-git directory.
+    assert 'mode === "worktree" && !isGit' in html
+    # Untrusted is deliberately NOT a hard blocker here (recoverable via trust-on-start);
+    # the helper must not reference trustState — only the worktree/git precondition.
+    block_fn_start = html.index("runBlockReason(name, isGit)")
+    block_fn_end = html.index("displayTokens", block_fn_start)
+    assert "trustState" not in html[block_fn_start:block_fn_end]
+
+
+def test_run_button_disabled_for_non_git_when_worktree_default(write_config):
+    # With worktree as the configured default spawn mode, the non-git project (beta) is a
+    # hard blocker (worktree on non-git is refused server-side), while the git project
+    # (alpha) stays launchable. The binding resolves this per row from `is_git_repo`.
+    html = _client(write_config, _WORKTREE_DEFAULT).get("/").text
+    # beta (non-git) is rendered with the helper arg `false`, so the worktree-default makes
+    # runBlockReason truthy -> the button disables. alpha (git) renders `true` -> enabled.
+    assert "runBlockReason('beta', false)" in html
+    assert "runBlockReason('alpha', true)" in html
+
+
 def test_bypass_option_hidden_without_ceiling(write_config):
     client = _client(write_config)
     assert _BYPASS_OPTION not in client.get("/").text
