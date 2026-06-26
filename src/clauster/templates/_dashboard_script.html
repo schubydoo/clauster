@@ -703,6 +703,9 @@
         const term = (t.q || "").trim();
         // A non-empty but too-short term drives the hint; empty clears it and reloads.
         t.queryTooShort = term.length > 0 && term.length < this.TRANSCRIPT_MIN_QUERY;
+        // A too-short term can't filter — skip the wasted fetch. (The empty-string clear
+        // path runs through clearTranscriptSearch, which still reloads the unfiltered view.)
+        if (t.queryTooShort) return;
         t._searchTimer = setTimeout(() => { this.loadTranscriptTurnsFromStart(); }, 250);
       },
       // Clear the search box and reload the unfiltered session from the top (#612).
