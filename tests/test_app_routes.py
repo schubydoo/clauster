@@ -216,6 +216,21 @@ def test_dashboard_renders_projects_sort_control(write_config, tmp_path):
     assert 'projectSort: "name"' in html
 
 
+def test_dashboard_renders_live_pty_terminal_affordance(write_config, tmp_path):
+    # The read-only live-terminal control (#534) is wired into the dashboard and gated
+    # on pty mode (isPty), with its own toggle + open functions and the WS path. This
+    # pins the template parses and the JS/markup wiring exists.
+    html = _client(write_config, tmp_path).get("/").text
+    assert "toggleTerminal(" in html  # the button handler
+    assert "openTerminal(" in html  # the WS-opening function
+    assert "/ws/pty-terminal/" in html  # the read-only stream endpoint
+    assert "isPty(i.project)" in html  # shown only for pty bridges
+    assert "Live terminal" in html  # the button label
+    # x-text (never x-html) for the streamed, untrusted terminal output.
+    assert "ptyTerm[i.project].lines.join" in html
+    assert "x-html" not in html  # untrusted content is never injected as HTML
+
+
 # ----- single-row fragment (reactive insertion, no full reload) ---------
 
 

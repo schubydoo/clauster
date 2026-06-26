@@ -111,6 +111,7 @@
       qrOpen: {},
       qrNonce: {},
       logs: {},
+      ptyTerm: {},   // project name -> live read-only pty-terminal tail state (#534; mirrors logs)
       spawnMode: {},
       permMode: {},
       resumeMode: {},
@@ -129,6 +130,7 @@
       toasts: [],
       _toastSeq: 0,
       _logSeq: 0,          // monotonic token per opened log tail (retire check; see openLogs)
+      _termSeq: 0,         // monotonic token per opened pty-terminal tail (retire check; see openTerminal)
       connLost: false,    // polling has failed repeatedly -> data is stale
       _refreshFails: 0,
       _refreshing: false,    // single-flight guard for refresh()
@@ -2012,6 +2014,77 @@
         if (el) el.scrollTop = el.scrollHeight;
       },
       jumpToLatest(name) { this.scrollLog(name); },
+
+      // --- live read-only pty terminal (#534) -------------------------------
+      // A parallel, deliberately-separate tail to openLogs: the bridge-log tail streams
+      // the parsed --debug-file, this streams the raw PTY frame buffer of a pty bridge.
+      // Same reconnect/retire machinery (token-bound, liveState proxy, give-up cap) so a
+      // retired socket can't append to a fresh panel. Read-only — there is no input path
+      // back into the PTY (the server never opens one); this only ever receives frames.
+      isPty(name) { return this.resumeModeOf(name) === "pty"; },
+      toggleTerminal(name) {
+        const s = this.ptyTerm[name];
+        if (s && s.open) { this.closeTerminal(name); } else { this.openTerminal(name); }
+      },
+      openTerminal(name, manual = false) {
+        const prev = this.ptyTerm[name];
+        if (prev) {
+          prev.open = false;
+          if (prev.ws) { try { prev.ws.close(); } catch (e) {} }
+        }
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const url = proto + "://" + location.host + ROOT + "/ws/pty-terminal/" + encodeURIComponent(name);
+        const token = ++this._termSeq;
+        const state = { open: true, ws: null, token,
+                        lines: prev ? prev.lines : [],
+                        lost: false, reconnecting: false,
+                        attempts: (prev && !manual) ? prev.attempts : 0 };
+        this.ptyTerm[name] = state;
+        const self = this;
+        const liveState = () => {
+          const s = self.ptyTerm[name];
+          return s && s.open && s.token === token ? s : null;
+        };
+        const ws = new WebSocket(url);
+        ws.onmessage = (ev) => {
+          const s = liveState();
+          if (!s) return;  // a retired socket → ignore
+          s.lost = false;
+          s.reconnecting = false;
+          s.attempts = 0;  // a healthy tail reconnects without limit
+          s.lines.push(ev.data);
+          if (s.lines.length > MAX_LOG_LINES) s.lines.splice(0, s.lines.length - MAX_LOG_LINES);
+          self.$nextTick(() => self.scrollTerm(name));
+        };
+        ws.onclose = () => {
+          const s = liveState();
+          if (!s) return;  // deliberate close / retired → don't reconnect
+          if (!["running", "starting"].includes(self.statusOf(name))) {
+            s.reconnecting = false; s.lost = true; return;
+          }
+          if (s.attempts >= MAX_LOG_RECONNECTS) {
+            s.reconnecting = false; s.lost = true; return;
+          }
+          s.attempts += 1;
+          s.lost = false;
+          s.reconnecting = true;
+          setTimeout(() => {
+            const s2 = self.ptyTerm[name];
+            if (s2 && s2.token === token && s2.open) self.openTerminal(name);
+          }, LOG_RECONNECT_MS);
+        };
+        this.ptyTerm[name].ws = ws;
+      },
+      closeTerminal(name) {
+        const s = this.ptyTerm[name];
+        if (!s) return;
+        s.open = false;  // before close() so onclose sees it as intentional
+        if (s.ws) { try { s.ws.close(); } catch (e) {} }
+      },
+      scrollTerm(name) {
+        const el = document.getElementById("pty-" + name);
+        if (el) el.scrollTop = el.scrollHeight;
+      },
     };
   }
 

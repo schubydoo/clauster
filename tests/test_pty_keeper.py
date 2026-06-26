@@ -228,3 +228,179 @@ def test_run_keeper_url_timeout(tmp_path: Path, monkeypatch, _restore_sighup) ->
     info = _read(sidecar)
     assert info["connect_url"] is None
     assert info["state"] == "exited"
+
+
+# --- live-terminal capture (#534) --------------------------------------------
+
+
+def test_run_keeper_captures_pty_output(tmp_path: Path, _restore_sighup) -> None:
+    """With a pty_log path, the keeper mirrors the bridge's terminal output to it."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    pty_log = tmp_path / "k.pty.log"
+    bridge = [
+        sys.executable,
+        "-c",
+        "import sys,time;"
+        "sys.stdout.write('HELLO-FROM-PTY\\r\\n');sys.stdout.flush();time.sleep(0.4)",
+    ]
+    rc = pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path), pty_log=pty_log)
+    assert rc == 0
+    assert pty_log.exists()
+    assert "HELLO-FROM-PTY" in pty_log.read_text(encoding="utf-8", errors="replace")
+    # The raw capture can echo secrets/command output → owner-only, like --debug-file.
+    assert (pty_log.stat().st_mode & 0o077) == 0
+
+
+def test_run_keeper_without_pty_log_writes_no_capture(tmp_path: Path, _restore_sighup) -> None:
+    """When no pty_log is given, no capture file is created (default off)."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    bridge = [sys.executable, "-c", "import sys;sys.stdout.write('x\\r\\n');sys.stdout.flush()"]
+    pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path))
+    assert not (tmp_path / "k.pty.log").exists()
+
+
+def test_main_passes_pty_log_through(tmp_path: Path, _restore_sighup) -> None:
+    """main() forwards --pty-log to run_keeper so the keeper captures the terminal."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    pty_log = tmp_path / "k.pty.log"
+    rc = pty_keeper.main(
+        [
+            "--sidecar",
+            str(sidecar),
+            "--pty-log",
+            str(pty_log),
+            "--",
+            sys.executable,
+            "-c",
+            "import sys;sys.stdout.write('CAP\\r\\n');sys.stdout.flush()",
+        ]
+    )
+    assert rc == 0
+    assert "CAP" in pty_log.read_text(encoding="utf-8", errors="replace")
+
+
+def _bound(mod) -> int:
+    # The post-truncate file is at most KEEP bytes plus one over-cap write before the
+    # next truncate fires; bound generously at MAX + KEEP for the assertion.
+    return mod._PTY_LOG_MAX_BYTES + mod._PTY_LOG_KEEP_BYTES
+
+
+def test_pty_capture_truncates_to_tail(tmp_path: Path, monkeypatch) -> None:
+    """The capture file is a bounded frame buffer: it truncates back to its tail."""
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_PTY_LOG_MAX_BYTES", 64)
+    monkeypatch.setattr(pty_keeper, "_PTY_LOG_KEEP_BYTES", 16)
+    cap = pty_keeper._PtyCapture(tmp_path / "c.pty.log")
+    for _ in range(20):
+        cap.write(b"0123456789\n")
+    cap.close()
+    data = (tmp_path / "c.pty.log").read_bytes()
+    # Bounded: never grows without limit (20×11 = 220 bytes written, file stays small).
+    assert len(data) <= _bound(pty_keeper)
+    # The kept tail starts on a line boundary — a truncate dropped to the first newline,
+    # so there is no leading partial fragment a redactor could mis-split.
+    assert data == b"" or data.startswith(b"0123456789\n")
+
+
+def test_pty_capture_dormant_when_unopenable(tmp_path: Path) -> None:
+    """A capture path that can't be opened goes dormant — write() never raises."""
+    from clauster import pty_keeper
+
+    # A path whose parent doesn't exist can't be created; capture stays dormant.
+    cap = pty_keeper._PtyCapture(tmp_path / "missing" / "c.pty.log")
+    cap.write(b"data")  # no raise
+    cap.close()  # idempotent, no raise
+    assert not (tmp_path / "missing").exists()
+
+
+def test_pty_capture_refuses_preexisting_path(tmp_path: Path) -> None:
+    """O_EXCL: a pre-planted file at the capture path makes capture dormant (no clobber)."""
+    from clauster import pty_keeper
+
+    planted = tmp_path / "c.pty.log"
+    planted.write_text("PRE-PLANTED", encoding="utf-8")
+    cap = pty_keeper._PtyCapture(planted)
+    cap.write(b"new-data")  # dormant — must not append to the planted file
+    cap.close()
+    assert planted.read_text(encoding="utf-8") == "PRE-PLANTED"
+
+
+def test_pty_capture_write_oserror_goes_dormant(tmp_path: Path, monkeypatch) -> None:
+    """A failing os.write closes the fd and goes dormant — never propagates to the bridge."""
+    from clauster import pty_keeper
+
+    cap = pty_keeper._PtyCapture(tmp_path / "c.pty.log")
+
+    def _boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pty_keeper.os, "write", _boom)
+    cap.write(b"data")  # no raise; capture should now be dormant
+    assert cap._fd is None
+    cap.write(b"more")  # a dormant capture's write is a no-op (early return)
+    cap.close()
+
+
+def test_pty_capture_truncate_oserror_goes_dormant(tmp_path: Path, monkeypatch) -> None:
+    """A read failure during truncation closes the fd rather than raising."""
+    import builtins
+
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_PTY_LOG_MAX_BYTES", 8)
+    monkeypatch.setattr(pty_keeper, "_PTY_LOG_KEEP_BYTES", 4)
+    cap = pty_keeper._PtyCapture(tmp_path / "c.pty.log")
+
+    real_open = builtins.open
+
+    def _boom(*_a, **_k):
+        raise OSError("cannot reopen for tail read")
+
+    monkeypatch.setattr(builtins, "open", _boom)
+    cap.write(b"0123456789\n")  # exceeds the cap → _truncate_tail → read fails → dormant
+    monkeypatch.setattr(builtins, "open", real_open)
+    assert cap._fd is None
+    cap.close()
+
+
+def test_pty_capture_truncate_write_oserror_goes_dormant(tmp_path: Path, monkeypatch) -> None:
+    """A write failure while rewriting the truncated tail goes dormant, never raises."""
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_PTY_LOG_MAX_BYTES", 8)
+    monkeypatch.setattr(pty_keeper, "_PTY_LOG_KEEP_BYTES", 4)
+    cap = pty_keeper._PtyCapture(tmp_path / "c.pty.log")
+
+    def _boom(*_a, **_k):
+        raise OSError("ftruncate failed")
+
+    monkeypatch.setattr(pty_keeper.os, "ftruncate", _boom)
+    cap.write(b"0123456789\n")  # over cap → tail read ok → ftruncate fails → dormant
+    assert cap._fd is None
+    cap.close()
+
+
+def test_pty_capture_close_swallows_oserror(tmp_path: Path, monkeypatch) -> None:
+    """A failing os.close during close() is swallowed (idempotent, never raises)."""
+    from clauster import pty_keeper
+
+    cap = pty_keeper._PtyCapture(tmp_path / "c.pty.log")
+    fd = cap._fd
+    assert fd is not None
+    real_close = pty_keeper.os.close
+
+    def _boom(_fd):
+        raise OSError("bad fd")
+
+    monkeypatch.setattr(pty_keeper.os, "close", _boom)
+    cap.close()  # no raise despite os.close failing
+    monkeypatch.setattr(pty_keeper.os, "close", real_close)
+    assert cap._fd is None  # marked closed regardless
+    real_close(fd)  # the stub blocked the real close; release the fd so the test leaks nothing

@@ -738,7 +738,14 @@ class SessionRunner:
 
     # Suffixes of one spawn's log "set" — all share the `<name>-<ms>-<seq>` stem.
     # Longest-match-first so `.keeper.log` / `.raw.log` strip whole, not just `.log`.
-    _LOG_SET_SUFFIXES = (".raw.log", ".stderr.log", ".keeper.json", ".keeper.log", ".log")
+    _LOG_SET_SUFFIXES = (
+        ".raw.log",
+        ".stderr.log",
+        ".keeper.json",
+        ".keeper.log",
+        ".pty.log",
+        ".log",
+    )
 
     @classmethod
     def _log_set_key(cls, filename: str) -> str:
@@ -1043,6 +1050,15 @@ class SessionRunner:
         """Discovery JSON the keeper writes beside the bridge's --debug-file."""
         return log_path.with_name(log_path.stem + ".keeper.json")
 
+    @staticmethod
+    def _pty_terminal_log_path_for(log_path: Path) -> Path:
+        """Live-terminal capture the keeper mirrors the PTY master to (#534).
+
+        Shares the spawn-set stem with the bridge's ``--debug-file`` (like the sidecar),
+        so a rediscovered pty survivor can re-derive it from the matched sidecar's stem.
+        """
+        return log_path.with_name(log_path.stem + ".pty.log")
+
     def _build_pty_bridge_argv(
         self, log_path: Path, name: str, permission_mode: PermissionMode, *, resume: bool
     ) -> list[str]:
@@ -1066,9 +1082,15 @@ class SessionRunner:
         return argv
 
     @staticmethod
-    def _keeper_launch_cmd(sidecar: Path, cwd: Path, bridge_argv: list[str]) -> list[str]:
-        """Wrap the bridge argv in a `python -m clauster.pty_keeper` launcher."""
-        return [
+    def _keeper_launch_cmd(
+        sidecar: Path, cwd: Path, bridge_argv: list[str], pty_log: Path | None = None
+    ) -> list[str]:
+        """Wrap the bridge argv in a `python -m clauster.pty_keeper` launcher.
+
+        ``pty_log`` (when given) tells the keeper to mirror the live terminal output to
+        that size-bounded file for the read-only ``/ws/pty-terminal`` view (#534).
+        """
+        cmd = [
             sys.executable,
             "-m",
             "clauster.pty_keeper",
@@ -1076,18 +1098,22 @@ class SessionRunner:
             str(sidecar),
             "--cwd",
             str(cwd),
-            "--",
-            *bridge_argv,
         ]
+        if pty_log is not None:
+            cmd += ["--pty-log", str(pty_log)]
+        cmd += ["--", *bridge_argv]
+        return cmd
 
-    def _popen_keeper(self, cwd: Path, sidecar: Path, bridge_argv: list[str]) -> subprocess.Popen:
+    def _popen_keeper(
+        self, cwd: Path, sidecar: Path, bridge_argv: list[str], pty_log: Path | None = None
+    ) -> subprocess.Popen:
         """Launch the PTY keeper detached so it outlives a Clauster restart.
 
         Same detached pattern as the subcommand `_popen` (own session, stdin
         detached, stdout/stderr to a file) — the keeper, not Clauster, holds the
         bridge's terminal, so it survives independently and keeps the bridge alive.
         """
-        cmd = self._keeper_launch_cmd(sidecar, cwd, bridge_argv)
+        cmd = self._keeper_launch_cmd(sidecar, cwd, bridge_argv, pty_log)
         keeper_log = sidecar.with_suffix(".log")  # the keeper's own stdout/stderr
         err_fh = keeper_log.open("wb")
         try:
@@ -1212,10 +1238,16 @@ class SessionRunner:
         # to the private raw parse-source (== log_path unless on-disk redaction is on).
         sidecar = self._sidecar_path_for(log_path)
         debug_path = instance.bridge_raw_log_path or log_path
+        # The keeper mirrors the live terminal frames here for the read-only
+        # `/ws/pty-terminal` view (#534); shares the spawn-set stem so retention prunes
+        # it with the rest of the set and a restart can re-derive it from the sidecar.
+        pty_log = self._pty_terminal_log_path_for(log_path)
         bridge_argv = self._build_pty_bridge_argv(debug_path, name, permission_mode, resume=resume)
         try:
             bridge_argv[0] = resolve_binary(bridge_argv[0])
-            proc = await asyncio.to_thread(self._popen_keeper, proj.path, sidecar, bridge_argv)
+            proc = await asyncio.to_thread(
+                self._popen_keeper, proj.path, sidecar, bridge_argv, pty_log
+            )
         except (OSError, ClaudeNotFound) as exc:
             _log.warning("pty spawn of %s failed to launch: %s", name, exc)
             instance.status = InstanceStatus.ERROR
@@ -1223,6 +1255,7 @@ class SessionRunner:
             return instance
         self._procs[name] = proc
         instance.keeper_pid = proc.pid
+        instance.bridge_pty_log_path = pty_log
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
         self._apply_pty_info(instance, info, proc)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
@@ -1699,6 +1732,11 @@ class SessionRunner:
             # prompt to act) rather than a silently-empty live panel. This keeps the pty
             # path symmetric with the standard path's `_latest_debug_log_for` (#584).
             tail_source = raw_path if raw_path.exists() else None
+            # Re-derive the live-terminal capture from the sidecar's shared stem (#534).
+            # The keeper is still writing it; bind only if it survived retention, else
+            # None so `/ws/pty-terminal` 1008s cleanly rather than tailing a gone file.
+            pty_set_path = self._pty_terminal_log_path_for(log_path)
+            pty_log_path = pty_set_path if pty_set_path.exists() else None
             log_path = log_path if tail_source is not None else None
             return RemoteControlInstance(
                 project=name,
@@ -1713,6 +1751,7 @@ class SessionRunner:
                 bridge_proc_start=bridge_proc_start,
                 bridge_debug_log_path=log_path,
                 bridge_raw_log_path=tail_source,
+                bridge_pty_log_path=pty_log_path,
                 starter_session_id=info.get("session_id") or None,
                 url=info.get("connect_url") or None,
             )

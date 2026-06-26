@@ -1922,6 +1922,58 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except (WebSocketDisconnect, RuntimeError):
             return
 
+    @app.websocket("/ws/pty-terminal/{instance_id}")
+    async def ws_pty_terminal(websocket: WebSocket, instance_id: str) -> None:
+        """Tail a *running pty* bridge's live terminal — read-only, ID/secret-redacted (#534).
+
+        Streams the PTY keeper's size-bounded master-capture (the raw terminal frames),
+        not the parsed transcript. **No input path exists** — this socket only sends; the
+        keeper never reads from the browser into the PTY (interactive is out of scope,
+        gated on the trust tier). Fails closed: an unauthed connect, a non-pty bridge, or
+        a missing capture file closes with 1008 and leaks no path.
+        """
+        if config.auth.enabled and not _ws_authorized(websocket):
+            await websocket.close(
+                code=1008
+            )  # validate before accept — never open an unauthed socket
+            return
+        await websocket.accept()
+        instance = runner.get_instance(instance_id)
+        # Only a pty bridge has a live terminal capture; everything else (no instance,
+        # a standard multi-session bridge, or a pty whose capture was pruned) gets a
+        # clean 1008 so the read-only view degrades to the "disconnected" banner.
+        if (
+            instance is None
+            or instance.resume_mode != "pty"
+            or instance.bridge_pty_log_path is None
+        ):
+            await websocket.close(code=1008)  # nothing to stream
+            return
+        path = instance.bridge_pty_log_path
+        # Always strip ANSI from the live terminal: the capture is raw PTY frames (cursor
+        # moves, colors, OSC) which a `<pre>` can't render — strip to readable plain text,
+        # and stripping first also stops an escape sequence splitting an id past redaction.
+        offset = await asyncio.to_thread(logstream.initial_offset, path)
+
+        async def _stream() -> None:
+            carry = ""
+            local_offset = offset
+            while True:
+                local_offset, text = await asyncio.to_thread(
+                    logstream.read_new, path, local_offset
+                )
+                if text:
+                    # Buffer whole lines so redaction never misses an id split across reads.
+                    *lines, carry = (carry + text).split("\n")
+                    for line in lines:
+                        await websocket.send_text(sanitize_line(line, strip_ansi_seq=True))
+                await asyncio.sleep(0.5)
+
+        try:
+            await stream_until_disconnect(websocket, _stream)
+        except (WebSocketDisconnect, RuntimeError):
+            return
+
     @app.websocket("/ws/hosted/{instance_id}")
     async def ws_hosted(websocket: WebSocket, instance_id: str) -> None:
         """Stream a hosted session's live events, replaying the ring past ``?after=``."""

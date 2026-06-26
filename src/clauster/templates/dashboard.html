@@ -498,6 +498,13 @@
                   <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleLogs(i.project)">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-logs"/></svg><span
                       x-text="logs[i.project] && logs[i.project].open ? 'Hide logs' : 'Logs'">Logs</span></button>
+                  {# Live read-only terminal — pty bridges only (the only mode with a captured PTY).
+                     Streams the raw frame buffer over /ws/pty-terminal; no keystroke input path (#534). #}
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" x-show="isPty(i.project)" x-cloak
+                          @click="toggleTerminal(i.project)"
+                          title="Watch this pty session's live terminal output (read-only).">
+                    <svg class="ico me-1" aria-hidden="true"><use href="#ic-logs"/></svg><span
+                      x-text="ptyTerm[i.project] && ptyTerm[i.project].open ? 'Hide terminal' : 'Live terminal'">Live terminal</span></button>
                   <button type="button" class="btn btn-sm btn-outline-danger" @click="stop(i.project)"
                           :disabled="isStopping(i.project)">
                     <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.project)" x-cloak></span>
@@ -548,6 +555,34 @@
                      themes (a console reads as dark) — not a theming straggler to "fix". #}
                   <pre class="log-view bg-dark text-white rounded p-2" :id="'log-' + i.project"
                        x-text="logs[i.project].lines.join('\n')"></pre>
+                </div>
+              </template>
+              {# Live read-only pty terminal panel (#534) — mirrors the logs panel above.
+                 x-text (never x-html): the streamed frames are untrusted terminal output. #}
+              <template x-if="ptyTerm[i.project] && ptyTerm[i.project].open">
+                <div class="mt-2">
+                  <div class="btn-list mb-1">
+                    <span class="text-secondary small" style="display:inline-flex; align-items:center">Live terminal — read-only</span>
+                    <button type="button" class="btn btn-sm" @click="scrollTerm(i.project)">Jump to latest</button>
+                  </div>
+                  {# Keep d-flex OFF the x-show element (Tabler's display:flex !important would
+                     defeat x-show's display:none) — flex goes on the inner wrapper, as in the logs panel. #}
+                  <div class="alert alert-info py-1 px-2 mb-1"
+                       role="status" aria-live="polite"
+                       x-show="ptyTerm[i.project].reconnecting && !ptyTerm[i.project].lost" x-cloak>
+                    <span>⏳ Live terminal dropped — reconnecting…</span>
+                  </div>
+                  <div class="alert alert-warning py-1 px-2 mb-1"
+                       role="alert"
+                       x-show="ptyTerm[i.project].lost" x-cloak>
+                    <div class="d-flex align-items-center">
+                      <span class="me-2" x-show="!isRunning(i.project) && !isBusy(i.project)">⚠ Live terminal disconnected — the bridge may have stopped.</span>
+                      <span class="me-2" x-show="isRunning(i.project) || isBusy(i.project)" x-cloak>⚠ Live terminal disconnected — the bridge is still running; click Reconnect to resume.</span>
+                      <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openTerminal(i.project, true)">Reconnect</button>
+                    </div>
+                  </div>
+                  <pre class="log-view bg-dark text-white rounded p-2" :id="'pty-' + i.project"
+                       x-text="ptyTerm[i.project].lines.join('\n')"></pre>
                 </div>
               </template>
             </div>

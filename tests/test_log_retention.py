@@ -9,7 +9,7 @@ from pathlib import Path
 from clauster.runner import SessionRunner
 
 # Longest-match-first, same order as SessionRunner._LOG_SET_SUFFIXES.
-_SUFFIXES = (".raw.log", ".stderr.log", ".keeper.json", ".keeper.log", ".log")
+_SUFFIXES = (".raw.log", ".stderr.log", ".keeper.json", ".keeper.log", ".pty.log", ".log")
 
 
 def _runner(runner_config) -> SessionRunner:
@@ -132,6 +132,18 @@ def test_keeper_log_groups_with_its_set(runner_config):
     assert runner._log_set_key(keeper_log.name) == "alpha-1-1"  # same key as the set
     runner._prune_logs(set())
     assert not keeper_log.exists()  # pruned with the rest of the set
+
+
+def test_pty_capture_log_groups_with_its_set(runner_config):
+    # The pty live-terminal capture `.pty.log` (#534) is a sibling too — it must strip to
+    # the same set key and prune with the rest of the set, never orphan as `<stem>.pty`.
+    runner = _runner(runner_config)
+    runner._config.logs.retention_max_age_days = 30
+    old = _make_set(runner._log_dir, "alpha", 1, age_days=40)
+    pty_log = next(p for p in old if p.name.endswith(".pty.log"))
+    assert runner._log_set_key(pty_log.name) == "alpha-1-1"  # same key as the set
+    runner._prune_logs(set())
+    assert not pty_log.exists()  # pruned with the rest of the set
 
 
 def test_protected_set_is_never_pruned(runner_config):

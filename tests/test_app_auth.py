@@ -369,7 +369,12 @@ def test_ws_rejected_without_auth(runner_config):
 
 @pytest.mark.parametrize(
     "path",
-    ["/ws/bridge-log/alpha", "/ws/hosted/alpha", "/ws/clone-progress/alpha"],
+    [
+        "/ws/bridge-log/alpha",
+        "/ws/pty-terminal/alpha",
+        "/ws/hosted/alpha",
+        "/ws/clone-progress/alpha",
+    ],
 )
 def test_all_ws_endpoints_reject_unauthenticated(runner_config, path):
     # #549 parity pin: EVERY WebSocket endpoint must gate on the same `auth.enabled` +
@@ -426,6 +431,79 @@ def test_ws_streams_sanitized_lines(runner_config, tmp_path):
             line = ws.receive_text()
     assert "RED" in line and "\x1b[" not in line  # ANSI stripped
     assert "env_01TESTENVAAAAAAAAAAAAAAAA" not in line  # id redacted (D11)
+
+
+# ----- live read-only pty terminal (#534) ----------------------------------
+
+
+def test_pty_terminal_streams_redacted_frames(runner_config, tmp_path):
+    # Happy path: a running pty bridge with a capture file -> the read-only WS reads
+    # raw frames, strips ANSI, redacts ids/secrets, and sends whole lines.
+    config, claude_json = runner_config  # auth off
+    runner = SessionRunner(config, claude_json=claude_json)
+    capf = tmp_path / "demo.pty.log"
+    capf.write_text(
+        "frame \x1b[32mGREEN\x1b[0m session_01TESTSESSIONAAAAAAAAA ghp_AAAAAAAAAAAAAAAAAAAA\n"
+    )
+    runner._instances["demo"] = RemoteControlInstance(
+        project="demo",
+        label="demo",
+        status=InstanceStatus.RUNNING,
+        resume_mode="pty",
+        bridge_pty_log_path=capf,
+    )
+    with TestClient(create_app(config, runner=runner)) as client:
+        with client.websocket_connect("/ws/pty-terminal/demo") as ws:
+            line = ws.receive_text()
+    assert "GREEN" in line and "\x1b[" not in line  # ANSI stripped
+    assert "session_01TESTSESSIONAAAAAAAAA" not in line  # bearer-equivalent id redacted
+    assert "ghp_AAAAAAAAAAAAAAAAAAAA" not in line  # secret shape redacted
+
+
+def test_pty_terminal_1008_for_standard_bridge(runner_config, tmp_path):
+    # A standard (non-pty) bridge has no captured PTY -> close 1008, never stream.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    capf = tmp_path / "demo.pty.log"
+    capf.write_text("anything\n")
+    runner._instances["demo"] = RemoteControlInstance(
+        project="demo",
+        label="demo",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pty_log_path=capf,  # even if a path is somehow set, standard mode is refused
+    )
+    with TestClient(create_app(config, runner=runner)) as client:
+        with client.websocket_connect("/ws/pty-terminal/demo") as ws:
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
+
+
+def test_pty_terminal_1008_when_no_capture_path(runner_config):
+    # A pty bridge with no capture file (pruned / never captured) -> close 1008.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._instances["demo"] = RemoteControlInstance(
+        project="demo",
+        label="demo",
+        status=InstanceStatus.RUNNING,
+        resume_mode="pty",
+        bridge_pty_log_path=None,
+    )
+    with TestClient(create_app(config, runner=runner)) as client:
+        with client.websocket_connect("/ws/pty-terminal/demo") as ws:
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
+
+
+def test_pty_terminal_1008_for_unknown_instance(runner_config):
+    # No such instance -> close 1008 (no path leak).
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    with TestClient(create_app(config, runner=runner)) as client:
+        with client.websocket_connect("/ws/pty-terminal/ghost") as ws:
+            with pytest.raises(WebSocketDisconnect):
+                ws.receive_text()
 
 
 # ----- API token (Bearer) auth (#360) --------------------------------------

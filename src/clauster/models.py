@@ -81,6 +81,11 @@ class RemoteControlInstance(BaseModel):
     # at-rest mirror of it. When redaction is off this equals `bridge_debug_log_path`
     # (a single verbatim file). Readers parse markers from here; the mirror redacts it.
     bridge_raw_log_path: Path | None = None
+    # Live read-only terminal capture for a "pty" bridge (#534): the PTY keeper mirrors
+    # the drained master frames to this size-bounded file, which `/ws/pty-terminal` tails
+    # (redacted in-flight). None for standard bridges (no PTY) and for any bridge whose
+    # capture file no longer exists (retention pruned it).
+    bridge_pty_log_path: Path | None = None
     # Tail of the bridge's stdout/stderr, captured when a spawn fails (ERROR/CRASHED)
     # so the UI can show *why* instead of a bare "Failed to start". None on success.
     error_detail: str | None = None

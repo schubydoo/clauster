@@ -50,6 +50,16 @@ _RE_CONNECT_URL = re.compile(rb"https?://claude\.ai/code/(session_[A-Za-z0-9]+)"
 # discovery (the bridge stays running regardless; this only bounds URL capture).
 _URL_TIMEOUT = 30.0
 
+# Cap for the optional live-terminal capture file (#534). The keeper drains the
+# PTY master regardless (so the bridge never blocks); when a capture path is given
+# it also writes those bytes here for the read-only `/ws/pty-terminal` tail. The
+# file is a *live frame buffer*, not an archive — once it exceeds this size it is
+# truncated back to its tail, so an unbounded session can't fill the disk. Sized to
+# comfortably hold a terminal's worth of recent frames.
+_PTY_LOG_MAX_BYTES = 1024 * 1024  # 1 MiB
+# How much of the tail to keep when the capture file is truncated.
+_PTY_LOG_KEEP_BYTES = 256 * 1024  # 256 KiB
+
 
 def _write_sidecar(path: Path, data: dict[str, object]) -> None:
     """Atomically write the sidecar JSON so a polling reader never sees a partial file."""
@@ -60,6 +70,79 @@ def _write_sidecar(path: Path, data: dict[str, object]) -> None:
     except OSError:
         # Best-effort: a transient write failure must not take the bridge down.
         pass
+
+
+class _PtyCapture:
+    """Append PTY-master bytes to a size-bounded live-terminal capture file (#534).
+
+    The capture backs the read-only ``/ws/pty-terminal`` tail: a *live frame buffer*,
+    not an archive. Writes are best-effort — a capture failure must never take the
+    bridge down (the keeper drains the master regardless), so every FS error is
+    swallowed and capture goes dormant for the rest of the session. The file is
+    created ``0600`` from a fresh inode (``O_CREAT | O_EXCL``) so the raw terminal
+    output — which can echo secrets/command output — is owner-only, matching the
+    bridge's ``--debug-file`` posture; the WS layer redacts each line again in-flight.
+    """
+
+    def __init__(self, path: Path) -> None:
+        """Open ``path`` ``0600`` for capture; go dormant if it can't be opened."""
+        self._path = path
+        self._fd: int | None = None
+        self._written = 0
+        try:
+            # O_EXCL refuses a pre-planted symlink at this per-spawn-unique path and
+            # guarantees a fresh 0600 inode (so the raw capture is never briefly
+            # group/world-readable the way touch()+chmod would leave it).
+            self._fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except OSError:
+            self._fd = None  # capture unavailable → the tail simply 1008s; bridge unaffected
+
+    def write(self, chunk: bytes) -> None:
+        """Append ``chunk``, truncating back to the tail once the cap is exceeded."""
+        if self._fd is None or not chunk:
+            return
+        try:
+            os.write(self._fd, chunk)
+            self._written += len(chunk)
+            if self._written > _PTY_LOG_MAX_BYTES:
+                self._truncate_tail()
+        except OSError:
+            self._close()  # capture broke → go dormant; never propagate to the bridge
+
+    def _truncate_tail(self) -> None:
+        """Rewrite the file to only its trailing ``_PTY_LOG_KEEP_BYTES`` and continue."""
+        try:
+            with open(self._path, "rb") as fh:
+                fh.seek(-_PTY_LOG_KEEP_BYTES, os.SEEK_END)
+                tail = fh.read()
+        except OSError:
+            self._close()
+            return
+        # A truncate can split a multibyte char or a redaction-relevant token across
+        # the new head; drop to the first newline so the tail starts on a line boundary
+        # (the WS reader buffers whole lines before redacting).
+        nl = tail.find(b"\n")
+        if nl != -1:
+            tail = tail[nl + 1 :]
+        try:
+            os.lseek(self._fd, 0, os.SEEK_SET)  # type: ignore[arg-type]
+            os.ftruncate(self._fd, 0)  # type: ignore[arg-type]
+            os.write(self._fd, tail)  # type: ignore[arg-type]
+            self._written = len(tail)
+        except OSError:
+            self._close()
+
+    def _close(self) -> None:
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+    def close(self) -> None:
+        """Close the capture fd (idempotent)."""
+        self._close()
 
 
 def _proc_start(pid: int) -> float | None:
@@ -73,12 +156,21 @@ def _proc_start(pid: int) -> float | None:
         return None
 
 
-def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) -> int:
+def run_keeper(
+    bridge_argv: list[str],
+    sidecar: Path,
+    cwd: str | None = None,
+    pty_log: Path | None = None,
+) -> int:
     """Spawn ``bridge_argv`` under a PTY, publish a discovery sidecar, drain, and wait.
 
     Returns the bridge's exit status. Any setup failure is recorded in the
     sidecar (``state: "error"``) and returned as a non-zero code rather than
     raised, so the launching process always gets a diagnosable result.
+
+    When ``pty_log`` is given the keeper also mirrors the drained PTY-master bytes
+    to that size-bounded file (#534), backing the read-only ``/ws/pty-terminal``
+    live-view. Capture is best-effort and never affects the bridge.
     """
     import fcntl
     import pty
@@ -158,6 +250,8 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
     poller = select.poll()
     poller.register(master, select.POLLIN)
 
+    capture = _PtyCapture(pty_log) if pty_log is not None else None
+
     buf = bytearray()
     url_found = False
     url_deadline = time.monotonic() + _URL_TIMEOUT
@@ -165,6 +259,12 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
         try:
             if poller.poll(500):  # ms; truthy when the master fd has data (no FD_SETSIZE limit)
                 chunk = os.read(master, 65536)
+                if chunk and capture is not None:
+                    # Mirror the live terminal frames for the read-only `/ws/pty-terminal`
+                    # tail (#534). Independent of the URL scrape below, which stops once
+                    # the connect URL is found — the capture must keep running for the
+                    # whole session so the live view stays current.
+                    capture.write(chunk)
                 if chunk and not url_found:
                     buf.extend(chunk)
                     hit = _RE_CONNECT_URL.search(buf)
@@ -200,6 +300,8 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
     rc = proc.poll() or 0
     base.update(state="exited", bridge_exit=rc)
     _write_sidecar(sidecar, base)
+    if capture is not None:
+        capture.close()
     try:
         os.close(master)
     except OSError:
@@ -213,6 +315,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sidecar", required=True, type=Path, help="JSON discovery file to write")
     parser.add_argument("--cwd", default=None, help="working directory for the bridge")
     parser.add_argument(
+        "--pty-log",
+        default=None,
+        type=Path,
+        help="size-bounded file to mirror the live terminal output to (read-only view)",
+    )
+    parser.add_argument(
         "bridge_argv",
         nargs=argparse.REMAINDER,
         help="the bridge command line, after a `--` separator",
@@ -223,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         bridge_argv = bridge_argv[1:]
     if not bridge_argv:
         parser.error("no bridge argv given after `--`")
-    return run_keeper(bridge_argv, ns.sidecar, cwd=ns.cwd)
+    return run_keeper(bridge_argv, ns.sidecar, cwd=ns.cwd, pty_log=ns.pty_log)
 
 
 # --- orphan-keeper management (#301) -----------------------------------------

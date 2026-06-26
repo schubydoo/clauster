@@ -46,6 +46,29 @@ def test_build_pty_bridge_argv_resume_adds_continue(runner_config) -> None:
     assert "--continue" in argv  # this is what restores prior context on restart
 
 
+def test_pty_terminal_log_path_shares_set_stem(runner_config) -> None:
+    """The live-terminal capture path is a `.pty.log` sibling of the bridge's log set (#534)."""
+    runner, _ = _pty_runner(runner_config)
+    p = runner._pty_terminal_log_path_for(Path("/logs/alpha-123-0.log"))
+    assert p == Path("/logs/alpha-123-0.pty.log")
+    # It strips back to the same spawn-set key as the rest of the set, so retention
+    # prunes it together with the .log/.raw.log/.keeper.json siblings.
+    assert runner._log_set_key(p.name) == runner._log_set_key("alpha-123-0.log")
+
+
+def test_keeper_launch_cmd_includes_pty_log_when_given(runner_config) -> None:
+    """The keeper launcher passes --pty-log only when a capture path is supplied (#534)."""
+    runner, _ = _pty_runner(runner_config)
+    bridge = [runner._binary, "--remote-control", "alpha"]
+    with_log = runner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), bridge, Path("/s.pty.log"))
+    assert "--pty-log" in with_log
+    assert with_log[with_log.index("--pty-log") + 1] == "/s.pty.log"
+    # The bridge argv stays intact after the `--` separator.
+    assert with_log[with_log.index("--") + 1 :] == bridge
+    without_log = runner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), bridge)
+    assert "--pty-log" not in without_log
+
+
 def test_is_pty_mode_gated_on_config_and_platform(runner_config) -> None:
     pty_runner, _ = _pty_runner(runner_config)
     std_runner = SessionRunner(runner_config[0], claude_json=runner_config[1])
@@ -157,6 +180,48 @@ async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monk
 
     assert out.status is InstanceStatus.ERROR
     assert persisted == [True]  # the ERROR state was persisted, not swallowed
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_sets_capture_path_and_passes_pty_log(
+    runner_config, tmp_path, monkeypatch
+) -> None:
+    """A pty spawn records bridge_pty_log_path and hands the same path to the keeper (#534)."""
+    from clauster.models import Project, RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+
+    captured = {}
+
+    def _fake_popen_keeper(cwd, sidecar, bridge_argv, pty_log=None):
+        captured["pty_log"] = pty_log
+
+        class _P:
+            pid = 4321
+
+            def poll(self):  # noqa: ANN201
+                return None
+
+        return _P()
+
+    async def _noop_persist() -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_popen_keeper", _fake_popen_keeper)
+    monkeypatch.setattr(runner, "_persist", _noop_persist)
+    monkeypatch.setattr(runner, "_await_ready_pty", lambda *a, **k: {"state": "ready"})
+    monkeypatch.setattr(runner, "_flush_redacted_mirror", lambda *a, **k: None)
+    monkeypatch.setattr(procutil, "proc_create_time", lambda *_: 1.0)
+
+    proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
+    inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
+    log_path = tmp_path / "alpha-9-0.log"
+
+    out = await runner._spawn_pty(inst, proj, "alpha", log_path, "default", resume=False)
+
+    expected = tmp_path / "alpha-9-0.pty.log"
+    assert out.bridge_pty_log_path == expected
+    assert captured["pty_log"] == expected  # the keeper was told where to capture
 
 
 class _FakeProc:
