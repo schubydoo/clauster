@@ -64,6 +64,11 @@ dev = [
     "pyright>=1.1.390",
     "yamllint>=1.38",
     "pre-commit>=4.0",
+    # pyte (live pty-screen view, #534) is an OPTIONAL runtime extra (see `pty` below) but
+    # is ALSO listed here so the pty_screen tests run in the default/CI suite and count
+    # toward the 96% coverage gate (same pattern as atheris above). `dev` is never bundled
+    # into the distributed binary, so listing it here carries no LGPL/relink obligation.
+    "pyte>=0.8.2",
 ]
 package = [
     # Standalone-binary builds (see clauster.spec + scripts/build-binary.sh).
@@ -80,6 +85,18 @@ notify = [
     # Optional: install with `pip install 'clauster[notify]'`. Apprise fans a single
     # call out to Slack/Discord/Telegram/email/etc.
     "apprise>=1.9",
+]
+pty = [
+    # Live read-only pty terminal view (#534): server-side terminal emulation via pyte,
+    # rendered to redacted cells for the dashboard's xterm.js panel. Optional — install
+    # with `pip install 'clauster[pty]'`.
+    #
+    # LGPLv3: pyte is deliberately kept OUT of [project.dependencies] and the Apache-2.0
+    # standalone PyInstaller binary, so the default distribution carries no (L)GPL relink
+    # obligation. clauster imports it LAZILY (pty_screen.py:_import_pyte) and degrades to a
+    # clear "install clauster[pty]" error when absent. If a future build ever bundles pyte,
+    # add an LGPL THIRD_PARTY_NOTICES entry and honor the relink terms.
+    "pyte>=0.8.2",
 ]
 fuzz = [
     # Standalone-fuzzing convenience extra: `uv pip install '.[fuzz]'` then
