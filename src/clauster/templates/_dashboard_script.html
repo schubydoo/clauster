@@ -27,6 +27,15 @@
   // frame resets each stream's counter, so a genuinely-healthy stream reconnects without limit.
   const LOG_RECONNECT_MS = 1500;
   const MAX_LOG_RECONNECTS = 5;  // give up auto-reconnect after this many consecutive failures (CodeRabbit)
+  // Live pty-screen view (#534): fixed geometry MUST match the keeper's pyte render
+  // (pty_screen.SCREEN_COLS/SCREEN_ROWS) — the wire carries no resize negotiation.
+  const PTY_COLS = 120;
+  const PTY_ROWS = 40;
+  // name -> { term, ws, token }. Deliberately OUTSIDE the Alpine component: an xterm.js
+  // Terminal is a large stateful object and must never be wrapped in Alpine's reactive
+  // Proxy (it would break its internals and thrash reactivity; cf. #310/#315). Only the
+  // lightweight {open,status,error} lifecycle lives in Alpine state (this.ptyScreen).
+  const _ptyScreens = {};
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
@@ -116,6 +125,8 @@
       qrOpen: {},
       qrNonce: {},
       logs: {},
+      ptyScreen: {},   // project -> { open, status, error } — live pty-screen lifecycle (#534)
+      _ptySeq: 0,      // monotonic token per opened pty-screen view (retire check; see openPtyScreen)
       spawnMode: {},
       permMode: {},
       resumeMode: {},
@@ -2151,6 +2162,81 @@
         if (el) el.scrollTop = el.scrollHeight;
       },
       jumpToLatest(name) { this.scrollLog(name); },
+      // --- read-only live pty-screen view (#534) ---
+      togglePtyScreen(name) {
+        const s = this.ptyScreen[name];
+        if (s && s.open) { this.closePtyScreen(name); } else { this.openPtyScreen(name); }
+      },
+      openPtyScreen(name) {
+        // Idempotent: retire any prior view first (close its socket + dispose its terminal),
+        // then bind THIS view to a fresh per-name token. The token — not object identity — is
+        // what the async handlers check, because Alpine wraps ptyScreen[name] in a reactive
+        // Proxy and a raw-object identity compare would always fail (mirrors openLogs/#310/#315).
+        this.closePtyScreen(name);
+        const token = ++this._ptySeq;
+        this.ptyScreen[name] = { open: true, status: "connecting", error: null, token };
+        const self = this;
+        const live = () => {
+          const s = self.ptyScreen[name];
+          return s && s.open && s.token === token ? s : null;
+        };
+        // Defer terminal creation until the host div is in the DOM (the x-if just flipped open).
+        this.$nextTick(() => {
+          const s = live();
+          if (!s) return;  // closed again before we mounted
+          const host = document.getElementById("pty-screen-" + name);
+          if (!host) return;
+          if (typeof Terminal === "undefined") {  // xterm.js failed to load (e.g. blocked asset)
+            s.status = "error"; s.error = "terminal component unavailable";
+            return;
+          }
+          const term = new Terminal({
+            cols: PTY_COLS, rows: PTY_ROWS, disableStdin: true, cursorBlink: false,
+            convertEol: false, scrollback: 0, fontSize: 12,
+          });
+          term.open(host);
+          const proto = location.protocol === "https:" ? "wss" : "ws";
+          const url = proto + "://" + location.host + ROOT + "/ws/pty-screen/" + encodeURIComponent(name);
+          const ws = new WebSocket(url);
+          _ptyScreens[name] = { term, ws, token };
+          ws.onmessage = (ev) => {
+            const s = live();
+            if (!s) return;  // a retired view → ignore
+            const reg = _ptyScreens[name];
+            if (!reg || reg.token !== token) return;  // a retired socket → ignore
+            let frame;
+            try { frame = JSON.parse(ev.data); } catch (e) { return; }  // a torn frame → skip
+            s.status = frame.state || "live";
+            s.error = frame.error || null;
+            const scr = frame.screen;
+            if (scr && Array.isArray(scr.rows)) {
+              const cur = scr.cursor || { x: 0, y: 0 };
+              // Autowrap OFF (\x1b[?7l) so a full-width row never wraps/scrolls; home, overwrite
+              // every row (each is exactly PTY_COLS wide, so no clear is needed), then place the
+              // cursor. Rows are plaintext cells (no control bytes, redacted server-side), so
+              // writing them raw can neither inject ANSI nor leak a masked span.
+              const out = "\x1b[?7l\x1b[H" + scr.rows.join("\r\n") +
+                          "\x1b[" + ((cur.y | 0) + 1) + ";" + ((cur.x | 0) + 1) + "H";
+              try { reg.term.write(out); } catch (e) {}
+            }
+          };
+          ws.onclose = () => {
+            const s = live();
+            if (!s) return;  // deliberate close / retired → leave status as-is
+            if (s.status !== "exited") s.status = "disconnected";  // a clean end already reads "exited"
+          };
+        });
+      },
+      closePtyScreen(name) {
+        const s = this.ptyScreen[name];
+        if (s) s.open = false;  // mark closed first so live() retires any late handler
+        const reg = _ptyScreens[name];
+        if (reg) {
+          if (reg.ws) { try { reg.ws.close(); } catch (e) {} }
+          if (reg.term) { try { reg.term.dispose(); } catch (e) {} }
+          delete _ptyScreens[name];
+        }
+      },
     };
   }
 

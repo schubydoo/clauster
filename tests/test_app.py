@@ -39,6 +39,25 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config):
+    # #534 S5: the per-bridge "Live terminal" control + the xterm.js assets render ONLY when the
+    # (default-off) claude.pty_screen_enabled tap is on. The button itself is further gated
+    # client-side on i.resume_mode === 'pty' (pty bridges have no PTY-less analog).
+    on = TestClient(create_app(load_config(write_config("claude:\n  pty_screen_enabled: true\n"))))
+    body = on.get("/").text
+    assert "/static/vendor/xterm/js/xterm.js" in body
+    assert (
+        "togglePtyScreen(i.project)" in body
+    )  # the button @click (Jinja-gated, not the JS method)
+    assert "i.resume_mode === 'pty'" in body
+    assert "#ic-terminal" in body
+
+    off = TestClient(create_app(load_config(write_config())))  # default: flag off
+    body_off = off.get("/").text
+    assert "/static/vendor/xterm/js/xterm.js" not in body_off
+    assert "togglePtyScreen(i.project)" not in body_off
+
+
 def test_transcript_viewer_has_sort_toggle_and_search(write_config):
     # #612: the read-only transcript modal gains a sort-direction toggle and an
     # in-message search box. Assert both controls + their wiring ship in the markup,

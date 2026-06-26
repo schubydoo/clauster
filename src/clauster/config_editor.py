@@ -34,6 +34,7 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "claude.resume_recap",
     "claude.resume_recap_max_chars",
     "claude.launch_mode",
+    "claude.pty_screen_enabled",
     "instance_defaults.spawn_mode",
     "instance_defaults.permission_mode",
     "instance_defaults.session_name_prefix",
@@ -191,6 +192,7 @@ FIELD_LABELS: dict[str, str] = {
     "claude.resume_recap": "Recap prior transcript on restart",
     "claude.resume_recap_max_chars": "Recap size limit",
     "claude.launch_mode": "Launch mode for new bridges",
+    "claude.pty_screen_enabled": "Live PTY terminal view",
     "instance_defaults.spawn_mode": "Where new sessions run",
     "instance_defaults.permission_mode": "Default permission mode",
     "instance_defaults.session_name_prefix": "Session name prefix",
@@ -289,6 +291,13 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "usage.show_cost": (
         "Deprecated. Use “Usage badge mode” → Off to hide the badge; usage.mode now takes "
         "precedence and show_cost only applies when mode is unset."
+    ),
+    "claude.pty_screen_enabled": (
+        "Applies to pty (true-resume) bridges only — standard bridges have no PTY to render. "
+        "Publishes a redacted, read-only render of the bridge's live terminal for the dashboard's "
+        "live-terminal view. Needs the optional pyte dependency (pip install 'clauster[pty]'); "
+        "without it the feature stays dormant. The render is best-effort secret-redacted, so "
+        "treat the live view as auth-gated, not secret-proof. Takes effect on the next start."
     ),
 }
 
