@@ -62,7 +62,8 @@ def test_keeper_launch_cmd_includes_pty_log_when_given(runner_config) -> None:
     bridge = [runner._binary, "--remote-control", "alpha"]
     with_log = runner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), bridge, Path("/s.pty.log"))
     assert "--pty-log" in with_log
-    assert with_log[with_log.index("--pty-log") + 1] == "/s.pty.log"
+    # str(Path(...)) so the comparison matches the OS path separator (Windows -> \s.pty.log).
+    assert with_log[with_log.index("--pty-log") + 1] == str(Path("/s.pty.log"))
     # The bridge argv stays intact after the `--` separator.
     assert with_log[with_log.index("--") + 1 :] == bridge
     without_log = runner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), bridge)
