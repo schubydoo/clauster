@@ -198,6 +198,52 @@ def test_field_specs_exposes_claustrum_block_with_depends() -> None:
     assert specs["claustrum.socket_path"]["placeholder"]
 
 
+def test_field_specs_exposes_notifications_block_with_depends() -> None:
+    # #541: the notifications block splits into two channel master switches (outbound
+    # `enabled` + `browser_enabled`) plus the per-event `notify_on_*` toggles, which grey
+    # out when the outbound master is off (same FIELD_DEPENDS mechanism).
+    specs = field_specs()
+    notif = [p for p in EDITABLE_FIELDS if p.startswith("notifications.")]
+    assert notif == [
+        "notifications.enabled",
+        "notifications.browser_enabled",
+        "notifications.notify_on_crash",
+        "notifications.notify_on_ready",
+        "notifications.notify_on_stop",
+        "notifications.notify_on_permission",
+        "notifications.notify_on_session_end",
+        "notifications.notify_on_reconnect_failed",
+    ]
+    # Both master switches are un-gated; neither depends on the other.
+    assert specs["notifications.enabled"]["depends_on"] is None
+    assert specs["notifications.browser_enabled"]["depends_on"] is None
+    assert specs["notifications.enabled"]["section_label"] == "Notifications"
+    # Every per-event toggle greys out unless the outbound channel is on.
+    for path in notif:
+        if path.startswith("notifications.notify_on_"):
+            assert specs[path]["depends_on"] == "notifications.enabled"
+    # The new fields are plain booleans.
+    assert specs["notifications.notify_on_session_end"]["type"] == "bool"
+
+
+def test_validate_edits_accepts_notification_event_toggles(write_config) -> None:
+    # #541: the new per-event toggles + the browser-channel switch round-trip through
+    # the Tier-A allowlist and re-validation.
+    raw = _raw(write_config)
+    candidate = validate_edits(
+        raw,
+        {
+            "notifications.enabled": True,
+            "notifications.browser_enabled": True,
+            "notifications.notify_on_ready": True,
+            "notifications.notify_on_reconnect_failed": True,
+        },
+    )
+    assert candidate["notifications"]["browser_enabled"] is True
+    assert candidate["notifications"]["notify_on_ready"] is True
+    assert candidate["notifications"]["notify_on_reconnect_failed"] is True
+
+
 def test_validate_edits_accepts_enabling_claustrum(write_config) -> None:
     # The reported papercut (#539): claustrum.enabled now flips from the editor (Tier-A write),
     # and an out-of-range operational value still fails closed.

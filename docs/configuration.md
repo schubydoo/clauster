@@ -298,9 +298,15 @@ sends nothing — a notification failure never affects a bridge's lifecycle.
 <!-- BEGIN GEN: notifications -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | Master switch for outbound notifications. |
+| `enabled` | bool | `false` | Master switch for the outbound (Apprise) channel. |
 | `urls` | list[str] | `[]` | Apprise notification URLs (e.g. `slack://`, `discord://`, `tgram://`). Requires the `notify` extra. A non-loopback secret in a URL is the operator's responsibility to keep out of shared configs. |
+| `browser_enabled` | bool | `false` | Master switch for the browser (Web Notifications) channel — the dashboard shows a desktop notification once the browser grants permission. |
 | `notify_on_crash` | bool | `true` | Notify when a bridge exits unexpectedly (CRASHED — i.e. not via the Stop button). |
+| `notify_on_ready` | bool | `false` | Notify when a bridge finishes starting and becomes ready (RUNNING). |
+| `notify_on_stop` | bool | `false` | Notify when a bridge is stopped normally (via the Stop button). |
+| `notify_on_permission` | bool | `false` | Notify when a hosted session parks a tool-permission prompt — the 'come look' signal. |
+| `notify_on_session_end` | bool | `false` | Notify when a session ends (a single-shot session bridge exits after its session completes). |
+| `notify_on_reconnect_failed` | bool | `false` | Notify when a resume/reconnect attempt fails to bring a bridge back up. |
 <!-- END GEN: notifications -->
 
 ```yaml

@@ -505,6 +505,42 @@ async def test_hosted_permission_needed_closure_emits_webhook(runner_config):
     ]
 
 
+class _RecordingNotifier:
+    """Active stand-in notifier capturing anotify calls (for app-wiring tests)."""
+
+    def __init__(self) -> None:
+        self.active = True
+        self.calls: list[tuple[str, str]] = []
+
+    async def anotify(self, title: str, body: str) -> None:
+        self.calls.append((title, body))
+
+
+async def test_hosted_permission_needed_closure_fires_notification(runner_config):
+    """The wired closure also fires a #541 notification when notify_on_permission is on."""
+    config, claude_json = runner_config
+    cfg = ClausterConfig(
+        projects_root=config.projects_root,
+        state_dir=config.state_dir,
+        claude={"binary": config.claude.binary},
+        notifications={"enabled": True, "urls": ["slack://x"], "notify_on_permission": True},
+    )
+    runner = SessionRunner(cfg, claude_json=claude_json)
+    runner._webhooks = RecordingEmitter()
+    notifier = _RecordingNotifier()
+    runner._notifier = notifier
+    app = create_app(cfg, runner)
+
+    app.state.hosted._on_permission_needed("0f1e2d3c", "can_use_tool")
+    await asyncio.gather(*runner._notify_tasks)
+
+    assert len(notifier.calls) == 1
+    title, body = notifier.calls[0]
+    assert "permission" in title.lower()
+    # The redacted subtype rides the body; the raw prompt body never does.
+    assert "can_use_tool" in body
+
+
 # ----- per-project usage (cost badge) -----------------------------------
 
 
@@ -1146,6 +1182,21 @@ def test_dashboard_injects_usage_mode_tokens_when_set(write_config, tmp_path):
     assert 'const USAGE_MODE = "tokens";' in html
 
 
+def test_dashboard_injects_browser_notifications_off_by_default(write_config, tmp_path):
+    html = _client(write_config, tmp_path).get("/").text
+    assert "const BROWSER_NOTIFICATIONS_ENABLED = false;" in html
+
+
+def test_dashboard_injects_browser_notifications_when_enabled(write_config, tmp_path):
+    extra = "notifications:\n  browser_enabled: true\n  notify_on_ready: true\n"
+    html = _client_with(write_config, tmp_path, extra).get("/").text
+    assert "const BROWSER_NOTIFICATIONS_ENABLED = true;" in html
+    # The per-event map carries the toggles the client honours on a transition.
+    assert "ready: true" in html
+    assert "crash: true" in html  # default-ON
+    assert "stop: false" in html  # default-OFF
+
+
 def test_dashboard_injects_usage_mode_off_via_legacy_show_cost(write_config, tmp_path):
     # The deprecated show_cost alias still flips the badge off through to the frontend.
     html = _client_with(write_config, tmp_path, "usage:\n  show_cost: false\n").get("/").text
@@ -1647,3 +1698,54 @@ def test_clone_cancel_running_job_202(write_config, tmp_path):
     assert r.json() == {"job_id": job.id, "cancelling": True}
     assert job.cancel_requested is True
     assert terminated == [True]  # the terminate hook actually fired
+
+
+def test_resume_failure_fires_reconnect_failed_notification(write_config, tmp_path, monkeypatch):
+    # #541: a bridge resume that fails (here SpawnError -> 409) fires the
+    # reconnect-failed notification, then still re-raises the mapped HTTP error.
+    from clauster.models import RemoteControlInstance
+    from clauster.runner import SpawnError
+
+    client = _client_with(
+        write_config,
+        tmp_path,
+        "notifications:\n  enabled: true\n  urls:\n    - 'slack://x'\n"
+        "  notify_on_reconnect_failed: true\n",
+    )
+    runner = client.app.state.runner
+    runner._instances["alpha"] = RemoteControlInstance(project="alpha", label="alpha")
+    notifier = _RecordingNotifier()
+    runner._notifier = notifier
+
+    async def _boom(_name):
+        raise SpawnError("bridge would not come back up")
+
+    monkeypatch.setattr(runner, "resume", _boom)
+    r = client.post("/api/instances/alpha/resume")
+    assert r.status_code == 409  # the mapped HTTP error is unchanged
+    assert len(notifier.calls) == 1
+    title, _body = notifier.calls[0]
+    assert "reconnect failed" in title.lower()
+
+
+def test_resume_failure_no_notification_when_toggle_off(write_config, tmp_path, monkeypatch):
+    # The notification stays silent when notify_on_reconnect_failed is off (default).
+    from clauster.models import RemoteControlInstance
+    from clauster.runner import SpawnError
+
+    client = _client_with(
+        write_config,
+        tmp_path,
+        "notifications:\n  enabled: true\n  urls:\n    - 'slack://x'\n",
+    )
+    runner = client.app.state.runner
+    runner._instances["alpha"] = RemoteControlInstance(project="alpha", label="alpha")
+    notifier = _RecordingNotifier()
+    runner._notifier = notifier
+
+    async def _boom(_name):
+        raise SpawnError("nope")
+
+    monkeypatch.setattr(runner, "resume", _boom)
+    assert client.post("/api/instances/alpha/resume").status_code == 409
+    assert notifier.calls == []

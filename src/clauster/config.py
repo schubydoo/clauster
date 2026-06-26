@@ -676,28 +676,90 @@ class ObservabilityConfig(BaseModel):
         return v
 
 
-class NotificationsConfig(BaseModel):
-    """Outbound notifications on bridge lifecycle events, sent via Apprise.
+# The notification event taxonomy (#541). Each maps to a ``notify_on_*`` toggle on
+# :class:`NotificationsConfig`. ``crash`` is the original event and stays default-ON
+# (no behaviour regression); every other event is default-OFF, so an existing config
+# keeps firing only crash alerts until the operator opts each new event in. Order is
+# the documented taxonomy, not significant.
+_NOTIFY_EVENTS: dict[str, str] = {
+    "crash": "notify_on_crash",
+    "ready": "notify_on_ready",
+    "stop": "notify_on_stop",
+    "permission-needed": "notify_on_permission",
+    "session-ended": "notify_on_session_end",
+    "reconnect-failed": "notify_on_reconnect_failed",
+}
 
-    Off by default. Requires the optional ``notify`` extra
-    (``pip install 'clauster[notify]'``); if it's enabled but Apprise isn't
-    installed, Clauster logs a warning at startup and sends nothing (fail-closed —
-    a notify failure never affects the bridge lifecycle). Sends are best-effort and
-    run off the event loop.
+
+class NotificationsConfig(BaseModel):
+    """Lifecycle notifications, over an outbound (Apprise) channel and/or the browser.
+
+    Two independent channels, each with its own switch:
+
+    * **Outbound** (``enabled`` + ``urls``) — sent via Apprise (the optional
+      ``notify`` extra; ``pip install 'clauster[notify]'``). If enabled but Apprise
+      isn't installed, Clauster logs a warning at startup and sends nothing
+      (fail-closed — a notify failure never affects the bridge lifecycle). Sends are
+      best-effort and run off the event loop.
+    * **Browser** (``browser_enabled``) — Web Notifications shown by the dashboard
+      via the JS ``Notification`` API; needs no extra and no URL, but the browser
+      grants it only after the user accepts the permission prompt.
+
+    Both channels share the per-event ``notify_on_*`` toggles. ``crash`` defaults ON
+    (the historical behaviour); every other event defaults OFF, so an upgrade never
+    starts emitting a new "come look" signal without an explicit opt-in.
     """
 
-    enabled: bool = Field(default=False, description="Master switch for outbound notifications.")
+    enabled: bool = Field(
+        default=False, description="Master switch for the outbound (Apprise) channel."
+    )
     urls: list[str] = Field(
         default_factory=list,
         description="Apprise notification URLs (e.g. `slack://`, `discord://`, "
         "`tgram://`). Requires the `notify` extra. A non-loopback secret in a URL is "
         "the operator's responsibility to keep out of shared configs.",
     )
+    browser_enabled: bool = Field(
+        default=False,
+        description="Master switch for the browser (Web Notifications) channel — the "
+        "dashboard shows a desktop notification once the browser grants permission.",
+    )
     notify_on_crash: bool = Field(
         default=True,
         description="Notify when a bridge exits unexpectedly (CRASHED — i.e. not via "
         "the Stop button).",
     )
+    notify_on_ready: bool = Field(
+        default=False,
+        description="Notify when a bridge finishes starting and becomes ready (RUNNING).",
+    )
+    notify_on_stop: bool = Field(
+        default=False,
+        description="Notify when a bridge is stopped normally (via the Stop button).",
+    )
+    notify_on_permission: bool = Field(
+        default=False,
+        description="Notify when a hosted session parks a tool-permission prompt — the "
+        "'come look' signal.",
+    )
+    notify_on_session_end: bool = Field(
+        default=False,
+        description="Notify when a session ends (a single-shot session bridge exits "
+        "after its session completes).",
+    )
+    notify_on_reconnect_failed: bool = Field(
+        default=False,
+        description="Notify when a resume/reconnect attempt fails to bring a bridge back up.",
+    )
+
+    def event_enabled(self, event: str) -> bool:
+        """Whether ``event`` should fire a notification (looks up its ``notify_on_*`` toggle).
+
+        ``event`` is a key of :data:`_NOTIFY_EVENTS`; an unknown key returns False so a
+        typo never silently emits.
+        """
+        attr = _NOTIFY_EVENTS.get(event)
+        return bool(getattr(self, attr)) if attr is not None else False
 
 
 # The four original bridge-lifecycle events (#371). An absent key for one of these

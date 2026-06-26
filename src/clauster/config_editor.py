@@ -68,7 +68,13 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "metrics.poll_seconds",
     "observability.prometheus_enabled",
     "notifications.enabled",
+    "notifications.browser_enabled",
     "notifications.notify_on_crash",
+    "notifications.notify_on_ready",
+    "notifications.notify_on_stop",
+    "notifications.notify_on_permission",
+    "notifications.notify_on_session_end",
+    "notifications.notify_on_reconnect_failed",
 )
 _EDITABLE = frozenset(EDITABLE_FIELDS)
 
@@ -244,8 +250,14 @@ FIELD_LABELS: dict[str, str] = {
     "metrics.sample_interval_seconds": "Metrics sampling window",
     "metrics.poll_seconds": "Metrics refresh interval",
     "observability.prometheus_enabled": "Enable /metrics endpoint",
-    "notifications.enabled": "Enable notifications",
+    "notifications.enabled": "Enable outbound notifications",
+    "notifications.browser_enabled": "Enable browser notifications",
     "notifications.notify_on_crash": "Notify on unexpected crash",
+    "notifications.notify_on_ready": "Notify when a bridge is ready",
+    "notifications.notify_on_stop": "Notify when a bridge is stopped",
+    "notifications.notify_on_permission": "Notify when permission is needed",
+    "notifications.notify_on_session_end": "Notify when a session ends",
+    "notifications.notify_on_reconnect_failed": "Notify when reconnect fails",
 }
 
 # Unit affix shown beside numeric controls.
@@ -281,7 +293,16 @@ FIELD_DEPENDS: dict[str, str] = {
     "metrics.show_disk": "metrics.enabled",
     "metrics.sample_interval_seconds": "metrics.enabled",
     "metrics.poll_seconds": "metrics.enabled",
+    # The per-event toggles drive BOTH the outbound and browser channels, but the
+    # single-master depends mechanism takes one master — gate them on the outbound
+    # switch (the historical home of notify_on_crash). The browser channel is an
+    # independent sibling switch.
     "notifications.notify_on_crash": "notifications.enabled",
+    "notifications.notify_on_ready": "notifications.enabled",
+    "notifications.notify_on_stop": "notifications.enabled",
+    "notifications.notify_on_permission": "notifications.enabled",
+    "notifications.notify_on_session_end": "notifications.enabled",
+    "notifications.notify_on_reconnect_failed": "notifications.enabled",
 }
 
 # Child -> (master field, the master VALUE that enables the child). Unlike FIELD_DEPENDS

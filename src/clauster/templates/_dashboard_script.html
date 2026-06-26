@@ -50,6 +50,15 @@
   const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
   const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
   const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
+  // Browser (Web Notifications) channel (#541): the master switch + the per-event
+  // toggles the client honours on a polled bridge status transition. crash/ready/stop
+  // are the transitions the client can observe from /api/instances without a server push.
+  const BROWSER_NOTIFICATIONS_ENABLED = {{ browser_notifications_enabled | tojson }};
+  const BROWSER_NOTIFY = {
+    crash: {{ browser_notify_on_crash | tojson }},
+    ready: {{ browser_notify_on_ready | tojson }},
+    stop: {{ browser_notify_on_stop | tojson }},
+  };
   // Pre-selected launch mode. Hosted ("browser") is opt-in and fails closed when
   // claustrum is off, so on a default install we pre-select a working mode (#345).
   const DEFAULT_LAUNCH_MODE = CLAUSTRUM_ENABLED ? "browser" : "desktop";
@@ -179,6 +188,54 @@
         setInterval(() => this.refresh(), 4000);
         // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
         if (METRICS_ENABLED) { this.refreshMetrics(); setInterval(() => this.refreshMetrics(), METRICS_POLL_MS); }
+        // Browser notifications (#541): request the permission grant up front when the
+        // channel is enabled so a later transition can show a notification.
+        this.initBrowserNotifications();
+      },
+      // --- browser (Web Notifications) channel (#541) ---
+      // Request the Notification permission once when the channel is enabled. The browser
+      // grants notifications only after the user accepts this prompt; a denied/unsupported
+      // grant simply means no notification fires (the helpers all no-op then).
+      initBrowserNotifications() {
+        if (!BROWSER_NOTIFICATIONS_ENABLED) return;
+        if (typeof Notification === "undefined") return;  // unsupported browser -> silent no-op
+        if (Notification.permission === "default") {
+          // Best-effort: a rejected promise (e.g. a non-secure context) is harmless.
+          try { Notification.requestPermission().catch(() => {}); } catch (e) { /* ignore */ }
+        }
+      },
+      // Map a new bridge status to the notification event the client can observe, or null.
+      // running = the bridge became ready; crashed = an unexpected exit; stopped = a normal
+      // stop. (interrupted/error/starting/stopping aren't surfaced as notifications.)
+      _statusToNotifyEvent(status) {
+        if (status === "running") return "ready";
+        if (status === "crashed") return "crash";
+        if (status === "stopped") return "stop";
+        return null;
+      },
+      // Compare the prior and next instance maps and fire a browser notification for each
+      // bridge whose status TRANSITIONED into a notifiable, enabled event. No-op unless the
+      // channel is enabled and the browser granted permission.
+      notifyOnTransitions(prev, next) {
+        if (!BROWSER_NOTIFICATIONS_ENABLED) return;
+        if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+        for (const name of Object.keys(next)) {
+          const after = next[name] && next[name].status;
+          const before = prev[name] && prev[name].status;
+          if (!after || after === before) continue;  // no transition for this bridge
+          const event = this._statusToNotifyEvent(after);
+          if (!event || !BROWSER_NOTIFY[event]) continue;  // not a notifiable/enabled event
+          this._showBrowserNotification(event, name);
+        }
+      },
+      _showBrowserNotification(event, name) {
+        const titles = {
+          ready: "Bridge ready — " + name,
+          crash: "Bridge crashed — " + name,
+          stop: "Bridge stopped — " + name,
+        };
+        try { new Notification(titles[event] || ("clauster: " + name)); }
+        catch (e) { /* a notification failure must never break the poll */ }
       },
       // --- system readiness (preflight panel) ---
       async loadReadiness() {
@@ -791,6 +848,9 @@
             for (const n of Object.keys(this.instances)) {
               if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
             }
+            // Browser notifications (#541): fire on a bridge status TRANSITION, before we
+            // swap in the new map. No-op unless the channel is on (gated inside the helper).
+            this.notifyOnTransitions(this.instances, next);
             this.instances = next;
           } else { ok = false; }
           if (sRes.ok) this.externalSessions = await sRes.json();
