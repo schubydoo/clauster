@@ -351,6 +351,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.state.config = config
     app.state.runner = runner
     app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
+    # In-app restart (#483): the entry point (``_run``) sets ``uvicorn_server`` to the
+    # live server so ``POST /api/restart`` can request a graceful shutdown; left None
+    # under TestClient / non-uvicorn hosts (the endpoint 503s rather than half-restart).
+    # ``restart_requested`` is read by ``_run`` after shutdown to decide whether to re-exec.
+    app.state.uvicorn_server = None
+    app.state.restart_requested = False
 
     # Hosted-channel sessions (CL-4); always present. The store (CL-6) persists them
     # so a clauster restart can reattach the survivors via lifespan reattach_all.
@@ -1504,6 +1510,35 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except config_editor.ConfigValidationError as exc:
             raise HTTPException(status_code=422, detail=f"invalid config: {exc}") from exc
         return {"hash": new_hash, "restart_required": True}
+
+    @app.post("/api/restart", status_code=202)
+    async def api_restart() -> dict:
+        """Restart Clauster in place to apply a saved config change (#483).
+
+        Re-exec mechanism (``os.execv``): uniform across systemd/launchd/terminal/
+        Docker, needs no unit change, keeps the same PID, and reloads config (read at
+        startup); detached + ``KillMode=process`` bridges survive. Live, clauster-managed
+        sessions (pty bridges + browser/hosted sessions) and in-flight requests are
+        dropped during the swap — that is expected; the UI gates this behind the #427
+        restart-impact confirmation.
+
+        Fail-closed: auth-gated by the guard middleware like every ``/api/*`` route, and
+        a 503 (not a half-restarted process) if no live server is wired to shut down.
+        Returns 202 **before** the swap so the client gets a response; the server then
+        shuts down gracefully (releasing the socket) and ``_run`` re-execs.
+        """
+        server = getattr(app.state, "uvicorn_server", None)
+        if server is None:
+            raise HTTPException(
+                status_code=503, detail="no live server to restart (not running under uvicorn)"
+            )
+        # Flag the restart, then ask uvicorn to shut down gracefully. The flag is read
+        # in ``_run`` AFTER serve() returns: a clean shutdown that releases the socket,
+        # then the re-exec. `should_exit` only takes effect once this handler's response
+        # has flushed (uvicorn checks it in its main loop), so the 202 reaches the client.
+        app.state.restart_requested = True
+        server.should_exit = True
+        return {"restarting": True}
 
     @app.get("/api/agents")
     async def api_agents() -> list[BackgroundJob]:

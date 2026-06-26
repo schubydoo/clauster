@@ -485,6 +485,17 @@ def test_dashboard_warns_restart_ends_live_sessions(write_config):
     assert "https://schubydoo.github.io/clauster/operations/#restart" in page
 
 
+def test_dashboard_renders_in_app_restart_action(write_config):
+    # #483: the config editor exposes a "Restart Clauster" action that POSTs the
+    # auth-gated restart endpoint, gated behind the same #427 restart-impact confirm.
+    page = _client(write_config).get("/").text
+    assert 'data-test="cfg-restart"' in page  # the button is rendered in the modal footer
+    assert "async restartClauster()" in page  # the handler is defined and shipped
+    assert 'fetch(ROOT + "/api/restart", { method: "POST" })' in page  # POSTs the endpoint
+    # Reuses the #427 impact confirmation rather than a new typed-confirm.
+    assert "this.restartImpactCount()" in page
+
+
 def test_desktop_stop_confirms_and_error_toasts_stick(write_config):
     # #577: two error-UX consistency papercuts.
     # A) the desktop-bridge Stop was the only destructive action with no window.confirm

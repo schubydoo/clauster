@@ -100,7 +100,7 @@
       adoptableProjects: [],  // names whose external session is a standard bridge we can adopt (#330)
       // --- in-app config editor (FE-3, Tier-A allowlist) ---
       configEditor: {
-        open: false, loading: false, saving: false,
+        open: false, loading: false, saving: false, restarting: false,
         fields: {}, specs: {}, edits: {}, editable: [], hash: null,
         error: "", saved: false, trigger: null, gen: 0,
       },
@@ -681,6 +681,37 @@
           }
         } catch (e) { c.error = "Save failed."; }
         finally { c.saving = false; }
+      },
+      // Restart Clauster in place to apply a saved config change (#483). Re-exec on the
+      // backend (os.execv): same PID, fresh config. Gated behind the SAME #427 restart-
+      // impact confirmation as config-save — a restart reaps the cgroup and ends live
+      // pty bridges + browser/hosted sessions (restartImpactCount()), so warn first.
+      async restartClauster() {
+        const c = this.configEditor;
+        if (c.restarting) return;  // single-flight (the button is also :disabled while restarting)
+        const n = this.restartImpactCount();
+        const impact = n > 0
+          ? " This will end " + n + " running " + (n === 1 ? "session" : "sessions") + "."
+          : "";
+        if (!window.confirm("Restart Clauster now to apply config changes?" + impact)) return;
+        c.restarting = true; c.error = "";
+        try {
+          const res = await fetch(ROOT + "/api/restart", { method: "POST" });
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (res.ok || res.status === 202) {
+            // The server is shutting down + re-execing; this connection is about to drop.
+            // Surface a non-error toast — the page will reconnect once the new image binds.
+            this.toast("Restarting Clauster — reconnecting shortly…", "info");
+          } else {
+            const b = await res.json().catch(() => ({}));
+            this.toast("Restart failed — " + (b.detail || res.status), "error");
+            c.restarting = false;  // clear only on a confirmed failure; on success we're going down
+          }
+        } catch (e) {
+          // A dropped connection mid-restart is EXPECTED (the server swapped its image
+          // before the response settled), so don't flag it as a failure.
+          this.toast("Restarting Clauster — reconnecting shortly…", "info");
+        }
       },
       // --- read-only transcript viewer (#431) ---
       // Coarse relative timestamp from an mtime (epoch SECONDS, as the API returns

@@ -154,3 +154,33 @@ def test_config_routes_handle_missing_source_path(tmp_path, projects_root):
     # PUT has nowhere to write -> 409, not a 500.
     res = client.put("/api/config", json={"edits": {"usage.fx_rate": 2.0}, "hash": "x"})
     assert res.status_code == 409
+
+
+# ----- POST /api/restart (#483) ------------------------------------------------------
+
+
+def test_restart_accepts_and_signals_shutdown(write_config, tmp_path):
+    # #483: with a live server wired on app.state, the endpoint returns 202, flags the
+    # restart, and asks uvicorn to shut down gracefully (which `_run` turns into a re-exec).
+    client, _ = _client_and_path(write_config, tmp_path)
+    app = client.app
+
+    class _FakeServer:
+        should_exit = False
+
+    app.state.uvicorn_server = _FakeServer()
+    res = client.post("/api/restart")
+    assert res.status_code == 202
+    assert res.json() == {"restarting": True}
+    assert app.state.restart_requested is True
+    assert app.state.uvicorn_server.should_exit is True
+
+
+def test_restart_503_without_live_server(write_config, tmp_path):
+    # No live server (e.g. under TestClient / not run via uvicorn): fail closed with a
+    # 503 rather than half-restart, and never flip restart_requested.
+    client, _ = _client_and_path(write_config, tmp_path)
+    assert client.app.state.uvicorn_server is None  # create_app leaves it unset
+    res = client.post("/api/restart")
+    assert res.status_code == 503
+    assert client.app.state.restart_requested is False
