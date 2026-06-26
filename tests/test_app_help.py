@@ -97,6 +97,7 @@ def test_login_page_has_help_trigger_and_offcanvas(runner_config):
     assert 'aria-label="Help"' in page
     assert 'data-test="help-offcanvas"' in page
     assert "Launch modes" in page  # the panel content ships on the public login page
+    assert re.search(r"<script nonce=\"[^\"]+\">\s*\(function", page)
 
 
 def test_404_page_has_help_trigger_and_offcanvas(write_config):
@@ -109,6 +110,7 @@ def test_404_page_has_help_trigger_and_offcanvas(write_config):
     assert 'data-test="help-offcanvas"' in page
     assert "#ic-help" in page
     assert "Launch modes" in page
+    assert re.search(r"<script nonce=\"[^\"]+\">\s*\(function", page)
 
 
 def test_help_trigger_count_is_one_per_page(write_config):
