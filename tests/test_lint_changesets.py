@@ -39,3 +39,15 @@ def test_multiline_with_complete_first_line_now_rejected() -> None:
 
 def test_empty_body_rejected() -> None:
     assert _violation("---\ndefault: patch\n---\n") is not None
+
+
+def test_main_exit_codes(tmp_path, monkeypatch) -> None:
+    # Cover main() itself — the exit code CI gates on. A refactor that returns 0 for a
+    # violating file would slip past the helper-only tests above (Greptile P2).
+    cdir = tmp_path / ".changeset"
+    cdir.mkdir()
+    (cdir / "good.md").write_text("---\ndefault: patch\n---\n\nA clean one-line summary.\n")
+    monkeypatch.setattr(lint_changesets, "_CHANGESET_GLOB", str(cdir / "*.md"))
+    assert lint_changesets.main() == 0  # all fragments single-line -> pass
+    (cdir / "bad.md").write_text("---\ndefault: patch\n---\n\nLine one.\n\nLine two.\n")
+    assert lint_changesets.main() == 1  # a multi-line fragment -> fail
