@@ -19,8 +19,11 @@ on:
     # types: replaces the implicit defaults (#623).
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - "templates/**"
-      - "static/**"
+      # The templates/static the suite exercises live UNDER src/clauster/ — the old
+      # bare "templates/**" / "static/**" matched nothing, so e2e never ran on a UI
+      # change (it merged a broken suite #577 → #629). Anchor to the real paths.
+      - "src/clauster/templates/**"
+      - "src/clauster/static/**"
       - "tests/e2e/**"
       - "scripts/e2e.sh"
       - ".github/workflows/e2e.yml"
