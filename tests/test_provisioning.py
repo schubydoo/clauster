@@ -26,6 +26,7 @@ from clauster.provisioning import (
     ProvisionError,
     TargetExists,
     _git_env,
+    _ip_blocked,
     clone_project,
     create_project,
     validate_clone_url,
@@ -252,6 +253,30 @@ def test_url_mixed_public_and_private_records_blocked(monkeypatch):
     )
     with pytest.raises(BlockedCloneHost):
         validate_clone_url("https://rebind.example/r.git", _cfg())
+
+
+def test_ip_blocked_skips_malformed_cidr_entry():
+    # The config loader rejects a malformed CIDR (test_malformed_cidr_rejected_at_
+    # config_load), so reach _ip_blocked directly via model_construct to bypass the
+    # field_validator. A garbage allowlist entry is `continue`-skipped, so a private
+    # target stays BLOCKED — a malformed CIDR can never widen access.
+    import ipaddress
+
+    cfg = CloneConfig.model_construct(
+        allow_private_hosts=False, allowed_private_cidrs=["not-a-cidr"]
+    )
+    assert _ip_blocked(ipaddress.ip_address("10.0.0.1"), cfg) is True
+
+
+def test_clone_url_host_resolving_to_no_addresses_rejected(monkeypatch):
+    # getaddrinfo succeeds but yields zero addresses -> the host can't be classified,
+    # so the URL is rejected as InvalidCloneUrl rather than silently passing.
+    monkeypatch.setattr(
+        "clauster.provisioning.socket.getaddrinfo",
+        lambda *a, **k: [],
+    )
+    with pytest.raises(InvalidCloneUrl, match="resolved to no addresses"):
+        validate_clone_url("https://empty.example/r.git", _cfg())
 
 
 # ----- clone (fake git) -------------------------------------------------
