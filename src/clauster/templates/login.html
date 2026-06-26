@@ -13,19 +13,26 @@
   </script>
   <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg?v={{ asset_version }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css?v={{ asset_version }}">
-  <style>
+  <style nonce="{{ csp_nonce }}">
     /* Brand lockup swaps with the theme; defaults to the white (dark-theme) logo
        so an unset/unknown data-bs-theme shows one logo, never both. */
     .brand-black { display: none; }
     [data-bs-theme="light"] .brand-white { display: none; }
     [data-bs-theme="light"] .brand-black { display: inline; }
+    /* #533: classes replacing former inline style="" attributes (the sprite + the
+       fixed help/theme controls are shared partials included on every page), so
+       style-src can drop 'unsafe-inline'. A nonce covers this <style> but NOT a
+       style attribute. */
+    .sprite-defs { display: none; }
+    .fixed-controls { z-index: 1080; gap: .5rem; }
+    .help-trigger-z { z-index: 1080; }
   </style>
 </head>
 <body class="d-flex flex-column">
   {% include "_tabler_sprite.html" %}
   <!-- Fixed top-right controls: theme toggle + in-app help (#571). A flex row keeps
        the two icons from overlapping the way two `end-0` fixed buttons would. -->
-  <div class="position-fixed top-0 end-0 m-3 d-flex align-items-center" style="z-index: 1080; gap:.5rem">
+  <div class="position-fixed top-0 end-0 m-3 d-flex align-items-center fixed-controls">
     <!-- Theme toggle (persists to localStorage; mirrors the dashboard control). -->
     <button id="theme-toggle" type="button" class="btn btn-icon" aria-label="Toggle theme">
       <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>

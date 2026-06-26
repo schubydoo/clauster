@@ -16,10 +16,16 @@ ORIGIN = "http://testserver"  # TestClient's default origin
 # script-src must list 'self', a per-request nonce, and 'unsafe-eval' (Alpine), and
 # must NOT carry 'unsafe-inline' (dropped in #442 — dead config once a nonce is present).
 _SCRIPT_SRC_RE = re.compile(r"script-src 'self' 'nonce-[A-Za-z0-9_-]+' 'unsafe-eval'")
+# style-src must list 'self' + the same per-request nonce, and must NOT carry
+# 'unsafe-inline' (dropped in #533 — the inline <style> blocks are nonce-gated and the
+# former inline style="" attributes were lifted to classes).
+_STYLE_SRC_RE = re.compile(r"style-src 'self' 'nonce-[A-Za-z0-9_-]+'")
 # Pull the nonce token out of a CSP header.
 _CSP_NONCE_RE = re.compile(r"script-src 'self' 'nonce-([A-Za-z0-9_-]+)'")
 # Pull the nonce attribute off the first inline <script nonce="..."> in a body.
 _BODY_NONCE_RE = re.compile(r'<script\s+nonce="([A-Za-z0-9_-]+)"')
+# Pull the nonce attribute off the first inline <style nonce="..."> in a body.
+_STYLE_BODY_NONCE_RE = re.compile(r'<style\s+nonce="([A-Za-z0-9_-]+)"')
 
 
 def _open_client(runner_config) -> TestClient:
@@ -56,6 +62,15 @@ def _assert_nonce_script_src(csp: str) -> None:
     assert _SCRIPT_SRC_RE.search(csp), csp
     assert "'unsafe-inline'" not in script_src, (
         f"script-src must NOT carry 'unsafe-inline' once a nonce is present: {script_src!r}"
+    )
+
+
+def _assert_nonce_style_src(csp: str) -> None:
+    """style-src is nonce-gated: 'self' + the per-request nonce, never 'unsafe-inline' (#533)."""
+    style_src = next((d for d in csp.split(";") if d.strip().startswith("style-src")), "").strip()
+    assert _STYLE_SRC_RE.search(csp), csp
+    assert "'unsafe-inline'" not in style_src, (
+        f"style-src must NOT carry 'unsafe-inline' once a nonce is present: {style_src!r}"
     )
 
 
@@ -118,9 +133,11 @@ def test_csp_present_and_locked_down(runner_config):
     # and bare ws:/wss: scheme-sources (any-host exfiltration channel) are excluded.
     assert "connect-src 'self';" in csp
     assert "ws:" not in csp and "wss:" not in csp
-    # style-src keeps 'unsafe-inline' (the inline <style> + style="" attributes can't be
-    # nonced); 'unsafe-eval' stays for Alpine. Dropping either is the #442 follow-up.
-    assert "style-src 'self' 'unsafe-inline'" in csp
+    # style-src is nonce-gated (#533): 'self' + the per-request nonce, and
+    # 'unsafe-inline' is gone (the inline <style> blocks carry the nonce; the former
+    # style="" attributes were lifted to classes). 'unsafe-eval' stays for Alpine.
+    _assert_nonce_style_src(csp)
+    assert "'unsafe-inline'" not in csp
 
 
 def test_csp_nonce_differs_per_request(runner_config):
@@ -183,6 +200,68 @@ def test_csp_with_nonce_fail_closed_when_none():
     assert "'unsafe-inline'" not in script_src, script_src
     assert "'nonce-" not in script_src
     assert script_src == "script-src 'self' 'unsafe-eval'"
+    # style-src degrades the same way: no nonce source, but never looser — and
+    # crucially never falls back to 'unsafe-inline' (#533).
+    style_src = next((d for d in csp.split(";") if d.strip().startswith("style-src")), "").strip()
+    assert "'unsafe-inline'" not in style_src, style_src
+    assert "'nonce-" not in style_src
+    assert style_src == "style-src 'self'"
+
+
+def test_csp_style_src_nonce_matches_script_src_nonce():
+    """The style-src + script-src nonces are the SAME per-request value (one nonce, both)."""
+    csp = _csp_with_nonce("deadbeefnonce")
+    assert "script-src 'self' 'nonce-deadbeefnonce' 'unsafe-eval'" in csp
+    assert "style-src 'self' 'nonce-deadbeefnonce'" in csp
+
+
+@pytest.mark.parametrize("path", ["/", "/login"])
+def test_csp_style_nonce_round_trip(runner_config, path):
+    """The inline <style nonce="X"> in the body matches the nonce-X in the CSP header.
+
+    Proves the per-request nonce reaches the <style> blocks too (not just <script>),
+    so the inline styles actually apply under the nonce-gated style-src. A mismatch
+    here would silently strip every inline style — broken brand/logo/layout — in a
+    real browser, exactly the failure dropping 'unsafe-inline' could reintroduce.
+    """
+    client = _open_client(runner_config)
+    resp = client.get(path, headers={"accept": "text/html"})
+    assert resp.status_code == 200, resp.text
+    csp = resp.headers["Content-Security-Policy"]
+    _assert_nonce_style_src(csp)
+    header_nonce = _CSP_NONCE_RE.search(csp)
+    style_nonce = _STYLE_BODY_NONCE_RE.search(resp.text)
+    assert header_nonce, csp
+    assert style_nonce, "no inline <style nonce=...> in the rendered body"
+    assert header_nonce.group(1) == style_nonce.group(1), (
+        f"CSP header nonce {header_nonce.group(1)!r} != body <style> nonce "
+        f"{style_nonce.group(1)!r} — the inline styles would be blocked"
+    )
+
+
+def test_no_static_style_attribute_in_rendered_pages(runner_config):
+    """No rendered page carries a static style="" attribute (#533).
+
+    A nonce covers <style> elements but NOT style="" attributes, so any inline
+    style attribute would be silently dropped under the nonce-gated style-src.
+    This guards the whole template surface (the dashboard + every shared partial it
+    includes) against a regression that reintroduces an inline style attribute.
+    """
+    client = _open_client(runner_config)
+    # Strip <style>…</style> bodies before scanning: a CSS comment inside a nonce'd
+    # <style> block can legitimately mention the literal `style="` in prose, and a real
+    # style attribute can never live inside a <style> element anyway.
+    style_block = re.compile(r"<style\b[^>]*>.*?</style>", re.DOTALL)
+    for path, code in (("/", 200), ("/login", 200), ("/no-such-path", 404)):
+        resp = client.get(path, headers={"accept": "text/html"})
+        assert resp.status_code == code, (path, resp.status_code)
+        markup = style_block.sub("", resp.text)
+        # `:style="..."` (Alpine, JS-applied → CSP-exempt) is fine; a bare ` style="`
+        # attribute is the violation. Match the attribute, not the Alpine binding.
+        assert ' style="' not in markup, (
+            f'{path} carries a static style="" attribute — it would be dropped under '
+            "the nonce-gated style-src; lift it into a class (#533)"
+        )
 
 
 def test_headers_on_dashboard_html(runner_config):
