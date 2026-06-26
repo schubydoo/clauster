@@ -31,6 +31,7 @@ from . import (
     logstream,
     ops,
     prometheus,
+    pty_screen,
     supervisor,
     usage,
 )
@@ -263,6 +264,12 @@ def _reap_ws_task(task: asyncio.Task) -> None:
     """Retrieve a finished WS helper task's outcome so the loop never warns about it."""
     if not task.cancelled() and task.exception() is not None:
         logger.debug("ws stream helper task ended with %r", task.exception())
+
+
+# How often the /ws/pty-screen reader re-reads the keeper's screen sidecar. Matched to the
+# keeper's _SCREEN_FLUSH_INTERVAL (0.25s) so the poll roughly tracks the publish cadence
+# without busy-spinning; frames already seen are skipped by their monotonic ``seq``.
+_SCREEN_POLL_INTERVAL = 0.25
 
 
 async def stream_until_disconnect(
@@ -2038,6 +2045,48 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return
         finally:
             job.unsubscribe(queue)
+
+    @app.websocket("/ws/pty-screen/{instance_id}")
+    async def ws_pty_screen(websocket: WebSocket, instance_id: str) -> None:
+        """Stream a pty bridge's redacted, cells-only live-screen frames (read-only, #534).
+
+        The keeper publishes redacted frames to a screen sidecar (off by default); this polls
+        that file and forwards each new frame — de-duped by its monotonic ``seq`` — as JSON.
+        The wire carries only pyte-rendered cells + cursor + state, never raw ANSI, so the
+        at-rest redaction invariant holds end to end.
+        """
+        if config.auth.enabled and not _ws_authorized(websocket):
+            await websocket.close(code=1008)  # validate before accept
+            return
+        await websocket.accept()
+        instance = runner.get_instance(instance_id)
+        # The live screen exists only for a pty bridge with the (default-off) tap enabled;
+        # anything else has no sidecar to stream, so refuse rather than hang silently.
+        if (
+            instance is None
+            or instance.resume_mode != "pty"
+            or instance.bridge_debug_log_path is None
+            or not config.claude.pty_screen_enabled
+        ):
+            await websocket.close(code=1008)
+            return
+        sidecar = pty_screen.screen_sidecar_path(instance.bridge_debug_log_path)
+
+        async def _stream() -> None:
+            last_seq = -1
+            while True:
+                frame = await asyncio.to_thread(pty_screen.read_screen_sidecar, sidecar)
+                if frame is not None:
+                    seq = frame.get("seq")
+                    if isinstance(seq, int) and seq > last_seq:
+                        last_seq = seq
+                        await websocket.send_json(frame)
+                await asyncio.sleep(_SCREEN_POLL_INTERVAL)
+
+        try:
+            await stream_until_disconnect(websocket, _stream)
+        except (WebSocketDisconnect, RuntimeError):
+            return
 
     async def _dashboard_context() -> dict:
         """Build the shared template context for the dashboard."""
