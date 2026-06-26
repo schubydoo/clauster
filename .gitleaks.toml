@@ -14,4 +14,10 @@ description = "Fuzz seed corpora + dictionaries: intentional fake secret-shaped 
 paths = [
   '''fuzz/seeds/.*''',
   '''fuzz/dicts/.*''',
+  # Vendored third-party front-end dist (minified bundles) — not our code and no real
+  # secrets; their minified identifiers trip generic high-entropy/api-key rules (xterm.js
+  # 6.0.0's bundle matched `generic-api-key`). Scoped to the self-hosted vendor tree +
+  # the flat Alpine bundle, so a real secret committed anywhere else is still caught.
+  '''src/clauster/static/vendor/.*''',
+  '''src/clauster/static/alpine\.min\.js''',
 ]
