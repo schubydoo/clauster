@@ -14,6 +14,10 @@ on:
   # Per-PR only when something the suite actually exercises changed — keeps the job off
   # the critical path for backend/docs-only PRs.
   pull_request:
+    # ready_for_review fires on the draft→ready flip; keep opened/synchronize/
+    # reopened so normal PRs + fixup pushes keep running e2e — setting any
+    # types: replaces the implicit defaults (#623).
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "templates/**"
       - "static/**"
@@ -36,6 +40,8 @@ concurrency:
 jobs:
   e2e:
     name: browser e2e (agent-browser)
+    # Draft PRs skip the browser suite; ready_for_review re-fires it (#623).
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
