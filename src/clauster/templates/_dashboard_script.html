@@ -1466,7 +1466,17 @@
         // Cancel/reset abandons this watch: flip `settled` so handlers no-op, then close the
         // socket so the server stops streaming. (The op gate is the correctness mechanism;
         // this just stops the stream promptly.)
-        this._abortClone = () => { settled = true; try { ws.close(); } catch (e) { /* closing */ } };
+        this._abortClone = () => {
+          settled = true;
+          // Actually stop the clone server-side — terminate the git worker + clean its
+          // partial dir (#573). Closing the socket alone only stops us watching; the work
+          // would keep running. Best-effort + fire-and-forget; the op gate stays the
+          // correctness mechanism, this just ends the server's transfer promptly.
+          try {
+            fetch(ROOT + "/api/projects/clone/" + encodeURIComponent(jobId) + "/cancel", { method: "POST" });
+          } catch (e) { /* best-effort: nothing to do if the cancel POST can't be issued */ }
+          try { ws.close(); } catch (e) { /* closing */ }
+        };
         ws.onmessage = async (ev) => {
           if (settled) return;  // aborted, or already terminal — ignore late frames
           if (!this._npOwns(op)) { settled = true; try { ws.close(); } catch (e) { /* closing */ } return; }
