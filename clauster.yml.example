@@ -5,7 +5,7 @@
 # Schema is additive-only: old configs always work in newer versions.
 
 schema_version: 1
-projects_root: /srv/projects       # required, must exist and be readable
+projects_root: ~/code              # required — edit to the dir whose subfolders are your projects (must exist & be readable)
 host: 127.0.0.1                    # non-loopback requires auth (see below)
 port: 7621
 state_dir: ~/.clauster             # state, logs, pid files
