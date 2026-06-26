@@ -762,8 +762,19 @@ class SessionRunner:
         return self._log_dir / f"{name}-{int(time.time() * 1000)}-{self._log_seq}.log"
 
     # Suffixes of one spawn's log "set" — all share the `<name>-<ms>-<seq>` stem.
-    # Longest-match-first so `.keeper.log` / `.raw.log` strip whole, not just `.log`.
-    _LOG_SET_SUFFIXES = (".raw.log", ".stderr.log", ".keeper.json", ".keeper.log", ".log")
+    # Longest-match-first so `.keeper.log` / `.raw.log` / `.screen.json` strip whole, not
+    # just `.log` / `.json`. `.screen.json` (the #534 live-screen sidecar) is grouped here so
+    # retention prunes it with its spawn set instead of orphaning it. (The orphan-keeper sweep
+    # in iter_keepers still globs `*.keeper.json` only — a `.screen.json` with no live keeper
+    # is harmless and gets pruned by age; revisit if S4+ ever leaves them without a keeper.)
+    _LOG_SET_SUFFIXES = (
+        ".raw.log",
+        ".stderr.log",
+        ".keeper.json",
+        ".keeper.log",
+        ".screen.json",
+        ".log",
+    )
 
     @classmethod
     def _log_set_key(cls, filename: str) -> str:
@@ -1068,6 +1079,11 @@ class SessionRunner:
         """Discovery JSON the keeper writes beside the bridge's --debug-file."""
         return log_path.with_name(log_path.stem + ".keeper.json")
 
+    @staticmethod
+    def _screen_sidecar_path_for(log_path: Path) -> Path:
+        """Redacted live-screen JSON the keeper writes beside the discovery sidecar (#534)."""
+        return log_path.with_name(log_path.stem + ".screen.json")
+
     def _build_pty_bridge_argv(
         self, log_path: Path, name: str, permission_mode: PermissionMode, *, resume: bool
     ) -> list[str]:
@@ -1091,9 +1107,11 @@ class SessionRunner:
         return argv
 
     @staticmethod
-    def _keeper_launch_cmd(sidecar: Path, cwd: Path, bridge_argv: list[str]) -> list[str]:
+    def _keeper_launch_cmd(
+        sidecar: Path, cwd: Path, bridge_argv: list[str], screen_sidecar: Path | None = None
+    ) -> list[str]:
         """Wrap the bridge argv in a `python -m clauster.pty_keeper` launcher."""
-        return [
+        cmd = [
             sys.executable,
             "-m",
             "clauster.pty_keeper",
@@ -1101,18 +1119,26 @@ class SessionRunner:
             str(sidecar),
             "--cwd",
             str(cwd),
-            "--",
-            *bridge_argv,
         ]
+        if screen_sidecar is not None:
+            cmd += ["--screen-sidecar", str(screen_sidecar)]
+        cmd += ["--", *bridge_argv]
+        return cmd
 
-    def _popen_keeper(self, cwd: Path, sidecar: Path, bridge_argv: list[str]) -> subprocess.Popen:
+    def _popen_keeper(
+        self,
+        cwd: Path,
+        sidecar: Path,
+        bridge_argv: list[str],
+        screen_sidecar: Path | None = None,
+    ) -> subprocess.Popen:
         """Launch the PTY keeper detached so it outlives a Clauster restart.
 
         Same detached pattern as the subcommand `_popen` (own session, stdin
         detached, stdout/stderr to a file) — the keeper, not Clauster, holds the
         bridge's terminal, so it survives independently and keeps the bridge alive.
         """
-        cmd = self._keeper_launch_cmd(sidecar, cwd, bridge_argv)
+        cmd = self._keeper_launch_cmd(sidecar, cwd, bridge_argv, screen_sidecar)
         keeper_log = sidecar.with_suffix(".log")  # the keeper's own stdout/stderr
         err_fh = keeper_log.open("wb")
         try:
@@ -1236,11 +1262,21 @@ class SessionRunner:
         # The sidecar stays keyed off the public log_path; the bridge's --debug-file goes
         # to the private raw parse-source (== log_path unless on-disk redaction is on).
         sidecar = self._sidecar_path_for(log_path)
+        # The redacted live-screen tap is opt-in (claude.pty_screen_enabled, #534) and only
+        # passed to the keeper when on — off by default, the keeper drains as before with no
+        # pyte dependency and no screen sidecar written.
+        screen_sidecar = (
+            self._screen_sidecar_path_for(log_path)
+            if self._config.claude.pty_screen_enabled
+            else None
+        )
         debug_path = instance.bridge_raw_log_path or log_path
         bridge_argv = self._build_pty_bridge_argv(debug_path, name, permission_mode, resume=resume)
         try:
             bridge_argv[0] = resolve_binary(bridge_argv[0])
-            proc = await asyncio.to_thread(self._popen_keeper, proj.path, sidecar, bridge_argv)
+            proc = await asyncio.to_thread(
+                self._popen_keeper, proj.path, sidecar, bridge_argv, screen_sidecar
+            )
         except (OSError, ClaudeNotFound) as exc:
             _log.warning("pty spawn of %s failed to launch: %s", name, exc)
             instance.status = InstanceStatus.ERROR
