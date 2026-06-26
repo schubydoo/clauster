@@ -119,6 +119,16 @@ def test_field_specs_more_enum_dropdowns_carry_friendly_labels() -> None:
     assert um is not None and um["off"] == "Off"
 
 
+def test_pty_screen_enabled_is_editable_bool_with_safety_note() -> None:
+    # #534 S5: the live pty-screen tap is a Tier-A editable bool carrying a friendly label and
+    # the "best-effort redaction → auth-gate, not secret-proof" safety note in its description.
+    assert "claude.pty_screen_enabled" in EDITABLE_FIELDS
+    spec = field_specs()["claude.pty_screen_enabled"]
+    assert spec["type"] == "bool"
+    assert spec["label"] == "Live PTY terminal view"
+    assert "redact" in spec["description"].lower()
+
+
 def test_classify_and_constraints_cover_edge_annotations() -> None:
     import types as _types
 

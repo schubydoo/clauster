@@ -2118,6 +2118,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # Hosted channel (CL-4c): the live-view panel only renders when the
             # claustrum daemon is configured; otherwise there's nothing to host.
             "claustrum_enabled": config.claustrum.enabled,
+            # Live pty-screen view (#534): the per-bridge "Live terminal" button only
+            # renders when the (default-off) tap is enabled; it streams /ws/pty-screen.
+            "pty_screen_enabled": config.claude.pty_screen_enabled,
         }
 
     @app.get("/", response_class=HTMLResponse)

@@ -13,6 +13,11 @@
   </script>
   <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg?v={{ asset_version }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css?v={{ asset_version }}">
+  {% if pty_screen_enabled %}
+  {# xterm.js renders the read-only live pty-screen view (#534); only loaded when the tap is on. #}
+  <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/xterm/css/xterm.css?v={{ asset_version }}">
+  <script defer src="{{ request.scope.root_path }}/static/vendor/xterm/js/xterm.js?v={{ asset_version }}"></script>
+  {% endif %}
   <style>
     /* Brand lockup swaps with the theme; defaults to the white (dark-theme) logo
        so an unset/unknown data-bs-theme shows one logo, never both. */
@@ -24,6 +29,10 @@
   <style>
     .log-view { max-height: 320px; overflow: auto; font-size: .78rem; line-height: 1.35;
                 white-space: pre-wrap; word-break: break-word; margin: 0; }
+    /* Host for the read-only xterm.js live pty-screen (#534): dark in both themes (a
+       terminal reads as dark), sized by xterm to its fixed 120x40 geometry. */
+    .pty-screen-host { background: #000; border-radius: 8px; padding: 6px; overflow: auto; }
+    .pty-screen-host .xterm { padding: 0; }
     /* #fff is required — a QR code needs a light field + quiet zone to scan reliably;
        intentionally NOT theme-variabled (a dark field breaks phone scanning). */
     .qr-box { background: #fff; padding: 8px; border-radius: 8px; width: max-content; }
@@ -502,6 +511,20 @@
                   <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleLogs(i.project)">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-logs"/></svg><span
                       x-text="logs[i.project] && logs[i.project].open ? 'Hide logs' : 'Logs'">Logs</span></button>
+                  {% if pty_screen_enabled %}
+                  {# Read-only live terminal (#534): pty bridges only — standard bridges have no PTY.
+                     The whole control is server-gated on pty_screen_enabled (no markup when off). #}
+                  <template x-if="i.resume_mode === 'pty'">
+                    <button type="button" class="btn btn-sm btn-ghost-secondary" @click="togglePtyScreen(i.project)"
+                            :aria-expanded="!!(ptyScreen[i.project] && ptyScreen[i.project].open)"
+                            {# Only reference the host id while the panel is mounted — the div lives
+                               inside the open-gated x-if, so a static aria-controls would dangle. #}
+                            :aria-controls="(ptyScreen[i.project] && ptyScreen[i.project].open) ? ('pty-screen-' + i.project) : null"
+                            title="Read-only live view of this bridge's terminal screen.">
+                      <svg class="ico me-1" aria-hidden="true"><use href="#ic-terminal"/></svg><span
+                        x-text="ptyScreen[i.project] && ptyScreen[i.project].open ? 'Hide terminal' : 'Live terminal'">Live terminal</span></button>
+                  </template>
+                  {% endif %}
                   <button type="button" class="btn btn-sm btn-outline-danger" @click="stop(i.project)"
                           :disabled="isStopping(i.project)">
                     <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.project)" x-cloak></span>
@@ -594,6 +617,35 @@
                        x-text="logs[i.project].lines.join('\n')"></pre>
                 </div>
               </template>
+              {% if pty_screen_enabled %}
+              {# Read-only live terminal (#534). The xterm.js Terminal is created on open and
+                 disposed on hide; it lives in a module-level registry, NOT Alpine state, so its
+                 internals are never wrapped in a reactive Proxy (cf. #310/#315). The wire is
+                 cells-only + redacted server-side — no raw ANSI ever reaches the browser. #}
+              <template x-if="ptyScreen[i.project] && ptyScreen[i.project].open">
+                <div class="mt-2">
+                  <div class="d-flex align-items-center mb-1 small text-secondary">
+                    <span class="me-2">Live terminal</span>
+                    <span class="badge bg-secondary-lt text-secondary" x-text="ptyScreen[i.project].status"></span>
+                    <span class="text-danger ms-2" x-show="ptyScreen[i.project].error" x-cloak
+                          x-text="ptyScreen[i.project].error"></span>
+                  </div>
+                  <div :id="'pty-screen-' + i.project" class="pty-screen-host" role="img"
+                       aria-label="Read-only live terminal view"></div>
+                  {# Restart/disconnect affordance: a pty bridge restart writes a final "exited"
+                     frame (the view freezes on the old session) and a dropped socket reads
+                     "disconnected" — both resolve by toggling the view to reattach to the new
+                     spawn. NB d-flex stays OFF the x-show element (Tabler !important; cf. #538). #}
+                  {# role="alert" (assertive) matches the sibling log-tail disconnect banner — this
+                     "session ended / toggle to reattach" message needs action, like that one. #}
+                  <div class="alert alert-warning py-1 px-2 mt-1 mb-0" role="alert"
+                       x-show="['exited','disconnected'].includes(ptyScreen[i.project].status)" x-cloak>
+                    <span x-show="ptyScreen[i.project].status === 'exited'" x-cloak>⚠ Session ended — toggle Live terminal to reattach.</span>
+                    <span x-show="ptyScreen[i.project].status === 'disconnected'" x-cloak>⚠ Live terminal disconnected — toggle to reconnect.</span>
+                  </div>
+                </div>
+              </template>
+              {% endif %}
             </div>
           </template>
 

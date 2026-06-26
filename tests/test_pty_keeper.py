@@ -306,6 +306,58 @@ def test_run_keeper_writes_redacted_screen_sidecar(tmp_path: Path, _restore_sigh
     assert frame["screen"]["cols"] == 120 and frame["screen"]["rows_count"] == 40
 
 
+def test_run_keeper_sets_pty_winsize_to_screen_geometry(tmp_path: Path, _restore_sighup) -> None:
+    """With the tap on, the bridge's PTY is sized to the pyte geometry (#534): the TUI then
+    redraws against the same rows the screen models, so its cursor-addressed footer can't
+    leave stale duplicates. The bridge reports the size it actually sees on its PTY."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    screen = tmp_path / "k.screen.json"
+    bridge = [
+        sys.executable,
+        "-c",
+        "import os,sys,time;"
+        "ts=os.get_terminal_size(sys.stdout.fileno());"
+        "sys.stdout.write('SIZE %dx%d\\r\\n' % (ts.columns, ts.lines));"
+        "sys.stdout.flush(); time.sleep(0.6)",
+    ]
+    rc = pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path), screen_sidecar=screen)
+    assert rc == 0
+    joined = "".join(_read(screen)["screen"]["rows"])
+    assert "SIZE 120x40" in joined  # bridge saw the fixed 120x40 PTY (matches SCREEN_COLS/ROWS)
+
+
+def test_run_keeper_tolerates_winsize_failure(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:
+    """A failed PTY winsize ioctl is best-effort: it must be swallowed, never aborting the
+    spawn (#534). Raise only on TIOCSWINSZ so the child's TIOCSCTTY still works."""
+    import fcntl
+
+    from clauster import pty_keeper
+
+    real_ioctl = fcntl.ioctl
+
+    def _ioctl(fd, request, *a, **k):
+        import termios
+
+        if request == termios.TIOCSWINSZ:
+            raise OSError("winsize nope")
+        return real_ioctl(fd, request, *a, **k)
+
+    monkeypatch.setattr("fcntl.ioctl", _ioctl)
+    sidecar = tmp_path / "k.json"
+    screen = tmp_path / "k.screen.json"
+    rc = pty_keeper.run_keeper(
+        [sys.executable, "-c", "import time; time.sleep(0.3)"],
+        sidecar,
+        cwd=str(tmp_path),
+        screen_sidecar=screen,
+    )
+    assert rc == 0  # the winsize failure was swallowed; the bridge ran normally
+
+
 def test_run_keeper_screen_unavailable_without_pyte(
     tmp_path: Path, monkeypatch, _restore_sighup
 ) -> None:
