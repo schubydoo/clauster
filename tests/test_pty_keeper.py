@@ -328,6 +328,36 @@ def test_run_keeper_sets_pty_winsize_to_screen_geometry(tmp_path: Path, _restore
     assert "SIZE 120x40" in joined  # bridge saw the fixed 120x40 PTY (matches SCREEN_COLS/ROWS)
 
 
+def test_run_keeper_tolerates_winsize_failure(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:
+    """A failed PTY winsize ioctl is best-effort: it must be swallowed, never aborting the
+    spawn (#534). Raise only on TIOCSWINSZ so the child's TIOCSCTTY still works."""
+    import fcntl
+
+    from clauster import pty_keeper
+
+    real_ioctl = fcntl.ioctl
+
+    def _ioctl(fd, request, *a, **k):
+        import termios
+
+        if request == termios.TIOCSWINSZ:
+            raise OSError("winsize nope")
+        return real_ioctl(fd, request, *a, **k)
+
+    monkeypatch.setattr("fcntl.ioctl", _ioctl)
+    sidecar = tmp_path / "k.json"
+    screen = tmp_path / "k.screen.json"
+    rc = pty_keeper.run_keeper(
+        [sys.executable, "-c", "import time; time.sleep(0.3)"],
+        sidecar,
+        cwd=str(tmp_path),
+        screen_sidecar=screen,
+    )
+    assert rc == 0  # the winsize failure was swallowed; the bridge ran normally
+
+
 def test_run_keeper_screen_unavailable_without_pyte(
     tmp_path: Path, monkeypatch, _restore_sighup
 ) -> None:
