@@ -521,22 +521,30 @@
                         :aria-expanded="!!bridgeSessOpen[i.project]"
                         :aria-controls="'bridge-sess-' + i.project"
                         title="This standard bridge is hosting more than one live session. Expand to open any of them.">
-                  <span x-text="bridgeSessionCount(i.project) + ' sessions'"></span>
+                  <span class="status-dot status-dot-animated bg-green me-2" aria-hidden="true"></span>
+                  <span x-text="bridgeSessionCount(i.project) + ' live sessions'"></span>
                   <span class="text-muted ms-1" aria-hidden="true"
                         x-text="bridgeSessOpen[i.project] ? '▾' : '▸'"></span>
                 </button>
-                <div class="mt-1 ps-3" :id="'bridge-sess-' + i.project" data-test="bridge-sessions-detail"
+                <div class="mt-1" :id="'bridge-sess-' + i.project" data-test="bridge-sessions-detail"
                      x-show="bridgeSessOpen[i.project]" x-cloak>
-                  <template x-for="s in bridgeSessions(i.project)" :key="bridgeSessionKey(s)">
-                    <div class="d-flex align-items-center flex-wrap gap-1 small text-secondary py-1" data-test="bridge-session-row">
-                      <code class="text-break" x-text="bridgeSessionShortId(s)"></code>
-                      <span x-show="externalWhen(s)" x-cloak x-text="'· up ' + externalWhen(s)"></span>
-                      <a class="btn btn-sm btn-ghost-primary py-0 ms-1" target="_blank" rel="noopener"
-                         x-show="bridgeSessionUrl(s)" x-cloak :href="bridgeSessionUrl(s)"
-                         title="Open this session in the Claude web app">
-                        <svg class="ico me-1" aria-hidden="true"><use href="#ic-open"/></svg>Open</a>
-                    </div>
-                  </template>
+                  <div class="list-group list-group-flush border rounded overflow-hidden">
+                    <template x-for="s in bridgeSessions(i.project)" :key="bridgeSessionKey(s)">
+                      <div class="list-group-item d-flex align-items-center gap-2 py-2 px-2" data-test="bridge-session-row">
+                        <span class="status-dot status-dot-animated bg-green flex-shrink-0" aria-hidden="true"
+                              title="Live session"></span>
+                        <code class="text-body text-break" x-text="bridgeSessionShortId(s)"></code>
+                        <span class="ms-auto d-flex align-items-center gap-2 flex-shrink-0">
+                          <span class="badge bg-secondary-lt text-secondary" x-show="externalWhen(s)" x-cloak
+                                x-text="'up ' + externalWhen(s)"></span>
+                          <a class="btn btn-sm btn-ghost-primary py-0" target="_blank" rel="noopener"
+                             x-show="bridgeSessionUrl(s)" x-cloak :href="bridgeSessionUrl(s)"
+                             title="Open this session in the Claude web app">
+                            <svg class="ico me-1" aria-hidden="true"><use href="#ic-open"/></svg>Open</a>
+                        </span>
+                      </div>
+                    </template>
+                  </div>
                 </div>
               </div>
               <template x-if="qrOpen[i.project]">
