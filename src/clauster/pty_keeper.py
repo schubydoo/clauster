@@ -42,6 +42,11 @@ from pathlib import Path
 
 from . import procutil
 
+# pty_screen is first-party and always importable (it lazy-imports the optional `pyte`
+# itself, only when a PtyScreen is actually constructed), so importing it here never pulls
+# in pyte and never fails for a missing extra.
+from .pty_screen import PtyScreen, PyteUnavailableError
+
 # The flag form prints its connect URL as a session path, NOT the subcommand's
 # `?environment=env_<ULID>` query form (verified, claude 2.1.159).
 _RE_CONNECT_URL = re.compile(rb"https?://claude\.ai/code/(session_[A-Za-z0-9]+)")
@@ -62,6 +67,54 @@ def _write_sidecar(path: Path, data: dict[str, object]) -> None:
         pass
 
 
+# Live-screen tap (#534): when a screen-sidecar path is given, the keeper feeds the same
+# drained chunks into a server-side terminal emulator (pyte) and republishes a redacted,
+# cells-only frame here for the dashboard's read-only live-terminal view. EVERYTHING about
+# the tap is best-effort — it must never affect the bridge or the keeper's drain/discovery.
+_SCREEN_FLUSH_INTERVAL = 0.25  # seconds; cap how often the screen sidecar is rewritten
+
+
+def _write_screen_status(path: Path, seq: int, state: str, error: str | None) -> None:
+    """Write a screen-sidecar status frame carrying no screen payload (best-effort).
+
+    Used for non-``live`` states (``unavailable``/``error``). A consumer should treat any
+    frame whose ``screen`` is null as a status, not a renderable baseline; the ``seq`` of
+    a setup-time status is 0 (before any live frame), while a mid-session disable continues
+    the monotonic live counter so a later WebSocket can still de-dup/skip-ahead correctly.
+    """
+    _write_sidecar(path, {"seq": seq, "state": state, "error": error, "screen": None})
+
+
+def _init_screen(path: Path) -> PtyScreen | None:
+    """Create the live-screen emulator, or return None (recording why) when unavailable.
+
+    ``pyte`` is the optional ``pty`` extra; if it is not installed the feature is simply off —
+    an ``unavailable`` status is written so a viewer can explain it, and None is returned so
+    the keeper drains normally. Any other setup failure is recorded as ``error``. The tap is
+    auxiliary and must never take the bridge or keeper down, so nothing here raises.
+    """
+    try:
+        return PtyScreen()
+    except PyteUnavailableError as exc:
+        _write_screen_status(path, 0, "unavailable", str(exc))
+        return None
+    except Exception as exc:  # noqa: BLE001 — never let tap setup kill the keeper
+        _write_screen_status(path, 0, "error", f"screen init: {exc}")
+        return None
+
+
+def _write_screen_frame(path: Path, screen: PtyScreen, seq: int, state: str) -> int:
+    """Write the current redacted screen frame to its sidecar (best-effort); return new seq."""
+    seq += 1
+    payload: dict[str, object] = {"seq": seq, "state": state, "error": None}
+    try:
+        payload["screen"] = screen.frame()
+    except Exception as exc:  # noqa: BLE001 — a render hiccup must never affect the bridge
+        payload.update(screen=None, state="error", error=f"screen render: {exc}")
+    _write_sidecar(path, payload)
+    return seq
+
+
 def _proc_start(pid: int) -> float | None:
     """Return the bridge's process start time for Clauster's PID-reuse defense, or None."""
     # Imported lazily so the keeper still runs if procutil grows heavier deps.
@@ -73,12 +126,21 @@ def _proc_start(pid: int) -> float | None:
         return None
 
 
-def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) -> int:
+def run_keeper(
+    bridge_argv: list[str],
+    sidecar: Path,
+    cwd: str | None = None,
+    screen_sidecar: Path | None = None,
+) -> int:
     """Spawn ``bridge_argv`` under a PTY, publish a discovery sidecar, drain, and wait.
 
     Returns the bridge's exit status. Any setup failure is recorded in the
     sidecar (``state: "error"``) and returned as a non-zero code rather than
     raised, so the launching process always gets a diagnosable result.
+
+    When ``screen_sidecar`` is given (the opt-in live-screen tap, #534), the same drained
+    chunks are also fed into a pyte emulator and a redacted, cells-only frame is republished
+    there — strictly best-effort, never affecting the drain, discovery, or the bridge.
     """
     import fcntl
     import pty
@@ -158,6 +220,14 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
     poller = select.poll()
     poller.register(master, select.POLLIN)
 
+    # Opt-in live-screen tap: a pyte emulator fed the same chunks, republished as a redacted
+    # frame at most every _SCREEN_FLUSH_INTERVAL. screen is None when off/unavailable (the
+    # keeper then drains exactly as before). `dirty` debounces writes to changed screens only.
+    screen = _init_screen(screen_sidecar) if screen_sidecar is not None else None
+    screen_seq = 0
+    screen_dirty = False
+    last_screen_write = 0.0
+
     buf = bytearray()
     url_found = False
     url_deadline = time.monotonic() + _URL_TIMEOUT
@@ -165,21 +235,42 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
         try:
             if poller.poll(500):  # ms; truthy when the master fd has data (no FD_SETSIZE limit)
                 chunk = os.read(master, 65536)
-                if chunk and not url_found:
-                    buf.extend(chunk)
-                    hit = _RE_CONNECT_URL.search(buf)
-                    if hit is not None:
-                        session_id = hit.group(1).decode()
-                        base.update(
-                            connect_url=f"https://claude.ai/code/{session_id}",
-                            session_id=session_id,
-                            state="ready",
-                        )
-                        _write_sidecar(sidecar, base)
-                        url_found = True
-                        buf = bytearray()  # keep draining, stop accumulating
+                if chunk:
+                    if screen is not None:
+                        try:
+                            screen.feed(chunk)
+                            screen_dirty = True
+                        except Exception as exc:  # noqa: BLE001 — tap is best-effort, never kill the bridge
+                            # Record the disable so a viewer sees a terminal `error` status
+                            # instead of a silently-frozen `live` screen, then turn the tap
+                            # off for the rest of this session (the bridge is unaffected).
+                            if screen_sidecar is not None:
+                                screen_seq += 1
+                                _write_screen_status(
+                                    screen_sidecar, screen_seq, "error", f"screen feed: {exc}"
+                                )
+                            screen = None
+                    if not url_found:
+                        buf.extend(chunk)
+                        hit = _RE_CONNECT_URL.search(buf)
+                        if hit is not None:
+                            session_id = hit.group(1).decode()
+                            base.update(
+                                connect_url=f"https://claude.ai/code/{session_id}",
+                                session_id=session_id,
+                                state="ready",
+                            )
+                            _write_sidecar(sidecar, base)
+                            url_found = True
+                            buf = bytearray()  # keep draining, stop accumulating
         except (OSError, BlockingIOError):
             time.sleep(0.2)
+        if screen is not None and screen_sidecar is not None and screen_dirty:
+            now = time.monotonic()
+            if now - last_screen_write >= _SCREEN_FLUSH_INTERVAL:
+                screen_seq = _write_screen_frame(screen_sidecar, screen, screen_seq, "live")
+                screen_dirty = False
+                last_screen_write = now
         if not url_found and time.monotonic() > url_deadline:
             # The connect URL never appeared. Stop accumulating an unbounded buffer.
             url_found = True
@@ -200,6 +291,9 @@ def run_keeper(bridge_argv: list[str], sidecar: Path, cwd: str | None = None) ->
     rc = proc.poll() or 0
     base.update(state="exited", bridge_exit=rc)
     _write_sidecar(sidecar, base)
+    if screen is not None and screen_sidecar is not None:
+        # Final frame so a late viewer sees the last screen state, marked exited.
+        _write_screen_frame(screen_sidecar, screen, screen_seq, "exited")
     try:
         os.close(master)
     except OSError:
@@ -213,6 +307,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sidecar", required=True, type=Path, help="JSON discovery file to write")
     parser.add_argument("--cwd", default=None, help="working directory for the bridge")
     parser.add_argument(
+        "--screen-sidecar",
+        default=None,
+        type=Path,
+        help="optional JSON file for the redacted live-screen frames (#534)",
+    )
+    parser.add_argument(
         "bridge_argv",
         nargs=argparse.REMAINDER,
         help="the bridge command line, after a `--` separator",
@@ -223,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         bridge_argv = bridge_argv[1:]
     if not bridge_argv:
         parser.error("no bridge argv given after `--`")
-    return run_keeper(bridge_argv, ns.sidecar, cwd=ns.cwd)
+    return run_keeper(bridge_argv, ns.sidecar, cwd=ns.cwd, screen_sidecar=ns.screen_sidecar)
 
 
 # --- orphan-keeper management (#301) -----------------------------------------

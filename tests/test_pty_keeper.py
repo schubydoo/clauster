@@ -228,3 +228,121 @@ def test_run_keeper_url_timeout(tmp_path: Path, monkeypatch, _restore_sighup) ->
     info = _read(sidecar)
     assert info["connect_url"] is None
     assert info["state"] == "exited"
+
+
+# ----- live-screen tap (#534) -----------------------------------------------
+
+
+def test_run_keeper_writes_redacted_screen_sidecar(tmp_path: Path, _restore_sighup) -> None:
+    """With a screen sidecar, the keeper republishes a redacted, cells-only frame (#534)."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    screen = tmp_path / "k.screen.json"
+    bridge = [
+        sys.executable,
+        "-c",
+        "import sys,time;"
+        "sys.stdout.write('hello sk-abcdef0123456789 world\\r\\n');"
+        "sys.stdout.flush(); time.sleep(0.6)",
+    ]
+    rc = pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path), screen_sidecar=screen)
+    assert rc == 0
+    frame = _read(screen)
+    assert frame["state"] == "exited"  # the final flush ran on bridge exit
+    assert frame["seq"] >= 1
+    joined = "".join(frame["screen"]["rows"])
+    assert "hello" in joined and "world" in joined  # rendered cells, not raw bytes
+    assert "sk-abcdef0123456789" not in joined and "<redacted>" in joined  # secret masked
+    assert frame["screen"]["cols"] == 120 and frame["screen"]["rows_count"] == 40
+
+
+def test_run_keeper_screen_unavailable_without_pyte(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:
+    """Without the optional pyte extra the tap is dormant; the bridge runs normally (#534)."""
+    from clauster import pty_keeper
+
+    monkeypatch.setitem(sys.modules, "pyte", None)  # simulate pyte not installed
+    sidecar = tmp_path / "k.json"
+    screen = tmp_path / "k.screen.json"
+    rc = pty_keeper.run_keeper(
+        [sys.executable, "-c", "import time; time.sleep(0.3)"],
+        sidecar,
+        cwd=str(tmp_path),
+        screen_sidecar=screen,
+    )
+    assert rc == 0  # the bridge is unaffected by the missing optional dependency
+    info = _read(screen)
+    assert info["state"] == "unavailable" and "clauster[pty]" in (info.get("error") or "")
+    assert _read(sidecar)["state"] == "exited"  # discovery path unaffected
+
+
+def test_init_screen_records_unavailable_without_pyte(tmp_path: Path, monkeypatch) -> None:
+    """_init_screen returns None and records the reason when pyte is absent."""
+    from clauster import pty_keeper
+
+    monkeypatch.setitem(sys.modules, "pyte", None)
+    screen = tmp_path / "s.json"
+    assert pty_keeper._init_screen(screen) is None
+    info = _read(screen)
+    assert info["state"] == "unavailable" and "clauster[pty]" in info["error"]
+
+
+def test_write_screen_frame_records_render_failure(tmp_path: Path) -> None:
+    """A frame-render error is recorded (not raised) and the seq still advances."""
+    from clauster import pty_keeper
+
+    class _BoomScreen:
+        def frame(self):  # noqa: ANN202 — test stub
+            raise RuntimeError("render boom")
+
+    path = tmp_path / "s.json"
+    seq = pty_keeper._write_screen_frame(path, _BoomScreen(), 4, "live")
+    assert seq == 5  # the seq advances even on a render failure
+    info = _read(path)
+    assert info["state"] == "error" and "render" in info["error"] and info["screen"] is None
+
+
+def test_init_screen_records_error_on_generic_failure(tmp_path: Path, monkeypatch) -> None:
+    """A non-pyte setup failure is recorded as `error` (not raised, not `unavailable`)."""
+    from clauster import pty_keeper
+
+    def _boom():
+        raise RuntimeError("emulator setup exploded")
+
+    monkeypatch.setattr(pty_keeper, "PtyScreen", _boom)
+    screen = tmp_path / "s.json"
+    assert pty_keeper._init_screen(screen) is None
+    info = _read(screen)
+    assert info["state"] == "error" and "screen init" in info["error"]
+
+
+def test_run_keeper_tap_failure_never_kills_bridge(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:
+    """A screen-tap feed() error disables the tap silently; the bridge runs to a clean exit."""
+    from clauster import pty_keeper
+
+    class _BoomFeed:
+        def feed(self, data):  # noqa: ANN001, ANN202 — test stub
+            raise RuntimeError("feed boom")
+
+        def frame(self):  # noqa: ANN202 — test stub
+            return {}
+
+    monkeypatch.setattr(pty_keeper, "_init_screen", lambda path: _BoomFeed())
+    sidecar = tmp_path / "k.json"
+    screen = tmp_path / "k.screen.json"
+    bridge = [
+        sys.executable,
+        "-c",
+        "import sys,time; sys.stdout.write('hi\\r\\n'); sys.stdout.flush(); time.sleep(0.3)",
+    ]
+    rc = pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path), screen_sidecar=screen)
+    assert rc == 0  # the bridge completed despite the tap blowing up
+    assert _read(sidecar)["state"] == "exited"  # discovery path unaffected
+    # The disable is recorded as a terminal `error` status, not a silently-frozen `live` frame.
+    disabled = _read(screen)
+    assert disabled["state"] == "error" and "feed" in disabled["error"]
+    assert disabled["screen"] is None

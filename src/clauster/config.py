@@ -99,6 +99,14 @@ class ClaudeConfig(BaseModel):
         "mode it launched with — editing this never re-modes a running or stopped bridge. "
         "(Renamed from `resume_mode`, still accepted as a deprecated alias.)",
     )
+    pty_screen_enabled: bool = Field(
+        default=False,
+        description="(pty mode) Publish a redacted, read-only render of the bridge's live "
+        "terminal screen for the dashboard's live-terminal view (#534). Off by default; "
+        "needs the optional `pyte` dependency (`pip install 'clauster[pty]'`) — without it the "
+        "feature stays dormant. The render is best-effort secret-redacted, so treat the live "
+        "view as auth-gated, not secret-proof.",
+    )
     path_append: list[str] = Field(
         default_factory=list,
         description="Directories appended to the bridge subprocess `PATH` so a `claude` "

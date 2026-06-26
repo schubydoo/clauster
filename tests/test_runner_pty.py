@@ -27,6 +27,28 @@ def _pty_runner(runner_config) -> tuple[SessionRunner, Path]:
     return SessionRunner(pty_config, claude_json=claude_json), claude_json
 
 
+# ----- live-screen tap wiring (#534) ----------------------------------------
+
+
+def test_keeper_launch_cmd_includes_screen_sidecar_only_when_given() -> None:
+    """The `--screen-sidecar` flag is passed to the keeper only when a path is supplied (#534)."""
+    off = SessionRunner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), ["claude", "x"])
+    assert "--screen-sidecar" not in off
+    on = SessionRunner._keeper_launch_cmd(
+        Path("/s.json"), Path("/cwd"), ["claude", "x"], Path("/s.screen.json")
+    )
+    assert on[on.index("--screen-sidecar") + 1] == "/s.screen.json"
+    # the bridge argv stays intact after the `--` separator in both cases
+    assert on[on.index("--") + 1 :] == ["claude", "x"]
+    assert off[off.index("--") + 1 :] == ["claude", "x"]
+
+
+def test_screen_sidecar_path_sits_beside_the_keeper_sidecar() -> None:
+    """The screen sidecar is `<stem>.screen.json`, beside the keeper discovery JSON (#534)."""
+    log = Path("/logs/alpha-123-0.log")
+    assert SessionRunner._screen_sidecar_path_for(log).name == "alpha-123-0.screen.json"
+
+
 # ----- pure unit: argv + status + signalling --------------------------------
 
 
@@ -157,6 +179,50 @@ async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monk
 
     assert out.status is InstanceStatus.ERROR
     assert persisted == [True]  # the ERROR state was persisted, not swallowed
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_screen_sidecar_gated_on_config(
+    runner_config, tmp_path, monkeypatch
+) -> None:
+    """The keeper receives a screen sidecar only when claude.pty_screen_enabled is on (#534)."""
+    from clauster.models import Project, RemoteControlInstance
+
+    captured: dict = {}
+
+    def _capture(cwd, sidecar, bridge_argv, screen_sidecar=None):
+        captured["screen_sidecar"] = screen_sidecar
+        raise OSError("captured — stop before the real keeper launch")
+
+    async def _noop_persist() -> None:
+        pass
+
+    proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
+    log_path = tmp_path / "alpha.log"
+
+    def _run(runner) -> None:
+        monkeypatch.setattr(runner, "_popen_keeper", _capture)
+        monkeypatch.setattr(runner, "_persist", _noop_persist)
+        inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
+        return runner._spawn_pty(inst, proj, "alpha", log_path, "default", resume=False)
+
+    # flag OFF (default) -> no screen sidecar handed to the keeper
+    off_runner, _ = _pty_runner(runner_config)
+    await _run(off_runner)
+    assert captured["screen_sidecar"] is None
+
+    # flag ON -> a `.screen.json` sidecar beside the keeper sidecar
+    captured.clear()
+    cfg = runner_config[0]
+    on_cfg = ClausterConfig(
+        projects_root=cfg.projects_root,
+        state_dir=cfg.state_dir,
+        claude={"binary": cfg.claude.binary, "launch_mode": "pty", "pty_screen_enabled": True},
+    )
+    on_runner = SessionRunner(on_cfg, claude_json=runner_config[1])
+    await _run(on_runner)
+    assert captured["screen_sidecar"] is not None
+    assert captured["screen_sidecar"].name.endswith(".screen.json")
 
 
 class _FakeProc:

@@ -635,6 +635,15 @@ def test_launch_mode_wins_when_both_keys_set(write_config, caplog):
     assert any("both" in r.message and "resume_mode" in r.message for r in caplog.records)
 
 
+def test_pty_screen_enabled_defaults_off_and_parses(write_config):
+    # #534: the live read-only pty-screen tap is off by default and opt-in via config.
+    assert (
+        load_config(write_config("claude:\n  binary: claude\n")).claude.pty_screen_enabled is False
+    )
+    on = load_config(write_config("claude:\n  pty_screen_enabled: true\n"))
+    assert on.claude.pty_screen_enabled is True
+
+
 def test_legacy_resume_mode_env_var_maps_to_launch_mode(write_config, monkeypatch, caplog):
     # The renamed key never silently loses its env override: the old CLAUSTER_CLAUDE_RESUME_MODE
     # still applies to launch_mode, with a deprecation warning.
