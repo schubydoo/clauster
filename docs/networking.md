@@ -95,6 +95,109 @@ hash is required.
 When a trusted proxy terminates TLS and reports `X-Forwarded-Proto=https`,
 `cookie_secure: auto` correctly marks the session cookie `Secure`.
 
+## Trusted-header (forward-auth) mode
+
+The HMAC recipe above is the higher-assurance default. Many SSO proxies, though
+— Authelia, authentik, Caddy `forward_auth`, Traefik, oauth2-proxy — authenticate
+the user and forward a `Remote-User` header but **do not sign a per-request HMAC**.
+For those, set `reverse_proxy.require_hmac: false`: a request from a `trusted_ips`
+peer carrying `user_header` then authenticates on the header alone — no HMAC needed.
+
+```yaml
+host: 0.0.0.0
+auth:
+  enabled: true
+  allowed_origins:
+    - https://clauster.example.com
+  reverse_proxy:
+    enabled: true
+    require_hmac: false         # forward-auth: trust user_header from a trusted peer
+    user_header: Remote-User
+    trusted_ips:
+      - 10.0.0.2                # the proxy's peer IP — REQUIRED in this mode
+```
+
+!!! danger "The header is only as trustworthy as the proxy"
+    With `require_hmac: false` the `user_header` is **unsigned and forgeable** by
+    anyone who can reach a `trusted_ips` peer. Keep `require_hmac: true` (the
+    default) whenever your proxy can sign an HMAC; only drop to header-only mode
+    under the two conditions below.
+
+Use header-only mode only when **both** hold:
+
+- the proxy is the **sole** network route to clauster (clauster is not reachable
+  directly), and
+- the proxy **strips `user_header` from every inbound client request** before
+  re-adding its own authenticated value (otherwise a client can forge the user).
+
+`trusted_ips` is **mandatory** in this mode — clauster refuses to start without it.
+The login rate-limiter never keys on the bare header: a forged-username flood from
+a trusted IP collapses to the shared-IP global backoff, so it can't mint a fresh
+per-user login budget.
+
+### Recipe — Caddy `forward_auth` + Authelia
+
+Caddy delegates each request to Authelia, then forwards Authelia's `Remote-User`
+to clauster. Clauster trusts it because Caddy is the only `trusted_ips` peer.
+
+```caddyfile
+clauster.example.com {
+    # Defence-in-depth: strip any client-supplied identity headers before
+    # forward_auth runs, so only Authelia's values reach clauster.
+    request_header -Remote-User
+    request_header -Remote-Groups
+    request_header -Remote-Email
+    forward_auth authelia:9091 {
+        uri /api/verify?rd=https://auth.example.com
+        # Authelia returns the authenticated user in Remote-User; copy_headers
+        # writes it onto the upstream request, so clauster sees Authelia's value.
+        copy_headers Remote-User Remote-Groups Remote-Email
+    }
+    reverse_proxy clauster:7621
+}
+```
+
+```yaml
+# clauster.yml
+auth:
+  enabled: true
+  allowed_origins: ["https://clauster.example.com"]
+  reverse_proxy:
+    enabled: true
+    require_hmac: false
+    user_header: Remote-User
+    trusted_ips: ["10.0.0.2"]   # Caddy's peer IP as seen by clauster
+```
+
+### Recipe — oauth2-proxy (header injection)
+
+oauth2-proxy authenticates against your OIDC/OAuth provider and injects the user
+into a configurable header. Point clauster's `user_header` at it.
+
+```ini
+# oauth2-proxy.cfg
+upstreams = ["http://clauster:7621/"]
+set_xauthrequest = true                 # emit X-Auth-Request-User upstream
+pass_user_headers = true
+# oauth2-proxy strips inbound X-Auth-Request-* from the client by default.
+```
+
+```yaml
+# clauster.yml
+auth:
+  enabled: true
+  allowed_origins: ["https://clauster.example.com"]
+  reverse_proxy:
+    enabled: true
+    require_hmac: false
+    user_header: X-Auth-Request-User
+    trusted_ips: ["10.0.0.3"]   # oauth2-proxy's peer IP
+```
+
+Traefik (`forwardAuth` middleware) and authentik (outpost) follow the same shape:
+authenticate at the proxy, forward an authenticated user header, list the proxy's
+peer IP in `trusted_ips`, and ensure the proxy strips the client-supplied header.
+
 ## Scraping `/metrics` from behind the auth gate
 
 The optional Prometheus `/metrics` endpoint
