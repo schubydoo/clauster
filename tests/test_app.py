@@ -460,6 +460,10 @@ def test_dashboard_warns_restart_ends_live_sessions(write_config):
     assert 'data-test="cfg-restart-warn"' in page  # the warning element
     assert 'x-show="restartImpactCount() > 0"' in page  # gated on live sessions
     assert "How do I restart?" in page  # the docs affordance
+    # #579: the link must point at a LIVE docs target (it previously rotted to a
+    # nonexistent README #running anchor). Pin the stable operations#restart URL so a
+    # silent rot fails the suite rather than shipping another dead help link.
+    assert "https://schubydoo.github.io/clauster/operations/#restart" in page
 
 
 def test_dashboard_surfaces_crashed_instance_error_detail(write_config):
