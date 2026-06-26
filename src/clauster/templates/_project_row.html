@@ -58,22 +58,13 @@
 
               <!-- right cluster: Run Claude here + overflow -->
               <span class="ms-auto d-flex align-items-center gap-1">
-                {# FE-578: gate "Run Claude here" on a HARD readiness blocker (a launch that
-                   would be refused outright — non-git + worktree spawn mode), surfacing the
-                   reason at the point of action instead of only the navbar/readiness pill.
-                   The native `disabled` + `aria-disabled` keep the button out of the tab order
-                   and announce the state; the reason rides `:title` on the wrapping anchor (a
-                   disabled <button> has pointer-events:none, so its own title wouldn't show on
-                   hover — the wrapper still does). Recoverable preconditions (untrusted dir)
-                   are NOT gated here — the launch flow already recovers them inline. The reason
-                   is `runBlockReason()` output rendered via :title (auto-escaped), never x-html. #}
-                <span class="launch-anchor"
-                      :title="runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }}) || null">
+                {# FE-578: surface a launch precondition INSIDE the popover; Run stays ENABLED
+                   (disabling it would hide the spawn picker / trust confirm that resolve it).
+                   On open we coerce a non-git+worktree default to a valid mode; the note below
+                   the Spawn picker explains it. #}
+                <span class="launch-anchor">
                   <button type="button" class="btn btn-primary" data-test="run-launch"
-                          @click="if (!runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }})) lopen = !lopen"
-                          :disabled="!!runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }})"
-                          :aria-disabled="!!runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }})"
-                          :title="runBlockReason('{{ p.name }}', {{ p.is_git_repo | tojson }}) || 'Launch a Claude session in this project'"
+                          @click="lopen = !lopen; if (lopen) coerceSpawnMode('{{ p.name }}', {{ p.is_git_repo | tojson }})"
                           :aria-expanded="lopen">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run Claude here
                     <span class="ms-1" x-text="lopen ? '▴' : '▾'">▾</span>
@@ -150,6 +141,12 @@
                               {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
                               <option value="session">session</option>
                             </select>
+                            {# #578: surface (don't disable) — a non-git dir can't worktree, so
+                               note it here and coerceSpawnMode() falls back to same-dir on open.
+                               x-text (auto-escaped, never x-html); no d-* class on this x-show el. #}
+                            <p class="form-hint text-warning small mt-1 mb-0" x-cloak
+                               x-show="spawnModeNote({{ p.is_git_repo | tojson }})"
+                               x-text="spawnModeNote({{ p.is_git_repo | tojson }})"></p>
                           </div>
                           {% if pty_supported %}
                           {# Keep d-flex OFF this x-show element — `.d-flex{display:flex!important}`
