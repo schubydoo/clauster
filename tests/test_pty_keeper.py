@@ -230,6 +230,55 @@ def test_run_keeper_url_timeout(tmp_path: Path, monkeypatch, _restore_sighup) ->
     assert info["state"] == "exited"
 
 
+def test_run_keeper_drains_output_after_url_found(tmp_path: Path, _restore_sighup) -> None:
+    """Output arriving AFTER the connect URL is still drained (the post-URL chunk arm)."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    bridge = [
+        sys.executable,
+        "-c",
+        "import sys,time;"
+        "sys.stdout.write('at https://claude.ai/code/session_01POSTURLAAAAAAAA\\r\\n');"
+        "sys.stdout.flush(); time.sleep(0.2);"
+        "sys.stdout.write('more output after the url\\r\\n'); sys.stdout.flush(); time.sleep(0.2)",
+    ]
+    rc = pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path))
+    assert rc == 0
+    info = _read(sidecar)
+    assert info["session_id"] == "session_01POSTURLAAAAAAAA"  # URL scraped from the first chunk
+    assert info["state"] == "exited"  # the later chunk was drained without re-scanning
+
+
+def test_run_keeper_tolerates_empty_read(tmp_path: Path, monkeypatch, _restore_sighup) -> None:
+    """An empty master read (EOF/POLLHUP while the bridge is briefly still alive) is a no-op."""
+    import os as _os
+
+    from clauster import pty_keeper
+
+    real_read = _os.read
+    state = {"first": True}
+
+    def fake_read(fd: int, n: int) -> bytes:
+        # Target only the master drain read (it uses a 65536 buffer); return one empty read
+        # WITHOUT consuming, so the real bytes are still there for the next (real) read.
+        if n == 65536 and state["first"]:
+            state["first"] = False
+            return b""
+        return real_read(fd, n)
+
+    monkeypatch.setattr(pty_keeper.os, "read", fake_read)
+    sidecar = tmp_path / "k.json"
+    bridge = [
+        sys.executable,
+        "-c",
+        "import sys,time; sys.stdout.write('hi\\r\\n'); sys.stdout.flush(); time.sleep(0.3)",
+    ]
+    rc = pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path))
+    assert rc == 0  # the empty read was tolerated; the bridge ran to a clean exit
+    assert _read(sidecar)["state"] == "exited"
+
+
 # ----- live-screen tap (#534) -----------------------------------------------
 
 
