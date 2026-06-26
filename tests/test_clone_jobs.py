@@ -155,6 +155,55 @@ def test_terminal_done_force_delivered_even_when_queue_full():
     asyncio.run(_run())
 
 
+def test_request_cancel_running_flags_and_terminates():
+    # #573: cancelling a running job sets the flag AND fires the registered terminate
+    # hook (the git subprocess's terminate) so the transfer actually stops.
+    mgr = CloneJobManager()
+    job = mgr.create("proj")
+    terminated: list[bool] = []
+    job.register_terminate(lambda: terminated.append(True))
+    assert job.request_cancel() is True
+    assert job.cancel_requested is True
+    assert terminated == [True]  # the registered terminate hook fired
+
+
+def test_request_cancel_before_spawn_terminates_on_register():
+    # Pre-spawn cancel race (#573): a cancel can arrive before git has spawned, so there
+    # is no process to kill yet — the flag is set and request_cancel still returns True.
+    # When register_terminate later lands, it must terminate immediately.
+    mgr = CloneJobManager()
+    job = mgr.create("proj")
+    assert job.request_cancel() is True  # no _terminate registered yet -> just flags
+    assert job.cancel_requested is True
+    terminated: list[bool] = []
+    job.register_terminate(lambda: terminated.append(True))
+    assert terminated == [True]  # registering after a pending cancel terminates at once
+
+
+def test_request_cancel_on_terminal_job_is_noop():
+    # A done/error/cancelled job is not cancellable: request_cancel returns False and
+    # leaves the flag untouched (the endpoint maps this to 409).
+    mgr = CloneJobManager()
+    job = mgr.create("proj")
+    mgr.finish(job)  # -> "done" (terminal)
+    assert job.request_cancel() is False
+    assert job.cancel_requested is False
+
+
+def test_manager_cancel_broadcasts_cancelled_terminal_frame():
+    async def _run():
+        mgr = CloneJobManager()
+        job = mgr.create("proj")
+        queue = job.subscribe()
+        mgr.cancel(job)
+        evt = await asyncio.wait_for(queue.get(), timeout=1)
+        # A cancel reads as a clean terminal frame, never an error.
+        assert evt == {"type": "done", "status": "cancelled", "error": None}
+        assert job.status == "cancelled" and job.error_detail is None
+
+    asyncio.run(_run())
+
+
 def test_unsubscribe_unknown_queue_is_a_noop():
     async def _run():
         mgr = CloneJobManager()

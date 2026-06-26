@@ -55,7 +55,7 @@ def test_clone_streams_progress_then_done(write_config, tmp_path, monkeypatch):
     # stream deterministically (no reliance on snapshot-vs-progress race timing).
     connected = threading.Event()
 
-    def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         assert connected.wait(timeout=5), "websocket never subscribed before progress"
         progress_cb("Receiving objects:  50% (5/10)")
         progress_cb("Receiving objects: 100% (10/10)")
@@ -84,7 +84,7 @@ def test_clone_streams_progress_then_done(write_config, tmp_path, monkeypatch):
 def test_clone_error_streams_terminal_error_frame(write_config, tmp_path, monkeypatch):
     from clauster.app import ProvisionError
 
-    def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         raise ProvisionError("clone failed: remote hung up")
 
     monkeypatch.setattr("clauster.app.clone_project", fake_clone)
@@ -106,7 +106,7 @@ def test_clone_error_streams_terminal_error_frame(write_config, tmp_path, monkey
 
 
 def test_clone_done_webhook_fires_on_success(write_config, tmp_path, monkeypatch):
-    def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         return None
 
     monkeypatch.setattr("clauster.app.clone_project", fake_clone)
@@ -138,7 +138,7 @@ def test_clone_done_webhook_redacts_error_and_omits_url(write_config, tmp_path, 
     from clauster.app import ProvisionError
 
     # A failure detail can echo a session/env id; it must be redacted before egress.
-    def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         raise ProvisionError("clone failed for session_01ARZ3NDEKTSV4RRFFQ69G5FAV")
 
     monkeypatch.setattr("clauster.app.clone_project", fake_clone)
@@ -167,7 +167,7 @@ def test_clone_done_webhook_redacts_error_and_omits_url(write_config, tmp_path, 
 def test_clone_done_webhook_silent_when_event_default_off(write_config, tmp_path, monkeypatch):
     # webhooks enabled but clone-done NOT opted in -> the real emitter's wants() gate
     # drops it: no aemit task is ever scheduled (default off).
-    def fake_clone(root, name, url, *, cfg, shallow, progress_cb):
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
         return None
 
     monkeypatch.setattr("clauster.app.clone_project", fake_clone)
