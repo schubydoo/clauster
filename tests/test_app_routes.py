@@ -718,6 +718,130 @@ def test_transcript_session_read_error_503_no_path_leak(write_config, tmp_path, 
     assert "/home/secret" not in r.text and "Errno" not in r.text
 
 
+# ----- transcript sort toggle + in-message search (#612) ----------------
+
+
+def test_transcript_session_default_order_is_newest_first(write_config, tmp_path, monkeypatch):
+    # No order param == the historical newest-first default: the last assistant turn leads.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["turns"][0]["role"] == "assistant"  # turn 4 (newest)
+    assert body["turns"][-1]["role"] == "user"  # turn 1 (oldest)
+
+
+def test_transcript_session_order_asc_is_oldest_first(write_config, tmp_path, monkeypatch):
+    # order=asc flips the page to chronological: the first user turn leads.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1?order=asc")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["turns"][0]["role"] == "user"  # turn 1 (oldest)
+    assert "read my config" in body["turns"][0]["content"]
+    assert body["turns"][-1]["role"] == "assistant"  # turn 4 (newest)
+
+
+def test_transcript_session_order_asc_desc_are_reverses(write_config, tmp_path, monkeypatch):
+    # The two orders are exact reverses of each other across the whole transcript.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    desc = client.get("/api/projects/gamma/transcripts/sess1?limit=500").json()["turns"]
+    asc = client.get("/api/projects/gamma/transcripts/sess1?order=asc&limit=500").json()["turns"]
+    assert list(reversed(asc)) == desc
+
+
+def test_transcript_session_unknown_order_falls_back_to_desc(write_config, tmp_path, monkeypatch):
+    # A typo'd / unexpected order value must never silently reverse — it stays newest-first.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    default = client.get("/api/projects/gamma/transcripts/sess1").json()["turns"]
+    bogus = client.get("/api/projects/gamma/transcripts/sess1?order=sideways").json()["turns"]
+    assert bogus == default
+
+
+def test_transcript_session_order_asc_pagination_terminates(write_config, tmp_path, monkeypatch):
+    # asc pagination still walks cursor 0 → end, terminates (next_cursor None), no double-render.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    first = client.get("/api/projects/gamma/transcripts/sess1?order=asc&limit=2").json()
+    assert len(first["turns"]) == 2
+    assert first["next_cursor"] == 2
+    second = client.get(
+        f"/api/projects/gamma/transcripts/sess1?order=asc&limit=2&cursor={first['next_cursor']}"
+    ).json()
+    assert second["next_cursor"] is None
+    # Together the two pages cover every turn exactly once, oldest-first.
+    full = client.get("/api/projects/gamma/transcripts/sess1?order=asc&limit=500").json()["turns"]
+    assert first["turns"] + second["turns"] == full
+
+
+def test_transcript_search_filters_to_matching_turns(write_config, tmp_path, monkeypatch):
+    # q= returns only turns whose (redacted) content contains the term.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1?q=config")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 1  # only the first user turn says "read my config"
+    assert len(body["turns"]) == 1
+    assert "config" in body["turns"][0]["content"]
+
+
+def test_transcript_search_is_case_insensitive(write_config, tmp_path, monkeypatch):
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    lower = client.get("/api/projects/gamma/transcripts/sess1?q=config").json()
+    upper = client.get("/api/projects/gamma/transcripts/sess1?q=CONFIG").json()
+    assert upper["total"] == lower["total"] == 1
+
+
+def test_transcript_search_no_match_returns_empty(write_config, tmp_path, monkeypatch):
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get(
+        "/api/projects/gamma/transcripts/sess1?q=zzz-nothing-matches"
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 0
+    assert body["turns"] == []
+    assert body["next_cursor"] is None
+
+
+def test_transcript_search_matches_redacted_text_not_secret(write_config, tmp_path, monkeypatch):
+    # THE security gate: searching for the planted secret's plaintext must NOT confirm it.
+    # The filter runs over the redacted content, so the secret is already <redacted>.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    # The raw secret no longer exists in any turn's content -> no match.
+    leaked = client.get("/api/projects/gamma/transcripts/sess1?q=DEADBEEF012345").json()
+    assert leaked["total"] == 0
+    # But the masked token IS searchable, proving the filter sees the redacted text.
+    masked = client.get("/api/projects/gamma/transcripts/sess1?q=redacted").json()
+    assert masked["total"] >= 1
+    assert "DEADBEEF012345" not in masked  # the secret never rides back in the response
+
+
+def test_transcript_search_blank_query_is_no_filter(write_config, tmp_path, monkeypatch):
+    # An empty / whitespace-only q means "no filter": the full ordered list pages.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    unfiltered = client.get("/api/projects/gamma/transcripts/sess1").json()
+    blank = client.get("/api/projects/gamma/transcripts/sess1?q=%20%20").json()
+    assert blank["total"] == unfiltered["total"] == 4
+
+
+def test_transcript_search_honors_order(write_config, tmp_path, monkeypatch):
+    # Search + order compose: filter the whole transcript, then order the matches.
+    # The substring "is" appears in two turns (assistant "here is the plan", user
+    # "my token is …"), so the filtered set is non-trivially ordered.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    asc = client.get("/api/projects/gamma/transcripts/sess1?q=is&order=asc").json()["turns"]
+    desc = client.get("/api/projects/gamma/transcripts/sess1?q=is&order=desc").json()["turns"]
+    assert len(asc) == 2  # two turns contain "is"
+    assert list(reversed(asc)) == desc  # asc and desc are exact reverses of the filtered set
+
+
 # ----- ghost-environment reaper (opt-in dashboard surface) --------------
 
 

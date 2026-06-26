@@ -39,6 +39,23 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_transcript_viewer_has_sort_toggle_and_search(write_config):
+    # #612: the read-only transcript modal gains a sort-direction toggle and an
+    # in-message search box. Assert both controls + their wiring ship in the markup,
+    # and that turn content is still bound via x-text (never x-html — it's untrusted,
+    # server-redacted output and binding it as HTML would be stored XSS).
+    page = _client(write_config).get("/").text
+    assert 'data-test="transcript-order-toggle"' in page
+    assert "toggleTranscriptOrder()" in page
+    assert 'data-test="transcript-search"' in page
+    assert "onTranscriptSearchInput()" in page
+    assert 'data-test="transcript-search-clear"' in page
+    assert 'data-test="transcript-no-matches"' in page
+    assert 'data-test="transcript-query-short"' in page
+    # Untrusted turn content stays x-text; there must be no x-html anywhere near it.
+    assert 'class="transcript-content small" x-text="t.content"' in page
+
+
 def test_clone_progressbar_exposes_aria_value_attributes(write_config):
     # #607 (a11y): the New-project clone bar is a real ARIA progressbar. It carries
     # role + min/max always, binds aria-valuenow during the determinate phase, and

@@ -978,16 +978,31 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/projects/{name}/transcripts/{session}")
     async def api_project_transcript_session(
-        name: str, session: str, cursor: int = 0, limit: int = 50
+        name: str,
+        session: str,
+        cursor: int = 0,
+        limit: int = 50,
+        order: str = "desc",
+        q: str = "",
     ) -> dict:
-        """Return a newest-first page of one session's turns (issue #431).
+        """Return one page of a session's turns, ordered + optionally filtered (#431, #612).
 
         Turns are ``{role, content, model, timestamp}`` already redacted by
         :func:`usage.read_transcript_turns` (every rendered field passes through
-        ``redact.sanitize_line`` before it leaves the reader). The page is
-        newest-first; ``cursor`` is an opaque offset into the reversed turn list and
-        ``next_cursor`` is the offset to fetch the following page (``None`` at the
-        end). BOTH ``name`` and ``session`` are validated path-safe: the name via the
+        ``redact.sanitize_line`` before it leaves the reader). ``cursor`` is an
+        opaque offset into the ordered turn list and ``next_cursor`` is the offset to
+        fetch the following page (``None`` at the end).
+
+        ``order`` (``desc`` default, newest-first; ``asc`` flips to oldest-first) and
+        the optional ``q=`` substring filter (#612) are applied *before* paging, so a
+        toggle/search re-fetches from cursor 0 and pagination still terminates without
+        double-rendering. The search matches against the **redacted** ``content`` (the
+        text that already left the reader) so it can never be used to confirm a
+        redacted secret, and it is case-insensitive. ``total`` reflects the count
+        *after* filtering, so the modal's turn count and the load-more terminator
+        track the visible set.
+
+        BOTH ``name`` and ``session`` are validated path-safe: the name via the
         project-name regex (422), and ``session`` via
         :func:`usage.resolve_session_transcript`, which fails closed against ``..`` /
         separators and confirms the resolved file sits strictly inside the project's
@@ -1001,6 +1016,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # must not let a client over-read or index from the tail.
         cursor = max(cursor, 0)
         limit = max(1, min(limit, 500))
+        # Normalize the sort: anything that isn't an explicit "asc" stays newest-first
+        # (the historical default), so a typo'd order never silently reverses the view.
+        ascending = order == "asc"
+        # The filter matches the already-redacted content, case-insensitively. An empty
+        # (or whitespace-only) term means "no filter" — the full ordered list pages.
+        needle = q.strip().casefold()
 
         def _read() -> dict:
             project_path = config.projects_root / name
@@ -1009,7 +1030,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # Fail closed: unsafe or unknown session is a 404, never a path escape.
                 raise HTTPException(status_code=404, detail="transcript not found")
             turns = usage.read_transcript_turns(path)
-            turns.reverse()  # newest-first page order
+            if not ascending:
+                turns.reverse()  # newest-first page order (default)
+            if needle:
+                # Match against the redacted content only — searching the text that
+                # already left the reader means a query can't confirm a masked secret.
+                turns = [t for t in turns if needle in (t.get("content") or "").casefold()]
             page = turns[cursor : cursor + limit]
             end = cursor + limit
             next_cursor = end if end < len(turns) else None
