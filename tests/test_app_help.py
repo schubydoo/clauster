@@ -58,14 +58,15 @@ def test_help_covers_the_key_concepts(write_config):
     # zones, the External/unmanaged definition, the header tools).
     assert "Launch modes" in page
     assert "Permission modes" in page
-    assert "PTY (true resume)" in page
-    assert "Standard" in page
-    assert "Browser (hosted)" in page
+    # The real launch modes are outcome-language (not "Standard/PTY/Browser"); standard/pty
+    # are a resume sub-choice under Desktop, and "Fire-and-forget" was renamed to "Background".
+    assert "In claude.ai / Desktop" in page
+    assert "Here in the browser" in page
+    assert "Background" in page
     assert "Managed vs. External sessions" in page
     # The External/unmanaged definition (UX-swarm fold-in on #571) is always-visible copy.
     assert "Clauster did not launch" in page
     assert "Configuration editor" in page
-    assert "Background agents" in page
     # Links out to the README for depth (not a rendered slice — avoids drift).
     assert "github.com/schubydoo/clauster#readme" in page
 
