@@ -422,15 +422,18 @@
       },
       // --- toasts ---
       toast(msg, type = "info") {
+        // De-dupe by message: a repeatedly-failing action would otherwise stack identical
+        // toasts, and since error toasts now persist until dismissed that pile-up is
+        // unbounded. Drop any existing toast with the same message, then add the fresh one
+        // — this bounds the common case WITHOUT ever silently dropping a *distinct* error
+        // (capping by recency would; distinct errors must persist until dismissed).
+        this.toasts = this.toasts.filter((t) => t.msg !== msg);
         const id = ++this._toastSeq;
         this.toasts.push({ id, msg, type });
         // Error toasts persist until dismissed (the stack has a close button) — several
         // failures surface only as a toast, so a 4.5s auto-dismiss would lose the only
         // record. Non-error toasts still auto-dismiss after 4.5s.
         if (type !== "error") setTimeout(() => this.dismissToast(id), 4500);
-        // Bound the stack: since error toasts no longer self-evict, a repeatedly failing
-        // action could otherwise pile up unbounded (and spam role=alert). Keep the newest few.
-        if (this.toasts.length > 6) this.toasts = this.toasts.slice(-6);
       },
       dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
       // --- config editor (FE-3) ---
