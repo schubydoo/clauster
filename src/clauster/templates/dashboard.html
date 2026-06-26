@@ -1021,17 +1021,52 @@
               </div>
             </div>
 
-            <!-- turn view: shown once a session is selected -->
-            <div x-show="!transcripts.loading && transcripts.session" x-cloak>
-              <button type="button" class="btn btn-ghost-secondary btn-sm mb-2"
-                      data-test="transcript-back" @click="backToTranscriptList()">← All sessions</button>
+            <!-- turn view: shown once a session is selected. The controls (back, sort
+                 toggle, search) stay visible during a reload so the focused search input
+                 keeps focus mid-keystroke (#612); only the turn LIST is loading-gated. -->
+            <div x-show="transcripts.session" x-cloak>
+              <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                <button type="button" class="btn btn-ghost-secondary btn-sm"
+                        data-test="transcript-back" @click="backToTranscriptList()">← All sessions</button>
+                {# Sort toggle (#612): flips newest-first ↔ oldest-first, re-fetching from the top. #}
+                <button type="button" class="btn btn-sm" data-test="transcript-order-toggle"
+                        :disabled="transcripts.loading"
+                        :aria-label="transcripts.order === 'asc' ? 'Sort newest first' : 'Sort oldest first'"
+                        @click="toggleTranscriptOrder()">
+                  <span x-text="transcripts.order === 'asc' ? 'Oldest first' : 'Newest first'">Newest first</span>
+                </button>
+              </div>
+              {# In-message search (#612): a backend q= scan over the whole transcript.
+                 Bound with x-model + a debounced handler; results are still redacted. #}
+              <div class="mb-2">
+                <div class="input-group input-group-sm">
+                  <input type="search" class="form-control" data-test="transcript-search"
+                         placeholder="Search in messages…" aria-label="Search in messages"
+                         x-model="transcripts.q" @input="onTranscriptSearchInput()"
+                         @search="onTranscriptSearchInput()">
+                  <button type="button" class="btn" data-test="transcript-search-clear"
+                          x-show="transcripts.q.length > 0" @click="clearTranscriptSearch()"
+                          aria-label="Clear search">Clear</button>
+                </div>
+                <div class="text-secondary small mt-1" data-test="transcript-query-short"
+                     x-show="transcripts.queryTooShort" x-cloak>
+                  Type at least 2 characters to search.
+                </div>
+              </div>
+              {# Only the turn list is loading-gated; the controls above stay put on reload. #}
+              <div x-show="!transcripts.loading">
               <div class="text-secondary small mb-2">
                 <code x-text="transcripts.session"></code>
                 · <span x-text="transcripts.total"></span>
                 <span x-text="transcripts.total === 1 ? 'turn' : 'turns'">turns</span>
               </div>
+              {# Distinct empty states: a true-empty session vs. a search that matched nothing. #}
+              <div class="text-secondary small" data-test="transcript-no-matches"
+                   x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.q.trim().length >= 2">
+                No messages match “<span x-text="transcripts.q.trim()"></span>”.
+              </div>
               <div class="text-secondary small" data-test="transcript-no-turns"
-                   x-show="transcripts.turns.length === 0 && !transcripts.error">
+                   x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.q.trim().length < 2">
                 This session has no turns.
               </div>
               <div class="d-flex flex-column gap-2">
@@ -1062,6 +1097,7 @@
                         :disabled="transcripts.loadingMore" @click="loadMoreTranscriptTurns()">
                   <span x-text="transcripts.loadingMore ? 'Loading…' : 'Load more'">Load more</span>
                 </button>
+              </div>
               </div>
             </div>
           </div>

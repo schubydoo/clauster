@@ -86,11 +86,14 @@
       },
       configQuery: "",
       // --- read-only transcript viewer (#431) ---
+      // order: "desc" (newest-first, default) | "asc" (oldest-first) — sort toggle (#612).
+      // q: in-message substring filter; queryTooShort drives the "keep typing" state (#612).
       transcripts: {
         open: false, loading: false, loadingMore: false,
         project: "", sessions: [],
         session: "", turns: [], total: 0, nextCursor: null,
         error: "", trigger: null, gen: 0,
+        order: "desc", q: "", queryTooShort: false,
       },
       agents: [],
       agentDispatchOpen: false,
@@ -614,6 +617,9 @@
         // loading flags so the next open isn't blocked by the single-flight guard.
         t.gen = (t.gen || 0) + 1;
         t.open = false; t.loading = false; t.loadingMore = false;
+        // Reset the per-view controls so the next open starts newest-first, unfiltered.
+        t.order = "desc"; t.q = ""; t.queryTooShort = false;
+        if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         document.body.style.overflow = "";  // release the scroll lock
         if (t.trigger && t.trigger.focus) t.trigger.focus();  // restore focus to the opener
       },
@@ -626,6 +632,7 @@
         t.trigger = document.activeElement;  // remember the opener to restore focus on close
         t.open = true; t.project = name; t.error = ""; t.loading = true;
         t.sessions = []; t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null;
+        t.order = "desc"; t.q = ""; t.queryTooShort = false;  // fresh open: newest-first, unfiltered
         document.body.style.overflow = "hidden";  // lock background scroll while modal is up
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/transcripts");
@@ -637,19 +644,42 @@
         } catch (e) { t.error = "Failed to load transcripts."; }
         finally { if (t.gen === myGen) t.loading = false; }
       },
-      // Select a session and load its first page of turns (newest-first).
+      // Minimum search term length: a 1-char query matches almost everything, so we
+      // gate it behind a "keep typing" hint rather than fetch on it (#612).
+      TRANSCRIPT_MIN_QUERY: 2,
+      // Build the "?cursor=…&order=…&q=…" query string for the turns route. order is
+      // only sent when non-default (asc) and q only when it clears the min length, so
+      // a plain newest-first page request stays byte-identical to the #431 shape.
+      _transcriptQuery(t, cursor) {
+        let qs = "?cursor=" + encodeURIComponent(cursor);
+        if (t.order === "asc") qs += "&order=asc";
+        const term = (t.q || "").trim();
+        if (term.length >= this.TRANSCRIPT_MIN_QUERY) qs += "&q=" + encodeURIComponent(term);
+        return qs;
+      },
+      // Select a session and load its first page of turns (honoring order + search).
       async openTranscriptSession(session) {
         const t = this.transcripts;
+        // A fresh session always starts from the default order with no active filter.
+        t.session = session; t.order = "desc"; t.q = ""; t.queryTooShort = false;
+        await this.loadTranscriptTurnsFromStart();
+      },
+      // (Re)load the first page of the current session from cursor 0 in the current
+      // order + filter. Shared by session-select, the sort toggle, and search — each
+      // re-fetches from the top so pagination still terminates and never double-renders.
+      async loadTranscriptTurnsFromStart() {
+        const t = this.transcripts;
+        if (!t.session) return;
         t.gen = (t.gen || 0) + 1;
         const myGen = t.gen;
-        // Clear loadingMore too: if a previous session's "Load more" was in flight when the
-        // user switched sessions, its gen-guarded finally was skipped, leaving the lock set —
-        // which would silently dead-button this session's "Load more".
-        t.session = session; t.error = ""; t.loading = true; t.loadingMore = false;
+        // Clear loadingMore too: if a previous "Load more" was in flight when the user
+        // switched session / order / query, its gen-guarded finally was skipped, leaving
+        // the lock set — which would silently dead-button the next "Load more".
+        t.error = ""; t.loading = true; t.loadingMore = false;
         t.turns = []; t.total = 0; t.nextCursor = null;
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
-            "/transcripts/" + encodeURIComponent(session));
+            "/transcripts/" + encodeURIComponent(t.session) + this._transcriptQuery(t, 0));
           if (t.gen !== myGen) return;
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
           if (!res.ok) { t.error = "Failed to load transcript."; return; }
@@ -660,6 +690,33 @@
         } catch (e) { t.error = "Failed to load transcript."; }
         finally { if (t.gen === myGen) t.loading = false; }
       },
+      // Flip newest-first ↔ oldest-first and re-fetch the session from the top (#612).
+      toggleTranscriptOrder() {
+        const t = this.transcripts;
+        if (t.loading) return;  // ignore a flip mid-load; the in-flight page wins
+        t.order = t.order === "asc" ? "desc" : "asc";
+        this.loadTranscriptTurnsFromStart();
+      },
+      // Debounced in-message search: re-fetch from the top once the term clears the
+      // minimum length, else show the "keep typing" hint and restore the unfiltered view.
+      onTranscriptSearchInput() {
+        const t = this.transcripts;
+        if (t._searchTimer) clearTimeout(t._searchTimer);
+        const term = (t.q || "").trim();
+        // A non-empty but too-short term drives the hint; empty clears it and reloads.
+        t.queryTooShort = term.length > 0 && term.length < this.TRANSCRIPT_MIN_QUERY;
+        // A too-short term can't filter — skip the wasted fetch. (The empty-string clear
+        // path runs through clearTranscriptSearch, which still reloads the unfiltered view.)
+        if (t.queryTooShort) return;
+        t._searchTimer = setTimeout(() => { this.loadTranscriptTurnsFromStart(); }, 250);
+      },
+      // Clear the search box and reload the unfiltered session from the top (#612).
+      clearTranscriptSearch() {
+        const t = this.transcripts;
+        if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
+        t.q = ""; t.queryTooShort = false;
+        this.loadTranscriptTurnsFromStart();
+      },
       // Append the next page using next_cursor; the control is hidden when it's null.
       async loadMoreTranscriptTurns() {
         const t = this.transcripts;
@@ -669,8 +726,8 @@
         t.loadingMore = true; t.error = "";
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
-            "/transcripts/" + encodeURIComponent(t.session) + "?cursor=" + encodeURIComponent(cursor));
-          if (t.gen !== myGen) return;  // session changed/closed mid-fetch — drop this page
+            "/transcripts/" + encodeURIComponent(t.session) + this._transcriptQuery(t, cursor));
+          if (t.gen !== myGen) return;  // session/order/query changed or closed mid-fetch — drop it
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
           if (!res.ok) { t.error = "Failed to load more turns."; return; }
           const d = await res.json();
@@ -679,11 +736,13 @@
         } catch (e) { t.error = "Failed to load more turns."; }
         finally { if (t.gen === myGen) t.loadingMore = false; }
       },
-      // Return to the session list (clear the selected session + its turns).
+      // Return to the session list (clear the selected session, its turns, + the filters).
       backToTranscriptList() {
         const t = this.transcripts;
         t.gen = (t.gen || 0) + 1;  // void any in-flight turn fetch
+        if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loadingMore = false;
+        t.order = "desc"; t.q = ""; t.queryTooShort = false;
       },
       async refresh() {
         // Single-flight: setInterval can fire a new tick while a slow refresh is still
