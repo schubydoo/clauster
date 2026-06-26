@@ -45,6 +45,16 @@ jobs:
   #              empty diff, or any non-PR event → code=true (never skip on
   #              main/cron). The `ci required checks passed` aggregator counts a
   #              skipped job as passing, so the required check still reports.
+  # DRAFT PRs (#623): the heavy jobs (tests, build, docker) also carry
+  #   `&& github.event.pull_request.draft != true`, so a DRAFT PR skips them
+  #   entirely — a batch of drafts can be opened cheaply and each flipped to
+  #   "ready for review" one at a time to fire its CI. `!= true` (not `== false`)
+  #   so push:main / cron (null draft field) fail-safe to running. The aggregator
+  #   counts the skipped jobs as passing, so `ci required checks passed` still
+  #   reports green on a draft (never the permanent "Expected — waiting" block);
+  #   `ready_for_review` is already in the pull_request types, so marking a draft
+  #   ready re-dispatches the full run. Do NOT add this guard to `setup` or the
+  #   aggregator (they must keep running so the required context always reports).
   # --------------------------------------------------------------------
   setup:
     name: setup (matrix + change filter)
@@ -125,7 +135,7 @@ jobs:
   tests:
     name: tests (${{ matrix.os }}, ${{ matrix.python }})
     needs: setup
-    if: needs.setup.outputs.code == 'true'
+    if: needs.setup.outputs.code == 'true' && github.event.pull_request.draft != true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -184,7 +194,7 @@ jobs:
   build:
     name: build sdist + wheel
     needs: setup
-    if: needs.setup.outputs.code == 'true'
+    if: needs.setup.outputs.code == 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -220,7 +230,7 @@ jobs:
   docker:
     name: docker smoke-test
     needs: setup
-    if: needs.setup.outputs.code == 'true'
+    if: needs.setup.outputs.code == 'true' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
