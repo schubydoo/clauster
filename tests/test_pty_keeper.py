@@ -304,6 +304,32 @@ def test_write_screen_frame_records_render_failure(tmp_path: Path) -> None:
     assert info["state"] == "error" and "render" in info["error"] and info["screen"] is None
 
 
+def test_run_keeper_screen_throttle_skips_within_interval(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:
+    """A second update within the flush interval is debounced (the throttle skip arm)."""
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_SCREEN_FLUSH_INTERVAL", 100.0)  # force the not-elapsed arm
+    sidecar = tmp_path / "k.json"
+    screen = tmp_path / "k.screen.json"
+    bridge = [
+        sys.executable,
+        "-c",
+        "import sys,time;"
+        "sys.stdout.write('first\\r\\n'); sys.stdout.flush(); time.sleep(0.15);"
+        "sys.stdout.write('second\\r\\n'); sys.stdout.flush(); time.sleep(0.3)",
+    ]
+    rc = pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path), screen_sidecar=screen)
+    assert rc == 0
+    # The mid-loop second write is throttled (skipped) within the 100s interval, but the exit
+    # frame still flushes the final state — so both lines are present in the terminal frame.
+    frame = _read(screen)
+    assert frame["state"] == "exited"
+    joined = "".join(frame["screen"]["rows"])
+    assert "first" in joined and "second" in joined
+
+
 def test_init_screen_records_error_on_generic_failure(tmp_path: Path, monkeypatch) -> None:
     """A non-pyte setup failure is recorded as `error` (not raised, not `unavailable`)."""
     from clauster import pty_keeper

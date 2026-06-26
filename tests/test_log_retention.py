@@ -8,8 +8,9 @@ from pathlib import Path
 
 from clauster.runner import SessionRunner
 
-# Longest-match-first, same order as SessionRunner._LOG_SET_SUFFIXES.
-_SUFFIXES = (".raw.log", ".stderr.log", ".keeper.json", ".keeper.log", ".log")
+# Longest-match-first, same order as SessionRunner._LOG_SET_SUFFIXES (incl. the #534
+# `.screen.json` live-screen sidecar, so these tests verify it's pruned with its set).
+_SUFFIXES = (".raw.log", ".stderr.log", ".keeper.json", ".keeper.log", ".screen.json", ".log")
 
 
 def _runner(runner_config) -> SessionRunner:

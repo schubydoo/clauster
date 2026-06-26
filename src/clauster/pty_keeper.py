@@ -115,6 +115,20 @@ def _write_screen_frame(path: Path, screen: PtyScreen, seq: int, state: str) -> 
     return seq
 
 
+@dataclass
+class _ScreenTap:
+    """The active live-screen tap: a pyte emulator paired with its sidecar path.
+
+    Bundling the two correlated non-optionals lets the drain loop hold a single
+    ``tap is not None`` invariant — they are set together when the tap turns on and cleared
+    together when a feed error disables it — instead of carrying a separate, always-true
+    ``sidecar is not None`` guard beside every ``screen is not None`` check.
+    """
+
+    screen: PtyScreen
+    sidecar: Path
+
+
 def _proc_start(pid: int) -> float | None:
     """Return the bridge's process start time for Clauster's PID-reuse defense, or None."""
     # Imported lazily so the keeper still runs if procutil grows heavier deps.
@@ -223,7 +237,11 @@ def run_keeper(
     # Opt-in live-screen tap: a pyte emulator fed the same chunks, republished as a redacted
     # frame at most every _SCREEN_FLUSH_INTERVAL. screen is None when off/unavailable (the
     # keeper then drains exactly as before). `dirty` debounces writes to changed screens only.
-    screen = _init_screen(screen_sidecar) if screen_sidecar is not None else None
+    tap: _ScreenTap | None = None
+    if screen_sidecar is not None:
+        screen = _init_screen(screen_sidecar)
+        if screen is not None:
+            tap = _ScreenTap(screen, screen_sidecar)
     screen_seq = 0
     screen_dirty = False
     last_screen_write = 0.0
@@ -236,20 +254,19 @@ def run_keeper(
             if poller.poll(500):  # ms; truthy when the master fd has data (no FD_SETSIZE limit)
                 chunk = os.read(master, 65536)
                 if chunk:
-                    if screen is not None:
+                    if tap is not None:
                         try:
-                            screen.feed(chunk)
+                            tap.screen.feed(chunk)
                             screen_dirty = True
                         except Exception as exc:  # noqa: BLE001 — tap is best-effort, never kill the bridge
                             # Record the disable so a viewer sees a terminal `error` status
                             # instead of a silently-frozen `live` screen, then turn the tap
                             # off for the rest of this session (the bridge is unaffected).
-                            if screen_sidecar is not None:
-                                screen_seq += 1
-                                _write_screen_status(
-                                    screen_sidecar, screen_seq, "error", f"screen feed: {exc}"
-                                )
-                            screen = None
+                            screen_seq += 1
+                            _write_screen_status(
+                                tap.sidecar, screen_seq, "error", f"screen feed: {exc}"
+                            )
+                            tap = None
                     if not url_found:
                         buf.extend(chunk)
                         hit = _RE_CONNECT_URL.search(buf)
@@ -265,10 +282,10 @@ def run_keeper(
                             buf = bytearray()  # keep draining, stop accumulating
         except (OSError, BlockingIOError):
             time.sleep(0.2)
-        if screen is not None and screen_sidecar is not None and screen_dirty:
+        if tap is not None and screen_dirty:
             now = time.monotonic()
             if now - last_screen_write >= _SCREEN_FLUSH_INTERVAL:
-                screen_seq = _write_screen_frame(screen_sidecar, screen, screen_seq, "live")
+                screen_seq = _write_screen_frame(tap.sidecar, tap.screen, screen_seq, "live")
                 screen_dirty = False
                 last_screen_write = now
         if not url_found and time.monotonic() > url_deadline:
@@ -291,9 +308,11 @@ def run_keeper(
     rc = proc.poll() or 0
     base.update(state="exited", bridge_exit=rc)
     _write_sidecar(sidecar, base)
-    if screen is not None and screen_sidecar is not None:
-        # Final frame so a late viewer sees the last screen state, marked exited.
-        _write_screen_frame(screen_sidecar, screen, screen_seq, "exited")
+    if tap is not None:
+        # Final frame so a late viewer sees the last screen state, marked exited. This is the
+        # terminal write, so the returned seq is intentionally not captured (capturing it would
+        # be a dead assignment); any future write added after this must re-capture the seq.
+        _write_screen_frame(tap.sidecar, tap.screen, screen_seq, "exited")
     try:
         os.close(master)
     except OSError:

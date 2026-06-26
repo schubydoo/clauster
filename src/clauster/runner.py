@@ -762,8 +762,19 @@ class SessionRunner:
         return self._log_dir / f"{name}-{int(time.time() * 1000)}-{self._log_seq}.log"
 
     # Suffixes of one spawn's log "set" — all share the `<name>-<ms>-<seq>` stem.
-    # Longest-match-first so `.keeper.log` / `.raw.log` strip whole, not just `.log`.
-    _LOG_SET_SUFFIXES = (".raw.log", ".stderr.log", ".keeper.json", ".keeper.log", ".log")
+    # Longest-match-first so `.keeper.log` / `.raw.log` / `.screen.json` strip whole, not
+    # just `.log` / `.json`. `.screen.json` (the #534 live-screen sidecar) is grouped here so
+    # retention prunes it with its spawn set instead of orphaning it. (The orphan-keeper sweep
+    # in iter_keepers still globs `*.keeper.json` only — a `.screen.json` with no live keeper
+    # is harmless and gets pruned by age; revisit if S4+ ever leaves them without a keeper.)
+    _LOG_SET_SUFFIXES = (
+        ".raw.log",
+        ".stderr.log",
+        ".keeper.json",
+        ".keeper.log",
+        ".screen.json",
+        ".log",
+    )
 
     @classmethod
     def _log_set_key(cls, filename: str) -> str:
