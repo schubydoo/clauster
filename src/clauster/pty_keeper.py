@@ -34,6 +34,7 @@ import os
 import re
 import select
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -45,7 +46,7 @@ from . import procutil
 # pty_screen is first-party and always importable (it lazy-imports the optional `pyte`
 # itself, only when a PtyScreen is actually constructed), so importing it here never pulls
 # in pyte and never fails for a missing extra.
-from .pty_screen import PtyScreen, PyteUnavailableError
+from .pty_screen import SCREEN_COLS, SCREEN_ROWS, PtyScreen, PyteUnavailableError
 
 # The flag form prints its connect URL as a session path, NOT the subcommand's
 # `?environment=env_<ULID>` query form (verified, claude 2.1.159).
@@ -181,6 +182,19 @@ def run_keeper(
     try:
         master, slave = pty.openpty()
         slave_name = os.ttyname(slave)
+        if screen_sidecar is not None:
+            # The live-screen tap renders at a fixed SCREEN_COLS x SCREEN_ROWS (pyte has no
+            # resize negotiation), so the bridge's PTY must match that geometry — otherwise the
+            # TUI's cursor-addressed redraws (e.g. its bottom status bar) land at the wrong rows
+            # and leave stale duplicate footers in the taller pyte screen (#534). Scoped to the
+            # tap so a non-tap bridge keeps its prior winsize; best-effort so a winsize ioctl
+            # failure never aborts the spawn.
+            try:
+                fcntl.ioctl(
+                    slave, termios.TIOCSWINSZ, struct.pack("HHHH", SCREEN_ROWS, SCREEN_COLS, 0, 0)
+                )
+            except OSError:
+                pass
     except OSError as exc:
         base.update(state="error", error=f"openpty failed: {exc}")
         _write_sidecar(sidecar, base)
