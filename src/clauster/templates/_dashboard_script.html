@@ -1094,11 +1094,18 @@
         return Array.isArray(s) ? s : [];
       },
       bridgeSessionCount(name) { return this.bridgeSessions(name).length; },
-      // Show the expander only for a STANDARD bridge with more than one live session:
-      // a single-session bridge already has its one "Open in Claude" link, and a pty
-      // bridge is single-session by construction (issue #570).
+      // Singular/plural label for the expander ("1 live session" vs "N live sessions").
+      bridgeSessionLabel(name) {
+        const n = this.bridgeSessionCount(name);
+        return n + (n === 1 ? " live session" : " live sessions");
+      },
+      // Show the expander for any STANDARD bridge with at least one live session. The row's
+      // "Open in Claude" link is the bridge CONNECT URL (it opens the bridge, where you pick
+      // or start a session) — distinct from these per-session claude.ai/code deep links, which
+      // jump straight into a specific working session, so even a single session is worth a
+      // direct link. pty bridges are single-session by construction (issue #570).
       hasBridgeSessions(name) {
-        return this.resumeModeOf(name) !== "pty" && this.bridgeSessionCount(name) > 1;
+        return this.resumeModeOf(name) !== "pty" && this.bridgeSessionCount(name) > 0;
       },
       toggleBridgeSessions(name) { this.bridgeSessOpen[name] = !this.bridgeSessOpen[name]; },
       // Stable x-for key + short label: the local RFC-4122 UUID is unique per session;
