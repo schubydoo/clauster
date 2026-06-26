@@ -375,7 +375,7 @@ A bridge stuck in `starting` → `error` most often means a `claude-login` probl
 (see `clauster doctor` above) or that the bridge couldn't register within
 `startup_grace_seconds`.
 
-## The `KillMode` / `systemctl restart` caveat
+## The `KillMode` / `systemctl restart` caveat { #restart }
 
 This is the single operational gotcha most likely to surprise you.
 
