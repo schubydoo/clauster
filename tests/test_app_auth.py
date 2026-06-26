@@ -465,7 +465,12 @@ def test_ws_rejected_without_auth(runner_config):
 
 @pytest.mark.parametrize(
     "path",
-    ["/ws/bridge-log/alpha", "/ws/hosted/alpha", "/ws/clone-progress/alpha"],
+    [
+        "/ws/bridge-log/alpha",
+        "/ws/hosted/alpha",
+        "/ws/clone-progress/alpha",
+        "/ws/pty-screen/alpha",
+    ],
 )
 def test_all_ws_endpoints_reject_unauthenticated(runner_config, path):
     # #549 parity pin: EVERY WebSocket endpoint must gate on the same `auth.enabled` +

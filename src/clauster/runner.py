@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from . import auth, bridge_log, inspector, metrics, pointers, procutil, redact
+from . import auth, bridge_log, inspector, metrics, pointers, procutil, pty_screen, redact
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
@@ -1082,7 +1082,7 @@ class SessionRunner:
     @staticmethod
     def _screen_sidecar_path_for(log_path: Path) -> Path:
         """Redacted live-screen JSON the keeper writes beside the discovery sidecar (#534)."""
-        return log_path.with_name(log_path.stem + ".screen.json")
+        return pty_screen.screen_sidecar_path(log_path)
 
     def _build_pty_bridge_argv(
         self, log_path: Path, name: str, permission_mode: PermissionMode, *, resume: bool

@@ -20,6 +20,8 @@ lazily here so importing this module â€” or running the app without the extra â€
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from .redact import redact_screen_text
@@ -28,6 +30,31 @@ from .redact import redact_screen_text
 # resize/negotiation path is out of scope for the read-only first cut (#534).
 SCREEN_COLS = 120
 SCREEN_ROWS = 40
+
+
+def screen_sidecar_path(log_path: Path) -> Path:
+    """Return the screen-sidecar path beside a bridge ``log_path`` (``<stem>.screen.json``).
+
+    The single source of truth for the live-screen sidecar's name, shared by the keeper-
+    spawn path (the writer, in ``runner``) and the ``/ws/pty-screen`` reader so the two can
+    never drift onto different filenames.
+    """
+    return log_path.with_name(log_path.stem + ".screen.json")
+
+
+def read_screen_sidecar(path: Path) -> dict[str, Any] | None:
+    """Read the keeper's screen-sidecar JSON, or None if absent/unreadable/malformed.
+
+    The polling counterpart to the keeper's atomic ``os.replace`` writes, and best-effort
+    in the same spirit: a missing file (keeper not up yet), a transient read error, or
+    malformed JSON all map to None so the reader simply waits for the next frame instead of
+    tearing down the live stream. A non-object payload is rejected the same way.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 class PyteUnavailableError(RuntimeError):

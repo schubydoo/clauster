@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -97,6 +98,39 @@ def test_no_control_bytes_ever_reach_rows():
             assert o >= 0x20 and o != 0x7F and not (0x80 <= o <= 0x9F), (
                 f"control byte {o:#x} leaked into a rendered row"
             )
+
+
+def test_screen_sidecar_path_is_stem_dot_screen_json():
+    # The shared naming helper (used by both the keeper-spawn writer and the /ws reader)
+    # swaps the log's suffix for `.screen.json`, keyed off the stem so it sits beside its set.
+    assert pty_screen.screen_sidecar_path(Path("/logs/alpha-1700000000000-1.log")) == Path(
+        "/logs/alpha-1700000000000-1.screen.json"
+    )
+
+
+def test_read_screen_sidecar_roundtrips_a_frame(tmp_path: Path):
+    p = tmp_path / "x.screen.json"
+    frame = {"seq": 3, "state": "live", "error": None, "screen": {"rows": ["hi"]}}
+    p.write_text(json.dumps(frame), encoding="utf-8")
+    assert pty_screen.read_screen_sidecar(p) == frame
+
+
+def test_read_screen_sidecar_missing_file_returns_none(tmp_path: Path):
+    # The keeper may not have written the sidecar yet — a missing file is a wait, not a fail.
+    assert pty_screen.read_screen_sidecar(tmp_path / "nope.screen.json") is None
+
+
+def test_read_screen_sidecar_malformed_json_returns_none(tmp_path: Path):
+    p = tmp_path / "x.screen.json"
+    p.write_text("{not json", encoding="utf-8")
+    assert pty_screen.read_screen_sidecar(p) is None
+
+
+def test_read_screen_sidecar_non_object_returns_none(tmp_path: Path):
+    # A valid-JSON but non-object payload (e.g. a bare list) is rejected like malformed input.
+    p = tmp_path / "x.screen.json"
+    p.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    assert pty_screen.read_screen_sidecar(p) is None
 
 
 def test_missing_pyte_raises_clear_error(monkeypatch):
