@@ -81,6 +81,51 @@ def test_clone_streams_progress_then_done(write_config, tmp_path, monkeypatch):
     assert 50 in streamed and 100 in streamed  # the full live progress stream was observed
 
 
+def test_clone_cancel_streams_cancelled_terminal_frame(write_config, tmp_path, monkeypatch):
+    # #573 wiring: POST /clone/{job_id}/cancel must actually stop the in-flight git
+    # transfer, not just close the client WS. The fake clone hands its "process" to
+    # on_proc (the route's _register_proc -> job.register_terminate(proc.terminate)),
+    # signals it spawned, then blocks until terminate() fires. terminate() is what the
+    # cancel endpoint reaches through the registered hook; it raises ProvisionError out
+    # of the worker (a terminated git exits non-zero -> CloneFailed). Because the job's
+    # cancel_requested flag is set, the route reports a clean `cancelled` over the WS.
+    from clauster.app import ProvisionError
+
+    spawned = threading.Event()
+    terminated = threading.Event()
+
+    class _FakeProc:
+        def terminate(self) -> None:
+            terminated.set()
+
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
+        on_proc(_FakeProc())  # hand the process to the job so cancel can terminate it
+        spawned.set()  # the git "process" is live -> a cancel now has something to kill
+        assert terminated.wait(timeout=5), "clone never terminated by cancel"
+        raise ProvisionError("clone failed: terminated")  # terminated git -> non-zero
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    with _client(write_config, tmp_path) as client:
+        resp = client.post(
+            "/api/projects/clone", json={"name": "cancelme", "url": "https://example.com/r.git"}
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job_id"]
+
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+            first = ws.receive_json()
+            assert first["type"] == "progress"  # the running snapshot (job not finished)
+            assert spawned.wait(timeout=5), "clone never spawned its process"
+            cancel = client.post(f"/api/projects/clone/{job_id}/cancel")
+            assert cancel.status_code == 202, cancel.text
+            assert cancel.json() == {"job_id": job_id, "cancelling": True}
+            frames = [first, *_drain_to_done(ws)]
+
+    assert frames[-1] == {"type": "done", "status": "cancelled", "error": None}
+
+
 def test_clone_error_streams_terminal_error_frame(write_config, tmp_path, monkeypatch):
     from clauster.app import ProvisionError
 
