@@ -1,0 +1,23 @@
+# libFuzzer dictionary for parse_markers_fuzzer (bridge_log.parse_bridge_markers).
+# The literal marker tokens the regexes anchor on. Random Atheris FDP bytes never
+# produce "[bridge:init]" / "session_…", so this dict (plus the seed corpus) is
+# what lets the fuzzer reach the marker-extraction branches. See fuzz/README.md.
+"[bridge:init]"
+"[bridge:api]"
+"[bridge:work]"
+"[bridge:session]"
+"[bridge:shutdown]"
+"[remote-bridge]"
+"bridgeId="
+"environment_id="
+"environmentId="
+"env_"
+"session_"
+"Created initial session "
+"Unarchive "
+"Starting poll loop"
+"spawnMode="
+"SIGINT"
+"SIGTERM"
+"shutting down"
+"Workspace not trusted"
