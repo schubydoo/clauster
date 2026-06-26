@@ -382,6 +382,31 @@ class SessionRunner:
                 out.setdefault(name, []).append(session)
         return out
 
+    def tracked_sessions_by_instance(self) -> dict[str, list[WorkingSession]]:
+        """Group TRACKED working sessions by their owning managed instance (#570).
+
+        A standard ``claude remote-control`` bridge is multi-session: one bridge
+        can host several concurrent working sessions, all sharing its cwd. The
+        ``agents --json`` cross-check (computed in :meth:`poll_once`) already
+        attributes each to its owning bridge via ``parent_instance``; this exposes
+        that list so the dashboard can enumerate every live session under a bridge,
+        not just its starter session.
+
+        Keyed by ``parent_instance`` (the project/instance id stamped at reconcile).
+        Sessions are ordered by ``started_at`` then ``local_uuid`` for a stable
+        render order across polls. HOSTED/EXTERNAL/UNTRACKED sessions are excluded.
+        """
+        out: dict[str, list[WorkingSession]] = {}
+        for session in self._sessions:
+            if session.attribution is not Attribution.TRACKED:
+                continue
+            if session.parent_instance is None:
+                continue
+            out.setdefault(session.parent_instance, []).append(session)
+        for sessions in out.values():
+            sessions.sort(key=lambda s: (s.started_at, s.local_uuid))
+        return out
+
     # ----- persistence (state.json, D14) ----------------------------------
 
     def _persist_subset(self) -> dict[str, dict]:

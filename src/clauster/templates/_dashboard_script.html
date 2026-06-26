@@ -76,6 +76,8 @@
     return {
       instances: {},
       externalSessions: {},
+      trackedSessions: {},  // instance id (project) -> live working sessions under its bridge (#570)
+      bridgeSessOpen: {},   // instance id -> true while its multi-session list is expanded (#570)
       externalOpen: {},   // project name -> true while its external-session detail is expanded
       adoptableProjects: [],  // names whose external session is a standard bridge we can adopt (#330)
       // --- in-app config editor (FE-3, Tier-A allowlist) ---
@@ -754,14 +756,15 @@
         this._refreshing = true;
         let ok = true;
         try {
-          const [iRes, sRes, aRes, dRes] = await Promise.all([
+          const [iRes, sRes, aRes, dRes, tRes] = await Promise.all([
             fetch(ROOT + "/api/instances"),
             fetch(ROOT + "/api/sessions"),
             fetch(ROOT + "/api/agents"),
             fetch(ROOT + "/api/sessions/adoptable"),
+            fetch(ROOT + "/api/sessions/tracked"),
           ]);
           // Session expired mid-use -> bounce to login instead of silently showing stale data.
-          if (iRes.status === 401 || sRes.status === 401 || aRes.status === 401 || dRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (iRes.status === 401 || sRes.status === 401 || aRes.status === 401 || dRes.status === 401 || tRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
           if (iRes.ok) {
             const list = await iRes.json();
             const next = {};
@@ -780,6 +783,10 @@
           // just hides the affordance rather than failing the whole refresh.
           if (dRes.ok) this.adoptableProjects = await dRes.json();
           else { this.adoptableProjects = []; }
+          // Per-bridge live session list (#570) — advisory, drives the standard-bridge
+          // multi-session expander only; a failed fetch just collapses to the starter link.
+          if (tRes.ok) this.trackedSessions = await tRes.json();
+          else { this.trackedSessions = {}; }
           // Hosted sessions live in a separate registry (HostedManager); only poll
           // them when the claustrum channel is configured.
           if (CLAUSTRUM_ENABLED) {
@@ -1079,6 +1086,40 @@
         const hrs = Math.floor(mins / 60);
         if (hrs < 24) return hrs + "h";
         return Math.floor(hrs / 24) + "d";
+      },
+      // --- per-bridge live session list (#570) ---
+      // A standard `claude remote-control` bridge is multi-session; surface every live
+      // session under it (not just the starter). pty bridges are single-session, so this
+      // expander is gated to standard mode at the row — they keep showing only their one.
+      bridgeSessions(name) {
+        const s = this.trackedSessions[name];
+        return Array.isArray(s) ? s : [];
+      },
+      bridgeSessionCount(name) { return this.bridgeSessions(name).length; },
+      // Show the expander only for a STANDARD bridge with more than one live session:
+      // a single-session bridge already has its one "Open in Claude" link, and a pty
+      // bridge is single-session by construction (issue #570).
+      hasBridgeSessions(name) {
+        return this.resumeModeOf(name) !== "pty" && this.bridgeSessionCount(name) > 1;
+      },
+      toggleBridgeSessions(name) { this.bridgeSessOpen[name] = !this.bridgeSessOpen[name]; },
+      // Stable x-for key + short label: the local RFC-4122 UUID is unique per session;
+      // fall back to project:pid for a pre-2.1.139 CLI that might omit it.
+      bridgeSessionKey(s) { return s.local_uuid || (s.parent_instance + ":" + s.pid); },
+      // Short-UUID label (first segment of the RFC-4122 sessionId), per the #570 decision:
+      // friendly session names are deferred to the separate session-naming work.
+      bridgeSessionShortId(s) {
+        const u = s.local_uuid || "";
+        return u ? u.split("-")[0] : ("pid " + s.pid);
+      },
+      // Per-session deep link into the Claude web app. Only the local sessionId is known
+      // here; gate on the exact RFC-4122 UUID shape the docs guarantee so a malformed or
+      // truncated id from the CLI yields null (no Open link) rather than a dead
+      // claude.ai/code/<garbage> link. The host is hardcoded — no redirect/injection surface.
+      bridgeSessionUrl(s) {
+        const u = s.local_uuid || "";
+        const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+        return UUID.test(u) ? "https://claude.ai/code/" + u : null;
       },
       async loadUsage(name) {
         if (USAGE_MODE === "off") return;  // badge disabled — don't even fetch usage
