@@ -39,11 +39,6 @@ pytestmark = pytest.mark.e2e
 # (matches test_bridge_e2e).
 _STATUS_TIMEOUT = 20_000
 
-# The toast auto-dismisses 4.5s after it renders (toast() -> setTimeout(…, 4500)); poll a
-# touch past that so "toast gone" is real, not a race, while still returning the instant it
-# clears (so this is faster than the old fixed 5s sleep on a fast machine).
-_TOAST_GONE_TIMEOUT = 10_000
-
 # The fake's PTY-session id and the bearer token it logs only with FAKE_CLAUDE_LOG_EXTRA
 # set (see tests/fixtures/fake_claude/claude) — these MUST NOT survive into the streamed
 # view (redacted by sanitize_line over the WS).
@@ -90,17 +85,17 @@ def test_failed_action_surfaces_inline_error(
     browser.expect_visible(error_block, timeout_ms=_STATUS_TIMEOUT)
     assert browser.get_text(error_block).strip(), "inline error block rendered empty"
 
-    # ...and it is genuinely persistent (not a toast that auto-dismisses). The failed
-    # action also fires a transient error toast (_dashboard_script.html toast() ->
-    # setTimeout(dismissToast, 4500)). Rather than a fixed 5s sleep, wait for that toast
-    # to be gone from the stack, then confirm the inline block is STILL shown — a toast
-    # that merely happened to match would be cleared by now. We do NOT hard-require the
-    # toast to be visible first: the preceding steps can themselves take >4.5s on a slow
-    # runner, leaving the toast already auto-dismissed. `expect_hidden` degrades to an
-    # immediate pass in that case (and otherwise returns the instant the toast clears),
-    # so this de-flakes without weakening the persistence assertion that follows.
+    # ...and it is genuinely persistent, independent of the toast. The failed action also
+    # fires an error toast which, since #577, PERSISTS until dismissed (error toasts no
+    # longer auto-dismiss; non-error toasts still do). Prove the inline block is its own
+    # thing: dismiss the (persistent) error toast via its close button, confirm it clears
+    # only on that explicit dismiss, and confirm the inline block is STILL shown.
     toast = ".toast-stack .alert-danger"
-    browser.expect_hidden(toast, timeout_ms=_TOAST_GONE_TIMEOUT)  # toast gone (or never lingered)
+    browser.expect_visible(toast, timeout_ms=_STATUS_TIMEOUT)  # error toast appears...
+    # ...and clears only on explicit dismiss (no 4.5s auto-hide). Scope the close click to
+    # the error toast's own button so a stray success toast can't be the one dismissed.
+    browser.click(f"{toast} .btn-close")
+    browser.expect_hidden(toast)
     browser.expect_visible(error_block)
     assert browser.get_text(error_block).strip(), "inline error block did not persist"
     # The failed action did not spawn a running bridge.
