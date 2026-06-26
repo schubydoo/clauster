@@ -82,6 +82,39 @@ working on operability or deployment, the [Operations runbook](docs/operations.m
 collects health checks (`/healthz`, `/metrics`), `clauster doctor`, crash alerts,
 reading the bridge debug log, the `KillMode` restart caveat, and backup/recovery.
 
+## Vendoring front-end assets
+
+Clauster **self-hosts** its front-end dependencies (no CDN) so the dashboard works
+on an air-gapped / loopback deploy and `script-src` / `connect-src` stay `'self'`.
+Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/static/vendor)
+(Alpine is the one exception — it sits flat at `static/alpine.min.js`). To add or update one:
+
+1. **Fetch the published dist** — `npm pack <pkg>@<version>` then `tar xzf` and copy the
+   prebuilt files in (mirror an existing layout, e.g. `vendor/tabler/{css,js}/`). Don't
+   add the package to `package.json` — there's no runtime `dependencies` block; the
+   tarball is the source.
+2. **Pin it for Renovate** — add a two-line block to
+   [`static/vendor/versions.txt`](src/clauster/static/vendor/versions.txt) in the exact
+   shape the `customManager` regex matches:
+
+   ```text
+   # renovate: datasource=npm depName=<npm-name>
+   <short-name>=<version>
+   ```
+
+   The existing `vendored-assets` `packageRule` (`renovate.json`) then tracks it —
+   Renovate opens a **heads-up PR** on a new upstream but **never auto-merges** a
+   vendored asset (it's labelled `vendored-assets` for a manual dist re-vendor). No
+   `renovate.json` edit is needed.
+3. **License + provenance** — copy the upstream `LICENSE` to `vendor/<dep>/LICENSE` and
+   write a `vendor/<dep>/README.md` (package, version, a file→source table, and an
+   `## Updating` recipe). When the asset is **shipped to users**, also add a section to
+   [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and credit it in the dashboard
+   footer (guarded by `test_dashboard_footer_credits_vendored_assets`).
+4. **Reference it cache-busted** — link it in the template with `?v={{ asset_version }}`
+   (the clauster version), so an upgrade busts the `immutable` static cache. Tests in
+   `tests/test_app.py` assert the `?v=` pattern for shipped assets.
+
 ## License
 
 By contributing, you agree that your contributions are licensed under the
