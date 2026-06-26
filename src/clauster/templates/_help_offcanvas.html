@@ -1,0 +1,155 @@
+{# In-app help (#571) — a `?` control that opens a Tabler offcanvas with hand-authored
+   help content. Self-contained: a small nonce'd vanilla-JS controller drives open/close
+   so this partial works on every page (dashboard, login, 404) regardless of whether
+   Alpine is loaded. Not a modal, not a /help route, not a rendered README slice
+   (decision on #571 — avoids drift).
+
+   Parameters (all optional):
+   - `help_part` — "all" (default) renders the `?` trigger AND the panel+script.
+     "trigger" renders only the `?` button (use inside a `.navbar-expand-*`, whose
+     responsive CSS would otherwise flatten a descendant `.offcanvas` to static).
+     "panel" renders only the offcanvas panel + controller (place it OUTSIDE any
+     navbar, e.g. near end-of-body).
+   - `help_trigger_fixed` — when true the `?` trigger is fixed top-right (login / 404,
+     which have no navbar to host it). Ignored for the "panel" part. #}
+{% set help_part = help_part | default("all") %}
+{% if help_part in ("all", "trigger") %}
+<button id="help-open" type="button" data-test="help-trigger"
+        class="btn btn-icon btn-ghost-secondary{% if help_trigger_fixed %} position-fixed top-0 end-0 m-3{% endif %}"
+        {% if help_trigger_fixed %}style="z-index: 1080"{% endif %}
+        aria-label="Help" aria-haspopup="dialog" aria-controls="help-offcanvas" title="Help">
+  <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-help"/></svg>
+</button>
+{% endif %}
+{% if help_part in ("all", "panel") %}
+{# Backdrop + offcanvas. Hidden by default (`hidden` on both); the controller toggles
+   the Tabler `.show` class + drops `hidden` on open. The panel must NOT live inside a
+   `.navbar-expand-*` — that responsive CSS flattens a descendant `.offcanvas` to a
+   static inline block at the breakpoint, killing the overlay. #}
+<div id="help-backdrop" class="offcanvas-backdrop fade" data-test="help-backdrop" hidden></div>
+<div id="help-offcanvas" class="offcanvas offcanvas-end" tabindex="-1" data-test="help-offcanvas"
+     role="dialog" aria-modal="true" aria-labelledby="help-offcanvas-title" aria-hidden="true" hidden>
+  <div class="offcanvas-header">
+    <h2 class="offcanvas-title h3 mb-0" id="help-offcanvas-title">Using Clauster</h2>
+    <button id="help-close" type="button" class="btn-close" data-test="help-close" aria-label="Close help"></button>
+  </div>
+  <div class="offcanvas-body">
+    <p class="text-secondary">
+      Clauster spawns and manages remote-control bridges for your coding agent on this
+      host, driven from the browser. Below is the short tour — the
+      <a href="https://github.com/schubydoo/clauster#readme" target="_blank" rel="noopener noreferrer">README</a>
+      has the full reference.
+    </p>
+
+    <h3 class="h4 mt-4">Launch modes</h3>
+    <p class="text-secondary small mb-2">How a session is started decides what it can resume.</p>
+    <ul class="text-secondary">
+      <li><strong>Standard</strong> — the multi-session bridge. Best when you want several
+        sessions per project; resume is best-effort.</li>
+      <li><strong>PTY (true resume)</strong> — a single session per project under a PTY keeper,
+        with true <code>--continue</code> resume. Note a service restart ends a live PTY
+        session.</li>
+      <li><strong>Browser (hosted)</strong> — when enabled, streams a live view in this tab
+        only; it is not attachable from the desktop or mobile apps.</li>
+    </ul>
+
+    <h3 class="h4 mt-4">Permission modes</h3>
+    <p class="text-secondary">
+      A session runs under a permission mode that decides how tool calls are approved —
+      from prompting on every action to running unattended. Clauster fails closed: when a
+      session needs a decision it can't make, it parks and waits for you rather than
+      guessing.
+    </p>
+
+    <h3 class="h4 mt-4">The dashboard zones</h3>
+    <ul class="text-secondary">
+      <li><strong>Active sessions</strong> — what's running for you right now. Use the
+        <em>Stop</em> / <em>Resume</em> controls on each row.</li>
+      <li><strong>Projects</strong> — every discovered project. Launch a new session, create
+        or clone a project, and open a project's read-only transcript here.</li>
+    </ul>
+
+    <h3 class="h4 mt-4">Managed vs. External sessions</h3>
+    <p class="text-secondary">
+      The session filter sorts rows by <em>who started the session</em>. <strong>External</strong>
+      (unmanaged) sessions are ones Clauster did not launch — for example a session started
+      directly from the desktop or mobile app. Clauster can show them, but it has no
+      lifecycle handle on them, so they carry no <em>Stop</em> or <em>Resume</em> control.
+    </p>
+
+    <h3 class="h4 mt-4">Tools in the header</h3>
+    <ul class="text-secondary">
+      <li><strong>Configuration editor</strong> (pencil icon) — edit operational settings;
+        changes apply after a restart.</li>
+      <li><strong>Background agents</strong> — the panel for agent-view background sessions
+        started on this host.</li>
+      <li><strong>Theme toggle</strong> — switch between dark and light.</li>
+    </ul>
+
+    <p class="text-secondary small mt-4 mb-0">
+      Need more depth? See the
+      <a href="https://github.com/schubydoo/clauster#readme" target="_blank" rel="noopener noreferrer">full README</a>.
+    </p>
+  </div>
+</div>
+
+<script nonce="{{ csp_nonce }}">
+  (function () {
+    // Self-contained offcanvas controller — no Bootstrap/Tabler JS is loaded, so we
+    // drive show/hide (and a11y: Esc, click-away, focus trap, focus restore) by hand,
+    // mirroring the config-modal idiom in the dashboard.
+    var panel = document.getElementById("help-offcanvas");
+    var backdrop = document.getElementById("help-backdrop");
+    var openBtn = document.getElementById("help-open");
+    var closeBtn = document.getElementById("help-close");
+    if (!openBtn || !panel || !backdrop) return;
+    var trigger = null;  // element to restore focus to on close
+    var FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),' +
+      'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
+    function isOpen() { return panel.classList.contains("show"); }
+
+    function openHelp() {
+      if (isOpen()) return;
+      trigger = document.activeElement;
+      backdrop.hidden = false; panel.hidden = false;
+      // Force a reflow so the .show transition runs from the hidden state.
+      void panel.offsetWidth;
+      backdrop.classList.add("show");
+      panel.classList.add("show");
+      panel.setAttribute("aria-hidden", "false");
+      document.body.style.overflow = "hidden";  // lock background scroll
+      (closeBtn || panel).focus();
+    }
+
+    function closeHelp() {
+      if (!isOpen()) return;
+      backdrop.classList.remove("show");
+      panel.classList.remove("show");
+      panel.setAttribute("aria-hidden", "true");
+      backdrop.hidden = true; panel.hidden = true;
+      document.body.style.overflow = "";  // release scroll lock
+      if (trigger && trigger.focus) trigger.focus();  // restore focus to the opener
+    }
+
+    function trapTab(e) {
+      if (e.key !== "Tab") return;
+      // Exclude display:none elements (they match the selector but aren't focusable).
+      var f = Array.prototype.slice.call(panel.querySelectorAll(FOCUSABLE))
+        .filter(function (el) { return el.offsetParent !== null; });
+      if (!f.length) return;
+      var first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+      else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+    }
+
+    openBtn.addEventListener("click", openHelp);
+    if (closeBtn) closeBtn.addEventListener("click", closeHelp);
+    backdrop.addEventListener("click", closeHelp);  // click-away
+    panel.addEventListener("keydown", trapTab);
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && isOpen()) closeHelp();  // Esc to close
+    });
+  })();
+</script>
+{% endif %}

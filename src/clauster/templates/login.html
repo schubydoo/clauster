@@ -23,12 +23,17 @@
 </head>
 <body class="d-flex flex-column">
   {% include "_tabler_sprite.html" %}
-  <!-- Theme toggle (persists to localStorage; mirrors the dashboard control). -->
-  <button id="theme-toggle" type="button" style="z-index: 1080"
-          class="btn btn-icon position-fixed top-0 end-0 m-3" aria-label="Toggle theme">
-    <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
-    <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
-  </button>
+  <!-- Fixed top-right controls: theme toggle + in-app help (#571). A flex row keeps
+       the two icons from overlapping the way two `end-0` fixed buttons would. -->
+  <div class="position-fixed top-0 end-0 m-3 d-flex align-items-center" style="z-index: 1080; gap:.5rem">
+    <!-- Theme toggle (persists to localStorage; mirrors the dashboard control). -->
+    <button id="theme-toggle" type="button" class="btn btn-icon" aria-label="Toggle theme">
+      <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
+      <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
+    </button>
+    {# In-app help (#571): `?` trigger here; panel is emitted before </body>. #}
+    {% with help_part = "trigger" %}{% include "_help_offcanvas.html" %}{% endwith %}
+  </div>
 
   <div class="page page-center">
     <div class="container container-tight py-4">
@@ -83,5 +88,7 @@
       sync();
     })();
   </script>
+  {# In-app help (#571) offcanvas panel + controller, emitted at end-of-body. #}
+  {% with help_part = "panel" %}{% include "_help_offcanvas.html" %}{% endwith %}
 </body>
 </html>

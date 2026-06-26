@@ -22,6 +22,12 @@
   </style>
 </head>
 <body class="d-flex flex-column">
+  {# Sprite is needed for the in-app help (#571) `#ic-help` glyph. #}
+  {% include "_tabler_sprite.html" %}
+  <!-- Fixed top-right in-app help control (#571), consistent across pages. -->
+  <div class="position-fixed top-0 end-0 m-3 d-flex align-items-center" style="z-index: 1080; gap:.5rem">
+    {% with help_part = "trigger" %}{% include "_help_offcanvas.html" %}{% endwith %}
+  </div>
   <div class="page page-center">
     <div class="container container-tight py-4">
       <div class="text-center mb-4">
@@ -42,5 +48,7 @@
       </div>
     </div>
   </div>
+  {# In-app help (#571) offcanvas panel + controller, emitted at end-of-body. #}
+  {% with help_part = "panel" %}{% include "_help_offcanvas.html" %}{% endwith %}
 </body>
 </html>
