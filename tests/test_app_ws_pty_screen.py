@@ -63,6 +63,48 @@ def test_streams_frames_and_dedups_by_seq(runner_config, tmp_path: Path):
             assert second["seq"] == 2 and second["screen"]["rows"] == ["bye"]
 
 
+def test_absent_sidecar_poll_is_skipped(runner_config, tmp_path: Path, monkeypatch):
+    # The keeper may not have written the sidecar yet (first connect / pre-flush): the first
+    # read returns None, so that poll is skipped and the loop waits; the next read yields a
+    # real frame. Covers the `frame is not None` False arc. Poll interval zeroed for speed.
+    monkeypatch.setattr(app_module, "_SCREEN_POLL_INTERVAL", 0)
+    calls = {"n": 0}
+
+    def _read(_path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # nothing on disk yet → skip this tick
+        return {"seq": 1, "state": "live", "error": None, "screen": {"rows": ["hi"]}}
+
+    monkeypatch.setattr(pty_screen, "read_screen_sidecar", _read)
+    log = tmp_path / "alpha-1-1.log"
+    with _client_with(runner_config, _pty_running("alpha", log), screen_enabled=True) as client:
+        with client.websocket_connect("/ws/pty-screen/alpha") as ws:
+            assert ws.receive_json()["seq"] == 1
+
+
+def test_unchanged_frame_is_not_resent(runner_config, tmp_path: Path, monkeypatch):
+    # When the keeper hasn't updated the sidecar between two polls the reader sees the same
+    # seq twice and must skip the duplicate, forwarding only on a strictly higher seq. Covers
+    # the `seq > last_seq` False arc (the de-dup skip).
+    monkeypatch.setattr(app_module, "_SCREEN_POLL_INTERVAL", 0)
+    calls = {"n": 0}
+
+    def _read(_path):
+        calls["n"] += 1
+        if calls["n"] >= 3:  # third poll onward: a newer frame
+            return {"seq": 2, "state": "live", "error": None, "screen": {"rows": ["b"]}}
+        return {"seq": 1, "state": "live", "error": None, "screen": {"rows": ["a"]}}  # polls 1-2
+
+    monkeypatch.setattr(pty_screen, "read_screen_sidecar", _read)
+    log = tmp_path / "alpha-1-1.log"
+    with _client_with(runner_config, _pty_running("alpha", log), screen_enabled=True) as client:
+        with client.websocket_connect("/ws/pty-screen/alpha") as ws:
+            first = ws.receive_json()  # seq 1 (poll 1)
+            second = ws.receive_json()  # seq 2 (poll 3); poll 2's duplicate seq 1 was skipped
+    assert first["seq"] == 1 and second["seq"] == 2
+
+
 def test_streams_status_frame_with_seq_zero(runner_config, tmp_path: Path):
     # A setup-time status (e.g. pyte unavailable) is seq 0 with screen=None; the reader must
     # still forward it (last_seq starts below 0) so the client can explain the missing screen.
