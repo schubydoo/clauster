@@ -70,6 +70,24 @@ def test_get_config_falls_back_to_memory_when_disk_unreadable(write_config, tmp_
     assert res.json()["fields"]["usage.fx_rate"] == 1.0  # in-memory fallback
 
 
+def test_get_config_survives_deleted_config_file(write_config, tmp_path):
+    """A config file DELETED after startup still opens the editor (no 500).
+
+    The field read degrades via ``editable_values_on_disk`` (catches ``OSError``),
+    but ``file_hash`` reads the same path — without its own guard a missing file
+    would raise ``FileNotFoundError`` and 500 the editor, the opposite of the
+    documented "editor still opens" behaviour. The corrupt-YAML test above keeps the
+    file readable, so it does not exercise this branch.
+    """
+    client, path = _client_and_path(write_config, tmp_path)
+    path.unlink()
+    res = client.get("/api/config")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["fields"]["usage.fx_rate"] == 1.0  # in-memory fallback
+    assert body["hash"] is None  # no file to hash -> save is rejected until it returns
+
+
 def test_put_config_applies_tier_a_edit(write_config, tmp_path):
     client, path = _client_and_path(write_config, tmp_path)
     h = client.get("/api/config").json()["hash"]
