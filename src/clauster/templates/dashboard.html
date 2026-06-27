@@ -1021,8 +1021,8 @@
                       </template>
                       <div class="cfg-help text-secondary" x-show="configEditor.specs[path].description" x-cloak
                            x-text="configEditor.specs[path].description"></div>
-                      <div class="cfg-help text-warning" x-show="configFieldDisabled(path)" x-cloak
-                           x-text="configDependHint(path)"></div>
+                      <div class="cfg-help text-warning" x-show="configFieldHint(path)" x-cloak
+                           x-text="configFieldHint(path)"></div>
                     </div>
                   </div>
                 </template>

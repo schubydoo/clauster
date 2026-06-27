@@ -605,6 +605,16 @@
       configFieldDisabled(path) {
         const spec = this.configEditor.specs[path];
         if (!spec) return false;
+        // #664: the browser-notifications channel can't deliver in an insecure context or an
+        // unsupported browser — facts the server config can't change. Disable the toggle so we
+        // never silently offer a no-op. (A mere "denied" permission is left enabled: the user
+        // can unblock that in the browser; notifyClientCaveat() carries the matching hint.)
+        if (
+          path === "notifications.browser_enabled" &&
+          (typeof Notification === "undefined" || !window.isSecureContext)
+        ) {
+          return true;
+        }
         // depends_on_any: editable when ANY listed master is on (e.g. a per-event notify
         // toggle stays editable while EITHER the outbound or the browser channel is on).
         const anyDeps = spec.depends_on_any;
@@ -641,6 +651,28 @@
           return "Set “" + masterLabel + "” to “" + valLabel + "” to use this.";
         }
         return "Turn on “" + masterLabel + "” to use this.";
+      },
+      // #664: why the browser-notifications channel can't deliver in THIS browser/connection,
+      // or "" when it can. The Notification API needs a secure context (HTTPS or localhost); an
+      // insecure origin forces permission to "denied" and never prompts. These are client facts
+      // the server config can't fix, so the editor surfaces them instead of a silent no-op.
+      notifyClientCaveat() {
+        if (typeof Notification === "undefined") return "This browser doesn’t support notifications.";
+        if (!window.isSecureContext)
+          return "Browser notifications need a secure context — serve clauster over HTTPS, or open it via localhost.";
+        if (Notification.permission === "denied")
+          return "Notifications are blocked for this site in your browser — allow them in the browser’s site settings, then reload this page.";
+        return "";
+      },
+      // The single hint shown under a config field: the browser-notifications client caveat
+      // (#664) takes precedence for that field, else the dependency-gate reason when the field
+      // is gated off, else "".
+      configFieldHint(path) {
+        if (path === "notifications.browser_enabled") {
+          const caveat = this.notifyClientCaveat();
+          if (caveat) return caveat;
+        }
+        return this.configFieldDisabled(path) ? this.configDependHint(path) : "";
       },
       scrollToSection(section) {
         const el = document.getElementById("cfg-sec-" + section);
