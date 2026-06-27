@@ -81,6 +81,8 @@ def test_doctor_old_claude_fails(write_config, tmp_path):
     checks, ok = run_doctor(_cfg_file(write_config, tmp_path, '  min_version: "9.9.9"\n'))
     by = {c.name: c for c in checks}
     assert by["claude"].status == FAIL and ok is False
+    # The FAIL message must carry a remediation hint, not just the bare comparison.
+    assert "claude update" in by["claude"].detail and "9.9.9" in by["claude"].detail
 
 
 def test_doctor_invalid_config_fails(tmp_path):
