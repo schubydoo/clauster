@@ -41,7 +41,7 @@ def test_tracked_sessions_empty_initially(runner_config):
         assert resp.json() == {}
 
 
-def test_tracked_sessions_endpoint_groups_by_instance(runner_config):
+def test_tracked_sessions_endpoint_groups_by_instance(runner_config, monkeypatch):
     """/api/sessions/tracked returns each bridge's live sessions, keyed by instance (#570)."""
     from pathlib import Path
 
@@ -69,6 +69,15 @@ def test_tracked_sessions_endpoint_groups_by_instance(runner_config):
             attribution=Attribution.TRACKED,
         ),
     ]
+
+    # The lifespan starts a background poll loop whose first poll_once() reconciles against
+    # `agents --json` and would overwrite this injected snapshot with [] — a race the endpoint
+    # read can lose (intermittent macOS/3.11 failures). Stub it so the injected sessions are
+    # stable; this test exercises the grouping endpoint, not the poll/reconcile path.
+    async def _no_poll() -> None:
+        return None
+
+    monkeypatch.setattr(runner, "poll_once", _no_poll)
     with TestClient(create_app(config, runner=runner)) as client:
         resp = client.get("/api/sessions/tracked")
         assert resp.status_code == 200
