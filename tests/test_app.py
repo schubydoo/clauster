@@ -309,6 +309,22 @@ def test_recompute_project_ranks_populates_name_sort(write_config):
     )
 
 
+def test_project_row_order_style_uses_object_not_clobbering_string():
+    # The bug #655 MISSED: the non-name-sort CSS `order` must be applied via an Alpine OBJECT
+    # :style binding ({ order: ... }) — NOT a STRING ('order:' + n). Alpine writes a string :style
+    # as the whole style attribute, clobbering the `display:none` that x-show sets on capped rows,
+    # so the 6-row cap silently uncaps on any non-name sort. The object form MERGES, so the
+    # display:none survives. Source-level guard only (no JS harness catches the DOM clobber — the
+    # fix itself was verified in a real browser).
+    from pathlib import Path
+
+    from clauster import app as _app
+
+    tpl = (Path(_app.__file__).parent / "templates" / "_project_row.html").read_text()
+    assert "{ order: projectOrderRank(" in tpl, "row order :style must use the Alpine object form"
+    assert "'order:' +" not in tpl, "row order :style must not be the clobbering string form"
+
+
 def test_load_sort_meta_swaps_ranks_without_clearing_first(write_config):
     # #585(a): the flash on sort change came from loadSortMeta() clearing projectRanks = {} BEFORE
     # the async fetch, which uncapped the whole list for the duration of the round-trip. The fix
