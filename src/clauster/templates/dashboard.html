@@ -1028,7 +1028,15 @@
             </div>
           </div>
           <div class="modal-footer justify-content-between">
-            <span class="text-secondary small">Saved changes take effect after a Clauster restart.</span>
+            {# In-app restart (#483): re-exec in place to apply saved changes without a
+               shell. Gated behind the same #427 restart-impact confirmation as Save
+               (restartClauster() warns about live sessions a restart would end). #}
+            <button type="button" class="btn btn-ghost-secondary" data-test="cfg-restart"
+                    :disabled="configEditor.restarting || configEditor.loading"
+                    @click="restartClauster()">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>
+              <span x-text="configEditor.restarting ? 'Restarting…' : 'Restart Clauster'">Restart Clauster</span>
+            </button>
             <span class="d-flex gap-2">
               <button type="button" class="btn" @click="closeConfig()">Close</button>
               <button type="button" class="btn btn-primary" data-test="cfg-save"

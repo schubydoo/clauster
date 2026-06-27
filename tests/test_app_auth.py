@@ -44,6 +44,31 @@ def test_unauth_api_returns_401(runner_config):
     assert client.get("/api/instances").status_code == 401
 
 
+def test_restart_requires_auth(runner_config):
+    # #483: the in-app restart endpoint is auth-gated like every mutating /api/* route.
+    # Unauthenticated -> 401, and the process is never flagged for restart.
+    client = _password_client(runner_config)
+    res = client.post("/api/restart", headers={"origin": ORIGIN})
+    assert res.status_code == 401
+    assert client.app.state.restart_requested is False
+
+
+def test_restart_authed_returns_202(runner_config):
+    # Authenticated (session cookie + trusted Origin) -> 202, flags the restart and
+    # signals the wired server to shut down (which `_run` turns into a re-exec).
+    client = _password_client(runner_config)
+    _login(client)
+
+    class _FakeServer:
+        should_exit = False
+
+    client.app.state.uvicorn_server = _FakeServer()
+    res = client.post("/api/restart", headers={"origin": ORIGIN})
+    assert res.status_code == 202
+    assert client.app.state.restart_requested is True
+    assert client.app.state.uvicorn_server.should_exit is True
+
+
 def test_unauth_html_redirects_to_login(runner_config):
     client = _password_client(runner_config)
     resp = client.get("/", follow_redirects=False)

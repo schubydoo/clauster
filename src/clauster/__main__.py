@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import sys
 import time
 from pathlib import Path
@@ -540,6 +541,20 @@ def _set_process_title(config: ClausterConfig) -> None:
             pass
 
 
+def _reexec() -> None:  # pragma: no cover - replaces the process image; tested via monkeypatch
+    """Re-exec this interpreter in place with the same argv (the #483 restart mechanism).
+
+    ``os.execv`` replaces the current process image — same PID, fresh code + config
+    (config is read at startup). Called only after the uvicorn server has shut down
+    gracefully and released its listening socket, so the new image can re-bind. The
+    indirection is a deliberate seam: tests monkeypatch this to assert the restart
+    endpoint triggers exactly one re-exec without actually replacing the test process.
+    """
+    # S606: re-exec the SAME interpreter with our own argv — no shell, no user input
+    # (argv is the process's own ``sys.argv``). This is the whole point of the action.
+    os.execv(sys.executable, [sys.executable, *sys.argv])  # noqa: S606
+
+
 def _run(config_path: str | None) -> int:
     try:
         config = load_config(config_path)
@@ -570,14 +585,30 @@ def _run(config_path: str | None) -> int:
     app = create_app(config)
     # proxy_headers=False: keep request.client.host as the real socket peer so the
     # reverse-proxy IP allowlist can't be defeated via a spoofed X-Forwarded-For.
-    uvicorn.run(
-        app,
-        host=config.host,
-        port=config.port,
-        log_level="info",
-        log_config=None,
-        proxy_headers=False,
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=config.host,
+            port=config.port,
+            log_level="info",
+            log_config=None,
+            proxy_headers=False,
+        )
     )
+    # Hand the live server to the app so the in-app "Restart Clauster" action (#483)
+    # can request a graceful shutdown via `server.should_exit = True`. That lets
+    # uvicorn close the listening socket cleanly before we re-exec — an unclosed,
+    # non-CLOEXEC socket FD would otherwise make the re-exec'd process fail to
+    # re-bind (address already in use).
+    app.state.uvicorn_server = server
+    server.run()  # blocks until graceful shutdown (Ctrl-C, SIGTERM, or restart request)
+    # If the shutdown was an in-app restart request, re-exec in place now that the
+    # socket is released. Re-exec is uniform across systemd/launchd/terminal/Docker,
+    # keeps the same PID (systemd's MainPID stays valid), and reloads config (read at
+    # startup); detached + KillMode=process bridges survive. Any other shutdown path
+    # (signal) falls through to a normal exit.
+    if getattr(app.state, "restart_requested", False):
+        _reexec()
     return 0
 
 

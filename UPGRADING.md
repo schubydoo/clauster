@@ -6,6 +6,14 @@ upgrades are an external operation: update the package, then restart. Run
 `clauster doctor` after upgrading to confirm config + environment are still sane
 (it also warns when your checkout is behind its upstream).
 
+> **Not the same as the in-app "Restart Clauster" action.** The config editor's
+> **Restart Clauster** button (#483) re-execs the *currently installed* process in
+> place (`os.execv` — same code, same PID) only to reload a **config** change. It
+> never fetches, installs, or rewrites code, so the no-self-**update** stance above
+> is unchanged: a version upgrade is still update-the-package-then-restart. The
+> in-app restart simply spares you a shell for a config reload; the live-session
+> caveat below (a restart reaps the cgroup) applies to it exactly as to any restart.
+
 Always **back up first** — it's a few seconds and makes any upgrade reversible:
 
 ```bash

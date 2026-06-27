@@ -62,29 +62,60 @@ def test_help_documents_config_search_order(capsys):
 # ----- run (default) ----------------------------------------------------
 
 
+def _stub_server(monkeypatch, on_run=None):
+    """Replace ``uvicorn.Server`` so ``_run`` never binds a socket or blocks.
+
+    ``_run`` now builds ``uvicorn.Server(uvicorn.Config(...))`` and calls
+    ``server.run()`` (so the #483 restart path can ``should_exit`` it). The fake
+    captures the Config kwargs and runs ``on_run(server)`` in place of serving — the
+    restart tests use ``on_run`` to flip ``app.state.restart_requested`` mid-"serve".
+    Returns the captured-config dict the test can assert on.
+    """
+    captured: dict = {}
+
+    class _FakeServer:
+        def __init__(self, config):
+            self.config = config
+            captured.update(
+                {
+                    "app": config.app,
+                    "host": config.host,
+                    "port": config.port,
+                    "proxy_headers": config.proxy_headers,
+                }
+            )
+            self.should_exit = False
+
+        def run(self):
+            if on_run is not None:
+                on_run(self)
+
+    monkeypatch.setattr(cli.uvicorn, "Server", _FakeServer)
+    return captured
+
+
 def test_run_invokes_uvicorn(write_config, tmp_path, monkeypatch):
-    calls = {}
-    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: calls.update(kw) or None)
+    captured = _stub_server(monkeypatch)
     rc = cli.main(["run", "-c", _cfg(write_config, tmp_path)])
     assert rc == 0
-    assert calls.get("port") == 7621 and calls.get("proxy_headers") is False
+    assert captured.get("port") == 7621 and captured.get("proxy_headers") is False
 
 
 def test_bare_args_default_to_run(write_config, tmp_path, monkeypatch):
     # Backward compat: `clauster -c x` means `run`.
     ran = {}
-    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kw: ran.setdefault("yes", True))
+    _stub_server(monkeypatch, on_run=lambda s: ran.setdefault("yes", True))
     assert cli.main(["-c", _cfg(write_config, tmp_path)]) == 0
     assert ran == {"yes": True}
 
 
 def test_run_missing_config_exits_2(monkeypatch):
-    monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **k: None)
+    _stub_server(monkeypatch)
     assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 2
 
 
 def test_run_claude_not_found_exits_2(write_config, tmp_path, monkeypatch):
-    monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **k: None)
+    _stub_server(monkeypatch)
     # point the binary at something that won't resolve
     bad = str(
         write_config(f"claude:\n  binary: definitely-not-claude\nstate_dir: {tmp_path}/.s\n")
@@ -210,10 +241,33 @@ def test_run_warns_on_insecure_cookie(write_config, tmp_path, monkeypatch, capsy
     pw = auth.hash_password(auth.make_hasher(), "pw")
     extra = f'auth:\n  enabled: true\n  password_required: true\n  password_hash: "{pw}"\n'
     cfg = _cfg(write_config, tmp_path, extra)
-    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **k: None)
+    _stub_server(monkeypatch)
     assert cli.main(["run", "-c", cfg]) == 0
     err = capsys.readouterr().err
     assert "WARNING" in err and "Secure" in err
+
+
+def test_run_reexecs_when_restart_requested(write_config, tmp_path, monkeypatch):
+    # #483: when the in-app restart endpoint flips app.state.restart_requested during
+    # serve(), _run re-execs in place exactly once after the server returns.
+    calls = []
+    monkeypatch.setattr(cli, "_reexec", lambda: calls.append(1))
+
+    def _request_restart(server):
+        server.config.app.state.restart_requested = True
+
+    _stub_server(monkeypatch, on_run=_request_restart)
+    assert cli.main(["run", "-c", _cfg(write_config, tmp_path)]) == 0
+    assert calls == [1]
+
+
+def test_run_does_not_reexec_on_normal_shutdown(write_config, tmp_path, monkeypatch):
+    # A plain shutdown (no restart request) must NOT re-exec — it exits cleanly.
+    calls = []
+    monkeypatch.setattr(cli, "_reexec", lambda: calls.append(1))
+    _stub_server(monkeypatch)  # on_run is a no-op: restart_requested stays False
+    assert cli.main(["run", "-c", _cfg(write_config, tmp_path)]) == 0
+    assert calls == []
 
 
 # ----- install-service --------------------------------------------------
