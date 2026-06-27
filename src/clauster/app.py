@@ -1394,11 +1394,32 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         """
         cfg = app.state.config
         path = cfg.source_path
+        # Serve the values from the on-disk file (consistent with the content hash
+        # below), not the startup config: a prior save writes the file but does not
+        # live-reload the runtime, so app.state.config goes stale after any save —
+        # reopening the editor would then show pre-save values and a successful save
+        # looks reverted. Fall back to the in-memory config if the file can't be
+        # re-read (missing / externally corrupted) so the editor still opens.
+        fields = None
+        content_hash = None
+        if path is not None:
+            fields = config_editor.editable_values_on_disk(path)
+            # Guard file_hash the same way as the field read: a config deleted or made
+            # unreadable after startup makes read_bytes() raise, which would 500 the
+            # editor out of reach even though `fields` already degraded to the in-memory
+            # snapshot. Fall back to no hash instead (the editor still opens; a save is
+            # safely rejected for the missing hash until the file returns).
+            try:
+                content_hash = config_editor.file_hash(path)
+            except OSError:
+                content_hash = None
+        if fields is None:
+            fields = config_editor.editable_values(cfg)
         return {
-            "fields": config_editor.editable_values(cfg),
+            "fields": fields,
             "editable": list(config_editor.EDITABLE_FIELDS),
             "specs": config_editor.field_specs(),
-            "hash": config_editor.file_hash(path) if path is not None else None,
+            "hash": content_hash,
         }
 
     @app.put("/api/config")

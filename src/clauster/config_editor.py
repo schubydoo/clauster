@@ -20,8 +20,9 @@ from typing import Any, Literal, Union, get_args, get_origin
 
 import annotated_types as at
 from pydantic import ValidationError
+from yaml import YAMLError
 
-from .config import ClausterConfig
+from .config import ClausterConfig, load_config
 
 # Tier-A allowlist: dotted paths editable from the web UI. Operational only — no
 # auth/secret/bind/structural/clone/supply-chain field appears here (those stay
@@ -121,6 +122,24 @@ def editable_values(config: ClausterConfig) -> dict[str, Any]:
     surfaced — redaction is structural, not a post-filter.
     """
     return {path: _get_by_path(config, path) for path in EDITABLE_FIELDS}
+
+
+def editable_values_on_disk(path: str | Path) -> dict[str, Any] | None:
+    """Re-read the Tier-A field values from the on-disk config, or ``None`` if unreadable.
+
+    The editor edits the FILE, but a save deliberately does not live-reload the
+    running config (a hot-swap is unsafe — the runner and other readers hold the
+    startup object). Serving the in-memory config would therefore show STALE values
+    after any save until a restart, making a successful save look reverted. Reading
+    the file keeps the returned fields consistent with the content ``hash`` (both
+    from disk) and reflects what the next restart will load. Returns ``None`` on a
+    missing / unparseable / schema-invalid file (e.g. a concurrent external edit) so
+    the caller can fall back to the in-memory config instead of failing the request.
+    """
+    try:
+        return editable_values(load_config(path))
+    except (OSError, ValueError, ValidationError, YAMLError):
+        return None
 
 
 def validate_edits(raw: dict[str, Any], edits: dict[str, Any]) -> dict[str, Any]:
