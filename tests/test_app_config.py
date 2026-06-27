@@ -44,6 +44,32 @@ def test_get_config_returns_tier_a_only(write_config, tmp_path):
     assert not any(any(s in k for s in secret_keys) for k in keys)
 
 
+def test_get_config_reflects_saved_value_without_restart(write_config, tmp_path):
+    """Reopening the editor after a save shows the saved value, not the startup config.
+
+    A PUT writes the file but does not live-reload the runtime config, so serving
+    app.state.config would show the stale, pre-save value until a restart — making a
+    successful save look reverted. The GET must reflect what is now on disk.
+    """
+    client, path = _client_and_path(write_config, tmp_path)
+    h = client.get("/api/config").json()["hash"]
+    saved = client.put("/api/config", json={"edits": {"usage.fx_rate": 9.0}, "hash": h})
+    assert saved.status_code == 200
+    # The runtime config is deliberately NOT reloaded (restart_required) ...
+    assert saved.json()["restart_required"] is True
+    # ... yet a fresh GET reflects the saved value (read from disk), not the stale 1.0.
+    assert client.get("/api/config").json()["fields"]["usage.fx_rate"] == 9.0
+
+
+def test_get_config_falls_back_to_memory_when_disk_unreadable(write_config, tmp_path):
+    """A corrupt on-disk config falls back to the in-memory values, not a 500."""
+    client, path = _client_and_path(write_config, tmp_path)
+    path.write_text("usage: {fx_rate: 1.0\n")  # unterminated flow map -> YAML parse error
+    res = client.get("/api/config")
+    assert res.status_code == 200
+    assert res.json()["fields"]["usage.fx_rate"] == 1.0  # in-memory fallback
+
+
 def test_put_config_applies_tier_a_edit(write_config, tmp_path):
     client, path = _client_and_path(write_config, tmp_path)
     h = client.get("/api/config").json()["hash"]
