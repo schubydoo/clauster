@@ -496,6 +496,25 @@ def test_dashboard_renders_in_app_restart_action(write_config):
     assert "this.restartImpactCount()" in page
 
 
+def test_restart_action_success_check_and_honest_catch(write_config):
+    # #483 review (Greptile P2 x2): the success branch must not carry the dead
+    # `|| res.status === 202` (res.ok already covers every 2xx), and the catch must
+    # not over-promise a reconnect — fetch throws the same TypeError for an expected
+    # mid-restart drop AND a pre-flight failure where nothing restarted, so the message
+    # must cover both and the button must re-enable so a still-running server is retriable.
+    page = _client(write_config).get("/").text
+    assert "if (res.ok || res.status === 202)" not in page  # dead condition is gone
+    assert "if (res.ok) {" in page  # simplified to the 2xx check
+    # The catch surfaces an honest, non-over-promising message (not the bare success copy)
+    # and re-enables the button rather than stranding it disabled forever.
+    assert "the restart may have failed; check the service." in page
+    assert re.search(
+        r"catch \(e\) \{.*?the restart may have failed.*?c\.restarting = false;",
+        page,
+        re.DOTALL,
+    )
+
+
 def test_desktop_stop_confirms_and_error_toasts_stick(write_config):
     # #577: two error-UX consistency papercuts.
     # A) the desktop-bridge Stop was the only destructive action with no window.confirm
