@@ -98,7 +98,7 @@ def run_doctor(
                     "claude",
                     FAIL,
                     f"{version} < required {config.claude.min_version} — run "
-                    f"`claude update` (or reinstall Claude Code via the installer / npm) "
+                    f"`claude update` (or reinstall via the installer) "
                     f"to reach >= {config.claude.min_version}",
                 )
             )
