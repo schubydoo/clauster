@@ -68,7 +68,13 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "metrics.poll_seconds",
     "observability.prometheus_enabled",
     "notifications.enabled",
+    "notifications.browser_enabled",
     "notifications.notify_on_crash",
+    "notifications.notify_on_ready",
+    "notifications.notify_on_stop",
+    "notifications.notify_on_permission",
+    "notifications.notify_on_session_end",
+    "notifications.notify_on_reconnect_failed",
 )
 _EDITABLE = frozenset(EDITABLE_FIELDS)
 
@@ -244,8 +250,14 @@ FIELD_LABELS: dict[str, str] = {
     "metrics.sample_interval_seconds": "Metrics sampling window",
     "metrics.poll_seconds": "Metrics refresh interval",
     "observability.prometheus_enabled": "Enable /metrics endpoint",
-    "notifications.enabled": "Enable notifications",
+    "notifications.enabled": "Enable outbound notifications",
+    "notifications.browser_enabled": "Enable browser notifications",
     "notifications.notify_on_crash": "Notify on unexpected crash",
+    "notifications.notify_on_ready": "Notify when a bridge is ready",
+    "notifications.notify_on_stop": "Notify when a bridge is stopped",
+    "notifications.notify_on_permission": "Notify when permission is needed",
+    "notifications.notify_on_session_end": "Notify when a session ends",
+    "notifications.notify_on_reconnect_failed": "Notify when reconnect fails",
 }
 
 # Unit affix shown beside numeric controls.
@@ -281,7 +293,21 @@ FIELD_DEPENDS: dict[str, str] = {
     "metrics.show_disk": "metrics.enabled",
     "metrics.sample_interval_seconds": "metrics.enabled",
     "metrics.poll_seconds": "metrics.enabled",
-    "notifications.notify_on_crash": "notifications.enabled",
+}
+
+# Child field -> masters where the child is editable if ANY master is on. The per-event
+# notify_on_* toggles drive BOTH the outbound (Apprise) and browser channels, so they must
+# stay editable when EITHER channel is on — gating them on the outbound switch alone greyed
+# them out for a browser-only user (browser_enabled=true, enabled=false) even though the
+# browser channel reads them.
+_NOTIFY_CHANNELS = ("notifications.enabled", "notifications.browser_enabled")
+FIELD_DEPENDS_ANY: dict[str, tuple[str, ...]] = {
+    "notifications.notify_on_crash": _NOTIFY_CHANNELS,
+    "notifications.notify_on_ready": _NOTIFY_CHANNELS,
+    "notifications.notify_on_stop": _NOTIFY_CHANNELS,
+    "notifications.notify_on_permission": _NOTIFY_CHANNELS,
+    "notifications.notify_on_session_end": _NOTIFY_CHANNELS,
+    "notifications.notify_on_reconnect_failed": _NOTIFY_CHANNELS,
 }
 
 # Child -> (master field, the master VALUE that enables the child). Unlike FIELD_DEPENDS
@@ -400,6 +426,7 @@ def field_specs() -> dict[str, dict[str, Any]]:
             "placeholder": FIELD_PLACEHOLDERS.get(path),
             "depends_on": FIELD_DEPENDS.get(path) or (dep_value[0] if dep_value else None),
             "depends_on_value": dep_value[1] if dep_value else None,
+            "depends_on_any": list(FIELD_DEPENDS_ANY.get(path, ())) or None,
             "deprecated": path in DEPRECATED_FIELDS,
             "default": default if isinstance(default, (str, int, float, bool)) else None,
         }

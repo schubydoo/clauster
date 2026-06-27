@@ -2014,7 +2014,8 @@ class SessionRunner:
                 self._crash_counts[instance.project] = (
                     self._crash_counts.get(instance.project, 0) + 1
                 )
-                self._notify_crash(instance)
+                # The crash notification is now fired inside _emit_lifecycle (#541), so
+                # the single chokepoint owns history + webhook + notification together.
                 self._emit_lifecycle("crash", instance)
             if alive:
                 live_projects.add(instance.project)
@@ -2144,19 +2145,48 @@ class SessionRunner:
         # ever authenticating to the controller — liveness is not usability, and
         # promoting on it reported uncontrollable bridges as RUNNING.
 
-    def _notify_crash(self, instance: RemoteControlInstance) -> None:
-        """Fire a best-effort crash notification (off-loop; never blocks/raises the poll).
-
-        Called when a bridge transitions to CRASHED — an unexpected exit, i.e. not via
-        the Stop button. No-op unless notifications are active and crash alerts are on.
-        """
-        if not self._notifier.active or not self._config.notifications.notify_on_crash:
-            return
-        title = f"clauster: bridge crashed — {instance.label}"
-        body = (
-            f"The bridge for project {instance.project!r} exited unexpectedly "
-            f"(not via Stop) — mode {instance.resume_mode}/{instance.spawn_mode}."
+    @staticmethod
+    def _notify_message(event: str, instance: RemoteControlInstance) -> tuple[str, str]:
+        """Build the (title, body) for a bridge-lifecycle notification ``event`` (#541)."""
+        mode = f"{instance.resume_mode}/{instance.spawn_mode}"
+        proj = repr(instance.project)
+        bodies = {
+            "crash": (
+                f"clauster: bridge crashed — {instance.label}",
+                f"The bridge for project {proj} exited unexpectedly (not via Stop) — mode {mode}.",
+            ),
+            "ready": (
+                f"clauster: bridge ready — {instance.label}",
+                f"The bridge for project {proj} finished starting — mode {mode}.",
+            ),
+            "stop": (
+                f"clauster: bridge stopped — {instance.label}",
+                f"The bridge for project {proj} was stopped — mode {mode}.",
+            ),
+            "session-ended": (
+                f"clauster: session ended — {instance.label}",
+                f"The session for project {proj} ended — mode {mode}.",
+            ),
+            "reconnect-failed": (
+                f"clauster: reconnect failed — {instance.label}",
+                f"Resuming the bridge for project {proj} failed — mode {mode}.",
+            ),
+        }
+        return bodies.get(
+            event,
+            (f"clauster: {event} — {instance.label}", f"Project {proj} — mode {mode}."),
         )
+
+    def _notify_event(self, event: str, instance: RemoteControlInstance) -> None:
+        """Fire a best-effort lifecycle notification (off-loop; never blocks/raises, #541).
+
+        ``event`` is a key of :data:`~clauster.config._NOTIFY_EVENTS`. No-op unless the
+        outbound notifier is active AND this event's per-event toggle is on. Routes
+        through the same fire-and-forget Apprise path the crash alert always used.
+        """
+        if not self._notifier.active or not self._config.notifications.event_enabled(event):
+            return
+        title, body = self._notify_message(event, instance)
         # Fire-and-forget: anotify sends off-thread and swallows its own errors. Keep a
         # reference so the task isn't GC'd mid-send; drop it on completion.
         task = asyncio.create_task(self._notifier.anotify(title, body))
@@ -2185,15 +2215,24 @@ class SessionRunner:
         return self._session_ref_secret
 
     def _emit_lifecycle(self, event: str, instance: RemoteControlInstance) -> None:
-        """Single chokepoint for a lifecycle transition: record history + fire webhook.
+        """Single chokepoint for a lifecycle transition: history + webhook + notification.
 
-        ``event`` is one of ``spawn`` / ``ready`` / ``stop`` / ``crash``. Both sinks
-        are best-effort and off the loop, so neither can affect the bridge lifecycle:
-        the history append is fail-closed (a lost row is logged, never raised) and the
-        webhook is fail-open (a broken endpoint is swallowed).
+        ``event`` is one of ``spawn`` / ``ready`` / ``stop`` / ``crash``. All three sinks
+        are best-effort and off the loop, so none can affect the bridge lifecycle: the
+        history append is fail-closed (a lost row is logged, never raised), the webhook is
+        fail-open (a broken endpoint is swallowed), and the notification is fire-and-forget.
+
+        Notifications use a finer-grained event taxonomy than webhooks (#541): a ``stop``
+        for a single-shot ``session`` bridge that wasn't ended via the Stop button is a
+        ``session-ended`` notification, not a ``stop``. ``spawn`` carries no notification.
         """
         self._record_event(event, instance)
         self._emit_webhook(event, instance)
+        notify_event = event
+        if event == "stop" and instance.spawn_mode == "session" and not instance.intentional_stop:
+            notify_event = "session-ended"
+        if notify_event != "spawn":
+            self._notify_event(notify_event, instance)
 
     # Maps the internal webhook event name to the persisted history ``kind``.
     _HISTORY_KIND = {"spawn": "spawned", "ready": "ready", "stop": "ended", "crash": "crashed"}
@@ -2356,6 +2395,25 @@ class SessionRunner:
         if not self._webhooks.wants(event):
             return
         task = asyncio.create_task(self._webhooks.aemit(event, payload))
+        self._notify_tasks.add(task)
+        task.add_done_callback(self._notify_tasks.discard)
+
+    def notify_app_event(self, event: str, title: str, body: str) -> None:
+        """Fire a non-bridge notification off-loop (fire-and-forget, fail-closed, #541).
+
+        Mirrors :meth:`emit_event` for the *notification* channel: subsystems that
+        don't hold the runner's :class:`Notifier` (the hosted manager's parked-prompt
+        callback, the resume route) route an event whose source isn't a bridge
+        ``RemoteControlInstance`` — e.g. ``permission-needed`` / ``reconnect-failed`` —
+        through here with a ready-made title/body. No-op unless the outbound notifier is
+        active and this event's per-event toggle is on (these default OFF). The send is
+        fire-and-forget and swallows its own errors, so it never affects the caller.
+
+        Must be called on the event loop (it schedules a task).
+        """
+        if not self._notifier.active or not self._config.notifications.event_enabled(event):
+            return
+        task = asyncio.create_task(self._notifier.anotify(title, body))
         self._notify_tasks.add(task)
         task.add_done_callback(self._notify_tasks.discard)
 

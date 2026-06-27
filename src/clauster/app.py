@@ -372,6 +372,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 "subtype": sanitize_line(subtype) if subtype else None,
             },
         )
+        # Notification channel (#541): the "come look" signal. Carries only the redacted
+        # subtype, never the prompt body. Fail-closed + fire-and-forget like the webhook.
+        clean = sanitize_line(subtype) if subtype else None
+        runner.notify_app_event(
+            "permission-needed",
+            "clauster: permission needed",
+            f"A hosted session parked a tool-permission prompt ({clean})."
+            if clean
+            else "A hosted session parked a tool-permission prompt.",
+        )
 
     app.state.hosted = HostedManager(
         runner.persistence.hosted_state_store(),
@@ -1868,7 +1878,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         hosted = app.state.hosted.get_instance(instance_id)
         if hosted is not None:
             return await _resume_hosted(instance_id, hosted)
-        return await _spawn_or_http(runner.resume(instance_id))
+        try:
+            return await _spawn_or_http(runner.resume(instance_id))
+        except HTTPException:
+            # The resume failed to bring the bridge back up — fire the #541
+            # reconnect-failed notification (fail-closed + fire-and-forget), then
+            # re-raise so the HTTP error mapping is unchanged.
+            runner.notify_app_event(
+                "reconnect-failed",
+                "clauster: reconnect failed",
+                f"Resuming the bridge for {instance_id!r} failed.",
+            )
+            raise
 
     @app.post("/api/instances/{instance_id}/forget")
     async def api_forget(instance_id: str) -> dict:
@@ -2181,6 +2202,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # Live pty-screen view (#534): the per-bridge "Live terminal" button only
             # renders when the (default-off) tap is enabled; it streams /ws/pty-screen.
             "pty_screen_enabled": config.claude.pty_screen_enabled,
+            # Browser (Web Notifications) channel (#541): the master switch plus the
+            # per-event toggles the client honours when a polled instance transitions.
+            # The client requests Notification permission only when the channel is on.
+            "browser_notifications_enabled": config.notifications.browser_enabled,
+            "browser_notify_on_crash": config.notifications.notify_on_crash,
+            "browser_notify_on_ready": config.notifications.notify_on_ready,
+            "browser_notify_on_stop": config.notifications.notify_on_stop,
         }
 
     @app.get("/", response_class=HTMLResponse)

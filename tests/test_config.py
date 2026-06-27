@@ -476,8 +476,15 @@ def test_usage_currency_override_via_config(write_config):
 def test_notifications_defaults(write_config):
     n = load_config(write_config()).notifications
     assert n.enabled is False
+    assert n.browser_enabled is False
     assert n.urls == []
+    # crash is the historical default-ON event; every #541 event defaults OFF.
     assert n.notify_on_crash is True
+    assert n.notify_on_ready is False
+    assert n.notify_on_stop is False
+    assert n.notify_on_permission is False
+    assert n.notify_on_session_end is False
+    assert n.notify_on_reconnect_failed is False
 
 
 def test_notifications_via_config(write_config):
@@ -494,6 +501,36 @@ def test_notifications_notify_on_crash_override(write_config):
     )
     n = load_config(write_config(extra)).notifications
     assert n.notify_on_crash is False
+
+
+def test_notifications_new_event_toggles_and_browser_channel(write_config):
+    extra = (
+        "notifications:\n"
+        "  browser_enabled: true\n"
+        "  notify_on_ready: true\n"
+        "  notify_on_stop: true\n"
+        "  notify_on_permission: true\n"
+        "  notify_on_session_end: true\n"
+        "  notify_on_reconnect_failed: true\n"
+    )
+    n = load_config(write_config(extra)).notifications
+    assert n.browser_enabled is True
+    assert n.notify_on_ready is True
+    assert n.notify_on_stop is True
+    assert n.notify_on_permission is True
+    assert n.notify_on_session_end is True
+    assert n.notify_on_reconnect_failed is True
+
+
+def test_notifications_event_enabled_maps_events_to_toggles(write_config):
+    n = load_config(write_config("notifications:\n  notify_on_ready: true\n")).notifications
+    assert n.event_enabled("crash") is True  # default-ON
+    assert n.event_enabled("ready") is True  # explicitly enabled
+    assert n.event_enabled("stop") is False  # default-OFF
+    assert n.event_enabled("permission-needed") is False
+    assert n.event_enabled("session-ended") is False
+    assert n.event_enabled("reconnect-failed") is False
+    assert n.event_enabled("totally-unknown") is False  # unknown -> False, never raises
 
 
 def test_usage_currency_normalized_to_uppercase(write_config, caplog):
