@@ -429,7 +429,11 @@ def _reconcile(config_path: str | None, *, dry_run: bool, assume_yes: bool) -> i
         return 0
 
     def decide(finding):  # type: ignore[no-untyped-def]
-        if assume_yes:
+        # --dry-run is a non-interactive PREVIEW: accept every proposal to show the full
+        # would-be plan, never prompt. build_plan() runs decide() eagerly, BEFORE the
+        # dry_run guard below, so without this a --dry-run blocks on input() on a real TTY
+        # (#650 — the docstring already promised dry-run "prints the plan and writes nothing").
+        if assume_yes or dry_run:
             return Decision(
                 apply=True, value=finding.proposed_value, has_value=finding.has_replacement
             )

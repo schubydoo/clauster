@@ -186,9 +186,28 @@ def test_cli_reconcile_clean_config_returns_zero(write_config, capsys) -> None:
 def test_cli_reconcile_dry_run_writes_nothing(write_config, capsys) -> None:
     path = _cfg(write_config, "usage:\n  show_cost: false\n")
     before = open(path, encoding="utf-8").read()
-    assert cli.main(["config", "reconcile", "-c", path, "--dry-run", "--yes"]) == 0
+    assert cli.main(["config", "reconcile", "-c", path, "--dry-run"]) == 0  # dry-run alone
     assert open(path, encoding="utf-8").read() == before  # untouched
     assert "--dry-run" in capsys.readouterr().err
+
+
+def test_cli_reconcile_dry_run_does_not_prompt(write_config, capsys, monkeypatch) -> None:
+    # #650 regression: --dry-run alone (no --yes) must be a NON-INTERACTIVE preview.
+    # build_plan() runs the per-finding decision BEFORE the dry-run guard, so previously
+    # --dry-run still called input() and blocked forever on a real TTY. It must now accept
+    # every proposal silently, show the plan, and write nothing — without ever prompting.
+    path = _cfg(write_config, "claude:\n  resume_mode: pty\nusage:\n  show_cost: false\n")
+    before = open(path, encoding="utf-8").read()
+
+    def _no_prompt(*_a, **_k):
+        raise AssertionError("--dry-run must not prompt for input")
+
+    monkeypatch.setattr("builtins.input", _no_prompt)
+    assert cli.main(["config", "reconcile", "-c", path, "--dry-run"]) == 0  # note: no --yes
+    assert open(path, encoding="utf-8").read() == before  # nothing written
+    err = capsys.readouterr().err
+    assert "--dry-run" in err
+    assert "resume_mode" in err and "show_cost" in err  # the full plan was still shown
 
 
 def test_cli_reconcile_yes_applies(write_config) -> None:
