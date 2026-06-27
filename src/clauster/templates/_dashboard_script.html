@@ -170,7 +170,7 @@
       projectFilter: "",     // Zone 1 search box
       showAllProjects: false, // Zone 1: reveal projects beyond the cap
       projectSort: "name",   // Zone 1 sort (FE-2): name (default, no reorder) | last-used | cost
-      projectRanks: {},      // project name -> CSS flex `order` int when a non-name sort is active
+      projectRanks: {},      // project name -> rank int for the 6-row cap + CSS flex `order`; always populated after the first sort (name = A–Z positions, non-name = the chosen key) — do NOT clear on name sort (that caused #585b)
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
