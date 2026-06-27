@@ -22,7 +22,7 @@ log_format: text                   # text | json (json for Docker/Loki)
 claude:
   binary: claude                   # name on PATH or absolute path
   min_version: "2.1.145"
-  agents_json_poll_interval_seconds: 300
+  agents_json_poll_interval_seconds: 30   # liveness/crash-detection poll; lower = snappier, more spawns
   startup_grace_seconds: 60        # a bridge alive-but-unregistered past this -> ERROR
   auto_enable_remote_control: true # pre-ack remote control in ~/.claude.json so a
                                    # detached bridge isn't stuck on the one-time prompt

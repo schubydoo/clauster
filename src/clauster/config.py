@@ -64,10 +64,11 @@ class ClaudeConfig(BaseModel):
     )
     min_version: str = Field(default="2.1.145", description="Minimum acceptable `claude` version.")
     agents_json_poll_interval_seconds: int = Field(
-        default=300,
+        default=30,
         ge=1,
         description="How often (≥1) the inspector cross-checks `claude agents --json` "
-        "for liveness.",
+        "for liveness; lower = snappier live indicators + crash detection, at the cost of "
+        "more subprocess spawns.",
     )
     startup_grace_seconds: float = Field(
         default=60.0,

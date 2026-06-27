@@ -93,7 +93,7 @@ under `auth`).
 | --- | --- | --- | --- |
 | `binary` | str | `claude` | The `claude` binary name or path (resolved to an absolute path before spawning). |
 | `min_version` | str | `2.1.145` | Minimum acceptable `claude` version. |
-| `agents_json_poll_interval_seconds` | int | `300` | How often (≥1) the inspector cross-checks `claude agents --json` for liveness. |
+| `agents_json_poll_interval_seconds` | int | `30` | How often (≥1) the inspector cross-checks `claude agents --json` for liveness; lower = snappier live indicators + crash detection, at the cost of more subprocess spawns. |
 | `startup_grace_seconds` | float | `60.0` | How long (>0) a freshly-spawned bridge may stay alive without registering an environment before it is marked `ERROR`. Liveness alone is not "running". |
 | `auto_enable_remote_control` | bool | `true` | Before the first spawn, mark remote control acknowledged (`hasUsedRemoteControl` / `remoteDialogSeen`) in `~/.claude.json` so a detached-stdin bridge isn't stuck on the one-time "Enable Remote Control? (y/n)" prompt. Set `false` to manage it yourself. |
 | `resume_recap` | bool | `false` | Install a `SessionStart` hook in the runtime user's `~/.claude/settings.json` that recaps the most recent prior transcript for the cwd into a restarted (standard-mode) bridge. Opt-in: edits the user's Claude settings and injects prior turns. |
