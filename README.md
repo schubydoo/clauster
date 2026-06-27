@@ -350,6 +350,7 @@ clauster install-service {systemd|launchd|windows}
 clauster reap-environments    # reap ghost bridge environments (dry-run by default)
 clauster keepers              # list or stop orphaned pty keepers
 clauster usage <transcript>   # token + approximate cost for a session transcript
+clauster config reconcile     # remove deprecated config keys, writing their replacements
 ```
 
 ## Roadmap

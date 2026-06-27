@@ -20,6 +20,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
+from .reconcile import resume_mode_to_launch_mode, show_cost_to_mode
+
 _log = logging.getLogger("clauster.config")
 
 SCHEMA_VERSION = 1
@@ -141,7 +143,7 @@ class ClaudeConfig(BaseModel):
                     "are set — using `launch_mode`, ignoring `resume_mode`. Remove `resume_mode`."
                 )
             else:
-                data["launch_mode"] = legacy
+                data["launch_mode"] = resume_mode_to_launch_mode(legacy)
                 _log.warning(
                     "config: `claude.resume_mode` was renamed to `claude.launch_mode`; the old "
                     "key still works but is deprecated. Please rename it in your clauster.yml."
@@ -568,7 +570,9 @@ class UsageConfig(BaseModel):
                     "usage.show_cost=false is deprecated; mapping it to usage.mode='off'. "
                     "Set usage.mode='off' instead.",
                 )
-                self.mode = "off"
+                # Reuse the reconcile registry's transform so the false->off mapping is
+                # defined in exactly one place (clauster.reconcile.show_cost_to_mode).
+                self.mode = show_cost_to_mode(self.show_cost)
         # A foreign currency with no FX rate paints a foreign symbol on a USD figure.
         if self.mode == "cost" and self.currency != "USD" and self.fx_rate == 1.0:
             _log.warning(
