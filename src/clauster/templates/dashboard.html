@@ -985,8 +985,15 @@
                       <template x-if="configEditor.specs[path].type === 'enum'">
                         <select class="form-select form-select-sm" :id="'cfg-' + path"
                                 :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]">
+                          {# x-model can't set the <select> value before the x-for options exist in the
+                             DOM, so the browser falls back to the FIRST option — the dropdown then shows
+                             e.g. "Standard"/"Cost" while the real saved value is "pty"/"off", and Save
+                             stays greyed when you pick the value already in the model. Bind :selected on
+                             each option so the right one is chosen as it renders; x-model still captures
+                             user changes. #}
                           <template x-for="opt in configEditor.specs[path].choices" :key="opt">
-                            <option :value="opt" x-text="(configEditor.specs[path].choice_labels && configEditor.specs[path].choice_labels[opt]) || opt"></option>
+                            <option :value="opt" :selected="opt === configEditor.edits[path]"
+                                    x-text="(configEditor.specs[path].choice_labels && configEditor.specs[path].choice_labels[opt]) || opt"></option>
                           </template>
                         </select>
                       </template>
