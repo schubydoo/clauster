@@ -979,22 +979,41 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/projects/{name}/transcripts")
     async def api_project_transcripts(name: str) -> dict:
-        """List a project's session transcripts for the read-only viewer (issue #431).
+        """List a project's session transcripts for the read-only viewer (issue #431, #614).
 
-        Returns ``{project, sessions: [{session, mtime, turn_count}]}`` newest-first
-        (by mtime). ``session`` is the transcript filename stem (the per-session
-        uuid). Mirrors :func:`api_project_usage`: the name is validated for
-        path-component safety (422), the on-disk walk runs off the event loop, and a
-        broken directory or unreadable file (``OSError``) degrades to a defined 503 —
-        never a bare 500 and never echoing the on-disk path to the browser. We
-        deliberately skip a discovery scan (an unknown-but-safe name simply has no
-        transcripts and lists empty).
+        Returns ``{project, sessions: [{session, mtime, turn_count, live}]}``,
+        live-first then newest-first (by mtime). ``session`` is the transcript filename
+        stem (the per-session uuid); ``live`` is True when that session id maps to a
+        currently-running bridge/agent or hosted session (#614). Mirrors
+        :func:`api_project_usage`: the name is validated for path-component safety (422),
+        the on-disk walk runs off the event loop, and a broken directory or unreadable
+        file (``OSError``) degrades to a defined 503 — never a bare 500 and never echoing
+        the on-disk path to the browser. We deliberately skip a discovery scan (an
+        unknown-but-safe name simply has no transcripts and lists empty).
+
+        The live set is computed before the off-thread walk from in-memory snapshots
+        (the runner's ``agents --json`` reconcile join + the hosted registry); both are
+        plain reads and never touch disk, so the liveness cross-reference can't fail the
+        listing — at worst a just-started/just-stopped session badges a poll late.
         """
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
 
+        project_path = config.projects_root / name
+        # Session ids of currently-running sessions writing into this project's dir.
+        # Bridge/agent sessions come from the runner's reconcile snapshot (keyed by
+        # sanitized cwd); hosted (claustrum) sessions run no agents --json session, so
+        # fold their captured session uuid in by project name. Both are in-memory reads.
+        live_uuids = runner.live_session_uuids(project_path)
+        live_uuids |= {
+            inst.claude_session_uuid
+            for inst in app.state.hosted.list_instances()
+            if inst.project == name
+            and inst.claude_session_uuid
+            and inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
+        }
+
         def _list() -> list[dict]:
-            project_path = config.projects_root / name
             out: list[dict] = []
             for path in usage.transcript_paths_for(project_path):
                 try:
@@ -1005,8 +1024,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 except FileNotFoundError:
                     # A session removed mid-walk (racing cleanup) is skipped, not fatal.
                     continue
-                out.append({"session": path.stem, "mtime": mtime, "turn_count": turn_count})
-            out.sort(key=lambda s: s["mtime"], reverse=True)  # newest first
+                out.append(
+                    {
+                        "session": path.stem,
+                        "mtime": mtime,
+                        "turn_count": turn_count,
+                        "live": path.stem in live_uuids,
+                    }
+                )
+            # Live sessions first (a glance at what's running now), then newest-first
+            # within each group so a stable, predictable order survives every poll.
+            out.sort(key=lambda s: (not s["live"], -s["mtime"]))
             return out
 
         # An OSError walking transcripts must surface as a defined "couldn't read"

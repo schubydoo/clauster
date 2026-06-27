@@ -631,7 +631,102 @@ def test_transcripts_list_newest_first_with_counts(write_config, tmp_path, monke
     sessions = body["sessions"]
     assert [s["session"] for s in sessions] == ["s-new", "s-old"]  # newest first
     assert all(s["turn_count"] == 4 for s in sessions)  # fixture has 4 renderable turns
-    assert all(set(s) == {"session", "mtime", "turn_count"} for s in sessions)
+    assert all(set(s) == {"session", "mtime", "turn_count", "live"} for s in sessions)
+    assert all(s["live"] is False for s in sessions)  # no running session → none live
+
+
+def test_transcripts_list_badges_running_bridge_session_live(write_config, tmp_path, monkeypatch):
+    """A transcript whose session id maps to a running bridge/agent is badged live (#614)."""
+    from clauster.models import Attribution, WorkingSession
+
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["live-one", "dead-one"])
+    client = _client(write_config, tmp_path)
+    # A live agents --json session at the project's cwd whose local_uuid is one of the
+    # planted transcript stems. The cwd must sanitize to the same dir Claude wrote into.
+    client.app.state.runner._sessions = [
+        WorkingSession(
+            pid=4242,
+            cwd=tmp_path / "gamma",  # projects_root / name -> same sanitized transcript dir
+            kind="interactive",
+            started_at=4242,
+            local_uuid="live-one",
+            attribution=Attribution.TRACKED,
+        )
+    ]
+    sessions = client.get("/api/projects/gamma/transcripts").json()["sessions"]
+    live = {s["session"]: s["live"] for s in sessions}
+    assert live == {"live-one": True, "dead-one": False}
+    # Live-first ordering: the running session sorts ahead of the dead one.
+    assert sessions[0]["session"] == "live-one"
+
+
+def test_transcripts_list_badges_hosted_session_live(write_config, tmp_path, monkeypatch):
+    """A hosted (claustrum) session's captured uuid badges its transcript live (#614)."""
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["hosted-uuid", "other"])
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(
+        project="gamma",
+        label="hosted:gamma",
+        channel="hosted",
+        claustrum_process_id="01HOSTED000000000000000A",
+        claude_session_uuid="hosted-uuid",
+        status=InstanceStatus.RUNNING,
+    )
+    client.app.state.hosted._instances[inst.claustrum_process_id] = inst
+    live = {
+        s["session"]: s["live"]
+        for s in client.get("/api/projects/gamma/transcripts").json()["sessions"]
+    }
+    assert live == {"hosted-uuid": True, "other": False}
+
+
+def test_transcripts_list_stopped_hosted_session_not_live(write_config, tmp_path, monkeypatch):
+    """A STOPPED/CRASHED hosted instance must NOT badge its transcript live (#614).
+
+    `_instances` is not pruned on session end, so the route must status-filter to
+    RUNNING/STARTING — otherwise a stopped session keeps showing as live.
+    """
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["hosted-uuid", "other"])
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(
+        project="gamma",
+        label="hosted:gamma",
+        channel="hosted",
+        claustrum_process_id="01HOSTED000000000000000A",
+        claude_session_uuid="hosted-uuid",
+        status=InstanceStatus.STOPPED,
+    )
+    client.app.state.hosted._instances[inst.claustrum_process_id] = inst
+    live = {
+        s["session"]: s["live"]
+        for s in client.get("/api/projects/gamma/transcripts").json()["sessions"]
+    }
+    assert live == {"hosted-uuid": False, "other": False}
+
+
+def test_transcripts_list_no_live_for_other_project(write_config, tmp_path, monkeypatch):
+    """A running session at a DIFFERENT cwd never badges a transcript here live (#614)."""
+    from clauster.models import Attribution, WorkingSession
+
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["s1"])
+    client = _client(write_config, tmp_path)
+    # Same uuid, but a cwd that sanitizes to a different transcript dir -> not a match.
+    client.app.state.runner._sessions = [
+        WorkingSession(
+            pid=7,
+            cwd=tmp_path / "elsewhere",
+            kind="interactive",
+            started_at=7,
+            local_uuid="s1",
+            attribution=Attribution.EXTERNAL,
+        )
+    ]
+    sessions = client.get("/api/projects/gamma/transcripts").json()["sessions"]
+    assert sessions[0]["live"] is False
 
 
 def test_transcripts_list_skips_session_vanished_mid_walk(write_config, tmp_path, monkeypatch):
