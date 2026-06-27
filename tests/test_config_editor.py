@@ -79,7 +79,7 @@ def test_field_specs_carries_rich_ui_metadata() -> None:
     assert poll["key"] == "agents_json_poll_interval_seconds"
     assert poll["section_label"] == "Claude"
     # Numeric bound + unit + default surfaced for the control.
-    assert poll["unit"] == "seconds" and poll["min"] == 1 and poll["default"] == 300
+    assert poll["unit"] == "seconds" and poll["min"] == 1 and poll["default"] == 30
     # Master/child dependency for disabling, and a placeholder for an optional field.
     assert specs["metrics.normalize_cpu"]["depends_on"] == "metrics.enabled"
     assert specs["instance_defaults.max_bridges"]["placeholder"]
