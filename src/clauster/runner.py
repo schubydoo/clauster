@@ -2049,6 +2049,19 @@ class SessionRunner:
             for i in self._instances.values()
             if i.project in discovered and i.project in live_projects
         }
+        # A worktree-spawn bridge runs each session in a per-session worktree under
+        # `<root>/.claude/worktrees/` (`claude remote-control --spawn worktree`), so the
+        # session cwd never exactly matches the project-root key above — without this the
+        # session reads EXTERNAL and the dashboard shows no live-session count for the
+        # bridge. Reconcile attributes such a session to its bridge by containment in
+        # that worktree subtree.
+        worktree_roots = {
+            Path(discovered[i.project].path): i.project
+            for i in self._instances.values()
+            if i.project in discovered
+            and i.project in live_projects
+            and i.spawn_mode == "worktree"
+        }
         # Clauster's own hosted (claustrum) sessions run no bridge process, so the
         # cross-check would otherwise see their live `claude` pid and label it
         # EXTERNAL/unmanaged (#592). Claim them by the CT-1 agent_pid (authoritative)
@@ -2082,7 +2095,9 @@ class SessionRunner:
                     proj = discovered.get(inst.project)
                     if proj is not None:
                         hosted_cwds[Path(proj.path)] = hid
-        self._sessions = inspector.reconcile(sessions, managed, hosted_pids, hosted_cwds)
+        self._sessions = inspector.reconcile(
+            sessions, managed, hosted_pids, hosted_cwds, worktree_roots
+        )
         # Drop a non-live managed instance whose project has a live EXTERNAL session:
         # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record
         # is a phantom. Showing it as a Stopped/Resume card is misleading and invites a

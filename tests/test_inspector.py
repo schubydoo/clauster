@@ -83,6 +83,91 @@ def test_reconcile_normalizes_trailing_slash(tmp_path: Path):
     assert result[0].attribution is Attribution.TRACKED
 
 
+def test_reconcile_worktree_session_attributed_by_containment(tmp_path: Path):
+    # `claude remote-control --spawn worktree` runs each session in a per-session
+    # worktree under `<root>/.claude/worktrees/<id>`, which never exactly matches the
+    # project-root key. It must still attribute to the bridge by containment, or the
+    # dashboard shows no live-session count for a worktree bridge (the #570 feature).
+    proj = tmp_path / "alpha"
+    wt = proj / ".claude" / "worktrees" / "bridge-cse_x"
+    wt.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(wt), "u-wt")]))
+    result = inspector.reconcile(sessions, {proj: "alpha"}, worktree_roots={proj: "alpha"})
+    assert result[0].attribution is Attribution.TRACKED
+    assert result[0].parent_instance == "alpha"
+
+
+def test_reconcile_worktree_containment_is_opt_in(tmp_path: Path):
+    # Containment is per worktree-spawn bridge only. A session in a subdir of a
+    # NON-worktree project (absent from worktree_roots) stays EXTERNAL — a stray
+    # `claude` in a project subdir must not be claimed as the bridge's session.
+    proj = tmp_path / "alpha"
+    sub = proj / "src"
+    sub.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(sub), "u-sub")]))
+    result = inspector.reconcile(sessions, {proj: "alpha"})  # no worktree_roots
+    assert result[0].attribution is Attribution.EXTERNAL
+    assert result[0].parent_instance is None
+
+
+def test_reconcile_worktree_containment_scoped_to_worktrees_dir(tmp_path: Path):
+    # Even for a worktree-spawn bridge, containment is the `.claude/worktrees` subtree
+    # ONLY — a stray interactive `claude` in another subdir of the project (here
+    # `<root>/src`) is not where `--spawn worktree` puts sessions and must stay
+    # EXTERNAL, so it doesn't inflate the bridge's live-session count.
+    proj = tmp_path / "alpha"
+    sub = proj / "src"
+    sub.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(sub), "u-stray")]))
+    result = inspector.reconcile(sessions, {proj: "alpha"}, worktree_roots={proj: "alpha"})
+    assert result[0].attribution is Attribution.EXTERNAL
+    assert result[0].parent_instance is None
+
+
+def test_reconcile_worktree_nested_root_most_specific_wins(tmp_path: Path):
+    # Nested worktree projects: a session under the inner root attributes to the
+    # inner bridge, not the ancestor project that also contains it.
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    wt = inner / ".claude" / "worktrees" / "bridge-y"
+    wt.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(wt), "u-nested")]))
+    result = inspector.reconcile(
+        sessions,
+        {outer: "outer", inner: "inner"},
+        worktree_roots={outer: "outer", inner: "inner"},
+    )
+    assert result[0].attribution is Attribution.TRACKED
+    assert result[0].parent_instance == "inner"
+
+
+def test_reconcile_worktree_containment_respects_kind_gate(tmp_path: Path):
+    # The kind gate still applies under containment: a `claude --bg` session inside a
+    # worktree-spawn project's tree is NOT the bridge's session.
+    proj = tmp_path / "alpha"
+    wt = proj / ".claude" / "worktrees" / "bridge-z"
+    wt.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(
+        json.dumps([_agent(10, str(wt), "u-bg", kind="background", state="working")])
+    )
+    result = inspector.reconcile(sessions, {proj: "alpha"}, worktree_roots={proj: "alpha"})
+    assert result[0].attribution is Attribution.UNTRACKED
+
+
+def test_reconcile_hosted_at_worktree_root_stays_hosted(tmp_path: Path):
+    # A pre-CT-1 hosted session (no agent pid) sits at the project ROOT, not in
+    # `.claude/worktrees`, so worktree containment must not claim it — it still
+    # resolves HOSTED via the cwd fallback even when a worktree root is supplied.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(proj), "u-hosted")]))
+    result = inspector.reconcile(
+        sessions, {}, hosted_cwds={proj: "host-9"}, worktree_roots={proj: "alpha"}
+    )
+    assert result[0].attribution is Attribution.HOSTED
+    assert result[0].parent_instance == "host-9"
+
+
 def test_parse_agents_json_drops_terminal_states():
     # Agent view (2.1.139+) can list finished sessions; done/failed/stopped are
     # not working sessions and must not count as live anywhere.
