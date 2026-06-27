@@ -44,3 +44,29 @@ def test_config_editor_persists_tier_a_change(
     data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     assert data["usage"]["fx_rate"] == 7
     assert list(cfg_path.parent.glob("clauster.yml.bak-*")), "expected a config backup"
+
+
+def test_config_editor_enum_selects_reflect_saved_value(
+    browser: AgentBrowser, enum_config_server: Server
+) -> None:
+    """Enum dropdowns show the persisted value, not the first option.
+
+    Regression for the ``<select>`` x-model/x-for ordering bug: options render
+    after x-model sets the value, so the browser fell back to option index 0 —
+    the editor displayed ``standard``/``cost`` while the saved value was
+    ``pty``/``off``, and Save stayed greyed when you re-picked the real value.
+    """
+    browser.goto(enum_config_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+
+    browser.click('[aria-label="Edit configuration"]')
+    launch_mode = '[id="cfg-claude.launch_mode"]'
+    browser.expect_visible(launch_mode)
+
+    # The selects must reflect the on-disk values (pty / off), NOT the first option.
+    browser.expect_value(launch_mode, "pty")
+    browser.expect_value('[id="cfg-usage.mode"]', "off")
+
+    # And since the displayed value matches the model, there are no pending edits —
+    # Save stays disabled until a real change (the symptom the bug masked).
+    browser.expect_disabled('[data-test="cfg-save"]')
