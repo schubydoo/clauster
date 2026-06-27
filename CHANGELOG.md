@@ -336,6 +336,42 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.5 (2026-06-27)
+
+### Features
+
+- Add an opt-in trusted-header (forward-auth) reverse-proxy mode (`auth.reverse_proxy.require_hmac: false`) so SSO proxies that don't sign a per-request HMAC (Authelia, authentik, Caddy, Traefik, oauth2-proxy) authenticate via `trusted_ips` + `user_header` alone; both modes now require `trusted_ips`, and a `reverse_proxy.enabled` config without it fails fast at startup instead of silently authenticating no one. ([#617](https://github.com/schubydoo/clauster/pull/617))
+- Add a read-only in-dashboard transcript viewer: a per-project "View transcript" button opens a modal listing each session's `.jsonl` file (newest-first, with turn counts) and renders turns with cursor-based pagination; content passes through `redact.sanitize_line` and renders via Alpine `x-text` only. ([#611](https://github.com/schubydoo/clauster/pull/611))
+- Add the read-only live PTY terminal view (#534, completes the epic): when `claude.pty_screen_enabled` is on, each pty bridge gets a "Live terminal" button that streams the keeper's redacted, cells-only screen frames over `/ws/pty-screen` into an xterm.js terminal (auth-gated, never raw ANSI); the flag is now toggleable in the in-app config editor. ([#640](https://github.com/schubydoo/clauster/pull/640))
+- List every live session under a standard `claude remote-control` bridge: an Active-session card now expands to enumerate each working session with a short-UUID label, uptime, and a per-session deep link into the Claude web app. ([#618](https://github.com/schubydoo/clauster/pull/618))
+- Add an in-app help page: a `?` icon in every page's navbar opens a keyboard-accessible offcanvas covering launch modes, permission modes, the dashboard zones, and session types, with a link to the README. ([#619](https://github.com/schubydoo/clauster/pull/619))
+- When a non-git project's default spawn mode is `worktree`, the "Run Claude here" popover now falls back to `same-dir` and shows a note rather than letting the server reject the spawn, keeping the picker and trust-on-start confirm reachable. ([#615](https://github.com/schubydoo/clauster/pull/615))
+- Add a sort-direction toggle (newest-first / oldest-first) and an in-message search box to the transcript viewer; search filters turns by substring against already-redacted content, so it can never confirm a masked secret. ([#616](https://github.com/schubydoo/clauster/pull/616))
+- Add an `instance_defaults.verbose` config toggle (default off, editable from the in-app config editor) that passes `--verbose` to spawned standard `claude remote-control` bridges in every spawn mode (same-dir/worktree/session) for detailed connection/session logs; the pty (flag-form) bridge is intentionally never passed `--verbose` so its live-screen tap stays clean. ([#642](https://github.com/schubydoo/clauster/pull/642))
+
+### Fixes
+
+- Rename the detached/background session type to "Background" consistently across the launch-picker, filter chip, and card badge (previously "Fire-and-forget" / `detached`), so one session type reads as one name everywhere (UX-04). ([#567](https://github.com/schubydoo/clauster/pull/567))
+- Show the live-session list from the first live session on a standard bridge (not only at two or more), giving each session its own `claude.ai/code` deep link; the toggle label is now singular/plural-aware. ([#622](https://github.com/schubydoo/clauster/pull/622))
+- Two dashboard error-UX fixes: the default-session Stop button now asks for confirmation (matching every other destructive action), and error toasts now persist until dismissed instead of auto-vanishing after 4.5 s. ([#627](https://github.com/schubydoo/clauster/pull/627))
+- Fix the config-editor "restart Clauster to apply" help link, which pointed at a nonexistent README anchor; it now targets the Operations runbook's restart section, which carries a stable custom anchor to prevent future rot. ([#624](https://github.com/schubydoo/clauster/pull/624))
+- `clauster.yml.example` now uses `projects_root: ~/code` (matching every prose doc) instead of `/srv/projects`, which contradicted the docs and hard-failed validation if copied as-is on a box without that directory. ([#625](https://github.com/schubydoo/clauster/pull/625))
+- Correct the `webhooks.block_private_targets` config-field description: it claimed DNS hostnames are not resolved, but the opt-in SSRF guard does resolve them at filter time — documentation only, behaviour unchanged. ([#598](https://github.com/schubydoo/clauster/pull/598))
+- a11y: the clone-progress bar now exposes `aria-valuemin`, `aria-valuemax`, `aria-valuenow`, and `aria-valuetext` so assistive technology can announce progress (previously `role="progressbar"` had no value attributes). ([#607](https://github.com/schubydoo/clauster/pull/607))
+- The "Recap prior transcript on restart" config toggle is now always editable instead of greyed out when the default launch mode isn't `standard`; an informational note explains it applies to standard bridges only. ([#600](https://github.com/schubydoo/clauster/pull/600))
+- Align the README "First bridge in 60 seconds" walkthrough with the shipped UI: "Run Claude here" replaces the removed "Start" button, "Open in Claude" fixes the link label, and the dead "Start new session" step is replaced with the actual forget-and-relaunch path. ([#605](https://github.com/schubydoo/clauster/pull/605))
+
+### Security
+
+- Redact a failed clone's `error_detail` (git stderr tail) on the progress WebSocket, closing a redaction asymmetry with the clone-done webhook path where the same value was already redacted. ([#606](https://github.com/schubydoo/clauster/pull/606))
+
+### Build System & Dependencies
+
+- Vendor xterm.js 6.0.0 (self-hosted under `static/vendor/xterm/`, Renovate-pinned) as the front-end foundation for the read-only live pty terminal view (#534), and document the front-end vendoring convention in CONTRIBUTING. No user-facing behavior yet — the terminal view, its WebSocket, and the (default-off) config flag land in later slices. ([#631](https://github.com/schubydoo/clauster/pull/631))
+- Add a pyte-backed module that renders redacted, cells-only terminal frames for the read-only live pty terminal view (#534), with pyte as an optional LGPL `pty` extra (lazy-imported, kept out of the default install and binary) — groundwork, no user-facing behavior yet. ([#634](https://github.com/schubydoo/clauster/pull/634))
+- Add the keeper-side live-screen tap (#534): when `claude.pty_screen_enabled` is on (default off, needs the optional `pyte` extra), the PTY keeper renders the bridge's terminal into a redacted, cells-only screen sidecar — strictly best-effort, never affecting the bridge — as groundwork for the live-terminal view; no WebSocket or UI yet. ([#638](https://github.com/schubydoo/clauster/pull/638))
+- Add the `/ws/pty-screen` WebSocket endpoint (#534): it polls the keeper's redacted screen sidecar and streams cells-only frames (de-duped by seq, never raw ANSI) to the browser, gated on a pty bridge with `claude.pty_screen_enabled` on; groundwork for the live-terminal view — no UI yet. ([#639](https://github.com/schubydoo/clauster/pull/639))
+
 ## 0.12.4 (2026-06-25)
 
 ### Fixes
