@@ -170,7 +170,7 @@
       projectFilter: "",     // Zone 1 search box
       showAllProjects: false, // Zone 1: reveal projects beyond the cap
       projectSort: "name",   // Zone 1 sort (FE-2): name (default, no reorder) | last-used | cost
-      projectRanks: {},      // project name -> CSS flex `order` int when a non-name sort is active
+      projectRanks: {},      // project name -> rank int for the 6-row cap + CSS flex `order`; always populated after the first sort (name = A–Z positions, non-name = the chosen key) — do NOT clear on name sort (that caused #585b)
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -434,17 +434,22 @@
       projectVisible(name, idx) {
         if ((this.projectFilter || "").trim()) return this.matchesProject(name);
         if (this.runningCountFor(name) > 0) return true;
-        // The 6-row cap + Show-all toggle apply in EVERY sort. In name order the stable Jinja
-        // `idx` is the row's position. In a non-name sort the DOM order stays A–Z (idx is
-        // meaningless) and the visual order is the CSS-`order` rank, so cap by that rank instead
-        // — otherwise the cap would keep the first 6 *alphabetical* rows, not the first 6 by the
-        // chosen sort. While the ranks are still loading (async sortmeta) don't cap, so the list
-        // never flashes empty mid-fetch.
-        if (this.projectSort !== "name") {
-          if (!Object.keys(this.projectRanks || {}).length) return true;
-          return this.showAllProjects || this.projectOrderRank(name) < 6;
-        }
-        return this.showAllProjects || idx < 6;
+        // The 6-row cap + Show-all toggle apply in EVERY sort, and ALWAYS via the same rank read
+        // (`projectOrderRank`) so the reactive dependency set is identical across sorts. That
+        // stability is the #585 fix: if the name branch read `idx` instead of `projectRanks`,
+        // switching back to A–Z would drop `projectRanks` from this row's tracked deps and Alpine
+        // would never re-apply the cap (leaving the list stuck uncapped). `recomputeProjectRanks`
+        // keeps `projectRanks` populated in every sort — name order ranks by the stable A–Z
+        // position (== Jinja `idx`), non-name sorts by the chosen key — so this read always caps
+        // correctly. `idx` is retained only as a fallback for the (transient) empty-ranks window.
+        const ranks = this.projectRanks || {};
+        // A freshly fragment-inserted project (insertCard) is NOT in PROJECT_NAMES / projectRanks
+        // yet. Keep the documented "a just-created project is always shown" contract (idx=0 from
+        // the row route) by never capping out a row absent from a populated ranks map — and still
+        // read `ranks` here so the reactive dep stays tracked. The transient empty-ranks window is
+        // handled by projectOrderRank's idx fallback below.
+        if (Object.keys(ranks).length && !(name in ranks)) return true;
+        return this.showAllProjects || this.projectOrderRank(name, idx) < 6;
       },
       // Zone 1 sort (FE-2) — opt-in, explicit-only. Default 'name' keeps the current
       // A–Z order with zero reorder; last-used/cost reorder via CSS `order` (no DOM
@@ -453,21 +458,33 @@
       // the latest session history (a project you just finished sorts to the top).
       // Degrades to name order if the keys never load.
       async loadSortMeta() {
-        // Clear ranks up front so projectVisible's loading guard shows the FULL list (not the
-        // previous sort's capped six) for the duration of the async fetch; recompute refills them.
-        this.projectRanks = {};
+        // Swap, don't clear-then-fetch (#585 symptom (a)): keep the PREVIOUS sort's ranks rendered
+        // for the duration of the async fetch, then atomically replace them once the new keys land.
+        // Clearing `projectRanks` up front used to uncap the whole list mid-round-trip — a visible
+        // flash of every project before it snapped back to six. recomputeProjectRanks() rebuilds
+        // the map in one assignment, so the cap stays applied throughout the transition.
         try {
           const res = await fetch(ROOT + "/api/projects/sortmeta");
           if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (!res.ok) return;  // advisory — sort silently falls back to name order
+          if (!res.ok) return;  // advisory — sort silently falls back to the prior order
           this.sortMeta = await res.json();
           this.recomputeProjectRanks();
-        } catch (e) { /* advisory — sort stays on name order */ }
+        } catch (e) { /* advisory — sort stays on the prior order */ }
       },
       // Rebuild the name -> CSS-`order` map for the current sort. Assigns a whole object
       // so Alpine's reactive Proxy sees the change (avoids the frame-drop class #310/#315).
       recomputeProjectRanks() {
-        if (this.projectSort === "name") { this.projectRanks = {}; return; }
+        // Name sort: rank by the stable A–Z position (the Jinja render order == PROJECT_NAMES
+        // order), so `projectRanks` stays POPULATED in every sort. That keeps projectVisible's
+        // reactive dep set stable and the cap correctly re-applied on the return-to-A–Z path
+        // (#585 symptom (b)). The `:style` order binding still no-ops in name sort (it's gated on
+        // `projectSort !== 'name'`), so these ranks only drive the cap, not a visual reorder.
+        if (this.projectSort === "name") {
+          const ranks = {};
+          PROJECT_NAMES.forEach((n, i) => { ranks[n] = i; });
+          this.projectRanks = ranks;
+          return;
+        }
         const meta = this.sortMeta || {};
         const key = this.projectSort === "cost" ? "cost_usd" : "last_used";
         const valOf = (n) => {
@@ -488,9 +505,14 @@
         }).forEach((n, i) => { ranks[n] = i; });
         this.projectRanks = ranks;
       },
-      // CSS flex `order` for a row under the active sort (0 = first); unknown -> sink.
-      projectOrderRank(name) {
-        const r = this.projectRanks[name];
+      // CSS flex `order` for a row under the active sort (0 = first). Falls back to the stable
+      // Jinja `idx` (A–Z position) while `projectRanks` is briefly empty mid-fetch, so the cap
+      // never lapses during the async sortmeta round-trip (#585). A name unknown to a populated
+      // ranks map sinks to the bottom.
+      projectOrderRank(name, idx) {
+        const ranks = this.projectRanks || {};
+        if (!Object.keys(ranks).length) return (idx === undefined || idx === null) ? 9999 : idx;
+        const r = ranks[name];
         return (r === undefined || r === null) ? 9999 : r;
       },
       // --- toasts ---

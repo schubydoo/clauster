@@ -229,6 +229,69 @@ def test_projects_show_more_toggle_appears_in_all_sorts(write_config):
     )
 
 
+def test_project_visible_caps_via_stable_rank_dep_not_idx_branch(write_config):
+    # #585(b): switching the sort back to A–Z used to leave the list STUCK uncapped. Root cause was
+    # a branch-varying reactive dep in projectVisible(): the name branch read the literal `idx`,
+    # the non-name branch read `projectRanks`. Returning to A–Z re-evaluated rows in the `idx`
+    # branch, dropping `projectRanks` from Alpine's tracked deps, so the cap never re-applied. The
+    # fix makes the dep set STABLE — projectVisible always caps via projectOrderRank (which reads
+    # projectRanks) in EVERY sort. No JS harness, so pin the mechanism in the rendered script.
+    page = _client(write_config).get("/").text
+    body = re.search(r"projectVisible\(name, idx\) \{(.*?)\n      \},", page, re.S)
+    assert body is not None, "projectVisible() not found in rendered script"
+    inner = body.group(1)
+    # The cap must go through projectOrderRank (the projectRanks read) — the stable dep.
+    assert "projectOrderRank(name, idx)" in inner, (
+        "projectVisible must cap via projectOrderRank so projectRanks is tracked in every sort"
+    )
+    # The branch-varying special-case (`this.projectSort !== "name"`) that caused the
+    # stuck-uncapped bug must be gone — a single rank-based path, not a per-sort branch.
+    assert 'this.projectSort !== "name"' not in inner, (
+        "projectVisible must not branch on projectSort; that reintroduces #585(b)"
+    )
+    # Now that projectRanks is always populated, a freshly fragment-inserted project (insertCard;
+    # idx=0 from /api/projects/{name}/row) is absent from the rank map and would otherwise be
+    # capped out (rank 9999). The "a just-created project is always shown" contract must hold:
+    # a row whose name is not in a populated ranks map is never capped.
+    assert "Object.keys(ranks).length && !(name in ranks)" in inner, (
+        "projectVisible must keep a fragment-inserted (unranked) project visible"
+    )
+
+
+def test_recompute_project_ranks_populates_name_sort(write_config):
+    # #585(b): recomputeProjectRanks() must POPULATE projectRanks for the name sort (ranked by the
+    # stable A–Z / PROJECT_NAMES position) instead of clearing it to {}. A populated map in every
+    # sort is what keeps projectVisible's reactive dep set stable so the cap re-applies on the
+    # return-to-A–Z path. Guard against reverting to the `projectSort === "name" -> {} ` clear.
+    page = _client(write_config).get("/").text
+    fn = re.search(r"recomputeProjectRanks\(\) \{(.*?)\n      \},", page, re.S)
+    assert fn is not None, "recomputeProjectRanks() not found in rendered script"
+    inner = fn.group(1)
+    assert 'this.projectSort === "name") { this.projectRanks = {}; return; }' not in inner, (
+        "name sort must populate projectRanks (A–Z ranks), not clear it to {}"
+    )
+    assert "PROJECT_NAMES.forEach((n, i) => { ranks[n] = i; });" in inner, (
+        "name sort must rank by the stable A–Z PROJECT_NAMES position"
+    )
+
+
+def test_load_sort_meta_swaps_ranks_without_clearing_first(write_config):
+    # #585(a): the flash on sort change came from loadSortMeta() clearing projectRanks = {} BEFORE
+    # the async fetch, which uncapped the whole list for the duration of the round-trip. The fix
+    # swaps (recomputeProjectRanks reassigns in one shot) instead of clear-then-fetch, so the cap
+    # stays applied throughout. Pin that the up-front clear is gone from loadSortMeta().
+    page = _client(write_config).get("/").text
+    fn = re.search(r"async loadSortMeta\(\) \{(.*?)\n      \},", page, re.S)
+    assert fn is not None, "loadSortMeta() not found in rendered script"
+    inner = fn.group(1)
+    # The fetch must still happen; the destructive pre-fetch clear must not.
+    assert "/api/projects/sortmeta" in inner, "loadSortMeta must still fetch the sort keys"
+    pre_fetch = inner.split("fetch(", 1)[0]
+    assert "this.projectRanks = {}" not in pre_fetch, (
+        "loadSortMeta must not clear projectRanks before fetch (the #585(a) flash)"
+    )
+
+
 def test_project_name_uses_responsive_width_cap(write_config):
     # DES-07: the project name truncates at a viewport-relative width (clamp 10rem→28rem), not a
     # fixed 16rem cap, so long names adapt to the screen. Guards against reverting to a fixed cap.
