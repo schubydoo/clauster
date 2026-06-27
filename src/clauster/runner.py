@@ -951,6 +951,10 @@ class SessionRunner:
         # not apply to the single-session `session` spawn mode, so don't pass it there.
         if spawn_mode in ("same-dir", "worktree"):
             cmd += ["--capacity", str(defaults.capacity)]
+        # Opt-in detailed connection/session logging for the bridge-disconnect
+        # investigation. Off by default; never pass --verbose unconditionally.
+        if defaults.verbose:
+            cmd += ["--verbose"]
         return cmd
 
     @staticmethod

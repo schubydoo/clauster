@@ -15,7 +15,14 @@ def test_loads_minimal_config(write_config, projects_root):
     assert config.port == 7621
     assert config.claude.binary == "claude"
     assert config.instance_defaults.capacity == 32
+    assert config.instance_defaults.verbose is False  # off by default
     assert config.source_path == cfg_path
+
+
+def test_instance_defaults_verbose_round_trips(write_config):
+    cfg_path = write_config("instance_defaults:\n  verbose: true\n")
+    config = load_config(cfg_path)
+    assert config.instance_defaults.verbose is True
 
 
 def test_missing_projects_root_rejected(tmp_path):

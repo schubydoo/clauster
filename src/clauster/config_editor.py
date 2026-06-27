@@ -37,6 +37,7 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "claude.pty_screen_enabled",
     "instance_defaults.spawn_mode",
     "instance_defaults.permission_mode",
+    "instance_defaults.verbose",
     "instance_defaults.session_name_prefix",
     "instance_defaults.capacity",
     "instance_defaults.max_bridges",
@@ -195,6 +196,7 @@ FIELD_LABELS: dict[str, str] = {
     "claude.pty_screen_enabled": "Live PTY terminal view",
     "instance_defaults.spawn_mode": "Where new sessions run",
     "instance_defaults.permission_mode": "Default permission mode",
+    "instance_defaults.verbose": "Verbose bridge logging",
     "instance_defaults.session_name_prefix": "Session name prefix",
     "instance_defaults.capacity": "Sessions per standard bridge",
     "instance_defaults.max_bridges": "Max concurrent bridges",
@@ -291,6 +293,12 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
     "usage.show_cost": (
         "Deprecated. Use “Usage badge mode” → Off to hide the badge; usage.mode now takes "
         "precedence and show_cost only applies when mode is unset."
+    ),
+    "instance_defaults.verbose": (
+        "Applies to standard (multi-session) bridges only — the pty bridge runs under a PTY "
+        "keeper and is not passed --verbose. Adds --verbose to the spawned `claude "
+        "remote-control` process so it logs detailed connection/session events (useful for "
+        "diagnosing intermittent bridge disconnects). Takes effect on the next bridge start."
     ),
     "claude.pty_screen_enabled": (
         "Applies to pty (true-resume) bridges only — standard bridges have no PTY to render. "

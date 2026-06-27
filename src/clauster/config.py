@@ -162,6 +162,12 @@ class InstanceDefaults(BaseModel):
     permission_mode: PermissionMode = Field(
         default="default", description="Default permission mode for new bridges."
     )
+    verbose: bool = Field(
+        default=False,
+        description="Pass `--verbose` to spawned remote-control bridges for detailed "
+        "connection/session logs. Applies to the standard (multi-session) bridge only; "
+        "off by default.",
+    )
     session_name_prefix: str | None = Field(
         default=None,
         description="Optional prefix for auto-generated Remote Control session names (maps to "

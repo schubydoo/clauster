@@ -129,6 +129,28 @@ def test_pty_screen_enabled_is_editable_bool_with_safety_note() -> None:
     assert "redact" in spec["description"].lower()
 
 
+def test_verbose_toggle_is_editable_bool_with_restart_note() -> None:
+    # The standard-bridge --verbose toggle is a Tier-A editable bool carrying a friendly label
+    # and the standard-only / restart-required note in its description.
+    assert "instance_defaults.verbose" in EDITABLE_FIELDS
+    spec = field_specs()["instance_defaults.verbose"]
+    assert spec["type"] == "bool"
+    assert spec["label"] == "Verbose bridge logging"
+    assert "standard" in spec["description"].lower()
+    assert "next bridge start" in spec["description"].lower()
+
+
+def test_validate_edits_accepts_verbose_toggle(write_config) -> None:
+    raw = _raw(write_config)
+    candidate = validate_edits(raw, {"instance_defaults.verbose": True})
+    assert candidate["instance_defaults"]["verbose"] is True
+
+
+def test_editable_values_surfaces_verbose_default_false(write_config) -> None:
+    vals = editable_values(load_config(write_config()))
+    assert vals["instance_defaults.verbose"] is False
+
+
 def test_classify_and_constraints_cover_edge_annotations() -> None:
     import types as _types
 
