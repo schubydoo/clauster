@@ -661,7 +661,7 @@
         if (!window.isSecureContext)
           return "Browser notifications need a secure context — serve clauster over HTTPS, or open it via localhost.";
         if (Notification.permission === "denied")
-          return "Notifications are blocked for this site in your browser — allow them in the browser’s site settings, then save again.";
+          return "Notifications are blocked for this site in your browser — allow them in the browser’s site settings, then reload this page.";
         return "";
       },
       // The single hint shown under a config field: the browser-notifications client caveat
