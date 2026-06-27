@@ -31,11 +31,42 @@
   // (pty_screen.SCREEN_COLS/SCREEN_ROWS) — the wire carries no resize negotiation.
   const PTY_COLS = 120;
   const PTY_ROWS = 40;
-  // name -> { term, ws, token }. Deliberately OUTSIDE the Alpine component: an xterm.js
-  // Terminal is a large stateful object and must never be wrapped in Alpine's reactive
-  // Proxy (it would break its internals and thrash reactivity; cf. #310/#315). Only the
-  // lightweight {open,status,error} lifecycle lives in Alpine state (this.ptyScreen).
+  // name -> { term, ws, token, host, fit }. Deliberately OUTSIDE the Alpine component: an
+  // xterm.js Terminal is a large stateful object and must never be wrapped in Alpine's
+  // reactive Proxy (it would break its internals and thrash reactivity; cf. #310/#315). Only
+  // the lightweight {open,status,error} lifecycle lives in Alpine state (this.ptyScreen).
   const _ptyScreens = {};
+  // Client-side fit (#641): the wire geometry stays a fixed PTY_COLS x PTY_ROWS — instead of
+  // negotiating a resize, we shrink the rendered terminal with a CSS transform so the fixed
+  // grid fits the panel width on narrow viewports (never magnify past 1 — keeps glyphs crisp).
+  function _fitPtyScreen(reg) {
+    if (!reg || !reg.host) return;
+    const inner = reg.host.querySelector(".xterm");  // the terminal's own root element
+    if (!inner) return;
+    // The intrinsic fixed-grid pixel size lives on .xterm-screen — xterm sets an explicit
+    // px width/height there (`screenElement.style.width = canvas.width`). The .xterm root is a
+    // plain block with no width, so it stretches to the host and its offsetWidth is NOT the grid
+    // width — measuring it would compute scale~=1 and the grid would clip under overflow:hidden.
+    const screen = reg.host.querySelector(".xterm-screen");
+    if (!screen) return;  // not laid out yet — a later fit (first frame / resize) will catch it
+    const naturalW = screen.offsetWidth;
+    const naturalH = screen.offsetHeight;
+    if (!naturalW || !naturalH) return;
+    // We scale the whole terminal (.xterm) from its top-left. Reset any prior transform first so
+    // the .xterm-screen measurement above reflects the intrinsic size, not a previous scale.
+    inner.style.transform = "";
+    inner.style.transformOrigin = "top left";
+    // Available width is the host's content box (clientWidth already excludes its padding).
+    const cs = getComputedStyle(reg.host);
+    const avail = reg.host.clientWidth -
+      (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+    if (avail <= 0) return;
+    const scale = Math.min(1, avail / naturalW);  // shrink-to-fit only; never upscale
+    inner.style.transform = scale < 1 ? "scale(" + scale + ")" : "";
+    // The transform doesn't shrink the host's layout box, so reserve exactly the scaled height
+    // (the .xterm fills the host width naturally) — otherwise a gap or overflow would remain.
+    reg.host.style.height = Math.ceil(naturalH * scale) + "px";
+  }
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
@@ -2358,7 +2389,14 @@
           const proto = location.protocol === "https:" ? "wss" : "ws";
           const url = proto + "://" + location.host + ROOT + "/ws/pty-screen/" + encodeURIComponent(name);
           const ws = new WebSocket(url);
-          _ptyScreens[name] = { term, ws, token };
+          const reg = { term, ws, token, host, fit: null };
+          // Fit the fixed grid to the panel now and on every viewport resize (#641). The
+          // listener is stored on the reg so closePtyScreen can detach it — leaking it would
+          // keep firing against a disposed terminal. Re-fit is cheap (a transform + measure).
+          reg.fit = () => { if (_ptyScreens[name] === reg) _fitPtyScreen(reg); };
+          window.addEventListener("resize", reg.fit);
+          _ptyScreens[name] = reg;
+          _fitPtyScreen(reg);  // first fit once the terminal element is laid out
           ws.onopen = () => {
             // Advance "connecting" -> "connected" on handshake so an idle session (no immediate
             // frame to push) doesn't sit on "connecting"; onmessage then sets the real frame state.
@@ -2384,6 +2422,9 @@
               const out = "\x1b[?7l\x1b[H" + scr.rows.join("\r\n") +
                           "\x1b[" + ((cur.y | 0) + 1) + ";" + ((cur.x | 0) + 1) + "H";
               try { reg.term.write(out); } catch (e) {}
+              // Re-fit once after the first frame: the terminal's intrinsic size is only
+              // accurate once it has rendered rows, so the open-time fit can be a hair off.
+              if (!reg._fittedOnce) { reg._fittedOnce = true; _fitPtyScreen(reg); }
             }
           };
           ws.onclose = () => {
@@ -2398,6 +2439,7 @@
         if (s) s.open = false;  // mark closed first so live() retires any late handler
         const reg = _ptyScreens[name];
         if (reg) {
+          if (reg.fit) { try { window.removeEventListener("resize", reg.fit); } catch (e) {} }
           if (reg.ws) { try { reg.ws.close(); } catch (e) {} }
           if (reg.term) { try { reg.term.dispose(); } catch (e) {} }
           delete _ptyScreens[name];

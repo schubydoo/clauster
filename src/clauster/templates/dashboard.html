@@ -30,8 +30,11 @@
     .log-view { max-height: 320px; overflow: auto; font-size: .78rem; line-height: 1.35;
                 white-space: pre-wrap; word-break: break-word; margin: 0; }
     /* Host for the read-only xterm.js live pty-screen (#534): dark in both themes (a
-       terminal reads as dark), sized by xterm to its fixed 120x40 geometry. */
-    .pty-screen-host { background: #000; border-radius: 8px; padding: 6px; overflow: auto; }
+       terminal reads as dark). The wire geometry stays a fixed 120x40 (#641) — the client
+       shrinks the rendered grid with a CSS transform to fit the panel width on narrow
+       viewports, so the host clips its overflow and its height is set in JS to the scaled
+       grid height (no scrollbars, no oversized gap). */
+    .pty-screen-host { background: #000; border-radius: 8px; padding: 6px; overflow: hidden; }
     .pty-screen-host .xterm { padding: 0; }
     /* #fff is required — a QR code needs a light field + quiet zone to scan reliably;
        intentionally NOT theme-variabled (a dark field breaks phone scanning). */
