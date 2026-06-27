@@ -293,6 +293,23 @@ def config_server(
 
 
 @pytest.fixture
+def enum_config_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A clauster seeded with enum fields set to their NON-first option.
+
+    ``claude.launch_mode: pty`` (first choice is ``standard``) and ``usage.mode:
+    "off"`` (first choice is ``cost``) so the config-editor dropdowns must reflect
+    the saved value rather than falling back to option index 0 — the regression
+    guard for the x-model/x-for ``<select>`` ordering bug.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-config-enum")
+    yield from _start_server(
+        tmp, mutable_projects_tree, extra='  launch_mode: pty\nusage:\n  mode: "off"\n'
+    )
+
+
+@pytest.fixture
 def trust_fail_bridge_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:

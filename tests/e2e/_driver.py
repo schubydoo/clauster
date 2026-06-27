@@ -260,6 +260,16 @@ class AgentBrowser:
             f"{selector}[{name}] == {value!r}",
         )
 
+    def expect_value(
+        self, selector: str, value: str, timeout_ms: int = _DEFAULT_TIMEOUT_MS
+    ) -> None:
+        """Assert ``selector``'s form value equals ``value`` within ``timeout_ms``."""
+        self._poll(
+            lambda: self.get_value(selector) == value,
+            timeout_ms,
+            f"{selector} value == {value!r}",
+        )
+
     def expect_count(
         self, selector: str, count: int, timeout_ms: int = _DEFAULT_TIMEOUT_MS
     ) -> None:
