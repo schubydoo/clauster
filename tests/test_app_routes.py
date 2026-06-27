@@ -1612,3 +1612,38 @@ def test_resume_instance_vanishes_mid_op_404(write_config, tmp_path, monkeypatch
     r = client.post("/api/instances/alpha/resume")
     assert r.status_code == 404
     assert "no managed instance to resume" in r.json()["detail"]
+
+
+# ----- clone cancel (#573) ----------------------------------------------
+
+
+def test_clone_cancel_unknown_job_404(write_config, tmp_path):
+    # No job with this id was ever created -> the endpoint maps the miss to a 404.
+    r = _client(write_config, tmp_path).post("/api/projects/clone/nope/cancel")
+    assert r.status_code == 404
+    assert "unknown or expired" in r.json()["detail"]
+
+
+def test_clone_cancel_terminal_job_409(write_config, tmp_path):
+    # A job that already finished is not cancellable: request_cancel returns False and
+    # the endpoint maps that to a 409 naming the terminal status.
+    client = _client(write_config, tmp_path)
+    job = client.app.state.clone_jobs.create("doomed")
+    client.app.state.clone_jobs.finish(job)  # -> "done" (terminal)
+    r = client.post(f"/api/projects/clone/{job.id}/cancel")
+    assert r.status_code == 409
+    assert "already done" in r.json()["detail"]
+
+
+def test_clone_cancel_running_job_202(write_config, tmp_path):
+    # A still-running job is cancellable: the endpoint returns 202, flags the job, and
+    # fires its registered terminate hook (the git subprocess's terminate).
+    client = _client(write_config, tmp_path)
+    job = client.app.state.clone_jobs.create("live")
+    terminated: list[bool] = []
+    job.register_terminate(lambda: terminated.append(True))
+    r = client.post(f"/api/projects/clone/{job.id}/cancel")
+    assert r.status_code == 202
+    assert r.json() == {"job_id": job.id, "cancelling": True}
+    assert job.cancel_requested is True
+    assert terminated == [True]  # the terminate hook actually fired

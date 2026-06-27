@@ -12,13 +12,14 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .claustrum_client import _Subscriber
 from .redact import redact_for_disk
 
-JobStatus = Literal["running", "done", "error"]
+JobStatus = Literal["running", "done", "error", "cancelled"]
 
 # Per-watcher queue depth. A clone emits at most a handful of progress phases, each a
 # tiny frame, so this is generous headroom; the bound exists only so a wedged/slow
@@ -66,6 +67,36 @@ class CloneJob:
     # steal each other's frames). Bounded so a slow/wedged consumer can't grow a queue
     # without limit; overflow drops a progress frame and marks the gap.
     _subscribers: list[_Subscriber] = field(default_factory=list)
+    # Cancellation (#573). The worker thread registers `_terminate` (the git
+    # subprocess's terminate) once it spawns; cancelling sets `cancel_requested` AND
+    # terminates the process so the transfer stops and its partial dir is cleaned up.
+    # `repr`/`compare` off so the callable never lands in a log line or breaks equality.
+    cancel_requested: bool = False
+    _terminate: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+
+    def register_terminate(self, fn: Callable[[], None]) -> None:
+        """Register the running clone's terminate hook (called by the worker on spawn).
+
+        If a cancel already arrived before the process spawned, terminate immediately so
+        the just-started transfer is stopped at once (closes the pre-spawn cancel race).
+        """
+        self._terminate = fn
+        if self.cancel_requested:
+            fn()
+
+    def request_cancel(self) -> bool:
+        """Request cancellation of an in-flight clone; return False if not cancellable.
+
+        Sets ``cancel_requested`` and terminates the git subprocess if it has spawned
+        (a terminated clone exits non-zero, so the worker tears down its partial temp
+        dir). A no-op returning ``False`` once the job is terminal (done/error/cancelled).
+        """
+        if self.status != "running":
+            return False
+        self.cancel_requested = True
+        if self._terminate is not None:
+            self._terminate()
+        return True
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         """Register a watcher and return its private (bounded) event queue."""
@@ -162,6 +193,16 @@ class CloneJobManager:
         """Mark ``job`` done (or errored) and broadcast its terminal frame."""
         job.status = "error" if error else "done"
         job.error_detail = error
+        job.broadcast(job.terminal_event())
+
+    def cancel(self, job: CloneJob) -> None:
+        """Mark ``job`` cancelled and broadcast its terminal frame (#573).
+
+        Called by the clone worker when its git subprocess was terminated by a cancel
+        request, so the outcome reads as a clean ``cancelled`` rather than an ``error``.
+        """
+        job.status = "cancelled"
+        job.error_detail = None
         job.broadcast(job.terminal_event())
 
     def discard(self, job_id: str) -> None:

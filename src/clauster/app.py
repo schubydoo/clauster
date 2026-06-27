@@ -6,6 +6,8 @@ import asyncio
 import io
 import logging
 import secrets
+import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -1235,8 +1237,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         def _forward(line: str) -> None:
             loop.call_soon_threadsafe(clone_jobs.push_progress, job, line)
 
+        def _register_proc(proc: subprocess.Popen[bytes]) -> None:
+            # Hand the worker's git process to the job so a cancel request can terminate
+            # it. Hop onto the loop: the job registry is mutated event-loop-only (#573).
+            loop.call_soon_threadsafe(job.register_terminate, proc.terminate)
+
         try:
-            await asyncio.to_thread(
+            target = await asyncio.to_thread(
                 clone_project,
                 config.projects_root,
                 name,
@@ -1244,16 +1251,33 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 cfg=config.clone,
                 shallow=shallow,
                 progress_cb=_forward,
+                on_proc=_register_proc,
             )
         except ProvisionError as exc:
-            clone_jobs.finish(job, error=str(exc))
+            # A cancel terminates git → non-zero exit → CloneFailed here; report it as a
+            # clean `cancelled`, not an error (the worker already tore down the temp dir).
+            if job.cancel_requested:
+                clone_jobs.cancel(job)
+            else:
+                clone_jobs.finish(job, error=str(exc))
         except Exception as exc:  # defensive: never leave a job stuck "running"
-            clone_jobs.finish(job, error=f"unexpected error: {exc}")
+            if job.cancel_requested:
+                clone_jobs.cancel(job)
+            else:
+                clone_jobs.finish(job, error=f"unexpected error: {exc}")
         else:
-            # The cloned directory may not bump projects_root's mtime at the cache's
-            # resolution; drop the cache so the new project's row renders immediately.
-            invalidate_discovery_cache()
-            clone_jobs.finish(job)
+            if job.cancel_requested:
+                # A cancel arrived but `terminate()` was a no-op — git had already
+                # finished and the dir landed. Honor the 202 "cancelling" contract: tear
+                # down the just-created project and broadcast `cancelled`, not `done`.
+                await asyncio.to_thread(shutil.rmtree, target, ignore_errors=True)
+                invalidate_discovery_cache()
+                clone_jobs.cancel(job)
+            else:
+                # The cloned directory may not bump projects_root's mtime at the cache's
+                # resolution; drop the cache so the new project's row renders immediately.
+                invalidate_discovery_cache()
+                clone_jobs.finish(job)
         # Fire the #432 `clone-done` webhook off the runner's emitter (fire-and-forget,
         # fail-open, default OFF). The error_detail is redacted before egress — a clone
         # failure can echo a remote URL/host into its message. The clone url itself is
@@ -1300,6 +1324,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         _clone_tasks.add(task)
         task.add_done_callback(_clone_tasks.discard)
         return {"job_id": job.id, "name": name}
+
+    @app.post("/api/projects/clone/{job_id}/cancel", status_code=202)
+    async def api_clone_cancel(job_id: str) -> dict:
+        """Cancel an in-progress clone: terminate the git worker + clean its partial dir.
+
+        404 for an unknown/expired job, 409 once it's already terminal (done/error/
+        cancelled). The worker reports the ``cancelled`` outcome over the progress WS;
+        the partial temp dir is torn down on the terminated git's non-zero exit (#573).
+        """
+        job = clone_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="unknown or expired clone job")
+        if not job.request_cancel():
+            raise HTTPException(status_code=409, detail=f"clone job is already {job.status}")
+        return {"job_id": job.id, "cancelling": True}
 
     @app.get("/api/instances")
     async def api_instances() -> list[RemoteControlInstance]:

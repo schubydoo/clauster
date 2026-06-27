@@ -244,6 +244,7 @@ def clone_project(
     shallow: bool = False,
     git_binary: str = "git",
     progress_cb: Callable[[str], None] | None = None,
+    on_proc: Callable[[subprocess.Popen[bytes]], None] | None = None,
 ) -> Path:
     """Clone ``url`` into a new project under projects_root, enforcing the clone guards.
 
@@ -285,7 +286,7 @@ def clone_project(
     cmd += ["--", url, str(tmp)]
 
     try:
-        _run_clone_streaming(cmd, cfg.timeout_seconds, progress_cb)
+        _run_clone_streaming(cmd, cfg.timeout_seconds, progress_cb, on_proc)
     except CloneFailed:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
@@ -308,12 +309,15 @@ def _run_clone_streaming(
     cmd: list[str],
     timeout_seconds: int,
     progress_cb: Callable[[str], None] | None,
+    on_proc: Callable[[subprocess.Popen[bytes]], None] | None = None,
 ) -> None:
     """Run ``git clone`` (``cmd``), forwarding stderr progress lines to ``progress_cb``.
 
     Raise ``CloneFailed`` on a non-zero exit or if the clone exceeds
     ``timeout_seconds`` — a watchdog terminates the process so a stalled transfer
-    can never hang the worker thread.
+    can never hang the worker thread. When ``on_proc`` is given it is called with the
+    spawned process so a caller can terminate it (explicit cancel, #573); a terminated
+    git exits non-zero, surfacing as ``CloneFailed`` (the caller cleans the temp dir).
     """
     proc = subprocess.Popen(
         cmd,
@@ -321,6 +325,8 @@ def _run_clone_streaming(
         stderr=subprocess.PIPE,
         env=_git_env(),
     )
+    if on_proc is not None:
+        on_proc(proc)
     timed_out = threading.Event()
 
     def _terminate() -> None:
