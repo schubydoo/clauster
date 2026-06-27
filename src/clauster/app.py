@@ -1008,7 +1008,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         live_uuids |= {
             inst.claude_session_uuid
             for inst in app.state.hosted.list_instances()
-            if inst.project == name and inst.claude_session_uuid
+            if inst.project == name
+            and inst.claude_session_uuid
+            and inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
         }
 
         def _list() -> list[dict]:

@@ -682,6 +682,32 @@ def test_transcripts_list_badges_hosted_session_live(write_config, tmp_path, mon
     assert live == {"hosted-uuid": True, "other": False}
 
 
+def test_transcripts_list_stopped_hosted_session_not_live(write_config, tmp_path, monkeypatch):
+    """A STOPPED/CRASHED hosted instance must NOT badge its transcript live (#614).
+
+    `_instances` is not pruned on session end, so the route must status-filter to
+    RUNNING/STARTING — otherwise a stopped session keeps showing as live.
+    """
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["hosted-uuid", "other"])
+    client = _client(write_config, tmp_path)
+    inst = RemoteControlInstance(
+        project="gamma",
+        label="hosted:gamma",
+        channel="hosted",
+        claustrum_process_id="01HOSTED000000000000000A",
+        claude_session_uuid="hosted-uuid",
+        status=InstanceStatus.STOPPED,
+    )
+    client.app.state.hosted._instances[inst.claustrum_process_id] = inst
+    live = {
+        s["session"]: s["live"]
+        for s in client.get("/api/projects/gamma/transcripts").json()["sessions"]
+    }
+    assert live == {"hosted-uuid": False, "other": False}
+
+
 def test_transcripts_list_no_live_for_other_project(write_config, tmp_path, monkeypatch):
     """A running session at a DIFFERENT cwd never badges a transcript here live (#614)."""
     from clauster.models import Attribution, WorkingSession
