@@ -2,8 +2,10 @@
 
 Secondary, ~5-min cadence. The JSON is a flat list of working sessions with no
 bridge/env grouping (Capture B), so attribution joins on ``cwd`` — the only link
-back to a managed bridge. ``sessionId`` here is the local RFC-4122 UUID, never
-the API ULID.
+back to a managed bridge: an exact match to a bridge's cwd, or (for worktree-spawn
+bridges, whose sessions run in per-session worktrees under the project) containment
+in the project root. ``sessionId`` here is the local RFC-4122 UUID, never the API
+ULID.
 
 Agent view (Claude Code 2.1.139+) lists `claude --bg` background sessions in the
 same output, tagged ``kind: "background"`` and carrying a lifecycle ``state``.
@@ -29,6 +31,12 @@ _TERMINAL_STATES = frozenset({"done", "failed", "stopped"})
 # "interactive"; "" tolerates a pre-agent-view CLI that omits the field. Anything
 # else ("background", future kinds) is allowlisted out — fail-closed attribution.
 _BRIDGE_KINDS = frozenset({"", "interactive"})
+# Where `claude remote-control --spawn worktree` places each session's git worktree,
+# relative to the project root. A worktree bridge's sessions live in this subtree,
+# never at the root, so containment attribution matches HERE specifically rather than
+# the whole project tree — a stray interactive `claude` run by hand elsewhere under
+# the project must not be claimed as the bridge's session.
+_WORKTREE_SUBDIR = Path(".claude") / "worktrees"
 
 
 def list_working_sessions(binary: str, *, timeout: float = 10.0) -> list[WorkingSession]:
@@ -91,6 +99,7 @@ def reconcile(
     managed_cwds: dict[Path, str],
     hosted_pids: dict[int, str] | None = None,
     hosted_cwds: dict[Path, str] | None = None,
+    worktree_roots: dict[Path, str] | None = None,
 ) -> list[WorkingSession]:
     """Attribute each working session to a managed bridge by resolved cwd.
 
@@ -100,6 +109,18 @@ def reconcile(
     join: a `claude --bg` session sharing a managed cwd must not read as the
     bridge's session (TRACKED = false liveness) nor as an unmanaged bridge
     (EXTERNAL phantom-deletes a stopped record) — it stays UNTRACKED.
+
+    ``worktree_roots`` maps a *worktree-spawn* bridge's resolved project root →
+    instance id. ``claude remote-control --spawn worktree`` runs each session in a
+    per-session git worktree under ``<root>/.claude/worktrees/…``, so the session
+    cwd never exactly matches the project-root key in ``managed_cwds`` and would
+    wrongly read as EXTERNAL — hiding every session under a worktree bridge from the
+    dashboard. Such a session is attributed by *containment* in that
+    ``.claude/worktrees`` subtree (not the whole project, so a stray ``claude`` run
+    by hand elsewhere under the project still reads EXTERNAL), most-specific root
+    first so a nested project's bridge wins. Only worktree-spawn bridges opt in;
+    same-dir/session bridges keep the exact-cwd join (their sessions share the bridge
+    cwd).
 
     Clauster's own hosted (claustrum) sessions are spawned by it but run no bridge
     process, so they would otherwise fall through to EXTERNAL/unmanaged (#592).
@@ -117,6 +138,17 @@ def reconcile(
     hosted_by_cwd = {
         p.resolve(): hid for p, hid in (hosted_cwds if hosted_cwds is not None else {}).items()
     }
+    # Match the `.claude/worktrees` subtree of each worktree-spawn root, most-specific
+    # (deepest) first: a session under a nested worktree project must attribute to the
+    # inner bridge, not an ancestor project that contains it.
+    worktree_dirs = sorted(
+        (
+            ((p / _WORKTREE_SUBDIR).resolve(), inst_id)
+            for p, inst_id in (worktree_roots or {}).items()
+        ),
+        key=lambda kv: len(kv[0].parts),
+        reverse=True,
+    )
     for s in sessions:
         hosted_id = hosted_by_pid.get(s.pid)
         if hosted_id is not None:
@@ -126,12 +158,18 @@ def reconcile(
         if s.kind not in _BRIDGE_KINDS:
             s.attribution = Attribution.UNTRACKED
             continue
-        inst_id = resolved.get(s.cwd.resolve())
+        cwd = s.cwd.resolve()
+        inst_id = resolved.get(cwd)
         if inst_id is not None:
             s.parent_instance = inst_id
             s.attribution = Attribution.TRACKED
             continue
-        hosted_id = hosted_by_cwd.get(s.cwd.resolve())
+        wt_id = next((iid for wt_dir, iid in worktree_dirs if cwd.is_relative_to(wt_dir)), None)
+        if wt_id is not None:
+            s.parent_instance = wt_id
+            s.attribution = Attribution.TRACKED
+            continue
+        hosted_id = hosted_by_cwd.get(cwd)
         if hosted_id is not None:
             s.parent_instance = hosted_id
             s.attribution = Attribution.HOSTED
