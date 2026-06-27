@@ -13,11 +13,12 @@ LAN / remote access, add auth afterwards — see [Networking](networking.md).
   doesn't vendor it — and a spawned bridge inherits that authentication.
 - A **directory that holds your projects** — each child directory becomes a card.
 
-Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview)
+Install [Claude Code](https://code.claude.com/docs/en/quickstart)
 and log in (a spawned bridge inherits this login):
 
 ```sh
-npm install -g @anthropic-ai/claude-code           # or: curl -fsSL https://claude.ai/install.sh | bash
+curl -fsSL https://claude.ai/install.sh | bash     # native installer (macOS/Linux/WSL), auto-updates
+# auditable alternative:  brew install --cask claude-code   # (Windows/other: see the docs link above)
 claude login                                       # or: export ANTHROPIC_API_KEY=sk-ant-...
 claude --version                                   # confirm it's on PATH
 ```
