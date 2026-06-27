@@ -164,9 +164,9 @@ class InstanceDefaults(BaseModel):
     )
     verbose: bool = Field(
         default=False,
-        description="Pass `--verbose` to spawned remote-control bridges for detailed "
-        "connection/session logs. Applies to the standard (multi-session) bridge only; "
-        "off by default.",
+        description="Pass `--verbose` to spawned standard `claude remote-control` bridges "
+        "for detailed connection/session logs — every spawn mode (same-dir/worktree/session). "
+        "The pty (flag-form) bridge is never passed --verbose. Off by default.",
     )
     session_name_prefix: str | None = Field(
         default=None,

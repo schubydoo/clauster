@@ -951,8 +951,9 @@ class SessionRunner:
         # not apply to the single-session `session` spawn mode, so don't pass it there.
         if spawn_mode in ("same-dir", "worktree"):
             cmd += ["--capacity", str(defaults.capacity)]
-        # Opt-in detailed connection/session logging for the bridge-disconnect
-        # investigation. Off by default; never pass --verbose unconditionally.
+        # Permanent opt-in observability toggle: detailed connection/session logging
+        # for the standard bridge (every spawn mode). Gated on config, never
+        # unconditional; off by default. The pty bridge is never passed --verbose.
         if defaults.verbose:
             cmd += ["--verbose"]
         return cmd

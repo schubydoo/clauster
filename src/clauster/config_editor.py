@@ -295,10 +295,11 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "precedence and show_cost only applies when mode is unset."
     ),
     "instance_defaults.verbose": (
-        "Applies to standard (multi-session) bridges only — the pty bridge runs under a PTY "
-        "keeper and is not passed --verbose. Adds --verbose to the spawned `claude "
-        "remote-control` process so it logs detailed connection/session events (useful for "
-        "diagnosing intermittent bridge disconnects). Takes effect on the next bridge start."
+        "Applies to standard `claude remote-control` bridges only (every spawn mode — "
+        "same-dir/worktree/session); the pty bridge runs under a PTY keeper and is never "
+        "passed --verbose. Adds --verbose to the spawned `claude remote-control` process so "
+        "it logs detailed connection/session events (useful for diagnosing intermittent "
+        "bridge disconnects). Takes effect on the next bridge start."
     ),
     "claude.pty_screen_enabled": (
         "Applies to pty (true-resume) bridges only — standard bridges have no PTY to render. "
