@@ -336,6 +336,29 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.7 (2026-06-27)
+
+### Features
+
+- Add an in-app "Restart Clauster" action to the config editor that re-execs the process in place (`os.execv`, same PID, reloads config) so a saved config change can be applied without dropping to a shell; gated behind the existing restart-impact confirmation and exposed via an auth-gated `POST /api/restart`. ([#637](https://github.com/schubydoo/clauster/pull/637))
+- Add a browser-notifications channel, split notifications into per-channel and per-event toggles, and emit ready/stop/permission-needed/session-ended/reconnect-failed events. ([#636](https://github.com/schubydoo/clauster/pull/636))
+- Add `clauster config reconcile`, an interactive CLI that removes deprecated config keys and writes their replacements via the atomic config writer. ([#650](https://github.com/schubydoo/clauster/pull/650))
+- Add a server-side cancel for an in-progress clone so the UI abort actually stops the git transfer ([#633](https://github.com/schubydoo/clauster/pull/633))
+- Badge a transcript as live in the read-only viewer when its session id maps to a currently-running bridge, agent, or hosted session. ([#653](https://github.com/schubydoo/clauster/pull/653))
+- Scale the read-only live terminal to fit the panel width on narrow viewports via a client-side CSS transform (no wire-geometry change). ([#654](https://github.com/schubydoo/clauster/pull/654))
+
+### Fixes
+
+- Quickstart gains a copy-paste Claude Code install + `claude login` step, and the doctor version-FAIL message now suggests `claude update`. ([#649](https://github.com/schubydoo/clauster/pull/649))
+- Fix the project-sort cap: changing sort no longer flashes the full list, and returning to A–Z restores the 6-row cap and "Show all N" toggle. ([#655](https://github.com/schubydoo/clauster/pull/655))
+- Correct the Claude Code install steps (native installer; npm is deprecated) and the clone dialog's helper text (name the `clone.allow_private_hosts` clauster.yml key; clarify cloning only fetches files). ([#658](https://github.com/schubydoo/clauster/pull/658))
+- Project sort: selecting a non-name sort (Last used / Cost) no longer uncaps the list past the 6-row limit. ([#661](https://github.com/schubydoo/clauster/pull/661))
+- Lower the default `claude.agents_json_poll_interval_seconds` from 300 to 30 so session liveness (the transcript live badge, active-session zone) and crash detection refresh within ~30s instead of up to 5 minutes. ([#662](https://github.com/schubydoo/clauster/pull/662))
+- Fix the in-app Restart: the page reloads once the server is back (no more stuck "Restarting…"), and the confirmation now correctly says running sessions survive the restart instead of warning they end. ([#666](https://github.com/schubydoo/clauster/pull/666))
+- Browser notifications now prompt for permission the moment you enable the channel instead of only after a reload, and a failed bridge resume only raises the "reconnect failed" notification when the bridge genuinely could not restart (not when the session was already gone or the request was invalid). ([#668](https://github.com/schubydoo/clauster/pull/668))
+- The config editor now flags when browser notifications can't be delivered in your browser/connection (insecure non-HTTPS context, unsupported browser, or blocked permission) and disables the toggle when it can't work, instead of silently offering a setting that does nothing. Browser notifications require a secure context (HTTPS or localhost). ([#675](https://github.com/schubydoo/clauster/pull/675))
+- `clauster config reconcile --dry-run` is now non-interactive — it previously ran the per-key prompt before the dry-run guard and blocked on a terminal; it now prints the plan and writes nothing without prompting. ([#667](https://github.com/schubydoo/clauster/pull/667))
+
 ## 0.12.6 (2026-06-27)
 
 ### Fixes
