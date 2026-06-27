@@ -335,11 +335,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         try:
             yield
         finally:
-            await app.state.hosted.aclose()  # stop live hosted sessions
+            await app.state.hosted.aclose()  # detach (not stop); sessions survive the restart
             daemon = getattr(app.state, "claustrum_daemon", None)
             if daemon is not None:
                 await daemon.aclose()  # drop our connection; leave the daemon running
-            await runner.shutdown()  # cancel poll task; leave bridges running
+            await runner.shutdown()  # cancel poll task; leave bridges running (survive re-exec)
             runner.persistence.dispose()  # close the DB engine's connection pool
 
     app = FastAPI(
@@ -1545,10 +1545,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
         Re-exec mechanism (``os.execv``): uniform across systemd/launchd/terminal/
         Docker, needs no unit change, keeps the same PID, and reloads config (read at
-        startup); detached + ``KillMode=process`` bridges survive. Live, clauster-managed
-        sessions (pty bridges + browser/hosted sessions) and in-flight requests are
-        dropped during the swap — that is expected; the UI gates this behind the #427
-        restart-impact confirmation.
+        startup). Because the swap keeps the same PID and never stops the unit, child
+        processes are untouched: ``runner.shutdown()`` leaves bridges running and
+        ``hosted.aclose()`` detaches (not stops) hosted sessions, so clauster-managed
+        sessions (standard + pty bridges + browser/hosted) survive the swap and are
+        reattached on startup (#663). Only in-flight HTTP/WS connections drop during the
+        re-bind window; the UI polls ``/healthz`` and reloads once the new image binds.
 
         Fail-closed: auth-gated by the guard middleware like every ``/api/*`` route, and
         a 503 (not a half-restarted process) if no live server is wired to shut down.

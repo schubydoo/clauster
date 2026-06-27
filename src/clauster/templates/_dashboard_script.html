@@ -640,13 +640,15 @@
         const el = document.getElementById("cfg-sec-" + section);
         if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
       },
-      // Config changes apply only after a Clauster restart — which reaps the cgroup and
-      // ENDS live, clauster-managed sessions (pty bridges + browser/hosted sessions).
-      // Detached background agents and external sessions are separate processes, so they
-      // aren't counted here. Drives the config-save "a restart will end them" warning (#427).
-      // Own "running"/"starting" filter rather than reusing activeBridges() (which also
-      // counts "stopping" bridges) — a bridge mid-Stop is on its way out, so counting it
-      // would overstate the "N session(s) running" copy.
+      // Config changes apply only after a Clauster restart. The in-app restart re-execs in
+      // place (os.execv, same PID): runner.shutdown() leaves bridges running and
+      // hosted.aclose() detaches (not stops) hosted sessions, so clauster-managed sessions
+      // (standard + pty bridges + browser/hosted) SURVIVE the swap and are reattached on
+      // startup — they only briefly disconnect, they don't end (#663). Drives the count in
+      // the restart confirmation + the config-save note. Own "running"/"starting" filter
+      // rather than reusing activeBridges() (which also counts "stopping" bridges) — a
+      // bridge mid-Stop is on its way out, so counting it would overstate the "N session(s)"
+      // copy.
       restartImpactCount() {
         const liveStatuses = ["running", "starting"];
         const bridges = Object.values(this.instances).filter((i) => liveStatuses.includes(i.status));
@@ -737,44 +739,71 @@
         finally { c.saving = false; }
       },
       // Restart Clauster in place to apply a saved config change (#483). Re-exec on the
-      // backend (os.execv): same PID, fresh config. Gated behind the SAME #427 restart-
-      // impact confirmation as config-save — a restart reaps the cgroup and ends live
-      // pty bridges + browser/hosted sessions (restartImpactCount()), so warn first.
+      // backend (os.execv): same PID, fresh config. The swap keeps child processes, so
+      // running sessions survive and reattach (restartImpactCount()) — the confirmation
+      // reassures rather than warns (#663). The re-exec rebinds the SAME port, so the WS
+      // reconnects but the page never reloads itself: poll /healthz, then reload (#663 —
+      // the old code left the button stuck on "Restarting…" assuming the page would drop).
       async restartClauster() {
         const c = this.configEditor;
         if (c.restarting) return;  // single-flight (the button is also :disabled while restarting)
         const n = this.restartImpactCount();
-        const impact = n > 0
-          ? " This will end " + n + " running " + (n === 1 ? "session" : "sessions") + "."
+        const sessions = n > 0
+          ? " Your " + n + " running " + (n === 1 ? "session keeps" : "sessions keep") +
+            " running and " + (n === 1 ? "reconnects" : "reconnect") + " automatically."
           : "";
-        if (!window.confirm("Restart Clauster now to apply config changes?" + impact)) return;
+        if (!window.confirm(
+          "Restart Clauster now to apply config changes?" + sessions +
+            " The page will briefly disconnect, then reload."
+        )) return;
         c.restarting = true; c.error = "";
         try {
           const res = await fetch(ROOT + "/api/restart", { method: "POST" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
-          if (res.ok) {  // 202 Accepted (or any 2xx): the server confirmed the restart
-            // The server is shutting down + re-execing; this connection is about to drop.
-            // Surface a non-error toast — the page will reconnect once the new image binds.
-            this.toast("Restarting Clauster — reconnecting shortly…", "info");
-          } else {
+          // Re-enable before navigating: location.assign is async, so a slow/blocked
+          // redirect would otherwise strand the button on "Restarting…" (the only exit
+          // with no health-poll fallback).
+          if (res.status === 401) { c.restarting = false; window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) {  // a definite reject (e.g. 503 no live server): nothing restarted
             const b = await res.json().catch(() => ({}));
             this.toast("Restart failed — " + (b.detail || res.status), "error");
-            c.restarting = false;  // clear only on a confirmed failure; on success we're going down
+            c.restarting = false;  // re-enable; the server is still up and unchanged
+            return;
           }
+          // 202 Accepted: the server confirmed it will shut down + re-exec.
+          this.toast("Restarting Clauster — reconnecting…", "info");
         } catch (e) {
           // fetch throws (TypeError) for BOTH an expected mid-restart connection drop
-          // (the server swapped its image before the response settled — a success) AND a
-          // pre-flight failure (proxy/TCP RST/offline) where the request never reached the
-          // server and nothing restarted. The two are indistinguishable here, so don't
-          // over-promise a reconnect: surface a message that covers both and re-enable the
-          // button so a genuinely-failed (still-running) server can be retried.
-          this.toast(
-            "The server may be restarting — the page should reconnect shortly. " +
-              "If it doesn't, the restart may have failed; check the service.",
-            "warning",
-          );
-          c.restarting = false;
+          // (the server released the socket before this response settled — a success) AND a
+          // pre-flight failure (proxy/TCP RST/offline) where nothing restarted. Don't
+          // re-enable here: fall through to the health poll, which resolves both — if the
+          // server is actually still up, /healthz answers at once and we just reload.
+          this.toast("Restarting Clauster — reconnecting…", "info");
         }
+        await this.awaitRestartThenReload();
+      },
+      // Poll /healthz until the re-exec'd server answers, then reload for fresh state.
+      // Bounded: a restart that never comes back re-enables the button with an explanation
+      // instead of spinning on "Restarting…" forever (#663). /healthz is auth-exempt, so
+      // the poll works even if the session cookie lapses across the swap.
+      async awaitRestartThenReload() {
+        const deadline = Date.now() + 60000;  // ~60s budget for the shutdown + re-bind
+        await new Promise((r) => setTimeout(r, 1500));  // let the old socket drop first
+        while (Date.now() < deadline) {
+          try {
+            // Cache-buster + no-store: defeat BOTH the browser cache and a fronting
+            // reverse proxy (nginx/Caddy) that might serve a stale 200 while the backend
+            // socket is actually down mid-swap — which would reload onto the old image.
+            const res = await fetch(ROOT + "/healthz?_=" + Date.now(), { cache: "no-store" });
+            if (res.ok) { window.location.reload(); return; }
+          } catch (e) { /* still swapping — keep polling */ }
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        this.configEditor.restarting = false;
+        this.toast(
+          "Restart is taking longer than expected — reload the page manually if it " +
+            "doesn't reconnect.",
+          "warning",
+        );
       },
       // --- read-only transcript viewer (#431) ---
       // Coarse relative timestamp from an mtime (epoch SECONDS, as the API returns
