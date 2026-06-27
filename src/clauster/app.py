@@ -1945,15 +1945,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return await _resume_hosted(instance_id, hosted)
         try:
             return await _spawn_or_http(runner.resume(instance_id))
-        except HTTPException:
-            # The resume failed to bring the bridge back up — fire the #541
-            # reconnect-failed notification (fail-closed + fire-and-forget), then
-            # re-raise so the HTTP error mapping is unchanged.
-            runner.notify_app_event(
-                "reconnect-failed",
-                "clauster: reconnect failed",
-                f"Resuming the bridge for {instance_id!r} failed.",
-            )
+        except HTTPException as exc:
+            # Only a genuine spawn failure (SpawnError -> 409) means the bridge tried to
+            # come back and could not — that is the case worth a #541 reconnect-failed
+            # notification. A 404 (the instance vanished / unknown), 422 (bad spawn option)
+            # or 403 (permission-mode) is a precondition error, not a failed reconnect, so
+            # it must NOT notify (#652). Fire only for 409, then re-raise unchanged.
+            if exc.status_code == 409:
+                runner.notify_app_event(
+                    "reconnect-failed",
+                    "clauster: reconnect failed",
+                    f"Resuming the bridge for {instance_id!r} failed.",
+                )
             raise
 
     @app.post("/api/instances/{instance_id}/forget")

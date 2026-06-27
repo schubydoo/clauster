@@ -230,11 +230,17 @@
       // grant simply means no notification fires (the helpers all no-op then).
       initBrowserNotifications() {
         if (!BROWSER_NOTIFICATIONS_ENABLED) return;
+        this.requestNotificationPermission();
+      },
+      // Ask the browser for Notification permission, once, while the user is still undecided.
+      // Ungated by the server-rendered master switch on purpose: the channel constant is baked
+      // at page render and stays stale until reload, so the config editor calls this directly at
+      // toggle-time (#664) — otherwise enabling the channel showed no prompt until restart+reload.
+      requestNotificationPermission() {
         if (typeof Notification === "undefined") return;  // unsupported browser -> silent no-op
-        if (Notification.permission === "default") {
-          // Best-effort: a rejected promise (e.g. a non-secure context) is harmless.
-          try { Notification.requestPermission().catch(() => {}); } catch (e) { /* ignore */ }
-        }
+        if (Notification.permission !== "default") return;  // already granted/denied -> no re-prompt
+        // Best-effort: a rejected promise (e.g. a non-secure context) is harmless.
+        try { Notification.requestPermission().catch(() => {}); } catch (e) { /* ignore */ }
       },
       // Map a new bridge status to the notification event the client can observe, or null.
       // running = the bridge became ready; crashed = an unexpected exit; stopped = a normal
@@ -729,6 +735,12 @@
             // form from the corrected baseline so a skipped blank reverts to its real value.
             c.fields = { ...c.fields, ...edits };
             c.edits = { ...c.fields };
+            // #664: enabling the browser channel must prompt for permission now, not only on
+            // the next page load (the channel constant is baked at render). The save button is
+            // a user gesture, so the browser allows the requestPermission() prompt from here.
+            if (edits["notifications.browser_enabled"] === true) {
+              this.requestNotificationPermission();
+            }
           } else if (res.status === 409) {
             c.error = "The config file changed on disk — close and reopen to reload.";
           } else {
