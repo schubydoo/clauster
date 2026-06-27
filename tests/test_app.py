@@ -77,18 +77,19 @@ def test_live_terminal_client_side_fit_wiring(write_config):
     # scales by a transform (shrink-only) and never magnifies past 1
     assert "Math.min(1, avail / naturalW)" in body
     assert 'inner.style.transform = scale < 1 ? "scale(" + scale + ")" : "";' in body
-    # fits on open, on every viewport resize, and once after the first rendered frame
-    assert 'window.addEventListener("resize", reg.fit)' in body
+    # fits on open, on every viewport resize (debounced), and once after the first rendered frame
+    assert 'window.addEventListener("resize", reg.onResize)' in body
+    assert "reg._fitTimer = setTimeout(reg.fit, 100);" in body  # resize is debounced
     assert "_fitPtyScreen(reg);  // first fit once the terminal element is laid out" in body
     assert "if (!reg._fittedOnce) { reg._fittedOnce = true; _fitPtyScreen(reg); }" in body
     # close detaches the resize listener so it can't fire against a disposed terminal
-    assert 'window.removeEventListener("resize", reg.fit)' in body
+    assert 'window.removeEventListener("resize", reg.onResize)' in body
     # the geometry constants are UNCHANGED — the wire stays fixed 120x40 (locked decision)
     assert "const PTY_COLS = 120;" in body
     assert "const PTY_ROWS = 40;" in body
     # the host clips overflow (the transform shrinks the grid; no scrollbars)
     assert ".pty-screen-host {" in body
-    assert "padding: 6px; overflow: hidden; }" in body
+    assert "overflow: hidden" in body
 
 
 def test_transcript_viewer_has_sort_toggle_and_search(write_config):

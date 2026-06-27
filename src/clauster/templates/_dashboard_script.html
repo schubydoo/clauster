@@ -52,8 +52,9 @@
     const naturalW = screen.offsetWidth;
     const naturalH = screen.offsetHeight;
     if (!naturalW || !naturalH) return;
-    // We scale the whole terminal (.xterm) from its top-left. Reset any prior transform first so
-    // the .xterm-screen measurement above reflects the intrinsic size, not a previous scale.
+    // Scale the whole terminal (.xterm) from its top-left. Clear any prior transform before
+    // recomputing — transforms don't affect the offsetWidth measured above, but this avoids
+    // leaving a stale scale on the early-return paths below (e.g. avail <= 0).
     inner.style.transform = "";
     inner.style.transformOrigin = "top left";
     // Available width is the host's content box (clientWidth already excludes its padding).
@@ -2394,7 +2395,13 @@
           // listener is stored on the reg so closePtyScreen can detach it — leaking it would
           // keep firing against a disposed terminal. Re-fit is cheap (a transform + measure).
           reg.fit = () => { if (_ptyScreens[name] === reg) _fitPtyScreen(reg); };
-          window.addEventListener("resize", reg.fit);
+          // Debounce the resize listener (~100ms): dragging the window edge fires dozens of
+          // events/sec and each fit forces a reflow. Immediate fits below call reg.fit directly.
+          reg.onResize = () => {
+            if (reg._fitTimer) clearTimeout(reg._fitTimer);
+            reg._fitTimer = setTimeout(reg.fit, 100);
+          };
+          window.addEventListener("resize", reg.onResize);
           _ptyScreens[name] = reg;
           _fitPtyScreen(reg);  // first fit once the terminal element is laid out
           ws.onopen = () => {
@@ -2439,7 +2446,8 @@
         if (s) s.open = false;  // mark closed first so live() retires any late handler
         const reg = _ptyScreens[name];
         if (reg) {
-          if (reg.fit) { try { window.removeEventListener("resize", reg.fit); } catch (e) {} }
+          if (reg.onResize) { try { window.removeEventListener("resize", reg.onResize); } catch (e) {} }
+          if (reg._fitTimer) { try { clearTimeout(reg._fitTimer); } catch (e) {} }
           if (reg.ws) { try { reg.ws.close(); } catch (e) {} }
           if (reg.term) { try { reg.term.dispose(); } catch (e) {} }
           delete _ptyScreens[name];
