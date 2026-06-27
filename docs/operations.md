@@ -437,6 +437,26 @@ separate `clauster migrate` command is a legacy helper that only upgrades an
 older `state.json` to the current JSON schema; on a database-backed install
 (`state.json` already imported) there is nothing for it to do.
 
+### `clauster config reconcile` — clean up deprecated config keys
+
+The config schema is additive-only with back-compat aliases for renamed keys, so
+a deprecated key keeps working but warns at every load and lingers in your
+`clauster.yml`. `clauster config reconcile` scans the loaded config for known
+deprecated keys (e.g. `claude.resume_mode` → `claude.launch_mode`,
+`usage.show_cost` → `usage.mode`), explains each, and proposes the replacement key
+with the equivalent value:
+
+```sh
+clauster config reconcile -c /etc/clauster/clauster.yml          # interactive
+clauster config reconcile -c /etc/clauster/clauster.yml --dry-run  # preview only
+clauster config reconcile -c /etc/clauster/clauster.yml --yes      # accept all
+```
+
+It rewrites the file through the same atomic backup + comment-preserving writer the
+in-app editor uses (a timestamped `.bak-*` is kept), so your comments and formatting
+survive. `--dry-run` writes nothing; `--yes` applies every proposed replacement
+without prompting (handy in a config-management pipeline). A clean config is a no-op.
+
 ### `clauster keepers` — stop an orphaned pty keeper
 
 A **pty** (true-resume) bridge runs under a detached *keeper* process that

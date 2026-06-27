@@ -2,7 +2,8 @@
 
 Subcommands: ``run`` (default), ``hash-password``, ``hash-token``,
 ``hash-metrics-token``, ``doctor``, ``backup``, ``restore``, ``migrate``,
-``install-service``, ``reap-environments``, ``keepers``, ``usage``.
+``install-service``, ``reap-environments``, ``keepers``, ``usage``,
+``config reconcile``.
 Bare ``clauster`` and ``clauster -c <cfg>`` still mean ``run`` for
 backward compatibility.
 """
@@ -48,6 +49,7 @@ _COMMANDS = {
     "reap-environments",
     "keepers",
     "usage",
+    "config",
 }
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
@@ -148,6 +150,23 @@ def main(argv: list[str] | None = None) -> int:
     usage_p = sub.add_parser("usage", help="token + approx cost summary for a session transcript")
     usage_p.add_argument("transcript", help="path to a session transcript .jsonl")
 
+    config_p = sub.add_parser("config", help="inspect / clean up the config file")
+    config_sub = config_p.add_subparsers(dest="config_command")
+    reconcile_p = config_sub.add_parser(
+        "reconcile", help="remove deprecated config keys, writing their replacements"
+    )
+    reconcile_p.add_argument("-c", "--config", help="path to clauster.yml")
+    reconcile_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show the proposed changes without writing anything",
+    )
+    reconcile_p.add_argument(
+        "--yes",
+        action="store_true",
+        help="apply the proposed replacements non-interactively (no prompts)",
+    )
+
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
     if argv and argv[0] not in _COMMANDS and argv[0] not in _TOP_LEVEL_FLAGS:
         argv = ["run", *argv]
@@ -175,6 +194,11 @@ def main(argv: list[str] | None = None) -> int:
         return _keepers(args.config, args.kill)
     if args.command == "usage":
         return _usage(args.transcript)
+    if args.command == "config":
+        if args.config_command == "reconcile":
+            return _reconcile(args.config, dry_run=args.dry_run, assume_yes=args.yes)
+        config_p.print_help(sys.stderr)
+        return 2
     return _run(getattr(args, "config", None))
 
 
@@ -322,6 +346,132 @@ def _migrate(config_path: str | None) -> int:
     print(
         f"clauster: state at schema {result['schema_version']} "
         f"({result['instances']} instance record(s))",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _format_value(value: object) -> str:
+    """Render a config value for the reconcile summary (lower-case booleans like YAML)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _interactive_decide(finding):  # type: ignore[no-untyped-def]
+    """Prompt the operator about one reconcile finding; return a Decision.
+
+    Reads from stdin (the only I/O in this path, so :func:`reconcile.build_plan` stays
+    testable with an injected callback). Accepts the proposed value by default, lets the
+    operator pick another allowed value, or skip the key entirely. EOF / empty input
+    means "accept the proposal".
+    """
+    from .reconcile import Decision
+
+    dep = finding.deprecation
+    choices = dep.choices
+    if finding.has_replacement:
+        proposal = f"{dep.replacement_key}: {_format_value(finding.proposed_value)}"
+    elif finding.replacement_present:
+        proposal = f"remove {dep.deprecated_key} ({dep.replacement_key} is already set — kept)"
+    else:
+        proposal = f"remove {dep.deprecated_key} (no replacement value needed)"
+    old = _format_value(finding.old_value)
+    print(f"\n  deprecated: {dep.deprecated_key} = {old}", file=sys.stderr)
+    print(f"  reason:     {dep.explain}", file=sys.stderr)
+    print(f"  proposed:   {proposal}", file=sys.stderr)
+    prompt = "  apply? [Y]es / [n]o"
+    if choices:
+        prompt += " / a value (" + ", ".join(choices) + ")"
+    prompt += ": "
+    try:
+        answer = input(prompt).strip()
+    except EOFError:  # non-interactive stdin closed — treat as accept-default
+        answer = ""
+    if answer == "" or answer.lower() in {"y", "yes"}:
+        return Decision(
+            apply=True, value=finding.proposed_value, has_value=finding.has_replacement
+        )
+    if answer.lower() in {"n", "no"}:
+        return Decision(apply=False)
+    if answer in choices:
+        return Decision(apply=True, value=answer, has_value=True)
+    print(
+        f"  clauster: '{answer}' is not a valid choice — skipping {dep.deprecated_key}.",
+        file=sys.stderr,
+    )
+    return Decision(apply=False)
+
+
+def _reconcile(config_path: str | None, *, dry_run: bool, assume_yes: bool) -> int:
+    """Scan the config for deprecated keys and rewrite them via the atomic config writer.
+
+    ``--dry-run`` prints the plan and writes nothing; ``--yes`` accepts every proposed
+    replacement without prompting. The interactive path prompts per finding. The rewrite
+    reuses ``config_writer.write_edits`` (backup + atomic replace).
+    """
+    from .reconcile import Decision, apply_plan, build_plan, scan_config_file
+
+    config = _load_or_exit(config_path)
+    source = config.source_path
+    if source is None:  # pragma: no cover - load_config always sets it; defensive
+        print("clauster: could not determine the loaded config file path.", file=sys.stderr)
+        return 1
+    source_str = str(source)
+
+    try:
+        findings = scan_config_file(source_str)
+    except OSError as exc:
+        print(f"clauster: could not read config: {exc}", file=sys.stderr)
+        return 1
+    if not findings:
+        print(f"clauster: no deprecated keys in {source_str}.", file=sys.stderr)
+        return 0
+
+    def decide(finding):  # type: ignore[no-untyped-def]
+        if assume_yes:
+            return Decision(
+                apply=True, value=finding.proposed_value, has_value=finding.has_replacement
+            )
+        return _interactive_decide(finding)
+
+    plan = build_plan(findings, decide)
+
+    # Summarize what will change (one line per accepted finding).
+    for finding in findings:
+        dep = finding.deprecation
+        if dep.deprecated_key in plan.removals:
+            if dep.replacement_key in plan.edits:
+                target = f"{dep.replacement_key}: {_format_value(plan.edits[dep.replacement_key])}"
+            elif finding.replacement_present:
+                target = f"(removed; existing {dep.replacement_key} kept)"
+            else:
+                target = "(removed; no replacement value)"
+            print(f"clauster: {dep.deprecated_key} -> {target}", file=sys.stderr)
+
+    if plan.is_empty:
+        print("clauster: nothing to change (all findings skipped).", file=sys.stderr)
+        return 0
+
+    if dry_run:
+        print(
+            f"clauster: --dry-run — {len(plan.removals)} key(s) would be rewritten in "
+            f"{source_str}; nothing written.",
+            file=sys.stderr,
+        )
+        return 0
+
+    try:
+        apply_plan(source_str, plan)
+    except OSError as exc:
+        print(f"clauster: rewrite failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # validation / stale-hash — surface, never silently swallow
+        print(f"clauster: rewrite rejected: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"clauster: rewrote {source_str} ({len(plan.removals)} deprecated key(s) removed); "
+        "a timestamped .bak-* backup was kept.",
         file=sys.stderr,
     )
     return 0

@@ -9,6 +9,7 @@ No live reload — the running process keeps its startup config until restarted.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import stat
@@ -45,6 +46,26 @@ def _set_ruamel(doc: Any, dotted: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+def _del_dotted(doc: Any, dotted: str) -> bool:
+    """Delete a dotted key from a nested mapping; return whether anything was removed.
+
+    Walks to the parent mapping and pops the leaf. A missing key (or a non-mapping
+    along the path) is a no-op returning ``False`` — never an error, so removing an
+    absent deprecated key is harmless.
+    """
+    parts = dotted.split(".")
+    cur = doc
+    for part in parts[:-1]:
+        nxt = cur.get(part) if isinstance(cur, dict) else None
+        if not isinstance(nxt, dict):
+            return False
+        cur = nxt
+    if isinstance(cur, dict) and parts[-1] in cur:
+        del cur[parts[-1]]
+        return True
+    return False
+
+
 def _prune_backups(path: Path) -> None:
     """Keep only the newest ``_KEEP_BACKUPS`` ``.bak-*`` files for this config."""
     backups = sorted(path.parent.glob(path.name + ".bak-*"))
@@ -53,23 +74,39 @@ def _prune_backups(path: Path) -> None:
 
 
 def write_edits(
-    path: str | os.PathLike, edits: dict[str, Any], *, expected_hash: str | None = None
+    path: str | os.PathLike,
+    edits: dict[str, Any],
+    *,
+    removals: list[str] | None = None,
+    expected_hash: str | None = None,
 ) -> str:
-    """Apply allowlisted ``edits`` to the config file; return the new file hash.
+    """Apply allowlisted ``edits`` (and optional ``removals``) to the config file.
 
-    Order is fail-closed: validate (disallowed key / bad value raises before any
+    Returns the new file hash. ``removals`` is a list of dotted keys to delete — used
+    by ``clauster config reconcile`` to drop a deprecated key while writing its
+    replacement in the same atomic pass. Removed keys are NOT allowlist-checked (a
+    deletion can never widen access; a legacy alias like ``claude.resume_mode`` is not
+    in the editable set), but the post-removal candidate is fully re-validated.
+
+    Order is fail-closed: validate (disallowed edit key / bad value raises before any
     I/O), then the external-edit guard, then backup + atomic write. Raises
     :class:`StaleConfigError` if the file changed since ``expected_hash`` was read,
     and re-raises :class:`~clauster.config_editor.DisallowedFieldError` /
     :class:`~clauster.config_editor.ConfigValidationError` from validation.
     """
     path = Path(path)
+    removals = removals or []
     with _write_lock:
         original_bytes = path.read_bytes()
 
-        # 1. Validate the merge first — a disallowed key or bad value never reaches disk.
+        # 1. Validate first — a disallowed edit key or a value that fails to construct a
+        #    valid config never reaches disk. Apply removals to a copy of the parsed
+        #    config so the validated candidate reflects the deletions too.
         raw = yaml.safe_load(original_bytes.decode("utf-8")) or {}
-        validate_edits(raw, edits)
+        candidate_raw = copy.deepcopy(raw)
+        for dotted in removals:
+            _del_dotted(candidate_raw, dotted)
+        validate_edits(candidate_raw, edits)
 
         # 2. External-edit guard: compare the bytes we actually read — re-reading the file
         #    for the hash would open a TOCTOU window where an intervening edit slips through.
@@ -83,6 +120,8 @@ def write_edits(
         ruamel = YAML()
         ruamel.preserve_quotes = True
         doc = ruamel.load(original_bytes.decode("utf-8")) or CommentedMap()
+        for dotted in removals:
+            _del_dotted(doc, dotted)
         for dotted, value in edits.items():
             _set_ruamel(doc, dotted, value)
 
