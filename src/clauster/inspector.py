@@ -4,8 +4,8 @@ Secondary, ~5-min cadence. The JSON is a flat list of working sessions with no
 bridge/env grouping (Capture B), so attribution joins on ``cwd`` — the only link
 back to a managed bridge: an exact match to a bridge's cwd, or (for worktree-spawn
 bridges, whose sessions run in per-session worktrees under the project) containment
-in the project root. ``sessionId`` here is the local RFC-4122 UUID, never the API
-ULID.
+in the ``.claude/worktrees`` subtree. ``sessionId`` here is the local RFC-4122 UUID,
+never the API ULID.
 
 Agent view (Claude Code 2.1.139+) lists `claude --bg` background sessions in the
 same output, tagged ``kind: "background"`` and carrying a lifecycle ``state``.
@@ -144,7 +144,7 @@ def reconcile(
     worktree_dirs = sorted(
         (
             ((p / _WORKTREE_SUBDIR).resolve(), inst_id)
-            for p, inst_id in (worktree_roots or {}).items()
+            for p, inst_id in (worktree_roots if worktree_roots is not None else {}).items()
         ),
         key=lambda kv: len(kv[0].parts),
         reverse=True,
