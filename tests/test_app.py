@@ -58,6 +58,40 @@ def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config):
     assert "togglePtyScreen(i.project)" not in body_off
 
 
+def test_live_terminal_client_side_fit_wiring(write_config):
+    # #641: the fixed-geometry (120x40) live terminal scales to the panel client-side with a
+    # CSS transform — no wire-protocol/resize change. Assert the fit helper, its open-time +
+    # resize-listener + first-frame re-fit hooks, and the cleanup that detaches the listener
+    # all ship in the rendered source. (No JS engine in CI; this is a source-level contract.)
+    body = (
+        TestClient(create_app(load_config(write_config("claude:\n  pty_screen_enabled: true\n"))))
+        .get("/")
+        .text
+    )
+    assert "function _fitPtyScreen(reg)" in body
+    # the intrinsic grid size MUST be measured off .xterm-screen (xterm sets the fixed px
+    # width/height there) — .xterm is a plain block that stretches to the host, so measuring it
+    # would yield scale~=1 and the grid would clip silently under overflow:hidden.
+    assert 'reg.host.querySelector(".xterm-screen")' in body
+    assert "const naturalW = screen.offsetWidth;" in body
+    # scales by a transform (shrink-only) and never magnifies past 1
+    assert "Math.min(1, avail / naturalW)" in body
+    assert 'inner.style.transform = scale < 1 ? "scale(" + scale + ")" : "";' in body
+    # fits on open, on every viewport resize (debounced), and once after the first rendered frame
+    assert 'window.addEventListener("resize", reg.onResize)' in body
+    assert "reg._fitTimer = setTimeout(reg.fit, 100);" in body  # resize is debounced
+    assert "_fitPtyScreen(reg);  // first fit once the terminal element is laid out" in body
+    assert "if (!reg._fittedOnce) { reg._fittedOnce = true; _fitPtyScreen(reg); }" in body
+    # close detaches the resize listener so it can't fire against a disposed terminal
+    assert 'window.removeEventListener("resize", reg.onResize)' in body
+    # the geometry constants are UNCHANGED — the wire stays fixed 120x40 (locked decision)
+    assert "const PTY_COLS = 120;" in body
+    assert "const PTY_ROWS = 40;" in body
+    # the host clips overflow (the transform shrinks the grid; no scrollbars)
+    assert ".pty-screen-host {" in body
+    assert "overflow: hidden" in body
+
+
 def test_transcript_viewer_has_sort_toggle_and_search(write_config):
     # #612: the read-only transcript modal gains a sort-direction toggle and an
     # in-message search box. Assert both controls + their wiring ship in the markup,
