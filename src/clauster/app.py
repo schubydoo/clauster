@@ -6,6 +6,7 @@ import asyncio
 import io
 import logging
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -1242,7 +1243,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             loop.call_soon_threadsafe(job.register_terminate, proc.terminate)
 
         try:
-            await asyncio.to_thread(
+            target = await asyncio.to_thread(
                 clone_project,
                 config.projects_root,
                 name,
@@ -1265,10 +1266,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             else:
                 clone_jobs.finish(job, error=f"unexpected error: {exc}")
         else:
-            # The cloned directory may not bump projects_root's mtime at the cache's
-            # resolution; drop the cache so the new project's row renders immediately.
-            invalidate_discovery_cache()
-            clone_jobs.finish(job)
+            if job.cancel_requested:
+                # A cancel arrived but `terminate()` was a no-op — git had already
+                # finished and the dir landed. Honor the 202 "cancelling" contract: tear
+                # down the just-created project and broadcast `cancelled`, not `done`.
+                await asyncio.to_thread(shutil.rmtree, target, ignore_errors=True)
+                invalidate_discovery_cache()
+                clone_jobs.cancel(job)
+            else:
+                # The cloned directory may not bump projects_root's mtime at the cache's
+                # resolution; drop the cache so the new project's row renders immediately.
+                invalidate_discovery_cache()
+                clone_jobs.finish(job)
         # Fire the #432 `clone-done` webhook off the runner's emitter (fire-and-forget,
         # fail-open, default OFF). The error_detail is redacted before egress — a clone
         # failure can echo a remote URL/host into its message. The clone url itself is

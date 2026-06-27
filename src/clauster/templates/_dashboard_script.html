@@ -1472,9 +1472,11 @@
           // partial dir (#573). Closing the socket alone only stops us watching; the work
           // would keep running. Best-effort + fire-and-forget; the op gate stays the
           // correctness mechanism, this just ends the server's transfer promptly.
-          try {
-            fetch(ROOT + "/api/projects/clone/" + encodeURIComponent(jobId) + "/cancel", { method: "POST" });
-          } catch (e) { /* best-effort: nothing to do if the cancel POST can't be issued */ }
+          // fetch() is async, so a network rejection escapes a synchronous try/catch;
+          // attach .catch() so the best-effort cancel POST never becomes an unhandled
+          // promise rejection.
+          fetch(ROOT + "/api/projects/clone/" + encodeURIComponent(jobId) + "/cancel", { method: "POST" })
+            .catch(() => { /* best-effort: nothing to do if the cancel POST fails */ });
           try { ws.close(); } catch (e) { /* closing */ }
         };
         ws.onmessage = async (ev) => {
@@ -1491,6 +1493,11 @@
             if (m.status === "error") {
               np.error = m.error || "clone failed"; np.busy = false;
               this.toast(name + ": clone failed", "error");
+            } else if (m.status === "cancelled") {
+              // The clone was cancelled and its dir torn down server-side — there is no
+              // project to reveal. Don't call afterClone (a second tab seeing this frame
+              // would otherwise insert a phantom card + "ready" toast for a gone dir).
+              np.busy = false;
             } else {
               await this.afterClone(np, name, op);
             }

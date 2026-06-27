@@ -126,6 +126,52 @@ def test_clone_cancel_streams_cancelled_terminal_frame(write_config, tmp_path, m
     assert frames[-1] == {"type": "done", "status": "cancelled", "error": None}
 
 
+def test_clone_cancel_after_completion_cleans_up_and_reports_cancelled(
+    write_config, tmp_path, monkeypatch
+):
+    # #573 race: a cancel arrives but `proc.terminate()` is a no-op because git already
+    # finished and the dir landed — so the worker takes the SUCCESS path, not the abort
+    # path. The success branch must still honor cancel_requested: tear down the just-
+    # created project and broadcast `cancelled` (not `done`), matching the 202 contract.
+    spawned = threading.Event()
+    terminated = threading.Event()
+
+    class _FakeProc:
+        def terminate(self) -> None:
+            terminated.set()  # no-op kill: git already exited, the dir is already on disk
+
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
+        target = Path(root) / name
+        target.mkdir()  # the clone "succeeded": the project dir is on disk
+        on_proc(_FakeProc())
+        spawned.set()
+        assert terminated.wait(timeout=5), "cancel never reached the terminate hook"
+        return target  # success path: git finished before terminate() could stop it
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    with _client(write_config, tmp_path) as client:
+        projects_root = client.app.state.config.projects_root
+        resp = client.post(
+            "/api/projects/clone", json={"name": "racey", "url": "https://example.com/r.git"}
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job_id"]
+
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+            first = ws.receive_json()
+            assert first["type"] == "progress"
+            assert spawned.wait(timeout=5), "clone never spawned its process"
+            cancel = client.post(f"/api/projects/clone/{job_id}/cancel")
+            assert cancel.status_code == 202, cancel.text
+            frames = [first, *_drain_to_done(ws)]
+
+    # The terminal frame is `cancelled`, not `done`, and the landed dir was torn down.
+    assert frames[-1] == {"type": "done", "status": "cancelled", "error": None}
+    assert not (projects_root / "racey").exists()
+
+
 def test_clone_error_streams_terminal_error_frame(write_config, tmp_path, monkeypatch):
     from clauster.app import ProvisionError
 
