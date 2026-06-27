@@ -1859,3 +1859,29 @@ def test_resume_failure_no_notification_when_toggle_off(write_config, tmp_path, 
     monkeypatch.setattr(runner, "resume", _boom)
     assert client.post("/api/instances/alpha/resume").status_code == 409
     assert notifier.calls == []
+
+
+def test_resume_non_spawn_failure_does_not_notify(write_config, tmp_path, monkeypatch):
+    # #652: a resume that fails for a precondition reason — here the instance vanished
+    # mid-op (UnknownProject -> 404) — is NOT a failed reconnect, so it must stay silent
+    # even with notify_on_reconnect_failed ON. Only a SpawnError (409) fires the notice.
+    from clauster.models import RemoteControlInstance
+    from clauster.runner import UnknownProject
+
+    client = _client_with(
+        write_config,
+        tmp_path,
+        "notifications:\n  enabled: true\n  urls:\n    - 'slack://x'\n"
+        "  notify_on_reconnect_failed: true\n",
+    )
+    runner = client.app.state.runner
+    runner._instances["alpha"] = RemoteControlInstance(project="alpha", label="alpha")
+    notifier = _RecordingNotifier()
+    runner._notifier = notifier
+
+    async def _gone(_name):
+        raise UnknownProject("no managed instance to resume: 'alpha'")
+
+    monkeypatch.setattr(runner, "resume", _gone)
+    assert client.post("/api/instances/alpha/resume").status_code == 404
+    assert notifier.calls == []
