@@ -940,14 +940,17 @@
               <div>Saved — restart Clauster to apply.
                 <a href="https://schubydoo.github.io/clauster/operations/#restart" target="_blank" rel="noopener noreferrer"
                    class="alert-link">How do I restart?</a></div>
-              {# A restart reaps the cgroup and kills live pty bridges + browser sessions —
-                 mirror the CLAUDE.md editor's live-session caveat so a save-then-restart
-                 doesn't silently end running work (#427 UX-03). #}
-              <div class="mt-1 fw-medium" data-test="cfg-restart-warn"
+              {# The in-app restart re-execs in place (os.execv): bridges + hosted sessions
+                 survive the swap and reattach, so a save-then-restart preserves running
+                 work — it only briefly disconnects. This note replaced a false
+                 session-ending warning that contradicted the leave-bridges-running
+                 shutdown (#663). #}
+              <div class="mt-1" data-test="cfg-restart-note"
                    x-show="restartImpactCount() > 0" x-cloak>
-                ⚠ <span x-text="restartImpactCount()"></span>
+                <span x-text="restartImpactCount()"></span>
                 <span x-text="restartImpactCount() === 1 ? 'session' : 'sessions'">session</span>
-                running — a restart will end <span x-text="restartImpactCount() === 1 ? 'it' : 'them'">them</span>.</div>
+                running — <span x-text="restartImpactCount() === 1 ? 'it keeps' : 'they keep'">they keep</span>
+                running and <span x-text="restartImpactCount() === 1 ? 'reconnects' : 'reconnect'">reconnect</span> after the restart.</div>
             </div>
 
             <!-- Filter + section jump-nav (sticky) -->
@@ -1031,9 +1034,10 @@
             </div>
           </div>
           <div class="modal-footer justify-content-between">
-            {# In-app restart (#483): re-exec in place to apply saved changes without a
-               shell. Gated behind the same #427 restart-impact confirmation as Save
-               (restartClauster() warns about live sessions a restart would end). #}
+            {# In-app restart (#483): re-exec in place (os.execv) to apply saved changes
+               without a shell. restartClauster() confirms first, noting that running
+               sessions survive the swap and reconnect — they only briefly disconnect,
+               and the handler polls /healthz then reloads once the new image binds (#663). #}
             <button type="button" class="btn btn-ghost-secondary" data-test="cfg-restart"
                     :disabled="configEditor.restarting || configEditor.loading"
                     @click="restartClauster()">

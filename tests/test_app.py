@@ -579,25 +579,42 @@ def test_dashboard_explains_missing_connect_url(write_config):
     assert '"Preparing connect link…"' in page  # transient SR text == spinner chip label
 
 
-def test_dashboard_warns_restart_ends_live_sessions(write_config):
-    # #427 UX-03: the config-save banner said 'restart Clauster to apply' with no
-    # affordance and no warning that a restart reaps the cgroup and ends live pty
-    # bridges + browser sessions. It now carries a 'How do I restart?' docs link and
-    # a conditional 'N session(s) running — a restart will end them' line (mirroring
-    # the CLAUDE.md editor's live-session caveat). Detached/external sessions are
-    # separate processes, so restartImpactCount() intentionally excludes them.
+def test_dashboard_restart_note_says_sessions_survive(write_config):
+    # #663: the config-save note previously WARNED 'N session(s) running — a restart will
+    # end them', contradicting the actual shutdown (runner.shutdown() leaves bridges
+    # running; hosted.aclose() detaches, not stops) — the in-app re-exec PRESERVES live
+    # sessions and reattaches them. The note now reassures ('they keep running and
+    # reconnect') instead of warning. Counts only "running"/"starting" (not "stopping" —
+    # a bridge mid-Stop is on its way out, so it would overstate the "N running" copy).
     page = _client(write_config).get("/").text
     assert "restartImpactCount() {" in page  # the count helper is defined and shipped
-    # Counts only "running"/"starting" sessions (not "stopping" — a bridge mid-Stop is
-    # on its way out, so the "N running" copy would overstate it; Greptile P2).
     assert 'const liveStatuses = ["running", "starting"];' in page
-    assert 'data-test="cfg-restart-warn"' in page  # the warning element
+    assert 'data-test="cfg-restart-note"' in page  # renamed: it's a note, not a warning
     assert 'x-show="restartImpactCount() > 0"' in page  # gated on live sessions
+    # The reassuring copy (with singular/plural verb agreement) — and NOT the old
+    # false "will end them" warning.
+    assert "restartImpactCount() === 1 ? 'reconnects' : 'reconnect'" in page
+    assert "after the restart" in page
+    assert "will end" not in page
     assert "How do I restart?" in page  # the docs affordance
     # #579: the link must point at a LIVE docs target (it previously rotted to a
     # nonexistent README #running anchor). Pin the stable operations#restart URL so a
     # silent rot fails the suite rather than shipping another dead help link.
     assert "https://schubydoo.github.io/clauster/operations/#restart" in page
+
+
+def test_restart_handler_polls_healthz_then_reloads(write_config):
+    # #663: the in-app re-exec rebinds the SAME port, so the WS reconnects but the page
+    # never reloads itself — the old handler left the button stuck on "Restarting…"
+    # forever. The handler now polls /healthz after the 202, then reloads; it is bounded
+    # so a restart that never returns re-enables the button instead of spinning.
+    page = _client(write_config).get("/").text
+    assert "async restartClauster()" in page  # the handler is defined and shipped
+    assert "async awaitRestartThenReload()" in page  # the poll-then-reload helper ships
+    assert 'ROOT + "/healthz?_="' in page  # polls the auth-exempt health endpoint (cache-busted)
+    assert "window.location.reload()" in page  # and reloads once the new image binds
+    # The confirmation reassures (sessions survive) rather than warning they end.
+    assert '(n === 1 ? "reconnects" : "reconnect") + " automatically."' in page
 
 
 def test_dashboard_renders_in_app_restart_action(write_config):
@@ -611,20 +628,25 @@ def test_dashboard_renders_in_app_restart_action(write_config):
     assert "this.restartImpactCount()" in page
 
 
-def test_restart_action_success_check_and_honest_catch(write_config):
-    # #483 review (Greptile P2 x2): the success branch must not carry the dead
-    # `|| res.status === 202` (res.ok already covers every 2xx), and the catch must
-    # not over-promise a reconnect — fetch throws the same TypeError for an expected
-    # mid-restart drop AND a pre-flight failure where nothing restarted, so the message
-    # must cover both and the button must re-enable so a still-running server is retriable.
+def test_restart_action_polls_health_then_reloads_and_handles_failure(write_config):
+    # #663 (supersedes #483's "honest catch"): the in-app re-exec rebinds the SAME port,
+    # so the page never reloads itself — the handler now polls /healthz after the 202, then
+    # reloads. A DEFINITE reject (e.g. 503 no live server) re-enables the button and returns
+    # (nothing restarted — retriable). The catch (an ambiguous mid-restart drop OR a
+    # pre-flight failure) falls through to the SAME bounded poll, which resolves both
+    # (/healthz answers at once if the server is still up) and re-enables on timeout so the
+    # button never strands on "Restarting…".
     page = _client(write_config).get("/").text
-    assert "if (res.ok || res.status === 202)" not in page  # dead condition is gone
-    assert "if (res.ok) {" in page  # simplified to the 2xx check
-    # The catch surfaces an honest, non-over-promising message (not the bare success copy)
-    # and re-enables the button rather than stranding it disabled forever.
-    assert "the restart may have failed; check the service." in page
+    assert "if (res.ok || res.status === 202)" not in page  # no dead 2xx condition
+    assert "if (!res.ok) {" in page  # the definite-reject branch
+    # The definite-reject path re-enables + bails before the poll (server still up).
+    assert re.search(r"if \(!res\.ok\) \{.*?c\.restarting = false;.*?return;", page, re.DOTALL)
+    # Both the 2xx path and the catch fall through to the one bounded poll-then-reload.
+    assert "await this.awaitRestartThenReload();" in page
+    # The poll is BOUNDED (a deadline) and re-enables on timeout instead of spinning forever.
+    assert "Date.now() + 60000" in page
     assert re.search(
-        r"catch \(e\) \{.*?the restart may have failed.*?c\.restarting = false;",
+        r"async awaitRestartThenReload\(\) \{.*?this\.configEditor\.restarting = false;",
         page,
         re.DOTALL,
     )

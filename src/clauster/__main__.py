@@ -755,7 +755,8 @@ def _run(config_path: str | None) -> int:
     # If the shutdown was an in-app restart request, re-exec in place now that the
     # socket is released. Re-exec is uniform across systemd/launchd/terminal/Docker,
     # keeps the same PID (systemd's MainPID stays valid), and reloads config (read at
-    # startup); detached + KillMode=process bridges survive. Any other shutdown path
+    # startup). Running bridges + hosted sessions survive the swap (their processes outlive
+    # the same-PID re-exec) and reattach on startup (#663). Any other shutdown path
     # (signal) falls through to a normal exit.
     if getattr(app.state, "restart_requested", False):
         _reexec()
