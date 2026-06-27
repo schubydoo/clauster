@@ -280,6 +280,16 @@ def test_cli_reconcile_interactive_both_present_shows_kept_note(
     assert "is already set — kept" in capsys.readouterr().err
 
 
+def test_cli_reconcile_summary_both_present_notes_existing_kept(write_config, capsys) -> None:
+    # The --yes summary must not claim "no replacement value" when the replacement
+    # already exists in the file; it reports the existing key was kept instead.
+    path = _cfg(write_config, "claude:\n  launch_mode: standard\n  resume_mode: pty\n")
+    assert cli.main(["config", "reconcile", "-c", path, "--yes"]) == 0
+    err = capsys.readouterr().err
+    assert "existing claude.launch_mode kept" in err
+    assert "no replacement value" not in err
+
+
 def test_cli_reconcile_surfaces_rewrite_rejection(write_config, monkeypatch, capsys) -> None:
     # A failing rewrite must surface (fail closed), never be swallowed.
     path = _cfg(write_config, "usage:\n  show_cost: false\n")

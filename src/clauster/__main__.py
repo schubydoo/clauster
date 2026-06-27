@@ -443,6 +443,8 @@ def _reconcile(config_path: str | None, *, dry_run: bool, assume_yes: bool) -> i
         if dep.deprecated_key in plan.removals:
             if dep.replacement_key in plan.edits:
                 target = f"{dep.replacement_key}: {_format_value(plan.edits[dep.replacement_key])}"
+            elif finding.replacement_present:
+                target = f"(removed; existing {dep.replacement_key} kept)"
             else:
                 target = "(removed; no replacement value)"
             print(f"clauster: {dep.deprecated_key} -> {target}", file=sys.stderr)
