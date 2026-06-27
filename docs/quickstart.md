@@ -10,10 +10,19 @@ LAN / remote access, add auth afterwards — see [Networking](networking.md).
 - The **`claude` CLI on your `PATH`**, authenticated — either logged in via
   `claude`'s interactive login **or** with `ANTHROPIC_API_KEY` set in the
   environment (either satisfies the check). Clauster *spawns* `claude` — it
-  doesn't vendor it — and a spawned bridge inherits that authentication. Install
-  [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview)
-  separately; `clauster doctor` (step 4) confirms it's found and authenticated.
+  doesn't vendor it — and a spawned bridge inherits that authentication.
 - A **directory that holds your projects** — each child directory becomes a card.
+
+Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview)
+and log in (a spawned bridge inherits this login):
+
+```sh
+npm install -g @anthropic-ai/claude-code           # or: curl -fsSL https://claude.ai/install.sh | bash
+claude login                                       # or: export ANTHROPIC_API_KEY=sk-ant-...
+claude --version                                   # confirm it's on PATH
+```
+
+`clauster doctor` (step 4) confirms `claude` is found and authenticated.
 
 ```sh
 mkdir -p ~/code/my-first-project    # one child dir = one project card

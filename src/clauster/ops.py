@@ -94,7 +94,13 @@ def run_doctor(
             checks.append(Check("claude", OK, f"{version} (>= {config.claude.min_version})"))
         else:
             checks.append(
-                Check("claude", FAIL, f"{version} < required {config.claude.min_version}")
+                Check(
+                    "claude",
+                    FAIL,
+                    f"{version} < required {config.claude.min_version} — run "
+                    f"`claude update` (or reinstall Claude Code via the installer / npm) "
+                    f"to reach >= {config.claude.min_version}",
+                )
             )
     except claude_cli.ClaudeNotFound as exc:
         checks.append(Check("claude", FAIL, str(exc)))
