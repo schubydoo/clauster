@@ -69,6 +69,14 @@ def test_build_pty_bridge_argv_resume_adds_continue(runner_config) -> None:
     assert "--continue" in argv  # this is what restores prior context on restart
 
 
+def test_build_pty_bridge_argv_never_adds_verbose(runner_config) -> None:
+    """The verbose toggle is standard-only — the pty flag-form keeper never gets --verbose."""
+    runner, claude_json = _pty_runner(runner_config)
+    runner._config.instance_defaults.verbose = True
+    argv = runner._build_pty_bridge_argv(Path("/tmp/x.log"), "alpha", "default", resume=False)
+    assert "--verbose" not in argv  # would corrupt the live-screen tap / PTY render
+
+
 def test_is_pty_mode_gated_on_config_and_platform(runner_config) -> None:
     pty_runner, _ = _pty_runner(runner_config)
     std_runner = SessionRunner(runner_config[0], claude_json=runner_config[1])

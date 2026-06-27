@@ -162,6 +162,12 @@ class InstanceDefaults(BaseModel):
     permission_mode: PermissionMode = Field(
         default="default", description="Default permission mode for new bridges."
     )
+    verbose: bool = Field(
+        default=False,
+        description="Pass `--verbose` to spawned standard `claude remote-control` bridges "
+        "for detailed connection/session logs — every spawn mode (same-dir/worktree/session). "
+        "The pty (flag-form) bridge is never passed --verbose. Off by default.",
+    )
     session_name_prefix: str | None = Field(
         default=None,
         description="Optional prefix for auto-generated Remote Control session names (maps to "
