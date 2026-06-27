@@ -17,8 +17,8 @@ Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview)
 and log in (a spawned bridge inherits this login):
 
 ```sh
-curl -fsSL https://claude.ai/install.sh | bash    # or: npm install -g @anthropic-ai/claude-code
-claude login                                       # or: export ANTHROPIC_API_KEY=sk-...
+npm install -g @anthropic-ai/claude-code           # or: curl -fsSL https://claude.ai/install.sh | bash
+claude login                                       # or: export ANTHROPIC_API_KEY=sk-ant-...
 claude --version                                   # confirm it's on PATH
 ```
 
