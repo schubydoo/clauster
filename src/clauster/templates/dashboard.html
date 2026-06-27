@@ -766,8 +766,8 @@
                      placeholder="https://github.com/owner/repo.git" @input="np.error = null" @keyup.enter="submitNew()">
               <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
                 <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>
-              <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts blocked unless enabled in
-                config · cloned code runs only when you launch a session.</p>
+              <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts need
+                <code>clone.allow_private_hosts</code> in clauster.yml · cloning only fetches files (nothing runs).</p>
             </div>
             <div class="mt-3">
               <button class="btn btn-primary" @click="submitNew()" :disabled="np.busy || !np.name">
