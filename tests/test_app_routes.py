@@ -1197,6 +1197,21 @@ def test_dashboard_injects_browser_notifications_when_enabled(write_config, tmp_
     assert "stop: false" in html  # default-OFF
 
 
+def test_notify_on_transitions_skips_first_observed_state(write_config, tmp_path):
+    # #636 (P1): instances starts as {} on (re)load, so without a guard every bridge in the
+    # first poll looks like a fresh transition and fires a spurious notification (e.g. a
+    # still-crashed bridge with notify_on_crash ON re-notifies on every dashboard open). The
+    # fix skips the first observed state — the empty-prev guard must run BEFORE the loop that
+    # diffs the maps. No JS engine ships in CI, so we pin the fix in the rendered source.
+    extra = "notifications:\n  browser_enabled: true\n"
+    html = _client_with(write_config, tmp_path, extra).get("/").text
+    body = html.split("notifyOnTransitions(prev, next) {", 1)[1].split("},", 1)[0]
+    guard = "if (Object.keys(prev).length === 0) return;"
+    assert guard in body, "first-load guard missing from notifyOnTransitions"
+    # The guard must precede the per-bridge transition loop, else the storm still fires.
+    assert body.index(guard) < body.index("for (const name of Object.keys(next))")
+
+
 def test_dashboard_injects_usage_mode_off_via_legacy_show_cost(write_config, tmp_path):
     # The deprecated show_cost alias still flips the badge off through to the frontend.
     html = _client_with(write_config, tmp_path, "usage:\n  show_cost: false\n").get("/").text

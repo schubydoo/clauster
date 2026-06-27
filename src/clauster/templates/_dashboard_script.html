@@ -219,6 +219,11 @@
       notifyOnTransitions(prev, next) {
         if (!BROWSER_NOTIFICATIONS_ENABLED) return;
         if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+        // Skip the first observed state: instances starts as {} on (re)load, so every bridge
+        // would have before === undefined and look like a fresh transition — firing a spurious
+        // notification on every dashboard open (e.g. a still-crashed bridge with notify_on_crash
+        // ON). Only fire once we have a prior map to compare against.
+        if (Object.keys(prev).length === 0) return;
         for (const name of Object.keys(next)) {
           const after = next[name] && next[name].status;
           const before = prev[name] && prev[name].status;
@@ -539,7 +544,14 @@
       // satisfies the gate (exactly the #586 stale-on-first-render bug this PR fixed).
       configFieldDisabled(path) {
         const spec = this.configEditor.specs[path];
-        const dep = spec && spec.depends_on;
+        if (!spec) return false;
+        // depends_on_any: editable when ANY listed master is on (e.g. a per-event notify
+        // toggle stays editable while EITHER the outbound or the browser channel is on).
+        const anyDeps = spec.depends_on_any;
+        if (Array.isArray(anyDeps) && anyDeps.length) {
+          return !anyDeps.some((m) => !!this.configEditor.edits[m]);
+        }
+        const dep = spec.depends_on;
         if (!dep) return false;
         const depVal = spec.depends_on_value;
         if (depVal !== null && depVal !== undefined) {
@@ -551,7 +563,16 @@
       // "Set X to <value>" (value-gated master).
       configDependHint(path) {
         const spec = this.configEditor.specs[path];
-        if (!spec || !spec.depends_on) return "";
+        if (!spec) return "";
+        const anyDeps = spec.depends_on_any;
+        if (Array.isArray(anyDeps) && anyDeps.length) {
+          const labels = anyDeps.map((m) => {
+            const ms = this.configEditor.specs[m] || {};
+            return "“" + (ms.label || m) + "”";
+          });
+          return "Turn on " + labels.join(" or ") + " to use this.";
+        }
+        if (!spec.depends_on) return "";
         const master = this.configEditor.specs[spec.depends_on] || {};
         const masterLabel = master.label || spec.depends_on;
         const depVal = spec.depends_on_value;

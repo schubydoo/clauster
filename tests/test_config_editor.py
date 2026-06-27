@@ -200,8 +200,8 @@ def test_field_specs_exposes_claustrum_block_with_depends() -> None:
 
 def test_field_specs_exposes_notifications_block_with_depends() -> None:
     # #541: the notifications block splits into two channel master switches (outbound
-    # `enabled` + `browser_enabled`) plus the per-event `notify_on_*` toggles, which grey
-    # out when the outbound master is off (same FIELD_DEPENDS mechanism).
+    # `enabled` + `browser_enabled`) plus the per-event `notify_on_*` toggles. Each toggle
+    # drives BOTH channels, so it stays editable when EITHER channel is on (depends_on_any).
     specs = field_specs()
     notif = [p for p in EDITABLE_FIELDS if p.startswith("notifications.")]
     assert notif == [
@@ -218,12 +218,36 @@ def test_field_specs_exposes_notifications_block_with_depends() -> None:
     assert specs["notifications.enabled"]["depends_on"] is None
     assert specs["notifications.browser_enabled"]["depends_on"] is None
     assert specs["notifications.enabled"]["section_label"] == "Notifications"
-    # Every per-event toggle greys out unless the outbound channel is on.
+    # Every per-event toggle is editable when EITHER channel is on — so a browser-only user
+    # (browser_enabled=true, enabled=false) can still edit them. No single-master depends_on.
     for path in notif:
         if path.startswith("notifications.notify_on_"):
-            assert specs[path]["depends_on"] == "notifications.enabled"
+            assert specs[path]["depends_on"] is None
+            assert specs[path]["depends_on_any"] == [
+                "notifications.enabled",
+                "notifications.browser_enabled",
+            ]
     # The new fields are plain booleans.
     assert specs["notifications.notify_on_session_end"]["type"] == "bool"
+
+
+def test_notify_event_toggles_editable_for_browser_only_user() -> None:
+    # #636 (P2): a browser-only user (browser_enabled=true, enabled=false) must still be able
+    # to edit the per-event toggles — the browser channel reads them. depends_on_any lists
+    # BOTH masters so the JS configFieldDisabled greys the toggle out only when NEITHER is on.
+    specs = field_specs()
+    spec = specs["notifications.notify_on_crash"]
+    masters = spec["depends_on_any"]
+    assert masters == ["notifications.enabled", "notifications.browser_enabled"]
+
+    # Mirror the JS gate (configFieldDisabled): disabled only when NO master is on.
+    def disabled(edits: dict[str, bool]) -> bool:
+        return not any(edits.get(m) for m in masters)
+
+    assert disabled({"notifications.enabled": False, "notifications.browser_enabled": False})
+    assert not disabled({"notifications.enabled": False, "notifications.browser_enabled": True})
+    assert not disabled({"notifications.enabled": True, "notifications.browser_enabled": False})
+    assert not disabled({"notifications.enabled": True, "notifications.browser_enabled": True})
 
 
 def test_validate_edits_accepts_notification_event_toggles(write_config) -> None:
