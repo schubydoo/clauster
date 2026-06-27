@@ -336,6 +336,14 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.6 (2026-06-27)
+
+### Fixes
+
+- Fix the in-app config editor's enum dropdowns (Launch mode, Usage badge mode, and every other `<select>`) showing the first option instead of the saved value — `x-model` ran before its `x-for` options existed, so the browser fell back to option index 0 (e.g. displaying "Standard" while the bridge default was `pty`, or "Cost" while the badge was `off`), which also left Save greyed when you re-picked the real value; each option now binds `:selected` to the model value so the dropdown reflects what is actually on disk. ([#644](https://github.com/schubydoo/clauster/pull/644))
+- Make the in-app config editor reflect the current on-disk config: `GET /api/config` now reads the editable field values from the file (consistent with the content hash) instead of the startup config captured in memory. A save writes the file but deliberately does not live-reload the running config, so previously reopening the editor after a save showed the stale pre-save values until a restart — making a successful save look reverted. The runtime still only adopts the change on restart (the `restart_required` flag is unchanged); an unreadable/corrupt file falls back to the in-memory values so the editor still opens. ([#645](https://github.com/schubydoo/clauster/pull/645))
+- Fix the dashboard's per-bridge live-session count (the #570/#622 expander) never appearing for a `spawn_mode: worktree` bridge. `claude remote-control --spawn worktree` runs each session in a per-session git worktree under `<project>/.claude/worktrees/`, but session→bridge attribution joined only on an exact project-root cwd match, so a worktree session read as EXTERNAL instead of TRACKED and was excluded from the count (and from the bridge's tracked-session liveness). Attribution now also matches a worktree-spawn bridge's `.claude/worktrees` subtree by containment (most-specific root first, so a nested project's bridge wins), while same-dir/session bridges keep the exact-cwd join. ([#646](https://github.com/schubydoo/clauster/pull/646))
+
 ## 0.12.5 (2026-06-27)
 
 ### Features

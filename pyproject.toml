@@ -1,6 +1,6 @@
 [project]
 name = "clauster"
-version = "0.12.5"
+version = "0.12.6"
 description = "Self-hosted web UI for spawning and managing Claude Code remote-control bridges on a remote host."
 readme = "README.md"
 requires-python = ">=3.11"
