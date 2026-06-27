@@ -320,7 +320,9 @@ def test_project_row_order_style_uses_object_not_clobbering_string():
 
     from clauster import app as _app
 
-    tpl = (Path(_app.__file__).parent / "templates" / "_project_row.html").read_text()
+    tpl = (Path(_app.__file__).parent / "templates" / "_project_row.html").read_text(
+        encoding="utf-8"
+    )
     assert "{ order: projectOrderRank(" in tpl, "row order :style must use the Alpine object form"
     assert "'order:' +" not in tpl, "row order :style must not be the clobbering string form"
 
