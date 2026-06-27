@@ -1088,8 +1088,15 @@
                           data-test="transcript-session" @click="openTranscriptSession(s.session)">
                     <div class="d-flex justify-content-between align-items-center gap-2">
                       <code class="text-truncate" x-text="s.session"></code>
-                      <span class="badge bg-secondary-lt"
-                            x-text="s.turn_count + (s.turn_count === 1 ? ' turn' : ' turns')"></span>
+                      <span class="d-flex align-items-center gap-2">
+                        {# #614: a transcript whose session id maps to a running
+                           bridge/agent/hosted session is badged "live". #}
+                        <span class="badge bg-green-lt" data-test="transcript-live"
+                              x-show="s.live" x-cloak
+                              title="This session is currently running."><span aria-hidden="true">●</span> live</span>
+                        <span class="badge bg-secondary-lt"
+                              x-text="s.turn_count + (s.turn_count === 1 ? ' turn' : ' turns')"></span>
+                      </span>
                     </div>
                     <div class="text-secondary small" x-text="transcriptWhen(s.mtime)"></div>
                   </button>

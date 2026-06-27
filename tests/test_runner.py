@@ -836,6 +836,38 @@ def test_tracked_sessions_empty_when_none(runner_config):
     assert runner.tracked_sessions_by_instance() == {}
 
 
+def test_live_session_uuids_matches_by_sanitized_cwd(runner_config):
+    """live_session_uuids returns local_uuids of sessions writing into a project's dir (#614)."""
+    config, _ = runner_config
+    runner = _make_runner(runner_config)
+    root = config.projects_root
+
+    def session(uuid, rel, attribution=Attribution.TRACKED):
+        return WorkingSession(
+            pid=hash(uuid) & 0xFFFF,
+            cwd=root / rel,
+            kind="interactive",
+            started_at=1,
+            local_uuid=uuid,
+            attribution=attribution,
+        )
+
+    runner._sessions = [
+        session("u-bridge", "alpha"),  # under alpha -> live for alpha
+        session("u-ext", "alpha", attribution=Attribution.EXTERNAL),  # any kind, same dir -> live
+        session("u-beta", "beta"),  # different project -> not live for alpha
+    ]
+    assert runner.live_session_uuids(root / "alpha") == {"u-bridge", "u-ext"}
+    assert runner.live_session_uuids(root / "beta") == {"u-beta"}
+    assert runner.live_session_uuids(root / "gamma") == set()
+
+
+def test_live_session_uuids_empty_when_no_sessions(runner_config):
+    config, _ = runner_config
+    runner = _make_runner(runner_config)
+    assert runner.live_session_uuids(config.projects_root / "alpha") == set()
+
+
 # -- external-session adoption (FE-4b, #330) ---------------------------------
 
 

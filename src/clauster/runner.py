@@ -407,6 +407,27 @@ class SessionRunner:
             sessions.sort(key=lambda s: (s.started_at, s.local_uuid))
         return out
 
+    def live_session_uuids(self, project_path: Path) -> set[str]:
+        """Local session UUIDs of currently-running sessions writing into a project's dir (#614).
+
+        Joins the live ``agents --json`` snapshot (:attr:`_sessions`, already
+        terminal-state-filtered at parse) to a project's transcript directory by the
+        same key Claude uses to lay the transcripts down: the *sanitized cwd* (see
+        :func:`pointers.sanitize_cwd`). A session whose ``cwd`` sanitizes to the same
+        directory as ``project_path`` writes its ``<local_uuid>.jsonl`` there, so its
+        ``local_uuid`` matches a transcript filename stem listed for that project.
+
+        The result lets the read-only transcript viewer badge a transcript as "live"
+        when its session id maps to a running bridge/agent. It covers any kind of live
+        session landing in that dir (a bridge child, an external terminal session); a
+        worktree-spawn session lives under a *different* sanitized cwd, so it is neither
+        listed here nor by :func:`usage.transcript_paths_for` for the project root —
+        the two stay consistent. Hosted (claustrum) sessions are folded in separately
+        by the route, since they run no ``agents --json`` session.
+        """
+        target = pointers.sanitize_cwd(project_path)
+        return {s.local_uuid for s in self._sessions if pointers.sanitize_cwd(s.cwd) == target}
+
     # ----- persistence (state.json, D14) ----------------------------------
 
     def _persist_subset(self) -> dict[str, dict]:
