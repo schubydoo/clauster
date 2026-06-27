@@ -9,7 +9,7 @@
    zone avoids). #}
           <div class="list-group-item" data-project="{{ p.name }}"
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
-               :style="projectSort !== 'name' ? ('order:' + projectOrderRank('{{ p.name }}')) : ''"
+               :style="projectSort !== 'name' ? { order: projectOrderRank('{{ p.name }}') } : {}"
                x-data="{ lopen: false, lmode: DEFAULT_LAUNCH_MODE, lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', ladv: false }">
             <div class="d-flex align-items-center flex-wrap gap-2">
               <svg class="ico text-success" style="flex:none" role="img" aria-label="Directory trusted" x-cloak
