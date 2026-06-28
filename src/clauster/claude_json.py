@@ -43,6 +43,15 @@ except ImportError:  # pragma: no cover - exercised only on Windows
 _log = logging.getLogger("clauster.claude_json")
 
 
+def _is_posix() -> bool:
+    """Return whether POSIX file-mode semantics apply (False on Windows).
+
+    A seam over ``os.name == "posix"`` so the non-POSIX atomic-write branch is testable on
+    a POSIX host without monkeypatching ``os.name`` itself (which would break ``tempfile``).
+    """
+    return os.name == "posix"
+
+
 @contextlib.contextmanager
 def _locked(claude_json: Path) -> Iterator[None]:
     """Hold an exclusive advisory lock for a read-modify-write of ``claude_json``.
@@ -56,9 +65,6 @@ def _locked(claude_json: Path) -> Iterator[None]:
     if fcntl is None:
         yield
         return
-    # The lock-path derivation MUST stay identical to ``clauster.trust._locked`` (its thin
-    # copy that resolves fcntl/os from trust's own namespace for monkeypatch tests): the two
-    # writers serialize against each other only by both computing this same sidecar path.
     lock_path = claude_json.with_suffix(claude_json.suffix + ".lock")
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
@@ -128,7 +134,7 @@ def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) ->
             # file keeps 0600 (it can hold tokens). POSIX-only — on Windows file
             # permissions are ACL-based (stat reports 0o666 regardless), so POSIX mode
             # bits are meaningless and we leave mkstemp's default as-is.
-            if os.name == "posix":
+            if _is_posix():
                 try:
                     mode = stat.S_IMODE(claude_json.stat().st_mode)
                 except FileNotFoundError:

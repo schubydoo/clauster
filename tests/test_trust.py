@@ -9,12 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from clauster import trust
+from clauster import claude_json, trust
 
-# The advisory flock is POSIX-only; on Windows `trust.fcntl` is None and the
+# The advisory flock is POSIX-only; on Windows `claude_json.fcntl` is None and the
 # lock degrades to a no-op, so the serialization/lockfile-path tests don't apply.
+# (The lock primitive lives in clauster.claude_json; trust routes its writes through it.)
 needs_fcntl = pytest.mark.skipif(
-    trust.fcntl is None, reason="advisory flock is POSIX-only (no fcntl)"
+    claude_json.fcntl is None, reason="advisory flock is POSIX-only (no fcntl)"
 )
 # POSIX-only behaviours: file-mode preservation (Windows stat reports 0o666 for any
 # writable file) and atomic concurrent os.replace (Windows raises WinError 5 on a
@@ -141,7 +142,7 @@ def test_trust_backup_failure_is_logged_not_silent(tmp_path: Path, caplog, monke
         return real_write_text(self, *args, **kwargs)
 
     monkeypatch.setattr(pathlib.Path, "write_text", boom)
-    with caplog.at_level("WARNING", logger="clauster.trust"):
+    with caplog.at_level("WARNING", logger="clauster.claude_json"):
         trust.trust_directory(target, cj)
     assert trust.is_trusted(target, cj) is True  # trust write still succeeded
     assert not cj.with_suffix(cj.suffix + ".bak").exists()  # backup genuinely failed
@@ -162,7 +163,7 @@ def test_locked_serializes_concurrent_writers(tmp_path: Path, monkeypatch):
     counter_lock = threading.Lock()
     active = 0
     max_active = 0
-    real_read = trust._read_claude_json
+    real_read = claude_json._read_claude_json
 
     def slow_read(path):
         nonlocal active, max_active
@@ -176,7 +177,7 @@ def test_locked_serializes_concurrent_writers(tmp_path: Path, monkeypatch):
             with counter_lock:
                 active -= 1
 
-    monkeypatch.setattr(trust, "_read_claude_json", slow_read)
+    monkeypatch.setattr(claude_json, "_read_claude_json", slow_read)
 
     threads = [threading.Thread(target=trust.trust_directory, args=(target, cj)) for _ in range(5)]
     for t in threads:
@@ -192,7 +193,7 @@ def test_locked_serializes_concurrent_writers(tmp_path: Path, monkeypatch):
 def test_locked_noop_without_fcntl(tmp_path: Path, monkeypatch):
     # On a platform without fcntl (Windows) the lock degrades to a no-op: the
     # write still completes and no .lock sidecar is created.
-    monkeypatch.setattr(trust, "fcntl", None)
+    monkeypatch.setattr(claude_json, "fcntl", None)
     cj = tmp_path / "claude.json"
     cj.write_text("{}", encoding="utf-8")
     target = tmp_path / "proj"
@@ -219,8 +220,8 @@ def test_locked_lockfile_open_failure_is_best_effort(tmp_path: Path, monkeypatch
             raise OSError("simulated: cannot open lock file")
         return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(trust.os, "open", boom)
-    with caplog.at_level("WARNING", logger="clauster.trust"):
+    monkeypatch.setattr(claude_json.os, "open", boom)
+    with caplog.at_level("WARNING", logger="clauster.claude_json"):
         trust.trust_directory(target, cj)
 
     assert trust.is_trusted(target, cj) is True  # write still completed
@@ -279,7 +280,7 @@ def test_concurrent_writers_without_lock_keep_valid_json(tmp_path: Path, monkeyp
     # POSIX-only: this relies on rename() being atomic under concurrency; Windows
     # os.replace raises WinError 5 on a racing replace (and has no advisory lock to
     # serialize writers), so the property simply doesn't hold there.
-    monkeypatch.setattr(trust, "fcntl", None)
+    monkeypatch.setattr(claude_json, "fcntl", None)
     cj = tmp_path / "claude.json"
     cj.write_text("{}", encoding="utf-8")
     targets = [tmp_path / f"proj{i}" for i in range(6)]

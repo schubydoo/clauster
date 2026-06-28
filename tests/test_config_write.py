@@ -239,6 +239,29 @@ def test_merge_redacted_scalar_sentinel_keeps_stored() -> None:
     assert cw.merge_redacted(cw.REDACTION_SENTINEL, "kept") == "kept"
 
 
+def test_merge_redacted_list_keeps_stored_secret_and_drops_orphan_sentinel() -> None:
+    # redact_secrets masks secrets INSIDE lists (e.g. a token in an MCP `args` list), so
+    # merge must restore from them symmetrically — a list sentinel must never be written
+    # verbatim. A sentinel at index i keeps stored_list[i]; a sentinel past the stored list
+    # (or over a non-list stored) is dropped, never written as the literal sentinel.
+    stored = ["--token", "sk-live-secret", "--flag"]
+    incoming = ["--token", cw.REDACTION_SENTINEL, "--flag"]
+    assert cw.merge_redacted(incoming, stored) == ["--token", "sk-live-secret", "--flag"]
+    # Orphan sentinel (no stored counterpart / stored is None) is dropped, not written.
+    assert cw.merge_redacted([cw.REDACTION_SENTINEL], None) == []
+    assert cw.REDACTION_SENTINEL not in str(cw.merge_redacted(["x", cw.REDACTION_SENTINEL], ["x"]))
+
+
+def test_redact_then_merge_round_trip_list_secret_survives() -> None:
+    # End-to-end: redact a config whose args list holds a secret, then merge the redacted
+    # view back over the stored value with nothing else touched — the real secret survives.
+    stored = {"mcpServers": {"s": {"args": ["--token", "${REAL_SECRET}"]}}}
+    redacted = cw.redact_secrets(stored)
+    assert redacted["mcpServers"]["s"]["args"][1] == cw.REDACTION_SENTINEL  # masked in the list
+    merged = cw.merge_redacted(redacted, stored)
+    assert merged["mcpServers"]["s"]["args"] == ["--token", "${REAL_SECRET}"]  # restored
+
+
 def test_merge_redacted_sentinel_cannot_exfiltrate_sibling_secret() -> None:
     # The security-critical property: a sent-back sentinel restores ONLY the same key's
     # stored value — it can never be replayed to read a *different* stored secret out.

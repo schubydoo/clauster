@@ -49,7 +49,7 @@ from typing import Any, Literal
 
 from fastapi import HTTPException
 
-from .claude_json import _atomic_write_claude_json, _locked, _read_claude_json
+from .claude_json import update_claude_json
 from .config import ClausterConfig
 from .discovery import is_valid_project_name
 
@@ -243,10 +243,12 @@ def merge_redacted(incoming: Any, stored: Any) -> Any:
     the browser can never read a secret out, and a write that doesn't touch it need not
     resend it. Dicts merge key-by-key (recursing); a sentinel for a key the store
     doesn't have is dropped entirely (there is nothing to keep). Non-dict / non-sentinel
-    values from ``incoming`` win. When ``incoming`` is a dict but ``stored`` is not (e.g.
-    ``None`` for an absent subtree — exactly what ``write_subtree`` passes), ``stored`` is
-    treated as ``{}`` so a sentinel for a never-stored key is dropped rather than written
-    verbatim as the literal ``"********"``.
+    values from ``incoming`` win. Dicts and lists both recurse (``redact_secrets`` masks
+    inside lists too — e.g. a token in an MCP ``args`` list — so the merge must restore
+    from them symmetrically, or the literal ``"********"`` would be written verbatim).
+    When ``incoming`` is a dict/list but ``stored`` is not (e.g. ``None`` for an absent
+    subtree — exactly what ``write_subtree`` passes), ``stored`` is treated as empty so a
+    sentinel for a never-stored slot is dropped rather than written as the literal sentinel.
     """
     if incoming == REDACTION_SENTINEL:
         return stored  # keep-stored (may be a missing-key sentinel handled by caller)
@@ -261,6 +263,19 @@ def merge_redacted(incoming: Any, stored: Any) -> Any:
             else:
                 out[k] = merge_redacted(v, stored_dict.get(k))
         return out
+    if isinstance(incoming, list):
+        stored_list = stored if isinstance(stored, list) else []
+        out_list: list[Any] = []
+        for i, v in enumerate(incoming):
+            if v == REDACTION_SENTINEL:
+                if i < len(stored_list):
+                    out_list.append(stored_list[i])  # keep the stored secret at this index
+                # else: sentinel past the stored list ⇒ nothing to keep, drop it
+            else:
+                out_list.append(
+                    merge_redacted(v, stored_list[i] if i < len(stored_list) else None)
+                )
+        return out_list
     return incoming
 
 
@@ -271,13 +286,15 @@ def write_subtree(claude_json: Path, subtree_key: str, mutate: Callable[[Any], A
     ``data[subtree_key]`` (or ``None`` when absent) and returns the new subtree value;
     every other top-level key is preserved verbatim by the atomic replace — never a
     whole-file browser blob over the top, which would wipe the operator's trust grants
-    and tokens. Runs under the shared :mod:`clauster.claude_json` ``flock`` + one-time
-    ``.bak`` + mode-preserving atomic replace, the same machinery ``trust`` uses.
+    and tokens. Runs through the shared
+    :func:`~clauster.claude_json.update_claude_json` transaction (``flock`` + one-time
+    ``.bak`` + mode-preserving atomic replace) — the same machinery ``trust`` uses.
     """
-    with _locked(claude_json):
-        raw, data = _read_claude_json(claude_json)
+
+    def _apply(data: dict) -> None:
         data[subtree_key] = mutate(data.get(subtree_key))
-        _atomic_write_claude_json(claude_json, raw, data)
+
+    update_claude_json(claude_json, _apply)
 
 
 def capability_status(config: ClausterConfig) -> dict[str, bool]:

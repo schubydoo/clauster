@@ -128,6 +128,19 @@ def test_update_claude_json_new_file_owner_only(tmp_path: Path) -> None:
     assert stat.S_IMODE(f.stat().st_mode) == 0o600  # it can hold tokens
 
 
+def test_update_claude_json_non_posix_skips_chmod(tmp_path: Path, monkeypatch) -> None:
+    # On a non-POSIX platform the mode-mirroring fchmod is skipped (Windows permissions are
+    # ACL-based); the atomic write still completes. Patch the _is_posix seam (not os.name,
+    # which would break tempfile) to cover the non-POSIX branch on a POSIX host.
+    monkeypatch.setattr(cj, "_is_posix", lambda: False)
+    f = tmp_path / "claude.json"
+    f.write_text('{"a": 1}', encoding="utf-8")
+
+    cj.update_claude_json(f, lambda data: data.__setitem__("b", 2))
+
+    assert json.loads(f.read_text(encoding="utf-8")) == {"a": 1, "b": 2}
+
+
 def test_locked_noop_without_fcntl(tmp_path: Path, monkeypatch) -> None:
     # Where fcntl is unavailable (Windows) the lock degrades to a no-op: the write
     # still completes and no .lock sidecar is created.
