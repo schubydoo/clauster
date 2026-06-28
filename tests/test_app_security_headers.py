@@ -22,6 +22,9 @@ _SCRIPT_SRC_RE = re.compile(r"script-src 'self' 'nonce-[A-Za-z0-9_-]+' 'unsafe-e
 _STYLE_SRC_RE = re.compile(r"style-src 'self' 'nonce-[A-Za-z0-9_-]+'")
 # Pull the nonce token out of a CSP header.
 _CSP_NONCE_RE = re.compile(r"script-src 'self' 'nonce-([A-Za-z0-9_-]+)'")
+# The style-src nonce specifically (script-src and style-src share a token today, but the
+# style round-trip must assert the style directive directly, not rely on that invariant).
+_STYLE_SRC_NONCE_RE = re.compile(r"style-src 'self' 'nonce-([A-Za-z0-9_-]+)'")
 # Pull the nonce attribute off the first inline <script nonce="..."> in a body.
 _BODY_NONCE_RE = re.compile(r'<script\s+nonce="([A-Za-z0-9_-]+)"')
 # Pull the nonce attribute off the first inline <style nonce="..."> in a body.
@@ -229,7 +232,7 @@ def test_csp_style_nonce_round_trip(runner_config, path):
     assert resp.status_code == 200, resp.text
     csp = resp.headers["Content-Security-Policy"]
     _assert_nonce_style_src(csp)
-    header_nonce = _CSP_NONCE_RE.search(csp)
+    header_nonce = _STYLE_SRC_NONCE_RE.search(csp)
     style_nonce = _STYLE_BODY_NONCE_RE.search(resp.text)
     assert header_nonce, csp
     assert style_nonce, "no inline <style nonce=...> in the rendered body"
