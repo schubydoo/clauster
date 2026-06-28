@@ -297,7 +297,6 @@
       // The pill's severity + wording follow this so it doesn't cry wolf over warnings.
       readinessBlockers() { return this.readiness.checks.filter((c) => c.status !== "ok" && c.status !== "warn"); },
       readinessWarnings() { return this.readiness.checks.filter((c) => c.status === "warn"); },
-      checkGlyph(s) { return s === "ok" ? "✓" : s === "warn" ? "⚠" : "✗"; },
       checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
       // --- launch popover + unified active list ---
       // Outcome-language launch choices — jargon (hosted/bridge/background) mapped to

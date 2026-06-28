@@ -53,7 +53,7 @@
                       @click="togglePreflight('{{ p.name }}')"
                       :aria-expanded="!!preflightOpen['{{ p.name }}']"
                       :title="preflightWarnCount('{{ p.name }}') + (preflightWarnCount('{{ p.name }}') === 1 ? ' readiness check' : ' readiness checks') + ' for this project before launch'">
-                <span aria-hidden="true">⚠</span> <span x-text="preflightWarnCount('{{ p.name }}')"></span> <span x-text="preflightWarnCount('{{ p.name }}') === 1 ? 'check' : 'checks'"></span>
+                <svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg><span x-text="preflightWarnCount('{{ p.name }}')"></span> <span x-text="preflightWarnCount('{{ p.name }}') === 1 ? 'check' : 'checks'"></span>
               </button>
 
               <!-- right cluster: Run Claude here + overflow -->
@@ -67,7 +67,7 @@
                           @click="lopen = !lopen; if (lopen) coerceSpawnMode('{{ p.name }}', {{ p.is_git_repo | tojson }})"
                           :aria-expanded="lopen">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run Claude here
-                    <span class="ms-1" x-text="lopen ? '▴' : '▾'">▾</span>
+                    <svg class="ico ms-1" aria-hidden="true" x-show="lopen"><use href="#ic-caret-up"/></svg><svg class="ico ms-1" aria-hidden="true" x-show="!lopen"><use href="#ic-caret-down"/></svg>
                   </button>
                   <div class="card launch-pop" x-show="lopen" x-cloak @click.outside="lopen = false"
                        @keydown.escape.window="lopen = false">
@@ -126,7 +126,7 @@
                       <!-- advanced (Desktop / bridge launch only): spawn dir + true-resume mode -->
                       <div class="mt-2" x-show="lmode === 'desktop'" x-cloak>
                         <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="ladv = !ladv"
-                                :aria-expanded="ladv" x-text="ladv ? 'Hide advanced ⌃' : 'Advanced ⌄'">Advanced ⌄</button>
+                                :aria-expanded="ladv"><span x-text="ladv ? 'Hide advanced' : 'Advanced'">Advanced</span><svg class="ico ms-1" aria-hidden="true" x-show="ladv"><use href="#ic-caret-up"/></svg><svg class="ico ms-1" aria-hidden="true" x-show="!ladv"><use href="#ic-caret-down"/></svg></button>
                         <div class="row g-2 mt-1" x-show="ladv" x-cloak>
                           {# Spawn only applies to the standard (multi-session) bridge — it maps to
                              `claude remote-control --spawn`. pty is a single interactive session run
@@ -203,7 +203,7 @@
               <div id="readiness-detail-head-{{ p.name }}" class="text-secondary fw-medium mb-1">Readiness checks for <code>{{ p.name }}</code> before launch</div>
               <template x-for="c in preflightWarnings('{{ p.name }}')" :key="c.name">
                 <div class="d-flex align-items-start gap-1 py-1">
-                  <span class="text-warning" aria-hidden="true">⚠</span>
+                  <svg class="ico text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>
                   <span><span class="fw-medium text-capitalize" x-text="c.name"></span><span class="text-secondary" x-text="': ' + c.detail"></span></span>
                 </div>
               </template>
@@ -211,7 +211,7 @@
             <!-- trust-on-start confirm (bridge / Desktop launch path) -->
             <div class="alert alert-warning mt-2" x-show="confirmTrust['{{ p.name }}']" x-cloak>
               <div>
-                <p class="mb-2">⚠ Trust the files in <code>{{ p.name }}</code>? Launching a session here
+                <p class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>Trust the files in <code>{{ p.name }}</code>? Launching a session here
                   lets it run tools and execute any code in <code>CLAUDE.md</code> /
                   <code>.claude</code> in this directory.</p>
                 <label class="form-check mb-2">
@@ -231,7 +231,7 @@
 
             <!-- bypassPermissions typed-confirm -->
             <div class="alert alert-danger mt-2" x-show="confirmBypass['{{ p.name }}']" x-cloak>
-              <p class="mb-2">⚠ <strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
+              <p class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg><strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
                 run tools without asking. Type the project name to confirm.</p>
               <div class="input-group">
                 <input type="text" class="form-control" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
@@ -265,7 +265,7 @@
                         x-text="cmdBytes('{{ p.name }}') + ' / 65536 bytes'"></span>
                 </div>
                 <div class="alert alert-warning py-1" x-show="cmd['{{ p.name }}'].bridge_running" x-cloak>
-                  ⚠ A session is running — saved changes apply to <strong>new</strong> sessions, not the attached one.</div>
+                  <svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>A session is running — saved changes apply to <strong>new</strong> sessions, not the attached one.</div>
                 <div class="alert alert-danger py-1" x-show="cmd['{{ p.name }}'].error" x-cloak x-text="cmd['{{ p.name }}'].error"></div>
                 <textarea class="form-control cmd-text" x-model="cmd['{{ p.name }}'].content" rows="12"
                           spellcheck="false" autocomplete="off" aria-label="CLAUDE.md contents for {{ p.name }}"
@@ -275,7 +275,7 @@
                           :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving || cmdBytes('{{ p.name }}') > 65536"
                           x-text="cmd['{{ p.name }}'].saving ? 'Saving…' : 'Save'">Save</button>
                   <button type="button" class="btn btn-sm" @click="closeClaudeMd('{{ p.name }}')">Cancel</button>
-                  <span class="text-green" x-show="cmd['{{ p.name }}'].savedAt && !cmd['{{ p.name }}'].error" x-cloak>✓ saved</span>
+                  <span class="text-green" x-show="cmd['{{ p.name }}'].savedAt && !cmd['{{ p.name }}'].error" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-check"/></svg>saved</span>
                 </div>
               </div>
             </template>
@@ -293,8 +293,7 @@
                   ? externalCount('{{ p.name }}') + ' external sessions active'
                   : 'External session active'"></span>
                 <span class="text-muted ms-1">— not managed by Clauster</span>
-                <span class="text-muted ms-1" aria-hidden="true"
-                      x-text="externalOpen['{{ p.name }}'] ? '▾' : '▸'"></span>
+                <svg class="ico ms-1 text-muted" aria-hidden="true" x-show="externalOpen['{{ p.name }}']"><use href="#ic-caret-down"/></svg><svg class="ico ms-1 text-muted" aria-hidden="true" x-show="!externalOpen['{{ p.name }}']"><use href="#ic-caret-right"/></svg>
               </button>
               <!-- Adopt: take over a *standard* external bridge so Clauster manages it (#330).
                    Server-gated to standard sessions — a pty external session stays display-only. -->
