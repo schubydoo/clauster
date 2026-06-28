@@ -318,7 +318,7 @@ def run_keeper(
                             # session: the live view (if any) reports a terminal `error` status
                             # instead of a silently-frozen `live` screen, and URL extraction
                             # falls back to the raw-bytes regex below. The bridge is unaffected.
-                            if tap is not None:
+                            if tap is not None:  # pragma: no cover - tap is set with screen
                                 screen_seq += 1
                                 _write_screen_status(
                                     tap.sidecar, screen_seq, "error", f"screen feed: {exc}"
