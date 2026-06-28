@@ -194,6 +194,20 @@ def test_persistence_propagates_migration_error(tmp_path):
             Persistence(tmp_path)
 
 
+def test_persistence_disposes_engine_when_construction_fails(tmp_path):
+    # A failed startup step must dispose the just-built engine (no pool leak) before
+    # propagating — the caller never receives the object to dispose() itself.
+    from clauster.db import persistence as persistence_mod
+
+    with (
+        mock.patch.object(bootstrap.command, "upgrade", side_effect=RuntimeError("boom")),
+        mock.patch.object(persistence_mod, "dispose_engine") as disposed,
+    ):
+        with pytest.raises(MigrationError):
+            Persistence(tmp_path)
+    disposed.assert_called_once()
+
+
 def test_migration_creates_all_foundation_tables(tmp_path):
     p = Persistence(tmp_path)
     try:
