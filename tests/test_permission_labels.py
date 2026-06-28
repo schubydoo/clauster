@@ -90,19 +90,22 @@ def test_no_bypass_option_without_ceiling(write_config) -> None:
     assert '<option value="bypassPermissions"' not in page
 
 
-def test_perm_tooltip_has_no_dangling_separator(write_config) -> None:
+def test_perm_tooltip_ends_cleanly(write_config) -> None:
     # The effect tooltip joins modes with " · " and must end cleanly. When bypass is
-    # filtered out (the common no-ceiling case) the trailing item is dontAsk, so the
-    # tooltip must end "…not pre-approved." with no stray separator before the period.
+    # filtered out (the common no-ceiling case) the trailing item is dontAsk, whose
+    # effect already ends in a period — so the tooltip must end with that effect string
+    # verbatim: no dangling " · " separator AND no doubled-up trailing period.
     import re
 
     row = _client(write_config).get("/api/projects/alpha/row").text
     m = re.search(r'title="What the agent may do without asking[^"]*"', row)
     assert m is not None
     tooltip = m.group(0)
-    assert ' · "' not in tooltip  # no dangling separator at the end
-    assert "·." not in tooltip and " ·." not in tooltip
-    assert tooltip.endswith(f'{PERMISSION_LABELS["dontAsk"]["effect"]}."')
+    assert ' · "' not in tooltip  # no dangling separator before the closing quote
+    last_effect = PERMISSION_LABELS["dontAsk"]["effect"]
+    assert last_effect.endswith(".")  # the effect supplies its own period
+    assert tooltip.endswith(f'{last_effect}"')  # ends with the effect itself — no extra "."
+    assert ".." not in tooltip  # no doubled period anywhere
 
 
 def test_project_row_endpoint_carries_the_map(write_config) -> None:

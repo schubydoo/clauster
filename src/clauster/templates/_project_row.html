@@ -115,9 +115,11 @@
                         <select id="perm-{{ p.name }}" class="form-select form-select-sm" x-model="lperm"
                                 aria-describedby="perm-effect-{{ p.name }}"
                                 {# Lead each rendered item with the separator (not trailing it) so a
-                                   filtered-out bypassPermissions tail never leaves a dangling " · ". #}
+                                   filtered-out bypassPermissions tail never leaves a dangling " · ".
+                                   Each effect string already ends with its own period — don't append
+                                   another, or the tail renders a double period. #}
                                 {% set ns = namespace(first=true) %}
-                                title="What the agent may do without asking — {% for mode, lbl in permission_labels.items() %}{% if mode != 'bypassPermissions' or p.allow_bypass_permissions %}{% if not ns.first %} · {% endif %}{{ mode }} = {{ lbl.effect }}{% set ns.first = false %}{% endif %}{% endfor %}.">
+                                title="What the agent may do without asking — {% for mode, lbl in permission_labels.items() %}{% if mode != 'bypassPermissions' or p.allow_bypass_permissions %}{% if not ns.first %} · {% endif %}{{ mode }} = {{ lbl.effect }}{% set ns.first = false %}{% endif %}{% endfor %}">
                           {% for mode, lbl in permission_labels.items() %}
                           {% if mode != 'bypassPermissions' %}
                           <option value="{{ mode }}">{{ lbl.long }}</option>
