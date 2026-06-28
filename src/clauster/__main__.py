@@ -3,7 +3,7 @@
 Subcommands: ``run`` (default), ``hash-password``, ``hash-token``,
 ``hash-metrics-token``, ``doctor``, ``backup``, ``restore``, ``migrate``,
 ``install-service``, ``reap-environments``, ``keepers``, ``usage``,
-``config reconcile``.
+``config reconcile``, ``mcp``.
 Bare ``clauster`` and ``clauster -c <cfg>`` still mean ``run`` for
 backward compatibility.
 """
@@ -52,6 +52,7 @@ _COMMANDS = {
     "keepers",
     "usage",
     "config",
+    "mcp",
 }
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
@@ -174,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
         help="apply the proposed replacements non-interactively (no prompts)",
     )
 
+    mcp_p = sub.add_parser(
+        "mcp", help="run the read-only MCP server over stdio (list + status, #527)"
+    )
+    mcp_p.add_argument("-c", "--config", help="path to clauster.yml")
+
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
     if argv and argv[0] not in _COMMANDS and argv[0] not in _TOP_LEVEL_FLAGS:
         argv = ["run", *argv]
@@ -206,6 +212,12 @@ def main(argv: list[str] | None = None) -> int:
             return _reconcile(args.config, dry_run=args.dry_run, assume_yes=args.yes)
         config_p.print_help(sys.stderr)
         return 2
+    if args.command == "mcp":
+        # Imported lazily so the common `run` path never pays for the MCP server's
+        # import graph, and the rest of the CLI works even if it's unused.
+        from .mcp_server import main as mcp_main
+
+        return mcp_main(["-c", args.config] if args.config else [])
     return _run(getattr(args, "config", None))
 
 
