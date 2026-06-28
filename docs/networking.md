@@ -63,6 +63,49 @@ auth:
     the `Secure` flag and be sniffable on the wire. Clauster warns about this at
     startup. Put it behind https / a TLS proxy, or set `cookie_secure: always`.
 
+## Native HTTPS (built-in TLS)
+
+Instead of an external TLS proxy, Clauster can terminate HTTPS itself — point it
+at an existing certificate + key and uvicorn serves TLS directly. This is the
+simplest way to get a **secure context** (required for browser features like Web
+Notifications on a LAN IP) when you don't want a reverse proxy or `tailscale
+serve`.
+
+```yaml
+projects_root: ~/code
+host: 0.0.0.0
+auth:
+  enabled: true
+  password_required: true
+  password_hash: "$argon2id$v=19$..."   # clauster hash-password
+tls:
+  cert_file: /etc/clauster/tls/fullchain.pem   # PEM cert (chain)
+  key_file: /etc/clauster/tls/privkey.pem      # PEM private key
+```
+
+Both paths are validated **fail-closed, twice** — at config-load and again at
+server start — for existence, readability, and that they resolve to an absolute
+file (any `..` is collapsed). If TLS is configured but a file is missing or
+unreadable, Clauster **aborts startup with a clear error** rather than silently
+falling back to plain HTTP. The key material is never logged.
+
+With native TLS the connection is `https`, so `auth.cookie_secure: auto` already
+marks the session cookie `Secure` — no `cookie_secure: always` needed, and the
+plain-http cookie warning above is suppressed. The bind/auth rules are unchanged:
+HTTPS does not relax the non-loopback "enforced auth" requirement.
+
+!!! note "Scope — cert provisioning is out of scope"
+    This wires an **existing** cert + key into uvicorn only. Self-signed-cert
+    generation and ACME/Let's Encrypt automation are **not** part of this feature —
+    obtain the cert with your own tool (mkcert, `openssl`, `certbot`, your CA) and
+    point `tls.cert_file`/`tls.key_file` at it.
+
+!!! warning "`tls` is file/CLI-managed only"
+    `tls.cert_file`/`tls.key_file` are structural filesystem paths, so — like the
+    bind host and secret hashes — they are **not** editable from the in-app config
+    editor. Set them in `clauster.yml` (or via `CLAUSTER_TLS_CERT_FILE` /
+    `CLAUSTER_TLS_KEY_FILE`).
+
 ## Behind a reverse proxy
 
 Set `root_path` if Clauster is served under a sub-path, and use

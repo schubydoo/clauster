@@ -14,8 +14,9 @@ import ipaddress
 import logging
 import os
 import re
+import types
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Union, get_args, get_origin
 
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
@@ -924,6 +925,60 @@ class ClaustrumConfig(BaseModel):
     )
 
 
+def resolve_cert_path(field: str, raw: str) -> Path:
+    """Resolve a TLS material path to a readable absolute file, or fail closed.
+
+    Expands ``~``, resolves to an absolute path (collapsing any ``..`` traversal so
+    the value can't quietly escape its intended directory), and confirms the target
+    is a regular file the process can read. Every failure raises ``ValueError`` — a
+    missing cert/key must abort startup, never fall back to plain HTTP. The path is
+    echoed in the message (a filesystem path, not the key material), the bytes never.
+    """
+    expanded = Path(raw).expanduser()
+    # resolve() collapses `..`/symlinks to a single canonical absolute path; strict
+    # would raise its own FileNotFoundError, but we want our explicit message + the
+    # readable-file checks below, so resolve non-strict then validate.
+    resolved = expanded.resolve()
+    if not resolved.exists():
+        raise ValueError(f"tls.{field} does not exist: {resolved}")
+    if not resolved.is_file():
+        raise ValueError(f"tls.{field} is not a regular file: {resolved}")
+    if not os.access(resolved, os.R_OK):
+        raise ValueError(f"tls.{field} is not readable: {resolved}")
+    return resolved
+
+
+class TlsConfig(BaseModel):
+    """Native HTTPS termination: serve TLS directly from a cert + key pair.
+
+    Off when absent. When set, uvicorn is handed ``ssl_certfile`` / ``ssl_keyfile``
+    and terminates TLS itself — an alternative to an external reverse proxy or
+    ``tailscale serve`` for operators who want neither. Both paths are validated at
+    config-load (existence + readable + absolute, traversal collapsed) and re-checked
+    at server start; a missing/unreadable file aborts startup rather than silently
+    serving plain HTTP. Self-signed generation and ACME are intentionally out of
+    scope here — point this at an already-provisioned cert + key.
+    """
+
+    cert_file: str = Field(
+        description="Path to the PEM certificate (chain) file. `~` is expanded and the "
+        "path is resolved to an absolute file at load — it must exist and be readable.",
+    )
+    key_file: str = Field(
+        description="Path to the PEM private-key file. `~` is expanded and the path is "
+        "resolved to an absolute file at load — it must exist and be readable.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_material(self) -> TlsConfig:
+        # Fail closed at load: resolve both paths to readable absolute files (or raise).
+        # Store the resolved paths back so the server hands uvicorn canonical absolutes
+        # and a second defense-in-depth check at start-up sees the same values.
+        self.cert_file = str(resolve_cert_path("cert_file", self.cert_file))
+        self.key_file = str(resolve_cert_path("key_file", self.key_file))
+        return self
+
+
 class ClausterConfig(BaseModel):
     """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
 
@@ -986,6 +1041,14 @@ class ClausterConfig(BaseModel):
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     webhooks: WebhooksConfig = Field(default_factory=WebhooksConfig)
     claustrum: ClaustrumConfig = Field(default_factory=ClaustrumConfig)
+    tls: TlsConfig | None = Field(
+        default=None,
+        description="Native HTTPS termination. Unset (default) = serve plain HTTP and "
+        "rely on a reverse proxy / `tailscale serve` for TLS. Set `tls.cert_file` + "
+        "`tls.key_file` to have Clauster terminate TLS itself (validated fail-closed at "
+        "load and at server start). Self-signed/ACME provisioning is out of scope — "
+        "supply an existing cert + key.",
+    )
 
     _source_path: Path | None = PrivateAttr(default=None)
 
@@ -993,6 +1056,16 @@ class ClausterConfig(BaseModel):
     def source_path(self) -> Path | None:
         """Filesystem path the config was loaded from, or None if not yet loaded."""
         return self._source_path
+
+    @property
+    def tls_active(self) -> bool:
+        """Whether native TLS termination is configured (a validated cert + key present).
+
+        The single source of truth shared by the server bring-up (which hands uvicorn
+        ``ssl_certfile``/``ssl_keyfile``) and the cookie-Secure startup warning (which
+        stays quiet because the connection is now https).
+        """
+        return self.tls is not None
 
     def allows_bypass(self, project_name: str) -> bool:
         """Whether the config hard-ceiling permits bypassPermissions for this project."""
@@ -1070,20 +1143,45 @@ def _candidate_paths(explicit: Path | None) -> list[Path]:
     return paths
 
 
+def _nested_model(ann: object) -> type[BaseModel] | None:
+    """Return the nested ``BaseModel`` an annotation wraps for env-var recursion, or ``None``.
+
+    Handles a bare ``BaseModel`` subclass and an ``Optional[BaseModel]`` (``X | None``,
+    e.g. ``tls: TlsConfig | None``) so an optional nested section's scalar leaves still
+    get ``CLAUSTER_<SECTION>_<LEAF>`` env vars — without the ``Optional`` case the field
+    short-circuits to a bogus ``CLAUSTER_TLS`` scalar no string could ever satisfy.
+
+    Deliberately does NOT unwrap ``dict``/``list`` containers (e.g.
+    ``dict[str, ProjectConfig]``): those stay unmappable leaves, because a single env
+    var can't address one entry of a map — recursing into the value model would invent
+    phantom keys like ``CLAUSTER_PROJECTS_<LEAF>`` that pollute the ``projects`` map.
+    """
+    if isinstance(ann, type) and issubclass(ann, BaseModel):
+        return ann
+    # Only unwrap a Union/Optional (`X | None` or `Optional[X]`) — never a generic
+    # container like dict/list, whose args are a key/value type, not a section model.
+    if get_origin(ann) in (Union, types.UnionType):
+        for arg in get_args(ann):
+            if isinstance(arg, type) and issubclass(arg, BaseModel):
+                return arg
+    return None
+
+
 def _scalar_env_map(
     model: type[BaseModel], prefix: tuple[str, ...] = ()
 ) -> dict[str, tuple[str, ...]]:
     """Map CLAUSTER_<UPPER_SNAKE_PATH> -> dotted path for every scalar leaf.
 
-    Nested models recurse; dict/list leaves (e.g. projects, trusted_ips) are
-    skipped because a single env var can't express them unambiguously.
+    Nested models recurse (including ``Optional`` ones); dict/list leaves (e.g.
+    projects, trusted_ips) are skipped because a single env var can't express them
+    unambiguously.
     """
     out: dict[str, tuple[str, ...]] = {}
     for name, field in model.model_fields.items():
-        ann = field.annotation
         path = (*prefix, name)
-        if isinstance(ann, type) and issubclass(ann, BaseModel):
-            out.update(_scalar_env_map(ann, path))
+        nested = _nested_model(field.annotation)
+        if nested is not None:
+            out.update(_scalar_env_map(nested, path))
         else:
             env_name = "CLAUSTER_" + "_".join(path).upper()
             out[env_name] = path

@@ -79,12 +79,13 @@ unknown per-project keys are ignored.
 | `root_path` | str | `""` | ASGI `root_path` for serving under a reverse-proxy sub-path. |
 | `log_format` | `text` \| `json` | `text` | Application log format. `text` (default) is the human single-line format; `json` emits one structured JSON object per record. Both modes redact session URLs / bearer ids before the line is written. |
 | `instance_name` | str \| null | `null` | Optional label (≤32 chars, `[A-Za-z0-9_.-]`). When set, retitles the process to `clauster[<name>]` so co-resident instances are distinguishable in `ps`/`pgrep`. Cosmetic only. |
+| `tls` | TlsConfig \| null | `null` | Native HTTPS termination. Unset (default) = serve plain HTTP and rely on a reverse proxy / `tailscale serve` for TLS. Set `tls.cert_file` + `tls.key_file` to have Clauster terminate TLS itself (validated fail-closed at load and at server start). Self-signed/ACME provisioning is out of scope — supply an existing cert + key. |
 <!-- END GEN: clauster -->
 
 Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
 `clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications`,
-`webhooks`, `claustrum` — each documented below (`auth.reverse_proxy` is nested
-under `auth`).
+`webhooks`, `claustrum`, `tls` — each documented below (`auth.reverse_proxy` is
+nested under `auth`).
 
 ## `claude` — binary & bridge spawn (`ClaudeConfig`)
 
@@ -413,6 +414,42 @@ claustrum:
   enabled: true
   binary: claustrum
 ```
+
+## `tls` — native HTTPS termination (`TlsConfig`)
+
+Unset by default — Clauster serves plain HTTP and you terminate TLS upstream (a
+reverse proxy or `tailscale serve`). Set both `tls.cert_file` and `tls.key_file`
+to have Clauster terminate TLS **itself** (uvicorn's `ssl_certfile`/`ssl_keyfile`),
+which gives a secure context — required for browser features like Web
+Notifications on a LAN IP — without a proxy.
+
+<!-- BEGIN GEN: tls -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `cert_file` | str | *(required)* | Path to the PEM certificate (chain) file. `~` is expanded and the path is resolved to an absolute file at load — it must exist and be readable. |
+| `key_file` | str | *(required)* | Path to the PEM private-key file. `~` is expanded and the path is resolved to an absolute file at load — it must exist and be readable. |
+<!-- END GEN: tls -->
+
+```yaml
+host: 0.0.0.0
+tls:
+  cert_file: /etc/clauster/tls/fullchain.pem
+  key_file: /etc/clauster/tls/privkey.pem
+```
+
+!!! danger "Fail-closed cert handling"
+    Both paths are validated **twice** — at config-load and again at server start —
+    for existence, readability, and that they resolve to an absolute file (any `..`
+    is collapsed). If TLS is configured but a file is missing or unreadable, Clauster
+    **aborts startup with a clear error** rather than silently serving plain HTTP.
+    The key material is never logged. These fields are file/CLI-managed only and are
+    deliberately **not** editable from the in-app config editor.
+
+When TLS is active the connection is `https`, so `auth.cookie_secure: auto` marks
+the session cookie `Secure` and the plain-http cookie warning is suppressed.
+Self-signed-cert generation and ACME/Let's Encrypt are **out of scope** for this
+block — point it at an already-provisioned cert + key. See
+[Networking → Native HTTPS](networking.md#native-https-built-in-tls).
 
 ## Minimal example
 
