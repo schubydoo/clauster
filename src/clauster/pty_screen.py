@@ -21,6 +21,7 @@ lazily here so importing this module â€” or running the app without the extra â€
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -65,14 +66,30 @@ class PyteUnavailableError(RuntimeError):
     """
 
 
+def _pyte_unavailable_message() -> str:
+    """Return a frozen-binary-aware explanation for the absent ``pyte`` dependency.
+
+    On the standalone PyInstaller binary ``pyte`` can never be present: it is LGPL-licensed
+    and deliberately not bundled, and a side ``pip``/``uv`` install lands in an environment
+    the frozen binary never reads. Pointing a binary user at ``install clauster[pty]`` is a
+    dead end, so emit a message that names the real constraint and the only working path.
+    """
+    if getattr(sys, "frozen", False):
+        return (
+            "the live terminal view is unavailable in the standalone binary: 'pyte' is "
+            "LGPL-licensed and is not bundled, and it cannot be added to the binary after "
+            "the fact. To use the live view, run clauster from a pip/uv install with the "
+            "extra instead: pip install 'clauster[pty]'."
+        )
+    return "the live pty-screen view needs the optional 'pyte' dependency; install clauster[pty]"
+
+
 def _import_pyte() -> Any:
     """Import ``pyte`` lazily, raising a clear error when the ``pty`` extra is absent."""
     try:
         import pyte
     except ImportError as exc:
-        raise PyteUnavailableError(
-            "the live pty-screen view needs the optional 'pyte' dependency; install clauster[pty]"
-        ) from exc
+        raise PyteUnavailableError(_pyte_unavailable_message()) from exc
     return pyte
 
 
