@@ -277,6 +277,28 @@ def test_sortmeta_for_all_omits_unknown_and_empty(store):
     assert store.sortmeta_for_all([]) == {}
 
 
+def test_sortmeta_for_all_chunks_large_name_lists(store, monkeypatch):
+    # With more projects than the IN() chunk size, results must still merge across chunk
+    # boundaries — the SQLite host-parameter cap must never silently drop projects or
+    # degrade the whole sort to empty.
+    from clauster.db import stores as stores_mod
+
+    monkeypatch.setattr(stores_mod, "_SORTMETA_CHUNK", 2)
+    base = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
+    names = ["p0", "p1", "p2", "p3", "p4"]  # 3 chunks of (2, 2, 1)
+    for i, name in enumerate(names):
+        store.append(
+            project_name=name,
+            mode="pty",
+            kind="ended",
+            at=base + timedelta(minutes=i),
+            cost_usd=float(i),
+        )
+    meta = store.sortmeta_for_all(names)
+    assert set(meta) == set(names)  # every chunk merged, none dropped
+    assert meta["p0"][1] == 0.0 and meta["p4"][1] == 4.0
+
+
 # ----- FK cascade ---------------------------------------------------------
 
 
