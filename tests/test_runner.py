@@ -1101,6 +1101,36 @@ async def test_poll_attributes_starting_bridge_session_not_external(runner_confi
     assert runner._instances["alpha"].status is InstanceStatus.STARTING  # still starting, kept
 
 
+async def test_poll_attributes_starting_worktree_bridge_session_not_external(
+    runner_config, monkeypatch
+):
+    # #713 (worktree arm): a STARTING worktree-spawn bridge runs its session in a per-session
+    # worktree under <root>/.claude/worktrees/<id>. During the startup window it must attribute
+    # to the bridge by containment (TRACKED), not read EXTERNAL — same race as the same-dir arm.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STARTING,
+        spawn_mode="worktree",
+    )  # bridge_pid None -> not in live_projects
+    wt = config.projects_root / "alpha" / ".claude" / "worktrees" / "bridge-cse_x"
+    wt.mkdir(parents=True, exist_ok=True)
+    sess = WorkingSession(
+        pid=843900,
+        cwd=wt,
+        kind="interactive",
+        started_at=843900,
+        local_uuid="u-wt",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    await runner.poll_once()
+    assert runner.external_sessions_by_project() == {}  # attributed by worktree containment
+    tracked = runner.tracked_sessions_by_instance()
+    assert tracked.get("alpha") and [s.local_uuid for s in tracked["alpha"]] == ["u-wt"]
+
+
 async def test_poll_ignores_background_session_at_stopped_cwd(runner_config, monkeypatch):
     # A `claude --bg` background session (agent view, 2.1.139+) at a STOPPED
     # project's cwd is NOT an external bridge: the stopped record must survive
