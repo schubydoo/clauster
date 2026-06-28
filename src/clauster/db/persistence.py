@@ -41,11 +41,18 @@ class Persistence:
         already-running loop without offloading it, or the migration blocks the loop.
         """
         self._engine: Engine = create_db_engine(state_dir, database_url)
-        upgrade_to_head(self._engine)
-        self._session_factory: sessionmaker[Session] = make_session_factory(self._engine)
-        # One-time, fail-closed: import a pre-existing JSON state on the first boot.
-        # The returned "did import" bool is informational and logged inside the call.
-        import_legacy_json(state_dir, self._session_factory)
+        try:
+            upgrade_to_head(self._engine)
+            self._session_factory: sessionmaker[Session] = make_session_factory(self._engine)
+            # One-time, fail-closed: import a pre-existing JSON state on the first boot.
+            # The returned "did import" bool is informational and logged inside the call.
+            import_legacy_json(state_dir, self._session_factory)
+        except BaseException:
+            # A failed startup step (e.g. MigrationError) still propagates fail-closed, but
+            # dispose the just-built engine first so its connection pool isn't leaked when
+            # construction raises before the caller ever receives the object to dispose().
+            dispose_engine(self._engine)
+            raise
 
     @property
     def session_factory(self) -> sessionmaker[Session]:
