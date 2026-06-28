@@ -1654,6 +1654,35 @@
         np.busy = false; np.cloning = false;
         np.progress = { percent: null, phase: "" };
       },
+      // Cancel an in-progress clone from the dedicated Cancel button (#659 items 1+2).
+      // Reuses the existing #573 server-side cancel via `_abortClone` (terminate the git
+      // worker + tear down its partial dir + close the watch WS), then confirms with a
+      // toast — the panel-close toggle aborted silently, leaving the operator unsure it
+      // actually stopped. Single-flight: the `!np.cloning` guard plus clearing np.cloning
+      // (which hides the button) and nulling `_abortClone` mean a second synchronous click
+      // no-ops — it can't re-POST cancel against a job already torn down.
+      cancelClone() {
+        const np = this.np;
+        if (!np.cloning) return;  // nothing in flight to cancel (button already hidden)
+        // Bump the op id FIRST, like resetNewProject does. A Cancel can land in the window
+        // between np.cloning=true and watchClone installing `_abortClone` (while the clone
+        // POST is still in flight); without this bump the resolving POST's `_npOwns(op)`
+        // stays true and installs an orphan live watch that runs the clone to completion
+        // invisibly. Bumping staleifies that attempt so watchClone early-returns instead.
+        this._nextNpOp();
+        // `_abortClone` POSTs the #573 cancel endpoint and closes the socket; it also sets
+        // the watch's `settled` flag so no late `done`/`cancelled` frame races our teardown.
+        // It may be null in the pre-watch window above — the op bump is what neutralizes
+        // that case; this just stops the server transfer promptly once the watch exists.
+        if (this._abortClone) { this._abortClone(); this._abortClone = null; }
+        // The clone (and its partial dir) is gone server-side — return the dialog to a clean,
+        // retryable state (panel + name/url kept) rather than stranding a frozen progress bar.
+        np.cloning = false; np.busy = false;
+        np.progress = { percent: null, phase: "" };
+        // Honest copy: the cancel POST is fire-and-forget, so the client can't confirm the
+        // server actually removed files — don't assert an outcome it didn't observe.
+        this.toast("Clone cancelled", "info");
+      },
       // Per-submit operation id. Each submit claims a fresh one; reset/supersede bumps the
       // counter so an older attempt's captured op stops matching. A safe ownership token
       // where the project name is NOT — two attempts (cancel + resubmit) can share a name.
