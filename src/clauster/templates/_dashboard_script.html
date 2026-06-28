@@ -2271,6 +2271,7 @@
         // Carry the consecutive-reconnect counter forward across an auto-reconnect so the cap
         // below bounds the whole retry burst, not each attempt in isolation (mirrors openLogs).
         const view = { open: true, ws: null, token, lastSeq: after, events: prev ? prev.events : [],
+                       nextKey: prev ? (prev.nextKey || 0) : 0,
                        input: prev ? prev.input : "", sending: false, connLost: false,
                        ended: false, endedReason: "", attempts: prev ? prev.attempts : 0 };
         this.hostedView[id] = view;
@@ -2378,7 +2379,10 @@
           this.$nextTick(() => this.scrollHosted(id));
           return;
         }
-        for (const it of this._hostedEventToItems(e)) v.events.push(it);
+        // Stamp a stable, monotonic key so the x-for keys on item identity, not list
+        // position — the MAX_LOG_LINES front-splice below shifts every index otherwise,
+        // and an index key would rebind nodes to the wrong events (the Alpine key gotcha).
+        for (const it of this._hostedEventToItems(e)) { it._key = v.nextKey++; v.events.push(it); }
         if (v.events.length > MAX_LOG_LINES) v.events.splice(0, v.events.length - MAX_LOG_LINES);
         this.$nextTick(() => this.scrollHosted(id));
       },
