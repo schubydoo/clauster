@@ -1664,14 +1664,24 @@
       cancelClone() {
         const np = this.np;
         if (!np.cloning) return;  // nothing in flight to cancel (button already hidden)
+        // Bump the op id FIRST, like resetNewProject does. A Cancel can land in the window
+        // between np.cloning=true and watchClone installing `_abortClone` (while the clone
+        // POST is still in flight); without this bump the resolving POST's `_npOwns(op)`
+        // stays true and installs an orphan live watch that runs the clone to completion
+        // invisibly. Bumping staleifies that attempt so watchClone early-returns instead.
+        this._nextNpOp();
         // `_abortClone` POSTs the #573 cancel endpoint and closes the socket; it also sets
         // the watch's `settled` flag so no late `done`/`cancelled` frame races our teardown.
+        // It may be null in the pre-watch window above — the op bump is what neutralizes
+        // that case; this just stops the server transfer promptly once the watch exists.
         if (this._abortClone) { this._abortClone(); this._abortClone = null; }
         // The clone (and its partial dir) is gone server-side — return the dialog to a clean,
         // retryable state (panel + name/url kept) rather than stranding a frozen progress bar.
         np.cloning = false; np.busy = false;
         np.progress = { percent: null, phase: "" };
-        this.toast("Clone cancelled — partial files removed", "info");
+        // Honest copy: the cancel POST is fire-and-forget, so the client can't confirm the
+        // server actually removed files — don't assert an outcome it didn't observe.
+        this.toast("Clone cancelled", "info");
       },
       // Per-submit operation id. Each submit claims a fresh one; reset/supersede bumps the
       // counter so an older attempt's captured op stops matching. A safe ownership token

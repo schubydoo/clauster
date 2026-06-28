@@ -1835,7 +1835,17 @@ def test_dashboard_clone_cancel_confirms_with_toast(write_config, tmp_path):
     # Item 2: cancelClone surfaces a confirmation toast via the existing toast()
     # mechanism so the operator sees the clone was actually cancelled.
     html = _client(write_config, tmp_path).get("/").text
-    assert 'this.toast("Clone cancelled — partial files removed", "info")' in html
+    assert 'this.toast("Clone cancelled", "info")' in html
+
+
+def test_dashboard_clone_cancel_bumps_op_to_neutralize_inflight(write_config, tmp_path):
+    # cancelClone bumps the per-submit op id (like resetNewProject) so a Cancel that lands
+    # while the clone POST is still in flight staleifies that attempt — the resolving POST
+    # then can't install an orphan watch that would run the clone to completion invisibly.
+    html = _client(write_config, tmp_path).get("/").text
+    # Slice the method body: from its definition up to the confirmation toast that ends it.
+    body = html.split("cancelClone() {", 1)[1].split('this.toast("Clone cancelled"', 1)[0]
+    assert "this._nextNpOp();" in body
 
 
 def test_resume_failure_fires_reconnect_failed_notification(write_config, tmp_path, monkeypatch):
