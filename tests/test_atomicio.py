@@ -128,6 +128,23 @@ def test_atomic_write_text_closes_fd_when_fdopen_fails(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []  # temp removed, target not written
 
 
+def test_atomic_write_text_fdopen_failure_survives_double_close(tmp_path, monkeypatch):
+    # If FileIO adopted+closed the fd before a wrapper stage raised, the guarded os.close
+    # hits EBADF — that must be swallowed so the ORIGINAL fdopen error propagates, not the
+    # double-close error.
+    def _boom_fdopen(*a, **k):
+        raise OSError("primary fdopen failure")
+
+    def _already_closed(fd):
+        raise OSError("EBADF: fd already closed")
+
+    monkeypatch.setattr(atomicio.os, "fdopen", _boom_fdopen)
+    monkeypatch.setattr(atomicio.os, "close", _already_closed)
+    with pytest.raises(OSError, match="primary fdopen failure"):
+        atomic_write_text(tmp_path / "f.txt", "data")
+    assert list(tmp_path.iterdir()) == []  # temp still removed
+
+
 def test_fsync_dir_ignores_open_error(tmp_path, monkeypatch):
     # A directory whose fd can't be opened for fsync (Windows can't open a dir; or a
     # perm/race) is a no-op — durability of the rename is then the filesystem's to keep.
