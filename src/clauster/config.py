@@ -115,9 +115,10 @@ class ClaudeConfig(BaseModel):
         description="(pty mode) Publish a redacted, read-only render of the bridge's live "
         "terminal screen for the dashboard's live-terminal view (#534). Off by default; "
         "needs the optional `pyte` dependency (`pip install 'clauster[pty]'`) — without it the "
-        "feature stays dormant. Not available on the standalone binary: `pyte` is LGPL-licensed "
-        "and is not bundled, and it cannot be side-loaded into a PyInstaller binary, so run "
-        "clauster from a `pip`/`uv` install with the `[pty]` extra to use the live view. The "
+        "feature stays dormant. The standalone binary does not bundle `pyte` (LGPL): either run "
+        "clauster from a `pip`/`uv` install with the `[pty]` extra, or keep the binary and "
+        "side-load `pyte` by setting `CLAUSTER_PYTE_PATH` to a directory holding an installed "
+        "`pyte` (#702) — the binary appends it to `sys.path` only when set. The "
         "render is best-effort secret-redacted, so treat the live view as auth-gated, not "
         "secret-proof.",
     )
