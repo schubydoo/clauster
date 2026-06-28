@@ -731,15 +731,16 @@ def _verify_cert_chain(cert: Path, key: Path) -> None:
     Catches a malformed/mismatched cert (one that passes existence/readability but won't
     parse) so it aborts here with our ``TLS error`` message + exit 2, instead of crashing
     uvicorn with a raw traceback at serve time. The re-raised ``ValueError`` carries only
-    the cert PATH and the generic SSL/PEM reason — never the private-key bytes. A seam so
-    tests can stub the parse without a real keypair (the parse itself is tested directly).
+    the cert + key PATHS and the generic SSL/PEM reason — never the private-key bytes. A
+    seam so tests can stub the parse without a real keypair (the parse itself is tested
+    directly).
     """
     try:
         ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(str(cert), str(key))
     except (ssl.SSLError, OSError) as exc:
         raise ValueError(
-            f"tls cert/key at {cert} could not be loaded (check the PEM cert and that the "
-            f"key matches it): {exc}"
+            f"tls cert/key at {cert} (key: {key}) could not be loaded (check the PEM cert "
+            f"and that the key matches it): {exc}"
         ) from None
 
 

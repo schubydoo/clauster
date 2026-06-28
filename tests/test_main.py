@@ -151,7 +151,10 @@ def test_run_aborts_when_cert_unparseable(write_config, tmp_path, monkeypatch, c
     err = capsys.readouterr().err
     assert "TLS error" in err
     assert "could not be loaded" in err
-    assert "SUPER-SECRET-KEY-BYTES" not in err  # key bytes never surface
+    # Both cert AND key PATHS are named so a cert/key mismatch is debuggable...
+    assert str(cert.resolve()) in err
+    assert str(key.resolve()) in err
+    assert "SUPER-SECRET-KEY-BYTES" not in err  # ...but key bytes never surface
     assert captured == {}  # server never constructed; no plain-HTTP fallback
 
 
