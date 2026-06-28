@@ -2075,10 +2075,18 @@ class SessionRunner:
         # dead instance (no live process — a `_stopped_from_persisted` phantom from a
         # stale pointer) is correctly absent here, so a real flag-form/tmux bridge at its
         # cwd still surfaces as external.
+        # Include STARTING instances, not just live (RUNNING) ones: a freshly-spawned bridge
+        # auto-creates its initial session, which `claude agents --json` surfaces *immediately*
+        # — before the bridge's pid reads live and the project enters `live_projects`. Without
+        # the STARTING arm, that session has no managed cwd to match during the start-up window
+        # and reads EXTERNAL/unmanaged (a transient "not managed by Clauster" phantom row that
+        # self-heals only once the bridge goes ready, #713). The phantom-prune below already
+        # skips RUNNING/STARTING rows, so attributing a STARTING bridge's cwd here is safe.
         managed = {
             Path(discovered[i.project].path): i.project
             for i in self._instances.values()
-            if i.project in discovered and i.project in live_projects
+            if i.project in discovered
+            and (i.project in live_projects or i.status is InstanceStatus.STARTING)
         }
         # A worktree-spawn bridge runs each session in a per-session worktree under
         # `<root>/.claude/worktrees/` (`claude remote-control --spawn worktree`), so the
@@ -2090,7 +2098,7 @@ class SessionRunner:
             Path(discovered[i.project].path): i.project
             for i in self._instances.values()
             if i.project in discovered
-            and i.project in live_projects
+            and (i.project in live_projects or i.status is InstanceStatus.STARTING)
             and i.spawn_mode == "worktree"
         }
         # Clauster's own hosted (claustrum) sessions run no bridge process, so the

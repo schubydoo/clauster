@@ -1074,6 +1074,33 @@ async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monk
     assert "alpha" in runner.external_sessions_by_project()  # now surfaced as external
 
 
+async def test_poll_attributes_starting_bridge_session_not_external(runner_config, monkeypatch):
+    # #713: a freshly-spawned bridge auto-creates its initial session, which `claude agents
+    # --json` surfaces immediately — before the bridge's pid reads live (still STARTING, not in
+    # live_projects). Reconcile must attribute that session to the STARTING bridge (TRACKED),
+    # not classify it EXTERNAL/unmanaged (a transient "not managed by Clauster" phantom row that
+    # used to flicker until the bridge went ready).
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    # bridge_pid is None -> the live-projects loop skips it, so alpha is NOT in live_projects.
+    runner._instances["alpha"] = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.STARTING, resume_mode="pty"
+    )
+    sess = WorkingSession(
+        pid=843868,
+        cwd=config.projects_root / "alpha",
+        kind="interactive",
+        started_at=843868,
+        local_uuid="u-starting",
+    )
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    await runner.poll_once()
+    assert runner.external_sessions_by_project() == {}  # NOT a phantom external row
+    tracked = runner.tracked_sessions_by_instance()
+    assert tracked.get("alpha") and [s.local_uuid for s in tracked["alpha"]] == ["u-starting"]
+    assert runner._instances["alpha"].status is InstanceStatus.STARTING  # still starting, kept
+
+
 async def test_poll_ignores_background_session_at_stopped_cwd(runner_config, monkeypatch):
     # A `claude --bg` background session (agent view, 2.1.139+) at a STOPPED
     # project's cwd is NOT an external bridge: the stopped record must survive
