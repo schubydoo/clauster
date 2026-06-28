@@ -231,7 +231,7 @@
                         <template x-if="it.kind === 'permission'">
                           <div class="alert py-1 px-2 mb-1" :class="it.resolved ? 'alert-secondary' : 'alert-warning'">
                             <div class="d-flex align-items-center flex-wrap gap-1">
-                              <span class="me-1">⏸ permission<template x-if="it.tool">: <code x-text="it.tool"></code></template></span>
+                              <span class="me-1"><svg class="ico me-1" aria-hidden="true"><use href="#ic-pause"/></svg>permission<template x-if="it.tool">: <code x-text="it.tool"></code></template></span>
                               <code class="small text-secondary" x-show="it.input" x-text="it.input"></code>
                               <template x-if="!it.resolved">
                                 <span class="ms-auto">
@@ -376,10 +376,11 @@
                 @click="readiness.showPanel = !readiness.showPanel"
                 :title="readinessBlockers().length
                   ? 'System readiness — a check is blocking; no session will start until it is fixed (affects every launch on this host)'
-                  : 'System readiness — warnings only; sessions can still start (affects every launch on this host)'"
+                  : 'System readiness — warnings only; sessions can still start (affects every launch on this host)'">
+          <svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg><span
                 x-text="readinessBlockers().length
-                  ? ('⚠ ' + readinessBlockers().length + ' blocking')
-                  : ('⚠ ' + readinessWarnings().length + (readinessWarnings().length === 1 ? ' check' : ' checks'))"></button>
+                  ? (readinessBlockers().length + ' blocking')
+                  : (readinessWarnings().length + (readinessWarnings().length === 1 ? ' check' : ' checks'))"></span></button>
         <button type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Edit configuration"
                 title="Edit configuration" :disabled="configEditor.loading" @click="openConfig()">
           <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-edit"/></svg>
@@ -421,15 +422,15 @@
             <div class="card-actions btn-list">
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="readiness.showAll = !readiness.showAll"
                       x-text="readiness.showAll ? 'Show only issues' : 'Show all checks'">Show all checks</button>
-              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()">↻ Re-check</button>
+              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()"><svg class="ico me-1" aria-hidden="true"><use href="#ic-refresh"/></svg>Re-check</button>
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="readiness.showPanel = false">Close</button>
             </div>
           </div>
           <div class="list-group list-group-flush">
             <template x-for="c in (readiness.showAll ? readiness.checks : readinessIssues())" :key="c.name">
               <div class="list-group-item d-flex align-items-start">
-                <span class="me-2 fw-bold" :class="checkClass(c.status)" x-text="checkGlyph(c.status)"
-                      style="width:1.1rem" aria-hidden="true"></span>
+                <span class="me-2 fw-bold" :class="checkClass(c.status)"
+                      style="width:1.1rem" aria-hidden="true"><svg class="ico" x-show="c.status === 'ok'"><use href="#ic-check"/></svg><svg class="ico" x-show="c.status === 'warn'"><use href="#ic-alert"/></svg><svg class="ico" x-show="c.status !== 'ok' && c.status !== 'warn'"><use href="#ic-x"/></svg></span>
                 <span class="fw-medium text-capitalize me-3" style="min-width:9rem"
                       x-text="c.name.split('-').join(' ')"></span>
                 <span class="text-secondary small" x-text="c.detail"></span>
@@ -437,8 +438,8 @@
             </template>
           </div>
           <div class="card-footer text-secondary small">
-            These are your <code>clauster doctor</code> checks. ⚠ are warnings — a session may still start;
-            ✗ must be fixed before one will.
+            These are your <code>clauster doctor</code> checks. <svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg> are warnings — a session may still start;
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg> must be fixed before one will.
           </div>
         </div>
       </div>
@@ -550,8 +551,7 @@
                         title="Live sessions running under this bridge — expand to open any of them directly.">
                   <span class="status-dot status-dot-animated bg-green me-2" aria-hidden="true"></span>
                   <span x-text="bridgeSessionLabel(i.project)"></span>
-                  <span class="text-muted ms-1" aria-hidden="true"
-                        x-text="bridgeSessOpen[i.project] ? '▾' : '▸'"></span>
+                  <svg class="ico ms-1 text-muted" aria-hidden="true" x-show="bridgeSessOpen[i.project]"><use href="#ic-caret-down"/></svg><svg class="ico ms-1 text-muted" aria-hidden="true" x-show="!bridgeSessOpen[i.project]"><use href="#ic-caret-right"/></svg>
                 </button>
                 <div class="mt-1" :id="'bridge-sess-' + i.project" data-test="bridge-sessions-detail"
                      x-show="bridgeSessOpen[i.project]" x-cloak>
@@ -609,8 +609,8 @@
                        role="alert"
                        x-show="logs[i.project].lost" x-cloak>
                     <div class="d-flex align-items-center">
-                      <span class="me-2" x-show="!isRunning(i.project) && !isBusy(i.project)">⚠ Live tail disconnected — the bridge may have stopped.</span>
-                      <span class="me-2" x-show="isRunning(i.project) || isBusy(i.project)" x-cloak>⚠ Live tail disconnected — the bridge is still running; click Reconnect to resume the tail.</span>
+                      <span class="me-2" x-show="!isRunning(i.project) && !isBusy(i.project)"><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live tail disconnected — the bridge may have stopped.</span>
+                      <span class="me-2" x-show="isRunning(i.project) || isBusy(i.project)" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live tail disconnected — the bridge is still running; click Reconnect to resume the tail.</span>
                       <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project, true)">Reconnect</button>
                     </div>
                   </div>
@@ -643,8 +643,8 @@
                      "session ended / toggle to reattach" message needs action, like that one. #}
                   <div class="alert alert-warning py-1 px-2 mt-1 mb-0" role="alert"
                        x-show="['exited','disconnected'].includes(ptyScreen[i.project].status)" x-cloak>
-                    <span x-show="ptyScreen[i.project].status === 'exited'" x-cloak>⚠ Session ended — toggle Live terminal to reattach.</span>
-                    <span x-show="ptyScreen[i.project].status === 'disconnected'" x-cloak>⚠ Live terminal disconnected — toggle to reconnect.</span>
+                    <span x-show="ptyScreen[i.project].status === 'exited'" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Session ended — toggle Live terminal to reattach.</span>
+                    <span x-show="ptyScreen[i.project].status === 'disconnected'" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live terminal disconnected — toggle to reconnect.</span>
                   </div>
                 </div>
               </template>
@@ -669,8 +669,8 @@
       <!-- Recent / resumable: terminated sessions, collapsed so they don't pad Active. -->
       <div class="mt-2" x-show="hasRecent()" x-cloak x-data="{ recentOpen: false }">
         <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="recentOpen = !recentOpen"
-                :aria-expanded="recentOpen"
-                x-text="(recentOpen ? '▾ ' : '▸ ') + 'Recent' + (hasResumable() ? ' / resumable' : '') + ' (' + recentCount() + ')'"></button>
+                :aria-expanded="recentOpen"><svg class="ico me-1" aria-hidden="true" x-show="recentOpen"><use href="#ic-caret-down"/></svg><svg class="ico me-1" aria-hidden="true" x-show="!recentOpen"><use href="#ic-caret-right"/></svg><span
+                x-text="'Recent' + (hasResumable() ? ' / resumable' : '') + ' (' + recentCount() + ')'"></span></button>
         <div class="card mt-1" x-show="recentOpen" x-cloak>
           <div class="list-group list-group-flush">
             {% if claustrum_enabled %}
@@ -729,7 +729,7 @@
                   @click="showAllProjects = !showAllProjects"
                   x-text="showAllProjects ? 'Show fewer' : ('Show all ' + PROJECT_NAMES.length)"></button>
           <button type="button" class="btn btn-sm btn-primary" @click="toggleNewProject()">
-            <span x-text="np.open ? '× Cancel' : '+ New project'">+ New project</span>
+            <span x-show="np.open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Cancel</span><span x-show="!np.open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>New project</span>
           </button>
         </div>
       </div>
@@ -799,7 +799,7 @@
             </div>
             <div class="alert alert-danger mt-2 mb-0" x-show="np.error" x-cloak x-text="np.error"></div>
             <div class="alert alert-warning mt-2 mb-0" x-show="np.warn" x-cloak>
-              ⚠ <strong x-text="np.submittedName || np.name"></strong> ships <strong x-text="np.warn"></strong>
+              <svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg><strong x-text="np.submittedName || np.name"></strong> ships <strong x-text="np.warn"></strong>
               — its code runs when you launch a session here. Review it before starting.
               <button class="btn btn-sm btn-warning ms-2" @click="revealProject(np.submittedName || np.name)">Show it</button>
             </div>
@@ -842,7 +842,7 @@
       <!-- ===== Maintenance (collapsed; operator upkeep, not daily) ===== -->
       <div class="mt-4" x-data="reaper()">
         <button class="btn btn-sm btn-ghost-secondary" @click="toggle()">
-          <span x-text="open ? '× Close maintenance' : '🛠 Maintenance'">🛠 Maintenance</span>
+          <span x-show="open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Close maintenance</span><span x-show="!open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-tool"/></svg>Maintenance</span>
         </button>
         <div class="card mt-2" x-show="open" x-cloak>
           <div class="card-body">
@@ -1124,7 +1124,7 @@
             <div x-show="transcripts.session" x-cloak>
               <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                 <button type="button" class="btn btn-ghost-secondary btn-sm"
-                        data-test="transcript-back" @click="backToTranscriptList()">← All sessions</button>
+                        data-test="transcript-back" @click="backToTranscriptList()"><svg class="ico me-1" aria-hidden="true"><use href="#ic-arrow-left"/></svg>All sessions</button>
                 {# Sort toggle (#612): flips newest-first ↔ oldest-first, re-fetching from the top. #}
                 <button type="button" class="btn btn-sm" data-test="transcript-order-toggle"
                         :disabled="transcripts.loading"

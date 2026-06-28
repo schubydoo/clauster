@@ -76,10 +76,11 @@ def test_overflow_menu_opens_claude_md_editor_and_saves(
     assert browser.get_value(editor) == "# beta"  # agent-browser strips the trailing \n
     browser.expect_text(f"{block} .alert-warning", "A session is running")
 
-    # Edit and Save; the green "✓ saved" confirmation appears (no reload).
+    # Edit and Save; the green "saved" confirmation appears (no reload). DES-03 (#694)
+    # swapped the leading ✓ glyph for a Tabler check SVG, so assert on the word only.
     browser.fill(editor, "# beta\n\nedited by e2e\n")
     browser.click(f"{block} button.btn-primary")
-    browser.expect_text(f"{block} .text-green", "✓ saved")
+    browser.expect_text(f"{block} .text-green", "saved")
 
     # Re-opening the editor shows the persisted edit (Cancel, then reopen). Assert the
     # Cancel button is present first, so an auto-collapse-on-save regression fails here
