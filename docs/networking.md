@@ -96,9 +96,9 @@ HTTPS does not relax the non-loopback "enforced auth" requirement.
 
 !!! note "Scope — cert provisioning is out of scope"
     This wires an **existing** cert + key into uvicorn only. Self-signed-cert
-    generation and ACME/Let's Encrypt automation are tracked separately and are
-    **not** part of this feature — obtain the cert with your own tool (mkcert,
-    `openssl`, `certbot`, your CA) and point `tls.cert_file`/`tls.key_file` at it.
+    generation and ACME/Let's Encrypt automation are **not** part of this feature —
+    obtain the cert with your own tool (mkcert, `openssl`, `certbot`, your CA) and
+    point `tls.cert_file`/`tls.key_file` at it.
 
 !!! warning "`tls` is file/CLI-managed only"
     `tls.cert_file`/`tls.key_file` are structural filesystem paths, so — like the
