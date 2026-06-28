@@ -131,9 +131,8 @@ class Attribution(StrEnum):
     """How a working session relates to a managed session (tracked/hosted/untracked/external)."""
 
     TRACKED = "tracked"
-    HOSTED = (
-        "hosted"  # owned by Clauster's Direct Session (claustrum) registry, not a bridge (#592)
-    )
+    # owned by Clauster's Direct Session (claustrum) registry, not a bridge (#592)
+    HOSTED = "hosted"
     UNTRACKED = "untracked"
     EXTERNAL = "external"
 

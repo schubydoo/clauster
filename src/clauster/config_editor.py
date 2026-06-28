@@ -371,7 +371,7 @@ FIELD_CHOICE_LABELS: dict[str, dict[str, str]] = {
     },
     "claude.launch_mode": {
         "standard": "Server Mode (multi-session bridge)",
-        "pty": "Interactive Session (single session, true resume)",
+        "pty": "Interactive Session (single-session, true-resume)",
     },
     "instance_defaults.spawn_mode": {
         "same-dir": "Same directory",
