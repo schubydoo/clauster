@@ -244,6 +244,24 @@ def test_cli_kill_refuses_carded_keeper(tmp_path, capsys):
     assert rc == 2 and "refusing to kill" in capsys.readouterr().err
 
 
+def test_cli_kill_refuses_db_carded_keeper_after_migration(tmp_path, capsys):
+    # Post JSON->DB migration the flat state.json is gone (renamed *.imported), so the
+    # card set must come from the DB. A keeper carded in the DB — with NO flat
+    # state.json present — must still be refused, not mislabeled an orphan and reaped.
+    cfg = _config(tmp_path)
+    from clauster.db.persistence import Persistence
+
+    persistence = Persistence(tmp_path / "state")
+    try:
+        persistence.state_store().save({"alpha": {"label": "alpha"}})
+    finally:
+        persistence.dispose()
+    assert not (tmp_path / "state" / "state.json").exists()  # DB-only; no flat card file
+    _sidecar(tmp_path / "state" / "logs", "alpha", keeper_pid=os.getpid())
+    rc = main(["keepers", "-c", str(cfg), "--kill", str(os.getpid())])
+    assert rc == 2 and "refusing to kill" in capsys.readouterr().err
+
+
 def test_cli_kill_reports_failure(tmp_path, capsys, monkeypatch):
     cfg = _config(tmp_path)
     _sidecar(tmp_path / "state" / "logs", "ghost", keeper_pid=os.getpid())
