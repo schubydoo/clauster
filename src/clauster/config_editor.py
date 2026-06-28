@@ -145,6 +145,13 @@ EXCLUDED_FIELDS: dict[str, str] = {
     # structural + binary-path — TLS material paths; load-validated, mis-set aborts HTTPS boot.
     "tls.cert_file": "structural + binary-path: TLS material path; mis-set aborts HTTPS boot",
     "tls.key_file": "structural + binary-path: TLS key path; security-material path",
+    # config-write — code-executing config-write capability (#347/#687); the single most
+    # important invariant is that these NEVER become web-editable. Turning them on from the
+    # browser would let a browser session grant itself RCE — file/CLI-managed only.
+    "config_write.enabled": "config-write: code-executing capability; file/CLI-managed only, "
+    "never web-editable (RCE surface)",
+    "config_write.allow_user_scope": "config-write: user-scope second opt-in; file/CLI-managed "
+    "only, never web-editable (RCE surface)",
 }
 _EXCLUDED = frozenset(EXCLUDED_FIELDS)
 

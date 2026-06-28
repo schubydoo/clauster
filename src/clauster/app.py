@@ -28,6 +28,7 @@ from . import (
     auth,
     claude_cli,
     config_editor,
+    config_write,
     config_writer,
     environments,
     logstream,
@@ -1246,6 +1247,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             }
 
         return await asyncio.to_thread(_work)
+
+    @app.get("/api/config-write/status")
+    async def api_config_write_status() -> dict:
+        # Foundation surface for the code-executing config-write trust tier (#347/#687).
+        # NO concrete config-mutation endpoint exists yet — the children (#688-#691)
+        # attach their writers behind this same gate. The capability gate fail-closes:
+        # when config_write.enabled is off this 404s (the surface is invisible, same as
+        # the reaper), so a disabled deployment exposes nothing. The body reflects only
+        # the two opt-in flags, never any config content.
+        config_write.require_capability(config, "project")
+        return config_write.capability_status(config)
 
     async def _project_by_name(name: str) -> Project:
         for proj in await list_projects():
