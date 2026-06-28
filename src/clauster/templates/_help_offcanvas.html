@@ -15,8 +15,7 @@
 {% set help_part = help_part | default("all") %}
 {% if help_part in ("all", "trigger") %}
 <button id="help-open" type="button" data-test="help-trigger"
-        class="btn btn-icon btn-ghost-secondary{% if help_trigger_fixed %} position-fixed top-0 end-0 m-3{% endif %}"
-        {% if help_trigger_fixed %}style="z-index: 1080"{% endif %}
+        class="btn btn-icon btn-ghost-secondary{% if help_trigger_fixed %} position-fixed top-0 end-0 m-3 help-trigger-z{% endif %}"
         aria-label="Help" aria-haspopup="dialog" aria-controls="help-offcanvas" title="Help">
   <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-help"/></svg>
 </button>

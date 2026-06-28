@@ -18,15 +18,23 @@
   <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/xterm/css/xterm.css?v={{ asset_version }}">
   <script defer src="{{ request.scope.root_path }}/static/vendor/xterm/js/xterm.js?v={{ asset_version }}"></script>
   {% endif %}
-  <style>
+  <style nonce="{{ csp_nonce }}">
     /* Brand lockup swaps with the theme; defaults to the white (dark-theme) logo
        so an unset/unknown data-bs-theme shows one logo, never both. */
     .brand-black { display: none; }
     [data-bs-theme="light"] .brand-white { display: none; }
     [data-bs-theme="light"] .brand-black { display: inline; }
+    /* Cross-page utility classes (#533): the Tabler-icon sprite + the fixed help
+       trigger are included on every page (dashboard, login, 404), so the classes
+       that replace their former inline style="" attributes live in this per-page
+       brand block (duplicated alongside .brand-* on login/404). */
+    .sprite-defs { display: none; }
+    .fixed-controls { z-index: 1080; gap: .5rem; }
+    .help-trigger-z { z-index: 1080; }
+    .brand-logo { height: 40px; width: auto; }
   </style>
   <script defer src="{{ request.scope.root_path }}/static/alpine.min.js?v={{ asset_version }}"></script>
-  <style>
+  <style nonce="{{ csp_nonce }}">
     .log-view { max-height: 320px; overflow: auto; font-size: .78rem; line-height: 1.35;
                 white-space: pre-wrap; word-break: break-word; margin: 0; }
     /* Host for the read-only xterm.js live pty-screen (#534): dark in both themes (a
@@ -139,6 +147,21 @@
         scroll-behavior: auto !important;
       }
     }
+
+    /* #533: classes replacing former inline style="" attributes so style-src can
+       drop 'unsafe-inline'. A nonce covers this <style> element but NOT a style
+       attribute, so the attributes had to become classes. */
+    .pre-wrap { white-space: pre-wrap; }
+    .navbar-tools { gap: .5rem; }
+    .hosted-stream { max-height: 360px; overflow-y: auto; font-size: .875rem; }
+    .check-glyph { width: 1.1rem; }
+    .check-name { min-width: 9rem; }
+    .inline-flex-center { display: inline-flex; align-items: center; }
+    .input-group-narrow { max-width: 320px; }
+    .modal-backdrop-dim { background: rgba(0, 0, 0, .4); }
+    /* _project_row.html — project name cap + the failure-detail <pre>. */
+    .project-name { font-size: 1.02rem; min-width: 0; max-width: clamp(10rem, 40vw, 28rem); }
+    .detail-pre { white-space: pre-wrap; max-height: 12rem; overflow: auto; }
   </style>
 </head>
 <body>
@@ -209,21 +232,20 @@
                   </div>
                   <div class="alert alert-secondary py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].ended" x-cloak
                        x-text="hostedView[h.claustrum_process_id].endedReason || 'This session has ended — it is no longer live.'"></div>
-                  <div class="border rounded p-2" :id="'hosted-stream-' + h.claustrum_process_id"
-                       style="max-height: 360px; overflow-y: auto; font-size: 0.875rem;">
+                  <div class="border rounded p-2 hosted-stream" :id="'hosted-stream-' + h.claustrum_process_id">
                     <template x-for="(it, idx) in hostedView[h.claustrum_process_id].events" :key="idx">
                       <div class="mb-1">
                         <template x-if="it.kind === 'msg'">
                           <div :class="it.role === 'assistant' ? 'text-body' : 'text-secondary'">
                             <span class="badge me-1" :class="it.role === 'assistant' ? 'bg-azure-lt' : 'bg-secondary-lt'" x-text="it.role"></span>
-                            <span style="white-space: pre-wrap;" x-text="it.text"></span>
+                            <span class="pre-wrap" x-text="it.text"></span>
                           </div>
                         </template>
                         <template x-if="it.kind === 'tool'">
                           <div><span class="badge bg-purple-lt me-1"><svg class="ico" aria-hidden="true"><use href="#ic-tool"/></svg> <span x-text="it.name"></span></span><code class="small text-secondary" x-text="it.input"></code></div>
                         </template>
                         <template x-if="it.kind === 'toolresult'">
-                          <div class="text-secondary small ps-2" style="white-space: pre-wrap;" x-text="it.text"></div>
+                          <div class="text-secondary small ps-2 pre-wrap" x-text="it.text"></div>
                         </template>
                         <template x-if="it.kind === 'marker'">
                           <div class="text-secondary small text-center" x-text="it.text"></div>
@@ -253,7 +275,7 @@
                           <div class="text-warning small text-center" x-text="it.text"></div>
                         </template>
                         <template x-if="it.kind === 'stderr'">
-                          <div class="text-danger small" style="white-space: pre-wrap;" x-text="it.text"></div>
+                          <div class="text-danger small pre-wrap" x-text="it.text"></div>
                         </template>
                         <template x-if="it.kind === 'error'">
                           <div class="text-danger small" x-text="it.text"></div>
@@ -360,12 +382,12 @@
     <div class="container-xl">
       <span class="navbar-brand d-inline-flex align-items-center mb-0">
         <img src="{{ request.scope.root_path }}/static/logo-white-accent.svg?v={{ asset_version }}"
-             class="brand-white" style="height:40px;width:auto" alt="Clauster">
+             class="brand-white brand-logo" alt="Clauster">
         <img src="{{ request.scope.root_path }}/static/logo-black-accent.svg?v={{ asset_version }}"
-             class="brand-black" style="height:40px;width:auto" alt="Clauster"></span>
+             class="brand-black brand-logo" alt="Clauster"></span>
       <span class="text-secondary fs-5 fw-normal">v{{ version }}</span>
       <span class="text-secondary small d-none d-lg-inline ms-2 text-truncate">{{ projects_root }}</span>
-      <div class="navbar-nav flex-row ms-auto align-items-center" style="gap:.5rem">
+      <div class="navbar-nav flex-row ms-auto align-items-center navbar-tools">
         <!-- Readiness promoted to a header pill: it gates whether anything will start,
              so it surfaces at header level (click to expand the checks). -->
         <!-- Severity-aware: solid red + "blocking" only when a check actually blocks a
@@ -429,9 +451,9 @@
           <div class="list-group list-group-flush">
             <template x-for="c in (readiness.showAll ? readiness.checks : readinessIssues())" :key="c.name">
               <div class="list-group-item d-flex align-items-start">
-                <span class="me-2 fw-bold" :class="checkClass(c.status)"
-                      style="width:1.1rem" aria-hidden="true"><svg class="ico" x-show="c.status === 'ok'"><use href="#ic-check"/></svg><svg class="ico" x-show="c.status === 'warn'"><use href="#ic-alert"/></svg><svg class="ico" x-show="c.status !== 'ok' && c.status !== 'warn'"><use href="#ic-x"/></svg></span>
-                <span class="fw-medium text-capitalize me-3" style="min-width:9rem"
+                <span class="me-2 fw-bold check-glyph" :class="checkClass(c.status)"
+                      aria-hidden="true"><svg class="ico" x-show="c.status === 'ok'"><use href="#ic-check"/></svg><svg class="ico" x-show="c.status === 'warn'"><use href="#ic-alert"/></svg><svg class="ico" x-show="c.status !== 'ok' && c.status !== 'warn'"><use href="#ic-x"/></svg></span>
+                <span class="fw-medium text-capitalize me-3 check-name"
                       x-text="c.name.split('-').join(' ')"></span>
                 <span class="text-secondary small" x-text="c.detail"></span>
               </div>
@@ -583,7 +605,7 @@
                     <button type="button" class="btn btn-sm" @click="logs[i.project].paused ? resumeLogs(i.project) : pauseLogs(i.project)"
                             x-text="logs[i.project].paused ? 'Resume' : 'Pause'"></button>
                     <button type="button" class="btn btn-sm" @click="jumpToLatest(i.project)">Jump to latest</button>
-                    <span class="text-secondary small" style="display:inline-flex; align-items:center" x-show="logs[i.project].paused" x-cloak>paused
+                    <span class="text-secondary small inline-flex-center" x-show="logs[i.project].paused" x-cloak>paused
                       (<span x-text="logs[i.project].pending.length"></span> buffered)</span>
                   </div>
                   {# The reconnecting/lost banners are mutually exclusive: the state machine sets one
@@ -887,7 +909,7 @@
                           x-text="busy ? 'Working…' : ('Archive ' + ghosts.length + ' (reversible)')">Archive</button>
                   <div class="mt-2">
                     <label class="form-label" for="force-delete-confirm">Permanently delete — this can't be undone. Type <code>DELETE</code> to confirm:</label>
-                    <div class="input-group" style="max-width:320px">
+                    <div class="input-group input-group-narrow">
                       <input id="force-delete-confirm" type="text" class="form-control" x-model="deleteTyped" placeholder="DELETE" autocomplete="off">
                       <button class="btn btn-danger" @click="del()" :disabled="busy || deleteTyped !== 'DELETE'">Permanently delete</button>
                     </div>
@@ -944,7 +966,7 @@
 
   <!-- Config editor modal (FE-3) — Tier-A operational settings only. -->
   <template x-if="configEditor.open">
-    <div class="modal modal-blur d-block" tabindex="-1" data-test="cfg-modal" style="background: rgba(0,0,0,.4)"
+    <div class="modal modal-blur d-block modal-backdrop-dim" tabindex="-1" data-test="cfg-modal"
          @keydown.escape.window="closeConfig()" @keydown.tab="trapConfigTab($event)"
          @click.self="closeConfig()">
       <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
@@ -1089,8 +1111,7 @@
        HTML would be stored XSS). Mirrors the config-editor modal's structure, focus
        trap, and scroll-lock. -->
   <template x-if="transcripts.open">
-    <div class="modal modal-blur d-block" tabindex="-1" data-test="transcript-modal"
-         style="background: rgba(0,0,0,.4)"
+    <div class="modal modal-blur d-block modal-backdrop-dim" tabindex="-1" data-test="transcript-modal"
          @keydown.escape.window="closeTranscripts()" @keydown.tab="trapTranscriptTab($event)"
          @click.self="closeTranscripts()">
       <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"

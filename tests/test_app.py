@@ -363,8 +363,13 @@ def test_load_sort_meta_swaps_ranks_without_clearing_first(write_config):
 def test_project_name_uses_responsive_width_cap(write_config):
     # DES-07: the project name truncates at a viewport-relative width (clamp 10rem→28rem), not a
     # fixed 16rem cap, so long names adapt to the screen. Guards against reverting to a fixed cap.
+    # The cap moved from an inline style="" to the .project-name class (#533, nonce-gated
+    # style-src), so assert the class is applied AND the clamp value survives in the CSS.
     page = _client(write_config).get("/").text
-    assert "max-width:clamp(10rem, 40vw, 28rem)" in page
+    assert "max-width: clamp(10rem, 40vw, 28rem)" in page
+    assert re.search(r'class="[^"]*\bproject-name\b[^"]*"', page), (
+        "the project name must carry the .project-name class that holds the width cap"
+    )
 
 
 def test_session_url_scheme_guard_present(write_config):

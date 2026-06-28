@@ -106,16 +106,22 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 # that lacks the per-request nonce.) The external alpine.min.js is 'self'-allowed
 # and needs no nonce.
 #
-# Tradeoff — two relaxations remain, deliberately out of scope for the nonce-only
-# slice and tracked as the residual follow-up under #442:
+# style-src is nonce-gated too (#533): the per-request nonce now also gates the
+# inline <style> blocks (each carries `nonce="{{ csp_nonce }}"`), and every inline
+# style="" *attribute* in the templates has been lifted into a class inside those
+# nonce'd <style> blocks — a nonce does NOT cover style attributes, only <style>
+# elements, so the attributes had to become classes, not nonce'd. With both done,
+# 'unsafe-inline' is dropped from style-src. (Alpine's `:style` bindings set
+# `element.style` via JS, which CSP does not classify as an inline style, so they
+# need no nonce and are unaffected.)
+#
+# Tradeoff — one relaxation remains, deliberately out of scope and tracked under
+# the #533 epic:
 #   * 'unsafe-eval' stays: the vendored standard Alpine build evaluates x-*
 #     expressions via `new Function()`, which CSP classifies as eval, so it is
 #     required for the dashboard to render at all. Dropping it needs the
 #     CSP-friendly Alpine build (rewriting every inline x-* directive into
 #     Alpine.data() components + a build-tool swap) — an epic, not this slice.
-#   * style-src keeps 'unsafe-inline': the dashboard carries an inline <style>
-#     block plus inline style="" attributes, and a nonce does not cover style
-#     *attributes*, so they cannot be nonce-gated without removing them.
 #
 # connect-src is just 'self': the live bridge-log + hosted-session streams open
 # same-origin WebSockets, and every browser this app targets matches same-origin
@@ -125,25 +131,29 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 
 
 def _csp_with_nonce(nonce: str | None) -> str:
-    """Build the per-request Content-Security-Policy with a nonce-gated script-src.
+    """Build the per-request Content-Security-Policy with nonce-gated script- and style-src.
 
     ``nonce`` is the per-request ``secrets.token_urlsafe(16)`` value generated in
     the ``security_headers`` middleware. When present, script-src lists
     ``'nonce-<nonce>'`` so the inline <script> blocks that carry the matching
-    ``nonce="..."`` attribute execute. ``'unsafe-inline'`` is dropped entirely
-    (#442): it is dead config once a nonce source is present, and dropping it is
-    what blocks an injected inline script lacking the per-request nonce.
+    ``nonce="..."`` attribute execute, and style-src lists the same nonce so the
+    inline <style> blocks (which also stamp ``nonce="..."``) apply.
+    ``'unsafe-inline'`` is dropped entirely from both (#442 for script-src, #533
+    for style-src): it is dead config once a nonce source is present, and dropping
+    it is what blocks an injected inline <script>/<style> lacking the per-request
+    nonce.
 
     Fail-closed: when ``nonce is None`` (a defensive degraded path that should not
-    occur in normal request flow), script-src still omits ``'unsafe-inline'`` — a
-    degraded policy is *stricter*, never looser. ``'unsafe-eval'`` and style-src
-    ``'unsafe-inline'`` are intentionally retained (see the comment above).
+    occur in normal request flow), both script-src and style-src still omit
+    ``'unsafe-inline'`` — a degraded policy is *stricter*, never looser.
+    ``'unsafe-eval'`` is intentionally retained (see the comment above).
     """
     nonce_src = f"'nonce-{nonce}' " if nonce else ""
+    style_src = "style-src 'self'" + (f" 'nonce-{nonce}'" if nonce else "")
     return (
         "default-src 'self'; "
         f"script-src 'self' {nonce_src}'unsafe-eval'; "
-        "style-src 'self' 'unsafe-inline'; "
+        f"{style_src}; "
         "img-src 'self' data:; "
         "font-src 'self'; "
         "connect-src 'self'; "
