@@ -1485,8 +1485,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # re-read (missing / externally corrupted) so the editor still opens.
         fields = None
         content_hash = None
+        present = None
         if path is not None:
             fields = config_editor.editable_values_on_disk(path)
+            # Which Tier-A keys are literally on disk — lets the editor drop a deprecated
+            # row once the user removed its key (e.g. via `config reconcile`). None when the
+            # file can't be read, which leaves every field visible (fail-open on display).
+            present = config_editor.present_on_disk(path)
             # Guard file_hash the same way as the field read: a config deleted or made
             # unreadable after startup makes read_bytes() raise, which would 500 the
             # editor out of reach even though `fields` already degraded to the in-memory
@@ -1498,10 +1503,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 content_hash = None
         if fields is None:
             fields = config_editor.editable_values(cfg)
+        specs = config_editor.field_specs(present)
+        # The front-end builds its rendered rows from `editable`, so a hidden deprecated
+        # field is removed by dropping it here — editing `specs` alone would not hide the row.
+        editable = [p for p in config_editor.EDITABLE_FIELDS if not specs[p]["hidden"]]
         return {
             "fields": fields,
-            "editable": list(config_editor.EDITABLE_FIELDS),
-            "specs": config_editor.field_specs(),
+            "editable": editable,
+            "specs": specs,
             "hash": content_hash,
         }
 

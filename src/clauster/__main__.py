@@ -388,7 +388,10 @@ def _interactive_decide(finding):  # type: ignore[no-untyped-def]
     print(f"  reason:     {dep.explain}", file=sys.stderr)
     print(f"  proposed:   {proposal}", file=sys.stderr)
     prompt = "  apply? [Y]es / [n]o"
-    if choices:
+    # Offer a value choice only when writing a replacement is actually on the table. When the
+    # replacement key is already set (both-present case) the existing value is kept, so picking
+    # a value would silently override it — don't even offer it.
+    if choices and not finding.replacement_present:
         prompt += " / a value (" + ", ".join(choices) + ")"
     prompt += ": "
     try:
@@ -401,6 +404,15 @@ def _interactive_decide(finding):  # type: ignore[no-untyped-def]
         )
     if answer.lower() in {"n", "no"}:
         return Decision(apply=False)
+    if answer in choices and finding.replacement_present:
+        # Defence in depth: even if the operator types a value (or scripts stdin), the
+        # already-set replacement is kept — never silently overridden by the dead alias.
+        print(
+            f"  clauster: {dep.replacement_key} is already set — keeping it; "
+            f"removing {dep.deprecated_key} without overriding.",
+            file=sys.stderr,
+        )
+        return Decision(apply=True, value=finding.proposed_value, has_value=False)
     if answer in choices:
         return Decision(apply=True, value=answer, has_value=True)
     print(

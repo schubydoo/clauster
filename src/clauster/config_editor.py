@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import annotated_types as at
+import yaml
 from pydantic import ValidationError
 from yaml import YAMLError
 
@@ -108,6 +109,16 @@ def _get_by_path(obj: Any, dotted: str) -> Any:
     return cur
 
 
+def _dotted_present(mapping: dict[str, Any], dotted: str) -> bool:
+    """Return whether a dotted key is literally present in a nested mapping."""
+    cur: Any = mapping
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    return True
+
+
 def _set_by_path(mapping: dict[str, Any], dotted: str, value: Any) -> None:
     """Set a dotted key into a nested mapping, creating intermediate mappings."""
     parts = dotted.split(".")
@@ -146,6 +157,27 @@ def editable_values_on_disk(path: str | Path) -> dict[str, Any] | None:
         return editable_values(load_config(path))
     except (OSError, ValueError, ValidationError, YAMLError):
         return None
+
+
+def present_on_disk(path: str | Path) -> set[str] | None:
+    """Return the Tier-A dotted keys literally present in the on-disk file, or ``None``.
+
+    Unlike :func:`editable_values` — which reads the PARSED pydantic config, where every
+    field always resolves via schema defaults — this inspects the raw YAML mapping so the
+    caller can tell which keys the user actually wrote. The editor uses it to drop a
+    deprecated field once its key has been removed from disk (e.g. by ``config reconcile``)
+    rather than rendering a flagged-deprecated row for a key that is gone. Returns ``None``
+    on a missing / unparseable file so the caller can fall back to showing every field
+    (fail-open on *display* only — never hide a field we cannot prove is absent).
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except (OSError, YAMLError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return {field for field in EDITABLE_FIELDS if _dotted_present(raw, field)}
 
 
 def validate_edits(raw: dict[str, Any], edits: dict[str, Any]) -> dict[str, Any]:
@@ -409,8 +441,16 @@ def _constraints(info: Any) -> dict[str, Any]:
     return out
 
 
-def field_specs() -> dict[str, dict[str, Any]]:
-    """Return rich per-field UI metadata for the editor (label, help, control, bounds)."""
+def field_specs(present: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    """Return rich per-field UI metadata for the editor (label, help, control, bounds).
+
+    ``present`` is the set of dotted keys literally on disk (from :func:`present_on_disk`).
+    A deprecated field whose key is ABSENT from ``present`` is flagged ``hidden`` so the
+    editor can drop its row — a key the user already removed (e.g. via ``config reconcile``)
+    no longer renders as a flagged-deprecated field. When ``present`` is ``None`` (the file
+    could not be read) nothing is hidden: fail-open on display, never drop a field we cannot
+    prove is absent.
+    """
     specs: dict[str, dict[str, Any]] = {}
     for path in EDITABLE_FIELDS:
         section, key = path.split(".", 1) if "." in path else ("", path)
@@ -433,6 +473,7 @@ def field_specs() -> dict[str, dict[str, Any]]:
             "depends_on_value": dep_value[1] if dep_value else None,
             "depends_on_any": list(FIELD_DEPENDS_ANY.get(path, ())) or None,
             "deprecated": path in DEPRECATED_FIELDS,
+            "hidden": (path in DEPRECATED_FIELDS and present is not None and path not in present),
             "default": default if isinstance(default, (str, int, float, bool)) else None,
         }
         if kind in ("int", "float"):

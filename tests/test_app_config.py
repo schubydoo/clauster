@@ -70,6 +70,42 @@ def test_get_config_falls_back_to_memory_when_disk_unreadable(write_config, tmp_
     assert res.json()["fields"]["usage.fx_rate"] == 1.0  # in-memory fallback
 
 
+def test_get_config_drops_absent_deprecated_field(write_config, tmp_path):
+    """#656: a deprecated key removed from disk no longer renders in the editor.
+
+    The fixture config has no ``usage.show_cost`` key, so the GET excludes it from
+    ``editable`` (the list the front-end renders) — a reconciled-away alias must not come
+    back as a flagged-deprecated row.
+    """
+    client, _ = _client_and_path(write_config, tmp_path)
+    body = client.get("/api/config").json()
+    assert "usage.show_cost" not in body["editable"]
+    # The spec still classifies it deprecated + flags it hidden (drives the drop).
+    assert body["specs"]["usage.show_cost"]["hidden"] is True
+    assert body["specs"]["usage.show_cost"]["deprecated"] is True
+
+
+def test_get_config_keeps_present_deprecated_field(write_config, tmp_path):
+    """#656: while the deprecated key is still on disk, keep showing the flagged row."""
+    path = write_config(
+        f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\nusage:\n  show_cost: false\n"
+    )
+    client = TestClient(create_app(load_config(path)))
+    body = client.get("/api/config").json()
+    assert "usage.show_cost" in body["editable"]
+    assert body["specs"]["usage.show_cost"]["hidden"] is False
+    assert body["specs"]["usage.show_cost"]["deprecated"] is True
+
+
+def test_get_config_unreadable_file_keeps_deprecated_field(write_config, tmp_path):
+    """#656: an unreadable file fails open — the deprecated field stays visible, not dropped."""
+    client, path = _client_and_path(write_config, tmp_path)
+    path.write_text("usage: {fx_rate: 1.0\n")  # unterminated flow map -> YAML parse error
+    body = client.get("/api/config").json()
+    assert "usage.show_cost" in body["editable"]  # present=None -> nothing hidden
+    assert body["specs"]["usage.show_cost"]["hidden"] is False
+
+
 def test_get_config_survives_deleted_config_file(write_config, tmp_path):
     """A config file DELETED after startup still opens the editor (no 500).
 
