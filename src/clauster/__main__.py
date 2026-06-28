@@ -677,8 +677,8 @@ def _warn_if_cookie_insecure(config) -> None:
     )
 
 
-def _tls_kwargs(config: ClausterConfig) -> dict[str, str]:
-    """Resolve the uvicorn ``ssl_certfile``/``ssl_keyfile`` kwargs, or ``{}`` if no TLS.
+def _tls_files(config: ClausterConfig) -> tuple[str, str] | None:
+    """Resolve the ``(ssl_certfile, ssl_keyfile)`` pair for uvicorn, or ``None`` if no TLS.
 
     Defense-in-depth: the config validator already resolved + readability-checked both
     paths at load, but a cert could be deleted or chmod-ed away between load and serve,
@@ -687,15 +687,15 @@ def _tls_kwargs(config: ClausterConfig) -> dict[str, str]:
     uvicorn will, so a malformed/mismatched cert (one that passes existence/readability
     but won't parse) also aborts cleanly here — with our ``TLS error`` message and exit
     2 — rather than crashing uvicorn with a raw traceback at serve time. The SSL error is
-    a generic PEM/parse message; it never carries key material. Returns canonical
-    absolute paths uvicorn opens.
+    a generic PEM/parse message; it never carries key material. Returns the canonical
+    absolute paths uvicorn opens, or ``None`` when ``tls`` is unset.
     """
     if config.tls is None:
-        return {}
+        return None
     cert = resolve_cert_path("cert_file", config.tls.cert_file)
     key = resolve_cert_path("key_file", config.tls.key_file)
     _verify_cert_chain(cert, key)
-    return {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+    return str(cert), str(key)
 
 
 def _verify_cert_chain(cert: Path, key: Path) -> None:
@@ -773,12 +773,13 @@ def _run(config_path: str | None) -> int:
     # between load and serve). A bad cert here aborts startup — Clauster must never
     # silently fall back to plain HTTP when TLS was asked for.
     try:
-        tls_kwargs = _tls_kwargs(config)
+        tls_files = _tls_files(config)
     except ValueError as exc:
         print(f"clauster: TLS error: {exc}", file=sys.stderr)
         return 2
 
-    scheme = "https" if tls_kwargs else "http"
+    ssl_certfile, ssl_keyfile = tls_files if tls_files is not None else (None, None)
+    scheme = "https" if tls_files else "http"
     print(
         f"clauster {__version__} | claude {version} | "
         f"projects_root={config.projects_root} | {scheme}://{config.host}:{config.port}",
@@ -803,7 +804,8 @@ def _run(config_path: str | None) -> int:
             log_level="info",
             log_config=None,
             proxy_headers=False,
-            **tls_kwargs,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
         )
     )
     # Hand the live server to the app so the in-app "Restart Clauster" action (#483)
