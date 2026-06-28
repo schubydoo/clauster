@@ -276,6 +276,24 @@ def test_external_pyte_path_ignored_when_not_frozen(monkeypatch, tmp_path):
         sys.path[:] = original_path
 
 
+def test_external_pyte_path_already_on_syspath_is_not_appended_twice(monkeypatch, tmp_path):
+    # Idempotent: when the resolved CLAUSTER_PYTE_PATH dir is ALREADY on sys.path, the shim
+    # takes the skip-the-append branch and leaves sys.path unchanged — no duplicate entry. A
+    # second call (e.g. a retried import) must not keep growing sys.path.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv(pty_screen.PYTE_PATH_ENV, str(tmp_path))
+
+    original_path = list(sys.path)
+    try:
+        sys.path.append(str(tmp_path))  # pre-seed: the dir is already present
+        before = list(sys.path)
+        pty_screen._maybe_add_external_pyte_path()
+        assert sys.path == before  # skip branch: nothing appended, no duplicate
+        assert sys.path.count(str(tmp_path)) == 1
+    finally:
+        sys.path[:] = original_path
+
+
 def test_external_pyte_path_expanduser_runtime_error_fails_closed(monkeypatch):
     # Fail-closed: Path.expanduser() raises RuntimeError (not OSError) when no home dir can
     # be resolved (no HOME, stripped container). The shim must swallow it and never raise,
