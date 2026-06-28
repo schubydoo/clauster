@@ -231,28 +231,31 @@ def _client_empty(tmp_path) -> TestClient:
 
 def test_empty_dashboard_renders_orientation_card(tmp_path):
     # First-run orientation (#692): an empty projects_root renders the dismissible
-    # "Welcome to Clauster" card — heading, both copy lines, and the keyboard-
-    # reachable "Got it" dismiss control wired to the persistent Alpine action.
+    # orientation card. Assert on STRUCTURE/wiring (stable contract), not the
+    # PROPOSED visible copy — the card wording awaits maintainer approval and may
+    # change before merge, so verbatim-text assertions would be brittle.
     html = _client_empty(tmp_path).get("/").text
+    # The card element and its labelled heading exist.
     assert 'id="orientation-card"' in html
-    assert "Welcome to Clauster" in html
-    # Both proposed copy lines.
-    assert "spawns Claude Code into your project directories" in html
-    assert "becomes a card you can launch a bridge in" in html
-    # Dismiss control: labeled, keyboard-reachable <button>, wired to the persisted action.
+    assert '<h2 class="empty-title" id="orientation-heading">' in html
+    assert 'aria-labelledby="orientation-heading"' in html
+    # Dismiss control: labeled (stable aria-label), keyboard-reachable, wired to
+    # the persisted action — assert the contract, not the visible "Got it" text.
     assert 'aria-label="Dismiss the welcome card"' in html
     assert "dismissOrientation()" in html
-    # Persistence is mirrored from the theme pattern: an Alpine flag read from localStorage.
+    # Persistence is mirrored from the theme pattern: an Alpine flag read from
+    # localStorage under a stable key.
     assert "orientationDismissed" in html
     assert "clauster-orientation-dismissed" in html
 
 
 def test_populated_dashboard_omits_orientation_card(write_config, tmp_path):
     # A dashboard with discovered projects never renders the orientation card —
-    # it lives strictly in the {% else %} empty branch.
+    # it lives strictly in the {% else %} empty branch. Assert on the stable
+    # element id, not the (proposed) copy.
     html = _client(write_config, tmp_path).get("/").text
     assert 'id="orientation-card"' not in html
-    assert "Welcome to Clauster" not in html
+    assert 'id="orientation-heading"' not in html
 
 
 # ----- single-row fragment (reactive insertion, no full reload) ---------
