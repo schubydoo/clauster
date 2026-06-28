@@ -336,6 +336,19 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.8 (2026-06-28)
+
+### Features
+
+- Add a dedicated Cancel button to the in-progress clone flow plus a confirmation toast when a clone is cancelled ([#684](https://github.com/schubydoo/clauster/pull/684))
+- Add an optional `tls` config block so Clauster can terminate HTTPS natively from an existing cert + key (uvicorn `ssl_certfile`/`ssl_keyfile`), validated fail-closed at load and at server start, and warn (non-fatally) when the private key is group/other-readable. ([#695](https://github.com/schubydoo/clauster/pull/695))
+
+### Fixes
+
+- Correct accuracy drift in the public docs (changeset-bot flow, Tier-A editable allowlist, restart/KillMode survival, doctor warnings, bridge-log glob, example config) and add a drift guard for the editable-fields table. ([#683](https://github.com/schubydoo/clauster/pull/683))
+- Fix Interactive (PTY) sessions failing to launch under the standalone binary — spawn the keeper via a frozen-binary subcommand instead of the `python -m` form that the binary's CLI rejects ([#697](https://github.com/schubydoo/clauster/pull/697))
+- Adopt Anthropic's Remote Control vocabulary (Server Mode / Interactive Session / Background Agent / Direct Session) across the UI and docs. ([#681](https://github.com/schubydoo/clauster/pull/681))
+
 ## 0.12.7 (2026-06-27)
 
 ### Features
