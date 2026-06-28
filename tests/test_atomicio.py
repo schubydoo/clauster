@@ -132,10 +132,16 @@ def test_atomic_write_text_fdopen_failure_survives_double_close(tmp_path, monkey
     # If FileIO adopted+closed the fd before a wrapper stage raised, the guarded os.close
     # hits EBADF — that must be swallowed so the ORIGINAL fdopen error propagates, not the
     # double-close error.
+    real_close = atomicio.os.close
+
     def _boom_fdopen(*a, **k):
         raise OSError("primary fdopen failure")
 
     def _already_closed(fd):
+        # Mimic the adopted-then-wrapper-failed case: the fd is genuinely released
+        # (so the temp can be unlinked — Windows can't delete a still-open file), but
+        # the second close still signals EBADF, which the production guard must swallow.
+        real_close(fd)
         raise OSError("EBADF: fd already closed")
 
     monkeypatch.setattr(atomicio.os, "fdopen", _boom_fdopen)
