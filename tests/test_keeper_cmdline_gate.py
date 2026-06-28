@@ -33,6 +33,19 @@ def test_is_keeper_cmdline_matches_only_the_keeper_module():
     assert not procutil.is_keeper_cmdline([])
 
 
+def test_is_keeper_cmdline_matches_the_frozen_subcommand_form():
+    # A frozen (PyInstaller) build runs `<exe> __pty-keeper__ …`; sys.executable is the
+    # clauster binary there, so `-m` is impossible. The gate must recognize this form, or
+    # orphan classification / hard-kill would never see a frozen keeper.
+    sub = procutil.KEEPER_SUBCOMMAND
+    assert procutil.is_keeper_cmdline(["/opt/clauster/clauster", sub, "--sidecar", "x"])
+    # The subcommand must sit in the exact argv[1] slot (right after the exe): a process
+    # merely carrying the token as a data argument is NOT a keeper (no spoofing the kill).
+    assert not procutil.is_keeper_cmdline(["grep", sub, "/var/log/foo"])
+    assert not procutil.is_keeper_cmdline(["clauster", "run", sub])
+    assert not procutil.is_keeper_cmdline([sub])  # token alone, no exe in argv[0]
+
+
 def test_is_keeper_process_fails_closed_on_a_dead_pid():
     assert procutil.is_keeper_process(2_147_483_646) is False  # NoSuchProcess → fail closed
 

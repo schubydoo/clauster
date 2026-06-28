@@ -67,6 +67,32 @@ def _check_version(binary: Path) -> None:
     print(f"version: {result.stdout.strip()}")
 
 
+def _check_pty_keeper_routed(binary: Path) -> None:
+    """Assert the hidden ``__pty-keeper__`` frozen entry point routes to the keeper CLI.
+
+    A PTY (Interactive) bridge is launched as ``<binary> __pty-keeper__ …`` only in a
+    frozen build, because ``sys.executable`` is the binary itself there and the source
+    form ``<python> -m clauster.pty_keeper`` cannot run. If that subcommand isn't wired
+    into the binary, clauster's top-level argparse rejects it with ``unrecognized
+    arguments`` and every PTY session dies the instant it spawns — a binary-only failure
+    no unit test can see (the unit tests build the keeper argv by hand). Invoke it with no
+    further args: a wired-in route reaches ``clauster.pty_keeper``'s OWN argparse, which
+    exits demanding ``--sidecar`` (proving the route); an unwired binary shows clauster's
+    top-level error instead. Cross-OS: the route + argparse run before any POSIX-only PTY
+    work.
+    """
+    result = subprocess.run(
+        [str(binary), "__pty-keeper__"], capture_output=True, text=True, timeout=60
+    )
+    out = result.stdout + result.stderr
+    if "usage: clauster.pty_keeper" not in out or "unrecognized arguments" in out:
+        raise SystemExit(
+            f"`__pty-keeper__` did not route to the keeper CLI (rc={result.returncode}) — "
+            f"PTY (Interactive) sessions would fail to launch on the binary:\n{out}"
+        )
+    print("pty-keeper subcommand: routed OK")
+
+
 def _check_boot(binary: Path) -> None:
     """Boot ``<binary> run`` against a throwaway config and confirm ``/healthz`` serves.
 
@@ -126,6 +152,7 @@ def main() -> int:
     if not FAKE_CLAUDE.is_file():
         raise SystemExit(f"fake claude fixture not found: {FAKE_CLAUDE}")
     _check_version(binary)
+    _check_pty_keeper_routed(binary)
     _check_boot(binary)
     print("smoke OK")
     return 0
