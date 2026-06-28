@@ -85,7 +85,12 @@ def _check_pty_keeper_routed(binary: Path) -> None:
         [str(binary), "__pty-keeper__"], capture_output=True, text=True, timeout=60
     )
     out = result.stdout + result.stderr
-    if "usage: clauster.pty_keeper" not in out or "unrecognized arguments" in out:
+    # Key on the actual failure condition, not a cosmetic string: an unwired binary
+    # shows clauster's top-level "unrecognized arguments", while a wired route reaches
+    # the keeper's own parser, whose required-arg error always names `--sidecar`. Both
+    # signals track the CLI contract, so a future rename of the keeper's argparse `prog`
+    # can't turn this into a false alarm.
+    if "unrecognized arguments" in out or "--sidecar" not in out:
         raise SystemExit(
             f"`__pty-keeper__` did not route to the keeper CLI (rc={result.returncode}) — "
             f"PTY (Interactive) sessions would fail to launch on the binary:\n{out}"
