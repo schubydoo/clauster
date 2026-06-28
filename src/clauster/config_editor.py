@@ -96,9 +96,14 @@ class ConfigValidationError(ConfigEditError):
     """The merged config failed re-validation (e.g. it would open the dashboard)."""
 
 
+def _hash_bytes(data: bytes) -> str:
+    """Return the hex SHA-256 of ``data`` (the editor's external-edit token)."""
+    return hashlib.sha256(data).hexdigest()
+
+
 def file_hash(path: str | Path) -> str:
     """Return a hex SHA-256 of the config file's bytes (the external-edit token)."""
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return _hash_bytes(Path(path).read_bytes())
 
 
 def _get_by_path(obj: Any, dotted: str) -> Any:
@@ -159,25 +164,33 @@ def editable_values_on_disk(path: str | Path) -> dict[str, Any] | None:
         return None
 
 
-def present_on_disk(path: str | Path) -> set[str] | None:
-    """Return the Tier-A dotted keys literally present in the on-disk file, or ``None``.
+def disk_state(path: str | Path) -> tuple[str | None, set[str] | None]:
+    """Read the on-disk config file ONCE; return ``(content hash, present Tier-A keys)``.
 
-    Unlike :func:`editable_values` — which reads the PARSED pydantic config, where every
-    field always resolves via schema defaults — this inspects the raw YAML mapping so the
-    caller can tell which keys the user actually wrote. The editor uses it to drop a
-    deprecated field once its key has been removed from disk (e.g. by ``config reconcile``)
-    rather than rendering a flagged-deprecated row for a key that is gone. Returns ``None``
-    on a missing / unparseable file so the caller can fall back to showing every field
-    (fail-open on *display* only — never hide a field we cannot prove is absent).
+    The editor GET needs both the file's SHA-256 — the optimistic-concurrency token that
+    guards a save against a concurrent external edit — and the set of Tier-A dotted keys
+    *literally* written on disk, used to drop a deprecated row once its key is gone (e.g.
+    after ``config reconcile``). Both derive from the same bytes, so read them once.
+
+    Returns ``(None, None)`` when the file can't be read (fail-open on display: the editor
+    still opens on the in-memory fallback, and a save is safely rejected for the missing hash
+    until the file returns). The key set alone is ``None`` when the YAML is not a mapping —
+    never hide a field we cannot prove is absent. Unlike :func:`editable_values` (the
+    schema-defaulted view, where every field always resolves), this inspects the raw mapping
+    to learn what the user actually wrote.
     """
     try:
-        with open(path, encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
-    except (OSError, YAMLError):
-        return None
+        data = Path(path).read_bytes()
+    except OSError:
+        return None, None
+    content_hash = _hash_bytes(data)
+    try:
+        raw = yaml.safe_load(data)
+    except YAMLError:
+        return content_hash, None
     if not isinstance(raw, dict):
-        return None
-    return {field for field in EDITABLE_FIELDS if _dotted_present(raw, field)}
+        return content_hash, None
+    return content_hash, {field for field in EDITABLE_FIELDS if _dotted_present(raw, field)}
 
 
 def validate_edits(raw: dict[str, Any], edits: dict[str, Any]) -> dict[str, Any]:
@@ -444,7 +457,7 @@ def _constraints(info: Any) -> dict[str, Any]:
 def field_specs(present: set[str] | None = None) -> dict[str, dict[str, Any]]:
     """Return rich per-field UI metadata for the editor (label, help, control, bounds).
 
-    ``present`` is the set of dotted keys literally on disk (from :func:`present_on_disk`).
+    ``present`` is the set of dotted keys literally on disk (from :func:`disk_state`).
     A deprecated field whose key is ABSENT from ``present`` is flagged ``hidden`` so the
     editor can drop its row — a key the user already removed (e.g. via ``config reconcile``)
     no longer renders as a flagged-deprecated field. When ``present`` is ``None`` (the file

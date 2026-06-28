@@ -1488,19 +1488,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         present = None
         if path is not None:
             fields = config_editor.editable_values_on_disk(path)
-            # Which Tier-A keys are literally on disk — lets the editor drop a deprecated
-            # row once the user removed its key (e.g. via `config reconcile`). None when the
-            # file can't be read, which leaves every field visible (fail-open on display).
-            present = config_editor.present_on_disk(path)
-            # Guard file_hash the same way as the field read: a config deleted or made
-            # unreadable after startup makes read_bytes() raise, which would 500 the
-            # editor out of reach even though `fields` already degraded to the in-memory
-            # snapshot. Fall back to no hash instead (the editor still opens; a save is
-            # safely rejected for the missing hash until the file returns).
-            try:
-                content_hash = config_editor.file_hash(path)
-            except OSError:
-                content_hash = None
+            # One read of the on-disk file yields both the external-edit hash and the set of
+            # Tier-A keys literally present — the latter lets the editor drop a deprecated row
+            # once the user removed its key (e.g. via `config reconcile`). Both are None when
+            # the file can't be read (deleted / unreadable after startup): the editor still
+            # opens on the in-memory `fields` fallback below, a save is safely rejected for the
+            # missing hash, and nothing is hidden (fail-open on display — never hide a field we
+            # can't prove is absent).
+            content_hash, present = config_editor.disk_state(path)
         if fields is None:
             fields = config_editor.editable_values(cfg)
         specs = config_editor.field_specs(present)

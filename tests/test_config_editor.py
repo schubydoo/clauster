@@ -9,10 +9,10 @@ from clauster.config_editor import (
     EDITABLE_FIELDS,
     ConfigValidationError,
     DisallowedFieldError,
+    disk_state,
     editable_values,
     field_specs,
     file_hash,
-    present_on_disk,
     validate_edits,
 )
 
@@ -342,27 +342,33 @@ def test_field_specs_none_present_hides_nothing() -> None:
     assert specs["usage.show_cost"]["hidden"] is False
 
 
-def test_present_on_disk_reports_literal_keys(write_config) -> None:
-    # #656: present_on_disk reads the RAW YAML, so a key only filled by a schema default
-    # (not written) is absent, while a literally-written key is present.
+def test_disk_state_reports_literal_keys(write_config) -> None:
+    # #656: disk_state reads the RAW YAML in one pass, so a key only filled by a schema
+    # default (not written) is absent, while a literally-written key is present. The hash
+    # is computed from the same bytes.
     path = write_config("usage:\n  show_cost: false\n")
-    present = present_on_disk(path)
+    content_hash, present = disk_state(path)
+    assert content_hash is not None
     assert present is not None
     assert "usage.show_cost" in present
     assert "usage.fx_rate" not in present  # schema default, not on disk
 
 
-def test_present_on_disk_unreadable_returns_none(tmp_path) -> None:
-    # #656: a missing file yields None so the caller falls back to showing every field.
-    assert present_on_disk(tmp_path / "no-such.yml") is None
+def test_disk_state_unreadable_returns_none(tmp_path) -> None:
+    # #656: a missing file yields (None, None) so the caller drops the hash and falls back to
+    # showing every field (fail-open on display).
+    assert disk_state(tmp_path / "no-such.yml") == (None, None)
 
 
-def test_present_on_disk_non_mapping_returns_none(tmp_path) -> None:
-    # #656: a file that parses to a non-dict (e.g. a bare scalar) is treated as unreadable —
-    # None so the editor shows every field rather than hiding on a malformed file.
+def test_disk_state_non_mapping_keeps_hash_drops_keys(tmp_path) -> None:
+    # #656: a file that parses to a non-dict (e.g. a bare scalar) still hashes (bytes are
+    # readable) but yields None keys, so the editor shows every field rather than hiding on a
+    # malformed file.
     bad = tmp_path / "scalar.yml"
     bad.write_text("just a string\n", encoding="utf-8")
-    assert present_on_disk(bad) is None
+    content_hash, present = disk_state(bad)
+    assert content_hash is not None
+    assert present is None
 
 
 def test_field_specs_exposes_log_retention_fields() -> None:
