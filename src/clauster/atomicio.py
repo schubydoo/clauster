@@ -55,7 +55,20 @@ def atomic_write_text(target: Path, text: str) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=target.name + ".", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        # If fdopen raises at the open(2)/FileIO level (EMFILE/ENFILE under fd-table
+        # pressure) the fd was NOT adopted, so the raw mkstemp fd would leak — close it.
+        # The close is guarded: in the rarer case where FileIO adopted the fd before a
+        # later wrapper stage raised, the fd is already closed, and an unguarded
+        # os.close would raise EBADF and mask the original error.
+        try:
+            fh = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        with fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
