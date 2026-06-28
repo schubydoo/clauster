@@ -43,6 +43,11 @@ _log = logging.getLogger("clauster.db.stores")
 # Terminal lifecycle kinds — the rows that carry the end-of-session cost snapshot.
 _TERMINAL_KINDS = ("ended", "crashed")
 
+# Max projects per batched IN() list. SQLite caps host parameters at 999
+# (SQLITE_MAX_VARIABLE_NUMBER), so chunk below that to keep the sort working — and
+# never silently degrade to empty — on a deployment with very many projects.
+_SORTMETA_CHUNK = 900
+
 # The fields each store round-trips, in the order the JSON ``_PERSISTED_FIELDS``
 # whitelist listed them. Kept here so the DB store drops the same unknown keys.
 _INSTANCE_FIELDS = ("label", "intentional_stop", "spawn_mode", "permission_mode", "resume_mode")
@@ -397,3 +402,58 @@ class SessionHistoryStore:
                 "session rollup read failed for %s, degrading to empty: %s", project_name, exc
             )
             return ProjectRollup(project_name=project_name)
+
+    def sortmeta_for_all(
+        self, names: list[str]
+    ) -> dict[str, tuple[datetime | None, float | None]]:
+        """Return ``{name: (last_used, cost_usd)}`` for many projects in ONE session.
+
+        The batched form of :meth:`rollup_for` for the Projects sort control, which
+        needs only ``last_used`` and the most-recent-terminal ``cost_usd``. Two grouped
+        queries replace ``rollup_for``'s per-project 3-SELECT loop (the dashboard-sort
+        N+1: P projects × a session checkout × 3 SELECTs). The ``IN()`` lists are
+        chunked at :data:`_SORTMETA_CHUNK` to stay under SQLite's host-parameter cap.
+        Names with no history are omitted (the caller defaults them to ``(None, None)``).
+        Degrades to ``{}`` on any DB error — a sort never crashes the dashboard.
+        """
+        if not names:
+            return {}
+        try:
+            out: dict[str, tuple[datetime | None, float | None]] = {}
+            with self._sessions() as session:
+                for start in range(0, len(names), _SORTMETA_CHUNK):
+                    chunk = names[start : start + _SORTMETA_CHUNK]
+                    for project_name, last_used in session.execute(
+                        select(SessionEvent.project_name, func.max(SessionEvent.at))
+                        .where(SessionEvent.project_name.in_(chunk))
+                        .group_by(SessionEvent.project_name)
+                    ):
+                        out[project_name] = (last_used, None)
+                    # Most-recent terminal row per project (the cumulative cost snapshot),
+                    # picked with one windowed pass instead of a per-project LIMIT 1 query.
+                    ranked = (
+                        select(
+                            SessionEvent.project_name.label("project_name"),
+                            SessionEvent.cost_usd.label("cost_usd"),
+                            func.row_number()
+                            .over(
+                                partition_by=SessionEvent.project_name,
+                                order_by=(SessionEvent.at.desc(), SessionEvent.id.desc()),
+                            )
+                            .label("rn"),
+                        )
+                        .where(
+                            SessionEvent.project_name.in_(chunk),
+                            SessionEvent.kind.in_(_TERMINAL_KINDS),
+                        )
+                        .subquery()
+                    )
+                    for project_name, cost_usd in session.execute(
+                        select(ranked.c.project_name, ranked.c.cost_usd).where(ranked.c.rn == 1)
+                    ):
+                        prior = out.get(project_name, (None, None))
+                        out[project_name] = (prior[0], cost_usd)
+            return out
+        except SQLAlchemyError as exc:
+            _log.warning("batch sortmeta read failed, degrading to empty: %s", exc)
+            return {}
