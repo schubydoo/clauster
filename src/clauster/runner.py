@@ -2066,19 +2066,21 @@ class SessionRunner:
             _log.warning("agents --json cross-check failed (continuing): %s", exc)
             return
         discovered = self._discovered()
-        # A managed bridge owns the working sessions at its cwd iff its PROCESS is alive
-        # (computed above), NOT merely if its status is RUNNING/STARTING. Keying on
-        # status mislabels our OWN live bridge as external whenever its status is wrong —
-        # e.g. a fresh pty bridge that connected but never printed a scrapeable connect
-        # URL is left pre-ready and would otherwise have its own session flagged
-        # "external session active" and the record phantom-deleted below. A genuinely
-        # dead instance (no live process — a `_stopped_from_persisted` phantom from a
-        # stale pointer) is correctly absent here, so a real flag-form/tmux bridge at its
-        # cwd still surfaces as external.
+        # A managed bridge owns the working sessions at its cwd if its PROCESS is alive
+        # (computed above), or — the one status-based exception, see the explicit arm below
+        # (#713) — if it is still STARTING. Keying on a *live* process rather than a stale
+        # RUNNING status is what keeps a genuinely dead instance from hiding a real external
+        # bridge: a `_stopped_from_persisted` phantom (no live process) is correctly absent
+        # here, so a real flag-form/tmux bridge at its cwd still surfaces as external. The
+        # STARTING arm is safe for the same reason — a dead STARTING row was already
+        # reconciled to CRASHED/STOPPED in the loop above, so it can't shadow an external
+        # bridge; it only covers a just-spawned bridge whose pid isn't live yet but whose
+        # auto-created session `agents --json` already reports.
         managed = {
             Path(discovered[i.project].path): i.project
             for i in self._instances.values()
-            if i.project in discovered and i.project in live_projects
+            if i.project in discovered
+            and (i.project in live_projects or i.status is InstanceStatus.STARTING)
         }
         # A worktree-spawn bridge runs each session in a per-session worktree under
         # `<root>/.claude/worktrees/` (`claude remote-control --spawn worktree`), so the
@@ -2090,7 +2092,7 @@ class SessionRunner:
             Path(discovered[i.project].path): i.project
             for i in self._instances.values()
             if i.project in discovered
-            and i.project in live_projects
+            and (i.project in live_projects or i.status is InstanceStatus.STARTING)
             and i.spawn_mode == "worktree"
         }
         # Clauster's own hosted (claustrum) sessions run no bridge process, so the
