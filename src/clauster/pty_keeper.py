@@ -86,22 +86,48 @@ def _write_screen_status(path: Path, seq: int, state: str, error: str | None) ->
     _write_sidecar(path, {"seq": seq, "state": state, "error": error, "screen": None})
 
 
-def _init_screen(path: Path) -> PtyScreen | None:
-    """Create the live-screen emulator, or return None (recording why) when unavailable.
+def _make_screen(screen_sidecar: Path | None) -> PtyScreen | None:
+    """Create the pyte emulator for URL reassembly + the optional live view, or None.
 
-    ``pyte`` is the optional ``pty`` extra; if it is not installed the feature is simply off —
-    an ``unavailable`` status is written so a viewer can explain it, and None is returned so
-    the keeper drains normally. Any other setup failure is recorded as ``error``. The tap is
-    auxiliary and must never take the bridge or keeper down, so nothing here raises.
+    A pyte screen serves two consumers: the connect-URL scrape (the raw byte stream fragments
+    the URL with cursor-positioning escapes at the TUI winsize, #665) and, when
+    ``screen_sidecar`` is given, the opt-in redacted live-screen view (#534).
+
+    Returns None when no live view was requested OR ``pyte`` (the optional ``pty`` extra) is
+    absent, so the keeper drains with no pyte dependency and scrapes the URL from the raw bytes
+    instead. Coupling "build a screen" to ``screen_sidecar`` is deliberate: the pyte screen
+    only earns its TUI winsize (what fragments the raw URL) when something consumes the
+    reassembly; with the live view off the default winsize already yields a contiguous,
+    raw-scrapable URL, so the keeper is left exactly as it was. A missing/failed ``pyte`` is
+    recorded to the live-view sidecar (when one was requested) so a viewer can explain the
+    dormant view; nothing here raises — screen setup must never take the bridge or keeper down.
     """
+    if screen_sidecar is None:
+        return None
     try:
         return PtyScreen()
     except PyteUnavailableError as exc:
-        _write_screen_status(path, 0, "unavailable", str(exc))
+        _write_screen_status(screen_sidecar, 0, "unavailable", str(exc))
         return None
-    except Exception as exc:  # noqa: BLE001 — never let tap setup kill the keeper
-        _write_screen_status(path, 0, "error", f"screen init: {exc}")
+    except Exception as exc:  # noqa: BLE001 — never let screen setup kill the keeper
+        _write_screen_status(screen_sidecar, 0, "error", f"screen init: {exc}")
         return None
+
+
+def _scan_connect_url(buf: bytes | bytearray, screen: PtyScreen | None) -> str | None:
+    """Return the bridge's ``session_<id>`` from its PTY output, or None if not yet seen.
+
+    Two sources, in order: the raw byte stream (a contiguous URL line — the no-pyte / plain
+    default-winsize case), then the pyte-reassembled screen, which recovers the URL when the
+    TUI winsize makes claude fragment it with cursor-positioning escapes the raw regex can't
+    follow (#665). The id is returned UN-redacted for the keeper's private discovery sidecar.
+    """
+    raw_hit = _RE_CONNECT_URL.search(buf)
+    if raw_hit is not None:
+        return raw_hit.group(1).decode()
+    if screen is not None:
+        return screen.find_session_id()
+    return None
 
 
 def _write_screen_frame(path: Path, screen: PtyScreen, seq: int, state: str) -> int:
@@ -179,16 +205,22 @@ def run_keeper(
     }
     _write_sidecar(sidecar, base)
 
+    screen: PtyScreen | None = None
     try:
         master, slave = pty.openpty()
         slave_name = os.ttyname(slave)
-        if screen_sidecar is not None:
-            # The live-screen tap renders at a fixed SCREEN_COLS x SCREEN_ROWS (pyte has no
-            # resize negotiation), so the bridge's PTY must match that geometry — otherwise the
-            # TUI's cursor-addressed redraws (e.g. its bottom status bar) land at the wrong rows
-            # and leave stale duplicate footers in the taller pyte screen (#534). Scoped to the
-            # tap so a non-tap bridge keeps its prior winsize; best-effort so a winsize ioctl
-            # failure never aborts the spawn.
+        # Build the pyte emulator (live view + connect-URL reassembly) BEFORE sizing the PTY so
+        # the winsize can be coupled to it. pyte renders at a fixed SCREEN_COLS x SCREEN_ROWS
+        # (no resize negotiation), so the bridge's PTY must match that geometry — otherwise the
+        # TUI's cursor-addressed redraws (e.g. its bottom status bar) land at the wrong rows and
+        # leave stale duplicate footers in the taller pyte screen (#534). That same TUI winsize
+        # is also what makes claude print the connect URL via cursor-positioning escapes that
+        # fragment the raw byte stream (#665), so set it ONLY when a pyte screen exists to
+        # reassemble it: without pyte the PTY keeps the default winsize, where claude emits plain
+        # output whose URL line stays contiguous for the raw-bytes scrape. Best-effort — a
+        # winsize ioctl failure never aborts the spawn.
+        screen = _make_screen(screen_sidecar)
+        if screen is not None:
             try:
                 fcntl.ioctl(
                     slave, termios.TIOCSWINSZ, struct.pack("HHHH", SCREEN_ROWS, SCREEN_COLS, 0, 0)
@@ -254,14 +286,17 @@ def run_keeper(
     poller = select.poll()
     poller.register(master, select.POLLIN)
 
-    # Opt-in live-screen tap: a pyte emulator fed the same chunks, republished as a redacted
-    # frame at most every _SCREEN_FLUSH_INTERVAL. screen is None when off/unavailable (the
-    # keeper then drains exactly as before). `dirty` debounces writes to changed screens only.
-    tap: _ScreenTap | None = None
-    if screen_sidecar is not None:
-        screen = _init_screen(screen_sidecar)
-        if screen is not None:
-            tap = _ScreenTap(screen, screen_sidecar)
+    # The pyte emulator built above backs the connect-URL reassembly always, and — when the
+    # live-view sidecar was requested — the opt-in redacted screen republished at most every
+    # _SCREEN_FLUSH_INTERVAL (#534). `tap` pairs the screen with that sidecar for the live view;
+    # `screen` alone drives URL extraction. screen is None when no live view was requested or
+    # pyte is unavailable (the keeper then drains as before, scraping the URL from raw bytes).
+    # `dirty` debounces live-view writes to changed screens only.
+    tap: _ScreenTap | None = (
+        _ScreenTap(screen, screen_sidecar)
+        if screen is not None and screen_sidecar is not None
+        else None
+    )
     screen_seq = 0
     screen_dirty = False
     last_screen_write = 0.0
@@ -274,24 +309,29 @@ def run_keeper(
             if poller.poll(500):  # ms; truthy when the master fd has data (no FD_SETSIZE limit)
                 chunk = os.read(master, 65536)
                 if chunk:
-                    if tap is not None:
+                    if screen is not None:
                         try:
-                            tap.screen.feed(chunk)
+                            screen.feed(chunk)
                             screen_dirty = True
-                        except Exception as exc:  # noqa: BLE001 — tap is best-effort, never kill the bridge
-                            # Record the disable so a viewer sees a terminal `error` status
-                            # instead of a silently-frozen `live` screen, then turn the tap
-                            # off for the rest of this session (the bridge is unaffected).
-                            screen_seq += 1
-                            _write_screen_status(
-                                tap.sidecar, screen_seq, "error", f"screen feed: {exc}"
-                            )
-                            tap = None
+                        except Exception as exc:  # noqa: BLE001 — best-effort, never kill the bridge
+                            # A feed failure disables both screen consumers for the rest of the
+                            # session: the live view (if any) reports a terminal `error` status
+                            # instead of a silently-frozen `live` screen, and URL extraction
+                            # falls back to the raw-bytes regex below. The bridge is unaffected.
+                            if tap is not None:
+                                screen_seq += 1
+                                _write_screen_status(
+                                    tap.sidecar, screen_seq, "error", f"screen feed: {exc}"
+                                )
+                                tap = None
+                            screen = None
                     if not url_found:
                         buf.extend(chunk)
-                        hit = _RE_CONNECT_URL.search(buf)
-                        if hit is not None:
-                            session_id = hit.group(1).decode()
+                        # Scrape the connect URL from the raw bytes first, then — at the TUI
+                        # winsize, where claude fragments it with cursor moves — the pyte screen
+                        # (#665). Either source yields the same UN-redacted session id.
+                        session_id = _scan_connect_url(buf, screen)
+                        if session_id is not None:
                             base.update(
                                 connect_url=f"https://claude.ai/code/{session_id}",
                                 session_id=session_id,
