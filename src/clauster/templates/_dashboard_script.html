@@ -146,6 +146,14 @@
         session: "", turns: [], total: 0, nextCursor: null,
         error: "", trigger: null, gen: 0,
         order: "desc", q: "", queryTooShort: false,
+        // --- live-tail (#614 Part 2): follow a running session's transcript ---
+        // live: the selected session maps to a running bridge/agent/hosted session;
+        // tailTurns: append-only oldest-first buffer of turns streamed since open;
+        // tailOffset: byte offset to poll from next; tailGen: per-session tail token
+        // (so a stale in-flight poll for an old session is dropped); _tailTimer +
+        // tailBusy: the single-flight timer/lock for the poll loop.
+        live: false, tailTurns: [], tailOffset: 0, tailGen: 0,
+        tailBusy: false, tailError: "", _tailTimer: null,
       },
       agents: [],
       agentDispatchOpen: false,
@@ -886,6 +894,7 @@
         // Reset the per-view controls so the next open starts newest-first, unfiltered.
         t.order = "desc"; t.q = ""; t.queryTooShort = false;
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
+        this._stopTranscriptTail();  // #614: kill the live-tail poll loop on close
         document.body.style.overflow = "";  // release the scroll lock
         if (t.trigger && t.trigger.focus) t.trigger.focus();  // restore focus to the opener
       },
@@ -928,7 +937,14 @@
         const t = this.transcripts;
         // A fresh session always starts from the default order with no active filter.
         t.session = session; t.order = "desc"; t.q = ""; t.queryTooShort = false;
+        // #614 Part 2: if this session is currently running, follow it. The list
+        // already carries `live` per session (Part 1) — reuse it as the gate so the
+        // tail only engages for a session that's actually being written right now.
+        const meta = t.sessions.find((s) => s.session === session);
+        t.live = !!(meta && meta.live);
+        this._stopTranscriptTail();  // tear down any prior session's poll loop first
         await this.loadTranscriptTurnsFromStart();
+        if (t.live) this._startTranscriptTail();
       },
       // (Re)load the first page of the current session from cursor 0 in the current
       // order + filter. Shared by session-select, the sort toggle, and search — each
@@ -1007,8 +1023,69 @@
         const t = this.transcripts;
         t.gen = (t.gen || 0) + 1;  // void any in-flight turn fetch
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
+        this._stopTranscriptTail();  // #614: stop following the (now-deselected) session
         t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loadingMore = false;
         t.order = "desc"; t.q = ""; t.queryTooShort = false;
+      },
+      // --- live-tail poll loop (#614 Part 2) -----------------------------------
+      // Poll cadence for following a running session's transcript. A few seconds is
+      // responsive without hammering the disk-walk endpoint (the bridge appends in
+      // bursts, not per-token), and it's single-flight so a slow poll never stacks.
+      TRANSCRIPT_TAIL_POLL_MS: 3000,
+      // Stop following: cancel the pending timer and bump the tail generation so any
+      // in-flight poll's response is dropped. Leaves the already-streamed tailTurns in
+      // place (the user can still read what arrived) but never appends more.
+      _stopTranscriptTail() {
+        const t = this.transcripts;
+        t.tailGen = (t.tailGen || 0) + 1;  // void any in-flight poll
+        if (t._tailTimer) { clearTimeout(t._tailTimer); t._tailTimer = null; }
+        t.tailBusy = false;
+      },
+      // Begin following the selected (live) session from a clean tail buffer. The
+      // first poll reads from offset 0 so the tail mirrors the whole live transcript
+      // oldest-first; subsequent polls advance by the server-returned byte offset.
+      _startTranscriptTail() {
+        const t = this.transcripts;
+        this._stopTranscriptTail();           // clear any prior loop + buffer state
+        t.tailTurns = []; t.tailOffset = 0; t.tailError = "";
+        t.tailGen = (t.tailGen || 0) + 1;
+        this._pollTranscriptTail(t.tailGen);  // kick the first poll immediately
+      },
+      // One single-flight tail poll. `myGen` pins the poll to the session/loop it was
+      // scheduled for: if the user switched session or closed the modal mid-fetch, the
+      // generation moved and we drop the response (never write into a stale view) and
+      // never reschedule. Errors are surfaced (not swallowed) but don't stop the loop.
+      async _pollTranscriptTail(myGen) {
+        const t = this.transcripts;
+        if (t.tailGen !== myGen || t.tailBusy) return;  // superseded or already polling
+        t.tailBusy = true;
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
+            "/transcripts/" + encodeURIComponent(t.session) +
+            "/tail?offset=" + encodeURIComponent(t.tailOffset));
+          if (t.tailGen !== myGen) return;  // session changed / closed mid-fetch — drop it
+          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (!res.ok) { t.tailError = "Live tail interrupted."; return; }
+          const d = await res.json();
+          if (t.tailGen !== myGen) return;  // re-check after the await on .json()
+          t.tailError = "";
+          // A truncated/rotated file restarts from 0: replace the buffer, don't append.
+          if (d.reset) t.tailTurns = [];
+          if (Array.isArray(d.turns) && d.turns.length) t.tailTurns.push(...d.turns);
+          if (typeof d.offset === "number") t.tailOffset = d.offset;
+          // The session ended (no longer maps to a running bridge): drain this final
+          // delta (already applied above) and stop the loop — leave tailTurns shown.
+          if (d.live === false) { t.live = false; this._stopTranscriptTail(); return; }
+        } catch (e) {
+          if (t.tailGen !== myGen) return;
+          t.tailError = "Live tail interrupted.";  // surface, never silently stall
+        } finally {
+          t.tailBusy = false;
+          // Reschedule only while this generation is still the active tail loop.
+          if (t.tailGen === myGen) {
+            t._tailTimer = setTimeout(() => this._pollTranscriptTail(myGen), this.TRANSCRIPT_TAIL_POLL_MS);
+          }
+        }
       },
       async refresh() {
         // Single-flight: setInterval can fire a new tick while a slow refresh is still
