@@ -201,6 +201,21 @@ https://github.com/schubydoo/clauster && scoop install clauster`), or
 [Installation guide](https://schubydoo.github.io/clauster/installation/). To hack
 on Clauster itself, use the dev quick-start below.
 
+### Uninstall
+
+- Install script / standalone binary: remove `~/.local/bin/clauster` on Linux or
+  macOS; on Windows, delete `%LOCALAPPDATA%\Programs\clauster\clauster.exe`
+  unless you set a custom install directory.
+- Python tools: run `uv tool uninstall clauster`, `pipx uninstall clauster`, or
+  `pip uninstall clauster`, matching how you installed it.
+- Scoop: run `scoop uninstall clauster`.
+- Docker: stop and remove the container with `docker rm -f clauster`, then remove
+  the image with `docker rmi ghcr.io/schubydoo/clauster:latest` if you no longer
+  need it.
+- Full purge: stop Clauster first, then remove your `state_dir` if you want local
+  state/config gone too. See [Privacy & data at rest](docs/privacy.md#how-to-purge)
+  and the [Installation guide](https://schubydoo.github.io/clauster/installation/).
+
 ## Quick start (dev)
 
 > **Just running Clauster, not hacking on it?** Follow the canonical
