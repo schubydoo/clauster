@@ -274,3 +274,48 @@ def test_external_pyte_path_ignored_when_not_frozen(monkeypatch, tmp_path):
         assert sys.path == original_path
     finally:
         sys.path[:] = original_path
+
+
+def test_external_pyte_path_expanduser_runtime_error_fails_closed(monkeypatch):
+    # Fail-closed: Path.expanduser() raises RuntimeError (not OSError) when no home dir can
+    # be resolved (no HOME, stripped container). The shim must swallow it and never raise,
+    # leaving sys.path untouched — not let a RuntimeError escape into PtyScreen.__init__.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv(pty_screen.PYTE_PATH_ENV, "~/pyte-lib")
+
+    def boom(self):
+        raise RuntimeError("could not determine home directory")
+
+    monkeypatch.setattr(pty_screen.Path, "expanduser", boom)
+    original_path = list(sys.path)
+    try:
+        pty_screen._maybe_add_external_pyte_path()  # must not raise
+        assert sys.path == original_path
+    finally:
+        sys.path[:] = original_path
+
+
+def test_external_pyte_path_malformed_module_fails_closed(monkeypatch, tmp_path):
+    # Fail-closed: a CLAUSTER_PYTE_PATH dir holding a BROKEN pyte (e.g. a corrupted install
+    # that raises SyntaxError on import) must surface PyteUnavailableError, not an opaque
+    # traceback — the retry catches any exception, not just ImportError.
+    (tmp_path / "pyte.py").write_text("def (this is not valid python\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv(pty_screen.PYTE_PATH_ENV, str(tmp_path))
+
+    original_path = list(sys.path)
+    had_pyte = "pyte" in sys.modules
+    prior_pyte = sys.modules.get("pyte")
+    sys.modules.pop("pyte", None)
+    blocker = _ExternalOnlyPyteFinder(tmp_path)
+    sys.meta_path.insert(0, blocker)
+    try:
+        with pytest.raises(PyteUnavailableError, match=r"standalone binary"):
+            pty_screen._import_pyte()
+    finally:
+        if blocker in sys.meta_path:
+            sys.meta_path.remove(blocker)
+        sys.path[:] = original_path
+        sys.modules.pop("pyte", None)
+        if had_pyte:
+            sys.modules["pyte"] = prior_pyte

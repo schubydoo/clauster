@@ -100,10 +100,12 @@ def _maybe_add_external_pyte_path() -> None:
     Honor :data:`PYTE_PATH_ENV` so a standalone-binary user can enable the live terminal
     view from a side ``pip install pyte`` (#699). Do nothing unless running frozen, since a
     normal install resolves ``pyte`` through the usual import machinery. Read the env var,
-    expand ``~``, and require an existing directory; a non-directory value or any
-    :class:`OSError` is swallowed (fail-closed — never raise from the shim). APPEND, never
-    prepend, so a bundled module always wins and the external copy is consulted only when no
-    bundled ``pyte`` exists. Skip the append if the path is already on ``sys.path``.
+    expand ``~``, and require an existing directory; a non-directory value, an
+    :class:`OSError`, or a :class:`RuntimeError` (``expanduser`` raises this when no home
+    directory can be resolved — e.g. a stripped container with no ``HOME``) is swallowed
+    (fail-closed — never raise from the shim). APPEND, never prepend, so a bundled module
+    always wins and the external copy is consulted only when no bundled ``pyte`` exists. Skip
+    the append if the path is already on ``sys.path``.
     """
     if not getattr(sys, "frozen", False):
         return
@@ -115,7 +117,7 @@ def _maybe_add_external_pyte_path() -> None:
         if not resolved.is_dir():
             return
         path_str = str(resolved)
-    except OSError:
+    except (OSError, RuntimeError):
         return
     if path_str not in sys.path:
         sys.path.append(path_str)
@@ -126,7 +128,10 @@ def _import_pyte() -> Any:
 
     Try a plain import first; on failure, consult the opt-in external-path shim
     (:func:`_maybe_add_external_pyte_path`, frozen binary only) and retry once before
-    raising :class:`PyteUnavailableError`.
+    raising :class:`PyteUnavailableError`. The retry catches any exception, not just
+    :class:`ImportError`: a user-pointed external ``pyte`` can be malformed (a corrupted
+    install raising ``SyntaxError`` etc.), and that must still surface as the helpful
+    :class:`PyteUnavailableError`, never an opaque traceback.
     """
     try:
         import pyte
@@ -134,7 +139,7 @@ def _import_pyte() -> Any:
         _maybe_add_external_pyte_path()
         try:
             import pyte
-        except ImportError as exc:
+        except Exception as exc:  # noqa: BLE001 — a broken external pyte must fail closed
             raise PyteUnavailableError(_pyte_unavailable_message()) from exc
     return pyte
 

@@ -155,7 +155,7 @@ want the full supply-chain check.
     view, run Clauster from a `pip`/`uv`/`pipx` install with the `[pty]` extra
     (`pip install 'clauster[pty]'`) instead of the binary — everything else works on the
     binary. To keep the binary but still enable the view without bundling any LGPL code,
-    `pip install pyte` into a directory of your choosing and set the `CLAUSTER_PYTE_PATH`
+    `pip install --target=/your/chosen/dir pyte` and set the `CLAUSTER_PYTE_PATH`
     environment variable to that directory: the binary appends it to `sys.path` only when
     set (a bundled module would always win), so the separately installed `pyte` is loaded
     on demand.
