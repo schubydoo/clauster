@@ -486,6 +486,7 @@ the browser. These are the day-to-day knobs that are safe to change at runtime:
 
 | Section | Editable fields |
 | --- | --- |
+| `(top-level)` | `log_format` |
 | `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode`, `pty_screen_enabled` |
 | `instance_defaults` | `spawn_mode`, `permission_mode`, `verbose`, `session_name_prefix`, `capacity`, `max_bridges` |
 | `claustrum` | `enabled`, `socket_path`, `spawn_timeout_seconds`, `keep_children`, `request_timeout_seconds` |
