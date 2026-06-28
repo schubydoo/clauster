@@ -44,6 +44,7 @@ import asyncio
 import json
 import logging
 import sys
+from datetime import UTC, datetime
 from typing import Any
 
 from . import __version__
@@ -108,7 +109,11 @@ async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
     for inst in runner.list_instances():
         sessions.append(_summarize_instance(inst, kind="bridge"))
         for ws in tracked.get(inst.project, []):
-            sessions.append(_summarize_working(ws, kind="bridge-session"))
+            summary = _summarize_working(ws, kind="bridge-session")
+            summary["project"] = (
+                inst.project
+            )  # the working session belongs to this bridge's project
+            sessions.append(summary)
 
     for project, working in runner.external_sessions_by_project().items():
         for ws in working:
@@ -165,6 +170,18 @@ def _summarize_instance(inst: Any, *, kind: str) -> dict[str, Any]:
     return summary
 
 
+def _ms_to_iso(ms: int | None) -> str | None:
+    """Convert an epoch-millisecond timestamp to an ISO-8601 UTC string (None passthrough).
+
+    ``WorkingSession.started_at`` is epoch ms (an int), but bridge/hosted sessions emit
+    ``started_at`` as an ISO string; normalize the working-session field so every session
+    kind reports ``started_at`` in the same shape for an MCP client.
+    """
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat()
+
+
 def _summarize_working(ws: Any, *, kind: str) -> dict[str, Any]:
     """Summarize a :class:`WorkingSession` (`claude agents --json` item) read-only."""
     return {
@@ -178,7 +195,7 @@ def _summarize_working(ws: Any, *, kind: str) -> dict[str, Any]:
         "state": ws.state or None,
         "attribution": ws.attribution.value,
         "parent_instance": ws.parent_instance,
-        "started_at": ws.started_at,
+        "started_at": _ms_to_iso(ws.started_at),
     }
 
 
@@ -324,8 +341,11 @@ class MCPServer:
 
     def _on_initialize(self, msg_id: Any, params: dict[str, Any]) -> dict[str, Any]:
         """Answer ``initialize``: negotiate the protocol version + advertise tools."""
+        # Per the MCP lifecycle spec, echo the requested version only when we actually
+        # support it; otherwise advertise the version we DO speak (never claim a version
+        # we don't implement, which would mislead the client about our capabilities).
         requested = params.get("protocolVersion")
-        version = requested if isinstance(requested, str) and requested else PROTOCOL_VERSION
+        version = requested if requested == PROTOCOL_VERSION else PROTOCOL_VERSION
         return _result(
             msg_id,
             {

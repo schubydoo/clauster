@@ -583,6 +583,9 @@ def test_gather_sessions_summarizes_tracked_and_external_working_sessions(cfg, m
     assert tracked["id"] == "aaaaaaaa-1111-2222-3333-444444444444"
     assert tracked["attribution"] == "tracked"
     assert tracked["parent_instance"] == "alpha"
+    assert tracked["project"] == "alpha"  # bridge-session carries its bridge's project (not null)
+    # started_at normalized to an ISO-8601 string for every kind (epoch-ms in -> ISO out)
+    assert tracked["started_at"] == "2023-11-14T22:13:20+00:00"
     ext = by_kind["external-session"]
     assert ext["id"] == "bbbbbbbb-1111-2222-3333-444444444444"
     assert ext["project"] == "beta"
