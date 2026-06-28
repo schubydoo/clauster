@@ -59,3 +59,4 @@ nav:
   - Networking: networking.md
   - Architecture: architecture.md
   - Operations: operations.md
+  - MCP server: mcp.md
