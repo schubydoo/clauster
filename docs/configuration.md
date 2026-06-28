@@ -449,15 +449,15 @@ the browser. These are the day-to-day knobs that are safe to change at runtime:
 
 | Section | Editable fields |
 | --- | --- |
-| `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode` |
-| `instance_defaults` | `spawn_mode`, `permission_mode`, `session_name_prefix`, `capacity`, `max_bridges` |
+| `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode`, `pty_screen_enabled` |
+| `instance_defaults` | `spawn_mode`, `permission_mode`, `verbose`, `session_name_prefix`, `capacity`, `max_bridges` |
 | `claustrum` | `enabled`, `socket_path`, `spawn_timeout_seconds`, `keep_children`, `request_timeout_seconds` |
 | `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream`, `retention_max_age_days`, `retention_max_files`, `retention_max_total_mb` |
 | `reaper` | `ui_enabled` |
 | `usage` | `mode`, `currency`, `currency_symbol`, `fx_rate`, `token_total_includes_cache`, `show_cost` |
 | `metrics` | `enabled`, `normalize_cpu`, `show_disk`, `sample_interval_seconds`, `poll_seconds` |
 | `observability` | `prometheus_enabled` |
-| `notifications` | `enabled`, `notify_on_crash` |
+| `notifications` | `enabled`, `browser_enabled`, `notify_on_crash`, `notify_on_ready`, `notify_on_stop`, `notify_on_permission`, `notify_on_session_end`, `notify_on_reconnect_failed` |
 
 The allowlist is the source of truth in `src/clauster/config_editor.py`
 (`EDITABLE_FIELDS`); `GET /api/config` returns it so the UI only renders fields

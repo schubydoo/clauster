@@ -349,10 +349,12 @@ over a WebSocket to the dashboard's live log view.
 - **On disk** — the public log under `<state_dir>/logs/` is, by default, the
   verbatim debug file (redaction happens only over the WebSocket unless
   `logs.redact_session_url: true`, which also redacts the on-disk copy). Tail it
-  directly when the dashboard is unavailable:
+  directly when the dashboard is unavailable. The on-disk filename is
+  `<label>-<timestamp>-<seq>.log`, where `<label>` is the bridge label (the project
+  name by default), so glob on the label:
 
   ```sh
-  tail -f ~/.clauster/logs/<project>*.log
+  tail -f ~/.clauster/logs/<label>-*.log
   ```
 
 - **For a Crashed bridge** — the bridge logs its failure reason to its debug file
@@ -434,8 +436,9 @@ The database schema is migrated automatically: on every start Clauster brings
 before serving, and **refuses to start** (fail-closed) if that migration fails —
 so a routine upgrade-and-restart is all an in-place schema change needs. The
 separate `clauster migrate` command is a legacy helper that only upgrades an
-older `state.json` to the current JSON schema; on a database-backed install
-(`state.json` already imported) there is nothing for it to do.
+older `state.json` to the current JSON schema; on a database-backed install (the
+legacy `state.json` has already been imported and renamed `state.json.imported`)
+it has no meaningful state to migrate.
 
 ### `clauster config reconcile` — clean up deprecated config keys
 

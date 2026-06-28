@@ -65,13 +65,14 @@ uv run clauster
   `CHANGELOG.md` or bump the version in `pyproject.toml` / `src/clauster/__init__.py`**
   — knope owns those, regenerating them in the release PR.
 
-  On same-repo PRs that touch `src/` and lack a changeset, a bot may **auto-draft**
-  one for you (the `changeset-autodraft` workflow) and push it to your branch. Treat
-  it as a starting point, not the final word: open the diff, confirm the bump type
-  (`patch` / `minor` / `major` / `perf` / `security` / `build`) and the summary
-  sentence match what your change actually does, and adjust them if not. It's a
-  **DRAFT** guessed from the diff — don't trust it blindly. (Fork PRs get the
-  advisory `Changeset check` nag instead and should add the changeset by hand.)
+  On same-repo PRs that touch `src/` and lack a changeset, a bot may post a
+  **suggested** changeset fragment as a one-time PR comment (the
+  `changeset-autodraft` workflow). It does **not** commit to your branch — copy the
+  suggestion in, confirm the bump type (`patch` / `minor` / `major` / `perf` /
+  `security` / `build`) and the summary sentence match what your change actually
+  does, adjust if not, and commit it yourself. It's a **DRAFT** guessed from the
+  diff — don't trust it blindly. (Fork PRs get the advisory `Changeset check` nag
+  instead and should add the changeset by hand.)
 
 CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.14
 (all merge-blocking; Linux additionally enforces the 96% coverage gate), plus

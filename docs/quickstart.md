@@ -51,9 +51,11 @@ clauster doctor
 ```
 
 `doctor` confirms `claude` is found and new enough, that you're logged in, and
-that `projects_root` and the state dir are usable. Fix any ✗ before continuing —
-the most common ones are "`claude` not found" (it's not on `PATH`) and
-"not logged in" (run a `claude` session first).
+that `projects_root` and the state dir are usable. Fix any ✗ (FAIL) before
+continuing — the most common one is "`claude` not found" (it's not on `PATH`).
+Also resolve any `!` warnings such as "not logged in": these don't block the
+server (`doctor` still exits 0), but a spawned bridge inherits your `claude`
+login, so run a `claude` session first.
 
 ## 5. Run it
 
