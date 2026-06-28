@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-import pytest
+import types
+from typing import Union, get_args, get_origin
 
-from clauster.config import load_config
+import pytest
+from pydantic import BaseModel
+
+from clauster.config import ClausterConfig, load_config
 from clauster.config_editor import (
     EDITABLE_FIELDS,
+    EXCLUDED_FIELDS,
     ConfigValidationError,
     DisallowedFieldError,
     disk_state,
@@ -15,6 +20,43 @@ from clauster.config_editor import (
     file_hash,
     validate_edits,
 )
+
+
+def _nested_model(annotation: object) -> type[BaseModel] | None:
+    """Return the nested BaseModel an annotation wraps (incl. Optional), else None.
+
+    Mirrors ``config._nested_model``: a bare BaseModel subclass and an
+    ``Optional[BaseModel]`` recurse; dict/list containers do NOT (their args are a
+    key/value type, not a section model) — so the same leaves the env-var walk treats
+    as unmappable scalars are the leaves this enumerates.
+    """
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    if get_origin(annotation) in (Union, types.UnionType):
+        for arg in get_args(annotation):
+            if isinstance(arg, type) and issubclass(arg, BaseModel):
+                return arg
+    return None
+
+
+def _config_leaf_paths(
+    model: type[BaseModel] = ClausterConfig, prefix: tuple[str, ...] = ()
+) -> list[str]:
+    """Enumerate every dotted leaf-field path in ClausterConfig (nested models recurse).
+
+    Same recursion as ``config._scalar_env_map`` — nested models recurse, dict/list
+    leaves stay leaves — so the editor's coverage decision is taken against exactly the
+    addressable scalar leaves.
+    """
+    out: list[str] = []
+    for name, field in model.model_fields.items():
+        path = (*prefix, name)
+        nested = _nested_model(field.annotation)
+        if nested is not None:
+            out.extend(_config_leaf_paths(nested, path))
+        else:
+            out.append(".".join(path))
+    return out
 
 
 def _raw(write_config, extra: str = "") -> dict:
@@ -407,3 +449,74 @@ def test_validate_edits_accepts_log_retention(write_config) -> None:
     ):
         with pytest.raises(ConfigValidationError):
             validate_edits(raw, {field: -1})  # ge=0 fails closed
+
+
+def test_log_format_is_editable_enum_with_general_section() -> None:
+    # #660 PR1: log_format is the one gap-safe add — a cosmetic operational enum with no
+    # security/bind/secret implication. Being top-level (no section prefix) it groups under the
+    # synthetic "General" heading (SECTION_LABELS[""]), and carries friendly choice labels.
+    assert "log_format" in EDITABLE_FIELDS
+    spec = field_specs()["log_format"]
+    assert spec["type"] == "enum"
+    assert spec["choices"] == ["text", "json"]
+    assert spec["section"] == ""
+    assert spec["section_label"] == "General"
+    assert spec["label"] == "Application log format"
+    assert spec["choice_labels"] == {
+        "text": "Human text (single line)",
+        "json": "Structured JSON",
+    }
+    # The restart note is surfaced (logging is configured once at startup).
+    assert "restart" in spec["description"].lower()
+
+
+def test_validate_edits_accepts_log_format(write_config) -> None:
+    # #660 PR1: log_format round-trips through the Tier-A allowlist + re-validation, and an
+    # off-Literal value fails closed (the Literal["text","json"] gate trips on re-validate).
+    raw = _raw(write_config)
+    candidate = validate_edits(raw, {"log_format": "json"})
+    assert candidate["log_format"] == "json"
+    with pytest.raises(ConfigValidationError):
+        validate_edits(raw, {"log_format": "yaml"})  # not a Literal member
+
+
+def test_every_config_leaf_is_classified_editable_or_excluded() -> None:
+    # #660 coverage guard: EVERY leaf field in ClausterConfig must be a deliberate editor
+    # decision — either Tier-A editable OR in the intentionally-excluded registry. A new
+    # config.py field with no decision lands in neither and FAILS here, forcing the dev to
+    # classify it (add to EDITABLE_FIELDS, or to EXCLUDED_FIELDS with a reason). This is the
+    # durable record that keeps the editor's surface and the config schema from drifting apart.
+    leaves = set(_config_leaf_paths())
+    editable = set(EDITABLE_FIELDS)
+    excluded = set(EXCLUDED_FIELDS)
+    unclassified = leaves - editable - excluded
+    assert not unclassified, (
+        f"Config leaf field(s) {sorted(unclassified)} are in neither EDITABLE_FIELDS nor "
+        "EXCLUDED_FIELDS in config_editor.py. Classify each: add it to EDITABLE_FIELDS (Tier-A "
+        "operational scalar — never a secret/bind/auth/binary/structural/clone/webhook field) "
+        "with its label/help/widget metadata, OR add it to EXCLUDED_FIELDS with a one-line "
+        "reason. When unsure, EXCLUDE it (fail closed)."
+    )
+
+
+def test_editable_and_excluded_are_disjoint() -> None:
+    # #660: a field cannot be both editable and intentionally-excluded — a path in both is a
+    # contradiction (the guard above would count it as covered while the editor surfaces it,
+    # masking a stale entry). Pin disjointness so a copy/paste slip fails loudly.
+    overlap = set(EDITABLE_FIELDS) & set(EXCLUDED_FIELDS)
+    assert not overlap, f"field(s) in BOTH EDITABLE_FIELDS and EXCLUDED_FIELDS: {sorted(overlap)}"
+
+
+def test_editable_and_excluded_reference_only_real_leaves() -> None:
+    # #660: neither set may carry a stale entry (a renamed/removed config field). Every dotted
+    # path in EDITABLE_FIELDS and EXCLUDED_FIELDS must resolve to a real ClausterConfig leaf, so
+    # a config.py rename that orphans an entry fails here instead of silently mis-classifying.
+    leaves = set(_config_leaf_paths())
+    stale_editable = set(EDITABLE_FIELDS) - leaves
+    stale_excluded = set(EXCLUDED_FIELDS) - leaves
+    assert not stale_editable, (
+        f"EDITABLE_FIELDS names non-existent leaf(s): {sorted(stale_editable)}"
+    )
+    assert not stale_excluded, (
+        f"EXCLUDED_FIELDS names non-existent leaf(s): {sorted(stale_excluded)}"
+    )

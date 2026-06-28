@@ -29,6 +29,7 @@ from .config import ClausterConfig, load_config
 # auth/secret/bind/structural/clone/supply-chain field appears here (those stay
 # file/CLI-managed). Keep in sync with scratch/fe3-config-editor-spike.md.
 EDITABLE_FIELDS: tuple[str, ...] = (
+    "log_format",
     "claude.min_version",
     "claude.agents_json_poll_interval_seconds",
     "claude.startup_grace_seconds",
@@ -78,6 +79,74 @@ EDITABLE_FIELDS: tuple[str, ...] = (
     "notifications.notify_on_reconnect_failed",
 )
 _EDITABLE = frozenset(EDITABLE_FIELDS)
+
+# Intentionally-excluded registry (#660). Every config leaf NOT in EDITABLE_FIELDS is named
+# here with a one-line reason, so {EDITABLE_FIELDS} ∪ {EXCLUDED_FIELDS} covers EVERY leaf in
+# ClausterConfig — a newly-added config.py field with no editor decision then trips the
+# coverage guard test (it is in neither set) rather than silently appearing or not appearing.
+# Reason tags: secret (credential material — never round-trips to the browser), bind (network
+# bind — open-dashboard / restart-only), auth (lockout / open-dashboard / bypass / CSRF
+# surface), binary-path (what executes — RCE surface), structural (boot / identity /
+# persistence — a wrong value breaks startup or locks out), list-or-dict (not expressible as a
+# single scalar editor field), clone (user-supplied-URL / SSRF surface), webhook (outbound HTTP
+# egress / SSRF surface). The clone.* and webhooks.* scalar toggles are GAP-SENSITIVE: real
+# "could-be-editable" fields deferred behind the #347 `config_write` trust tier, NOT Tier-A.
+# CRITICAL SECURITY INVARIANT: when unsure, a field is EXCLUDED here, never added to Tier-A.
+EXCLUDED_FIELDS: dict[str, str] = {
+    # structural — boot / identity / persistence; a wrong value breaks load/startup.
+    "schema_version": "structural: schema version; a wrong value breaks load/migration",
+    "projects_root": "structural: core path; existence-validated, a wrong value breaks boot",
+    "state_dir": "structural: DB/state path; a wrong value orphans state",
+    "database_url": "structural: persistence DSN; may embed a DB password",
+    "root_path": "structural: ASGI sub-path; a wrong value breaks routing/login",
+    "instance_name": "structural: cosmetic process label, but structural/identity; left out v1",
+    # bind — network bind; open-dashboard / restart-only.
+    "host": "bind: bind address; 0.0.0.0 without auth = open dashboard",
+    "port": "bind: bind port; restart-only, can collide / lock out",
+    # binary-path — what executes; a browser-set binary is an RCE surface.
+    "claude.binary": "binary-path: what executes; a browser-set binary = RCE",
+    "claustrum.binary": "binary-path: what executes (daemon binary); RCE surface",
+    # list-or-dict — not addressable as a single scalar editor field (some also security).
+    "claude.path_append": "list-or-dict: list; also influences tool resolution (supply-chain)",
+    "claude.env": "list-or-dict: dict; injects subprocess env (can leak/alter behavior)",
+    "projects": "list-or-dict: per-project map; not addressable as a single editor field",
+    "auth.reverse_proxy.trusted_ips": "list-or-dict + auth: IP/CIDR allowlist (list); trust",
+    "auth.allowed_origins": "list-or-dict + auth: CSRF/WS origin allowlist (list); security",
+    "clone.allowed_schemes": "list-or-dict + clone: scheme allowlist (list); clone-security",
+    "clone.allowed_private_cidrs": "list-or-dict + clone: SSRF allowlist (list); security",
+    "webhooks.urls": "list-or-dict + secret: egress targets (list); may embed secrets",
+    "webhooks.events": "list-or-dict: per-event map; not a single editor field",
+    "notifications.urls": "list-or-dict + secret: Apprise URLs embed tokens (list+secret)",
+    # secret — credential material; never round-trips to the browser.
+    "auth.password_hash": "secret: credential; never round-trips to the browser",
+    "auth.api_token_hash": "secret: credential hash; write-only / CLI",
+    "auth.reverse_proxy.shared_secret": "secret: HMAC key; never round-trips",
+    "observability.metrics_token_hash": "secret: bearer-token hash; write-only / CLI",
+    # auth — lockout / open-dashboard / auth-bypass / CSRF surface.
+    "auth.enabled": "auth: master auth switch; lockout / open-dashboard surface",
+    "auth.password_required": "auth: auth gate; lockout surface",
+    "auth.allow_unauthenticated_network": "auth: opt-out that opens the dashboard off-loopback",
+    "auth.cookie_secure": "auth: session-cookie security flag; auth/cookie surface",
+    "auth.session_max_age_seconds": "auth: session lifetime; auth-policy surface",
+    "auth.reverse_proxy.enabled": "auth: auth-mode switch; bypass surface",
+    "auth.reverse_proxy.user_header": "auth: trusted-identity header; auth-bypass surface",
+    "auth.reverse_proxy.shared_secret_header": "auth: HMAC header name; auth surface",
+    "auth.reverse_proxy.hmac_window_seconds": "auth: replay window; loosening it weakens auth",
+    "auth.reverse_proxy.require_hmac": "auth: turning off drops HMAC → header-only trust",
+    # clone — user-supplied-URL / SSRF surface (GAP-SENSITIVE: defer behind #347 trust tier).
+    "clone.enabled": "clone (GAP-SENSITIVE): gates the clone/SSRF surface; defer behind #347",
+    "clone.allow_private_hosts": "clone (GAP-SENSITIVE): loosens the SSRF guard; defer (#347)",
+    "clone.timeout_seconds": "clone (GAP-SENSITIVE): clone.* kept whole in Tier-B; defer (#347)",
+    "clone.max_mb": "clone (GAP-SENSITIVE): clone.* kept whole in Tier-B; defer behind #347",
+    # webhook — outbound HTTP egress / SSRF surface (GAP-SENSITIVE: defer behind #347).
+    "webhooks.enabled": "webhook (GAP-SENSITIVE): enables outbound HTTP egress; defer behind #347",
+    "webhooks.timeout_seconds": "webhook (GAP-SENSITIVE): meaningful only with egress on; defer",
+    "webhooks.block_private_targets": "webhook (GAP-SENSITIVE): the webhook SSRF guard; defer",
+    # structural + binary-path — TLS material paths; load-validated, mis-set aborts HTTPS boot.
+    "tls.cert_file": "structural + binary-path: TLS material path; mis-set aborts HTTPS boot",
+    "tls.key_file": "structural + binary-path: TLS key path; security-material path",
+}
+_EXCLUDED = frozenset(EXCLUDED_FIELDS)
 
 
 class ConfigEditError(Exception):
@@ -242,7 +311,12 @@ def _classify(annotation: Any) -> tuple[str, list[str] | None]:
 
 
 # Human section names (raw key -> heading), in display order.
+# The empty-string section is the home for top-level (un-prefixed) scalar fields such as
+# `log_format`: `field_specs` yields section="" for a path with no dot, so without this entry
+# the UI would group it under a blank heading (``_humanize("") == ""``). "General" gives those
+# top-level operational scalars a real heading.
 SECTION_LABELS: dict[str, str] = {
+    "": "General",
     "claude": "Claude",
     "instance_defaults": "Instance defaults",
     "claustrum": "Direct Session (live-view)",
@@ -256,6 +330,7 @@ SECTION_LABELS: dict[str, str] = {
 
 # Human field labels (the raw key is still shown as subtext for cross-reference).
 FIELD_LABELS: dict[str, str] = {
+    "log_format": "Application log format",
     "claude.min_version": "Minimum Claude version",
     "claude.agents_json_poll_interval_seconds": "Liveness poll interval",
     "claude.startup_grace_seconds": "Startup grace period",
@@ -373,6 +448,12 @@ DEPRECATED_FIELDS: frozenset[str] = frozenset({"usage.show_cost"})
 # Plain-text UI description overrides, keyed by dotted path. Used where the model's own
 # description is raw markdown unsuitable for the panel (e.g. a deprecation note).
 FIELD_DESCRIPTIONS: dict[str, str] = {
+    "log_format": (
+        "Application log format. `text` (default) is the human single-line format; `json` "
+        "emits one structured JSON object per record. Both modes redact session URLs / bearer "
+        "ids before the line is written. Logging is configured once at startup — restart "
+        "clauster for a change to take effect."
+    ),
     "claude.resume_recap": (
         "Applies to Server Mode (standard) bridges only — Interactive Session (pty) bridges "
         "resume natively (via --continue), so recap does nothing for a pty launch. Opt-in: "
@@ -409,6 +490,10 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
 # same friendly wording as the "Run Claude here" launch dropdown instead of bare enum tokens.
 # Keyed by field path -> {value: label}.
 FIELD_CHOICE_LABELS: dict[str, dict[str, str]] = {
+    "log_format": {
+        "text": "Human text (single line)",
+        "json": "Structured JSON",
+    },
     "instance_defaults.permission_mode": {
         "default": "Ask each time (default)",
         "plan": "Plan only (read-only)",

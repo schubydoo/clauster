@@ -72,7 +72,10 @@ def _parse_tier_a_table() -> set[str]:
             continue
         section = section_match.group(1)
         for key in re.findall(r"`([^`]+)`", cols[1]):
-            fields.add(f"{section}.{key}")
+            # A top-level (un-prefixed) field — e.g. `log_format` — is grouped under the
+            # "(top-level)" section marker and parses to the bare dotted path with no prefix,
+            # matching its literal `EDITABLE_FIELDS` entry.
+            fields.add(key if section == "(top-level)" else f"{section}.{key}")
     return fields
 
 
