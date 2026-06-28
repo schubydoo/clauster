@@ -215,6 +215,46 @@ def test_dashboard_renders_projects_sort_control(write_config, tmp_path):
     assert 'projectSort: "name"' in html
 
 
+def _client_empty(tmp_path) -> TestClient:
+    # A client whose projects_root is an empty directory, so discovery finds no
+    # projects and the dashboard renders its {% else %} empty branch (#692).
+    empty_root = tmp_path / "empty_root"
+    empty_root.mkdir()
+    cfg = tmp_path / "clauster_empty.yml"
+    cfg.write_text(
+        f"projects_root: {empty_root}\nclaude:\n  binary: {FAKE_CLAUDE}\n"
+        f"state_dir: {tmp_path}/.se\n",
+        encoding="utf-8",
+    )
+    return TestClient(create_app(load_config(cfg)))
+
+
+def test_empty_dashboard_renders_orientation_card(tmp_path):
+    # First-run orientation (#692): an empty projects_root renders the dismissible
+    # "Welcome to Clauster" card — heading, both copy lines, and the keyboard-
+    # reachable "Got it" dismiss control wired to the persistent Alpine action.
+    html = _client_empty(tmp_path).get("/").text
+    assert 'id="orientation-card"' in html
+    assert "Welcome to Clauster" in html
+    # Both proposed copy lines.
+    assert "spawns Claude Code into your project directories" in html
+    assert "becomes a card you can launch a bridge in" in html
+    # Dismiss control: labeled, keyboard-reachable <button>, wired to the persisted action.
+    assert 'aria-label="Dismiss the welcome card"' in html
+    assert "dismissOrientation()" in html
+    # Persistence is mirrored from the theme pattern: an Alpine flag read from localStorage.
+    assert "orientationDismissed" in html
+    assert "clauster-orientation-dismissed" in html
+
+
+def test_populated_dashboard_omits_orientation_card(write_config, tmp_path):
+    # A dashboard with discovered projects never renders the orientation card —
+    # it lives strictly in the {% else %} empty branch.
+    html = _client(write_config, tmp_path).get("/").text
+    assert 'id="orientation-card"' not in html
+    assert "Welcome to Clauster" not in html
+
+
 # ----- single-row fragment (reactive insertion, no full reload) ---------
 
 

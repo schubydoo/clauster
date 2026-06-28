@@ -855,7 +855,39 @@
         </div>
       </div>
       {% else %}
-      <div class="empty" id="empty-state">
+      <!-- First-run orientation (#692): a fresh self-hoster sees a plain-language
+           "what this is / how to start" card. Dismissal persists via localStorage
+           (orientationDismissed). Once dismissed, the quieter "No projects yet"
+           action block below takes over so Create/Clone stay reachable. The two
+           are mutually exclusive on x-show, never via d-* (the documented Alpine
+           x-show-clobber gotcha). -->
+      <div class="empty" id="orientation-card" role="region"
+           aria-labelledby="orientation-heading"
+           x-show="!orientationDismissed" x-cloak>
+        <h2 class="empty-title" id="orientation-heading">Welcome to Clauster</h2>
+        <p class="empty-subtitle text-secondary" style="max-width: 65ch;">
+          Clauster spawns Claude Code into your project directories and lets you drive each
+          session from claude.ai/code or the Claude mobile app — no SSH session, no terminal
+          on the host.
+        </p>
+        <p class="empty-subtitle text-secondary" style="max-width: 65ch;">
+          Point <code>projects_root</code> at a folder whose subdirectories are projects, then
+          create or clone one below. Each becomes a card you can launch a bridge in.
+        </p>
+        <div class="empty-action">
+          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
+          </button>
+          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
+          </button>
+          <button type="button" class="btn btn-ghost-secondary"
+                  @click="dismissOrientation()" aria-label="Dismiss the welcome card">
+            Got it
+          </button>
+        </div>
+      </div>
+      <div class="empty" id="empty-state" x-show="orientationDismissed" x-cloak>
         <p class="empty-title">No projects yet</p>
         <p class="empty-subtitle text-secondary">
           Clauster runs Claude in a project directory under <code>{{ projects_root }}</code>.

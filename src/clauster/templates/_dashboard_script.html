@@ -212,6 +212,22 @@
       showAllProjects: false, // Zone 1: reveal projects beyond the cap
       projectSort: "name",   // Zone 1 sort (FE-2): name (default, no reorder) | last-used | cost
       projectRanks: {},      // project name -> rank int for the 6-row cap + CSS flex `order`; always populated after the first sort (name = A–Z positions, non-name = the chosen key) — do NOT clear on name sort (that caused #585b)
+      // First-run orientation card (#692): shown on the empty dashboard until the
+      // operator dismisses it. The dismissal persists in localStorage so a fresh
+      // self-hoster sees the "what this is / how to start" card exactly once.
+      // Read once at construction (mirrors the theme-persistence pattern above);
+      // a malformed/blocked store falls back to "not dismissed" (fail open here is
+      // harmless — worst case the card shows again).
+      orientationDismissed: (function () {
+        try { return localStorage.getItem("clauster-orientation-dismissed") === "1"; }
+        catch (e) { return false; }
+      })(),
+      // Hide the orientation card and remember the dismissal across reloads.
+      dismissOrientation() {
+        this.orientationDismissed = true;
+        try { localStorage.setItem("clauster-orientation-dismissed", "1"); }
+        catch (e) { /* storage blocked/full — the in-memory flag still hides it this session */ }
+      },
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
