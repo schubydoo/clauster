@@ -871,21 +871,23 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         discovered project, read from the session-history rollup. Powers the
         dashboard's opt-in sort dropdown (name / last-used / cost); the client sorts
         client-side, so this is advisory and read-only. Declared before the
-        ``{name}/…`` routes so the literal path wins the match. ``rollup_for`` already
-        returns an empty rollup on a DB error, so a sort never crashes the dashboard;
-        the try/except is just an outer net for an engine/IO fault. Invalid project
-        names are dropped before use.
+        ``{name}/…`` routes so the literal path wins the match. ``sortmeta_for_all``
+        reads every project in one session (two grouped queries, not the old per-project
+        N+1) and already degrades to empty on a DB error, so a sort never crashes the
+        dashboard; the try/except is just an outer net for an engine/IO fault. Invalid
+        project names are dropped before use.
         """
         names = [p.name for p in await list_projects() if is_valid_project_name(p.name)]
 
         def _collect() -> dict[str, dict]:
             store = runner.persistence.session_history_store()
+            meta = store.sortmeta_for_all(names)
             out: dict[str, dict] = {}
             for name in names:
-                roll = store.rollup_for(name)
+                last_used, cost_usd = meta.get(name, (None, None))
                 out[name] = {
-                    "last_used": roll.last_used.isoformat() if roll.last_used else None,
-                    "cost_usd": roll.total_cost_usd,
+                    "last_used": last_used.isoformat() if last_used else None,
+                    "cost_usd": cost_usd,
                 }
             return out
 
@@ -1266,7 +1268,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # see a live bridge as a ghost. Fail closed on ANY liveness-probe failure.
         try:
             live = environments.live_bridge_directories(config.claude.binary, config.projects_root)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — fail closed: any liveness-probe failure must not let a reap proceed
             raise HTTPException(
                 status_code=503,
                 detail=f"refusing to reap — could not determine live bridges: {exc}",
