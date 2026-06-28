@@ -151,11 +151,14 @@ want the full supply-chain check.
 !!! note "The live terminal view needs a Python install"
     The optional read-only live terminal view ([`pty_screen_enabled`](configuration.md))
     depends on [`pyte`](https://pypi.org/project/pyte/), which
-    is LGPL-licensed and so **is not bundled in the standalone binary** — and it
-    cannot be side-loaded into a PyInstaller binary after the fact. To use the live
+    is LGPL-licensed and so **is not bundled in the standalone binary**. To use the live
     view, run Clauster from a `pip`/`uv`/`pipx` install with the `[pty]` extra
-    (`pip install 'clauster[pty]'`) instead of the binary. Everything else works on
-    the binary.
+    (`pip install 'clauster[pty]'`) instead of the binary — everything else works on the
+    binary. To keep the binary but still enable the view without bundling any LGPL code,
+    `pip install --target=/your/chosen/dir pyte` and set the `CLAUSTER_PYTE_PATH`
+    environment variable to that directory: the binary appends it to `sys.path` only when
+    set (a bundled module would always win), so the separately installed `pyte` is loaded
+    on demand.
 
 ## Scoop (Windows)
 
