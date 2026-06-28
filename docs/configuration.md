@@ -237,6 +237,25 @@ strict.
 | `ui_enabled` | bool | `false` | Expose the ghost-environment reaper in the **dashboard**. The CLI (`clauster reap-environments`) is always available; this gates only the destructive browser surface. |
 <!-- END GEN: reaper -->
 
+## `config_write` — code-executing config-write trust tier (`ConfigWriteConfig`)
+
+A fail-closed trust tier (#347/#687) for writing Claude Code's *own* configuration
+(MCP servers, hooks, permission rules, skills) from the dashboard. Each of those is
+code the spawned `claude` executes as the clauster runtime user, so the gate assumes
+the browser is the threat: both flags default **off**, and — unlike the operational
+fields above — they are **never** web-editable. The capability is file/CLI-managed
+only (exactly like the auth/bind/secret fields), so a browser session can never grant
+itself the write capability. When `enabled` is off, the entire surface returns `404`.
+User-scope writes (`~/.claude.json`) require the separate `allow_user_scope` opt-in on
+top of `enabled`.
+
+<!-- BEGIN GEN: config_write -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch for the code-executing config-write capability (MCP servers / hooks / permission rules / skills). Off by default; the whole dashboard surface 404s when off. **Not** web-editable — file/CLI-managed only, exactly like the auth/bind/secret fields, because it is an RCE surface. |
+| `allow_user_scope` | bool | `false` | A **second, independent** opt-in for user-scope writes (`~/.claude.json` / `~` settings), which affect every project and the live account — strictly more dangerous than a single project's `.mcp.json`. Project-scope can run with this off. Off by default; **not** web-editable. |
+<!-- END GEN: config_write -->
+
 ## `usage` — per-project cost/token badge (`UsageConfig`)
 
 <!-- BEGIN GEN: usage -->

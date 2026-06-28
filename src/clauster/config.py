@@ -428,6 +428,36 @@ class ReaperConfig(BaseModel):
     )
 
 
+class ConfigWriteConfig(BaseModel):
+    """Trust tier for code-executing config writes (#347/#687) — a fail-closed gate.
+
+    Gates the (future) dashboard surface that writes Claude Code's *own* config
+    (MCP servers, hooks, permission rules, skills). Every one of those is code the
+    spawned ``claude`` will execute as the clauster runtime user, so a browser that
+    can write them is transitively RCE — the gate assumes the browser is the threat.
+
+    Both flags default **off** and are deliberately **not** in the config-editor
+    Tier-A allowlist: the code-execution capability is file/CLI-managed only and can
+    never be turned on from the browser (mirrors the auth/bind/secret exclusions).
+    A missing/garbled flag means *off* (fail closed).
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Master switch for the code-executing config-write capability "
+        "(MCP servers / hooks / permission rules / skills). Off by default; the whole "
+        "dashboard surface 404s when off. **Not** web-editable — file/CLI-managed only, "
+        "exactly like the auth/bind/secret fields, because it is an RCE surface.",
+    )
+    allow_user_scope: bool = Field(
+        default=False,
+        description="A **second, independent** opt-in for user-scope writes "
+        "(`~/.claude.json` / `~` settings), which affect every project and the live "
+        "account — strictly more dangerous than a single project's `.mcp.json`. "
+        "Project-scope can run with this off. Off by default; **not** web-editable.",
+    )
+
+
 class LogsConfig(BaseModel):
     """Bridge-log rotation sizing and WebSocket redaction/ANSI-stripping toggles."""
 
@@ -1038,6 +1068,7 @@ class ClausterConfig(BaseModel):
     logs: LogsConfig = Field(default_factory=LogsConfig)
     clone: CloneConfig = Field(default_factory=CloneConfig)
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
+    config_write: ConfigWriteConfig = Field(default_factory=ConfigWriteConfig)
     usage: UsageConfig = Field(default_factory=UsageConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
