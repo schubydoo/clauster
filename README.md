@@ -379,6 +379,13 @@ reference, security model) are published as a live docs site at
 Python 3.11+ · FastAPI · Alpine.js + Jinja2 + Tabler · `uv` · `pydantic`. Developed
 and CI-gated on Linux; macOS / Windows are in the test matrix. Apache-2.0 licensed.
 
+## Support
+
+Questions, bugs, and feature requests all go through
+[GitHub Issues](https://github.com/schubydoo/clauster/issues) — Discussions are
+intentionally not enabled. See [`SUPPORT.md`](SUPPORT.md) for how to get help, and
+[`SECURITY.md`](SECURITY.md) to report a vulnerability privately.
+
 ## License
 
 [Apache License 2.0](https://github.com/schubydoo/clauster/blob/main/LICENSE).
