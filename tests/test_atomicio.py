@@ -74,6 +74,60 @@ def test_atomic_write_text_cleans_up_temp_on_replace_failure(tmp_path, monkeypat
     assert list(tmp_path.iterdir()) == []  # the unique temp was removed; no target written
 
 
+def test_atomic_write_text_cleans_up_temp_on_fsync_failure(tmp_path, monkeypatch):
+    # The likely write-path fault (ENOSPC/EIO surfacing at fsync) must remove the temp
+    # and propagate — never leave a half-written stray .tmp behind.
+    def _boom(fd):
+        raise OSError("EIO")
+
+    monkeypatch.setattr(atomicio.os, "fsync", _boom)
+    with pytest.raises(OSError, match="EIO"):
+        atomic_write_text(tmp_path / "f.txt", "data")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_write_text_cleans_up_temp_on_interrupt_mid_write(tmp_path, monkeypatch):
+    # A KeyboardInterrupt mid-write is why the cleanup catches BaseException, not just
+    # Exception — the temp must still be removed and the interrupt re-raised.
+    def _interrupt(fd):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(atomicio.os, "fsync", _interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        atomic_write_text(tmp_path / "f.txt", "data")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_write_text_closes_fd_when_fdopen_fails(tmp_path, monkeypatch):
+    # If os.fdopen raises before the `with` adopts the fd (e.g. EMFILE under fd-table
+    # pressure), the raw mkstemp fd must be closed, not leaked — and the temp removed.
+    captured: dict[str, int] = {}
+    real_mkstemp = atomicio.tempfile.mkstemp
+    real_close = atomicio.os.close
+    closed: list[int] = []
+
+    def _spy_mkstemp(*a, **k):
+        fd, name = real_mkstemp(*a, **k)
+        captured["fd"] = fd
+        return fd, name
+
+    def _boom_fdopen(*a, **k):
+        raise OSError("too many open files")
+
+    def _spy_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(atomicio.tempfile, "mkstemp", _spy_mkstemp)
+    monkeypatch.setattr(atomicio.os, "fdopen", _boom_fdopen)
+    monkeypatch.setattr(atomicio.os, "close", _spy_close)
+
+    with pytest.raises(OSError, match="too many open files"):
+        atomic_write_text(tmp_path / "f.txt", "data")
+    assert captured["fd"] in closed  # the raw fd was closed, not leaked
+    assert list(tmp_path.iterdir()) == []  # temp removed, target not written
+
+
 def test_fsync_dir_ignores_open_error(tmp_path, monkeypatch):
     # A directory whose fd can't be opened for fsync (Windows can't open a dir; or a
     # perm/race) is a no-op — durability of the rename is then the filesystem's to keep.

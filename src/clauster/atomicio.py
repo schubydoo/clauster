@@ -55,7 +55,15 @@ def atomic_write_text(target: Path, text: str) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=target.name + ".", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        # fdopen adopts the fd only on success; if it raises (e.g. EMFILE/ENFILE under
+        # fd-table pressure) the raw mkstemp fd would otherwise leak, so close it here
+        # before falling through to the temp-file cleanup below.
+        try:
+            fh = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
