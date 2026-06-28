@@ -695,7 +695,34 @@ def _tls_files(config: ClausterConfig) -> tuple[str, str] | None:
     cert = resolve_cert_path("cert_file", config.tls.cert_file)
     key = resolve_cert_path("key_file", config.tls.key_file)
     _verify_cert_chain(cert, key)
+    # After the fail-closed checks: a non-fatal hygiene warning if the private key is
+    # readable beyond its owner. Advisory only — an over-permissive key still serves.
+    _warn_if_key_world_readable(key)
     return str(cert), str(key)
+
+
+def _warn_if_key_world_readable(key: Path) -> None:
+    """Warn (non-fatal) when the TLS private key is accessible beyond its owner.
+
+    A private key should be ``0600``-ish; any group/other bit (read, write, or
+    execute) exposes it to other local users. This is a hygiene nudge, not a gate —
+    it never aborts startup (a cosmetic permission check must not fail-closed) and is
+    skipped on non-POSIX platforms (Windows) where these mode bits don't carry the
+    same meaning.
+    """
+    if os.name != "posix":
+        return
+    try:
+        mode = key.stat().st_mode
+    except OSError:  # pragma: no cover - the key was just resolved+readable; racey unlink only
+        return
+    if mode & 0o077:
+        print(
+            f"clauster: WARNING — tls.key_file {key} is group/other-accessible "
+            f"(mode {mode & 0o777:#o}); a private key should be accessible only by its owner. "
+            "Restrict it, e.g. `chmod 600`.",
+            file=sys.stderr,
+        )
 
 
 def _verify_cert_chain(cert: Path, key: Path) -> None:

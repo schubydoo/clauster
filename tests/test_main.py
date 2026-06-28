@@ -8,6 +8,7 @@ tests don't touch.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -108,11 +109,17 @@ def test_run_invokes_uvicorn(write_config, tmp_path, monkeypatch):
 
 
 def _tls_cert_key(tmp_path):
-    """Throwaway cert + key files (filesystem-only validation needs no real TLS)."""
+    """Throwaway cert + key files (filesystem-only validation needs no real TLS).
+
+    The key is chmod 0600 so the (non-fatal) world-readable-key warning stays silent
+    by default — tests that assert on the warning set the mode explicitly.
+    """
     cert = tmp_path / "cert.pem"
     key = tmp_path / "key.pem"
     cert.write_text("CERT", encoding="utf-8")
     key.write_text("KEY", encoding="utf-8")
+    if os.name == "posix":
+        key.chmod(0o600)
     return cert, key
 
 
@@ -333,6 +340,44 @@ def test_run_quiets_cookie_warning_under_tls(write_config, tmp_path, monkeypatch
     # And the banner advertises https rather than http.
     assert f"https://127.0.0.1:{7621}" in err
     assert captured.get("ssl_certfile") == str(cert.resolve())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits only")
+def test_run_warns_on_world_readable_key(write_config, tmp_path, monkeypatch, capsys):
+    # Non-fatal hygiene nudge: an over-permissive (group/other-accessible) private key
+    # warns but STILL serves (rc 0, server constructed) — never aborts startup.
+    cert, key = _tls_cert_key(tmp_path)
+    key.chmod(0o644)  # group + other readable
+    extra = f"tls:\n  cert_file: {cert}\n  key_file: {key}\n"
+    captured = _stub_server(monkeypatch)
+    monkeypatch.setattr(cli, "_verify_cert_chain", lambda cert, key: None)
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)])
+    assert rc == 0  # non-fatal: it warns but serves
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "group/other-accessible" in err
+    assert captured.get("ssl_certfile") == str(cert.resolve())  # server still wired up
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits only")
+def test_run_silent_for_owner_only_key(write_config, tmp_path, monkeypatch, capsys):
+    # A 0600 key is the correct posture — no warning.
+    cert, key = _tls_cert_key(tmp_path)
+    key.chmod(0o600)  # owner-only
+    extra = f"tls:\n  cert_file: {cert}\n  key_file: {key}\n"
+    _stub_server(monkeypatch)
+    monkeypatch.setattr(cli, "_verify_cert_chain", lambda cert, key: None)
+    assert cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)]) == 0
+    assert "group/other-accessible" not in capsys.readouterr().err
+
+
+def test_key_perms_warning_skipped_on_non_posix(tmp_path, monkeypatch, capsys):
+    # On Windows (os.name != "posix") the mode-bit check is skipped entirely — even a
+    # would-be over-permissive key produces no warning, since the bits don't apply.
+    key = tmp_path / "key.pem"
+    key.write_text("KEY", encoding="utf-8")
+    monkeypatch.setattr(cli.os, "name", "nt")
+    cli._warn_if_key_world_readable(key)
+    assert capsys.readouterr().err == ""
 
 
 def test_run_reexecs_when_restart_requested(write_config, tmp_path, monkeypatch):
