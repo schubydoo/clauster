@@ -241,6 +241,42 @@ def test_rollup_for_unknown_project_is_empty(store):
     assert rollup.total_cost_usd is None
 
 
+# ----- batched sortmeta (the dashboard-sort N+1 fix) ----------------------
+
+
+def test_sortmeta_for_all_batches_projects(store):
+    base = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
+    store.append(project_name="alpha", mode="pty", kind="spawned", at=base)
+    store.append(
+        project_name="alpha", mode="pty", kind="ended", at=base + timedelta(hours=1), cost_usd=1.0
+    )
+    # alpha's later terminal row carries the snapshot the sort must use.
+    store.append(
+        project_name="alpha", mode="pty", kind="ended", at=base + timedelta(hours=3), cost_usd=3.5
+    )
+    store.append(
+        project_name="beta", mode="standard", kind="spawned", at=base + timedelta(hours=2)
+    )
+
+    meta = store.sortmeta_for_all(["alpha", "beta"])
+
+    a_last, a_cost = meta["alpha"]
+    assert a_cost == 3.5  # most-recent terminal row, not the first
+    a_last = a_last.replace(tzinfo=UTC) if a_last.tzinfo is None else a_last
+    assert a_last == base + timedelta(hours=3)
+    b_last, b_cost = meta["beta"]  # has history but no terminal row
+    assert b_cost is None
+    assert b_last is not None
+
+
+def test_sortmeta_for_all_omits_unknown_and_empty(store):
+    store.append(project_name="alpha", mode="pty", kind="spawned")
+    meta = store.sortmeta_for_all(["alpha", "ghost"])
+    assert "ghost" not in meta  # no history → omitted (caller defaults to None/None)
+    assert meta["alpha"][0] is not None
+    assert store.sortmeta_for_all([]) == {}
+
+
 # ----- FK cascade ---------------------------------------------------------
 
 
@@ -292,3 +328,8 @@ def test_rollup_degrades_to_empty_on_db_error(store):
     with mock.patch.object(store, "_sessions", side_effect=SQLAlchemyError("boom")):
         rollup = store.rollup_for("alpha")
         assert rollup == ProjectRollup(project_name="alpha")
+
+
+def test_sortmeta_for_all_degrades_to_empty_on_db_error(store):
+    with mock.patch.object(store, "_sessions", side_effect=SQLAlchemyError("boom")):
+        assert store.sortmeta_for_all(["alpha"]) == {}
