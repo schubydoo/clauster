@@ -277,6 +277,49 @@ def _render_content(content: object) -> str:
     return "\n".join(parts)
 
 
+def _line_to_turn(line: str) -> dict | None:
+    """Parse one transcript JSONL line into a redacted, render-ready turn (or ``None``).
+
+    Returns ``{role, content, model, timestamp}`` with every free-text field
+    passed through :func:`redact.sanitize_line` — so a session/env identifier or
+    an obvious secret shape can never reach the browser. ``None`` is returned for
+    a line that isn't a renderable message: blank, not JSON, not a dict, missing a
+    ``message`` dict, or missing a non-empty ``role`` (mirroring the skip rules of
+    :func:`parse_transcript`). Never raises on a malformed line.
+
+    The single source of truth for "JSONL record → redacted turn", shared by both
+    :func:`read_transcript_turns` (whole file) and
+    :func:`read_transcript_turns_from_offset` (incremental tail) so the redaction
+    and skip semantics can never drift between the two readers.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None  # skip a corrupt line rather than abort the whole page
+    if not isinstance(record, dict):
+        return None
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    if not isinstance(role, str) or not role:
+        return None  # a turn without a role isn't a renderable message
+    text = _render_content(message.get("content"))
+    model = message.get("model")
+    timestamp = record.get("timestamp")
+    return {
+        # Every rendered field that can carry user/model free text is
+        # sanitized before it leaves this reader (D11 redaction order).
+        "role": redact.sanitize_line(role),
+        "content": redact.sanitize_line(text),
+        "model": redact.sanitize_line(model) if isinstance(model, str) else None,
+        "timestamp": timestamp if isinstance(timestamp, str) else None,
+    }
+
+
 def read_transcript_turns(path: Path) -> list[dict]:
     """Stream a transcript JSONL into a list of redacted, render-ready turns.
 
@@ -302,35 +345,58 @@ def read_transcript_turns(path: Path) -> list[dict]:
         raise FileNotFoundError(f"transcript not found: {path}") from exc
     with fh:
         for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # skip a corrupt line rather than abort the whole page
-            if not isinstance(record, dict):
-                continue
-            message = record.get("message")
-            if not isinstance(message, dict):
-                continue
-            role = message.get("role")
-            if not isinstance(role, str) or not role:
-                continue  # a turn without a role isn't a renderable message
-            text = _render_content(message.get("content"))
-            model = message.get("model")
-            timestamp = record.get("timestamp")
-            turns.append(
-                {
-                    # Every rendered field that can carry user/model free text is
-                    # sanitized before it leaves this reader (D11 redaction order).
-                    "role": redact.sanitize_line(role),
-                    "content": redact.sanitize_line(text),
-                    "model": redact.sanitize_line(model) if isinstance(model, str) else None,
-                    "timestamp": timestamp if isinstance(timestamp, str) else None,
-                }
-            )
+            turn = _line_to_turn(line)
+            if turn is not None:
+                turns.append(turn)
     return turns
+
+
+def read_transcript_turns_from_offset(path: Path, offset: int) -> tuple[list[dict], int, bool]:
+    """Read the redacted turns appended to a transcript since byte ``offset`` (live tail, #614).
+
+    Returns ``(turns, new_offset, reset)``:
+
+    - ``turns`` — the renderable turns in **file order** (oldest-first append
+      order) parsed from the bytes after ``offset``, each already passed through
+      :func:`redact.sanitize_line` via the shared :func:`_line_to_turn` (so the
+      tail is redacted identically to the paged reader — never raw).
+    - ``new_offset`` — the byte position the caller should poll from next: it
+      advances **only past the last complete line** (the final newline). A
+      partially-written trailing line is intentionally left unconsumed so the next
+      poll reparses it once the bridge finishes writing it — a half-written JSON
+      line never reaches the browser as a corrupt/empty turn.
+    - ``reset`` — ``True`` when the file is now **shorter than** ``offset`` (the
+      session was rotated/truncated/replaced): the read restarts from byte 0 and
+      the caller should replace, not append. A negative ``offset`` is clamped to 0
+      and is not itself a reset.
+
+    Read in **binary** and decoded ``utf-8`` with ``errors="replace"`` (same
+    tolerance as :func:`read_transcript_turns`) — invalid bytes from the external
+    bridge never crash the tail. Blocking + pure; the caller runs it off the event
+    loop. Raises :class:`FileNotFoundError` if the file can't be opened, matching
+    :func:`read_transcript_turns` so the route maps both the same way.
+    """
+    start = max(int(offset), 0)
+    try:
+        fh = open(path, "rb")
+    except (FileNotFoundError, OSError) as exc:
+        raise FileNotFoundError(f"transcript not found: {path}") from exc
+    with fh:
+        size = fh.seek(0, 2)  # SEEK_END → current size in bytes
+        reset = start > size  # the file shrank past our cursor → rotated/truncated
+        if reset:
+            start = 0
+        fh.seek(start)
+        chunk = fh.read()  # start..EOF
+        # Consume only up to and including the last newline; a trailing partial
+        # line (no newline yet) is left for the next poll so we never parse a
+        # half-written record. With no newline at all, nothing is consumed.
+        nl = chunk.rfind(b"\n")
+        consumed = b"" if nl == -1 else chunk[: nl + 1]
+        new_offset = start + len(consumed)
+        text = consumed.decode("utf-8", errors="replace")
+        turns = [t for line in text.splitlines() if (t := _line_to_turn(line)) is not None]
+    return turns, new_offset, reset
 
 
 def resolve_session_transcript(
