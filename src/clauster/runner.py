@@ -1136,11 +1136,20 @@ class SessionRunner:
     def _keeper_launch_cmd(
         sidecar: Path, cwd: Path, bridge_argv: list[str], screen_sidecar: Path | None = None
     ) -> list[str]:
-        """Wrap the bridge argv in a `python -m clauster.pty_keeper` launcher."""
+        """Wrap the bridge argv in a PTY-keeper launcher.
+
+        Source/venv: ``<python> -m clauster.pty_keeper …``. A frozen (PyInstaller)
+        binary can't use ``-m`` — ``sys.executable`` is the clauster binary, whose
+        argparse rejects it — so it re-invokes itself with the hidden
+        :data:`~clauster.procutil.KEEPER_SUBCOMMAND` (routed in
+        :func:`clauster.__main__.main`, mirroring the recap hook).
+        """
+        if getattr(sys, "frozen", False):
+            launcher = [sys.executable, procutil.KEEPER_SUBCOMMAND]
+        else:
+            launcher = [sys.executable, "-m", "clauster.pty_keeper"]
         cmd = [
-            sys.executable,
-            "-m",
-            "clauster.pty_keeper",
+            *launcher,
             "--sidecar",
             str(sidecar),
             "--cwd",

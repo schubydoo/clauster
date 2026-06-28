@@ -448,6 +448,21 @@ def test_recap_hook_subcommand_swallows_errors(monkeypatch):
     assert cli.main(["__recap-hook__"]) == 0
 
 
+def test_pty_keeper_subcommand_forwards_to_keeper_main(monkeypatch):
+    # The frozen-binary keeper entry point hands argv[1:] to pty_keeper.main and returns
+    # its rc verbatim (and isn't rewritten to `run` by the bare-args shim).
+    seen: dict[str, list[str]] = {}
+
+    def fake_keeper_main(argv):
+        seen["argv"] = argv
+        return 7
+
+    monkeypatch.setattr(cli.pty_keeper, "main", fake_keeper_main)
+    rc = cli.main(["__pty-keeper__", "--sidecar", "/s.json", "--", "claude", "--rc", "p"])
+    assert rc == 7
+    assert seen["argv"] == ["--sidecar", "/s.json", "--", "claude", "--rc", "p"]
+
+
 def test_install_service_write_to_path(tmp_path, capsys):
     dest = tmp_path / "clauster.service"
     rc = cli.main(

@@ -25,6 +25,7 @@ from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
 from .config import ClausterConfig, load_config, resolve_cert_path
 from .logging_config import setup_logging
+from .procutil import KEEPER_SUBCOMMAND
 from .recap import RECAP_SUBCOMMAND
 from .state import StateStore
 
@@ -73,6 +74,11 @@ def main(argv: list[str] | None = None) -> int:
     # (its bundled resume_recap.py lives in an ephemeral _MEIxxx dir). See clauster.recap.
     if argv and argv[0] == RECAP_SUBCOMMAND:
         return _recap_hook()
+    # Same frozen-binary trick for the PTY keeper: a one-file build re-invokes itself as
+    # `<exe> __pty-keeper__ …` because `sys.executable -m clauster.pty_keeper` can't work
+    # when sys.executable is the binary. See runner._keeper_launch_cmd / procutil.
+    if argv and argv[0] == KEEPER_SUBCOMMAND:
+        return pty_keeper.main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="clauster",
         description=__doc__,

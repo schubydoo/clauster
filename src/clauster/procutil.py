@@ -30,6 +30,16 @@ _BRIDGE_BINARY_HINT = "claude"
 # `python -m clauster.pty_keeper --sidecar P -- <bridge argv>`).
 _KEEPER_MODULE = "clauster.pty_keeper"
 
+# Hidden CLI subcommand a frozen (PyInstaller) binary re-invokes to run the PTY
+# keeper. Under a one-file build ``sys.executable`` is the clauster binary itself,
+# so the source-mode ``<python> -m clauster.pty_keeper`` form can't work — clauster's
+# argparse would reject the bare ``-m``. The frozen launcher uses
+# ``<exe> __pty-keeper__ --sidecar P -- <argv>`` instead (see
+# :func:`clauster.runner.SessionRunner._keeper_launch_cmd` and
+# :func:`clauster.__main__.main`, mirroring the recap hook's ``__recap-hook__``).
+# Lives here so the cmdline gate below recognizes either form.
+KEEPER_SUBCOMMAND = "__pty-keeper__"
+
 # A proc_start we measured ourselves (a float create_time) is the SAME
 # measurement as the live process's create_time, so the same process matches it
 # near-exactly — only a hair of float jitter is plausible. A reused PID, having
@@ -109,16 +119,33 @@ def is_hosted_cmdline(cmdline: list[str]) -> bool:
 
 
 def is_keeper_cmdline(cmdline: list[str]) -> bool:
-    """Whether a command line is a ``python -m clauster.pty_keeper`` PTY keeper.
+    """Whether a command line is a clauster PTY keeper (source or frozen form).
 
-    The keeper is launched as ``<python> -m clauster.pty_keeper --sidecar P -- <argv>``.
+    Source/venv: ``<python> -m clauster.pty_keeper --sidecar P -- <argv>``.
+    Frozen binary: ``<clauster-exe> __pty-keeper__ --sidecar P -- <argv>`` — under a
+    PyInstaller one-file build ``sys.executable`` is the clauster binary, so the ``-m``
+    form is impossible (see :data:`KEEPER_SUBCOMMAND`). Both forms must be recognized or
+    orphan classification / hard-kill would miss a frozen keeper.
+
     As :func:`is_bridge_cmdline` / :func:`is_hosted_cmdline` gate on the ``claude`` binary
-    before the distinguishing token, this requires BOTH the python interpreter (argv[0])
-    AND the module passed via ``-m`` — so an unrelated process that merely carries the
-    string as a data argument (a ``grep``, a ``python -c`` script) is never mistaken for a
-    keeper and killed in the TOCTOU window (#301 / RUNOPS-1).
+    before the distinguishing token, each form pairs the identifying token with its
+    launcher: the source form needs ``python`` in argv[0] AND ``-m`` before the module;
+    the frozen form needs the ``clauster`` binary in argv[0] AND the subcommand as argv[1].
+    So an unrelated process that merely carries the string as a data argument (a ``grep``,
+    a ``python -c`` script) is never mistaken for a keeper and killed in the TOCTOU window
+    (#301 / RUNOPS-1).
     """
-    if not cmdline or _KEEPER_MODULE not in cmdline:
+    if not cmdline:
+        return False
+    # Frozen form: `<clauster-exe> __pty-keeper__ …` — the binary, then the subcommand.
+    if (
+        len(cmdline) > 1
+        and cmdline[1] == KEEPER_SUBCOMMAND
+        and "clauster" in os.path.basename(cmdline[0]).lower()
+    ):
+        return True
+    # Source form: `<python> -m clauster.pty_keeper …`.
+    if _KEEPER_MODULE not in cmdline:
         return False
     idx = cmdline.index(_KEEPER_MODULE)
     return "python" in cmdline[0].lower() and idx > 0 and cmdline[idx - 1] == "-m"

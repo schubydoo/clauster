@@ -44,6 +44,32 @@ def test_keeper_launch_cmd_includes_screen_sidecar_only_when_given() -> None:
     assert off[off.index("--") + 1 :] == ["claude", "x"]
 
 
+def test_keeper_launch_cmd_uses_module_form_when_not_frozen(monkeypatch) -> None:
+    """A source/venv install runs the keeper as `<python> -m clauster.pty_keeper …`."""
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    cmd = SessionRunner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), ["claude", "x"])
+    assert cmd[:3] == [sys.executable, "-m", "clauster.pty_keeper"]
+    assert procutil.KEEPER_SUBCOMMAND not in cmd
+
+
+def test_keeper_launch_cmd_uses_subcommand_when_frozen(monkeypatch) -> None:
+    """A frozen (PyInstaller) build re-invokes itself: `<exe> __pty-keeper__ …`, never `-m`.
+
+    Under a one-file binary ``sys.executable`` IS the clauster binary, so the `-m` form
+    would make clauster's argparse reject the keeper — the exact failure this guards.
+    """
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    # In a real frozen build sys.executable is the clauster binary, not the test's python.
+    monkeypatch.setattr(sys, "executable", "/opt/clauster/clauster")
+    cmd = SessionRunner._keeper_launch_cmd(Path("/s.json"), Path("/cwd"), ["claude", "x"])
+    assert cmd[:2] == ["/opt/clauster/clauster", procutil.KEEPER_SUBCOMMAND]
+    assert "-m" not in cmd
+    # the bridge argv still survives intact after the `--` separator
+    assert cmd[cmd.index("--") + 1 :] == ["claude", "x"]
+    # and procutil recognizes the very command this produces as a keeper (round-trip)
+    assert procutil.is_keeper_cmdline(cmd)
+
+
 def test_screen_sidecar_path_sits_beside_the_keeper_sidecar() -> None:
     """The screen sidecar is `<stem>.screen.json`, beside the keeper discovery JSON (#534)."""
     log = Path("/logs/alpha-123-0.log")
