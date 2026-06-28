@@ -149,11 +149,13 @@ resume always honour the recorded mode.
     recorded mode — standard re-spawns (optionally recapping), pty resumes the
     keeper with `--continue`.
 
-!!! warning "pty bridges and `systemctl restart`"
-    With `KillMode=control-group`, a `systemctl restart` reaps the whole cgroup,
-    which kills live pty keepers — **pty bridges do not survive a service
-    restart**. A lost session's transcript is still recoverable with
-    `claude --continue`.
+!!! note "Interactive Session bridges and `systemctl restart`"
+    Interactive Session bridges survive a `systemctl restart` under the
+    `KillMode=process` unit `install-service` writes by default (the keeper is
+    detached and reattached on startup). They're only reaped under systemd's
+    default `KillMode=control-group`, which kills the whole service cgroup —
+    `clauster doctor` flags that case. A session lost to a cgroup reap still has its
+    transcript recoverable with `claude --continue`.
 
 ## Configuration & state
 
