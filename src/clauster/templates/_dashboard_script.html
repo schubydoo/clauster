@@ -192,7 +192,8 @@
       _refreshQueued: false,  // a refresh requested while one was in flight -> run one trailing
       np: { open: false, name: "", submittedName: "", mode: "create", url: "", shallow: false,
             gitInit: false, busy: false, error: null, warn: null,
-            cloning: false, progress: { percent: null, phase: "" } },
+            cloning: false, confirmCancel: false, reattached: false,
+            progress: { percent: null, phase: "" } },
       // System-readiness (preflight) — the `clauster doctor` checks surfaced in the
       // browser so a precondition (claude not logged in, dir untrusted, …) is visible
       // up front instead of failing silently when you click Start. loaded stays false
@@ -217,6 +218,7 @@
         this.loadAllPreflight();
         for (const n of PROJECT_NAMES) { this.loadUsage(n); }
         this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
+        this.reattachActiveClones();  // #659: a clone started in another tab streams here too
         setInterval(() => this.refresh(), 4000);
         // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
         if (METRICS_ENABLED) { this.refreshMetrics(); setInterval(() => this.refreshMetrics(), METRICS_POLL_MS); }
@@ -1647,21 +1649,38 @@
         // longer mutate the dialog), and abandon its clone watch so the stream stops.
         this._nextNpOp();
         if (this._abortClone) { this._abortClone(); this._abortClone = null; }
+        this._cloneJobId = null; this._cloneDetachOnly = false;
         const np = this.np;
         np.name = ""; np.url = ""; np.submittedName = "";
         np.error = null; np.warn = null;
         np.busy = false; np.cloning = false;
+        np.confirmCancel = false; np.reattached = false;
         np.progress = { percent: null, phase: "" };
       },
-      // Cancel an in-progress clone from the dedicated Cancel button (#659 items 1+2).
-      // Reuses the existing #573 server-side cancel via `_abortClone` (terminate the git
-      // worker + tear down its partial dir + close the watch WS), then confirms with a
-      // toast — the panel-close toggle aborted silently, leaving the operator unsure it
-      // actually stopped. Single-flight: the `!np.cloning` guard plus clearing np.cloning
-      // (which hides the button) and nulling `_abortClone` mean a second synchronous click
-      // no-ops — it can't re-POST cancel against a job already torn down.
+      // Open the confirm-before-cancel prompt (#659 item 3). Cancelling a clone discards an
+      // in-progress download, so a stray click on "Cancel clone" shouldn't abort it outright;
+      // the dedicated button now arms this small inline confirm (consistent with the trust /
+      // bypass confirms) instead of calling cancelClone() directly. Friction is deliberately
+      // minimal — cancel is safe + recoverable (just re-Clone), so a single inline Yes/No.
+      promptCancelClone() {
+        if (!this.np.cloning) return;  // nothing in flight (button already hidden)
+        this.np.confirmCancel = true;
+      },
+      dismissCancelClone() {
+        this.np.confirmCancel = false;  // "Keep cloning" — leave the clone running untouched
+      },
+      // Cancel an in-progress clone, confirmed via promptCancelClone (#659 items 1+2+3).
+      // Triggers the existing #573 server-side cancel (terminate the git worker + tear down
+      // its partial dir + close the watch WS), then confirms with a toast — the panel-close
+      // toggle aborted silently, leaving the operator unsure it actually stopped. The cancel
+      // POST fires for BOTH an owning watch (via `_abortClone`) and a reattached/detach-only
+      // watch (directly here), so a deliberate Cancel always destroys the clone regardless of
+      // which tab started it (#659 item 4). Single-flight: the `!np.cloning` guard plus
+      // clearing np.cloning (which hides the button) and nulling `_abortClone` mean a second
+      // synchronous click no-ops — it can't re-POST cancel against a job already torn down.
       cancelClone() {
         const np = this.np;
+        np.confirmCancel = false;  // close the confirm prompt regardless of what follows
         if (!np.cloning) return;  // nothing in flight to cancel (button already hidden)
         // Bump the op id FIRST, like resetNewProject does. A Cancel can land in the window
         // between np.cloning=true and watchClone installing `_abortClone` (while the clone
@@ -1669,11 +1688,22 @@
         // stays true and installs an orphan live watch that runs the clone to completion
         // invisibly. Bumping staleifies that attempt so watchClone early-returns instead.
         this._nextNpOp();
-        // `_abortClone` POSTs the #573 cancel endpoint and closes the socket; it also sets
-        // the watch's `settled` flag so no late `done`/`cancelled` frame races our teardown.
-        // It may be null in the pre-watch window above — the op bump is what neutralizes
-        // that case; this just stops the server transfer promptly once the watch exists.
+        // A confirmed Cancel ALWAYS stops the clone server-side. On an OWNING watch, the
+        // `_abortClone()` below already POSTs the #573 cancel, so this would double-POST — only
+        // POST directly on a DETACH-ONLY (reattached) watch, where `_abortClone` deliberately
+        // won't. That makes the deliberate action destroy the clone regardless of which tab
+        // started it. Best-effort + fire-and-forget; the op bump above neutralizes the pre-watch
+        // window where no socket exists yet.
+        if (this._cloneDetachOnly && this._cloneJobId) {
+          fetch(ROOT + "/api/projects/clone/" + encodeURIComponent(this._cloneJobId) + "/cancel",
+                { method: "POST" })
+            .catch(() => { /* best-effort: nothing to do if the cancel POST fails */ });
+        }
+        // `_abortClone` closes the socket and sets the watch's `settled` flag so no late
+        // `done`/`cancelled` frame races our teardown; on an owning watch it also POSTs cancel.
+        // It may be null in the pre-watch window above — the op bump is what neutralizes that.
         if (this._abortClone) { this._abortClone(); this._abortClone = null; }
+        this._cloneJobId = null; this._cloneDetachOnly = false;
         // The clone (and its partial dir) is gone server-side — return the dialog to a clean,
         // retryable state (panel + name/url kept) rather than stranding a frozen progress bar.
         np.cloning = false; np.busy = false;
@@ -1681,6 +1711,42 @@
         // Honest copy: the cancel POST is fire-and-forget, so the client can't confirm the
         // server actually removed files — don't assert an outcome it didn't observe.
         this.toast("Clone cancelled", "info");
+      },
+      // Cross-tab in-flight clone awareness (#659 item 4). A clone's progress streams over
+      // its per-job WebSocket only to tabs that started it; a tab opened mid-clone sees
+      // nothing. On load we ask the server for any running clone job and reattach this tab
+      // to its live progress stream — the WS already fans out to every subscriber, so a
+      // second watcher gets the same `{phase, percent}` frames and terminal `done`.
+      //
+      // Conservative by design: only reattach when this tab has no clone of its own in
+      // flight (`np.cloning`/`np.busy`), so we never clobber a clone the user just started
+      // here. `reattached` flags the UI to label it as started elsewhere. Best-effort: any
+      // failure (endpoint disabled, network) leaves the tab exactly as it was.
+      async reattachActiveClones() {
+        const np = this.np;
+        if (np.cloning || np.busy) return;  // this tab already owns/started a clone — leave it
+        let jobs;
+        try {
+          const res = await fetch(ROOT + "/api/projects/clone/active");
+          if (!res.ok) return;  // clone disabled or transient error — nothing to reattach
+          jobs = (await res.json()).jobs;
+        } catch (e) { return; }  // best-effort: a fetch failure must not break first paint
+        if (!Array.isArray(jobs) || jobs.length === 0) return;
+        // Re-check after the await: the user may have started their own clone meanwhile.
+        if (np.cloning || np.busy) return;
+        const job = jobs[0];  // a single clone runs at a time in this UI; reattach to it
+        const op = this._nextNpOp();
+        np.open = true; np.mode = "clone";
+        np.submittedName = job.name; np.name = np.name || job.name;
+        np.reattached = true; np.cloning = true; np.busy = true;
+        np.error = null; np.warn = null; np.confirmCancel = false;
+        // Seed from the snapshot so the bar shows the live phase/percent before the first
+        // WS frame lands (the WS resends a snapshot on connect, but seeding avoids a flash).
+        np.progress = { percent: job.percent, phase: job.phase || "Cloning…" };
+        // detachOnly: this tab didn't start the clone, so closing/resetting the panel must
+        // drop our watch WITHOUT server-cancelling another tab's clone. A deliberate
+        // "Cancel clone" still tears it down (cancelClone POSTs the #573 cancel directly).
+        this.watchClone(np, job.job_id, job.name, op, /* detachOnly */ true);
       },
       // Per-submit operation id. Each submit claims a fresh one; reset/supersede bumps the
       // counter so an older attempt's captured op stops matching. A safe ownership token
@@ -1724,10 +1790,19 @@
           this.watchClone(np, body.job_id, name, op);
         } catch (e) { if (this._npOwns(op)) { np.error = String(e); np.busy = false; np.cloning = false; } }
       },
-      watchClone(np, jobId, name, op) {
+      // `detachOnly` (#659 item 4): a tab that REATTACHED to a clone started elsewhere must
+      // not server-cancel it when its panel closes/resets — it didn't start the job, so a
+      // panel-close should drop our local watch and leave the originating tab's clone (and
+      // its partial dir) untouched. The owning tab keeps the prior behavior (close = abort).
+      // A deliberate "Cancel clone" still server-cancels on either tab via cancelClone().
+      watchClone(np, jobId, name, op, detachOnly = false) {
         // A Cancel before the clone POST returned already bumped the op — don't even install
         // a watch for a superseded attempt, or its frames would drive a newer dialog.
         if (!this._npOwns(op)) return;
+        // Remember the job id + whether this watch is detach-only so a confirmed cancelClone()
+        // can reach the #573 endpoint itself on a reattached watch (whose _abortClone won't POST).
+        this._cloneJobId = jobId;
+        this._cloneDetachOnly = detachOnly;
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const ws = new WebSocket(proto + "://" + location.host + ROOT +
                                  "/ws/clone-progress/" + encodeURIComponent(jobId));
@@ -1744,15 +1819,18 @@
         // this just stops the stream promptly.)
         this._abortClone = () => {
           settled = true;
-          // Actually stop the clone server-side — terminate the git worker + clean its
-          // partial dir (#573). Closing the socket alone only stops us watching; the work
-          // would keep running. Best-effort + fire-and-forget; the op gate stays the
-          // correctness mechanism, this just ends the server's transfer promptly.
-          // fetch() is async, so a network rejection escapes a synchronous try/catch;
-          // attach .catch() so the best-effort cancel POST never becomes an unhandled
-          // promise rejection.
-          fetch(ROOT + "/api/projects/clone/" + encodeURIComponent(jobId) + "/cancel", { method: "POST" })
-            .catch(() => { /* best-effort: nothing to do if the cancel POST fails */ });
+          // An OWNING watch stops the clone server-side — terminate the git worker + clean its
+          // partial dir (#573). A REATTACHED watch (detachOnly) only drops our socket: it never
+          // started the job, so a panel-close must not destroy another tab's clone. In both
+          // cases closing the socket alone just stops us watching; the cancel POST is what ends
+          // the transfer. Best-effort + fire-and-forget; the op gate stays the correctness
+          // mechanism. fetch() is async, so a network rejection escapes a synchronous
+          // try/catch; attach .catch() so the best-effort cancel POST never becomes an
+          // unhandled promise rejection.
+          if (!detachOnly) {
+            fetch(ROOT + "/api/projects/clone/" + encodeURIComponent(jobId) + "/cancel", { method: "POST" })
+              .catch(() => { /* best-effort: nothing to do if the cancel POST fails */ });
+          }
           try { ws.close(); } catch (e) { /* closing */ }
         };
         ws.onmessage = async (ev) => {
@@ -1765,7 +1843,8 @@
             settled = true;  // before close(), so onclose below no-ops
             try { ws.close(); } catch (e) { /* already closing */ }
             this._abortClone = null;  // this watch reached its terminal state
-            np.cloning = false;
+            this._cloneJobId = null; this._cloneDetachOnly = false;
+            np.cloning = false; np.confirmCancel = false;  // a settled clone leaves no cancel prompt
             if (m.status === "error") {
               np.error = m.error || "clone failed"; np.busy = false;
               this.toast(name + ": clone failed", "error");

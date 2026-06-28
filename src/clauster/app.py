@@ -1406,6 +1406,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=409, detail=f"clone job is already {job.status}")
         return {"job_id": job.id, "cancelling": True}
 
+    @app.get("/api/projects/clone/active")
+    async def api_clone_active() -> dict:
+        """List in-flight clone jobs so a second tab can reattach to live progress (#659).
+
+        Clone progress streams over the per-job WebSocket only to tabs that started (or
+        already reattached to) it. A tab opened mid-clone polls this on load: a running
+        job here lets it reattach to ``/ws/clone-progress/{job_id}`` and show the same
+        live bar. The clone URL is never returned (it can carry credentials) — only the
+        job id, project name, and current ``{phase, percent}``.
+        """
+        return {"jobs": [job.status_snapshot() for job in clone_jobs.active_jobs()]}
+
     @app.get("/api/instances")
     async def api_instances() -> list[RemoteControlInstance]:
         return runner.list_instances()

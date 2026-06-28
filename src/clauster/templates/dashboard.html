@@ -800,10 +800,28 @@
               <!-- Dedicated cancel for an in-progress clone (#659 item 1): a first-class
                    control next to Clone, shown only while a clone is cancellable, rather
                    than relying on the panel-close toggle to abort it as a side effect.
-                   x-show flips off the instant cancelClone() clears np.cloning, so the
-                   button vanishes on first click — its own single-flight guard. -->
-              <button type="button" class="btn btn-outline-danger" x-show="np.cloning" x-cloak
-                      @click="cancelClone()">Cancel clone</button>
+                   It now arms the confirm-before-cancel prompt below (#659 item 3) instead
+                   of cancelling outright; hidden once a confirm is open so the inline Yes/No
+                   is the only live control. -->
+              <button type="button" class="btn btn-outline-danger" x-show="np.cloning && !np.confirmCancel" x-cloak
+                      @click="promptCancelClone()">Cancel clone</button>
+            </div>
+            <!-- Confirm-before-cancel (#659 item 3): aborting discards the partial download,
+                 so a small inline confirm (same pattern as the trust/bypass confirms) guards
+                 the destructive click. Minimal friction — cancel is safe + recoverable. -->
+            <div class="alert alert-warning mt-3 mb-0" x-show="np.confirmCancel" x-cloak>
+              <p class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>Cancel this clone? The partial download is discarded — you can start it again.</p>
+              <div class="btn-list">
+                <button type="button" class="btn btn-sm btn-danger" @click="cancelClone()">Yes, cancel clone</button>
+                <button type="button" class="btn btn-sm btn-ghost-secondary" @click="dismissCancelClone()">Keep cloning</button>
+              </div>
+            </div>
+            <!-- Cross-tab reattach badge (#659 item 4): this clone was started in another
+                 tab; we reattached to its live stream. Auto-hides when the clone settles.
+                 aria-live: the badge appears reactively after load, so announce it to AT. -->
+            <div class="text-secondary small mt-2" x-show="np.cloning && np.reattached" x-cloak
+                 aria-live="polite">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>A clone is already in progress (started in another tab) — showing its live progress here.
             </div>
             <div class="mt-3" x-show="np.cloning" x-cloak>
               <div class="d-flex justify-content-between small text-secondary mb-1">
