@@ -12,7 +12,10 @@ upgrades are an external operation: update the package, then restart. Run
 > never fetches, installs, or rewrites code, so the no-self-**update** stance above
 > is unchanged: a version upgrade is still update-the-package-then-restart. The
 > in-app restart simply spares you a shell for a config reload; the live-session
-> caveat below (a restart reaps the cgroup) applies to it exactly as to any restart.
+> caveat below applies to it exactly as to any restart (under a default
+> `KillMode=control-group` unit a restart reaps the cgroup and takes live bridges
+> with it; a `KillMode=process` unit — what `clauster install-service` writes — does
+> not, so they survive).
 
 Always **back up first** — it's a few seconds and makes any upgrade reversible:
 
@@ -91,10 +94,13 @@ pre-0.12 flat-file `state.json`.)
 > **Server Mode** bridges are detached and survive a Clauster restart, so the
 > upgrade only refreshes the manager and doesn't interrupt them.
 >
-> **Interactive Session bridges do *not* survive a `systemctl restart`** — the
-> default `KillMode=control-group` reaps the whole service cgroup, killing the
-> bridge. Its transcript is preserved (resume with `claude --continue`), but the
-> live session ends. `clauster doctor` flags a unit with the reaping default;
-> `sudo clauster install-service systemd --write` then installs a
-> `KillMode=process` unit so Interactive Session bridges survive *future* restarts (the one
-> restart that applies the new unit still reaps the current bridges).
+> **Interactive Session bridges also survive a `systemctl restart`** — *as long as
+> the unit uses `KillMode=process`, which is what `clauster install-service` writes
+> by default*, so a clauster-managed install is already safe (the surviving keeper
+> is reattached on startup). They're only reaped under systemd's **default**
+> `KillMode=control-group`, which kills the whole service cgroup (`clauster doctor`
+> flags that case; `sudo clauster install-service systemd --write` installs the
+> `KillMode=process` unit). One caveat during a unit migration: the single restart
+> that *applies* a new `KillMode=process` unit still runs under the old unit, so it
+> reaps whatever bridges are live at that moment (transcript preserved; resume with
+> `claude --continue`).

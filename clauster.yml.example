@@ -79,6 +79,9 @@ auth:
     shared_secret: null            # HMAC key the proxy signs the auth header with
     trusted_ips: []
     hmac_window_seconds: 60
+    # require_hmac: false            # header-only forward-auth proxies (Authelia/Traefik/
+    #                                # oauth2-proxy) that sign no HMAC — set true (the
+    #                                # default) when using a shared_secret HMAC proxy instead
 
 logs:
   bridge_log_max_size_mb: 10
@@ -143,9 +146,15 @@ usage:
 # extra: pip install 'clauster[notify]'. Best-effort + fail-closed — a notify
 # failure never affects the bridge lifecycle.
 # notifications:
-#   enabled: false
+#   enabled: false                 # MASTER switch for the outbound (Apprise) channel
 #   urls: []                       # Apprise URLs, e.g. ["discord://...", "tgram://..."]
+#   browser_enabled: false         # in-browser Web Notifications channel (no URL needed)
 #   notify_on_crash: true          # alert when a bridge exits NOT via Stop
+#   notify_on_ready: false         # alert when a bridge becomes ready (RUNNING)
+#   notify_on_stop: false          # alert when a bridge is stopped via the Stop button
+#   notify_on_permission: false    # alert when a hosted session parks a permission prompt
+#   notify_on_session_end: false   # alert when a single-shot session bridge finishes
+#   notify_on_reconnect_failed: false  # alert when a resume/reconnect fails to recover
 
 # Outbound HTTP webhooks on Clauster lifecycle transitions. Fail-open: a slow/broken
 # endpoint is timeout-bounded and never affects the lifecycle. http/https URLs only

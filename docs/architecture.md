@@ -11,7 +11,7 @@ Key modules under `src/clauster/`:
 | Module | Responsibility |
 | --- | --- |
 | `app.py` | FastAPI app factory; routes, middleware, cookie/session/WS wiring. |
-| `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`). |
+| `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`, `config` (with `config reconcile`)). |
 | `runner.py` | `SessionRunner` — spawn / stop / observe **standard** `claude remote-control` bridges. |
 | `pty_keeper.py` | Sidecar that owns a true-resume (**pty**) bridge's PTY. |
 | `discovery.py` | Project discovery under `projects_root`; `~/.claude.json` paths. |
@@ -149,11 +149,13 @@ resume always honour the recorded mode.
     recorded mode — standard re-spawns (optionally recapping), pty resumes the
     keeper with `--continue`.
 
-!!! warning "pty bridges and `systemctl restart`"
-    With `KillMode=control-group`, a `systemctl restart` reaps the whole cgroup,
-    which kills live pty keepers — **pty bridges do not survive a service
-    restart**. A lost session's transcript is still recoverable with
-    `claude --continue`.
+!!! note "Interactive Session bridges and `systemctl restart`"
+    Interactive Session bridges survive a `systemctl restart` under the
+    `KillMode=process` unit `install-service` writes by default (the keeper is
+    detached and reattached on startup). They're only reaped under systemd's
+    default `KillMode=control-group`, which kills the whole service cgroup —
+    `clauster doctor` flags that case. A session lost to a cgroup reap still has its
+    transcript recoverable with `claude --continue`.
 
 ## Configuration & state
 
