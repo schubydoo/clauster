@@ -125,7 +125,7 @@ def test_pty_screen_enabled_is_editable_bool_with_safety_note() -> None:
     assert "claude.pty_screen_enabled" in EDITABLE_FIELDS
     spec = field_specs()["claude.pty_screen_enabled"]
     assert spec["type"] == "bool"
-    assert spec["label"] == "Live PTY terminal view"
+    assert spec["label"] == "Live Interactive Session terminal view"
     assert "redact" in spec["description"].lower()
 
 
@@ -189,7 +189,7 @@ def test_field_specs_exposes_claustrum_block_with_depends() -> None:
     ]
     assert "claustrum.binary" not in EDITABLE_FIELDS
     assert specs["claustrum.enabled"]["type"] == "bool"
-    assert specs["claustrum.enabled"]["section_label"] == "Claustrum (hosted live-view)"
+    assert specs["claustrum.enabled"]["section_label"] == "Direct Session (live-view)"
     assert specs["claustrum.enabled"]["depends_on"] is None  # the master switch itself
     # The 4 operational fields all depend on the master toggle (greyed when the channel is off).
     for path in claustrum[1:]:

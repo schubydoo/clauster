@@ -200,7 +200,7 @@ def _classify(annotation: Any) -> tuple[str, list[str] | None]:
 SECTION_LABELS: dict[str, str] = {
     "claude": "Claude",
     "instance_defaults": "Instance defaults",
-    "claustrum": "Claustrum (hosted live-view)",
+    "claustrum": "Direct Session (live-view)",
     "logs": "Logs",
     "reaper": "Reaper",
     "usage": "Usage",
@@ -218,14 +218,14 @@ FIELD_LABELS: dict[str, str] = {
     "claude.resume_recap": "Recap prior transcript on restart",
     "claude.resume_recap_max_chars": "Recap size limit",
     "claude.launch_mode": "Launch mode for new bridges",
-    "claude.pty_screen_enabled": "Live PTY terminal view",
+    "claude.pty_screen_enabled": "Live Interactive Session terminal view",
     "instance_defaults.spawn_mode": "Where new sessions run",
     "instance_defaults.permission_mode": "Default permission mode",
     "instance_defaults.verbose": "Verbose bridge logging",
     "instance_defaults.session_name_prefix": "Session name prefix",
-    "instance_defaults.capacity": "Sessions per standard bridge",
+    "instance_defaults.capacity": "Sessions per Server Mode bridge",
     "instance_defaults.max_bridges": "Max concurrent bridges",
-    "claustrum.enabled": "Enable hosted live-view channel",
+    "claustrum.enabled": "Enable Direct Session live-view channel",
     "claustrum.socket_path": "Daemon socket path",
     "claustrum.spawn_timeout_seconds": "Daemon spawn timeout",
     "claustrum.keep_children": "Keep sessions on daemon restart",
@@ -329,25 +329,27 @@ DEPRECATED_FIELDS: frozenset[str] = frozenset({"usage.show_cost"})
 # description is raw markdown unsuitable for the panel (e.g. a deprecation note).
 FIELD_DESCRIPTIONS: dict[str, str] = {
     "claude.resume_recap": (
-        "Applies to standard bridges only — pty bridges resume natively (via --continue), so "
-        "recap does nothing for a pty launch. Opt-in: installs a SessionStart hook in the "
-        "runtime user's ~/.claude/settings.json that recaps the most recent prior transcript "
-        "for the cwd into a restarted standard bridge (edits the user's Claude settings and "
-        "injects prior turns)."
+        "Applies to Server Mode (standard) bridges only — Interactive Session (pty) bridges "
+        "resume natively (via --continue), so recap does nothing for a pty launch. Opt-in: "
+        "installs a SessionStart hook in the runtime user's ~/.claude/settings.json that recaps "
+        "the most recent prior transcript for the cwd into a restarted Server Mode bridge (edits "
+        "the user's Claude settings and injects prior turns)."
     ),
     "usage.show_cost": (
         "Deprecated. Use “Usage badge mode” → Off to hide the badge; usage.mode now takes "
         "precedence and show_cost only applies when mode is unset."
     ),
     "instance_defaults.verbose": (
-        "Applies to standard `claude remote-control` bridges only (every spawn mode — "
-        "same-dir/worktree/session); the pty bridge runs under a PTY keeper and is never "
-        "passed --verbose. Adds --verbose to the spawned `claude remote-control` process so "
+        "Applies to Server Mode (standard) `claude remote-control` bridges only (every spawn "
+        "mode — same-dir/worktree/session); the Interactive Session (pty) bridge runs under a "
+        "PTY keeper and is never passed --verbose. Adds --verbose to the spawned "
+        "`claude remote-control` process so "
         "it logs detailed connection/session events (useful for diagnosing intermittent "
         "bridge disconnects). Takes effect on the next bridge start."
     ),
     "claude.pty_screen_enabled": (
-        "Applies to pty (true-resume) bridges only — standard bridges have no PTY to render. "
+        "Applies to Interactive Session (pty / true-resume) bridges only — Server Mode "
+        "(standard) bridges have no PTY to render. "
         "Publishes a redacted, read-only render of the bridge's live terminal for the dashboard's "
         "live-terminal view. Needs the optional pyte dependency (pip install 'clauster[pty]'); "
         "without it the feature stays dormant. The render is best-effort secret-redacted, so "
@@ -368,8 +370,8 @@ FIELD_CHOICE_LABELS: dict[str, dict[str, str]] = {
         "bypassPermissions": "Skip all checks ⚠",
     },
     "claude.launch_mode": {
-        "standard": "Standard (multi-session bridge)",
-        "pty": "True-resume (pty, single session)",
+        "standard": "Server Mode (multi-session bridge)",
+        "pty": "Interactive Session (single session, true resume)",
     },
     "instance_defaults.spawn_mode": {
         "same-dir": "Same directory",

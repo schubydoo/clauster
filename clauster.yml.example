@@ -29,8 +29,8 @@ claude:
   resume_recap: false              # opt-in: install a SessionStart hook that recaps the
                                    # prior transcript into a restarted bridge's context
   resume_recap_max_chars: 8000     # recap budget (most recent turns kept)
-  launch_mode: standard            # standard = headless `claude remote-control` server.
-                                   # pty = run the `claude --remote-control` flag form under
+  launch_mode: standard            # standard = Server Mode: headless `claude remote-control` server.
+                                   # pty = Interactive Session: run the `claude --remote-control` flag form under
                                    # a PTY keeper for true conversation resume on Restart
                                    # (single-session; POSIX only). Opt-in.
                                    # This is the DEFAULT for *new* bridges only — a bridge's
@@ -164,16 +164,16 @@ usage:
 #     crash: true
 #     # Extended events (#432). Absent key = DISABLED — opt in explicitly. One,
 #     # permission-needed, is a "come look" signal, so none start emitting on upgrade.
-#     bg-settled: false            # a `claude --bg` background job settled (stop/remove)
-#     permission-needed: false     # a hosted session parked a tool-permission prompt
+#     bg-settled: false            # a Background Agent (`claude --bg`) job settled (stop/remove)
+#     permission-needed: false     # a Direct Session parked a tool-permission prompt
 #     clone-done: false            # a project clone finished (status done|error)
 
-# Claustrum hosted live-view channel (EXPERIMENTAL). When enabled, Clauster
+# Claustrum Direct Session live-view channel (EXPERIMENTAL). When enabled, Clauster
 # connect-or-spawns one claustrum daemon per deployment and hosts headless
 # stream-json sessions on it — dashboard panel with live stream, send, tool-
 # permission approve/deny, resume, and orphan recovery after a daemon restart.
 # Fail-closed: daemon trouble surfaces in /healthz, never touches bridges.
-# NOTE: hosted sessions are LOCAL live-view only — unlike bridges, they are never
+# NOTE: Direct Sessions are LOCAL live-view only — unlike bridges, they are never
 # attachable from claude.ai/code or the Claude mobile app.
 # claustrum:
 #   enabled: false

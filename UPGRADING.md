@@ -88,13 +88,13 @@ detect dependency drift, so re-run `uv sync --extra dev` whenever
 migrates automatically on startup; `clauster migrate` is only for folding in a
 pre-0.12 flat-file `state.json`.)
 
-> **Standard** bridges are detached and survive a Clauster restart, so the
+> **Server Mode** bridges are detached and survive a Clauster restart, so the
 > upgrade only refreshes the manager and doesn't interrupt them.
 >
-> **pty (true-resume) bridges do *not* survive a `systemctl restart`** — the
+> **Interactive Session bridges do *not* survive a `systemctl restart`** — the
 > default `KillMode=control-group` reaps the whole service cgroup, killing the
 > bridge. Its transcript is preserved (resume with `claude --continue`), but the
 > live session ends. `clauster doctor` flags a unit with the reaping default;
 > `sudo clauster install-service systemd --write` then installs a
-> `KillMode=process` unit so pty bridges survive *future* restarts (the one
+> `KillMode=process` unit so Interactive Session bridges survive *future* restarts (the one
 > restart that applies the new unit still reaps the current bridges).

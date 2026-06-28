@@ -46,17 +46,43 @@ A bridge is a `claude` process Clauster launches in a project directory. The two
 modes have **different argv and different readiness logic** and are deliberately
 not unified.
 
-> Orthogonal to these modes is an experimental **hosted channel** (`hosted.py`):
-> a headless stream-json `claude` run on the claustrum daemon's pipes rather than
-> as a remote-control bridge. It is a separate `channel` axis on the instance
-> model, not a third bridge mode. It has its own dashboard panel — start a
-> session, watch it stream live, drive it, approve/deny tool prompts, and resume
-> it after a restart — backed by `WS /ws/hosted/{id}` and `GET /api/hosted`.
+## Session modes (canonical vocabulary)
+
+These four names describe how clauster spawns and talks to a `claude` process. Use
+exactly these display names in UI labels, tooltips, help/offcanvas copy, and docs;
+the serialized wire tokens (`standard`, `pty`, `hosted`) never change.
+
+- **Server Mode** — a headless `claude remote-control` server (the subcommand
+  form) that hosts multiple Desktop/web sessions at once and survives a clauster
+  restart, but does not resume a prior conversation. (wire token: launch/resume
+  mode `"standard"`)
+- **Interactive Session** — a single `claude --remote-control` (flag form) bridge
+  run under a PTY keeper, pairing a live terminal with remote control so it can
+  genuinely restore the prior conversation on restart (true resume). (wire token:
+  launch/resume mode `"pty"`)
+- **Background Agent** — a fire-and-forget `claude --bg` agent-view run that
+  executes a task on its own and reports back, with no attached interactive
+  session. (the `--bg` / agent-view substrate)
+- **Direct Session** — clauster drives `claude` itself over the claustrum-daemon
+  stream-json channel and renders the conversation in its own UI, rather than
+  proxying a remote-control bridge. (wire token: session channel `"hosted"`)
+
+Reference: <https://code.claude.com/docs/en/remote-control> — Server mode is the
+`claude remote-control` multi-session server; an interactive session is
+`claude --remote-control`, a terminal paired with remote control.
+
+> Orthogonal to these modes is the experimental **Direct Session** channel
+> (`hosted.py`, wire token `channel` `"hosted"`): a headless stream-json `claude` run
+> on the claustrum daemon's pipes rather than as a remote-control bridge. It is a
+> separate `channel` axis on the instance model, not a third bridge mode. It has its
+> own dashboard panel — start a session, watch it stream live, drive it, approve/deny
+> tool prompts, and resume it after a restart — backed by `WS /ws/hosted/{id}` and
+> `GET /api/hosted`.
 >
 > **The key user-visible difference:** a **bridge** (`remote-control` / pty) is
 > **cloud-visible** — attachable from `claude.ai/code` and the Claude mobile app.
-> A **hosted** session is **local live-view only** — it streams in this dashboard
-> but is *never* attachable from the Claude app. Starting a hosted session and then
+> A **Direct Session** is **local live-view only** — it streams in this dashboard
+> but is *never* attachable from the Claude app. Starting a Direct Session and then
 > trying to open it on your phone is a dead end by design.
 >
 > With `claustrum.keep_children` (default on) the daemon is spawned with
@@ -68,9 +94,9 @@ not unified.
 > (`procutil.is_killable_hosted`); without that evidence it is reported lost,
 > never killed.
 
-### standard (`claude remote-control`)
+### Server Mode (`claude remote-control`)
 
-The default. `runner.py`'s `SessionRunner` spawns the headless
+The default (Server Mode). `runner.py`'s `SessionRunner` spawns the headless
 `claude remote-control` subcommand server:
 
 - **Multi-session** — multiple Claude sessions per bridge.
@@ -84,9 +110,9 @@ The default. `runner.py`'s `SessionRunner` spawns the headless
   is not "running"**. `inspector.py` cross-checks `claude agents --json` as the
   liveness source.
 
-### pty (`claude --remote-control` under a keeper)
+### Interactive Session (`claude --remote-control` under a keeper)
 
-Opt-in via `claude.launch_mode: pty`, POSIX only (falls back to standard on
+Opt-in via `claude.launch_mode: pty`, POSIX only (falls back to Server Mode on
 Windows). `pty_keeper.py` runs the `claude --remote-control` **flag form** under
 a PTY keeper sidecar:
 

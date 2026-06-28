@@ -108,8 +108,8 @@ stay visible on the card.
 ## 8. Stop / resume
 
 - **Stop** ends the bridge.
-- **Resume** brings a stopped bridge back. In the default *standard* mode a
-  resume starts a fresh context; opt into *true resume* with
+- **Resume** brings a stopped bridge back. In the default *Server Mode* a
+  resume starts a fresh context; opt into the *Interactive Session* mode with
   `claude.launch_mode: pty` (POSIX), or recap the prior conversation with
   `claude.resume_recap`. See [the two bridge modes](index.md#the-two-bridge-modes).
 - To start fresh, **Forget** the stopped session (drops it from Recent) and

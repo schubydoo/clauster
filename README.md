@@ -77,7 +77,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   never registers an environment is reported honestly as `Error` after a grace
   window, not a phantom `Running`.
 - **Spawn controls** — pick the spawn mode (same-dir / worktree / session),
-  permission mode, and resume mode (standard / pty true-resume, POSIX) per launch;
+  permission mode, and resume mode (Server Mode / Interactive Session true-resume, POSIX) per launch;
   `claude.launch_mode` is the pre-selected default. `bypassPermissions` is
   double-gated: a per-project config ceiling
   (`projects.<name>.allow_bypass_permissions`) **and** a type-the-project-name
@@ -135,7 +135,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   With `claude.resume_recap` enabled, Clauster installs a `SessionStart` hook in the
   runtime user's Claude settings that recaps the most recent prior transcript for
   that directory back into the new session.
-- **Native true-resume / "PTY mode" (opt-in, POSIX)** — `claude.launch_mode: pty`
+- **Native true-resume / "Interactive Session" mode (opt-in, POSIX)** — `claude.launch_mode: pty`
   runs the `claude --remote-control` flag form under a PTY *keeper* sidecar, which
   **genuinely restores prior conversation context** on Resume (`--continue`) rather
   than recapping it. The keeper outlives a Clauster restart and is stopped by signal.
