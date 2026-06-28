@@ -973,6 +973,188 @@ def test_transcript_search_honors_order(write_config, tmp_path, monkeypatch):
     assert list(reversed(asc)) == desc  # asc and desc are exact reverses of the filtered set
 
 
+# ----- transcript live-tail (#614 Part 2) -------------------------------
+
+# Two complete JSONL records (each newline-terminated) for building a tail fixture.
+_TAIL_TURN_1 = b'{"message": {"role": "user", "content": "first live turn"}}\n'
+_TAIL_TURN_2 = b'{"message": {"role": "assistant", "content": "second live turn"}}\n'
+
+
+def _make_bridge_live(client, tmp_path, session, project_name="gamma"):
+    """Plant a running bridge whose session uuid maps a transcript to live (#614)."""
+    from clauster.models import Attribution, WorkingSession
+
+    client.app.state.runner._sessions = [
+        WorkingSession(
+            pid=4242,
+            cwd=tmp_path / project_name,  # sanitizes to the same dir Claude wrote into
+            kind="interactive",
+            started_at=4242,
+            local_uuid=session,
+            attribution=Attribution.TRACKED,
+        )
+    ]
+
+
+def test_transcript_tail_invalid_name_422(write_config, tmp_path):
+    r = _client(write_config, tmp_path).get("/api/projects/bad.name/transcripts/s1/tail")
+    assert r.status_code == 422
+
+
+@pytest.mark.parametrize("session", ["..", "../escape", "a%2Fb", "..%2F..%2Fx"])
+def test_transcript_tail_unsafe_session_404(write_config, tmp_path, monkeypatch, session):
+    # The path-traversal guard fails closed at the tail boundary too (never an escape).
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get(f"/api/projects/gamma/transcripts/{session}/tail")
+    assert r.status_code == 404
+
+
+def test_transcript_tail_unknown_session_404(write_config, tmp_path, monkeypatch):
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/nope/tail")
+    assert r.status_code == 404
+
+
+def test_transcript_tail_from_zero_all_turns_oldest_first(write_config, tmp_path, monkeypatch):
+    # offset=0 -> the whole transcript in FILE order (oldest-first append order),
+    # with an offset == file size to poll from next, and no reset.
+    tdir = _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    f = tdir / "sess1.jsonl"
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1/tail?offset=0")
+    assert r.status_code == 200
+    body = r.json()
+    assert [t["role"] for t in body["turns"]] == ["user", "assistant", "user", "assistant"]
+    assert body["offset"] == f.stat().st_size
+    assert body["reset"] is False
+    assert {"role", "content", "model", "timestamp"} == set(body["turns"][0])
+
+
+def test_transcript_tail_appends_new_turns_after_offset(write_config, tmp_path, monkeypatch):
+    # The core tail contract: read from the prior offset and get ONLY the turns
+    # appended since, with the offset advanced past them.
+    tdir = _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    f = tdir / "sess1.jsonl"
+    client = _client(write_config, tmp_path)
+    first = client.get("/api/projects/gamma/transcripts/sess1/tail?offset=0").json()
+    # Append a brand-new turn to the live transcript, then poll from the prior offset.
+    with f.open("ab") as fh:
+        fh.write(_TAIL_TURN_1)
+    nxt = client.get(f"/api/projects/gamma/transcripts/sess1/tail?offset={first['offset']}").json()
+    assert [t["role"] for t in nxt["turns"]] == ["user"]
+    assert nxt["turns"][0]["content"] == "first live turn"
+    assert nxt["offset"] == f.stat().st_size
+    assert nxt["reset"] is False
+
+
+def test_transcript_tail_eof_no_new_data_is_empty(write_config, tmp_path, monkeypatch):
+    # Polling at EOF (offset == size) returns no turns and the same offset — the
+    # steady-state "nothing new yet" poll while the agent is idle.
+    tdir = _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    size = (tdir / "sess1.jsonl").stat().st_size
+    body = (
+        _client(write_config, tmp_path)
+        .get(f"/api/projects/gamma/transcripts/sess1/tail?offset={size}")
+        .json()
+    )
+    assert body["turns"] == []
+    assert body["offset"] == size
+    assert body["reset"] is False
+
+
+def test_transcript_tail_partial_trailing_line_not_consumed(write_config, tmp_path, monkeypatch):
+    # A half-written final record (no trailing newline) is NOT parsed or consumed: the
+    # offset stops at the last complete line so the partial reparses once it's finished.
+    tdir = _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    f = tdir / "sess1.jsonl"
+    client = _client(write_config, tmp_path)
+    base = client.get("/api/projects/gamma/transcripts/sess1/tail?offset=0").json()["offset"]
+    with f.open("ab") as fh:
+        fh.write(b'{"message": {"role": "user", "content": "half')  # no newline yet
+    mid = client.get(f"/api/projects/gamma/transcripts/sess1/tail?offset={base}").json()
+    assert mid["turns"] == []  # the partial line is not surfaced as a turn
+    assert mid["offset"] == base  # and the offset did not advance past it
+    # Finish the record; the next poll picks it up exactly once.
+    with f.open("ab") as fh:
+        fh.write(b' done"}}\n')
+    done = client.get(f"/api/projects/gamma/transcripts/sess1/tail?offset={mid['offset']}").json()
+    assert [t["content"] for t in done["turns"]] == ["half done"]
+
+
+def test_transcript_tail_rotated_file_resets_to_zero(write_config, tmp_path, monkeypatch):
+    # A truncated/rotated transcript (now shorter than our offset) signals reset and
+    # re-reads from byte 0 so the client replaces its buffer instead of appending.
+    tdir = _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    f = tdir / "sess1.jsonl"
+    client = _client(write_config, tmp_path)
+    old_offset = client.get("/api/projects/gamma/transcripts/sess1/tail?offset=0").json()["offset"]
+    # Replace the file with a single, shorter record (simulating rotation/truncation).
+    f.write_bytes(_TAIL_TURN_1)
+    body = client.get(f"/api/projects/gamma/transcripts/sess1/tail?offset={old_offset}").json()
+    assert body["reset"] is True
+    assert [t["content"] for t in body["turns"]] == ["first live turn"]
+    assert body["offset"] == f.stat().st_size
+
+
+def test_transcript_tail_redacts_planted_secret(write_config, tmp_path, monkeypatch):
+    # THE security gate at the tail boundary: a planted session id / sk- key / AKIA id
+    # in newly-appended transcript text must never reach the HTTP response.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1/tail?offset=0")
+    assert r.status_code == 200
+    assert "DEADBEEF012345" not in r.text
+    assert "sk-ABCDEF0123456789ghij" not in r.text
+    assert "AKIAIOSFODNN7EXAMPLE" not in r.text
+    assert "<redacted>" in r.text
+
+
+def test_transcript_tail_negative_offset_clamped_to_zero(write_config, tmp_path, monkeypatch):
+    # A negative offset can't seek before the file; it clamps to 0 and is not a reset.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    body = (
+        _client(write_config, tmp_path)
+        .get("/api/projects/gamma/transcripts/sess1/tail?offset=-5")
+        .json()
+    )
+    assert len(body["turns"]) == 4
+    assert body["reset"] is False
+
+
+def test_transcript_tail_live_true_for_running_session(write_config, tmp_path, monkeypatch):
+    # The `live` flag tracks the same running-bridge mapping as the list route (#614).
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    client = _client(write_config, tmp_path)
+    _make_bridge_live(client, tmp_path, "sess1")
+    body = client.get("/api/projects/gamma/transcripts/sess1/tail?offset=0").json()
+    assert body["live"] is True
+
+
+def test_transcript_tail_live_false_when_not_running(write_config, tmp_path, monkeypatch):
+    # No running session -> live is False, so the front-end stops polling after this drain.
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+    body = (
+        _client(write_config, tmp_path)
+        .get("/api/projects/gamma/transcripts/sess1/tail?offset=0")
+        .json()
+    )
+    assert body["live"] is False
+
+
+def test_transcript_tail_read_error_503_no_path_leak(write_config, tmp_path, monkeypatch):
+    # An OSError reading the transcript degrades to a defined 503 with no on-disk path.
+    from clauster import usage as usage_mod
+
+    _plant_transcripts(monkeypatch, tmp_path, sessions=["sess1"])
+
+    def _boom(*a, **k):
+        raise OSError("[Errno 13] Permission denied: '/home/secret/projects/gamma'")
+
+    monkeypatch.setattr(usage_mod, "read_transcript_turns_from_offset", _boom)
+    r = _client(write_config, tmp_path).get("/api/projects/gamma/transcripts/sess1/tail?offset=0")
+    assert r.status_code == 503
+    assert r.json()["detail"] == "could not read transcript"
+    assert "/home/secret" not in r.text and "Errno" not in r.text
+
+
 # ----- ghost-environment reaper (opt-in dashboard surface) --------------
 
 

@@ -20,6 +20,7 @@ from clauster.usage import (
     invalidate_usage_cache,
     parse_transcript,
     read_transcript_turns,
+    read_transcript_turns_from_offset,
     resolve_session_transcript,
     transcript_paths_for,
 )
@@ -675,6 +676,109 @@ def test_read_transcript_turns_text_block_with_non_string_text_is_skipped(tmp_pa
     p.write_text(json.dumps({"message": {"role": "assistant", "content": content}}) + "\n")
     [turn] = read_transcript_turns(p)
     assert turn["content"] == "kept"  # only the valid text block survives
+
+
+# ----- incremental offset reader (live tail, #614 Part 2) ---------------
+
+
+def test_read_transcript_turns_from_offset_zero_matches_whole_reader(tmp_path):
+    # From offset 0, the tail reader yields the SAME turns as the whole-file reader
+    # (shared _line_to_turn) but in file order; the offset lands at the file size.
+    p = _transcript(
+        tmp_path,
+        [
+            {"message": {"role": "user", "content": "a"}},
+            {"message": {"role": "assistant", "content": "b"}},
+        ],
+    )
+    turns, offset, reset = read_transcript_turns_from_offset(p, 0)
+    assert [t["content"] for t in turns] == ["a", "b"]
+    assert offset == p.stat().st_size
+    assert reset is False
+
+
+def test_read_transcript_turns_from_offset_reads_only_appended(tmp_path):
+    p = _transcript(tmp_path, [{"message": {"role": "user", "content": "a"}}])
+    _, offset, _ = read_transcript_turns_from_offset(p, 0)
+    with p.open("ab") as fh:
+        fh.write(b'{"message": {"role": "assistant", "content": "b"}}\n')
+    turns, new_offset, reset = read_transcript_turns_from_offset(p, offset)
+    assert [t["content"] for t in turns] == ["b"]  # only the appended record
+    assert new_offset == p.stat().st_size
+    assert reset is False
+
+
+def test_read_transcript_turns_from_offset_eof_returns_nothing(tmp_path):
+    p = _transcript(tmp_path, [{"message": {"role": "user", "content": "a"}}])
+    size = p.stat().st_size
+    turns, offset, reset = read_transcript_turns_from_offset(p, size)
+    assert turns == []
+    assert offset == size
+    assert reset is False
+
+
+def test_read_transcript_turns_from_offset_partial_line_left_unconsumed(tmp_path):
+    # A trailing line with no newline yet is not parsed and not consumed; once it's
+    # completed, the next read picks it up exactly once.
+    p = _transcript(tmp_path, [{"message": {"role": "user", "content": "a"}}])
+    _, offset, _ = read_transcript_turns_from_offset(p, 0)
+    with p.open("ab") as fh:
+        fh.write(b'{"message": {"role": "user", "content": "par')  # half-written
+    turns, mid_offset, reset = read_transcript_turns_from_offset(p, offset)
+    assert turns == []
+    assert mid_offset == offset  # did not advance past the partial line
+    with p.open("ab") as fh:
+        fh.write(b'tial"}}\n')
+    turns2, _, _ = read_transcript_turns_from_offset(p, mid_offset)
+    assert [t["content"] for t in turns2] == ["partial"]
+
+
+def test_read_transcript_turns_from_offset_truncated_file_resets(tmp_path):
+    p = _transcript(tmp_path, [{"message": {"role": "user", "content": "longer original"}}])
+    _, offset, _ = read_transcript_turns_from_offset(p, 0)
+    # Replace with a shorter file: now offset > size -> reset, re-read from 0.
+    p.write_bytes(b'{"message": {"role": "user", "content": "x"}}\n')
+    turns, new_offset, reset = read_transcript_turns_from_offset(p, offset)
+    assert reset is True
+    assert [t["content"] for t in turns] == ["x"]
+    assert new_offset == p.stat().st_size
+
+
+def test_read_transcript_turns_from_offset_negative_clamped(tmp_path):
+    p = _transcript(tmp_path, [{"message": {"role": "user", "content": "a"}}])
+    turns, _, reset = read_transcript_turns_from_offset(p, -10)
+    assert [t["content"] for t in turns] == ["a"]
+    assert reset is False  # a clamped negative offset is not a reset
+
+
+def test_read_transcript_turns_from_offset_redacts(tmp_path):
+    p = _transcript(
+        tmp_path,
+        [{"message": {"role": "user", "content": "key sk-ABCDEF0123456789ghij here"}}],
+    )
+    turns, _, _ = read_transcript_turns_from_offset(p, 0)
+    assert "sk-ABCDEF0123456789ghij" not in turns[0]["content"]
+    assert "<redacted>" in turns[0]["content"]
+
+
+def test_read_transcript_turns_from_offset_skips_malformed(tmp_path):
+    # Blank / non-JSON / no-message / no-role lines are skipped, mirroring the
+    # whole-file reader (shared _line_to_turn), never raising.
+    p = tmp_path / "mixed.jsonl"
+    p.write_text(
+        "\n"
+        "not json\n"
+        '{"summary": "no message field"}\n'
+        '{"message": {"content": "no role"}}\n'
+        '{"message": {"role": "user", "content": "kept"}}\n'
+    )
+    turns, _, _ = read_transcript_turns_from_offset(p, 0)
+    assert [t["content"] for t in turns] == ["kept"]
+
+
+def test_read_transcript_turns_from_offset_missing_file_raises_filenotfound(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        read_transcript_turns_from_offset(tmp_path / "nope.jsonl", 0)
 
 
 def test_resolve_session_transcript_happy_path(tmp_path):

@@ -1168,6 +1168,56 @@
                   Type at least 2 characters to search.
                 </div>
               </div>
+              {# Live tail (#614 Part 2): while the selected session is running, we poll
+                 the transcript from a byte offset and append new turns here, oldest-first.
+                 It lives ABOVE the loading-gated turn list (NOT inside the
+                 `!transcripts.loading` wrapper) so a sort flip / search keystroke — which
+                 toggles `loading` for the static-turn re-fetch — never hides the live feed.
+                 The panel stays mounted after the session ends (live flips false) so the
+                 streamed turns remain readable; it only shows once it has content. #}
+              <div class="card mb-3" data-test="transcript-tail"
+                   x-show="transcripts.tailTurns.length > 0 || transcripts.live" x-cloak>
+                {# aria-live so the live↔ended transition + first-turn arrival are announced. #}
+                <div class="card-header py-2 d-flex align-items-center gap-2"
+                     role="status" aria-live="polite">
+                  <span class="badge bg-green-lt" data-test="transcript-tail-live" x-show="transcripts.live"
+                        x-cloak title="Following this running session live."><span aria-hidden="true">●</span> following live</span>
+                  <span class="badge bg-secondary-lt" data-test="transcript-tail-ended" x-show="!transcripts.live"
+                        x-cloak>session ended</span>
+                  <span class="text-secondary small"
+                        x-text="transcripts.tailTurns.length + (transcripts.tailTurns.length === 1 ? ' new turn' : ' new turns')"></span>
+                </div>
+                <div class="card-body p-2">
+                  <div class="alert alert-warning py-1 px-2 mb-2 small" data-test="transcript-tail-error"
+                       role="status" aria-live="polite" x-show="transcripts.tailError" x-cloak
+                       x-text="transcripts.tailError"></div>
+                  <div class="text-secondary small" data-test="transcript-tail-waiting"
+                       x-show="transcripts.tailTurns.length === 0 && transcripts.live && !transcripts.tailError" x-cloak>
+                    Waiting for new activity…
+                  </div>
+                  {# Append-only, oldest-first: newest live turn lands at the bottom. #}
+                  <div class="d-flex flex-column gap-2">
+                    <template x-for="(t, i) in transcripts.tailTurns" :key="'tail-' + i">
+                      <div class="card transcript-turn" data-test="transcript-tail-turn"
+                           :class="t.role === 'assistant' ? 'align-self-start border-azure' : 'align-self-end border-secondary'">
+                        <div class="card-body p-2">
+                          <div class="d-flex justify-content-between align-items-baseline gap-2 mb-1"
+                               :class="t.role === 'user' ? 'flex-row-reverse' : ''">
+                            <span class="badge" :class="t.role === 'assistant' ? 'bg-azure-lt' : 'bg-secondary-lt'"
+                                  x-text="t.role === 'user' ? 'you' : t.role"></span>
+                            <span class="text-secondary small">
+                              <span x-show="t.model" x-cloak x-text="t.model"></span>
+                              <span x-show="t.timestamp" x-cloak x-text="t.timestamp"></span>
+                            </span>
+                          </div>
+                          {# x-text, NEVER x-html: turn content is untrusted (server-redacted) output. #}
+                          <div class="transcript-content small" x-text="t.content"></div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
               {# Only the turn list is loading-gated; the controls above stay put on reload. #}
               <div x-show="!transcripts.loading">
               <div class="text-secondary small mb-2">

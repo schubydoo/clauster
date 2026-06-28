@@ -978,6 +978,28 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             },
         }
 
+    def _live_session_uuids(project_path: Path, name: str) -> set[str]:
+        """Session ids of currently-running sessions writing into this project's dir.
+
+        Bridge/agent sessions come from the runner's reconcile snapshot (keyed by
+        sanitized cwd); hosted (claustrum) sessions run no ``agents --json`` session,
+        so their captured session uuid is folded in by project name, status-filtered
+        to RUNNING/STARTING (``_instances`` is not pruned on session end). Both are
+        in-memory reads that never touch disk, so this liveness join can't fail a
+        transcript listing or tail — at worst a just-started/just-stopped session
+        flips a poll late. Shared by the list (#614 Part 1) and tail (#614 Part 2)
+        routes so they agree on exactly which sessions are live.
+        """
+        live_uuids = runner.live_session_uuids(project_path)
+        live_uuids |= {
+            inst.claude_session_uuid
+            for inst in app.state.hosted.list_instances()
+            if inst.project == name
+            and inst.claude_session_uuid
+            and inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
+        }
+        return live_uuids
+
     @app.get("/api/projects/{name}/transcripts")
     async def api_project_transcripts(name: str) -> dict:
         """List a project's session transcripts for the read-only viewer (issue #431, #614).
@@ -1001,18 +1023,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=422, detail="invalid project name")
 
         project_path = config.projects_root / name
-        # Session ids of currently-running sessions writing into this project's dir.
-        # Bridge/agent sessions come from the runner's reconcile snapshot (keyed by
-        # sanitized cwd); hosted (claustrum) sessions run no agents --json session, so
-        # fold their captured session uuid in by project name. Both are in-memory reads.
-        live_uuids = runner.live_session_uuids(project_path)
-        live_uuids |= {
-            inst.claude_session_uuid
-            for inst in app.state.hosted.list_instances()
-            if inst.project == name
-            and inst.claude_session_uuid
-            and inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING)
-        }
+        # In-memory liveness join (see _live_session_uuids): never touches disk, so
+        # it can't fail the listing — at worst a session badges a poll late.
+        live_uuids = _live_session_uuids(project_path, name)
 
         def _list() -> list[dict]:
             out: list[dict] = []
@@ -1127,6 +1140,71 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except (FileNotFoundError, OSError) as exc:
             logger.warning("transcript read failed for %r/%r: %s", name, session, exc)
             raise HTTPException(status_code=503, detail="could not read transcript") from exc
+
+    @app.get("/api/projects/{name}/transcripts/{session}/tail")
+    async def api_project_transcript_tail(name: str, session: str, offset: int = 0) -> dict:
+        """Return a live session's transcript turns appended since byte ``offset`` (#614 Part 2).
+
+        The front-end opens a session, then — *only while it is live* — polls this
+        endpoint on a timer to follow new turns as the agent works (the maintainer's
+        decided mechanism: poll the ``.jsonl`` from a known byte offset, not the
+        bridge-log WebSocket). Returns
+        ``{project, session, turns, offset, reset, live}``:
+
+        - ``turns`` — the renderable turns appended after ``offset``, in **file
+          order** (oldest-first append order) so the client appends them to the
+          bottom of the tail. Each is already redacted by
+          :func:`usage.read_transcript_turns_from_offset` (shared
+          ``redact.sanitize_line`` path) — never raw.
+        - ``offset`` — the byte position to poll from next. It only advances past
+          **complete** lines, so a half-written final record is reparsed next poll
+          rather than surfaced as a corrupt/empty turn.
+        - ``reset`` — ``True`` when the file shrank below the requested offset
+          (rotated/truncated): the read restarts from 0 and the client replaces
+          its tail buffer instead of appending.
+        - ``live`` — whether the session still maps to a running bridge/agent/hosted
+          session. The client stops polling once this is ``False`` (the session
+          ended), after draining this final delta.
+
+        Same fail-closed boundary as the paged reader: ``name`` is project-name
+        validated (422); ``session`` is resolved strictly inside the project's
+        transcript dir via :func:`usage.resolve_session_transcript` (unsafe/unknown
+        → 404, never a directory escape); an unreadable transcript (``OSError``)
+        degrades to a defined 503 with no on-disk path in the body — never a bare
+        500. Read-only throughout: it never writes or mutates the transcript.
+        """
+        if not is_valid_project_name(name):
+            raise HTTPException(status_code=422, detail="invalid project name")
+        # Clamp a negative offset to 0 defensively (the reader clamps too, but keep
+        # the wire contract clean); a client can't seek to a negative position.
+        start = max(offset, 0)
+        project_path = config.projects_root / name
+        # In-memory liveness join (never disk) — computed before the off-thread read.
+        live = session in _live_session_uuids(project_path, name)
+
+        def _tail() -> dict:
+            path = usage.resolve_session_transcript(project_path, session)
+            if path is None:
+                # Fail closed: unsafe or unknown session is a 404, never a path escape.
+                raise HTTPException(status_code=404, detail="transcript not found")
+            turns, new_offset, reset = usage.read_transcript_turns_from_offset(path, start)
+            return {
+                "project": name,
+                "session": session,
+                "turns": turns,
+                "offset": new_offset,
+                "reset": reset,
+            }
+
+        try:
+            body = await asyncio.to_thread(_tail)
+        except HTTPException:
+            raise
+        except (FileNotFoundError, OSError) as exc:
+            logger.warning("transcript tail failed for %r/%r: %s", name, session, exc)
+            raise HTTPException(status_code=503, detail="could not read transcript") from exc
+        body["live"] = live
+        return body
 
     @app.get("/api/projects/{name}/metrics")
     async def api_project_metrics(name: str) -> dict:
