@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -147,10 +148,129 @@ def test_missing_pyte_raises_clear_error(monkeypatch):
 
 
 def test_missing_pyte_frozen_binary_message(monkeypatch):
-    # On the standalone (frozen) binary pyte is structurally absent (LGPL, not bundled
-    # and not side-loadable), so the error must name the binary limitation instead of the
-    # dead-end `install clauster[pty]` instruction a binary user cannot act on.
+    # On the standalone (frozen) binary, with the opt-in env var UNSET, pyte stays absent
+    # (LGPL, not bundled), so the error must name the binary limitation AND both escape
+    # hatches — the CLAUSTER_PYTE_PATH env var and the pip/uv `[pty]` install — instead of
+    # the dead-end `install clauster[pty]` a binary user cannot act on (#699).
     monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.delenv(pty_screen.PYTE_PATH_ENV, raising=False)
     monkeypatch.setitem(sys.modules, "pyte", None)
-    with pytest.raises(PyteUnavailableError, match=r"standalone binary"):
+    with pytest.raises(PyteUnavailableError) as exc_info:
         PtyScreen()
+    msg = str(exc_info.value)
+    assert "standalone binary" in msg
+    assert pty_screen.PYTE_PATH_ENV in msg
+
+
+class _ExternalOnlyPyteFinder:
+    """A meta-path finder that serves `pyte` ONLY from `external_dir`, masking site-packages.
+
+    The dev/CI venv has the real `pyte` installed, and the #699 shim APPENDS the external
+    dir to sys.path (so a bundled/earlier copy always wins) — which means in this venv the
+    installed pyte would still win on the retry and the external-load path could never be
+    proven. Inserting this finder at the FRONT of sys.meta_path makes `pyte` resolvable only
+    from `external_dir`: before the shim runs `external_dir` is not on sys.path, so it raises
+    ImportError (standing in for the frozen binary's absent pyte); after the shim appends
+    `external_dir`, this finder loads the external copy from disk.
+    """
+
+    def __init__(self, external_dir: Path):
+        self.external_dir = external_dir
+
+    def find_spec(self, name, path, target=None):
+        if name != "pyte":
+            return None
+        if str(self.external_dir) not in sys.path:
+            raise ImportError("pyte unavailable until CLAUSTER_PYTE_PATH is on sys.path")
+        src = self.external_dir / "pyte.py"
+        return importlib.util.spec_from_file_location("pyte", src)
+
+
+def test_external_pyte_path_loads_pyte_on_frozen_binary(monkeypatch, tmp_path):
+    # The opt-in escape hatch (#699): on the frozen binary, CLAUSTER_PYTE_PATH pointing at a
+    # directory holding an installed `pyte` lets `_import_pyte()` find it. The first import
+    # is forced to fail (the venv has the real pyte; _ExternalOnlyPyteFinder stands in for the
+    # frozen binary's absent pyte), so the shim appends tmp_path and the retry loads our copy.
+    # Snapshot and restore sys.path + sys.modules["pyte"] so the fake module never leaks into
+    # the rest of the suite (a leaked tmp dir on sys.path or a stale sys.modules entry would
+    # corrupt isolation).
+    sentinel = "EXTERNAL_PYTE_SENTINEL_699"
+    (tmp_path / "pyte.py").write_text(
+        "EXTERNAL_PYTE_SENTINEL_699 = True\n"
+        "\n"
+        "class Screen:\n"
+        "    def __init__(self, cols, rows):\n"
+        "        self.cols, self.rows = cols, rows\n"
+        "\n"
+        "class ByteStream:\n"
+        "    def __init__(self, screen):\n"
+        "        self.screen = screen\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv(pty_screen.PYTE_PATH_ENV, str(tmp_path))
+
+    original_path = list(sys.path)
+    had_pyte = "pyte" in sys.modules
+    prior_pyte = sys.modules.get("pyte")
+    sys.modules.pop("pyte", None)  # force the lazy import to actually resolve from disk
+    blocker = _ExternalOnlyPyteFinder(tmp_path)
+    sys.meta_path.insert(0, blocker)
+    try:
+        mod = pty_screen._import_pyte()
+        assert getattr(mod, sentinel, False) is True
+        assert Path(mod.__file__).parent == tmp_path
+        # The PtyScreen constructor uses pyte.Screen/ByteStream, so it must build too.
+        assert pty_screen.PtyScreen(cols=10, rows=2) is not None
+    finally:
+        if blocker in sys.meta_path:
+            sys.meta_path.remove(blocker)
+        sys.path[:] = original_path
+        sys.modules.pop("pyte", None)
+        if had_pyte:
+            sys.modules["pyte"] = prior_pyte
+
+
+def test_external_pyte_path_nonexistent_dir_fails_closed(monkeypatch, tmp_path):
+    # Fail-closed: a CLAUSTER_PYTE_PATH pointing at a non-existent path adds nothing to
+    # sys.path and the import still fails cleanly with PyteUnavailableError, not a crash.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv(pty_screen.PYTE_PATH_ENV, str(tmp_path / "does-not-exist"))
+    monkeypatch.setitem(sys.modules, "pyte", None)
+    original_path = list(sys.path)
+    try:
+        with pytest.raises(PyteUnavailableError, match=r"standalone binary"):
+            PtyScreen()
+        assert str(tmp_path / "does-not-exist") not in sys.path
+    finally:
+        sys.path[:] = original_path
+
+
+def test_external_pyte_path_file_not_dir_fails_closed(monkeypatch, tmp_path):
+    # Fail-closed: a CLAUSTER_PYTE_PATH pointing at a FILE (not a directory) is rejected by
+    # the is_dir() check, adds nothing to sys.path, and the import fails cleanly.
+    target = tmp_path / "pyte-but-a-file"
+    target.write_text("not a package dir\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv(pty_screen.PYTE_PATH_ENV, str(target))
+    monkeypatch.setitem(sys.modules, "pyte", None)
+    original_path = list(sys.path)
+    try:
+        with pytest.raises(PyteUnavailableError, match=r"standalone binary"):
+            PtyScreen()
+        assert str(target) not in sys.path
+    finally:
+        sys.path[:] = original_path
+
+
+def test_external_pyte_path_ignored_when_not_frozen(monkeypatch, tmp_path):
+    # The shim is a frozen-binary-only escape hatch: a non-frozen process must ignore
+    # CLAUSTER_PYTE_PATH entirely and never touch sys.path, even when the dir exists.
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setenv(pty_screen.PYTE_PATH_ENV, str(tmp_path))
+    original_path = list(sys.path)
+    try:
+        pty_screen._maybe_add_external_pyte_path()
+        assert sys.path == original_path
+    finally:
+        sys.path[:] = original_path

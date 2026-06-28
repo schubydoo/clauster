@@ -21,6 +21,7 @@ lazily here so importing this module — or running the app without the extra �
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,13 @@ from .redact import redact_screen_text
 # resize/negotiation path is out of scope for the read-only first cut (#534).
 SCREEN_COLS = 120
 SCREEN_ROWS = 40
+
+# Opt-in escape hatch for the standalone (frozen) binary (#699). The binary deliberately
+# omits LGPL ``pyte`` and ignores system site-packages / PYTHONPATH, so a side ``pip
+# install pyte`` is otherwise invisible. Pointing this env var at a directory that holds an
+# installed ``pyte`` lets a binary user enable the live terminal view without bundling any
+# LGPL code into the Apache-licensed binary.
+PYTE_PATH_ENV = "CLAUSTER_PYTE_PATH"
 
 
 def screen_sidecar_path(log_path: Path) -> Path:
@@ -69,27 +77,65 @@ class PyteUnavailableError(RuntimeError):
 def _pyte_unavailable_message() -> str:
     """Return a frozen-binary-aware explanation for the absent ``pyte`` dependency.
 
-    On the standalone PyInstaller binary ``pyte`` can never be present: it is LGPL-licensed
-    and deliberately not bundled, and a side ``pip``/``uv`` install lands in an environment
-    the frozen binary never reads. Pointing a binary user at ``install clauster[pty]`` is a
-    dead end, so emit a message that names the real constraint and the only working path.
+    On the standalone PyInstaller binary ``pyte`` is not bundled (LGPL-licensed) and a side
+    ``pip``/``uv`` install lands in an environment the frozen binary never reads, so plain
+    ``install clauster[pty]`` is a dead end. Name the two working paths instead: point
+    :data:`PYTE_PATH_ENV` at a directory holding an installed ``pyte``, or run clauster from
+    a ``pip``/``uv`` install with the ``[pty]`` extra.
     """
     if getattr(sys, "frozen", False):
         return (
             "the live terminal view is unavailable in the standalone binary: 'pyte' is "
-            "LGPL-licensed and is not bundled, and it cannot be added to the binary after "
-            "the fact. To use the live view, run clauster from a pip/uv install with the "
-            "extra instead: pip install 'clauster[pty]'."
+            "LGPL-licensed and is not bundled. To enable it, either set the "
+            f"{PYTE_PATH_ENV} environment variable to a directory containing an installed "
+            "'pyte', or run clauster from a pip/uv install with the extra instead: "
+            "pip install 'clauster[pty]'."
         )
     return "the live pty-screen view needs the optional 'pyte' dependency; install clauster[pty]"
 
 
+def _maybe_add_external_pyte_path() -> None:
+    """Append an opt-in external ``pyte`` directory to ``sys.path`` (frozen binary only).
+
+    Honor :data:`PYTE_PATH_ENV` so a standalone-binary user can enable the live terminal
+    view from a side ``pip install pyte`` (#699). Do nothing unless running frozen, since a
+    normal install resolves ``pyte`` through the usual import machinery. Read the env var,
+    expand ``~``, and require an existing directory; a non-directory value or any
+    :class:`OSError` is swallowed (fail-closed — never raise from the shim). APPEND, never
+    prepend, so a bundled module always wins and the external copy is consulted only when no
+    bundled ``pyte`` exists. Skip the append if the path is already on ``sys.path``.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    raw = os.environ.get(PYTE_PATH_ENV, "").strip()
+    if not raw:
+        return
+    try:
+        resolved = Path(raw).expanduser()
+        if not resolved.is_dir():
+            return
+        path_str = str(resolved)
+    except OSError:
+        return
+    if path_str not in sys.path:
+        sys.path.append(path_str)
+
+
 def _import_pyte() -> Any:
-    """Import ``pyte`` lazily, raising a clear error when the ``pty`` extra is absent."""
+    """Import ``pyte`` lazily, raising a clear error when the ``pty`` extra is absent.
+
+    Try a plain import first; on failure, consult the opt-in external-path shim
+    (:func:`_maybe_add_external_pyte_path`, frozen binary only) and retry once before
+    raising :class:`PyteUnavailableError`.
+    """
     try:
         import pyte
-    except ImportError as exc:
-        raise PyteUnavailableError(_pyte_unavailable_message()) from exc
+    except ImportError:
+        _maybe_add_external_pyte_path()
+        try:
+            import pyte
+        except ImportError as exc:
+            raise PyteUnavailableError(_pyte_unavailable_message()) from exc
     return pyte
 
 
