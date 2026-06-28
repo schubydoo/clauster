@@ -12,15 +12,15 @@
                :style="projectSort !== 'name' ? { order: projectOrderRank('{{ p.name }}') } : {}"
                x-data="{ lopen: false, lmode: DEFAULT_LAUNCH_MODE, lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', ladv: false }">
             <div class="d-flex align-items-center flex-wrap gap-2">
-              <svg class="ico text-success" style="flex:none" role="img" aria-label="Directory trusted" x-cloak
+              <svg class="ico text-success" role="img" aria-label="Directory trusted" x-cloak
                    x-show="trustState['{{ p.name }}'] === 'trusted'" title="Directory trusted"><use href="#ic-trust"/></svg>
-              <svg class="ico text-secondary" style="flex:none" role="img" aria-label="Directory not yet trusted" x-cloak
+              <svg class="ico text-secondary" role="img" aria-label="Directory not yet trusted" x-cloak
                    x-show="trustState['{{ p.name }}'] !== 'trusted'"
                    title="Not yet trusted — you'll confirm trust when you launch a session here"><use href="#ic-trust"/></svg>
               {# DES-07: responsive name cap — clamp scales the truncation width with the viewport
                  (narrow phone → ~10rem, wide desktop → 28rem) instead of a fixed 16rem; min-width:0
                  lets text-truncate shrink inside the flex row. #}
-              <span class="fw-bold text-truncate" style="font-size:1.02rem; min-width:0; max-width:clamp(10rem, 40vw, 28rem)">{{ p.name }}</span>
+              <span class="fw-bold text-truncate project-name">{{ p.name }}</span>
               <!-- inline meta -->
               <span class="text-secondary small project-meta">
                 {% if p.is_git_repo %}<span title="This directory is a git repository"><svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Git</span>{% endif %}
@@ -251,7 +251,7 @@
                  from errorOf above (a transient *action* error). x-text auto-escapes the tail. -->
             <div class="alert alert-danger mt-2 mb-0" x-show="detailOf('{{ p.name }}')" x-cloak role="alert">
               <h4 class="alert-title">Session failed to start</h4>
-              <pre class="mb-0 mt-1 text-break" style="white-space: pre-wrap; max-height: 12rem; overflow: auto;"
+              <pre class="mb-0 mt-1 text-break detail-pre"
                    tabindex="0" aria-label="Failure detail" x-text="detailOf('{{ p.name }}')"></pre>
             </div>
 
