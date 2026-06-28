@@ -132,15 +132,15 @@ def test_tabler_sprites_for_hosted_chrome_present(write_config):
 
 
 def test_tabler_sprites_for_structural_swap_present(write_config):
-    # Icon pass (DES-03, #694): the structural-emoji swap (⚠/carets/↻/⏸/←) relies on these
-    # Tabler symbols existing in the sheet for the `<use>` refs to render.
+    # Icon pass (DES-03, #694): the structural-emoji swap (⚠/carets/⏸/←) relies on these
+    # Tabler symbols existing in the sheet for the `<use>` refs to render. (The ↻ Re-check
+    # reuses the pre-existing ic-restart, which is the same Tabler refresh glyph.)
     page = _client(write_config).get("/").text
     for sym in (
         'id="ic-alert"',
         'id="ic-caret-down"',
         'id="ic-caret-up"',
         'id="ic-caret-right"',
-        'id="ic-refresh"',
         'id="ic-pause"',
         'id="ic-arrow-left"',
     ):
