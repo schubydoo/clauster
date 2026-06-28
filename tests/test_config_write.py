@@ -226,6 +226,15 @@ def test_merge_redacted_sentinel_for_absent_key_is_dropped() -> None:
     assert "API_TOKEN" not in merged  # nothing stored to keep ⇒ dropped
 
 
+def test_merge_redacted_dict_over_none_stored_drops_sentinel() -> None:
+    # write_subtree passes data.get(subtree_key) — None for an absent subtree. A sentinel
+    # for a never-stored key must be DROPPED, never written verbatim as the literal sentinel.
+    merged = cw.merge_redacted({"API_TOKEN": cw.REDACTION_SENTINEL, "HOST": "h"}, None)
+    assert "API_TOKEN" not in merged
+    assert merged["HOST"] == "h"
+    assert cw.REDACTION_SENTINEL not in str(merged)
+
+
 def test_merge_redacted_scalar_sentinel_keeps_stored() -> None:
     assert cw.merge_redacted(cw.REDACTION_SENTINEL, "kept") == "kept"
 

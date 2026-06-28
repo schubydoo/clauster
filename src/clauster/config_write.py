@@ -186,6 +186,11 @@ def guard_unchanged(path: Path, expected_hash: str | None) -> bytes:
     file was edited since the caller loaded it (→ 409). Returns the read bytes so the
     caller hashes them once (no TOCTOU re-read). A missing file reads as empty bytes,
     which only matches an ``expected_hash`` of the empty digest.
+
+    **Footgun for child writers:** ``expected_hash=None`` SKIPS the check entirely (returns
+    the bytes unguarded). That is the deliberate "no prior hash" path, but a child that
+    conditionally computes the hash and accidentally passes ``None`` gets an unguarded write
+    with no signal. Pass a real hash whenever the caller loaded the file first.
     """
     try:
         data = path.read_bytes()
@@ -238,19 +243,23 @@ def merge_redacted(incoming: Any, stored: Any) -> Any:
     the browser can never read a secret out, and a write that doesn't touch it need not
     resend it. Dicts merge key-by-key (recursing); a sentinel for a key the store
     doesn't have is dropped entirely (there is nothing to keep). Non-dict / non-sentinel
-    values from ``incoming`` win.
+    values from ``incoming`` win. When ``incoming`` is a dict but ``stored`` is not (e.g.
+    ``None`` for an absent subtree — exactly what ``write_subtree`` passes), ``stored`` is
+    treated as ``{}`` so a sentinel for a never-stored key is dropped rather than written
+    verbatim as the literal ``"********"``.
     """
     if incoming == REDACTION_SENTINEL:
         return stored  # keep-stored (may be a missing-key sentinel handled by caller)
-    if isinstance(incoming, dict) and isinstance(stored, dict):
+    if isinstance(incoming, dict):
+        stored_dict = stored if isinstance(stored, dict) else {}
         out: dict[Any, Any] = {}
         for k, v in incoming.items():
             if v == REDACTION_SENTINEL:
-                if k in stored:
-                    out[k] = stored[k]  # keep the stored secret
+                if k in stored_dict:
+                    out[k] = stored_dict[k]  # keep the stored secret
                 # else: sentinel for an absent key ⇒ nothing to keep, drop it
             else:
-                out[k] = merge_redacted(v, stored.get(k))
+                out[k] = merge_redacted(v, stored_dict.get(k))
         return out
     return incoming
 
