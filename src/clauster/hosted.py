@@ -740,10 +740,17 @@ class HostedManager:
     async def stop(self, hosted_id: str) -> RemoteControlInstance:
         """Stop a hosted session and return its final (status-synced) instance."""
         await self._require(hosted_id).stop()
+        # A concurrent forget()/resume() can pop the row during the stop grace
+        # window (the entry-time check isn't held across the await); re-fetch and
+        # treat absence as already-gone so the caller maps it to a clean 404
+        # instead of an unmapped KeyError 500.
+        instance = self._instances.get(hosted_id)
+        if instance is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
         # Mark the intent so a restart shows it as stopped, not "lost"/crashed.
-        self._instances[hosted_id].intentional_stop = True
+        instance.intentional_stop = True
         await self._persist()
-        return self._synced(self._instances[hosted_id])
+        return self._synced(instance)
 
     async def resume(
         self,
