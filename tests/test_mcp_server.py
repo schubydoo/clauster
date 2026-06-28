@@ -41,6 +41,13 @@ def server(cfg) -> mcp_server.MCPServer:
     return mcp_server.MCPServer(cfg)
 
 
+def test_ms_to_iso_none_passthrough():
+    # WorkingSession.started_at is always an int, but the helper guards None defensively;
+    # cover that branch directly (None -> None, a real ms value -> ISO-8601 UTC string).
+    assert mcp_server._ms_to_iso(None) is None
+    assert mcp_server._ms_to_iso(1700000000000) == "2023-11-14T22:13:20+00:00"
+
+
 # --------------------------------------------------------------------------- #
 # Protocol: initialize / lifecycle
 # --------------------------------------------------------------------------- #
