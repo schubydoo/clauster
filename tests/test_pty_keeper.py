@@ -153,6 +153,36 @@ def test_run_keeper_inprocess_scrapes_url(tmp_path: Path, _restore_sighup) -> No
     assert isinstance(info["bridge_pid"], int)
 
 
+def test_run_keeper_scrapes_url_from_screen_when_raw_fragments_it(
+    tmp_path: Path, _restore_sighup
+) -> None:
+    """#665: with the live tap on (120x40 PTY), claude prints the connect URL via
+    cursor-positioning escapes that fragment the raw byte stream — the raw regex (and a plain
+    ANSI-strip) miss it. The keeper recovers it from the pyte-reassembled screen and publishes
+    it to the discovery sidecar so the dashboard surfaces 'Open in Claude' instead of nothing."""
+    from clauster import pty_keeper
+
+    sidecar = tmp_path / "k.json"
+    screen = tmp_path / "k.screen.json"
+    # Emit the URL fragmented like the captured failure: "...cod" + a wrong char, then a
+    # cursor-reposition (\x1b[22G = column 22) back over it, overwritten with "e/session_…".
+    # Raw bytes read "...codX\x1b[22Ge/session_…" — regex misses, ANSI-strip leaves "codXe/…"
+    # which also misses; only the emulator renders the whole "code/session_…" line.
+    bridge = [
+        sys.executable,
+        "-c",
+        "import sys,time;"
+        "sys.stdout.buffer.write("
+        "b'start\\r\\nhttps://claude.ai/codX\\x1b[22Ge/session_01SCREENSCRAPE665\\r\\n');"
+        "sys.stdout.flush(); time.sleep(0.6)",
+    ]
+    rc = pty_keeper.run_keeper(bridge, sidecar, cwd=str(tmp_path), screen_sidecar=screen)
+    assert rc == 0
+    info = _read(sidecar)
+    assert info["session_id"] == "session_01SCREENSCRAPE665"
+    assert info["connect_url"] == "https://claude.ai/code/session_01SCREENSCRAPE665"
+
+
 def test_run_keeper_inprocess_spawn_failure(tmp_path: Path, _restore_sighup) -> None:
     """A bridge that can't be exec'd is recorded as an error, not raised."""
     from clauster import pty_keeper
@@ -379,15 +409,26 @@ def test_run_keeper_screen_unavailable_without_pyte(
     assert _read(sidecar)["state"] == "exited"  # discovery path unaffected
 
 
-def test_init_screen_records_unavailable_without_pyte(tmp_path: Path, monkeypatch) -> None:
-    """_init_screen returns None and records the reason when pyte is absent."""
+def test_make_screen_records_unavailable_without_pyte(tmp_path: Path, monkeypatch) -> None:
+    """_make_screen returns None and records the reason on the sidecar when pyte is absent."""
     from clauster import pty_keeper
 
     monkeypatch.setitem(sys.modules, "pyte", None)
     screen = tmp_path / "s.json"
-    assert pty_keeper._init_screen(screen) is None
+    assert pty_keeper._make_screen(screen) is None
     info = _read(screen)
     assert info["state"] == "unavailable" and "clauster[pty]" in info["error"]
+
+
+def test_make_screen_none_when_no_live_view_requested(tmp_path: Path) -> None:
+    """_make_screen returns None (and writes nothing) when no live-view sidecar was requested.
+
+    With the live view off the keeper keeps the default winsize — where claude prints the
+    connect URL contiguously — and scrapes it from the raw bytes, so no pyte screen is built.
+    """
+    from clauster import pty_keeper
+
+    assert pty_keeper._make_screen(None) is None
 
 
 def test_write_screen_frame_records_render_failure(tmp_path: Path) -> None:
@@ -445,7 +486,7 @@ def test_run_keeper_screen_throttle_skips_within_interval(
     assert "first" in joined and "second" in joined
 
 
-def test_init_screen_records_error_on_generic_failure(tmp_path: Path, monkeypatch) -> None:
+def test_make_screen_records_error_on_generic_failure(tmp_path: Path, monkeypatch) -> None:
     """A non-pyte setup failure is recorded as `error` (not raised, not `unavailable`)."""
     from clauster import pty_keeper
 
@@ -454,7 +495,7 @@ def test_init_screen_records_error_on_generic_failure(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(pty_keeper, "PtyScreen", _boom)
     screen = tmp_path / "s.json"
-    assert pty_keeper._init_screen(screen) is None
+    assert pty_keeper._make_screen(screen) is None
     info = _read(screen)
     assert info["state"] == "error" and "screen init" in info["error"]
 
@@ -472,7 +513,7 @@ def test_run_keeper_tap_failure_never_kills_bridge(
         def frame(self):  # noqa: ANN202 — test stub
             return {}
 
-    monkeypatch.setattr(pty_keeper, "_init_screen", lambda path: _BoomFeed())
+    monkeypatch.setattr(pty_keeper, "_make_screen", lambda screen_sidecar: _BoomFeed())
     sidecar = tmp_path / "k.json"
     screen = tmp_path / "k.screen.json"
     bridge = [

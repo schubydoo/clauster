@@ -1319,19 +1319,15 @@
         const u = (this.instances[name] || {}).session_url;
         return u && /^https?:\/\//i.test(u) ? u : null;
       },
-      // A running bridge whose connect URL hasn't arrived (or never will). session_url
-      // is captured asynchronously only AFTER the bridge reaches "running", so gate on
-      // that — during "starting" no output has been produced yet, so "Preparing connect
-      // link…" (and, for pty, "No web link") would surface before it's true. Without this
-      // a green "Running" row shows no connect affordance and no explanation.
+      // A running bridge whose connect URL hasn't arrived yet. session_url is captured
+      // asynchronously only AFTER the bridge reaches "running", so gate on that — during
+      // "starting" no output has been produced yet, so "Preparing connect link…" would
+      // surface before it's true. Without this a green "Running" row shows no connect
+      // affordance and no explanation. Applies to BOTH modes: a pty (flag-form) bridge
+      // DOES print a connect URL (the keeper scrapes it from the reassembled pty screen,
+      // #665) — so it is a transient capture gap, not a permanent "no link" state.
       connectUrlMissing(name) {
         return this.statusOf(name) === "running" && !this.sessionUrlOf(name);
-      },
-      // pty (flag-form) bridges genuinely never print a connect URL (claude >2.1.161
-      // stopped emitting it) — so it's not a transient gap, it's permanent. Tell the
-      // user to drive it from Logs rather than imply a link is still coming.
-      connectUrlUnavailable(name) {
-        return this.connectUrlMissing(name) && this.resumeModeOf(name) === "pty";
       },
       // Screen-reader text for the connect-link state, surfaced via an aria-live region
       // that stays mounted across the connect gap (empty when idle). A live region only
@@ -1339,13 +1335,10 @@
       // whole live element in via x-show (display:none→visible) is silently skipped by
       // NVDA/VoiceOver — so the wrapper persists and only this text changes. (The region
       // shares the row's filter x-show, so an off-filter desktop row stays silent — which
-      // is intended: a row the user has filtered out shouldn't announce.) Strings mirror
-      // the visible chip labels so the SR and sighted experiences match word-for-word.
+      // is intended: a row the user has filtered out shouldn't announce.) The string
+      // mirrors the visible chip label so the SR and sighted experiences match word-for-word.
       connectStatusText(name) {
-        if (!this.connectUrlMissing(name)) return "";
-        return this.connectUrlUnavailable(name)
-          ? "No web link — use Logs"
-          : "Preparing connect link…";
+        return this.connectUrlMissing(name) ? "Preparing connect link…" : "";
       },
       envUrlOf(name) { return (this.instances[name] || {}).url || null; },
       errorOf(name) { return this.errors[name] || null; },
