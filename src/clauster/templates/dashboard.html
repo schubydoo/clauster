@@ -233,7 +233,7 @@
                   <div class="alert alert-secondary py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].ended" x-cloak
                        x-text="hostedView[h.claustrum_process_id].endedReason || 'This session has ended — it is no longer live.'"></div>
                   <div class="border rounded p-2 hosted-stream" :id="'hosted-stream-' + h.claustrum_process_id">
-                    <template x-for="(it, idx) in hostedView[h.claustrum_process_id].events" :key="idx">
+                    <template x-for="it in hostedView[h.claustrum_process_id].events" :key="it._key">
                       <div class="mb-1">
                         <template x-if="it.kind === 'msg'">
                           <div :class="it.role === 'assistant' ? 'text-body' : 'text-secondary'">
