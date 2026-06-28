@@ -1072,7 +1072,7 @@ class SessionRunner:
         finally:
             err_fh.close()
 
-    # ----- pty / true-resume mode -----------------------------------------
+    # ----- pty / Interactive Session mode (true conversation resume) ------
 
     def _is_pty_mode(
         self,
@@ -1080,7 +1080,7 @@ class SessionRunner:
         *,
         requested: str | None = None,
     ) -> bool:
-        """Whether the bridge launches under the PTY keeper (true resume). POSIX only.
+        """Whether the bridge launches under the PTY keeper (Interactive Session). POSIX only.
 
         A bridge's mode is fixed at first launch. Precedence: an explicit
         *requested* mode (the per-launch picker) wins for a fresh start; else when

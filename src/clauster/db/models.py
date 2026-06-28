@@ -101,7 +101,7 @@ class Instance(Base, TimestampMixin):
 
 
 class HostedSession(Base, TimestampMixin):
-    """A hosted-channel session — the ``hosted_state.json`` ``sessions`` record.
+    """A Direct Session (hosted-channel) record — the ``hosted_state.json`` ``sessions`` row.
 
     Keyed by the client-chosen ``claustrum_process_id``. Holds only what a clauster
     restart can't re-derive: the metadata to rebuild the dashboard row plus the

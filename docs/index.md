@@ -17,22 +17,22 @@ and exposes to the Claude remote-control controller. Clauster supports two
 launch modes, selected per instance via `claude.launch_mode`. They are **not
 interchangeable** — each has its own argv and readiness logic.
 
-| | **standard** (default) | **pty** (opt-in, POSIX) |
+| | **Server Mode** (default) | **Interactive Session** (opt-in, POSIX) |
 | --- | --- | --- |
 | Command form | `claude remote-control` (subcommand) | `claude --remote-control` (flag) |
 | Sessions | multi-session server | single session |
 | Restart behaviour | spawns a fresh, empty context — no conversation resume | genuinely restores prior context (`--continue` true resume) |
 | Process model | headless server | runs under a **PTY keeper** sidecar that owns the PTY |
-| Platform | all | POSIX only — falls back to standard on Windows |
+| Platform | all | POSIX only — falls back to Server Mode on Windows |
 
 The mode is recorded on a bridge **at launch**: editing `claude.launch_mode`
 seeds the mode for *new* bridges only and never re-modes a running or stopped
 one (stop/resume always honour the recorded mode).
 
-For users on the **standard** mode who still want continuity across a restart,
+For users on **Server Mode** who still want continuity across a restart,
 the opt-in `claude.resume_recap` SessionStart hook recaps the most recent prior
-transcript for the directory back into a freshly restarted bridge. Unlike pty
-mode, this *recaps* the prior conversation rather than truly restoring it.
+transcript for the directory back into a freshly restarted bridge. Unlike
+Interactive Session mode, this *recaps* the prior conversation rather than truly restoring it.
 
 ## Key features
 
@@ -70,7 +70,7 @@ mode, this *recaps* the prior conversation rather than truly restoring it.
 ### Opt-in extras
 
 - Conversation recap on restart (`claude.resume_recap`).
-- Native true-resume PTY mode (`claude.launch_mode: pty`).
+- Native Interactive Session mode (`claude.launch_mode: pty`).
 - Ghost-environment reaper (CLI always available; dashboard gated by
   `reaper.ui_enabled`).
 - Background agents (**experimental**) — list / dispatch / stop `claude --bg`

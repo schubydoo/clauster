@@ -384,9 +384,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         runner.notify_app_event(
             "permission-needed",
             "clauster: permission needed",
-            f"A hosted session parked a tool-permission prompt ({clean})."
+            f"A Direct Session parked a tool-permission prompt ({clean})."
             if clean
-            else "A hosted session parked a tool-permission prompt.",
+            else "A Direct Session parked a tool-permission prompt.",
         )
 
     app.state.hosted = HostedManager(

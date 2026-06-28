@@ -1,4 +1,4 @@
-"""PTY keeper — the sidecar that owns a true-resume bridge's pseudo-terminal.
+"""PTY keeper — the sidecar that owns an Interactive Session bridge's pseudo-terminal.
 
 The ``claude --remote-control`` *flag* form (main command, not the
 ``remote-control`` subcommand) is the only entrypoint that genuinely restores

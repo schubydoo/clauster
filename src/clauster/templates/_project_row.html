@@ -163,9 +163,9 @@
                             <label class="form-label small mb-1" for="resume-{{ p.name }}">Mode</label>
                             <select id="resume-{{ p.name }}" class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
                                     aria-describedby="resume-hint-{{ p.name }}"
-                                    title="standard (multi-session bridge) = the claude remote-control server; supports the Spawn options. pty (single-session, true-resume) = one interactive session that restores its prior conversation on Resume; always runs in the project directory.">
-                              <option value="standard">standard (multi-session bridge)</option>
-                              <option value="pty">pty (single-session, true-resume)</option>
+                                    title="Server Mode (multi-session bridge) = the claude remote-control server; supports the Spawn options. Interactive Session (single-session, true-resume) = one interactive session that restores its prior conversation on Resume; always runs in the project directory.">
+                              <option value="standard">Server Mode (multi-session bridge)</option>
+                              <option value="pty">Interactive Session (single-session, true-resume)</option>
                             </select>
                           </div>
                           {% endif %}

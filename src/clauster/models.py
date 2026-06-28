@@ -67,9 +67,9 @@ class RemoteControlInstance(BaseModel):
     url: str | None = None  # https://claude.ai/code?environment=env_<ULID>
     spawn_mode: SpawnMode = "same-dir"
     permission_mode: PermissionMode = "default"
-    # How this bridge was launched. "pty" bridges run the flag form under a PTY
-    # keeper for true conversation resume; their `bridge_pid` is the bridge the
-    # keeper spawned and `keeper_pid` is the keeper holding its terminal.
+    # How this bridge was launched. "pty" bridges (Interactive Session) run the flag
+    # form under a PTY keeper for true conversation resume; their `bridge_pid` is the
+    # bridge the keeper spawned and `keeper_pid` is the keeper holding its terminal.
     resume_mode: ResumeMode = "standard"
     keeper_pid: int | None = None  # PTY keeper holding the bridge's terminal ("pty" mode only)
     status: InstanceStatus = InstanceStatus.STARTING
@@ -86,8 +86,8 @@ class RemoteControlInstance(BaseModel):
     error_detail: str | None = None
 
     # --- hosted channel (CL-4) ------------------------------------------------
-    # Orthogonal axis to resume_mode: "hosted" sessions run a headless stream-json
-    # `claude` on the claustrum daemon's pipes rather than a remote-control bridge.
+    # Orthogonal axis to resume_mode: "hosted" sessions (Direct Session) run a headless
+    # stream-json `claude` on the claustrum daemon's pipes rather than a remote-control bridge.
     # All fields below are nullable/defaulted so existing remote-control state.json
     # rows load unchanged (additive-only schema). They are populated only when
     # channel == "hosted". CL-4b wired spawn dispatch + endpoints; state.json
@@ -131,7 +131,8 @@ class Attribution(StrEnum):
     """How a working session relates to a managed session (tracked/hosted/untracked/external)."""
 
     TRACKED = "tracked"
-    HOSTED = "hosted"  # owned by Clauster's hosted (claustrum) registry, not a bridge (#592)
+    # owned by Clauster's Direct Session (claustrum) registry, not a bridge (#592)
+    HOSTED = "hosted"
     UNTRACKED = "untracked"
     EXTERNAL = "external"
 

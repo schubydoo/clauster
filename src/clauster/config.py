@@ -33,15 +33,22 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 # a git repo; bypassPermissions is footgun-gated (see `ProjectConfig.allow_bypass_permissions`).
 SpawnMode = Literal["same-dir", "worktree", "session"]
 PermissionMode = Literal["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"]
-# How a bridge is launched. "standard" = the headless `claude remote-control`
+# How a bridge is launched. "standard" = Server Mode: the headless `claude remote-control`
 # subcommand server (multi-session, survives a restart, no conversation resume).
-# "pty" = the `claude --remote-control` flag form under a PTY keeper, which is
-# single-session but genuinely restores prior context on restart (true resume).
+# "pty" = Interactive Session: the `claude --remote-control` flag form under a PTY keeper,
+# which is single-session but genuinely restores prior context on restart.
 ResumeMode = Literal["standard", "pty"]
 # Orthogonal to ResumeMode: which substrate hosts a managed session. "remote-control"
-# is the bridge (standard/pty modes above); "hosted" is the claustrum-daemon headless
-# stream-json channel (CL-4). ResumeMode applies only to the remote-control channel.
+# is the bridge (standard/pty modes above); "hosted" is the Direct Session channel — the
+# claustrum-daemon headless stream-json channel (CL-4). ResumeMode applies only to the
+# remote-control channel.
 SessionChannel = Literal["remote-control", "hosted"]
+# Display-name <-> wire-token map (UI/docs say the left, code/config keep the right):
+#   "Server Mode"         == ResumeMode "standard"  (claude remote-control, multi-session)
+#   "Interactive Session" == ResumeMode "pty"       (claude --remote-control, true resume)
+#   "Direct Session"      == SessionChannel "hosted" (claustrum stream-json channel)
+#   "Background Agent"    == claude --bg agent-view run (no ResumeMode/SessionChannel token)
+# Never rename the wire tokens above — only the display names are user-facing.
 SPAWN_MODES: tuple[str, ...] = ("same-dir", "worktree", "session")
 RESUME_MODES: tuple[str, ...] = ("standard", "pty")
 PERMISSION_MODES: tuple[str, ...] = (
