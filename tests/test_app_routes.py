@@ -169,12 +169,11 @@ def test_projects_sortmeta_shape_and_all_projects(write_config, tmp_path, monkey
 
     when = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
 
-    def _rollup(self, name):
-        if name == "alpha":
-            return stores_mod.ProjectRollup(project_name=name, last_used=when, total_cost_usd=1.25)
-        return stores_mod.ProjectRollup(project_name=name)
+    def _sortmeta(self, names):
+        # alpha has history; the others are omitted -> caller defaults to (None, None).
+        return {"alpha": (when, 1.25)}
 
-    monkeypatch.setattr(stores_mod.SessionHistoryStore, "rollup_for", _rollup)
+    monkeypatch.setattr(stores_mod.SessionHistoryStore, "sortmeta_for_all", _sortmeta)
     r = _client(write_config, tmp_path).get("/api/projects/sortmeta")
     assert r.status_code == 200
     body = r.json()
@@ -197,10 +196,10 @@ def test_projects_sortmeta_degrades_to_empty_on_error(write_config, tmp_path, mo
     # client falls back to name order), never 500 the dashboard.
     from clauster.db import stores as stores_mod
 
-    def _boom(self, name):
+    def _boom(self, names):
         raise OSError("db gone")
 
-    monkeypatch.setattr(stores_mod.SessionHistoryStore, "rollup_for", _boom)
+    monkeypatch.setattr(stores_mod.SessionHistoryStore, "sortmeta_for_all", _boom)
     r = _client(write_config, tmp_path).get("/api/projects/sortmeta")
     assert r.status_code == 200
     assert r.json() == {}
