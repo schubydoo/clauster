@@ -1810,6 +1810,34 @@ def test_clone_cancel_running_job_202(write_config, tmp_path):
     assert terminated == [True]  # the terminate hook actually fired
 
 
+# ----- clone cancel UI affordance (#659 items 1+2) ----------------------
+
+
+def test_dashboard_renders_clone_cancel_button(write_config, tmp_path):
+    # Item 1: a dedicated Cancel control next to Clone, shown only while a clone is
+    # in its cancellable in-progress state (np.cloning) and wired to cancelClone().
+    html = _client(write_config, tmp_path).get("/").text
+    assert "cancelClone()" in html
+    assert 'x-show="np.cloning"' in html  # only visible during an in-progress clone
+    assert "Cancel clone" in html
+
+
+def test_dashboard_clone_cancel_is_single_flight(write_config, tmp_path):
+    # Item 1: cancelClone() guards on np.cloning so a second click (after the first
+    # already cleared np.cloning + nulled _abortClone) no-ops rather than re-POSTing
+    # cancel against a job already torn down.
+    html = _client(write_config, tmp_path).get("/").text
+    assert "if (!np.cloning) return;" in html  # the single-flight guard
+    assert "this._abortClone = null;" in html  # second click finds no abort hook
+
+
+def test_dashboard_clone_cancel_confirms_with_toast(write_config, tmp_path):
+    # Item 2: cancelClone surfaces a confirmation toast via the existing toast()
+    # mechanism so the operator sees the clone was actually cancelled.
+    html = _client(write_config, tmp_path).get("/").text
+    assert 'this.toast("Clone cancelled — partial files removed", "info")' in html
+
+
 def test_resume_failure_fires_reconnect_failed_notification(write_config, tmp_path, monkeypatch):
     # #541: a bridge resume that fails (here SpawnError -> 409) fires the
     # reconnect-failed notification, then still re-raises the mapped HTTP error.

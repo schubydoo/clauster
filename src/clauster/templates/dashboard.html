@@ -769,12 +769,19 @@
               <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts need
                 <code>clone.allow_private_hosts</code> in clauster.yml · cloning only fetches files (nothing runs).</p>
             </div>
-            <div class="mt-3">
+            <div class="mt-3 d-flex gap-2">
               <button class="btn btn-primary" @click="submitNew()" :disabled="np.busy || !np.name">
                 <span class="spinner-border spinner-border-sm me-1" x-show="np.busy" x-cloak></span>
                 <span x-text="np.busy ? (np.mode === 'clone' ? 'Cloning…' : 'Creating…')
                                       : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</span>
               </button>
+              <!-- Dedicated cancel for an in-progress clone (#659 item 1): a first-class
+                   control next to Clone, shown only while a clone is cancellable, rather
+                   than relying on the panel-close toggle to abort it as a side effect.
+                   x-show flips off the instant cancelClone() clears np.cloning, so the
+                   button vanishes on first click — its own single-flight guard. -->
+              <button type="button" class="btn btn-outline-danger" x-show="np.cloning" x-cloak
+                      @click="cancelClone()">Cancel clone</button>
             </div>
             <div class="mt-3" x-show="np.cloning" x-cloak>
               <div class="d-flex justify-content-between small text-secondary mb-1">
