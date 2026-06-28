@@ -106,17 +106,25 @@
                            is offered only where the per-project config ceiling allows it. -->
                       <div class="mt-2">
                         <label class="form-label small mb-1" for="perm-{{ p.name }}">Permissions</label>
+                        {# Option text + effect tooltip both come from the canonical
+                           permission_labels map (#685) — never a hand-maintained copy.
+                           bypassPermissions is offered only where the per-project ceiling
+                           allows it and only for the Desktop/bridge launch (the typed-confirm
+                           footgun guard); the "(Desktop only)" caveat is a contextual hint
+                           appended here, not baked into the canonical label. #}
                         <select id="perm-{{ p.name }}" class="form-select form-select-sm" x-model="lperm"
                                 aria-describedby="perm-effect-{{ p.name }}"
-                                title="What the agent may do without asking: default = prompts each time · plan = read-only planning · acceptEdits = auto-accepts file edits · auto = model auto-approves what it judges safe · dontAsk = never prompts, denies anything not pre-approved{% if p.allow_bypass_permissions %} · bypassPermissions = skips all checks (gated ⚠){% endif %}.">
-                          <option value="default">Ask each time (default)</option>
-                          <option value="plan">Plan only (read-only)</option>
-                          <option value="acceptEdits">Auto-accept edits</option>
-                          <option value="auto">Auto-approve safe</option>
-                          <option value="dontAsk">Never prompt — deny unknowns</option>
-                          {# bypassPermissions only for the Desktop/bridge launch, which carries the
-                             typed-confirm footgun guard; reset away from it on other modes (above). #}
-                          {% if p.allow_bypass_permissions %}<option value="bypassPermissions" :disabled="lmode !== 'desktop'">Skip all checks ⚠ (Desktop only)</option>{% endif %}
+                                {# Lead each rendered item with the separator (not trailing it) so a
+                                   filtered-out bypassPermissions tail never leaves a dangling " · ". #}
+                                {% set ns = namespace(first=true) %}
+                                title="What the agent may do without asking — {% for mode, lbl in permission_labels.items() %}{% if mode != 'bypassPermissions' or p.allow_bypass_permissions %}{% if not ns.first %} · {% endif %}{{ mode }} = {{ lbl.effect }}{% set ns.first = false %}{% endif %}{% endfor %}.">
+                          {% for mode, lbl in permission_labels.items() %}
+                          {% if mode != 'bypassPermissions' %}
+                          <option value="{{ mode }}">{{ lbl.long }}</option>
+                          {% elif p.allow_bypass_permissions %}
+                          <option value="bypassPermissions" :disabled="lmode !== 'desktop'">{{ lbl.long }} {{ bypass_desktop_hint }}</option>
+                          {% endif %}
+                          {% endfor %}
                         </select>
                         {# Plain-language effect of the SELECTED mode, inline (not just title=) so it's
                            visible on touch — the riskiest per-launch choice shouldn't hide in a tooltip. #}
