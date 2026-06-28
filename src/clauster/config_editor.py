@@ -352,8 +352,11 @@ FIELD_DESCRIPTIONS: dict[str, str] = {
         "(standard) bridges have no PTY to render. "
         "Publishes a redacted, read-only render of the bridge's live terminal for the dashboard's "
         "live-terminal view. Needs the optional pyte dependency (pip install 'clauster[pty]'); "
-        "without it the feature stays dormant. The render is best-effort secret-redacted, so "
-        "treat the live view as auth-gated, not secret-proof. Takes effect on the next start."
+        "without it the feature stays dormant. Not available on the standalone binary — pyte is "
+        "LGPL and not bundled, and can't be side-loaded into it; run clauster from a pip/uv "
+        "install with the [pty] extra to use the live view. The render is best-effort "
+        "secret-redacted, so treat the live view as auth-gated, not secret-proof. Takes effect "
+        "on the next start."
     ),
 }
 

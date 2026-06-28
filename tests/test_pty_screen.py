@@ -137,6 +137,20 @@ def test_missing_pyte_raises_clear_error(monkeypatch):
     # Without the optional `pty` extra, the lazy import fails -> a clear
     # PyteUnavailableError naming the extra, never a bare ImportError. Simulate the
     # absent dependency by poisoning sys.modules so `import pyte` re-raises ImportError.
+    monkeypatch.delattr(sys, "frozen", raising=False)
     monkeypatch.setitem(sys.modules, "pyte", None)
-    with pytest.raises(PyteUnavailableError, match=r"clauster\[pty\]"):
+    with pytest.raises(PyteUnavailableError, match=r"clauster\[pty\]") as exc_info:
+        PtyScreen()
+    # Pin the non-frozen path independently — both messages name clauster[pty], so without
+    # this the test would still pass if the sys.frozen branch were inverted or removed.
+    assert "standalone binary" not in str(exc_info.value)
+
+
+def test_missing_pyte_frozen_binary_message(monkeypatch):
+    # On the standalone (frozen) binary pyte is structurally absent (LGPL, not bundled
+    # and not side-loadable), so the error must name the binary limitation instead of the
+    # dead-end `install clauster[pty]` instruction a binary user cannot act on.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setitem(sys.modules, "pyte", None)
+    with pytest.raises(PyteUnavailableError, match=r"standalone binary"):
         PtyScreen()
