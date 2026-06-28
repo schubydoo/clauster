@@ -38,6 +38,7 @@ from clauster.config import (
     ProjectConfig,
     ReaperConfig,
     ReverseProxyConfig,
+    TlsConfig,
     UsageConfig,
     WebhooksConfig,
 )
@@ -62,6 +63,7 @@ SECTIONS: list[tuple[str, type[BaseModel]]] = [
     ("notifications", NotificationsConfig),
     ("webhooks", WebhooksConfig),
     ("claustrum", ClaustrumConfig),
+    ("tls", TlsConfig),
 ]
 
 

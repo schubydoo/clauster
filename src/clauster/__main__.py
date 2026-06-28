@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import ssl
 import sys
 import time
 from pathlib import Path
@@ -22,7 +23,7 @@ import uvicorn
 from . import __version__, claude_cli, environments, ops, pty_keeper, usage
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
-from .config import ClausterConfig, load_config
+from .config import ClausterConfig, load_config, resolve_cert_path
 from .logging_config import setup_logging
 from .recap import RECAP_SUBCOMMAND
 from .state import StateStore
@@ -663,6 +664,9 @@ def _warn_if_cookie_insecure(config) -> None:
         return
     if a.cookie_secure == "always":
         return  # Secure forced regardless of scheme
+    if config.tls_active:
+        return  # Clauster terminates TLS itself: request.url.scheme is https, so the
+        # cookie ships Secure under `auto` (see app._cookie_secure). No warning needed.
     if a.reverse_proxy.enabled:
         return  # a TLS proxy is expected to terminate https and set X-Forwarded-Proto
     print(
@@ -671,6 +675,45 @@ def _warn_if_cookie_insecure(config) -> None:
         "auth.cookie_secure: always.",
         file=sys.stderr,
     )
+
+
+def _tls_kwargs(config: ClausterConfig) -> dict[str, str]:
+    """Resolve the uvicorn ``ssl_certfile``/``ssl_keyfile`` kwargs, or ``{}`` if no TLS.
+
+    Defense-in-depth: the config validator already resolved + readability-checked both
+    paths at load, but a cert could be deleted or chmod-ed away between load and serve,
+    so re-resolve here and **abort** (never silently fall back to plain HTTP) if either
+    file is now missing/unreadable. A final pre-flight builds the SSL context exactly as
+    uvicorn will, so a malformed/mismatched cert (one that passes existence/readability
+    but won't parse) also aborts cleanly here — with our ``TLS error`` message and exit
+    2 — rather than crashing uvicorn with a raw traceback at serve time. The SSL error is
+    a generic PEM/parse message; it never carries key material. Returns canonical
+    absolute paths uvicorn opens.
+    """
+    if config.tls is None:
+        return {}
+    cert = resolve_cert_path("cert_file", config.tls.cert_file)
+    key = resolve_cert_path("key_file", config.tls.key_file)
+    _verify_cert_chain(cert, key)
+    return {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+
+
+def _verify_cert_chain(cert: Path, key: Path) -> None:
+    """Pre-flight the cert + key by building the SSL context uvicorn will, or fail closed.
+
+    Catches a malformed/mismatched cert (one that passes existence/readability but won't
+    parse) so it aborts here with our ``TLS error`` message + exit 2, instead of crashing
+    uvicorn with a raw traceback at serve time. The re-raised ``ValueError`` carries only
+    the cert PATH and the generic SSL/PEM reason — never the private-key bytes. A seam so
+    tests can stub the parse without a real keypair (the parse itself is tested directly).
+    """
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(str(cert), str(key))
+    except (ssl.SSLError, OSError) as exc:
+        raise ValueError(
+            f"tls cert/key at {cert} could not be loaded (check the PEM cert and that the "
+            f"key matches it): {exc}"
+        ) from None
 
 
 def _process_title(config: ClausterConfig) -> str | None:
@@ -725,9 +768,20 @@ def _run(config_path: str | None) -> int:
         print(f"clauster: could not probe claude version: {exc}", file=sys.stderr)
         return 2
 
+    # Fail closed BEFORE serving: re-resolve the TLS material (the config validator
+    # already checked it at load, but a cert could vanish or lose read permission
+    # between load and serve). A bad cert here aborts startup — Clauster must never
+    # silently fall back to plain HTTP when TLS was asked for.
+    try:
+        tls_kwargs = _tls_kwargs(config)
+    except ValueError as exc:
+        print(f"clauster: TLS error: {exc}", file=sys.stderr)
+        return 2
+
+    scheme = "https" if tls_kwargs else "http"
     print(
         f"clauster {__version__} | claude {version} | "
-        f"projects_root={config.projects_root} | http://{config.host}:{config.port}",
+        f"projects_root={config.projects_root} | {scheme}://{config.host}:{config.port}",
         file=sys.stderr,
     )
     _warn_if_cookie_insecure(config)
@@ -739,6 +793,8 @@ def _run(config_path: str | None) -> int:
     app = create_app(config)
     # proxy_headers=False: keep request.client.host as the real socket peer so the
     # reverse-proxy IP allowlist can't be defeated via a spoofed X-Forwarded-For.
+    # ssl_certfile/ssl_keyfile (when tls is configured) make uvicorn terminate TLS
+    # itself — `request.url.scheme` is then https and the session cookie ships Secure.
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -747,6 +803,7 @@ def _run(config_path: str | None) -> int:
             log_level="info",
             log_config=None,
             proxy_headers=False,
+            **tls_kwargs,
         )
     )
     # Hand the live server to the app so the in-app "Restart Clauster" action (#483)

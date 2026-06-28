@@ -83,6 +83,17 @@ auth:
     #                                # oauth2-proxy) that sign no HMAC — set true (the
     #                                # default) when using a shared_secret HMAC proxy instead
 
+# Native HTTPS: have Clauster terminate TLS itself (uvicorn ssl_certfile/keyfile),
+# instead of a reverse proxy / `tailscale serve`. Unset = plain HTTP. Both paths are
+# validated fail-closed at load AND at server start (exist + readable + absolute, `..`
+# collapsed); a missing/unreadable file aborts startup — it never falls back to plain
+# HTTP. With TLS on, cookie_secure: auto already marks the cookie Secure. Self-signed
+# generation and ACME are out of scope here — supply an already-provisioned cert + key.
+# These are structural paths: file/CLI-managed only, NOT editable in the in-app editor.
+# tls:
+#   cert_file: /etc/clauster/tls/fullchain.pem   # PEM cert (chain); also CLAUSTER_TLS_CERT_FILE
+#   key_file: /etc/clauster/tls/privkey.pem       # PEM private key; also CLAUSTER_TLS_KEY_FILE
+
 logs:
   bridge_log_max_size_mb: 10
   keep_rotated: 5
