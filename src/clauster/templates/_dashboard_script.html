@@ -1844,7 +1844,7 @@
             try { ws.close(); } catch (e) { /* already closing */ }
             this._abortClone = null;  // this watch reached its terminal state
             this._cloneJobId = null; this._cloneDetachOnly = false;
-            np.cloning = false;
+            np.cloning = false; np.confirmCancel = false;  // a settled clone leaves no cancel prompt
             if (m.status === "error") {
               np.error = m.error || "clone failed"; np.busy = false;
               this.toast(name + ": clone failed", "error");
