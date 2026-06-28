@@ -79,9 +79,9 @@ auth:
     shared_secret: null            # HMAC key the proxy signs the auth header with
     trusted_ips: []
     hmac_window_seconds: 60
-    # require_hmac: true             # header-only forward-auth proxies (Authelia/Traefik/
-    #                                # oauth2-proxy) that sign NO HMAC must set this false
-    #                                # and rely on trusted_ips alone
+    # require_hmac: false            # header-only forward-auth proxies (Authelia/Traefik/
+    #                                # oauth2-proxy) that sign no HMAC — set true (the
+    #                                # default) when using a shared_secret HMAC proxy instead
 
 logs:
   bridge_log_max_size_mb: 10

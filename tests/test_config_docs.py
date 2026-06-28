@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from clauster.config_editor import EDITABLE_FIELDS
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,9 +43,23 @@ def _parse_tier_a_table() -> set[str]:
     """
     text = CONFIG_DOC.read_text(encoding="utf-8")
     # The table lives between these two headings (it sits OUTSIDE the gen-config
-    # BEGIN/END markers, so the `--check` gate above does not cover it).
-    start = text.index("### What's editable")
-    end = text.index("### Why everything else", start)
+    # BEGIN/END markers, so the `--check` gate above does not cover it). A missing
+    # heading means the page was restructured — fail clearly instead of a bare
+    # ValueError traceback.
+    try:
+        start = text.index("### What's editable")
+    except ValueError:
+        pytest.fail(
+            "Tier-A heading '### What's editable' not found — did "
+            "docs/configuration.md headings change?"
+        )
+    try:
+        end = text.index("### Why everything else", start)
+    except ValueError:
+        pytest.fail(
+            "Tier-A heading '### Why everything else' not found — did "
+            "docs/configuration.md headings change?"
+        )
     fields: set[str] = set()
     for line in text[start:end].splitlines():
         if not line.startswith("|"):
