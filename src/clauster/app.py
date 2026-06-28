@@ -1485,23 +1485,27 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # re-read (missing / externally corrupted) so the editor still opens.
         fields = None
         content_hash = None
+        present = None
         if path is not None:
             fields = config_editor.editable_values_on_disk(path)
-            # Guard file_hash the same way as the field read: a config deleted or made
-            # unreadable after startup makes read_bytes() raise, which would 500 the
-            # editor out of reach even though `fields` already degraded to the in-memory
-            # snapshot. Fall back to no hash instead (the editor still opens; a save is
-            # safely rejected for the missing hash until the file returns).
-            try:
-                content_hash = config_editor.file_hash(path)
-            except OSError:
-                content_hash = None
+            # One read of the on-disk file yields both the external-edit hash and the set of
+            # Tier-A keys literally present — the latter lets the editor drop a deprecated row
+            # once the user removed its key (e.g. via `config reconcile`). Both are None when
+            # the file can't be read (deleted / unreadable after startup): the editor still
+            # opens on the in-memory `fields` fallback below, a save is safely rejected for the
+            # missing hash, and nothing is hidden (fail-open on display — never hide a field we
+            # can't prove is absent).
+            content_hash, present = config_editor.disk_state(path)
         if fields is None:
             fields = config_editor.editable_values(cfg)
+        specs = config_editor.field_specs(present)
+        # The front-end builds its rendered rows from `editable`, so a hidden deprecated
+        # field is removed by dropping it here — editing `specs` alone would not hide the row.
+        editable = [p for p in config_editor.EDITABLE_FIELDS if not specs[p]["hidden"]]
         return {
             "fields": fields,
-            "editable": list(config_editor.EDITABLE_FIELDS),
-            "specs": config_editor.field_specs(),
+            "editable": editable,
+            "specs": specs,
             "hash": content_hash,
         }
 

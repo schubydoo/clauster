@@ -299,6 +299,36 @@ def test_cli_reconcile_interactive_both_present_shows_kept_note(
     assert "is already set — kept" in capsys.readouterr().err
 
 
+def test_cli_reconcile_interactive_both_present_typed_value_kept(
+    write_config, monkeypatch, capsys
+) -> None:
+    # #656: when both keys are present and the operator types a replacement value, the
+    # already-set replacement must be KEPT (not overridden), with a clear affirmation.
+    path = _cfg(write_config, "claude:\n  launch_mode: standard\n  resume_mode: pty\n")
+    monkeypatch.setattr("sys.stdin", io.StringIO("pty\n"))
+    assert cli.main(["config", "reconcile", "-c", path]) == 0
+    text = open(path, encoding="utf-8").read()
+    assert "resume_mode" not in text  # dead alias removed
+    assert load_config(path).claude.launch_mode == "standard"  # existing value kept, not "pty"
+    err = capsys.readouterr().err
+    assert "is already set — keeping it" in err
+    assert "without overriding" in err
+
+
+def test_cli_reconcile_interactive_both_present_omits_value_prompt(
+    write_config, monkeypatch, capsys
+) -> None:
+    # #656: the both-present prompt no longer offers the value list — picking a value would
+    # silently override the kept replacement, so the hint is suppressed.
+    path = _cfg(write_config, "claude:\n  launch_mode: standard\n  resume_mode: pty\n")
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n"))
+    assert cli.main(["config", "reconcile", "-c", path]) == 0
+    captured = capsys.readouterr()
+    # input()'s prompt lands on stdout; the value hint must be absent there (and stderr).
+    assert "/ a value (" not in captured.out
+    assert "/ a value (" not in captured.err
+
+
 def test_cli_reconcile_summary_both_present_notes_existing_kept(write_config, capsys) -> None:
     # The --yes summary must not claim "no replacement value" when the replacement
     # already exists in the file; it reports the existing key was kept instead.

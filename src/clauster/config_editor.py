@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import annotated_types as at
+import yaml
 from pydantic import ValidationError
 from yaml import YAMLError
 
@@ -95,9 +96,14 @@ class ConfigValidationError(ConfigEditError):
     """The merged config failed re-validation (e.g. it would open the dashboard)."""
 
 
+def _hash_bytes(data: bytes) -> str:
+    """Return the hex SHA-256 of ``data`` (the editor's external-edit token)."""
+    return hashlib.sha256(data).hexdigest()
+
+
 def file_hash(path: str | Path) -> str:
     """Return a hex SHA-256 of the config file's bytes (the external-edit token)."""
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return _hash_bytes(Path(path).read_bytes())
 
 
 def _get_by_path(obj: Any, dotted: str) -> Any:
@@ -106,6 +112,16 @@ def _get_by_path(obj: Any, dotted: str) -> Any:
     for part in dotted.split("."):
         cur = getattr(cur, part)
     return cur
+
+
+def _dotted_present(mapping: dict[str, Any], dotted: str) -> bool:
+    """Return whether a dotted key is literally present in a nested mapping."""
+    cur: Any = mapping
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    return True
 
 
 def _set_by_path(mapping: dict[str, Any], dotted: str, value: Any) -> None:
@@ -146,6 +162,35 @@ def editable_values_on_disk(path: str | Path) -> dict[str, Any] | None:
         return editable_values(load_config(path))
     except (OSError, ValueError, ValidationError, YAMLError):
         return None
+
+
+def disk_state(path: str | Path) -> tuple[str | None, set[str] | None]:
+    """Read the on-disk config file ONCE; return ``(content hash, present Tier-A keys)``.
+
+    The editor GET needs both the file's SHA-256 — the optimistic-concurrency token that
+    guards a save against a concurrent external edit — and the set of Tier-A dotted keys
+    *literally* written on disk, used to drop a deprecated row once its key is gone (e.g.
+    after ``config reconcile``). Both derive from the same bytes, so read them once.
+
+    Returns ``(None, None)`` when the file can't be read (fail-open on display: the editor
+    still opens on the in-memory fallback, and a save is safely rejected for the missing hash
+    until the file returns). The key set alone is ``None`` when the YAML is not a mapping —
+    never hide a field we cannot prove is absent. Unlike :func:`editable_values` (the
+    schema-defaulted view, where every field always resolves), this inspects the raw mapping
+    to learn what the user actually wrote.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None, None
+    content_hash = _hash_bytes(data)
+    try:
+        raw = yaml.safe_load(data)
+    except YAMLError:
+        return content_hash, None
+    if not isinstance(raw, dict):
+        return content_hash, None
+    return content_hash, {field for field in EDITABLE_FIELDS if _dotted_present(raw, field)}
 
 
 def validate_edits(raw: dict[str, Any], edits: dict[str, Any]) -> dict[str, Any]:
@@ -409,8 +454,16 @@ def _constraints(info: Any) -> dict[str, Any]:
     return out
 
 
-def field_specs() -> dict[str, dict[str, Any]]:
-    """Return rich per-field UI metadata for the editor (label, help, control, bounds)."""
+def field_specs(present: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    """Return rich per-field UI metadata for the editor (label, help, control, bounds).
+
+    ``present`` is the set of dotted keys literally on disk (from :func:`disk_state`).
+    A deprecated field whose key is ABSENT from ``present`` is flagged ``hidden`` so the
+    editor can drop its row — a key the user already removed (e.g. via ``config reconcile``)
+    no longer renders as a flagged-deprecated field. When ``present`` is ``None`` (the file
+    could not be read) nothing is hidden: fail-open on display, never drop a field we cannot
+    prove is absent.
+    """
     specs: dict[str, dict[str, Any]] = {}
     for path in EDITABLE_FIELDS:
         section, key = path.split(".", 1) if "." in path else ("", path)
@@ -433,6 +486,7 @@ def field_specs() -> dict[str, dict[str, Any]]:
             "depends_on_value": dep_value[1] if dep_value else None,
             "depends_on_any": list(FIELD_DEPENDS_ANY.get(path, ())) or None,
             "deprecated": path in DEPRECATED_FIELDS,
+            "hidden": (path in DEPRECATED_FIELDS and present is not None and path not in present),
             "default": default if isinstance(default, (str, int, float, bool)) else None,
         }
         if kind in ("int", "float"):
