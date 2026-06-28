@@ -8,6 +8,7 @@ tests don't touch.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -82,6 +83,9 @@ def _stub_server(monkeypatch, on_run=None):
                     "host": config.host,
                     "port": config.port,
                     "proxy_headers": config.proxy_headers,
+                    # None when no tls is configured; the resolved abs path otherwise.
+                    "ssl_certfile": getattr(config, "ssl_certfile", None),
+                    "ssl_keyfile": getattr(config, "ssl_keyfile", None),
                 }
             )
             self.should_exit = False
@@ -99,6 +103,78 @@ def test_run_invokes_uvicorn(write_config, tmp_path, monkeypatch):
     rc = cli.main(["run", "-c", _cfg(write_config, tmp_path)])
     assert rc == 0
     assert captured.get("port") == 7621 and captured.get("proxy_headers") is False
+    # No tls configured: uvicorn must NOT receive ssl_certfile/ssl_keyfile.
+    assert captured.get("ssl_certfile") is None
+    assert captured.get("ssl_keyfile") is None
+
+
+def _tls_cert_key(tmp_path):
+    """Throwaway cert + key files (filesystem-only validation needs no real TLS).
+
+    The key is chmod 0600 so the (non-fatal) world-readable-key warning stays silent
+    by default — tests that assert on the warning set the mode explicitly.
+    """
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("CERT", encoding="utf-8")
+    key.write_text("KEY", encoding="utf-8")
+    if os.name == "posix":
+        key.chmod(0o600)
+    return cert, key
+
+
+def test_run_passes_ssl_files_to_uvicorn_when_tls_set(write_config, tmp_path, monkeypatch):
+    cert, key = _tls_cert_key(tmp_path)
+    extra = f"tls:\n  cert_file: {cert}\n  key_file: {key}\n"
+    captured = _stub_server(monkeypatch)
+    # Throwaway files aren't real PEM, so stub the SSL pre-flight parse; the path
+    # resolution + uvicorn wiring under test are independent of cert validity.
+    monkeypatch.setattr(cli, "_verify_cert_chain", lambda cert, key: None)
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)])
+    assert rc == 0
+    # The resolved absolute cert/key reach uvicorn's Config so it terminates TLS itself.
+    assert captured.get("ssl_certfile") == str(cert.resolve())
+    assert captured.get("ssl_keyfile") == str(key.resolve())
+
+
+def test_run_aborts_when_cert_unparseable(write_config, tmp_path, monkeypatch, capsys):
+    # Defense-in-depth: a cert/key that exists and is readable but is NOT valid PEM
+    # aborts cleanly (exit 2, our message) via the real SSL pre-flight — no raw
+    # traceback, no plain-HTTP fallback. No stub here: the parse genuinely fails on
+    # the throwaway non-PEM bytes, and the message must not leak key material.
+    cert, key = _tls_cert_key(tmp_path)  # "CERT" / "KEY" — not real PEM
+    key.write_text("SUPER-SECRET-KEY-BYTES", encoding="utf-8")
+    extra = f"tls:\n  cert_file: {cert}\n  key_file: {key}\n"
+    captured = _stub_server(monkeypatch)
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "TLS error" in err
+    assert "could not be loaded" in err
+    # Both cert AND key PATHS are named so a cert/key mismatch is debuggable...
+    assert str(cert.resolve()) in err
+    assert str(key.resolve()) in err
+    assert "SUPER-SECRET-KEY-BYTES" not in err  # ...but key bytes never surface
+    assert captured == {}  # server never constructed; no plain-HTTP fallback
+
+
+def test_run_aborts_when_tls_cert_missing_at_start(write_config, tmp_path, monkeypatch, capsys):
+    # Defense-in-depth: a cert that passed load-time validation but is gone by serve
+    # time aborts startup (exit 2) — never a silent fall back to plain HTTP. Patch the
+    # server-start resolver to simulate the file vanishing between load and serve.
+    cert, key = _tls_cert_key(tmp_path)
+    extra = f"tls:\n  cert_file: {cert}\n  key_file: {key}\n"
+    captured = _stub_server(monkeypatch)
+
+    def _boom(field, raw):
+        raise ValueError(f"tls.{field} does not exist: {raw}")
+
+    monkeypatch.setattr(cli, "resolve_cert_path", _boom)
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)])
+    assert rc == 2
+    assert "TLS error" in capsys.readouterr().err
+    # The server was never constructed (no plain-HTTP fallback).
+    assert captured == {}
 
 
 def test_bare_args_default_to_run(write_config, tmp_path, monkeypatch):
@@ -245,6 +321,66 @@ def test_run_warns_on_insecure_cookie(write_config, tmp_path, monkeypatch, capsy
     assert cli.main(["run", "-c", cfg]) == 0
     err = capsys.readouterr().err
     assert "WARNING" in err and "Secure" in err
+
+
+def test_run_quiets_cookie_warning_under_tls(write_config, tmp_path, monkeypatch, capsys):
+    # With native TLS the connection is https, so the cookie ships Secure under
+    # cookie_secure: auto — the plain-http warning must NOT fire.
+    from clauster import auth
+
+    cert, key = _tls_cert_key(tmp_path)
+    pw = auth.hash_password(auth.make_hasher(), "pw")
+    extra = (
+        f'auth:\n  enabled: true\n  password_required: true\n  password_hash: "{pw}"\n'
+        f"tls:\n  cert_file: {cert}\n  key_file: {key}\n"
+    )
+    cfg = _cfg(write_config, tmp_path, extra)
+    captured = _stub_server(monkeypatch)
+    monkeypatch.setattr(cli, "_verify_cert_chain", lambda cert, key: None)
+    assert cli.main(["run", "-c", cfg]) == 0
+    err = capsys.readouterr().err
+    assert "WARNING" not in err
+    # And the banner advertises https rather than http.
+    assert f"https://127.0.0.1:{7621}" in err
+    assert captured.get("ssl_certfile") == str(cert.resolve())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits only")
+def test_run_warns_on_world_readable_key(write_config, tmp_path, monkeypatch, capsys):
+    # Non-fatal hygiene nudge: an over-permissive (group/other-accessible) private key
+    # warns but STILL serves (rc 0, server constructed) — never aborts startup.
+    cert, key = _tls_cert_key(tmp_path)
+    key.chmod(0o644)  # group + other readable
+    extra = f"tls:\n  cert_file: {cert}\n  key_file: {key}\n"
+    captured = _stub_server(monkeypatch)
+    monkeypatch.setattr(cli, "_verify_cert_chain", lambda cert, key: None)
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)])
+    assert rc == 0  # non-fatal: it warns but serves
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "group/other-accessible" in err
+    assert captured.get("ssl_certfile") == str(cert.resolve())  # server still wired up
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits only")
+def test_run_silent_for_owner_only_key(write_config, tmp_path, monkeypatch, capsys):
+    # A 0600 key is the correct posture — no warning.
+    cert, key = _tls_cert_key(tmp_path)
+    key.chmod(0o600)  # owner-only
+    extra = f"tls:\n  cert_file: {cert}\n  key_file: {key}\n"
+    _stub_server(monkeypatch)
+    monkeypatch.setattr(cli, "_verify_cert_chain", lambda cert, key: None)
+    assert cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)]) == 0
+    assert "group/other-accessible" not in capsys.readouterr().err
+
+
+def test_key_perms_warning_skipped_on_non_posix(tmp_path, monkeypatch, capsys):
+    # On Windows (os.name != "posix") the mode-bit check is skipped entirely — even a
+    # would-be over-permissive key produces no warning, since the bits don't apply.
+    key = tmp_path / "key.pem"
+    key.write_text("KEY", encoding="utf-8")
+    monkeypatch.setattr(cli.os, "name", "nt")
+    cli._warn_if_key_world_readable(key)
+    assert capsys.readouterr().err == ""
 
 
 def test_run_reexecs_when_restart_requested(write_config, tmp_path, monkeypatch):
