@@ -216,3 +216,34 @@ def test_unsubscribe_unknown_queue_is_a_noop():
         assert (await asyncio.wait_for(live.get(), timeout=1))["percent"] == 33
 
     asyncio.run(_run())
+
+
+def test_active_jobs_lists_only_running(monkeypatch):
+    # #659: a second tab discovers in-flight clones via active_jobs(). A terminal job
+    # lingers in the registry for the reconnect-TTL window, but a fresh tab must not treat
+    # a finished clone as still in progress — so only `running` jobs are listed.
+    mgr = CloneJobManager()
+    running = mgr.create("alive")
+    done = mgr.create("finished")
+    mgr.finish(done)  # -> status "done"; stays in the registry until discard()
+    cancelled = mgr.create("aborted")
+    cancelled.status = "running"
+    cancelled.request_cancel()  # no terminate hook -> just flags; finish drives terminal
+    mgr.cancel(cancelled)  # -> status "cancelled"
+
+    active = mgr.active_jobs()
+    assert [j.id for j in active] == [running.id]  # only the still-running job
+    assert running in active and done not in active and cancelled not in active
+
+
+def test_status_snapshot_omits_url_and_carries_progress():
+    # #659: the cross-tab status poll surfaces enough to reattach (job id + name +
+    # phase/percent) but NEVER the clone URL — it can carry credentials and must not leave
+    # the box. The snapshot mirrors progress, not the terminal/error detail.
+    mgr = CloneJobManager()
+    job = mgr.create("proj")
+    job.phase = "Receiving"
+    job.percent = 73
+    snap = job.status_snapshot()
+    assert snap == {"job_id": job.id, "name": "proj", "phase": "Receiving", "percent": 73}
+    assert "url" not in snap  # the clone URL (credential-bearing) is never surfaced

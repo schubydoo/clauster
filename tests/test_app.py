@@ -889,3 +889,38 @@ def test_dashboard_transcript_content_uses_x_text_not_x_html(write_config):
     # (The role badge renders "you" for user turns, so match the x-text binding by prefix.)
     assert 'x-text="t.role' in page
     assert 'x-text="t.model"' in page
+
+
+def test_clone_cancel_has_confirm_before_cancel_dialog(write_config):
+    # #659 item 3: the dedicated "Cancel clone" button arms an inline confirm rather than
+    # aborting outright — cancel discards a partial download, so a stray click shouldn't
+    # destroy it. The button calls promptCancelClone(); the confirm shows a destructive
+    # "Yes, cancel clone" + a non-destructive "Keep cloning", mirroring the trust/bypass
+    # confirms. The button hides while the confirm is open so the inline Yes/No is the
+    # only live control.
+    page = _client(write_config).get("/").text
+    assert "promptCancelClone()" in page  # the button arms the confirm, not a direct cancel
+    assert 'x-show="np.confirmCancel"' in page  # the inline confirm dialog
+    assert ">Yes, cancel clone<" in page
+    assert ">Keep cloning<" in page
+    assert 'x-show="np.cloning && !np.confirmCancel"' in page  # button hides under the confirm
+
+
+def test_clone_reattach_badge_present_for_cross_tab(write_config):
+    # #659 item 4: a clone started in another tab reattaches here and shows a badge marking
+    # it as started elsewhere. The badge is gated on np.cloning && np.reattached so it
+    # auto-hides the moment the clone settles.
+    page = _client(write_config).get("/").text
+    assert 'x-show="np.cloning && np.reattached"' in page
+    assert "started in another tab" in page
+    assert 'aria-live="polite"' in page  # the reactive badge is announced to assistive tech
+
+
+def test_clone_reattach_is_detach_only(write_config):
+    # #659 item 4: a tab that reattached to a clone started ELSEWHERE must not server-cancel
+    # it when its panel closes/resets — it didn't start the job. reattachActiveClones installs
+    # the watch with detachOnly=true; a deliberate "Cancel clone" still tears it down via the
+    # direct cancel POST in cancelClone (gated on _cloneDetachOnly).
+    page = _client(write_config).get("/").text
+    assert "/* detachOnly */ true" in page  # reattach watch is detach-only
+    assert "this._cloneDetachOnly && this._cloneJobId" in page  # confirmed Cancel still POSTs

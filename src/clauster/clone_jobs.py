@@ -145,6 +145,21 @@ class CloneJob:
         """Return the current progress as a WS ``progress`` frame."""
         return {"type": "progress", "phase": self.phase, "percent": self.percent}
 
+    def status_snapshot(self) -> dict[str, Any]:
+        """Return a small, safe summary of this job for the cross-tab status poll (#659).
+
+        A second tab opened mid-clone reads this to discover the in-flight job's id and
+        current progress, then reattaches to ``/ws/clone-progress/{id}`` for the live
+        stream. The URL is deliberately omitted — it can carry credentials and must never
+        leave the box; only ``name`` + ``phase`` + ``percent`` are surfaced.
+        """
+        return {
+            "job_id": self.id,
+            "name": self.name,
+            "phase": self.phase,
+            "percent": self.percent,
+        }
+
     def terminal_event(self) -> dict[str, Any]:
         """Return the final WS frame describing how the job ended.
 
@@ -175,6 +190,15 @@ class CloneJobManager:
     def get(self, job_id: str) -> CloneJob | None:
         """Return the job with ``job_id``, or ``None`` if unknown/already pruned."""
         return self._jobs.get(job_id)
+
+    def active_jobs(self) -> list[CloneJob]:
+        """Return every still-running clone job (cross-tab reattach source, #659).
+
+        Terminal jobs (done/error/cancelled) linger in the registry for ``_CLONE_JOB_TTL``
+        so a reconnecting watcher can read their final frame, but a fresh tab must not
+        treat a finished clone as "in progress" — so only ``running`` jobs are listed.
+        """
+        return [job for job in self._jobs.values() if job.status == "running"]
 
     def push_progress(self, job: CloneJob, line: str) -> None:
         """Parse a git progress ``line`` into the job and enqueue a progress frame.

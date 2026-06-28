@@ -286,3 +286,79 @@ def test_clone_done_webhook_silent_when_event_default_off(write_config, tmp_path
             _drain_to_done(ws)
         # Negative assertion: confirm no emit fires across a window, failing fast if one does.
         assert_stays_empty(aemit_calls)
+
+
+def test_clone_active_lists_running_job_and_reattach_streams(write_config, tmp_path, monkeypatch):
+    # #659 cross-tab: a clone started in one tab is discoverable by another via
+    # GET /api/projects/clone/active, which carries the job id + name + live progress
+    # (never the URL). A second watcher then reattaches to the same /ws/clone-progress
+    # and sees the full live stream — the WS fans out to every subscriber.
+    connected = threading.Event()
+
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
+        progress_cb("Receiving objects:  40% (4/10)")  # so active/ reports a non-null percent
+        assert connected.wait(timeout=5), "second watcher never subscribed"
+        progress_cb("Receiving objects: 100% (10/10)")
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    with _client(write_config, tmp_path) as client:
+        resp = client.post(
+            "/api/projects/clone",
+            json={"name": "shared", "url": "https://secret:token@example.com/r.git"},
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job_id"]
+
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as first_ws:
+            first_ws.receive_json()  # drain the running snapshot for the first watcher
+            # A SECOND tab loads and polls the active-clones endpoint.
+            active = client.get("/api/projects/clone/active")
+            assert active.status_code == 200, active.text
+            jobs = active.json()["jobs"]
+            assert len(jobs) == 1
+            job = jobs[0]
+            assert job["job_id"] == job_id and job["name"] == "shared"
+            assert "url" not in job  # the credential-bearing clone URL is never surfaced
+            assert "token" not in active.text  # nothing leaks the URL anywhere in the body
+            # That second tab reattaches to the live stream using the discovered id.
+            with client.websocket_connect(f"/ws/clone-progress/{job_id}") as second_ws:
+                snap = second_ws.receive_json()
+                assert snap["type"] == "progress"  # the live snapshot on reconnect
+                connected.set()  # release the clone to finish -> both watchers see done
+                frames = _drain_to_done(second_ws)
+            assert frames[-1] == {"type": "done", "status": "done", "error": None}
+
+
+def test_clone_active_empty_when_no_clone_in_flight(write_config, tmp_path):
+    # With nothing cloning, the endpoint returns an empty list (not 404) so a fresh tab's
+    # reattach check is a cheap no-op.
+    with _client(write_config, tmp_path) as client:
+        resp = client.get("/api/projects/clone/active")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"jobs": []}
+
+
+def test_clone_active_excludes_finished_job(write_config, tmp_path, monkeypatch):
+    # A completed clone lingers in the registry for the reconnect-TTL window, but the
+    # active list must exclude it — a fresh tab must not reattach to a finished clone.
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
+        (Path(root) / name).mkdir()  # land the dir so the success path runs
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    with _client(write_config, tmp_path) as client:
+        resp = client.post(
+            "/api/projects/clone", json={"name": "quick", "url": "https://example.com/r.git"}
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job_id"]
+        # Drain the WS to its terminal frame so the job is provably finished before we poll.
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+            frames = _drain_to_done(ws)
+        assert frames[-1]["status"] == "done"
+        active = client.get("/api/projects/clone/active")
+        assert active.status_code == 200, active.text
+        assert active.json() == {"jobs": []}  # the finished job is not listed
