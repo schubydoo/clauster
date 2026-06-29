@@ -73,6 +73,10 @@
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
   const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
   const DEFAULT_RESUME_MODE = {{ default_resume_mode | tojson }};
+  // Canonical permission-mode labels (#685): the single server-injected source of truth
+  // ({mode: {short, long, effect}}) shared with the launch <select> and the config editor.
+  // permLabel()/permissionEffect() read from THIS map — no second hand-maintained copy.
+  const PERMISSION_LABELS = {{ permission_labels | tojson }};
   const USAGE_MODE = {{ usage_mode | tojson }};  // usage.mode — "cost" | "tokens" | "off"
   const CURRENCY = {{ currency | tojson }};  // usage.currency — code, shown in the tooltip
   const CURRENCY_SYMBOL = {{ currency_symbol | tojson }};  // resolved symbol for cost mode
@@ -1369,27 +1373,16 @@
         return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
       },
       resumeModeOf(name) { return (this.instances[name] || {}).resume_mode || ""; },
-      // Plain-language effect of each permission mode — the same copy as the
-      // <select>'s title=, but surfaced inline so it's visible on touch (this is
-      // a phone-first product; hover tooltips never fire there). Keep in sync
-      // with the option labels in _project_row.html.
+      // Plain-language effect of each permission mode, surfaced inline so it's visible
+      // on touch (this is a phone-first product; hover tooltips never fire there).
+      // Reads the canonical PERMISSION_LABELS map (#685) — no second copy to drift.
       permissionEffect(mode) {
-        return {
-          default: "Asks before each tool use — the safe default.",
-          plan: "Read-only planning; makes no changes until you switch modes.",
-          acceptEdits: "Auto-accepts file edits; still asks for other tools.",
-          auto: "The model auto-approves what it judges safe; asks otherwise.",
-          dontAsk: "Never prompts — denies anything not pre-approved.",
-          bypassPermissions: "Skips every permission check — the agent may do anything.",
-        }[mode] || "";
+        return (PERMISSION_LABELS[mode] || {}).effect || "";
       },
-      // Short permission-mode label for inline display (Run button, hosted row) — a concise form
-      // of the <select> option text so the UI never shows a raw enum token (acceptEdits, dontAsk…).
+      // Short permission-mode label for inline display (Run button, hosted row) — the
+      // canonical "short" form so the UI never shows a raw enum token (acceptEdits, dontAsk…).
       permLabel(mode) {
-        return {
-          default: "Ask each time", plan: "Plan only", acceptEdits: "Auto-accept edits",
-          auto: "Auto-approve safe", dontAsk: "Never prompt", bypassPermissions: "Skip all checks ⚠",
-        }[mode] || mode;
+        return (PERMISSION_LABELS[mode] || {}).short || mode;
       },
       // Friendly session-type label for the Active-zone filter chips, matching the launch-modal
       // product names (Desktop / Browser / Background) rather than the raw internal tokens.
