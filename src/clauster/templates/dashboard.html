@@ -90,11 +90,12 @@
     /* In-popover trust-on-start gate (#747): the nested .alert sat inside the card's
        p-2, doubling padding and squeezing body text to 1–2 words per line on a security-
        critical surface. Give it comfortable, single-source padding + readable leading, and
-       let the explanation breathe before the action row. Scoped to [data-test="trust-confirm"]
-       so it never reshapes the sibling bypass gate. */
-    .launch-pop [data-test="trust-confirm"] { padding: .75rem .85rem; }
-    .launch-pop [data-test="trust-confirm"] p { line-height: 1.5; }
-    .launch-pop [data-test="trust-confirm"] .btn-list { margin-top: .25rem; }
+       let the explanation breathe before the action row. Scoped to the .trust-gate
+       semantic class (a durable style hook, not the data-test attribute) so it never
+       reshapes the sibling bypass gate. */
+    .launch-pop .trust-gate { padding: .75rem .85rem; }
+    .launch-pop .trust-gate p { line-height: 1.5; }
+    .launch-pop .trust-gate .btn-list { margin-top: .25rem; }
     /* The project list is a card; let the popover overflow its bounds instead of clipping. */
     #project-grid { overflow: visible; }
     .launch-opt { display: flex; align-items: flex-start; gap: .15rem; width: 100%; margin: 0;
