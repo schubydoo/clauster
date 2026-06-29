@@ -260,6 +260,46 @@ def test_run_keeper_url_timeout(tmp_path: Path, monkeypatch, _restore_sighup) ->
     assert info["state"] == "exited"
 
 
+def test_run_keeper_swallows_oserror_closing_master_on_exit(
+    tmp_path: Path, monkeypatch, _restore_sighup
+) -> None:
+    """The teardown ``os.close(master)`` is best-effort: an OSError there (a double-close /
+    already-reaped fd) must be swallowed so the keeper still returns the bridge's rc, never
+    raising out of run_keeper. Mirrors the atomicio double-close swallow."""
+    import pty as _pty
+
+    from clauster import pty_keeper
+
+    real_openpty = _pty.openpty
+    master_box: list[int] = []
+
+    def _capture_openpty():
+        master, slave = real_openpty()
+        master_box[:] = [master]
+        return master, slave
+
+    real_close = os.close
+
+    def _close(fd):  # raise only for the captured master fd's teardown close
+        if master_box and fd == master_box[0]:
+            master_box.clear()  # one-shot: don't re-fire if the fd number is reused before restore
+            real_close(fd)  # actually close it so the fd does not leak in this process
+            raise OSError("master already closed")
+        return real_close(fd)
+
+    monkeypatch.setattr(_pty, "openpty", _capture_openpty)
+    monkeypatch.setattr(pty_keeper.os, "close", _close)
+
+    sidecar = tmp_path / "k.json"
+    # short-lived bridge: exits on its own so run_keeper reaches the teardown close
+    rc = pty_keeper.run_keeper(
+        [sys.executable, "-c", "import time; time.sleep(0.3)"], sidecar, cwd=str(tmp_path)
+    )
+
+    assert rc == 0  # the OSError on the master teardown close was swallowed, rc still returned
+    assert _read(sidecar)["state"] == "exited"
+
+
 def test_run_keeper_drains_output_after_url_found(tmp_path: Path, _restore_sighup) -> None:
     """Output arriving AFTER the connect URL is still drained (the post-URL chunk arm)."""
     from clauster import pty_keeper
