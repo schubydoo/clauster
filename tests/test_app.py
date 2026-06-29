@@ -925,6 +925,19 @@ def test_dashboard_transcript_live_is_single_list(write_config):
     # when present (live), else a timestamp+role+index composite. The old `:key="i"` is gone.
     assert "t._key ?? ((t.timestamp || '') + ':' + t.role + ':' + i)" in page
     assert ':key="i"' not in page
+    # Live path bumps t.gen before starting the tail (it no longer calls the paged loader
+    # that used to do it) so an in-flight non-live fetch from a prior session is gen-voided
+    # and can't write its stale turns over the live view.
+    assert "t.gen = (t.gen || 0) + 1;\n          t.turns = []" in page
+    # Idle polls (no new turns, no reset) must NOT trigger the O(n) rebuild; the rebuild is
+    # gated on the master actually changing.
+    assert "if (changed) this._rebuildLiveTurns();" in page
+    # closeTranscripts clears tailOffset alongside the other live-state fields (matching
+    # backToTranscriptList) so the two teardown paths don't diverge.
+    assert (
+        "t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; "
+        't.tailError = "";  // clear live state on close'
+    ) in page
 
 
 def test_clone_cancel_has_confirm_before_cancel_dialog(write_config):

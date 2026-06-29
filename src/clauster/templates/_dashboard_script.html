@@ -937,7 +937,7 @@
         t.order = "desc"; t.q = ""; t.queryTooShort = false;
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         this._stopTranscriptTail();  // #614: kill the live-tail poll loop on close
-        t.live = false; t.tailRaw = []; t.tailKey = 0; t.tailError = "";  // clear live state on close
+        t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = "";  // clear live state on close
         document.body.style.overflow = "";  // release the scroll lock
         if (t.trigger && t.trigger.focus) t.trigger.focus();  // restore focus to the opener
       },
@@ -990,6 +990,9 @@
           // Single-list live mode: the tail endpoint (offset 0) IS the loader — it reads
           // the whole transcript oldest-first into tailRaw, then keeps appending deltas.
           // No paged fetch (and no pagination) for a live session: the one list tails.
+          // Bump gen (as the paged loader does) so any in-flight non-live fetch from a
+          // prior session is gen-voided and can't write its stale turns over this view.
+          t.gen = (t.gen || 0) + 1;
           t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loading = false;
           this._startTranscriptTail();
         } else {
@@ -1160,19 +1163,25 @@
           const d = await res.json();
           if (t.tailGen !== myGen) return;  // re-check after the await on .json()
           t.tailError = "";
+          // Track whether this delta actually mutated the master — an idle poll returns
+          // no turns and no reset, so there's nothing new to render.
+          let changed = false;
           // A truncated/rotated file restarts from 0: replace the master (and reset the
           // key counter so the re-read doesn't collide keys), don't append.
-          if (d.reset) { t.tailRaw = []; t.tailKey = 0; }
+          if (d.reset) { t.tailRaw = []; t.tailKey = 0; changed = true; }
           if (Array.isArray(d.turns) && d.turns.length) {
             // Stamp each turn with a monotonic _key so the x-for keys on a stable id, not
             // the positional index (#720) — the rendered list is reordered/filtered, so
             // an index key would rebind nodes to a different turn.
             for (const turn of d.turns) turn._key = t.tailKey++;
             t.tailRaw.push(...d.turns);
+            changed = true;
           }
           if (typeof d.offset === "number") t.tailOffset = d.offset;
-          // Re-derive the one rendered list from the new master (honors sort + search).
-          this._rebuildLiveTurns();
+          // Re-derive the one rendered list only when the master changed — skip the O(n)
+          // filter/reverse pass (and the new-array-reference key-diff it triggers) on the
+          // idle polls that dominate a quiet session.
+          if (changed) this._rebuildLiveTurns();
           // The session ended (no longer maps to a running bridge): drain this final
           // delta (already applied above) and stop the loop. The one list stays — it now
           // holds the full transcript; flipping live just swaps the header badge and lets
