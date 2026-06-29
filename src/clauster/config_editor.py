@@ -13,7 +13,6 @@ atomic replace + ruamel round-trip) lives in :mod:`clauster.config_writer`.
 from __future__ import annotations
 
 import copy
-import hashlib
 import types
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
@@ -24,6 +23,7 @@ from pydantic import ValidationError
 from yaml import YAMLError
 
 from .config import PERMISSION_LABELS, ClausterConfig, load_config
+from .config_write import hash_bytes
 
 # Tier-A allowlist: dotted paths editable from the web UI. Operational only — no
 # auth/secret/bind/structural/clone/supply-chain field appears here (those stay
@@ -172,14 +172,9 @@ class ConfigValidationError(ConfigEditError):
     """The merged config failed re-validation (e.g. it would open the dashboard)."""
 
 
-def _hash_bytes(data: bytes) -> str:
-    """Return the hex SHA-256 of ``data`` (the editor's external-edit token)."""
-    return hashlib.sha256(data).hexdigest()
-
-
 def file_hash(path: str | Path) -> str:
     """Return a hex SHA-256 of the config file's bytes (the external-edit token)."""
-    return _hash_bytes(Path(path).read_bytes())
+    return hash_bytes(Path(path).read_bytes())
 
 
 def _get_by_path(obj: Any, dotted: str) -> Any:
@@ -259,7 +254,7 @@ def disk_state(path: str | Path) -> tuple[str | None, set[str] | None]:
         data = Path(path).read_bytes()
     except OSError:
         return None, None
-    content_hash = _hash_bytes(data)
+    content_hash = hash_bytes(data)
     try:
         raw = yaml.safe_load(data)
     except YAMLError:
