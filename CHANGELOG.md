@@ -336,6 +336,41 @@
 ### Build System & Dependencies
 
 * sync uv.lock with pyproject (drop logfire tree, add ruff + pyright) ([48abfcd](https://github.com/schubydoo/clauster/commit/48abfcdba851dee46ab5e367f98a3ea19f6af918))
+## 0.12.9 (2026-06-29)
+
+### Features
+
+- Confirm before cancelling an in-progress clone, and reattach a second tab to a live clone's progress instead of showing nothing ([#708](https://github.com/schubydoo/clauster/pull/708))
+- Make the application `log_format` editable in the in-app config editor and add a coverage guard that asserts every config field is a deliberate editable-or-excluded decision. ([#705](https://github.com/schubydoo/clauster/pull/705))
+- Add a gated `config-write` surface for `settings.json` `hooks` (project + user scope) behind the off-by-default fail-closed Foundation gate; the structural validator only checks shape (recognized event, string matcher, `type: "command"`, non-empty command, optional int timeout) and never resolves, parses, or runs a hook command (#690). ([#740](https://github.com/schubydoo/clauster/pull/740))
+- Add a gated `config_write` API for MCP servers behind the fail-closed gate: a structural-only (validate-never-execute) validator + router for project `.mcp.json` and user `mcpServers`, with type-the-name confirm, path containment, stale-hash guard, and secret redaction inherited from the #347 foundation — no dashboard UI yet (#688) ([#732](https://github.com/schubydoo/clauster/pull/732))
+- Add a gated `config_write` API for permission rules (`settings.json` `permissions` allow/deny/defaultMode) behind the fail-closed gate: a structural-only (validate-never-execute) validator + router for project `.claude/settings.json` and user `~/.claude/settings.json`, with type-the-name confirm, path containment, stale-hash guard, and `bypassPermissions` kept behind the existing footgun gate — no dashboard UI yet (#689) ([#738](https://github.com/schubydoo/clauster/pull/738))
+- Add the fail-closed `config_write` trust-tier foundation (off-by-default capability + scope gate, type-the-name confirm, structural secret redaction, and a shared `~/.claude.json` lock+merge+atomic writer factored out of trust.py) ([#706](https://github.com/schubydoo/clauster/pull/706))
+- Add a `clauster mcp` read-only stdio MCP server exposing `list_sessions` and `session_status` tools that report Clauster's bridge, hosted, background-agent, and external sessions to any MCP client ([#710](https://github.com/schubydoo/clauster/pull/710))
+- Add an opt-in `CLAUSTER_PYTE_PATH` env var so a standalone-binary user can enable the read-only live terminal view by separately installing `pyte` and pointing it at that directory, without bundling LGPL code ([#702](https://github.com/schubydoo/clauster/pull/702))
+- Live-tail a running session's transcript in the read-only viewer: a new offset-based tail endpoint polls the `.jsonl` from the last byte position and appends redacted new turns as the agent works ([#709](https://github.com/schubydoo/clauster/pull/709))
+
+### Fixes
+
+- Drop `'unsafe-inline'` from the CSP `style-src` by nonce-gating the inline `<style>` blocks and lifting every inline `style=""` attribute into a CSS class (#533). ([#635](https://github.com/schubydoo/clauster/pull/635))
+- Fix pty bridges intermittently showing "No web link — use Logs": the keeper now scrapes the connect URL from the pyte-reassembled screen (the live-view winsize makes claude fragment it with cursor-positioning escapes the raw scan can't follow), so "Open in Claude" surfaces reliably (#665). ([#721](https://github.com/schubydoo/clauster/pull/721))
+- Unify the launch + permission mode labels into one server-injected canonical map (`{mode: {short, long, effect}}`), so the launch picker, the inline JS helpers, and the config editor all read a single source instead of three hand-maintained copies (#685). ([#729](https://github.com/schubydoo/clauster/pull/729))
+- Reshape the launch flow into a single-screen popover: the Mode selector and Spawn fold under one "More options" disclosure (tucked away by default), the trust-on-start and bypassPermissions confirm gates render inside the popover instead of as below-the-row alerts, and the default launch mode stays the safe Desktop choice rather than auto-flipping to the experimental browser channel. ([#731](https://github.com/schubydoo/clauster/pull/731))
+- Fix the launch popover (#686): a failed trust-on-start now closes the popover so the error is visible, instead of leaving it hidden behind the open card. ([#739](https://github.com/schubydoo/clauster/pull/739))
+- Add a dismissible first-run orientation card to the empty dashboard explaining what Clauster is and how to start, with the dismissal persisted in localStorage (#692). ([#728](https://github.com/schubydoo/clauster/pull/728))
+- Fix a freshly-spawned bridge's auto-created session briefly reading as an EXTERNAL/unmanaged "phantom" row during the bridge's Starting window — reconcile now attributes a STARTING bridge's cwd, not only a live one (#713) ([#714](https://github.com/schubydoo/clauster/pull/714))
+- Harden `atomic_write_text`: close the raw `mkstemp` fd if `os.fdopen` fails (an EMFILE/ENFILE leak the temp-only cleanup missed), and cover the write/fsync-failure and interrupt-mid-write cleanup paths with tests. ([#718](https://github.com/schubydoo/clauster/pull/718))
+- Hide a deprecated config-editor field once its key is removed from disk, and stop interactive `config reconcile` from offering to override an already-set replacement ([#703](https://github.com/schubydoo/clauster/pull/703))
+- Apply dynamic dashboard styles via object-form Alpine `:style` so the strict nonce-gated `style-src` (no `unsafe-inline`) no longer blocks the progress-bar fill and the non-name sort layout. ([#742](https://github.com/schubydoo/clauster/pull/742))
+- Stamp the per-request CSP nonce on xterm.js's runtime-injected `<style>` elements so the read-only live terminal renders under the strict nonce-gated `style-src` (no `unsafe-inline`). ([#743](https://github.com/schubydoo/clauster/pull/743))
+- Docs: the `pty_screen_enabled` reference now documents the `CLAUSTER_PYTE_PATH` side-load on the standalone binary (#702) instead of claiming the live view is impossible there, and the install guide lists `clauster hash-metrics-token` + `clauster config reconcile`. ([#717](https://github.com/schubydoo/clauster/pull/717))
+- Fix a transient mis-render in the hosted live-event stream: key the events `x-for` on a stable per-item id instead of the list index, so the `MAX_LOG_LINES` front-splice no longer rebinds rows to the wrong events past 1000 lines. ([#720](https://github.com/schubydoo/clauster/pull/720))
+- Fix a `HostedManager.stop()` KeyError (an unmapped 500) when a concurrent forget/resume pops the hosted session's registry row during the stop grace window — re-fetch after the await and surface a clean 404 instead. ([#715](https://github.com/schubydoo/clauster/pull/715))
+- Fix `clauster keepers`: read the carded-project set from the DB-backed store, not the flat `state.json` (renamed `*.imported` after the JSON→DB migration) — otherwise every live keeper was mislabeled an orphan and `--kill` could reap a carded, dashboard-managed keeper. ([#719](https://github.com/schubydoo/clauster/pull/719))
+- Make the live-terminal "pyte unavailable" error honest on the standalone binary — pyte is LGPL and not bundled, so point binary users at a `pip`/`uv` install with the `[pty]` extra instead of the dead-end `install clauster[pty]`; documented in installation/configuration and the in-app editor help ([#700](https://github.com/schubydoo/clauster/pull/700))
+- Collapse the `/api/projects/sortmeta` N+1: a batched `sortmeta_for_all` (two grouped queries in one session) replaces the per-project 3-SELECT rollup loop on the dashboard sort path. ([#716](https://github.com/schubydoo/clauster/pull/716))
+- Swap structural Unicode emoji (warnings, carets, refresh, pause, back arrow, check/x) in the dashboard for consistent inline Tabler symbol icons ([#704](https://github.com/schubydoo/clauster/pull/704))
+
 ## 0.12.8 (2026-06-28)
 
 ### Features
