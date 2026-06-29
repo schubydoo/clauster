@@ -145,7 +145,12 @@ def _load_json_obj(raw: bytes) -> dict[str, Any]:
     A non-object or malformed JSON is a structural error (→ caller maps to 422):
     we will not overwrite a file we could not parse.
     """
-    text = raw.decode("utf-8").strip()
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        # Non-UTF-8 bytes are a structural error too (→ caller maps to 422), not an
+        # unhandled UnicodeDecodeError 500: we will not overwrite a file we can't read.
+        raise cw.InvalidCandidateError(f"existing config is not valid UTF-8: {exc}") from exc
     if not text:
         return {}
     try:

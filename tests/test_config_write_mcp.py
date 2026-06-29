@@ -11,6 +11,7 @@ runs under the autouse HOME-isolation fixture — the live account is never touc
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -404,6 +405,35 @@ def test_route_read_corrupt_file_is_422(write_config, tmp_path, projects_root) -
     (projects_root / "alpha" / ".mcp.json").write_text("{not json", encoding="utf-8")
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.get("/api/config-write/mcp?project=alpha")
+        assert resp.status_code == 422
+
+
+def test_route_read_non_utf8_file_is_422(write_config, tmp_path, projects_root) -> None:
+    # A non-UTF-8 .mcp.json: _load_json_obj's raw.decode("utf-8") raises UnicodeDecodeError,
+    # which is wrapped as InvalidCandidateError so the GET route reports 422, not a 500.
+    (projects_root / "alpha" / ".mcp.json").write_bytes(b"\xff\xfe not utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get("/api/config-write/mcp?project=alpha").status_code == 422
+
+
+def test_route_write_over_non_utf8_file_is_422(write_config, tmp_path, projects_root) -> None:
+    # The write-side complement: a non-UTF-8 existing file is read under the lock in
+    # _mutate; the UnicodeDecodeError must surface as a clean 422, never escape the
+    # ConfigWriteError guard as a 500. (A valid hash can't be formed for unreadable bytes,
+    # but the decode failure is reached before the hash check via the stale-hash path.)
+    (projects_root / "alpha" / ".mcp.json").write_bytes(b"\xff\xfe not utf-8")
+    file_hash = hashlib.sha256(b"\xff\xfe not utf-8").hexdigest()
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "servers": {"s": {"command": "x"}},
+                "hash": file_hash,
+            },
+        )
         assert resp.status_code == 422
 
 
