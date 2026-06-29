@@ -173,3 +173,76 @@ def test_locked_lockfile_open_failure_is_best_effort(tmp_path: Path, monkeypatch
 
     assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}  # write still landed
     assert any("without a lock" in r.message for r in caplog.records)
+
+
+# --- locked_replace_json_file: the project-file (non-~/.claude.json) primitive ----
+
+
+def test_locked_replace_creates_missing_file(tmp_path: Path) -> None:
+    f = tmp_path / ".mcp.json"  # absent
+    cj.locked_replace_json_file(
+        f,
+        lambda raw: {"mcpServers": {"s": {"command": "x"}}},
+        render=lambda d: json.dumps(d) + "\n",
+    )
+    assert json.loads(f.read_text(encoding="utf-8")) == {"mcpServers": {"s": {"command": "x"}}}
+    assert not f.with_suffix(f.suffix + ".bak").exists()  # no prior content ⇒ no backup
+
+
+def test_locked_replace_sees_current_bytes_and_backs_up_once(tmp_path: Path) -> None:
+    f = tmp_path / ".mcp.json"
+    f.write_text('{"old": 1}', encoding="utf-8")
+    seen: list[bytes] = []
+
+    def mutate(raw: bytes) -> dict:
+        seen.append(raw)
+        return {"new": 2}
+
+    cj.locked_replace_json_file(f, mutate, render=lambda d: json.dumps(d))
+    assert seen == [b'{"old": 1}']  # mutate receives the verbatim current bytes
+    assert json.loads(f.read_text(encoding="utf-8")) == {"new": 2}
+    assert f.with_suffix(f.suffix + ".bak").read_text(encoding="utf-8") == '{"old": 1}'
+
+
+def test_locked_replace_mutate_raise_aborts_without_writing(tmp_path: Path) -> None:
+    f = tmp_path / ".mcp.json"
+    f.write_text('{"keep": 1}', encoding="utf-8")
+
+    def mutate(raw: bytes) -> dict:
+        raise ValueError("abort")
+
+    with pytest.raises(ValueError, match="abort"):
+        cj.locked_replace_json_file(f, mutate, render=json.dumps)
+    assert json.loads(f.read_text(encoding="utf-8")) == {"keep": 1}  # untouched
+
+
+needs_posix2 = pytest.mark.skipif(os.name != "posix", reason="POSIX file-mode semantics")
+
+
+@needs_posix2
+def test_locked_replace_preserves_existing_mode(tmp_path: Path) -> None:
+    f = tmp_path / ".mcp.json"
+    f.write_text("{}", encoding="utf-8")
+    os.chmod(f, 0o600)
+    cj.locked_replace_json_file(f, lambda raw: {"k": 1}, render=json.dumps)
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600  # not loosened by the replace
+
+
+def test_locked_replace_backup_failure_is_warned_not_fatal(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    # A failed .bak is best-effort: warn, never block the write (mirrors the ~/.claude.json path).
+    f = tmp_path / ".mcp.json"
+    f.write_text('{"old": 1}', encoding="utf-8")
+    real_write_text = Path.write_text
+
+    def boom(self, *a, **k):
+        if self.name.endswith(".bak"):
+            raise OSError("simulated: cannot write backup")
+        return real_write_text(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    with caplog.at_level("WARNING", logger="clauster.claude_json"):
+        cj.locked_replace_json_file(f, lambda raw: {"new": 2}, render=json.dumps)
+    assert json.loads(f.read_text(encoding="utf-8")) == {"new": 2}  # write still landed
+    assert any("backup" in r.message for r in caplog.records)

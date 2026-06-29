@@ -166,3 +166,67 @@ def update_claude_json(claude_json: Path, mutate: Callable[[dict], object]) -> b
             return False
         _atomic_write_claude_json(claude_json, raw, data)
         return True
+
+
+def locked_replace_json_file(
+    path: Path, mutate: Callable[[bytes], dict], *, render: Callable[[dict], str]
+) -> None:
+    """Locked read-modify-write of an arbitrary JSON ``path`` (the project-file primitive).
+
+    The project-scope twin of :func:`update_claude_json` for files that are *not*
+    ``~/.claude.json`` (e.g. a project ``.mcp.json``). It reuses the identical
+    hardened machinery — the advisory ``flock`` held across the whole transaction,
+    the one-time ``.bak``, and the unique-``mkstemp`` + mode-preserving + atomic
+    ``os.replace`` — so no second, subtly-weaker writer is hand-rolled.
+
+    ``mutate`` receives the **verbatim current bytes** read under the lock (``b""``
+    when absent) and returns the new full object to render; doing the read inside the
+    lock lets the caller run an external-edit / stale-hash check against those exact
+    bytes with the read and the replace as one critical section (no TOCTOU window a
+    second clauster writer could slip through). ``render`` serializes the returned
+    object to text. ``mutate`` may raise to abort the whole transaction before any
+    write (the lock is released, nothing is replaced).
+    """
+    with _locked(path):
+        try:
+            current = path.read_bytes()
+        except FileNotFoundError:
+            current = b""
+        data = mutate(current)
+        raw = current.decode("utf-8") if current else None
+        _atomic_write_json(path, raw, data, render)
+
+
+def _atomic_write_json(
+    path: Path, raw: str | None, data: dict, render: Callable[[dict], str]
+) -> None:
+    """Back up ``raw`` once, then atomically replace ``path`` with ``render(data)``.
+
+    The render-agnostic core of :func:`_atomic_write_claude_json` (which keeps its own
+    fixed ``json.dumps(indent=2)`` render for behavior preservation): same one-time
+    ``.bak``, unique ``mkstemp`` temp in the target dir, existing-mode preservation on
+    POSIX, and atomic ``os.replace``. Must be called inside :func:`_locked`.
+    """
+    if raw is not None:
+        backup = path.with_suffix(path.suffix + ".bak")
+        if not backup.exists():
+            try:
+                backup.write_text(raw, encoding="utf-8")
+            except OSError as exc:
+                _log.warning("could not write %s backup: %s", backup, exc)
+
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(render(data))
+            if _is_posix():
+                try:
+                    mode = stat.S_IMODE(path.stat().st_mode)
+                except FileNotFoundError:
+                    mode = 0o600
+                os.fchmod(fh.fileno(), mode)
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
