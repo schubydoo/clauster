@@ -896,6 +896,37 @@ def test_dashboard_transcript_content_uses_x_text_not_x_html(write_config):
     assert 'x-text="t.model"' in page
 
 
+def test_dashboard_transcript_live_is_single_list(write_config):
+    # #614 Part 2 follow-up (0.12.9): a LIVE session is ONE unified, tailing transcript —
+    # not a separate "live tail" box alongside a static list. Regression guards for the
+    # duplication / divergence / ordering / label / fragile-key bug set.
+    page = _client(write_config).get("/").text
+    # Single list: there is exactly ONE turn x-for, over transcripts.turns. The old
+    # separate tail loop (x-for over tailTurns, keyed 'tail-'+i) must be gone.
+    assert page.count('data-test="transcript-turn"') == 1  # one rendered turn card block
+    assert "transcripts.tailTurns" not in page  # the second list is gone
+    assert ":key=\"'tail-' + i\"" not in page  # ...and so is its fragile index key
+    # The live header is just a badge strip (no turns of its own); turns render in the
+    # single list below. It shows only while live.
+    assert 'data-test="transcript-tail"' in page
+    assert 'x-show="transcripts.live"' in page
+    assert 'data-test="transcript-tail-live"' in page
+    # New live turns flow through tailRaw (the oldest-first master) into the one list via
+    # _rebuildLiveTurns, which honors the active sort + search.
+    assert "transcripts.tailRaw" in page
+    assert "_rebuildLiveTurns()" in page
+    assert "_liveMatch(" in page  # search filters the live list client-side
+    # Sort toggle flips in place while live (no re-fetch); both label + aria-label
+    # describe the same STATE (the old aria-label described the opposite ACTION).
+    assert "if (t.live) this._rebuildLiveTurns();" in page  # flip re-derives, no re-fetch
+    assert "transcripts.order === 'asc' ? 'Sorted oldest first' : 'Sorted newest first'" in page
+    assert "transcripts.order === 'asc' ? 'Oldest first' : 'Newest first'" in page
+    # Stable keys, not the bare index (#720): the single list keys on the per-turn _key
+    # when present (live), else a timestamp+role+index composite. The old `:key="i"` is gone.
+    assert "t._key ?? ((t.timestamp || '') + ':' + t.role + ':' + i)" in page
+    assert ':key="i"' not in page
+
+
 def test_clone_cancel_has_confirm_before_cancel_dialog(write_config):
     # #659 item 3: the dedicated "Cancel clone" button arms an inline confirm rather than
     # aborting outright — cancel discards a partial download, so a stray click shouldn't

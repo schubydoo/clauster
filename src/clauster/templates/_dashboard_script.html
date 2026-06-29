@@ -153,12 +153,22 @@
         error: "", trigger: null, gen: 0,
         order: "desc", q: "", queryTooShort: false,
         // --- live-tail (#614 Part 2): follow a running session's transcript ---
-        // live: the selected session maps to a running bridge/agent/hosted session;
-        // tailTurns: append-only oldest-first buffer of turns streamed since open;
+        // SINGLE-LIST design (#614 Part 2 follow-up): a live session is ONE unified,
+        // tailing transcript — there is NO separate "live tail" box. `turns` is the one
+        // rendered list. For a LIVE session it's DERIVED (search-filtered + sorted) from
+        // `tailRaw`, the canonical oldest-first master the poll loop appends to; new
+        // turns land per the CURRENT sort (top when newest-first, bottom when oldest-
+        // first), the active search filter is honored, and a "following live" badge rides
+        // the one list's header. For a non-live (ended) session, `turns` stays the paged
+        // backend result (cursor pagination), untouched.
+        //
+        // live: the session maps to a running bridge/agent/hosted session;
+        // tailRaw: oldest-first master of every turn (pre-open history + live), each
+        //   stamped with a monotonic _key (stable x-for key, not the index — #720);
         // tailOffset: byte offset to poll from next; tailGen: per-session tail token
-        // (so a stale in-flight poll for an old session is dropped); _tailTimer +
-        // tailBusy: the single-flight timer/lock for the poll loop.
-        live: false, tailTurns: [], tailOffset: 0, tailGen: 0,
+        //   (so a stale in-flight poll for an old session is dropped); tailKey: the
+        //   monotonic _key counter; _tailTimer + tailBusy: the single-flight poll lock.
+        live: false, tailRaw: [], tailOffset: 0, tailGen: 0, tailKey: 0,
         tailBusy: false, tailError: "", _tailTimer: null,
       },
       agents: [],
@@ -927,6 +937,7 @@
         t.order = "desc"; t.q = ""; t.queryTooShort = false;
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         this._stopTranscriptTail();  // #614: kill the live-tail poll loop on close
+        t.live = false; t.tailRaw = []; t.tailKey = 0; t.tailError = "";  // clear live state on close
         document.body.style.overflow = "";  // release the scroll lock
         if (t.trigger && t.trigger.focus) t.trigger.focus();  // restore focus to the opener
       },
@@ -975,8 +986,15 @@
         const meta = t.sessions.find((s) => s.session === session);
         t.live = !!(meta && meta.live);
         this._stopTranscriptTail();  // tear down any prior session's poll loop first
-        await this.loadTranscriptTurnsFromStart();
-        if (t.live) this._startTranscriptTail();
+        if (t.live) {
+          // Single-list live mode: the tail endpoint (offset 0) IS the loader — it reads
+          // the whole transcript oldest-first into tailRaw, then keeps appending deltas.
+          // No paged fetch (and no pagination) for a live session: the one list tails.
+          t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loading = false;
+          this._startTranscriptTail();
+        } else {
+          await this.loadTranscriptTurnsFromStart();
+        }
       },
       // (Re)load the first page of the current session from cursor 0 in the current
       // order + filter. Shared by session-select, the sort toggle, and search — each
@@ -1004,12 +1022,39 @@
         } catch (e) { t.error = "Failed to load transcript."; }
         finally { if (t.gen === myGen) t.loading = false; }
       },
-      // Flip newest-first ↔ oldest-first and re-fetch the session from the top (#612).
+      // Flip newest-first ↔ oldest-first (#612). For a LIVE session the one tailing list
+      // is derived from tailRaw, so a flip just re-derives it (and the tail keeps
+      // appending in the new order) — no re-fetch. For a non-live session, re-fetch the
+      // paged list from the top in the new order.
       toggleTranscriptOrder() {
         const t = this.transcripts;
         if (t.loading) return;  // ignore a flip mid-load; the in-flight page wins
         t.order = t.order === "asc" ? "desc" : "asc";
-        this.loadTranscriptTurnsFromStart();
+        if (t.live) this._rebuildLiveTurns(); else this.loadTranscriptTurnsFromStart();
+      },
+      // Client-side match for the live list's search filter: same casefold-substring
+      // semantics as the backend q= scan (over the already-redacted content), so a live
+      // filter behaves like the static one. A blank/too-short term matches everything.
+      // NOTE: JS toLowerCase() ≈ Python casefold() — they diverge for a few Unicode
+      // cases (ß, Turkish İ). Acceptable here: this only affects the transient live
+      // filter; the ended/static path runs the backend casefold scan.
+      _liveMatch(turn) {
+        const term = (this.transcripts.q || "").trim().toLowerCase();
+        if (term.length < this.TRANSCRIPT_MIN_QUERY) return true;
+        return (turn.content || "").toLowerCase().includes(term);
+      },
+      // Re-derive the single rendered list for a LIVE session from the oldest-first
+      // master (tailRaw): apply the active search filter, then the active sort order
+      // (desc = newest-first reverses a copy — never mutate tailRaw, the poll appends to
+      // it). total tracks the filtered visible count, mirroring the paged endpoint.
+      _rebuildLiveTurns() {
+        const t = this.transcripts;
+        // .filter() already returns a fresh array, so reverse() for desc never touches
+        // tailRaw — the poll loop keeps appending to that master untouched.
+        const filtered = t.tailRaw.filter((turn) => this._liveMatch(turn));
+        t.turns = t.order === "asc" ? filtered : filtered.reverse();
+        t.total = filtered.length;
+        t.nextCursor = null;  // the live list isn't paged — it tails the whole file
       },
       // Debounced in-message search: re-fetch from the top once the term clears the
       // minimum length, else show the "keep typing" hint and restore the unfiltered view.
@@ -1021,15 +1066,26 @@
         t.queryTooShort = term.length > 0 && term.length < this.TRANSCRIPT_MIN_QUERY;
         // A too-short term can't filter — skip the wasted fetch. (The empty-string clear
         // path runs through clearTranscriptSearch, which still reloads the unfiltered view.)
-        if (t.queryTooShort) return;
-        t._searchTimer = setTimeout(() => { this.loadTranscriptTurnsFromStart(); }, 250);
+        // For a LIVE session re-derive immediately so the visible list drops back to the
+        // unfiltered tail this keystroke rather than staying filtered until the next poll
+        // (_liveMatch treats a too-short term as "match all"); non-live keeps its page.
+        if (t.queryTooShort) { if (t.live) this._rebuildLiveTurns(); return; }
+        t._searchTimer = setTimeout(() => { this._reloadTranscriptTurns(); }, 250);
       },
       // Clear the search box and reload the unfiltered session from the top (#612).
       clearTranscriptSearch() {
         const t = this.transcripts;
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         t.q = ""; t.queryTooShort = false;
-        this.loadTranscriptTurnsFromStart();
+        this._reloadTranscriptTurns();
+      },
+      // Apply the current order + search to the rendered list. For a LIVE session that's
+      // a client-side re-derive over the still-growing tailRaw master (the tail keeps
+      // appending, so clearing the filter reveals any turns that streamed in while it was
+      // active); for a non-live session it's the paged backend re-fetch from the top.
+      _reloadTranscriptTurns() {
+        if (this.transcripts.live) this._rebuildLiveTurns();
+        else this.loadTranscriptTurnsFromStart();
       },
       // Append the next page using next_cursor; the control is hidden when it's null.
       async loadMoreTranscriptTurns() {
@@ -1057,6 +1113,7 @@
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         this._stopTranscriptTail();  // #614: stop following the (now-deselected) session
         t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loadingMore = false;
+        t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = "";  // clear live state
         t.order = "desc"; t.q = ""; t.queryTooShort = false;
       },
       // --- live-tail poll loop (#614 Part 2) -----------------------------------
@@ -1065,21 +1122,23 @@
       // bursts, not per-token), and it's single-flight so a slow poll never stacks.
       TRANSCRIPT_TAIL_POLL_MS: 3000,
       // Stop following: cancel the pending timer and bump the tail generation so any
-      // in-flight poll's response is dropped. Leaves the already-streamed tailTurns in
-      // place (the user can still read what arrived) but never appends more.
+      // in-flight poll's response is dropped. Leaves the rendered list (and tailRaw
+      // master) in place — the user can still read what arrived — but never appends more.
       _stopTranscriptTail() {
         const t = this.transcripts;
         t.tailGen = (t.tailGen || 0) + 1;  // void any in-flight poll
         if (t._tailTimer) { clearTimeout(t._tailTimer); t._tailTimer = null; }
         t.tailBusy = false;
       },
-      // Begin following the selected (live) session from a clean tail buffer. The
-      // first poll reads from offset 0 so the tail mirrors the whole live transcript
-      // oldest-first; subsequent polls advance by the server-returned byte offset.
+      // Begin following the selected (live) session from a clean master buffer. The
+      // first poll reads from offset 0 so tailRaw mirrors the whole live transcript
+      // oldest-first; subsequent polls advance by the server-returned byte offset. The
+      // rendered `turns` is derived from tailRaw via _rebuildLiveTurns after each delta.
       _startTranscriptTail() {
         const t = this.transcripts;
         this._stopTranscriptTail();           // clear any prior loop + buffer state
-        t.tailTurns = []; t.tailOffset = 0; t.tailError = "";
+        t.tailRaw = []; t.tailOffset = 0; t.tailError = ""; t.tailKey = 0;
+        t.turns = []; t.total = 0; t.nextCursor = null;
         t.tailGen = (t.tailGen || 0) + 1;
         this._pollTranscriptTail(t.tailGen);  // kick the first poll immediately
       },
@@ -1101,12 +1160,24 @@
           const d = await res.json();
           if (t.tailGen !== myGen) return;  // re-check after the await on .json()
           t.tailError = "";
-          // A truncated/rotated file restarts from 0: replace the buffer, don't append.
-          if (d.reset) t.tailTurns = [];
-          if (Array.isArray(d.turns) && d.turns.length) t.tailTurns.push(...d.turns);
+          // A truncated/rotated file restarts from 0: replace the master (and reset the
+          // key counter so the re-read doesn't collide keys), don't append.
+          if (d.reset) { t.tailRaw = []; t.tailKey = 0; }
+          if (Array.isArray(d.turns) && d.turns.length) {
+            // Stamp each turn with a monotonic _key so the x-for keys on a stable id, not
+            // the positional index (#720) — the rendered list is reordered/filtered, so
+            // an index key would rebind nodes to a different turn.
+            for (const turn of d.turns) turn._key = t.tailKey++;
+            t.tailRaw.push(...d.turns);
+          }
           if (typeof d.offset === "number") t.tailOffset = d.offset;
+          // Re-derive the one rendered list from the new master (honors sort + search).
+          this._rebuildLiveTurns();
           // The session ended (no longer maps to a running bridge): drain this final
-          // delta (already applied above) and stop the loop — leave tailTurns shown.
+          // delta (already applied above) and stop the loop. The one list stays — it now
+          // holds the full transcript; flipping live just swaps the header badge and lets
+          // the (already-derived) `turns` render as the static, complete list. No second
+          // box, so no duplication at the live→ended transition.
           if (d.live === false) { t.live = false; this._stopTranscriptTail(); return; }
         } catch (e) {
           if (t.tailGen !== myGen) return;
