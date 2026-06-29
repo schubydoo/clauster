@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/dashboard-dark.png" alt="Clauster dashboard" width="860">
+  <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/clauster-demo.gif" alt="Spawn a Claude session from the Clauster dashboard — open a project's launch menu, trust the directory, and the session starts, then shows Running under Active sessions" width="860">
 </p>
 
 Anthropic's first-party tooling assumes terminal access on the host to spawn a

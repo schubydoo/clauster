@@ -8,7 +8,7 @@
 # that installs it) along with ~/.claude credentials and your projects dir.
 
 # ----- builder: resolve the locked deps into a self-contained venv -----------
-FROM python:3.14-slim-trixie@sha256:63a4c7f612a00f92042cbdcc7cdc6a306f38485af0a200b9c89de7d9b1607d15 AS builder
+FROM python:3.14-slim-trixie@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS builder
 
 # renovate: datasource=docker depName=ghcr.io/astral-sh/uv
 COPY --from=ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac16ff35925780cf5c459858b2d693f01a9 /uv /uvx /bin/
@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable
 
 # ----- runtime ---------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:63a4c7f612a00f92042cbdcc7cdc6a306f38485af0a200b9c89de7d9b1607d15 AS runtime
+FROM python:3.14-slim-trixie@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS runtime
 
 # apt upgrade pulls Debian security fixes published since the base image was
 # built. NB: this layer is keyed on the FROM digest, so the CI build cache

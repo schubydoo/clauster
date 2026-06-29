@@ -233,7 +233,7 @@
                   <div class="alert alert-secondary py-1 px-2 mb-2" x-show="hostedView[h.claustrum_process_id].ended" x-cloak
                        x-text="hostedView[h.claustrum_process_id].endedReason || 'This session has ended — it is no longer live.'"></div>
                   <div class="border rounded p-2 hosted-stream" :id="'hosted-stream-' + h.claustrum_process_id">
-                    <template x-for="(it, idx) in hostedView[h.claustrum_process_id].events" :key="idx">
+                    <template x-for="it in hostedView[h.claustrum_process_id].events" :key="it._key">
                       <div class="mb-1">
                         <template x-if="it.kind === 'msg'">
                           <div :class="it.role === 'assistant' ? 'text-body' : 'text-secondary'">
@@ -516,19 +516,16 @@
                   <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleQr(i.project)"
                           x-show="sessionUrlOf(i.project)" x-cloak title="Show a QR code to open on your phone">
                     <svg class="ico" aria-hidden="true"><use href="#ic-qr"/></svg></button>
-                  {# Running but no connect URL yet: explain the gap instead of silently
-                     dropping the headline "open on your phone" affordance (#427 UX-02).
-                     pty flag-form bridges never get a URL — say so; otherwise it's a
-                     transient capture gap — show a spinner placeholder. The two chips are
-                     VISUAL only (aria-hidden); the screen-reader announcement comes from a
-                     persistent aria-live region below, because a live region toggled in via
-                     x-show (display:none→visible) is silently skipped by NVDA/VoiceOver. #}
+                  {# Running but no connect URL yet: explain the transient capture gap instead
+                     of silently dropping the headline "open on your phone" affordance (#427
+                     UX-02). Both modes get a URL (pty's is scraped from the reassembled pty
+                     screen, #665), so this is always a spinner placeholder, never a permanent
+                     "no link" state. The chip is VISUAL only (aria-hidden); the screen-reader
+                     announcement comes from a persistent aria-live region below, because a
+                     live region toggled in via x-show (display:none→visible) is silently
+                     skipped by NVDA/VoiceOver. #}
                   <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-hidden="true"
-                        x-show="connectUrlUnavailable(i.project)" x-cloak
-                        title="This bridge mode (pty true-resume) has no web link — open Logs to drive it.">
-                    No web link — use Logs</span>
-                  <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-hidden="true"
-                        x-show="connectUrlMissing(i.project) && !connectUrlUnavailable(i.project)" x-cloak
+                        x-show="connectUrlMissing(i.project)" x-cloak
                         title="The connect link is being captured from the bridge…">
                     <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing connect link…</span>
                   {# Persistent live region — always mounted, empty when idle — so the
@@ -858,7 +855,39 @@
         </div>
       </div>
       {% else %}
-      <div class="empty" id="empty-state">
+      <!-- First-run orientation (#692): a fresh self-hoster sees a plain-language
+           "what this is / how to start" card. Dismissal persists via localStorage
+           (orientationDismissed). Once dismissed, the quieter "No projects yet"
+           action block below takes over so Create/Clone stay reachable. The two
+           are mutually exclusive on x-show, never via d-* (the documented Alpine
+           x-show-clobber gotcha). -->
+      <div class="empty" id="orientation-card" role="region"
+           aria-labelledby="orientation-heading"
+           x-show="!orientationDismissed" x-cloak>
+        <h2 class="empty-title" id="orientation-heading">Welcome to Clauster</h2>
+        <p class="empty-subtitle text-secondary" style="max-width: 65ch;">
+          Clauster spawns Claude Code into your project directories and lets you drive each
+          session from claude.ai/code or the Claude mobile app — no SSH session, no terminal
+          on the host.
+        </p>
+        <p class="empty-subtitle text-secondary" style="max-width: 65ch;">
+          Point <code>projects_root</code> at a folder whose subdirectories are projects, then
+          create or clone one below. Each becomes a card you can launch a bridge in.
+        </p>
+        <div class="empty-action">
+          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
+          </button>
+          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'">
+            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
+          </button>
+          <button type="button" class="btn btn-ghost-secondary"
+                  @click="dismissOrientation()" aria-label="Dismiss the welcome card">
+            Got it
+          </button>
+        </div>
+      </div>
+      <div class="empty" id="empty-state" x-show="orientationDismissed" x-cloak>
         <p class="empty-title">No projects yet</p>
         <p class="empty-subtitle text-secondary">
           Clauster runs Claude in a project directory under <code>{{ projects_root }}</code>.
