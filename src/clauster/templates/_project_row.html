@@ -249,6 +249,9 @@
                               @click="launchRun('{{ p.name }}', lmode, lperm, lcloud, lprompt).then(done => { if (done) lopen = false })">
                         <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="permLabel(lperm)"></span>
                       </button>
+                      {# Semantic end-of-popover sentinel: a stable structural boundary for tests
+                         (so they don't couple to template whitespace/nesting). Renders nothing. #}
+                      <div data-test="launch-pop-end" hidden></div>
                     </div>
                   </div>
                 </span>
