@@ -72,6 +72,9 @@ Everything below is implemented and shipping. Items marked **(opt-in)** are gate
 behind a config flag and off by default — the flag is named inline so you can find
 it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example).
 
+<details>
+<summary>Show all features</summary>
+
 ### Projects & bridges
 
 - **Project discovery** — one card per directory under `projects_root`, with git /
@@ -131,6 +134,8 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   control as acknowledged in the runtime user's `~/.claude.json` so a detached-stdin
   bridge isn't stuck on the one-time interactive "Enable Remote Control?" prompt. On
   by default (`claude.auto_enable_remote_control`); set false to manage it yourself.
+
+</details>
 
 ### Opt-in extras
 
