@@ -24,10 +24,10 @@ from . import __version__, claude_cli, environments, ops, pty_keeper, usage
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
 from .config import ClausterConfig, load_config, resolve_cert_path
+from .db.persistence import Persistence
 from .logging_config import setup_logging
 from .procutil import KEEPER_SUBCOMMAND
 from .recap import RECAP_SUBCOMMAND
-from .state import StateStore
 
 # setproctitle is a required dependency (so the retitle works out of the box). The
 # guard is defensive, not optionality: a cosmetic process-rename must never crash
@@ -622,7 +622,16 @@ def _keepers(config_path: str | None, kill_pid: int | None) -> int:
     """
     config = _load_or_exit(config_path)
     log_dir = (config.state_dir / "logs").expanduser()
-    carded = set(StateStore(config.state_dir).load())
+    # The authoritative card set lives in the DB now. The flat state.json is renamed to
+    # *.imported after the one-time JSON->DB migration, so reading it directly would see
+    # an EMPTY card set and mislabel every live keeper — including carded ones — as an
+    # orphan, letting `--kill` reap a managed keeper. Build Persistence (the same
+    # fail-closed migrate + legacy-import the app runs) and read the DB-backed store.
+    persistence = Persistence(config.state_dir)
+    try:
+        carded = set(persistence.state_store().load())
+    finally:
+        persistence.dispose()
     orphans = pty_keeper.find_orphan_keepers(log_dir, carded)
     if kill_pid is not None:
         target = next((k for k in orphans if k.keeper_pid == kill_pid), None)

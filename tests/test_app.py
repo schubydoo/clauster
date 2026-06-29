@@ -575,28 +575,28 @@ def test_dashboard_permission_effect_renders_inline(write_config):
 
 
 def test_dashboard_explains_missing_connect_url(write_config):
-    # #427 UX-02: a running desktop bridge whose session_url hasn't arrived (async
-    # capture gap) — or never will (pty flag-form) — used to show 'Running' with the
-    # 'Open in Claude' + QR affordances silently gone and unexplained. Now a disabled
-    # placeholder fills the gap: a spinner 'Preparing connect link…' for the transient
-    # case, 'No web link — use Logs' for pty. Assert the helpers ship + are bound.
+    # #427 UX-02 + #665: a running bridge whose session_url hasn't arrived yet (async capture
+    # gap) used to show 'Running' with the 'Open in Claude' + QR affordances silently gone and
+    # unexplained. A disabled spinner placeholder 'Preparing connect link…' fills the gap. This
+    # now applies to BOTH modes: pty DOES get a connect URL (the keeper scrapes it from the
+    # reassembled pty screen, #665), so the old permanent 'No web link — use Logs' pty split is
+    # gone — never claim a pty bridge has no link.
     page = _client(write_config).get("/").text
-    assert "connectUrlMissing(name) {" in page  # transient-or-permanent gap helper
-    assert "connectUrlUnavailable(name) {" in page  # pty (no URL ever) split
-    assert 'x-show="connectUrlUnavailable(i.project)"' in page  # pty placeholder gate
-    assert 'x-show="connectUrlMissing(i.project) && !connectUrlUnavailable(i.project)"' in page
+    assert "connectUrlMissing(name) {" in page  # the transient-gap helper
+    assert "connectUrlUnavailable(name) {" not in page  # the pty 'no URL ever' split is removed
+    assert "No web link" not in page  # the false 'permanent no link' copy is gone for good
+    assert 'x-show="connectUrlMissing(i.project)"' in page  # single placeholder gate, both modes
     assert "Preparing connect link" in page  # the transient spinner copy (visual chip)
-    # The visual chips are aria-hidden; the SR announcement is a PERSISTENT aria-live
-    # region (always mounted, content-toggled) — a live region shown in via x-show is
-    # silently skipped by NVDA/VoiceOver (Greptile P2). Assert that wiring.
+    # The visual chip is aria-hidden; the SR announcement is a PERSISTENT aria-live region
+    # (always mounted, content-toggled) — a live region shown in via x-show is silently skipped
+    # by NVDA/VoiceOver (Greptile P2). Assert that wiring.
     assert "connectStatusText(name) {" in page  # the live-region text helper ships
     assert (
         '<span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.project)">'
         in page
     )
-    # The announced strings mirror the visible chip labels word-for-word, so the SR and
-    # sighted experiences match (pin them — they're otherwise unasserted and could drift).
-    assert '"No web link — use Logs"' in page  # pty SR text == pty chip label
+    # The announced string mirrors the visible chip label word-for-word, so the SR and sighted
+    # experiences match (pin it — it's otherwise unasserted and could drift).
     assert '"Preparing connect link…"' in page  # transient SR text == spinner chip label
 
 

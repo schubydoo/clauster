@@ -33,6 +33,34 @@ def test_frame_redacts_secrets_and_ids():
     assert "<redacted>" in joined
 
 
+def test_find_session_id_recovers_cursor_fragmented_url():
+    # #665: at the TUI winsize claude prints its connect URL with cursor-positioning escapes,
+    # so the raw byte stream is NOT contiguous — and the literal "code" is overwritten in
+    # place, so a plain ANSI-strip can't recover it either. Only a real emulator that honors
+    # the cursor move reconstructs the logical line. This mirrors the captured failure: write
+    # "...cod" + a wrong char, reposition the cursor back over it, then overwrite with "e/...".
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(b"https://claude.ai/codX\x1b[22Ge/session_01TESTpty665ABC")
+    # The raw bytes the keeper's _RE_CONNECT_URL would scan: the escape splits "code/session_"
+    # AND ANSI-stripping leaves "codXe/session_" — both miss. pyte renders the line whole.
+    assert scr.find_session_id() == "session_01TESTpty665ABC"
+
+
+def test_find_session_id_reads_unredacted_screen():
+    # find_session_id is server-side only — it must return the REAL id so the keeper can build
+    # the connect URL, even though frame() (what reaches the browser) redacts that same id.
+    scr = PtyScreen(cols=80, rows=2)
+    scr.feed(b"  https://claude.ai/code/session_01ABCDEFGHIJKLMNOP")
+    assert scr.find_session_id() == "session_01ABCDEFGHIJKLMNOP"
+    assert "session_01ABCDEFGHIJKLMNOP" not in "".join(scr.frame()["rows"])  # frame stays redacted
+
+
+def test_find_session_id_none_when_absent():
+    scr = PtyScreen(cols=40, rows=2)
+    scr.feed(b"just some terminal output, no connect url here")
+    assert scr.find_session_id() is None
+
+
 def test_title_is_never_serialized():
     # An OSC title sequence must not surface in any frame field — OSC 0/1/2 are a
     # data-exfiltration channel, so the title is rendered by pyte but never emitted.

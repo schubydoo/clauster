@@ -1132,6 +1132,27 @@ async def test_manager_stop_returns_synced_instance(fake_claustrum):
         assert result.status is InstanceStatus.STOPPED
 
 
+async def test_manager_stop_row_popped_mid_grace_raises_not_keyerror(fake_claustrum):
+    # A concurrent forget()/resume() can pop the registry row during stop()'s grace
+    # window; stop() must surface that as HostedSessionError (caller maps 404), never
+    # an unmapped KeyError 500.
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit_exit(pid, 0)  # exit first so the real stop() returns at once
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
+        session = mgr.session(pid)
+        real_stop = session.stop
+
+        async def _stop_then_evict():
+            await real_stop()
+            mgr._instances.pop(pid, None)  # a concurrent forget()/resume() wins the row
+
+        session.stop = _stop_then_evict
+        with pytest.raises(HostedSessionError):
+            await mgr.stop(pid)
+
+
 async def test_manager_forget_drops_stopped_session(fake_claustrum):
     async with _manager(fake_claustrum) as (fake, client, mgr):
         inst = await _spawn(mgr, client)

@@ -61,6 +61,54 @@ PERMISSION_MODES: tuple[str, ...] = (
     "bypassPermissions",
 )
 
+# Canonical permission-mode labels — the SINGLE source of truth for every label
+# surface (#685). Each mode carries three forms:
+#   short  — compact chips/badges (Run button, hosted row): "Plan only"
+#   long   — pickers/dropdowns (launch <select>, config editor): "Plan only (read-only)"
+#   effect — the plain-language inline hint under the picker: a full sentence.
+# Server-injected into the template once; the launch <select>, the JS permLabel()/
+# permissionEffect() helpers, and the config editor's choice labels all read from
+# THIS map — never a hand-maintained copy. The bypassPermissions "(Desktop only)"
+# caveat lives OUT of the label as a separate contextual hint (BYPASS_DESKTOP_HINT)
+# so it isn't baked into the label string.
+PERMISSION_LABELS: dict[str, dict[str, str]] = {
+    "default": {
+        "short": "Ask each time",
+        "long": "Ask each time (default)",
+        "effect": "Asks before each tool use — the safe default.",
+    },
+    "plan": {
+        "short": "Plan only",
+        "long": "Plan only (read-only)",
+        "effect": "Read-only planning; makes no changes until you switch modes.",
+    },
+    "acceptEdits": {
+        "short": "Auto-accept edits",
+        "long": "Auto-accept edits",
+        "effect": "Auto-accepts file edits; still asks for other tools.",
+    },
+    "auto": {
+        "short": "Auto-approve safe",
+        "long": "Auto-approve safe",
+        "effect": "The model auto-approves what it judges safe; asks otherwise.",
+    },
+    "dontAsk": {
+        "short": "Never prompt",
+        "long": "Never prompt — deny unknowns",
+        "effect": "Never prompts — denies anything not pre-approved.",
+    },
+    "bypassPermissions": {
+        "short": "Skip all checks ⚠",
+        "long": "Skip all checks ⚠",
+        "effect": "Skips every permission check — the agent may do anything.",
+    },
+}
+
+# Contextual hint for bypassPermissions in the launch picker — kept OUT of the
+# label (#685) because it is true only of the Desktop/bridge launch, not of the
+# mode itself. The picker appends it to the long label only on that option.
+BYPASS_DESKTOP_HINT = "(Desktop only)"
+
 
 class ClaudeConfig(BaseModel):
     """Settings for the `claude` binary and bridge-spawn behavior."""
@@ -115,9 +163,10 @@ class ClaudeConfig(BaseModel):
         description="(pty mode) Publish a redacted, read-only render of the bridge's live "
         "terminal screen for the dashboard's live-terminal view (#534). Off by default; "
         "needs the optional `pyte` dependency (`pip install 'clauster[pty]'`) — without it the "
-        "feature stays dormant. Not available on the standalone binary: `pyte` is LGPL-licensed "
-        "and is not bundled, and it cannot be side-loaded into a PyInstaller binary, so run "
-        "clauster from a `pip`/`uv` install with the `[pty]` extra to use the live view. The "
+        "feature stays dormant. The standalone binary does not bundle `pyte` (LGPL): either run "
+        "clauster from a `pip`/`uv` install with the `[pty]` extra, or keep the binary and "
+        "side-load `pyte` by setting `CLAUSTER_PYTE_PATH` to a directory holding an installed "
+        "`pyte` (#702) — the binary appends it to `sys.path` only when set. The "
         "render is best-effort secret-redacted, so treat the live view as auth-gated, not "
         "secret-proof.",
     )

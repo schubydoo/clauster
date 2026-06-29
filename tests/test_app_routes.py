@@ -169,12 +169,11 @@ def test_projects_sortmeta_shape_and_all_projects(write_config, tmp_path, monkey
 
     when = datetime(2026, 6, 22, 12, 0, tzinfo=UTC)
 
-    def _rollup(self, name):
-        if name == "alpha":
-            return stores_mod.ProjectRollup(project_name=name, last_used=when, total_cost_usd=1.25)
-        return stores_mod.ProjectRollup(project_name=name)
+    def _sortmeta(self, names):
+        # alpha has history; the others are omitted -> caller defaults to (None, None).
+        return {"alpha": (when, 1.25)}
 
-    monkeypatch.setattr(stores_mod.SessionHistoryStore, "rollup_for", _rollup)
+    monkeypatch.setattr(stores_mod.SessionHistoryStore, "sortmeta_for_all", _sortmeta)
     r = _client(write_config, tmp_path).get("/api/projects/sortmeta")
     assert r.status_code == 200
     body = r.json()
@@ -197,10 +196,10 @@ def test_projects_sortmeta_degrades_to_empty_on_error(write_config, tmp_path, mo
     # client falls back to name order), never 500 the dashboard.
     from clauster.db import stores as stores_mod
 
-    def _boom(self, name):
+    def _boom(self, names):
         raise OSError("db gone")
 
-    monkeypatch.setattr(stores_mod.SessionHistoryStore, "rollup_for", _boom)
+    monkeypatch.setattr(stores_mod.SessionHistoryStore, "sortmeta_for_all", _boom)
     r = _client(write_config, tmp_path).get("/api/projects/sortmeta")
     assert r.status_code == 200
     assert r.json() == {}
@@ -214,6 +213,49 @@ def test_dashboard_renders_projects_sort_control(write_config, tmp_path):
     assert '<option value="last-used">' in html
     assert '<option value="cost">' in html
     assert 'projectSort: "name"' in html
+
+
+def _client_empty(tmp_path) -> TestClient:
+    # A client whose projects_root is an empty directory, so discovery finds no
+    # projects and the dashboard renders its {% else %} empty branch (#692).
+    empty_root = tmp_path / "empty_root"
+    empty_root.mkdir()
+    cfg = tmp_path / "clauster_empty.yml"
+    cfg.write_text(
+        f"projects_root: {empty_root}\nclaude:\n  binary: {FAKE_CLAUDE}\n"
+        f"state_dir: {tmp_path}/.se\n",
+        encoding="utf-8",
+    )
+    return TestClient(create_app(load_config(cfg)))
+
+
+def test_empty_dashboard_renders_orientation_card(tmp_path):
+    # First-run orientation (#692): an empty projects_root renders the dismissible
+    # orientation card. Assert on STRUCTURE/wiring (stable contract), not the
+    # PROPOSED visible copy — the card wording awaits maintainer approval and may
+    # change before merge, so verbatim-text assertions would be brittle.
+    html = _client_empty(tmp_path).get("/").text
+    # The card element and its labelled heading exist.
+    assert 'id="orientation-card"' in html
+    assert '<h2 class="empty-title" id="orientation-heading">' in html
+    assert 'aria-labelledby="orientation-heading"' in html
+    # Dismiss control: labeled (stable aria-label), keyboard-reachable, wired to
+    # the persisted action — assert the contract, not the visible "Got it" text.
+    assert 'aria-label="Dismiss the welcome card"' in html
+    assert "dismissOrientation()" in html
+    # Persistence is mirrored from the theme pattern: an Alpine flag read from
+    # localStorage under a stable key.
+    assert "orientationDismissed" in html
+    assert "clauster-orientation-dismissed" in html
+
+
+def test_populated_dashboard_omits_orientation_card(write_config, tmp_path):
+    # A dashboard with discovered projects never renders the orientation card —
+    # it lives strictly in the {% else %} empty branch. Assert on the stable
+    # element id, not the (proposed) copy.
+    html = _client(write_config, tmp_path).get("/").text
+    assert 'id="orientation-card"' not in html
+    assert 'id="orientation-heading"' not in html
 
 
 # ----- single-row fragment (reactive insertion, no full reload) ---------

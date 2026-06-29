@@ -23,7 +23,7 @@ import yaml
 from pydantic import ValidationError
 from yaml import YAMLError
 
-from .config import ClausterConfig, load_config
+from .config import PERMISSION_LABELS, ClausterConfig, load_config
 
 # Tier-A allowlist: dotted paths editable from the web UI. Operational only — no
 # auth/secret/bind/structural/clone/supply-chain field appears here (those stay
@@ -501,13 +501,11 @@ FIELD_CHOICE_LABELS: dict[str, dict[str, str]] = {
         "text": "Human text (single line)",
         "json": "Structured JSON",
     },
+    # Derived from the canonical permission-label map (#685) — the launch <select>,
+    # the JS permLabel()/permissionEffect() helpers, and this editor all read the same
+    # source. The picker uses the "long" form; never a hand-maintained copy.
     "instance_defaults.permission_mode": {
-        "default": "Ask each time (default)",
-        "plan": "Plan only (read-only)",
-        "acceptEdits": "Auto-accept edits",
-        "auto": "Auto-approve safe",
-        "dontAsk": "Never prompt — deny unknowns",
-        "bypassPermissions": "Skip all checks ⚠",
+        mode: labels["long"] for mode, labels in PERMISSION_LABELS.items()
     },
     "claude.launch_mode": {
         "standard": "Server Mode (multi-session bridge)",
