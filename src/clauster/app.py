@@ -29,6 +29,7 @@ from . import (
     claude_cli,
     config_editor,
     config_write,
+    config_write_hooks,
     config_write_mcp,
     config_write_permissions,
     config_writer,
@@ -1572,6 +1573,97 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 config_write_permissions.write_project_permissions,
                 project_dir,
                 permissions,
+                expected,
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": "project", "project": project, "ok": True}
+
+    @app.get("/api/config-write/hooks")
+    async def api_config_write_hooks_read(scope: str = "project", project: str = "") -> dict:
+        # Read the hooks block for a surface. Gated exactly like the permissions/MCP/status
+        # routes: 404 when config-write is off, and 404 for user scope when allow_user_scope
+        # is off — the surface is invisible, never 403. A corrupt/non-object on-disk
+        # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
+        # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
+        # READ never runs a command — it only reflects the stored (inert) hook structure.
+        if scope not in ("project", "user"):
+            raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope == "user":
+            try:
+                hooks, file_hash = await asyncio.to_thread(
+                    config_write_hooks.read_user_hooks, _user_settings_json()
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "hooks": hooks, "hash": file_hash}
+        project_dir = _resolve_cw_project(project)
+        try:
+            hooks, file_hash = await asyncio.to_thread(
+                config_write_hooks.read_project_hooks, project_dir
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": "project", "project": project, "hooks": hooks, "hash": file_hash}
+
+    @app.put("/api/config-write/hooks")
+    async def api_config_write_hooks_write(body: dict) -> dict:
+        # Foundation pipeline IN ORDER, identical to the permissions write route:
+        # capability/scope 404 gate → (auth is global middleware) → type-the-name confirm
+        # (400, the FIRST semantic gate) → validate request shape / VALIDATE-NEVER-EXECUTE
+        # (422) → path containment + existence (project: 400 escape / 404 missing dir) →
+        # stale-hash (409) → atomic locked write of ONLY the hooks subtree (siblings
+        # preserved). Any step aborts BEFORE the write.
+        #
+        # SECURITY: this is the code-executing surface — a hook is a shell command claude
+        # runs on an event. The structural validator NEVER resolves, spawns, runs, or
+        # shell-parses a command string; the command is stored as inert data and only ever
+        # runs later inside a real claude process. The off-by-default gate above + this
+        # validate-never-execute invariant are why a browser write can't reach host RCE.
+        scope = body.get("scope", "project")
+        if scope not in ("project", "user"):
+            raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
+        config_write.require_capability(config, scope)
+
+        if scope == "user":
+            # Confirm is the FIRST semantic gate after capability (USER SCOPE literal,
+            # server-derived) — before any structural validation or I/O.
+            config_write.require_confirm("user", None, body.get("confirm"))
+            hooks = body.get("hooks")
+            if not isinstance(hooks, dict):
+                raise HTTPException(status_code=422, detail="body must include a 'hooks' object")
+            expected = body.get("hash")
+            if expected is not None and not isinstance(expected, str):
+                raise HTTPException(status_code=422, detail="'hash' must be a string when present")
+            try:
+                await asyncio.to_thread(
+                    config_write_hooks.write_user_hooks,
+                    _user_settings_json(),
+                    hooks,
+                    expected,
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "ok": True}
+
+        # project scope: confirm against the project name FIRST (the server-derived token
+        # is the literal name; it needs no disk resolution), then validate the request
+        # shape, then resolve+contain the project dir.
+        project = body.get("project")
+        config_write.require_confirm("project", project, body.get("confirm"))
+        hooks = body.get("hooks")
+        if not isinstance(hooks, dict):
+            raise HTTPException(status_code=422, detail="body must include a 'hooks' object")
+        project_dir = _resolve_cw_project(project, require_exists=True)
+        expected = body.get("hash")
+        if expected is not None and not isinstance(expected, str):
+            raise HTTPException(status_code=422, detail="'hash' must be a string when present")
+        try:
+            await asyncio.to_thread(
+                config_write_hooks.write_project_hooks,
+                project_dir,
+                hooks,
                 expected,
             )
         except config_write.ConfigWriteError as exc:
