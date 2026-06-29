@@ -31,8 +31,7 @@
 Anthropic's first-party tooling assumes terminal access on the host to spawn a
 bridge in a given project directory. Clauster fills that gap: a browser-based dispatcher of
 `claude remote-control` instances on a remote machine (NAS, homelab box). You pick
-a project, start a bridge, and attach to it from `claude.ai/code` or the mobile app
-— no SSH session required.
+a project, start a bridge, and attach to it from `claude.ai/code` or the mobile app.
 
 > **Status: pre-1.0, in active development.** Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
