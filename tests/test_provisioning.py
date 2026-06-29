@@ -475,6 +475,17 @@ def test_route_clone_bad_url_422(write_config):
     assert resp.status_code == 422
 
 
+@pytest.mark.parametrize("url", ["", "   ", None])
+def test_route_clone_missing_url_friendly_422(write_config, url):
+    # #749: an empty/whitespace/absent Git URL gets the friendly required-URL message,
+    # not a raw URL-format error (the client guards this too, but the API stays the
+    # fail-closed backstop).
+    client = _client(write_config)
+    resp = client.post("/api/projects/clone", json={"name": "x", "url": url})
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "A Git URL is required to clone."
+
+
 def _drain_clone_ws(client, job_id: str) -> list[dict]:
     """Watch a clone job's WS to completion, returning every frame received."""
     events: list[dict] = []

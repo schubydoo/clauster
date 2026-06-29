@@ -1881,6 +1881,9 @@
       async submitNew() {
         const np = this.np;
         if (!np.name || np.busy) return;
+        // Clone needs a Git URL — guard here too so @keyup.enter can't bypass the
+        // disabled submit button and hit the API with an empty/whitespace URL (#749).
+        if (np.mode === "clone" && !np.url.trim()) return;
         // Freeze the name + claim a fresh op id for THIS attempt: the POST awaits, and a
         // Cancel mid-request bumps the op (and clears np), so every shared-state write on
         // the completion path is gated on `op` — the name alone can't tell two attempts apart.
