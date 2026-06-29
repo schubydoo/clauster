@@ -38,6 +38,11 @@ a project, start a bridge, and attach to it from `claude.ai/code` or the mobile 
 > [Auth & networking](#auth--networking)). **No telemetry, ever** — see
 > [Privacy & data at rest](docs/privacy.md) for what Clauster keeps locally.
 
+**Install now:** `curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash`
+
+The full install recipes and verification steps are in the
+[Installation guide](https://schubydoo.github.io/clauster/installation/).
+
 <table>
   <tr>
     <td width="50%" align="center">
@@ -66,6 +71,9 @@ a project, start a bridge, and attach to it from `claude.ai/code` or the mobile 
 Everything below is implemented and shipping. Items marked **(opt-in)** are gated
 behind a config flag and off by default — the flag is named inline so you can find
 it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example).
+
+<details>
+<summary>Show all features</summary>
 
 ### Projects & bridges
 
@@ -127,7 +135,12 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   bridge isn't stuck on the one-time interactive "Enable Remote Control?" prompt. On
   by default (`claude.auto_enable_remote_control`); set false to manage it yourself.
 
+</details>
+
 ### Opt-in extras
+
+<details>
+<summary>Show all opt-in extras</summary>
 
 - **Conversation recap on restart (opt-in)** — `claude remote-control` restarts into
   a fresh, empty context, so a restarted bridge "forgets" the prior conversation.
@@ -176,6 +189,8 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   binary, which is **not yet publicly distributed** — there is
   currently no public install or build recipe, so leave `claustrum.enabled: false`
   unless you already have the binary on your `PATH`.
+
+</details>
 
 ## Install
 
