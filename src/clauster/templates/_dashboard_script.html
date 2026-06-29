@@ -73,6 +73,10 @@
   const DEFAULT_SPAWN_MODE = {{ default_spawn_mode | tojson }};
   const DEFAULT_PERMISSION_MODE = {{ default_permission_mode | tojson }};
   const DEFAULT_RESUME_MODE = {{ default_resume_mode | tojson }};
+  // Canonical permission-mode labels (#685): the single server-injected source of truth
+  // ({mode: {short, long, effect}}) shared with the launch <select> and the config editor.
+  // permLabel()/permissionEffect() read from THIS map — no second hand-maintained copy.
+  const PERMISSION_LABELS = {{ permission_labels | tojson }};
   const USAGE_MODE = {{ usage_mode | tojson }};  // usage.mode — "cost" | "tokens" | "off"
   const CURRENCY = {{ currency | tojson }};  // usage.currency — code, shown in the tooltip
   const CURRENCY_SYMBOL = {{ currency_symbol | tojson }};  // resolved symbol for cost mode
@@ -212,6 +216,22 @@
       showAllProjects: false, // Zone 1: reveal projects beyond the cap
       projectSort: "name",   // Zone 1 sort (FE-2): name (default, no reorder) | last-used | cost
       projectRanks: {},      // project name -> rank int for the 6-row cap + CSS flex `order`; always populated after the first sort (name = A–Z positions, non-name = the chosen key) — do NOT clear on name sort (that caused #585b)
+      // First-run orientation card (#692): shown on the empty dashboard until the
+      // operator dismisses it. The dismissal persists in localStorage so a fresh
+      // self-hoster sees the "what this is / how to start" card exactly once.
+      // Read once at construction (mirrors the theme-persistence pattern above);
+      // a malformed/blocked store falls back to "not dismissed" (fail open here is
+      // harmless — worst case the card shows again).
+      orientationDismissed: (function () {
+        try { return localStorage.getItem("clauster-orientation-dismissed") === "1"; }
+        catch (e) { return false; }
+      })(),
+      // Hide the orientation card and remember the dismissal across reloads.
+      dismissOrientation() {
+        this.orientationDismissed = true;
+        try { localStorage.setItem("clauster-orientation-dismissed", "1"); }
+        catch (e) { /* storage blocked/full — the in-memory flag still hides it this session */ }
+      },
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -1319,19 +1339,15 @@
         const u = (this.instances[name] || {}).session_url;
         return u && /^https?:\/\//i.test(u) ? u : null;
       },
-      // A running bridge whose connect URL hasn't arrived (or never will). session_url
-      // is captured asynchronously only AFTER the bridge reaches "running", so gate on
-      // that — during "starting" no output has been produced yet, so "Preparing connect
-      // link…" (and, for pty, "No web link") would surface before it's true. Without this
-      // a green "Running" row shows no connect affordance and no explanation.
+      // A running bridge whose connect URL hasn't arrived yet. session_url is captured
+      // asynchronously only AFTER the bridge reaches "running", so gate on that — during
+      // "starting" no output has been produced yet, so "Preparing connect link…" would
+      // surface before it's true. Without this a green "Running" row shows no connect
+      // affordance and no explanation. Applies to BOTH modes: a pty (flag-form) bridge
+      // DOES print a connect URL (the keeper scrapes it from the reassembled pty screen,
+      // #665) — so it is a transient capture gap, not a permanent "no link" state.
       connectUrlMissing(name) {
         return this.statusOf(name) === "running" && !this.sessionUrlOf(name);
-      },
-      // pty (flag-form) bridges genuinely never print a connect URL (claude >2.1.161
-      // stopped emitting it) — so it's not a transient gap, it's permanent. Tell the
-      // user to drive it from Logs rather than imply a link is still coming.
-      connectUrlUnavailable(name) {
-        return this.connectUrlMissing(name) && this.resumeModeOf(name) === "pty";
       },
       // Screen-reader text for the connect-link state, surfaced via an aria-live region
       // that stays mounted across the connect gap (empty when idle). A live region only
@@ -1339,13 +1355,10 @@
       // whole live element in via x-show (display:none→visible) is silently skipped by
       // NVDA/VoiceOver — so the wrapper persists and only this text changes. (The region
       // shares the row's filter x-show, so an off-filter desktop row stays silent — which
-      // is intended: a row the user has filtered out shouldn't announce.) Strings mirror
-      // the visible chip labels so the SR and sighted experiences match word-for-word.
+      // is intended: a row the user has filtered out shouldn't announce.) The string
+      // mirrors the visible chip label so the SR and sighted experiences match word-for-word.
       connectStatusText(name) {
-        if (!this.connectUrlMissing(name)) return "";
-        return this.connectUrlUnavailable(name)
-          ? "No web link — use Logs"
-          : "Preparing connect link…";
+        return this.connectUrlMissing(name) ? "Preparing connect link…" : "";
       },
       envUrlOf(name) { return (this.instances[name] || {}).url || null; },
       errorOf(name) { return this.errors[name] || null; },
@@ -1360,27 +1373,16 @@
         return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
       },
       resumeModeOf(name) { return (this.instances[name] || {}).resume_mode || ""; },
-      // Plain-language effect of each permission mode — the same copy as the
-      // <select>'s title=, but surfaced inline so it's visible on touch (this is
-      // a phone-first product; hover tooltips never fire there). Keep in sync
-      // with the option labels in _project_row.html.
+      // Plain-language effect of each permission mode, surfaced inline so it's visible
+      // on touch (this is a phone-first product; hover tooltips never fire there).
+      // Reads the canonical PERMISSION_LABELS map (#685) — no second copy to drift.
       permissionEffect(mode) {
-        return {
-          default: "Asks before each tool use — the safe default.",
-          plan: "Read-only planning; makes no changes until you switch modes.",
-          acceptEdits: "Auto-accepts file edits; still asks for other tools.",
-          auto: "The model auto-approves what it judges safe; asks otherwise.",
-          dontAsk: "Never prompts — denies anything not pre-approved.",
-          bypassPermissions: "Skips every permission check — the agent may do anything.",
-        }[mode] || "";
+        return (PERMISSION_LABELS[mode] || {}).effect || "";
       },
-      // Short permission-mode label for inline display (Run button, hosted row) — a concise form
-      // of the <select> option text so the UI never shows a raw enum token (acceptEdits, dontAsk…).
+      // Short permission-mode label for inline display (Run button, hosted row) — the
+      // canonical "short" form so the UI never shows a raw enum token (acceptEdits, dontAsk…).
       permLabel(mode) {
-        return {
-          default: "Ask each time", plan: "Plan only", acceptEdits: "Auto-accept edits",
-          auto: "Auto-approve safe", dontAsk: "Never prompt", bypassPermissions: "Skip all checks ⚠",
-        }[mode] || mode;
+        return (PERMISSION_LABELS[mode] || {}).short || mode;
       },
       // Friendly session-type label for the Active-zone filter chips, matching the launch-modal
       // product names (Desktop / Browser / Background) rather than the raw internal tokens.
@@ -2271,6 +2273,7 @@
         // Carry the consecutive-reconnect counter forward across an auto-reconnect so the cap
         // below bounds the whole retry burst, not each attempt in isolation (mirrors openLogs).
         const view = { open: true, ws: null, token, lastSeq: after, events: prev ? prev.events : [],
+                       nextKey: prev ? (prev.nextKey || 0) : 0,
                        input: prev ? prev.input : "", sending: false, connLost: false,
                        ended: false, endedReason: "", attempts: prev ? prev.attempts : 0 };
         this.hostedView[id] = view;
@@ -2378,7 +2381,10 @@
           this.$nextTick(() => this.scrollHosted(id));
           return;
         }
-        for (const it of this._hostedEventToItems(e)) v.events.push(it);
+        // Stamp a stable, monotonic key so the x-for keys on item identity, not list
+        // position — the MAX_LOG_LINES front-splice below shifts every index otherwise,
+        // and an index key would rebind nodes to the wrong events (the Alpine key gotcha).
+        for (const it of this._hostedEventToItems(e)) { it._key = v.nextKey++; v.events.push(it); }
         if (v.events.length > MAX_LOG_LINES) v.events.splice(0, v.events.length - MAX_LOG_LINES);
         this.$nextTick(() => this.scrollHosted(id));
       },

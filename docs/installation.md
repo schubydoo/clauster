@@ -292,6 +292,8 @@ searches `$CLAUSTER_CONFIG`, then `./clauster.yml`, then
 clauster run                  # start the server (default)
 clauster hash-password        # generate an argon2id hash for auth.password_hash
 clauster hash-token           # mint an API token + hash for auth.api_token_hash
+clauster hash-metrics-token   # mint a /metrics scrape token + hash for observability.metrics_token_hash
+clauster config reconcile     # remove deprecated config keys, writing their replacements
 clauster doctor               # diagnose config / environment
 clauster backup | restore | migrate
 clauster install-service {systemd|launchd|windows}

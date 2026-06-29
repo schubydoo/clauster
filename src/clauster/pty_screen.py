@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,13 @@ from .redact import redact_screen_text
 # resize/negotiation path is out of scope for the read-only first cut (#534).
 SCREEN_COLS = 120
 SCREEN_ROWS = 40
+
+# The pty bridge's connect URL, as a session path (the flag form, not the subcommand's
+# `?environment=` query form). The keeper's raw-bytes scrape uses the same pattern on the
+# undecoded stream (`pty_keeper._RE_CONNECT_URL`); this str variant runs over the
+# pyte-reassembled screen, where the URL is whole even when the raw stream fragments it
+# with cursor-positioning escapes at the TUI winsize (#665).
+_RE_CONNECT_URL = re.compile(r"https?://claude\.ai/code/(session_[A-Za-z0-9]+)")
 
 # Opt-in escape hatch for the standalone (frozen) binary (#699). The binary deliberately
 # omits LGPL ``pyte`` and ignores system site-packages / PYTHONPATH, so a side ``pip
@@ -163,6 +171,22 @@ class PtyScreen:
     def feed(self, data: bytes) -> None:
         """Feed a chunk of raw pty bytes into the emulator (escape sequences consumed here)."""
         self._stream.feed(data)
+
+    def find_session_id(self) -> str | None:
+        """Scan the reassembled screen for the bridge's ``session_<id>``, or None.
+
+        The pty bridge prints its connect URL (``https://claude.ai/code/session_<id>``) with
+        cursor-addressed positioning that fragments the raw PTY byte stream at the TUI winsize
+        — the host even loses the literal ``code`` — so the keeper's raw-bytes regex misses it
+        (#665). pyte honors that positioning, so the logical URL line is whole here and the id
+        scrapes cleanly. Returns the id UN-redacted: the keeper writes it only to its private
+        discovery sidecar (never a streamed frame), exactly like the raw-bytes scrape it backs
+        up; :meth:`frame` stays redacted. Scanning the rendered ``display`` (not a redacted
+        copy) is what makes the match possible — a redacted frame's mask token carries no
+        ``session_`` prefix, so it could never yield the real id anyway.
+        """
+        match = _RE_CONNECT_URL.search("\n".join(self._screen.display))
+        return match.group(1) if match else None
 
     def frame(self) -> dict[str, Any]:
         """Return the current screen as a redacted, cells-only frame.
