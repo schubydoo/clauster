@@ -130,6 +130,11 @@
       background: var(--tblr-bg-surface, var(--tblr-body-bg));
       border-bottom: 1px solid var(--tblr-border-color);
       box-shadow: 0 6px 6px -6px rgba(0, 0, 0, .25); }
+    /* #745: the section jump-nav must wrap to a second row on narrow viewports.
+       A Bootstrap/Tabler .btn-group is a single non-wrapping row — adding flex-wrap
+       to it makes any WRAPPED .btn flex-grow to fill the row (full-width bars). Use a
+       plain gapped flex-wrap container instead so each tab keeps its intrinsic width. */
+    .cfg-jump { display: flex; flex-wrap: wrap; gap: .25rem; }
     /* Zero the body's top padding so the sticky nav pins flush to the top (no uncovered
        padding strip for rows to bleed through); the intro carries the spacing instead. */
     [data-test="cfg-modal"] .modal-body { padding-top: 0; }
@@ -1038,9 +1043,9 @@
             <div class="cfg-nav" x-show="!configEditor.loading" x-cloak>
               <input type="search" class="form-control form-control-sm mb-2" x-model="configQuery"
                      placeholder="Filter settings…" aria-label="Filter settings">
-              <div class="btn-group btn-group-sm flex-wrap" role="group" aria-label="Jump to section">
+              <div class="cfg-jump" role="group" aria-label="Jump to section">
                 <template x-for="s in configSections()" :key="s">
-                  <button type="button" class="btn btn-ghost-secondary" @click="scrollToSection(s)"
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="scrollToSection(s)"
                           x-show="configFieldsVisible(s).length"
                           x-text="configSectionLabel(s)"></button>
                 </template>
