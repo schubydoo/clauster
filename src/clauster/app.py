@@ -1775,7 +1775,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         url = body.get("url")
         if not isinstance(name, str) or not name:
             raise HTTPException(status_code=422, detail="body must include a 'name' string")
-        if not isinstance(url, str) or not url:
+        if not isinstance(url, str) or not url.strip():
             raise HTTPException(status_code=422, detail="A Git URL is required to clone.")
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail=f"invalid project name: {name!r}")
