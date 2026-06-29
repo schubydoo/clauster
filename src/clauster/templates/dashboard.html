@@ -813,7 +813,8 @@
                 <code>clone.allow_private_hosts</code> in clauster.yml · cloning only fetches files (nothing runs).</p>
             </div>
             <div class="mt-3 d-flex gap-2">
-              <button class="btn btn-primary" @click="submitNew()" :disabled="np.busy || !np.name">
+              <button class="btn btn-primary" @click="submitNew()"
+                      :disabled="np.busy || !np.name || (np.mode === 'clone' && !np.url.trim())">
                 <span class="spinner-border spinner-border-sm me-1" x-show="np.busy" x-cloak></span>
                 <span x-text="np.busy ? (np.mode === 'clone' ? 'Cloning…' : 'Creating…')
                                       : (np.mode === 'clone' ? 'Clone' : 'Create')">Create</span>
