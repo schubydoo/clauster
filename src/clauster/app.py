@@ -30,6 +30,7 @@ from . import (
     config_editor,
     config_write,
     config_write_mcp,
+    config_write_permissions,
     config_writer,
     environments,
     logstream,
@@ -1465,6 +1466,113 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         try:
             await asyncio.to_thread(
                 config_write_mcp.write_project_servers, project_dir, servers, expected
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": "project", "project": project, "ok": True}
+
+    def _user_settings_json() -> Path:
+        # User-scope permission rules live in ~/.claude/settings.json (the settings
+        # file), NOT ~/.claude.json. Derive it the same way the runner does internally
+        # (beside the claude.json whose trusted-dirs we honor) so the two never diverge.
+        #
+        # The user-scope surface needs a runner to resolve that path. If none is wired
+        # (create_app's runner is None — test harnesses / CLI tooling that skip the
+        # SessionRunner coercion), fail CLOSED with the same 404-invisible shape
+        # require_capability uses for a disabled user scope, rather than letting
+        # runner.claude_json raise an AttributeError that escapes as an unhandled 500.
+        active_runner = app.state.runner
+        if active_runner is None:
+            raise HTTPException(status_code=404, detail="config-write user scope is unavailable")
+        return active_runner.claude_json.parent / ".claude" / "settings.json"
+
+    @app.get("/api/config-write/permissions")
+    async def api_config_write_permissions_read(scope: str = "project", project: str = "") -> dict:
+        # Read the permission-rules block for a surface. Gated exactly like the MCP/status
+        # routes: 404 when config-write is off, and 404 for user scope when allow_user_scope
+        # is off — the surface is invisible, never 403. A corrupt/non-object on-disk
+        # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
+        # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
+        if scope not in ("project", "user"):
+            raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope == "user":
+            try:
+                permissions, file_hash = await asyncio.to_thread(
+                    config_write_permissions.read_user_permissions, _user_settings_json()
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "permissions": permissions, "hash": file_hash}
+        project_dir = _resolve_cw_project(project)
+        try:
+            permissions, file_hash = await asyncio.to_thread(
+                config_write_permissions.read_project_permissions, project_dir
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {
+            "scope": "project",
+            "project": project,
+            "permissions": permissions,
+            "hash": file_hash,
+        }
+
+    @app.put("/api/config-write/permissions")
+    async def api_config_write_permissions_write(body: dict) -> dict:
+        # Foundation pipeline IN ORDER, identical to the MCP write route: capability/scope
+        # 404 gate → (auth is global middleware) → type-the-name confirm (400, the FIRST
+        # semantic gate) → validate request shape / validate-never-execute (422) → path
+        # containment + existence (project: 400 escape / 404 missing dir) → stale-hash
+        # (409) → atomic locked write of ONLY the permissions subtree (siblings preserved).
+        # Any step aborts BEFORE the write. bypassPermissions can never be set here: the
+        # validator rejects it as a defaultMode (422), keeping it behind the footgun gate.
+        scope = body.get("scope", "project")
+        if scope not in ("project", "user"):
+            raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
+        config_write.require_capability(config, scope)
+
+        if scope == "user":
+            # Confirm is the FIRST semantic gate after capability (USER SCOPE literal,
+            # server-derived) — before any structural validation or I/O.
+            config_write.require_confirm("user", None, body.get("confirm"))
+            permissions = body.get("permissions")
+            if not isinstance(permissions, dict):
+                raise HTTPException(
+                    status_code=422, detail="body must include a 'permissions' object"
+                )
+            expected = body.get("hash")
+            if expected is not None and not isinstance(expected, str):
+                raise HTTPException(status_code=422, detail="'hash' must be a string when present")
+            try:
+                await asyncio.to_thread(
+                    config_write_permissions.write_user_permissions,
+                    _user_settings_json(),
+                    permissions,
+                    expected,
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "ok": True}
+
+        # project scope: confirm against the project name FIRST (the server-derived token
+        # is the literal name; it needs no disk resolution), then validate the request
+        # shape, then resolve+contain the project dir.
+        project = body.get("project")
+        config_write.require_confirm("project", project, body.get("confirm"))
+        permissions = body.get("permissions")
+        if not isinstance(permissions, dict):
+            raise HTTPException(status_code=422, detail="body must include a 'permissions' object")
+        project_dir = _resolve_cw_project(project, require_exists=True)
+        expected = body.get("hash")
+        if expected is not None and not isinstance(expected, str):
+            raise HTTPException(status_code=422, detail="'hash' must be a string when present")
+        try:
+            await asyncio.to_thread(
+                config_write_permissions.write_project_permissions,
+                project_dir,
+                permissions,
+                expected,
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
