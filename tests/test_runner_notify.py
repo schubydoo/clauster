@@ -384,3 +384,54 @@ async def test_notify_app_event_noop_when_notifier_inactive(runner_config):
     assert runner._notifier.active is False
     runner.notify_app_event("permission-needed", "t", "b")
     assert not runner._notify_tasks
+
+
+class _GatedNotifier:
+    """A notifier whose anotify blocks until ``release`` is set (timing control)."""
+
+    def __init__(self) -> None:
+        self.active = True
+        self.release = asyncio.Event()
+        self.finished = False
+
+    async def anotify(self, title: str, body: str) -> None:
+        await self.release.wait()
+        self.finished = True
+
+
+async def test_shutdown_drains_pending_notify_tasks(runner_config):
+    # shutdown() must await an in-flight fire-and-forget notify rather than leave it
+    # pending (a pending task is GC-cancelled at exit: "Task was destroyed but it is
+    # pending", #734). With the send completing inside the grace, the task finishes and
+    # the set drains.
+    runner = _notify_runner(runner_config)
+    gated = _GatedNotifier()
+    runner._notifier = gated
+    runner._notify_event("crash", _inst())
+    assert len(runner._notify_tasks) == 1
+    gated.release.set()  # the send can complete the moment shutdown awaits it
+
+    await runner.shutdown()
+
+    assert gated.finished is True  # drained to completion, not GC-cancelled
+    assert not runner._notify_tasks  # done-callback removed it from the set
+
+
+async def test_shutdown_cancels_notify_tasks_past_grace(runner_config, monkeypatch):
+    # A notify send that outlives the drain grace must not block shutdown forever: the
+    # grace elapses and the straggler is cancelled (bounded teardown).
+    monkeypatch.setattr("clauster.runner._NOTIFY_DRAIN_GRACE", 0.05)
+    runner = _notify_runner(runner_config)
+    gated = _GatedNotifier()  # never released → the send never completes on its own
+    runner._notifier = gated
+    runner._notify_event("crash", _inst())
+    [task] = list(runner._notify_tasks)
+
+    await asyncio.wait_for(runner.shutdown(), timeout=1.0)  # returns despite the stuck send
+
+    assert task.cancelled()  # the straggler was cancelled at the grace boundary
+    assert gated.finished is False
+
+
+def _inst() -> RemoteControlInstance:
+    return RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.CRASHED)

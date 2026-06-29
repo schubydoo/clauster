@@ -1752,6 +1752,110 @@ async def test_manager_resume_kills_orphan_survivor(fake_claustrum, monkeypatch)
         await mgr.aclose()
 
 
+# -- per-id lifecycle serialization (#734) ---------------------------------
+
+
+async def test_manager_concurrent_resume_yields_one_process(fake_claustrum, monkeypatch):
+    # The #715-shaped race, structurally: two concurrent resume(id) must NOT both pass
+    # the running-check and both _spawn_session (two live processes for one
+    # conversation). The per-id lock serializes them — the first resumes, retires the
+    # row; the second blocks at the lock, then sees the row gone and 409s. Exactly one
+    # fresh spawn results.
+    uuid = "11111111-2222-4333-8444-555555555555"
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        old_id = await _crash_with_uuid(fake, mgr, client, uuid)
+        spawns_before = len(fake.spawned)
+
+        # Gate the first resume INSIDE its critical section so the second resume is
+        # provably racing it at the lock, not merely running after it finished.
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_spawn = mgr._spawn_session
+
+        async def gated_spawn(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await real_spawn(*args, **kwargs)
+
+        monkeypatch.setattr(mgr, "_spawn_session", gated_spawn)
+
+        first = asyncio.create_task(
+            mgr.resume(client, old_id, cwd="/tmp/proj", claude_binary=_BIN)
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1.0)  # first holds the lock + is spawning
+        second = asyncio.create_task(
+            mgr.resume(client, old_id, cwd="/tmp/proj", claude_binary=_BIN)
+        )
+        # The second is blocked at the per-id lock: it has not (and must not) start a
+        # second spawn while the first holds the section.
+        await asyncio.sleep(0.05)
+        assert not second.done()
+        assert len(fake.spawned) == spawns_before  # neither spawn completed yet
+
+        release.set()
+        resumed = await asyncio.wait_for(first, timeout=1.0)
+        with pytest.raises(HostedSessionError):  # row already retired → no double-spawn
+            await asyncio.wait_for(second, timeout=1.0)
+
+        assert len(fake.spawned) == spawns_before + 1  # exactly ONE fresh process
+        assert mgr.get_instance(resumed.claustrum_process_id) is not None
+        assert mgr.get_instance(old_id) is None
+        await mgr.aclose()
+
+
+async def test_manager_forget_then_resume_serialize(fake_claustrum, monkeypatch):
+    # forget+resume on the same id is the cross-method shape of the same race: the
+    # registry-pop and the spawn must not interleave. Whichever wins the lock runs to
+    # completion; the loser sees the post-mutation state. Exactly one outcome, never a
+    # spawned process left orphaned behind a forgotten row.
+    uuid = "11111111-2222-4333-8444-555555555555"
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        old_id = await _crash_with_uuid(fake, mgr, client, uuid)
+        spawns_before = len(fake.spawned)
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        real_spawn = mgr._spawn_session
+
+        async def gated_spawn(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await real_spawn(*args, **kwargs)
+
+        monkeypatch.setattr(mgr, "_spawn_session", gated_spawn)
+
+        resume_task = asyncio.create_task(
+            mgr.resume(client, old_id, cwd="/tmp/proj", claude_binary=_BIN)
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1.0)  # resume holds the lock
+        forget_task = asyncio.create_task(mgr.forget(old_id))
+        await asyncio.sleep(0.05)
+        assert not forget_task.done()  # forget waits behind the lock, can't pop mid-resume
+
+        release.set()
+        resumed = await asyncio.wait_for(resume_task, timeout=1.0)
+        # forget now runs against the retired old row → unknown id → raises (the resumed
+        # row lives under a NEW id, so it is never forgotten out from under its process).
+        with pytest.raises(HostedSessionError):
+            await asyncio.wait_for(forget_task, timeout=1.0)
+
+        assert len(fake.spawned) == spawns_before + 1
+        assert mgr.get_instance(resumed.claustrum_process_id) is not None
+        await mgr.aclose()
+
+
+def test_lock_for_returns_same_lock_per_id():
+    # The get-or-create is synchronous (no await between .get and the assignment), so two
+    # callers for the same id always observe the SAME lock object — the lock-creation race
+    # that would let two coroutines each mint a private lock can't happen.
+    mgr = HostedManager()
+    a = mgr._lock_for("id-1")
+    b = mgr._lock_for("id-1")
+    c = mgr._lock_for("id-2")
+    assert a is b
+    assert a is not c
+
+
 def test_redact_obj_sanitizes_nested_string_leaves():
     # Direct coverage for the structured-frame redactor (#549): every string leaf at any
     # depth is sanitized; non-string scalars pass through with type + value intact.

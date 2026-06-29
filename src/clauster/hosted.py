@@ -182,6 +182,10 @@ class HostedSession:
         self.daemon_last_seq = 0
         self._ring: deque[dict[str, Any]] = deque(maxlen=ring_size)
         self._event_seq = 0
+        # Subscriber list: the DEPTH-bound (per-subscriber queue) is bounded above by
+        # _queue_maxsize; the BREADTH-bound (list length) is the count of live WS
+        # connections to this one session — unsubscribe() drops each on disconnect, so
+        # it tracks concurrent viewers and is not an unbounded accumulation.
         self._subscribers: list[_Subscriber] = []
         self._pending: dict[str, _ControlRequest] = {}
         # Latched at the start of stop() so a concurrent respond_control fails closed
@@ -638,6 +642,15 @@ class HostedManager:
         # finishing last would overwrite a newer file (dropping a session / regressing
         # the cursor). The lock makes snapshot→save→_last_saved atomic per writer.
         self._persist_lock = asyncio.Lock()
+        # Per-hosted_id lifecycle lock — mirrors SessionRunner._spawn_lock_for. The
+        # lifecycle ops (stop/resume/forget/kill_orphan) each guard an entry-time
+        # registry check, then await (kill/spawn/detach/to_thread), then mutate the
+        # registry. Without serialization two concurrent resume(id) both pass the
+        # running-check and both spawn → two live processes for one conversation
+        # (the #715-shaped race, structurally prevented here rather than relied-upon-
+        # .get()/.pop()-staying-KeyError-safe). Distinct from _persist_lock: never
+        # held together, so no lock-ordering inversion.
+        self._id_locks: dict[str, asyncio.Lock] = {}
 
     def list_instances(self) -> list[RemoteControlInstance]:
         """Snapshot of every hosted instance, each synced to its live session state."""
@@ -738,19 +751,23 @@ class HostedManager:
         await self._require(hosted_id).respond_control(request_id, response)
 
     async def stop(self, hosted_id: str) -> RemoteControlInstance:
-        """Stop a hosted session and return its final (status-synced) instance."""
-        await self._require(hosted_id).stop()
-        # A concurrent forget()/resume() can pop the row during the stop grace
-        # window (the entry-time check isn't held across the await); re-fetch and
-        # treat absence as already-gone so the caller maps it to a clean 404
-        # instead of an unmapped KeyError 500.
-        instance = self._instances.get(hosted_id)
-        if instance is None:
-            raise HostedSessionError(f"no such hosted session: {hosted_id}")
-        # Mark the intent so a restart shows it as stopped, not "lost"/crashed.
-        instance.intentional_stop = True
-        await self._persist()
-        return self._synced(instance)
+        """Stop a hosted session and return its final (status-synced) instance.
+
+        Serialized per id (see :meth:`_lock_for`): a concurrent forget/resume on the
+        same id waits rather than racing the stop's grace-window awaits.
+        """
+        async with self._lock_for(hosted_id):
+            await self._require(hosted_id).stop()
+            # The per-id lock now bars a concurrent forget()/resume() from popping the
+            # row mid-grace; the re-fetch + absent→404 mapping stays as defense-in-depth
+            # (and still covers the no-session-but-row corner) rather than a 500.
+            instance = self._instances.get(hosted_id)
+            if instance is None:
+                raise HostedSessionError(f"no such hosted session: {hosted_id}")
+            # Mark the intent so a restart shows it as stopped, not "lost"/crashed.
+            instance.intentional_stop = True
+            await self._persist()
+            return self._synced(instance)
 
     async def resume(
         self,
@@ -768,7 +785,25 @@ class HostedManager:
         once the resumed one is live. Raises :class:`HostedSessionError` if the session
         is unknown, still running, or has no captured uuid to resume from. A
         :class:`ClaustrumError` from the spawn propagates (the caller maps it).
+
+        Serialized per id (see :meth:`_lock_for`): two concurrent resume(id) can't
+        both pass the running-check and both spawn — the second blocks at the lock,
+        then sees the row already retired and 404s, so exactly one process results.
         """
+        async with self._lock_for(hosted_id):
+            return await self._resume_locked(
+                client, hosted_id, cwd=cwd, claude_binary=claude_binary
+            )
+
+    async def _resume_locked(
+        self,
+        client: ClaustrumClient,
+        hosted_id: str,
+        *,
+        cwd: str,
+        claude_binary: str,
+    ) -> RemoteControlInstance:
+        """Body of :meth:`resume`, always run under the per-id lifecycle lock."""
         old = self._instances.get(hosted_id)
         if old is None:
             raise HostedSessionError(f"no such hosted session: {hosted_id}")
@@ -816,20 +851,26 @@ class HostedManager:
         the survivor pid+tree — gated on a pid + create_time + hosted-cmdline match so a
         reused/unrelated PID is never touched — then mark the row stopped. Raises
         :class:`HostedSessionError` for an unknown id.
+
+        Serialized per id (see :meth:`_lock_for`) so a concurrent resume can't spawn
+        a fresh agent off this row while we're hard-killing the survivor.
         """
-        inst = self._instances.get(hosted_id)
-        if inst is None:
-            raise HostedSessionError(f"no such hosted session: {hosted_id}")
-        if inst.agent_pid is not None:
-            await asyncio.to_thread(procutil.kill_if_match, inst.agent_pid, inst.agent_proc_start)
-        inst.is_orphan = False
-        inst.intentional_stop = True
-        inst.status = InstanceStatus.STOPPED
-        # Clear any orphan/loss recovery prompt — the row is now a clean stop, not a
-        # "Resume or Kill" survivor, so a stale detail would mislead the UI.
-        inst.error_detail = None
-        await self._persist()
-        return self._synced(inst)
+        async with self._lock_for(hosted_id):
+            inst = self._instances.get(hosted_id)
+            if inst is None:
+                raise HostedSessionError(f"no such hosted session: {hosted_id}")
+            if inst.agent_pid is not None:
+                await asyncio.to_thread(
+                    procutil.kill_if_match, inst.agent_pid, inst.agent_proc_start
+                )
+            inst.is_orphan = False
+            inst.intentional_stop = True
+            inst.status = InstanceStatus.STOPPED
+            # Clear any orphan/loss recovery prompt — the row is now a clean stop, not a
+            # "Resume or Kill" survivor, so a stale detail would mislead the UI.
+            inst.error_detail = None
+            await self._persist()
+            return self._synced(inst)
 
     async def forget(self, hosted_id: str) -> None:
         """Drop a stopped hosted session's record so it leaves the Recent list (fail closed).
@@ -844,30 +885,37 @@ class HostedManager:
         Fail closed: a running/starting session, or a live orphan survivor, is refused
         with :class:`HostedSessionError` — Stop it (or Kill the orphan) first; forget
         never terminates a process. Raises :class:`HostedSessionError` for an unknown id.
+
+        Serialized per id (see :meth:`_lock_for`): the still-running guard and the
+        registry-pop are held together, so a concurrent stop→running-transition or a
+        resume can't slip between the check and the drop.
         """
-        inst = self._instances.get(hosted_id)
-        if inst is None:
-            raise HostedSessionError(f"no such hosted session: {hosted_id}")
-        inst = self._synced(inst)
-        session = self._sessions.get(hosted_id)
-        if (session is not None and session.status in ("running", "starting")) or inst.status in (
-            InstanceStatus.RUNNING,
-            InstanceStatus.STARTING,
-        ):
-            raise HostedSessionError(
-                f"hosted session {hosted_id} is still running — Stop it first"
-            )
-        if inst.is_orphan:
-            raise HostedSessionError(
-                f"hosted session {hosted_id} is a live orphan — Kill it first"
-            )
-        # Detach the terminal session like resume() retires a dead row — drops the
-        # client-side ProcessStream subscriber deterministically instead of leaking it.
-        if session is not None:
-            await session.detach()
-        self._sessions.pop(hosted_id, None)
-        self._instances.pop(hosted_id, None)
-        await self._persist()
+        async with self._lock_for(hosted_id):
+            inst = self._instances.get(hosted_id)
+            if inst is None:
+                raise HostedSessionError(f"no such hosted session: {hosted_id}")
+            inst = self._synced(inst)
+            session = self._sessions.get(hosted_id)
+            if (
+                session is not None and session.status in ("running", "starting")
+            ) or inst.status in (
+                InstanceStatus.RUNNING,
+                InstanceStatus.STARTING,
+            ):
+                raise HostedSessionError(
+                    f"hosted session {hosted_id} is still running — Stop it first"
+                )
+            if inst.is_orphan:
+                raise HostedSessionError(
+                    f"hosted session {hosted_id} is a live orphan — Kill it first"
+                )
+            # Detach the terminal session like resume() retires a dead row — drops the
+            # client-side ProcessStream subscriber deterministically instead of leaking it.
+            if session is not None:
+                await session.detach()
+            self._sessions.pop(hosted_id, None)
+            self._instances.pop(hosted_id, None)
+            await self._persist()
 
     @staticmethod
     def _is_orphan(instance: RemoteControlInstance) -> bool:
@@ -956,6 +1004,18 @@ class HostedManager:
         if session is None:
             raise HostedSessionError(f"no such hosted session: {hosted_id}")
         return session
+
+    def _lock_for(self, hosted_id: str) -> asyncio.Lock:
+        """Return the per-id lifecycle lock, creating it on first use.
+
+        Synchronous (no ``await``) so the get-or-create can't itself race on the
+        loop — two coroutines for the same id can never each mint a distinct lock.
+        Mirrors :meth:`SessionRunner._spawn_lock_for`.
+        """
+        lock = self._id_locks.get(hosted_id)
+        if lock is None:
+            lock = self._id_locks[hosted_id] = asyncio.Lock()
+        return lock
 
     def _synced(self, instance: RemoteControlInstance) -> RemoteControlInstance:
         """Reflect the live session's status + captured uuid + reattach cursor onto the row."""

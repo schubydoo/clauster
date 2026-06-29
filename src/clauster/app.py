@@ -52,7 +52,7 @@ from .claude_md import (
 from .claustrum_client import ClaustrumError
 from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJob, CloneJobManager
-from .config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS, ClausterConfig
+from .config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS, PERMISSION_MODES, ClausterConfig
 from .discovery import (
     discover_projects_cached,
     invalidate_discovery_cache,
@@ -2272,6 +2272,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # from the ceiling, then gate the effective mode before any daemon/trust/spawn work.
         await _resolve_project_path(project)
         pm = permission_mode or config.instance_defaults.permission_mode
+        # Validate the mode before any daemon/spawn work — parity with the bridge channel
+        # (runner rejects an unknown mode pre-argv). Not exploitable (list-argv, no
+        # injection), but an unknown mode is a client error: 422, not a 502 from a daemon
+        # spawn that fails downstream.
+        if pm not in PERMISSION_MODES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"invalid permission_mode {pm!r}; expected one of {PERMISSION_MODES}",
+            )
         _enforce_bypass_ceiling(project, pm)
         client, path, binary = await _hosted_prereqs(project)
         try:
