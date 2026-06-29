@@ -223,6 +223,21 @@ def test_spawn_unknown_channel_is_422(write_config, projects_root):
     assert r.status_code == 422
 
 
+def test_spawn_hosted_unknown_permission_mode_is_422(write_config, projects_root):
+    # Parity with the bridge channel (the runner rejects an unknown mode pre-argv,
+    # #734): an unknown permission_mode is a client error → a clean 422, not a 502 from
+    # a downstream daemon spawn. Validated before any daemon/trust work, so no daemon is
+    # needed for this to resolve.
+    app = _app(write_config, daemon=_StubDaemon())
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/instances",
+            json={"project": "alpha", "channel": "hosted", "permission_mode": "bogusMode"},
+        )
+    assert r.status_code == 422
+    assert "permission_mode" in r.json()["detail"]
+
+
 # -- forget (POST /api/instances/{id}/forget) ------------------------------
 
 

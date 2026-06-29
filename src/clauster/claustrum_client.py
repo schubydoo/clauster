@@ -129,6 +129,10 @@ class ProcessStream:
         self.exited = asyncio.Event()
         self.last_seq = 0
         self._queue_maxsize = queue_maxsize
+        # Subscriber list: the DEPTH-bound (per-subscriber queue) is _queue_maxsize; the
+        # BREADTH-bound (list length) is the number of live attachers to this process —
+        # in practice one pump per HostedSession plus any reattach overlap — each dropped
+        # by unsubscribe() on teardown, so it is bounded by live attachers, not unbounded.
         self._subscribers: list[_Subscriber] = []
         # Per-channel byte buffers for line re-assembly across split frames.
         self._buffers: dict[str, bytes] = {"stdout": b"", "stderr": b""}

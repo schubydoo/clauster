@@ -133,6 +133,9 @@ _STARTUP_WATCH_INTERVAL = 2.0
 # (the two epochs are derived independently). Mirrors procutil.is_live_bridge's
 # default tolerance so the two PID-reuse checks can't disagree.
 _PROC_START_TOLERANCE = 2.0
+# How long shutdown() waits for in-flight fire-and-forget notify sends to finish
+# before cancelling them — bounds shutdown while letting a quick send complete.
+_NOTIFY_DRAIN_GRACE = 2.0
 
 
 class SessionRunner:
@@ -2495,3 +2498,22 @@ class SessionRunner:
                 except asyncio.CancelledError:
                     pass
                 setattr(self, attr, None)
+        # Drain any in-flight fire-and-forget notify sends. Without this a pending
+        # anotify is GC-cancelled at interpreter exit ("Task was destroyed but it is
+        # pending"). Snapshot first (the done-callback mutates the set), let them finish
+        # within a short grace (don't block shutdown on a slow notifier), and swallow
+        # every per-task error — a notification failure must never fail shutdown.
+        pending = [t for t in self._notify_tasks if not t.done()]
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=_NOTIFY_DRAIN_GRACE,
+                )
+            except TimeoutError:
+                for task in pending:
+                    task.cancel()
+                # Reap the cancelled stragglers so none is GC'd while still pending on
+                # the timeout path. Cancelling an I/O-awaiting send completes promptly,
+                # so this needs no further timeout.
+                await asyncio.gather(*pending, return_exceptions=True)
