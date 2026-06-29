@@ -114,9 +114,11 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 # style="" *attribute* in the templates has been lifted into a class inside those
 # nonce'd <style> blocks — a nonce does NOT cover style attributes, only <style>
 # elements, so the attributes had to become classes, not nonce'd. With both done,
-# 'unsafe-inline' is dropped from style-src. (Alpine's `:style` bindings set
-# `element.style` via JS, which CSP does not classify as an inline style, so they
-# need no nonce and are unaffected.)
+# 'unsafe-inline' is dropped from style-src. (Alpine's `:style` bindings must use
+# the OBJECT form `{ prop: value }`, which sets individual `element.style`
+# properties via CSSOM — CSP does not classify that as an inline style, so it
+# needs no nonce and is unaffected. A STRING `:style` is applied via the style
+# *attribute* and WOULD be blocked, so all dynamic styling uses the object form.)
 #
 # Tradeoff — one relaxation remains, deliberately out of scope and tracked under
 # the #533 epic:
