@@ -31,8 +31,7 @@
 Anthropic's first-party tooling assumes terminal access on the host to spawn a
 bridge in a given project directory. Clauster fills that gap: a browser-based dispatcher of
 `claude remote-control` instances on a remote machine (NAS, homelab box). You pick
-a project, start a bridge, and attach to it from `claude.ai/code` or the mobile app
-— no SSH session required.
+a project, start a bridge, and attach to it from `claude.ai/code` or the mobile app.
 
 > **Status: pre-1.0, in active development.** Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
@@ -210,6 +209,23 @@ https://github.com/schubydoo/clauster && scoop install clauster`), or
 [Docker](#docker). Full recipes — including supply-chain verification — are in the
 [Installation guide](https://schubydoo.github.io/clauster/installation/). To hack
 on Clauster itself, use the dev quick-start below.
+
+### Uninstall
+
+- Install script / standalone binary: remove `~/.local/bin/clauster` on Linux or
+  macOS; on Windows, delete `%LOCALAPPDATA%\Programs\clauster\clauster.exe`
+  unless you set a custom install directory.
+- Python tools: run `uv tool uninstall clauster`, `pipx uninstall clauster`, or
+  `pip uninstall clauster`, matching how you installed it.
+- Scoop: run `scoop uninstall clauster`.
+- Docker: stop and remove the container with `docker rm -f clauster`, then remove
+  the image with `docker rmi ghcr.io/schubydoo/clauster:latest` (substitute the
+  pinned tag you pulled, e.g. `:0.5.0`, if you used a specific release) if you no
+  longer need it. Docker Compose users: run `docker compose down` from the directory
+  containing `compose.yaml` (add `-v` to also delete named volumes).
+- Full purge: stop Clauster first, then remove your `state_dir` if you want local
+  state/config gone too. See [Privacy & data at rest](docs/privacy.md#how-to-purge)
+  and the [Installation guide](https://schubydoo.github.io/clauster/installation/).
 
 ## Quick start (dev)
 

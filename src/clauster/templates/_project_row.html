@@ -10,7 +10,8 @@
           <div class="list-group-item" data-project="{{ p.name }}"
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
                :style="projectSort !== 'name' ? { order: projectOrderRank('{{ p.name }}') } : {}"
-               x-data="{ lopen: false, lmode: DEFAULT_LAUNCH_MODE, lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', ladv: false }">
+               x-data="{ lopen: false, lmode: DEFAULT_LAUNCH_MODE, lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', mopen: false }"
+               @launch-pop-close.window="if ($event.detail.name === '{{ p.name }}') { lopen = false; mopen = false }">
             <div class="d-flex align-items-center flex-wrap gap-2">
               <svg class="ico text-success" role="img" aria-label="Directory trusted" x-cloak
                    x-show="trustState['{{ p.name }}'] === 'trusted'" title="Directory trusted"><use href="#ic-trust"/></svg>
@@ -69,8 +70,12 @@
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run Claude here
                     <svg class="ico ms-1" aria-hidden="true" x-show="lopen"><use href="#ic-caret-up"/></svg><svg class="ico ms-1" aria-hidden="true" x-show="!lopen"><use href="#ic-caret-down"/></svg>
                   </button>
-                  <div class="card launch-pop" x-show="lopen" x-cloak @click.outside="lopen = false"
-                       @keydown.escape.window="lopen = false">
+                  {# Dismissing the popover (outside-click / Escape) also clears any pending
+                     trust/bypass gate (#686) so a hidden gate never lingers — reopening starts
+                     a fresh launch. mopen is reset too so More options collapses on reopen. #}
+                  <div class="card launch-pop" x-show="lopen" x-cloak
+                       @click.outside="lopen = false; mopen = false; confirmTrust['{{ p.name }}'] = false; confirmBypass['{{ p.name }}'] = false"
+                       @keydown.escape.window="lopen = false; mopen = false; confirmTrust['{{ p.name }}'] = false; confirmBypass['{{ p.name }}'] = false">
                     <div class="card-body p-2">
                       <div class="form-label small mb-1">How do you want to drive it?</div>
                       <template x-for="m in launchModes()" :key="m.id">
@@ -133,16 +138,34 @@
                         <p id="perm-effect-{{ p.name }}" class="form-hint text-secondary small mt-1 mb-0"
                            x-text="permissionEffect(lperm)"></p>
                       </div>
-                      <!-- advanced (Desktop / bridge launch only): spawn dir + true-resume mode -->
+                      {# "More options" — a single disclosure (#686) holding the ADVANCED choices
+                         for the Desktop/bridge launch: the Mode selector (Server Mode / Interactive
+                         Session) AND Spawn. Mode is an advanced choice, tucked away by default; the
+                         safe Desktop default works with this closed. Only the Desktop launch exposes
+                         these (browser/background ignore spawn + resume mode). #}
                       <div class="mt-2" x-show="lmode === 'desktop'" x-cloak>
-                        <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="ladv = !ladv"
-                                :aria-expanded="ladv"><span x-text="ladv ? 'Hide advanced' : 'Advanced'">Advanced</span><svg class="ico ms-1" aria-hidden="true" x-show="ladv"><use href="#ic-caret-up"/></svg><svg class="ico ms-1" aria-hidden="true" x-show="!ladv"><use href="#ic-caret-down"/></svg></button>
-                        <div class="row g-2 mt-1" x-show="ladv" x-cloak>
+                        <button type="button" class="btn btn-sm btn-ghost-secondary px-1" data-test="launch-more-options"
+                                @click="mopen = !mopen" :aria-expanded="mopen" aria-controls="more-opts-{{ p.name }}"><span x-text="mopen ? 'Fewer options' : 'More options'">More options</span><svg class="ico ms-1" aria-hidden="true" x-show="mopen"><use href="#ic-caret-up"/></svg><svg class="ico ms-1" aria-hidden="true" x-show="!mopen"><use href="#ic-caret-down"/></svg></button>
+                        <div id="more-opts-{{ p.name }}" class="row g-2 mt-1" x-show="mopen" x-cloak>
+                          {% if pty_supported %}
+                          {# Mode (Server Mode / Interactive Session) — the advanced launch-shape choice,
+                             tucked inside More options. Drives whether Spawn applies (standard) or the
+                             single-session note shows (pty). #}
+                          <div class="col-12">
+                            <label class="form-label small mb-1" for="resume-{{ p.name }}">Mode</label>
+                            <select id="resume-{{ p.name }}" class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
+                                    aria-describedby="resume-hint-{{ p.name }}"
+                                    title="Server Mode (multi-session bridge) = the claude remote-control server; supports the Spawn options. Interactive Session (single-session, true-resume) = one interactive session that restores its prior conversation on Resume; always runs in the project directory.">
+                              <option value="standard">Server Mode (multi-session bridge)</option>
+                              <option value="pty">Interactive Session (single-session, true-resume)</option>
+                            </select>
+                          </div>
+                          {% endif %}
                           {# Spawn only applies to the standard (multi-session) bridge — it maps to
                              `claude remote-control --spawn`. pty is a single interactive session run
                              under the keeper with no `--spawn`, so it ignores these; hide them in pty
                              mode rather than offer no-op choices. #}
-                          <div class="col-6"
+                          <div class="col-12"
                                {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) !== 'pty'" x-cloak{% endif %}>
                             <label class="form-label small mb-1" for="spawn-{{ p.name }}">Spawn</label>
                             <select id="spawn-{{ p.name }}" class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']"
@@ -163,27 +186,67 @@
                              overrides x-show's inline display:none and would pin this hint visible
                              even in standard mode (same bug as the live-tail banners). Flex goes on
                              the inner wrapper. #}
-                          <div class="col-6"
+                          <div class="col-12"
                                x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) === 'pty'" x-cloak>
                             <div class="d-flex align-items-end">
                               <p id="resume-hint-{{ p.name }}" class="form-hint text-secondary small mb-1">Runs as one session in the project directory.</p>
                             </div>
                           </div>
-                          <div class="col-6">
-                            <label class="form-label small mb-1" for="resume-{{ p.name }}">Mode</label>
-                            <select id="resume-{{ p.name }}" class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
-                                    aria-describedby="resume-hint-{{ p.name }}"
-                                    title="Server Mode (multi-session bridge) = the claude remote-control server; supports the Spawn options. Interactive Session (single-session, true-resume) = one interactive session that restores its prior conversation on Resume; always runs in the project directory.">
-                              <option value="standard">Server Mode (multi-session bridge)</option>
-                              <option value="pty">Interactive Session (single-session, true-resume)</option>
-                            </select>
-                          </div>
                           {% endif %}
                         </div>
                       </div>
-                      <button type="button" class="btn btn-primary w-100 mt-2"
+
+                      {# Trust-on-start + bypassPermissions gates fold INSIDE the popover (#686) —
+                         no separate below-the-row alerts. Both are hidden until the Run button routes
+                         a Desktop launch into start(), which opens the matching gate; resolving or
+                         cancelling either one dismisses the popover (via the launch-pop-close event). #}
+                      {# When a gate opens INSIDE the popover the Run button hides, so move focus
+                         into the gate's first control (WCAG 2.4.3 / 4.1.3) — else focus is orphaned
+                         on <body> and a keyboard/SR user gets no signal a confirm now blocks launch.
+                         x-effect re-runs when confirmTrust[name] flips; $nextTick waits for x-show. #}
+                      <!-- trust-on-start confirm (bridge / Desktop launch path) -->
+                      <div class="alert alert-warning mt-2 mb-0" data-test="trust-confirm" x-show="confirmTrust['{{ p.name }}']" x-cloak role="group" aria-labelledby="trust-head-{{ p.name }}"
+                           x-effect="if (confirmTrust['{{ p.name }}']) $nextTick(() => $refs.trustCheck && $refs.trustCheck.focus())">
+                        <p id="trust-head-{{ p.name }}" class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>Trust the files in <code>{{ p.name }}</code>? Launching a session here
+                          lets it run tools and execute any code in <code>CLAUDE.md</code> /
+                          <code>.claude</code> in this directory.</p>
+                        <label class="form-check mb-2">
+                          <input class="form-check-input" type="checkbox" x-ref="trustCheck" x-model="trustConfirmed['{{ p.name }}']">
+                          <span class="form-check-label">I trust the files in this directory</span>
+                        </label>
+                        <div class="btn-list">
+                          <button type="button" class="btn btn-sm btn-warning" @click="confirmTrustStart('{{ p.name }}')"
+                                  :disabled="!trustConfirmed['{{ p.name }}'] || trusting['{{ p.name }}']">
+                            <span class="spinner-border spinner-border-sm me-1" x-show="trusting['{{ p.name }}']" x-cloak></span>
+                            Trust &amp; start
+                          </button>
+                          <button type="button" class="btn btn-sm btn-ghost-secondary" @click="cancelTrust('{{ p.name }}')">Cancel</button>
+                        </div>
+                      </div>
+
+                      <!-- bypassPermissions typed-confirm -->
+                      <div class="alert alert-danger mt-2 mb-0" data-test="bypass-confirm" x-show="confirmBypass['{{ p.name }}']" x-cloak role="group" aria-labelledby="bypass-head-{{ p.name }}"
+                           x-effect="if (confirmBypass['{{ p.name }}']) $nextTick(() => $refs.bypassInput && $refs.bypassInput.focus())">
+                        <p id="bypass-head-{{ p.name }}" class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg><strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
+                          run tools without asking. Type the project name to confirm.</p>
+                        <div class="input-group">
+                          <input type="text" class="form-control" x-ref="bypassInput" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
+                                 aria-label="Type the project name to confirm bypassPermissions"
+                                 @keyup.enter="confirmBypassStart('{{ p.name }}')">
+                          <button type="button" class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')"
+                                  :disabled="(bypassTyped['{{ p.name }}'] || '') !== '{{ p.name }}'">Start with bypass</button>
+                          <button type="button" class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
+                        </div>
+                      </div>
+
+                      {# Primary Run action. Hidden while a trust/bypass gate is showing INSIDE the
+                         popover so the gate's own confirm button is the single next step (no competing
+                         primary). On a clean launch (no gate pending) launchRun() returns true and the
+                         popover closes; when it opens a gate it returns false and the popover stays. #}
+                      <button type="button" class="btn btn-primary w-100 mt-2" data-test="launch-run-go"
+                              x-show="!confirmTrust['{{ p.name }}'] && !confirmBypass['{{ p.name }}']" x-cloak
                               :disabled="launching['{{ p.name }}']"
-                              @click="launchRun('{{ p.name }}', lmode, lperm, lcloud, lprompt); lopen = false">
+                              @click="launchRun('{{ p.name }}', lmode, lperm, lcloud, lprompt).then(done => { if (done) lopen = false })">
                         <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="permLabel(lperm)"></span>
                       </button>
                     </div>
@@ -218,41 +281,8 @@
                 </div>
               </template>
             </div>
-            <!-- trust-on-start confirm (bridge / Desktop launch path) -->
-            <div class="alert alert-warning mt-2" x-show="confirmTrust['{{ p.name }}']" x-cloak>
-              <div>
-                <p class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>Trust the files in <code>{{ p.name }}</code>? Launching a session here
-                  lets it run tools and execute any code in <code>CLAUDE.md</code> /
-                  <code>.claude</code> in this directory.</p>
-                <label class="form-check mb-2">
-                  <input class="form-check-input" type="checkbox" x-model="trustConfirmed['{{ p.name }}']">
-                  <span class="form-check-label">I trust the files in this directory</span>
-                </label>
-                <div class="btn-list">
-                  <button type="button" class="btn btn-sm btn-warning" @click="confirmTrustStart('{{ p.name }}')"
-                          :disabled="!trustConfirmed['{{ p.name }}'] || trusting['{{ p.name }}']">
-                    <span class="spinner-border spinner-border-sm me-1" x-show="trusting['{{ p.name }}']" x-cloak></span>
-                    Trust &amp; start
-                  </button>
-                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="cancelTrust('{{ p.name }}')">Cancel</button>
-                </div>
-              </div>
-            </div>
-
-            <!-- bypassPermissions typed-confirm -->
-            <div class="alert alert-danger mt-2" x-show="confirmBypass['{{ p.name }}']" x-cloak>
-              <p class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg><strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
-                run tools without asking. Type the project name to confirm.</p>
-              <div class="input-group">
-                <input type="text" class="form-control" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
-                       aria-label="Type the project name to confirm bypassPermissions"
-                       @keyup.enter="confirmBypassStart('{{ p.name }}')">
-                <button type="button" class="btn btn-danger" @click="confirmBypassStart('{{ p.name }}')"
-                        :disabled="(bypassTyped['{{ p.name }}'] || '') !== '{{ p.name }}'">Start with bypass</button>
-                <button type="button" class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
-              </div>
-            </div>
-
+            {# The trust-on-start + bypassPermissions confirm gates moved INSIDE the launch
+               popover (#686) — they no longer render as separate below-the-row alerts. #}
             <div class="alert alert-danger mt-2 mb-0" x-show="errorOf('{{ p.name }}')" x-cloak x-text="errorOf('{{ p.name }}')"></div>
 
             <!-- Spawn-failure reason (#313): a bridge that started then CRASHED/ERRORED has its
