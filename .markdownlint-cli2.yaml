@@ -39,11 +39,13 @@ config:
       - b
       - br
       - code
+      - details
       - em
       - h1
       - img
       - p
       - sub
+      - summary
       - table
       - td
       - tr
