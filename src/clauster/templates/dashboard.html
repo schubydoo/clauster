@@ -831,7 +831,7 @@
                      :aria-valuenow="np.progress.percent !== null ? np.progress.percent : false"
                      :aria-valuetext="np.progress.percent === null ? (np.progress.phase || 'Cloning…') : false"
                      :class="np.progress.percent === null ? 'progress-bar-indeterminate' : ''"
-                     :style="np.progress.percent !== null ? ('width: ' + np.progress.percent + '%') : ''"></div>
+                     :style="np.progress.percent !== null ? { width: np.progress.percent + '%' } : {}"></div>
               </div>
             </div>
             <div class="alert alert-danger mt-2 mb-0" x-show="np.error" x-cloak x-text="np.error"></div>
@@ -847,7 +847,7 @@
       <!-- Project list (rows — same layout language as the Active-sessions list below) -->
       {% if projects %}
       <div class="card" id="project-grid">
-        <div class="list-group list-group-flush" :style="projectSort !== 'name' ? 'display:flex; flex-direction:column' : ''">
+        <div class="list-group list-group-flush" :style="projectSort !== 'name' ? { display: 'flex', flexDirection: 'column' } : {}">
         {% for p in projects %}
           {% set idx = loop.index0 %}
           {% include "_project_row.html" %}
