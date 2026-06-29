@@ -841,6 +841,10 @@ class HostedManager:
             # pid+create_time match) so the resumed agent doesn't share its session.
             await asyncio.to_thread(procutil.kill_if_match, old.agent_pid, old.agent_proc_start)
         self._instances.pop(hosted_id, None)
+        # Prune this id's lock too: resume retires the old hosted_id permanently (the
+        # resumed agent runs under a fresh id), so the old lock would otherwise strand
+        # in _id_locks. Safe under the held lock, same as forget().
+        self._id_locks.pop(hosted_id, None)
         await self._persist()
         return self._synced(instance)
 

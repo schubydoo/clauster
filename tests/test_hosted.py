@@ -1501,6 +1501,7 @@ async def test_manager_resume_respawns_with_uuid(fake_claustrum):
         assert resumed.claustrum_process_id != old_id  # fresh daemon process
         assert resumed.claude_session_uuid == uuid
         assert mgr.get_instance(old_id) is None  # dead row retired
+        assert old_id not in mgr._id_locks  # resume prunes the retired id's lock
         # The fresh spawn carried --resume <uuid>.
         args = fake.spawned[-1]["args"]
         assert args[args.index("--resume") + 1] == uuid
