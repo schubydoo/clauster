@@ -49,7 +49,7 @@ from .claude_md import (
 from .claustrum_client import ClaustrumError
 from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJob, CloneJobManager
-from .config import ClausterConfig
+from .config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS, ClausterConfig
 from .discovery import (
     discover_projects_cached,
     invalidate_discovery_cache,
@@ -937,7 +937,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return _render(
             request,
             "_project_row.html",
-            {"p": proj, "idx": 0, "pty_supported": sys.platform != "win32"},
+            {
+                "p": proj,
+                "idx": 0,
+                "pty_supported": sys.platform != "win32",
+                # Same canonical label map the dashboard grid loop passes through (#685);
+                # the standalone row render must carry it too so the launch <select>'s
+                # <option> text and the bypass hint render identically here.
+                "permission_labels": PERMISSION_LABELS,
+                "bypass_desktop_hint": BYPASS_DESKTOP_HINT,
+            },
         )
 
     @app.get("/api/projects/{name}/usage")
@@ -2367,6 +2376,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "default_spawn_mode": config.instance_defaults.spawn_mode,
             "default_permission_mode": config.instance_defaults.permission_mode,
             "default_resume_mode": config.claude.launch_mode,
+            # Canonical permission-mode label map (#685): one server-injected source
+            # of truth ({mode: {short, long, effect}}) drives the launch <select>, the
+            # JS permLabel()/permissionEffect() helpers, and the config editor.
+            "permission_labels": PERMISSION_LABELS,
+            "bypass_desktop_hint": BYPASS_DESKTOP_HINT,
             # pty (true-resume) is POSIX-only; hide the option on Windows hosts.
             "pty_supported": sys.platform != "win32",
             # Usage badge: mode ("cost"|"tokens"|"off"), the currency code + its
