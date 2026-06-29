@@ -6,6 +6,11 @@
   <title>Clauster</title>
   <!-- Set theme before first paint to avoid a flash. Defaults to dark. -->
   <script nonce="{{ csp_nonce }}">
+    // Expose the per-request CSP nonce so the vendored xterm.js can stamp it on
+    // the <style> elements its DOM renderer injects at runtime — without it the
+    // strict nonce-gated style-src (#635) blocks them and the live terminal
+    // renders mangled. Set before xterm.js (deferred) executes.
+    window.__clausterCspNonce = "{{ csp_nonce }}";
     (function () {
       var t = localStorage.getItem("clauster-theme") || "dark";
       document.documentElement.setAttribute("data-bs-theme", t);
