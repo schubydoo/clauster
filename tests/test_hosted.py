@@ -1162,10 +1162,12 @@ async def test_manager_forget_drops_stopped_session(fake_claustrum):
         await mgr.stop(pid)
         assert mgr.get_instance(pid) is not None  # a stopped, resumable row
 
+        assert pid in mgr._id_locks  # the lifecycle ops minted a per-id lock
         await mgr.forget(pid)
         assert mgr.get_instance(pid) is None
         assert mgr.session(pid) is None
         assert mgr.list_instances() == []
+        assert pid not in mgr._id_locks  # forget prunes it so _id_locks stays bounded
 
 
 async def test_manager_forget_with_no_session_handle(fake_claustrum):

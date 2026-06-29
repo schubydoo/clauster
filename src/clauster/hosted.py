@@ -915,6 +915,12 @@ class HostedManager:
                 await session.detach()
             self._sessions.pop(hosted_id, None)
             self._instances.pop(hosted_id, None)
+            # Prune the per-id lock so _id_locks doesn't grow unbounded — it's keyed by
+            # the fresh per-session UUID, not by a finite stable set like the runner's
+            # spawn locks. Safe under the held lock: a coroutine already waiting on this
+            # lock object still acquires it, finds no instance, and raises; a later
+            # arrival mints a fresh lock and hits the same not-found result.
+            self._id_locks.pop(hosted_id, None)
             await self._persist()
 
     @staticmethod
