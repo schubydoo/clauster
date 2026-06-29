@@ -1684,9 +1684,16 @@
         await this.trust(name);            // trusts; sets the inline error on failure
         this.confirmTrust[name] = false;   // close the gate either way
         if (this.trustState[name] === "trusted") {
-          // now-trusted → continue the launch. start() may re-open the bypass gate (still
-          // inside the popover); only close the popover once nothing further is pending.
-          await this.start(name);
+          // now-trusted → continue the launch. Dispatch start() but DON'T await the spawn
+          // round-trip: blocking the close behind it left a dead popover lingering for the
+          // whole spawn (#748). start()'s gate decision (trust/bypass) is synchronous and
+          // runs before its first await, so by the time control returns the flags are set;
+          // if start() re-opened the bypass gate (still inside the popover) we keep it open,
+          // otherwise we close optimistically. _spawn() surfaces any failure on its own —
+          // inline error + toast — so an un-awaited start still reports errors (mirrors
+          // confirmBypassStart). Trust is already confirmed above, so closing early can't
+          // let an untrusted start through.
+          this.start(name);
           if (!this.confirmTrust[name] && !this.confirmBypass[name]) this._closeLaunchPop(name);
         } else {
           // Trust failed: close the popover so the error alert (errorOf(), rendered OUTSIDE
