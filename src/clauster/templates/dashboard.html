@@ -86,7 +86,16 @@
     /* "Run Claude here" launch popover — drops below-right of the row's Run button. */
     .launch-anchor { position: relative; display: inline-block; }
     .launch-pop { position: absolute; z-index: 40; right: 0; left: auto; margin-top: .35rem;
-                  width: min(340px, 86vw); box-shadow: 0 .5rem 1.25rem rgba(0,0,0,.3); }
+                  width: min(360px, 92vw); box-shadow: 0 .5rem 1.25rem rgba(0,0,0,.3); }
+    /* In-popover trust-on-start gate (#747): the nested .alert sat inside the card's
+       p-2, doubling padding and squeezing body text to 1–2 words per line on a security-
+       critical surface. Give it comfortable, single-source padding + readable leading, and
+       let the explanation breathe before the action row. Scoped to the .trust-gate
+       semantic class (a durable style hook, not the data-test attribute) so it never
+       reshapes the sibling bypass gate. */
+    .launch-pop .trust-gate { padding: .75rem .85rem; }
+    .launch-pop .trust-gate p { line-height: 1.5; }
+    .launch-pop .trust-gate .btn-list { margin-top: .25rem; }
     /* The project list is a card; let the popover overflow its bounds instead of clipping. */
     #project-grid { overflow: visible; }
     .launch-opt { display: flex; align-items: flex-start; gap: .15rem; width: 100%; margin: 0;
