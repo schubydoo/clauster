@@ -416,6 +416,15 @@ def test_route_read_non_utf8_file_is_422(write_config, tmp_path, projects_root) 
         assert c.get("/api/config-write/mcp?project=alpha").status_code == 422
 
 
+def test_route_read_user_corrupt_file_is_422(write_config, tmp_path) -> None:
+    # User-scope complement of the project read guard (P1): a corrupt ~/.claude.json must
+    # surface as a clean 422 from the GET route, never an unhandled 500. read_user_servers
+    # -> _load_json_obj raises InvalidCandidateError; the route maps it through the helper.
+    (Path(os.environ["HOME"]) / ".claude.json").write_text("{not json", encoding="utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get("/api/config-write/mcp?scope=user").status_code == 422
+
+
 def test_route_write_over_non_utf8_file_is_422(write_config, tmp_path, projects_root) -> None:
     # The write-side complement: a non-UTF-8 existing file is read under the lock in
     # _mutate; the UnicodeDecodeError must surface as a clean 422, never escape the

@@ -1398,9 +1398,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope == "user":
-            servers = await asyncio.to_thread(
-                config_write_mcp.read_user_servers, runner.claude_json
-            )
+            try:
+                servers = await asyncio.to_thread(
+                    config_write_mcp.read_user_servers, runner.claude_json
+                )
+            except config_write.ConfigWriteError as exc:
+                # A corrupt/non-object/non-UTF-8 ~/.claude.json raises InvalidCandidateError
+                # from _load_json_obj — same as the project read below; map it to a clean 422
+                # rather than letting it escape as an unhandled 500.
+                raise _map_config_write_error(exc) from exc
             return {"scope": "user", "servers": servers, "hash": None}
         project_dir = _resolve_cw_project(project)
         try:
