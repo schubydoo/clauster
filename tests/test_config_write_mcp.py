@@ -392,3 +392,140 @@ def test_route_user_write_round_trip(write_config, tmp_path) -> None:
     isolated = Path(os.environ["HOME"]) / ".claude.json"
     out = json.loads(isolated.read_text(encoding="utf-8"))
     assert out["mcpServers"]["u"]["command"] == "node"
+
+
+# --- regression: the route-level error guards (P1/P2 from review) -------------------
+
+
+def test_route_read_corrupt_file_is_422(write_config, tmp_path, projects_root) -> None:
+    # A hand-edited / partially-written .mcp.json that is not valid JSON must surface
+    # as a clean 422 from the GET route, never an unhandled 500 (P1). read_project_servers
+    # -> _load_json_obj raises InvalidCandidateError; the route maps it through the helper.
+    (projects_root / "alpha" / ".mcp.json").write_text("{not json", encoding="utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.get("/api/config-write/mcp?project=alpha")
+        assert resp.status_code == 422
+
+
+def test_route_read_non_object_file_is_422(write_config, tmp_path, projects_root) -> None:
+    # Valid JSON whose root is not an object (e.g. an array) is likewise a 422 on read,
+    # not a 500 — we refuse to interpret a file we could not parse as a server map.
+    (projects_root / "alpha" / ".mcp.json").write_text("[1, 2, 3]", encoding="utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get("/api/config-write/mcp?project=alpha").status_code == 422
+
+
+def test_route_write_missing_project_dir_is_404(write_config, tmp_path, projects_root) -> None:
+    # A contained-but-absent project dir on the first-write path used to reach
+    # mkstemp(dir=path.parent) and raise FileNotFoundError outside the ConfigWriteError
+    # guard -> unhandled 500 (P2). It must now be a clean 404, and nothing is written.
+    absent = projects_root / "noexist"
+    assert not absent.exists()
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "project",
+                "project": "noexist",
+                "confirm": "noexist",
+                "servers": {"s": {"command": "x"}},
+            },
+        )
+        assert resp.status_code == 404
+    assert not (absent / ".mcp.json").exists()  # nothing written
+
+
+def test_route_confirm_runs_before_validate(write_config, tmp_path, projects_root) -> None:
+    # P2 ordering: the type-the-name confirm is the FIRST semantic gate after capability.
+    # A request that BOTH omits a valid confirm AND carries a malformed `servers` must
+    # fail at the confirm gate (400), never reach the structural validator (422).
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "WRONG",
+                "servers": "not-a-dict",  # malformed shape (would 422 if reached)
+            },
+        )
+        assert resp.status_code == 400
+    # User scope: same ordering — bad confirm short-circuits before the shape check.
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={"scope": "user", "confirm": "WRONG", "servers": 123},
+        )
+        assert resp.status_code == 400
+
+
+def test_route_missing_servers_is_422_after_valid_confirm(
+    write_config, tmp_path, projects_root
+) -> None:
+    # With a VALID confirm token, a request omitting `servers` reaches the shape check
+    # and is a 422 — confirms the reorder did not drop the structural guard.
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={"scope": "project", "project": "alpha", "confirm": "alpha"},
+        )
+        assert resp.status_code == 422
+
+
+def test_route_read_empty_project_is_422(write_config, tmp_path, projects_root) -> None:
+    # GET with no/empty project name fails the project-string guard (422) before any I/O.
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get("/api/config-write/mcp?project=").status_code == 422
+
+
+def test_route_user_missing_servers_is_422_after_valid_confirm(write_config, tmp_path) -> None:
+    # User scope, valid confirm, no `servers` -> the user-branch shape check 422s.
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={"scope": "user", "confirm": cw.USER_SCOPE_TOKEN},
+        )
+        assert resp.status_code == 422
+
+
+def test_route_user_invalid_entry_is_422(write_config, tmp_path) -> None:
+    # User scope, valid confirm + dict `servers` but a malformed entry: the structural
+    # validator raises InvalidCandidateError, mapped through _map_config_write_error -> 422.
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "user",
+                "confirm": cw.USER_SCOPE_TOKEN,
+                "servers": {"s": {"command": "x", "bogus": 1}},  # unknown key
+            },
+        )
+        assert resp.status_code == 422
+
+
+def test_route_project_non_string_hash_is_422(write_config, tmp_path, projects_root) -> None:
+    # A non-string `hash` (when present) is a 422 before any write.
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "servers": {"s": {"command": "x"}},
+                "hash": 123,  # not a string
+            },
+        )
+        assert resp.status_code == 422
+    assert not (projects_root / "alpha" / ".mcp.json").exists()
+
+
+def test_route_project_missing_name_is_400(write_config, tmp_path, projects_root) -> None:
+    # Project scope with no `project` name: confirm runs first and a project-scope write
+    # with no resolvable token fails closed at 400 (never reaches resolve/validate).
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={"scope": "project", "confirm": "", "servers": {"s": {"command": "x"}}},
+        )
+        assert resp.status_code == 400

@@ -1359,25 +1359,34 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         config_write.require_capability(config, "project")
         return config_write.capability_status(config)
 
-    def _resolve_cw_project(name: object) -> Path:
+    def _resolve_cw_project(name: object, *, require_exists: bool = False) -> Path:
         # Project-scope config-write: validate-before-I/O path containment. A bad
         # name or an escaping path is a 400 (PathEscapeError), never a write. The
         # name is also the type-the-name confirm token (server-re-derived below).
+        # ``require_exists`` is set on the WRITE path only: a contained-but-absent
+        # project dir would make the atomic writer's ``mkstemp(dir=path.parent)``
+        # raise ``FileNotFoundError`` (an OSError outside the ConfigWriteError guard)
+        # → an unhandled 500. Surface it as a clean 404 instead. The READ path leaves
+        # it False so a missing dir still reads as an empty server map (harmless).
         if not isinstance(name, str) or not name:
             raise HTTPException(status_code=422, detail="body must include a 'project' string")
         try:
-            return config_write.resolve_project_dir(config.projects_root, name)
+            project_dir = config_write.resolve_project_dir(config.projects_root, name)
         except config_write.PathEscapeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if require_exists and not project_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"project directory not found: {name!r}")
+        return project_dir
 
     def _map_config_write_error(exc: config_write.ConfigWriteError) -> HTTPException:
         # Map the Foundation's typed write failures to their fail-closed HTTP codes.
+        # InvalidCandidate ⇒ 422 (bad shape), Stale ⇒ 409 (external edit). Everything
+        # else — including PathEscapeError, which the route catches earlier as a 400
+        # before the writer is even reached — falls through to a 400.
         if isinstance(exc, config_write.InvalidCandidateError):
             return HTTPException(status_code=422, detail=str(exc))
         if isinstance(exc, config_write.StaleConfigWriteError):
             return HTTPException(status_code=409, detail=str(exc))
-        if isinstance(exc, config_write.PathEscapeError):
-            return HTTPException(status_code=400, detail=str(exc))
         return HTTPException(status_code=400, detail=str(exc))
 
     @app.get("/api/config-write/mcp")
@@ -1394,29 +1403,39 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
             return {"scope": "user", "servers": servers, "hash": None}
         project_dir = _resolve_cw_project(project)
-        servers, file_hash = await asyncio.to_thread(
-            config_write_mcp.read_project_servers, project_dir
-        )
+        try:
+            servers, file_hash = await asyncio.to_thread(
+                config_write_mcp.read_project_servers, project_dir
+            )
+        except config_write.ConfigWriteError as exc:
+            # A corrupt/non-object on-disk .mcp.json raises InvalidCandidateError from
+            # _load_json_obj. Map it through the same helper as the PUT route so a
+            # hand-edited or partially-written file is reported as a clean 422, never
+            # an unhandled 500.
+            raise _map_config_write_error(exc) from exc
         return {"scope": "project", "project": project, "servers": servers, "hash": file_hash}
 
     @app.put("/api/config-write/mcp")
     async def api_config_write_mcp_write(body: dict) -> dict:
         # Foundation pipeline IN ORDER: capability/scope 404 gate → (auth is global
-        # middleware) → type-the-name confirm (400) → validate-never-execute (422) →
-        # path containment (project) / locked subtree writer (user) → stale-hash (409,
-        # project) → merge_redacted keep-stored. Any step aborts BEFORE the write.
+        # middleware) → type-the-name confirm (400, the FIRST semantic gate) →
+        # validate request shape / validate-never-execute (422) → path containment +
+        # existence (project: 400 escape / 404 missing dir) / locked subtree writer
+        # (user) → stale-hash (409, project) → merge_redacted keep-stored. Any step
+        # aborts BEFORE the write.
         scope = body.get("scope", "project")
         if scope not in ("project", "user"):
             raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
         config_write.require_capability(config, scope)
 
-        servers = body.get("servers")
-        if not isinstance(servers, dict):
-            raise HTTPException(status_code=422, detail="body must include a 'servers' object")
-
         if scope == "user":
-            # Confirm BEFORE any validation or I/O (USER SCOPE literal, server-derived).
+            # Confirm is the FIRST semantic gate after capability (USER SCOPE literal,
+            # server-derived) — before any structural validation or I/O, so a CSRF /
+            # accidental-click write can never reach the validator.
             config_write.require_confirm("user", None, body.get("confirm"))
+            servers = body.get("servers")
+            if not isinstance(servers, dict):
+                raise HTTPException(status_code=422, detail="body must include a 'servers' object")
             try:
                 await asyncio.to_thread(
                     config_write_mcp.write_user_servers, runner.claude_json, servers
@@ -1425,10 +1444,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 raise _map_config_write_error(exc) from exc
             return {"scope": "user", "ok": True}
 
-        # project scope: resolve+contain the project, then confirm against its name.
+        # project scope: confirm against the project name FIRST (the server-derived
+        # token is the literal name; it needs no disk resolution), then validate the
+        # request shape, then resolve+contain the project dir.
         project = body.get("project")
-        project_dir = _resolve_cw_project(project)
         config_write.require_confirm("project", project, body.get("confirm"))
+        servers = body.get("servers")
+        if not isinstance(servers, dict):
+            raise HTTPException(status_code=422, detail="body must include a 'servers' object")
+        project_dir = _resolve_cw_project(project, require_exists=True)
         expected = body.get("hash")
         if expected is not None and not isinstance(expected, str):
             raise HTTPException(status_code=422, detail="'hash' must be a string when present")

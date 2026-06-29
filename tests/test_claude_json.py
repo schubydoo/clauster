@@ -246,3 +246,25 @@ def test_locked_replace_backup_failure_is_warned_not_fatal(
         cj.locked_replace_json_file(f, lambda raw: {"new": 2}, render=json.dumps)
     assert json.loads(f.read_text(encoding="utf-8")) == {"new": 2}  # write still landed
     assert any("backup" in r.message for r in caplog.records)
+
+
+def test_locked_replace_backup_taken_once(tmp_path: Path) -> None:
+    # The .bak is written once (before the first modification) and a later write does NOT
+    # clobber it — the original pre-edit content is preserved across repeated writes.
+    f = tmp_path / ".mcp.json"
+    f.write_text('{"v": 1}', encoding="utf-8")
+    cj.locked_replace_json_file(f, lambda raw: {"v": 2}, render=json.dumps)
+    cj.locked_replace_json_file(f, lambda raw: {"v": 3}, render=json.dumps)
+    assert json.loads(f.read_text(encoding="utf-8")) == {"v": 3}
+    # .bak still holds the ORIGINAL content, not the intermediate {"v": 2}.
+    assert f.with_suffix(f.suffix + ".bak").read_text(encoding="utf-8") == '{"v": 1}'
+
+
+def test_locked_replace_non_posix_skips_chmod(tmp_path: Path, monkeypatch) -> None:
+    # On Windows file permissions are ACL-based, so the POSIX mode-preservation branch is
+    # skipped; the atomic write still completes. Patch the _is_posix seam (not os.name,
+    # which would break tempfile), mirroring test_update_claude_json_non_posix_skips_chmod.
+    monkeypatch.setattr(cj, "_is_posix", lambda: False)
+    f = tmp_path / ".mcp.json"
+    cj.locked_replace_json_file(f, lambda raw: {"k": 1}, render=json.dumps)
+    assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}
