@@ -153,13 +153,16 @@ def _read_permissions(path: Path) -> tuple[dict[str, Any], str]:
 
 
 def _write_permissions(path: Path, incoming: dict[str, Any], expected_hash: str | None) -> None:
-    """Validate + write the ``permissions`` subtree of ``path``, fail-closed.
+    """Write the ``permissions`` subtree of ``path`` under the lock, fail-closed.
 
-    Pipeline (each step aborts before the write): validate the candidate structurally
-    (→ 422) → stale-hash external-edit guard over the current bytes read under the lock
-    (→ 409) → replace **only** the ``permissions`` subtree, preserving every sibling
-    key → atomic replace of the rendered file. The caller must have already run the
-    capability gate, the type-the-name confirm, and (project scope) path containment.
+    Pipeline (each step aborts before the write): stale-hash external-edit guard over
+    the current bytes read under the lock (→ 409) → replace **only** the ``permissions``
+    subtree, preserving every sibling key → atomic replace of the rendered file. The
+    caller must have already run the capability gate, the type-the-name confirm,
+    (project scope) path containment, **and the structural validation (→ 422)** — this
+    helper trusts an already-validated ``incoming`` (the public ``write_*`` entry points
+    validate before ``mkdir`` so a bad shape never creates a directory; mirrors the
+    single-validation shape of :func:`config_write_mcp.write_project_servers`).
 
     The whole read-merge-write runs inside the shared
     :func:`~clauster.claude_json.locked_replace_json_file` transaction (``flock`` +
@@ -168,8 +171,6 @@ def _write_permissions(path: Path, incoming: dict[str, Any], expected_hash: str 
 
     No rule string is ever parsed or executed; only the block's shape is checked.
     """
-    # Validate before taking the lock — a bad shape must 422 with no I/O at all.
-    cw.validate_candidate(incoming, validate_permissions)
 
     def _mutate(current_bytes: bytes) -> dict[str, Any]:
         # Stale-hash guard against the bytes read under the lock (raises → 409). An

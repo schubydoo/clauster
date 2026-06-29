@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from clauster import config_write as cw
 from clauster import config_write_permissions as perms
 from clauster.app import create_app
-from clauster.config import load_config
+from clauster.config import PERMISSION_LABELS, load_config
 
 # --- structural validator: accept the valid shapes ---------------------------------
 
@@ -86,8 +86,11 @@ def test_validate_rejects_bypass_default_mode() -> None:
 
 def test_bypass_excluded_from_recognized_modes() -> None:
     assert "bypassPermissions" not in perms.RECOGNIZED_MODES
-    # The recognized set is exactly the canonical labels minus the footgun mode.
-    assert perms.RECOGNIZED_MODES == {"default", "plan", "acceptEdits", "auto", "dontAsk"}
+    # Assert the RELATIONSHIP to the source of truth, not a frozen copy: the recognized
+    # set is exactly the canonical permission-label vocabulary minus the footgun mode,
+    # so adding a label to PERMISSION_LABELS tracks here instead of failing on a stale
+    # literal set (same brittleness class flagged on #731).
+    assert perms.RECOGNIZED_MODES == frozenset(PERMISSION_LABELS) - {"bypassPermissions"}
 
 
 def test_bypass_as_rule_string_is_inert_data(tmp_path: Path) -> None:
@@ -250,6 +253,24 @@ def test_route_404_when_disabled(write_config, tmp_path) -> None:
 
 def test_route_user_scope_404_when_user_off(write_config, tmp_path) -> None:
     with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
+        assert c.get(f"{_URL}?scope=user").status_code == 404
+        assert (
+            c.put(
+                _URL,
+                json={"scope": "user", "confirm": cw.USER_SCOPE_TOKEN, "permissions": {}},
+            ).status_code
+            == 404
+        )
+
+
+def test_route_user_scope_404_when_runner_missing(write_config, tmp_path) -> None:
+    # Fail-closed guard: user scope is enabled but no runner is wired (app.state.runner
+    # is None). The user-scope settings path can't be resolved, so GET/PUT must return
+    # the 404-invisible shape — NEVER an unhandled 500 from runner.claude_json.
+    cfg = write_config(f"claude:\n  binary: {FAKE_CLAUDE}\nstate_dir: {tmp_path}/.s\n{_ON}")
+    app = create_app(load_config(cfg))
+    with TestClient(app) as c:
+        app.state.runner = None  # simulate an app started without a runner
         assert c.get(f"{_URL}?scope=user").status_code == 404
         assert (
             c.put(

@@ -1475,7 +1475,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # User-scope permission rules live in ~/.claude/settings.json (the settings
         # file), NOT ~/.claude.json. Derive it the same way the runner does internally
         # (beside the claude.json whose trusted-dirs we honor) so the two never diverge.
-        return runner.claude_json.parent / ".claude" / "settings.json"
+        #
+        # The user-scope surface needs a runner to resolve that path. If none is wired
+        # (create_app's runner is None — test harnesses / CLI tooling that skip the
+        # SessionRunner coercion), fail CLOSED with the same 404-invisible shape
+        # require_capability uses for a disabled user scope, rather than letting
+        # runner.claude_json raise an AttributeError that escapes as an unhandled 500.
+        active_runner = app.state.runner
+        if active_runner is None:
+            raise HTTPException(status_code=404, detail="config-write user scope is unavailable")
+        return active_runner.claude_json.parent / ".claude" / "settings.json"
 
     @app.get("/api/config-write/permissions")
     async def api_config_write_permissions_read(scope: str = "project", project: str = "") -> dict:
