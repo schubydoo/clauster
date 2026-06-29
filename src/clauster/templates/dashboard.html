@@ -109,7 +109,12 @@
     .zone-active .sess-row.sess-dead { border-left-color: var(--tblr-secondary); }
 
     /* Config editor: human-layer rows with clear section division. */
-    .cfg-section { margin-bottom: 1.25rem; }
+    /* #746: scroll-margin-top keeps scrollToSection()'s block:"start" alignment from
+       parking the heading UNDER the sticky .cfg-nav. scrollToSection() sets the exact
+       value at scroll time from the nav's measured height (it has a search row + the
+       jump-button row, which wraps on narrow viewports). This static value is the
+       no-JS fallback, sized to cover both un-wrapped rows + a gap. */
+    .cfg-section { margin-bottom: 1.25rem; scroll-margin-top: 5.5rem; }
     /* Section headers are plain dividers (NOT sticky) — only the nav bar floats, so the
        two sticky layers can't overlap at top:0. */
     .cfg-section-head { margin: 0 0 .25rem; padding: .4rem 0;

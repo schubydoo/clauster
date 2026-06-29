@@ -727,7 +727,14 @@
       },
       scrollToSection(section) {
         const el = document.getElementById("cfg-sec-" + section);
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (!el) return;
+        // The sticky .cfg-nav has a variable height — a search-input row above the
+        // jump-button row, which itself wraps on narrow viewports — so derive the
+        // scroll offset from its measured height. A fixed scroll-margin-top can't
+        // cover both rows (and wrapping) and would park the heading under the nav.
+        const nav = document.querySelector(".cfg-nav");
+        if (nav) el.style.scrollMarginTop = nav.offsetHeight + 8 + "px";
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
       },
       // Config changes apply only after a Clauster restart. The in-app restart re-execs in
       // place (os.execv, same PID): runner.shutdown() leaves bridges running and
