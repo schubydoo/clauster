@@ -133,8 +133,10 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   bridge isn't stuck on the one-time interactive "Enable Remote Control?" prompt. On
   by default (`claude.auto_enable_remote_control`); set false to manage it yourself.
 
+### Opt-in extras
+
 <details>
-<summary>Opt-in extras</summary>
+<summary>Show all opt-in extras</summary>
 
 - **Conversation recap on restart (opt-in)** — `claude remote-control` restarts into
   a fresh, empty context, so a restarted bridge "forgets" the prior conversation.
