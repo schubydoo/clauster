@@ -282,6 +282,7 @@ def test_run_keeper_swallows_oserror_closing_master_on_exit(
 
     def _close(fd):  # raise only for the captured master fd's teardown close
         if master_box and fd == master_box[0]:
+            master_box.clear()  # one-shot: don't re-fire if the fd number is reused before restore
             real_close(fd)  # actually close it so the fd does not leak in this process
             raise OSError("master already closed")
         return real_close(fd)
