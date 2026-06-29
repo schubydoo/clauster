@@ -210,8 +210,9 @@ on Clauster itself, use the dev quick-start below.
   `pip uninstall clauster`, matching how you installed it.
 - Scoop: run `scoop uninstall clauster`.
 - Docker: stop and remove the container with `docker rm -f clauster`, then remove
-  the image with `docker rmi ghcr.io/schubydoo/clauster:latest` if you no longer
-  need it. Docker Compose users: run `docker compose down` from the directory
+  the image with `docker rmi ghcr.io/schubydoo/clauster:latest` (substitute the
+  pinned tag you pulled, e.g. `:0.5.0`, if you used a specific release) if you no
+  longer need it. Docker Compose users: run `docker compose down` from the directory
   containing `compose.yaml` (add `-v` to also delete named volumes).
 - Full purge: stop Clauster first, then remove your `state_dir` if you want local
   state/config gone too. See [Privacy & data at rest](docs/privacy.md#how-to-purge)
