@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -131,8 +133,10 @@ def test_validate_never_executes_the_command(tmp_path: Path) -> None:
     which would be the browser→host RCE the gate exists to prevent.
     """
     marker = tmp_path / "PWNED"
-    # A command that, if ever run through a shell, would create the marker file.
-    pwn = f"touch {marker}"
+    # A command that, if ever run through a shell, would create the marker file. The path
+    # is shell-quoted so the proof stays valid even on a tmp path with spaces/metacharacters
+    # (an unquoted path would make the sentinel a no-op and the assertions below vacuous).
+    pwn = f"touch {shlex.quote(str(marker))}"
     candidate = {"PreToolUse": [{"hooks": [{"type": "command", "command": pwn}]}]}
 
     # 1) pure validation does not execute it
@@ -143,13 +147,19 @@ def test_validate_never_executes_the_command(tmp_path: Path) -> None:
     hooks.write_project_hooks(tmp_path, candidate, expected_hash=cw.hash_bytes(b""))
     assert not marker.exists()
 
-    # 3) the command landed verbatim as inert data, and is only ever runnable by a real
-    #    shell — prove the sentinel script itself is sound (it WOULD create the marker)
-    #    so the assertion above is meaningful, not vacuous.
+    # 3) the command landed verbatim as inert data — prove the sentinel itself is sound
+    #    (a real interpreter CAN create the marker) so the assertions above are meaningful,
+    #    not vacuous. We spawn the marker via the Python interpreter rather than a shell so
+    #    the proof is portable (Windows has no `sh`); it asserts nothing about HOW the
+    #    stored `command` would run — only that a marker at this path is genuinely creatable.
     stored = json.loads(hooks.project_settings_path(tmp_path).read_text(encoding="utf-8"))
     assert stored["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == pwn
-    subprocess.run(["sh", "-c", pwn], check=True)  # noqa: S603,S607 - prove the marker CAN be made
-    assert marker.exists()  # the command is real; the validator simply never ran it
+    make_marker = "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()"
+    subprocess.run(  # noqa: S603 - prove the marker CAN be made (portable, no shell)
+        [sys.executable, "-c", make_marker, str(marker)],
+        check=True,
+    )
+    assert marker.exists()  # the marker is genuinely creatable; the validator never ran it
 
 
 # --- project read/write round-trip + stale-hash ------------------------------------

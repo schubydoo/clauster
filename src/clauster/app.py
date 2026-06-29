@@ -1609,12 +1609,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.put("/api/config-write/hooks")
     async def api_config_write_hooks_write(body: dict) -> dict:
-        # Foundation pipeline IN ORDER, identical to the permissions write route:
+        # Foundation pipeline IN ORDER, identical to the permissions/MCP write routes:
         # capability/scope 404 gate → (auth is global middleware) → type-the-name confirm
-        # (400, the FIRST semantic gate) → validate request shape / VALIDATE-NEVER-EXECUTE
+        # (400, the FIRST semantic gate) → request-shape lite-check that 'hooks' is a dict
         # (422) → path containment + existence (project: 400 escape / 404 missing dir) →
-        # stale-hash (409) → atomic locked write of ONLY the hooks subtree (siblings
-        # preserved). Any step aborts BEFORE the write.
+        # full VALIDATE-NEVER-EXECUTE structural validation (422 bad shape, runs inside
+        # write_project_hooks/write_user_hooks) → stale-hash (409) → atomic locked write of
+        # ONLY the hooks subtree (siblings preserved). The deep structural validate fires
+        # AFTER path containment, so a request that BOTH escapes the project root AND carries
+        # a malformed hooks block is rejected as a 400 escape, not a 422 shape error. Any step
+        # aborts BEFORE the write. (Validation is structure-only either way — see SECURITY.)
         #
         # SECURITY: this is the code-executing surface — a hook is a shell command claude
         # runs on an event. The structural validator NEVER resolves, spawns, runs, or
