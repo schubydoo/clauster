@@ -109,7 +109,12 @@
     .zone-active .sess-row.sess-dead { border-left-color: var(--tblr-secondary); }
 
     /* Config editor: human-layer rows with clear section division. */
-    .cfg-section { margin-bottom: 1.25rem; }
+    /* #746: scroll-margin-top keeps scrollToSection()'s block:"start" alignment from
+       parking the heading UNDER the sticky .cfg-nav — it offsets the scroll target by
+       the nav's height so the heading lands just below it. CSS-native (no brittle JS
+       measurement); value tracks the single-row nav height (~btn-sm + its .65/.55rem
+       padding + 1px border) plus a small gap. */
+    .cfg-section { margin-bottom: 1.25rem; scroll-margin-top: 3.25rem; }
     /* Section headers are plain dividers (NOT sticky) — only the nav bar floats, so the
        two sticky layers can't overlap at top:0. */
     .cfg-section-head { margin: 0 0 .25rem; padding: .4rem 0;
