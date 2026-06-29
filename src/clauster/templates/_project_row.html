@@ -205,7 +205,7 @@
                          on <body> and a keyboard/SR user gets no signal a confirm now blocks launch.
                          x-effect re-runs when confirmTrust[name] flips; $nextTick waits for x-show. #}
                       <!-- trust-on-start confirm (bridge / Desktop launch path) -->
-                      <div class="alert alert-warning mt-2 mb-0" data-test="trust-confirm" x-show="confirmTrust['{{ p.name }}']" x-cloak role="group" aria-labelledby="trust-head-{{ p.name }}"
+                      <div class="alert alert-warning mt-2 mb-0 trust-gate" data-test="trust-confirm" x-show="confirmTrust['{{ p.name }}']" x-cloak role="group" aria-labelledby="trust-head-{{ p.name }}"
                            x-effect="if (confirmTrust['{{ p.name }}']) $nextTick(() => $refs.trustCheck && $refs.trustCheck.focus())">
                         <p id="trust-head-{{ p.name }}" class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>Trust the files in <code>{{ p.name }}</code>? Launching a session here
                           lets it run tools and execute any code in <code>CLAUDE.md</code> /
