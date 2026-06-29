@@ -141,6 +141,28 @@ def test_launch_run_keeps_popover_open_for_a_gate(write_config) -> None:
     assert "@launch-pop-close.window" in page
 
 
+def test_confirm_trust_start_closes_popover_optimistically(write_config) -> None:
+    # #748: confirmTrustStart() must dispatch start() WITHOUT awaiting the spawn
+    # round-trip, then close the popover the same turn (unless start() re-opened a
+    # gate) — otherwise the popover lingers open through the whole spawn. _spawn()
+    # surfaces any failure on its own (inline error + toast), so the un-awaited start
+    # still reports errors. Trust is already awaited+confirmed above the dispatch, so
+    # closing early can't let an untrusted start through.
+    page = _client(write_config).get("/").text
+    handler = page[page.find("async confirmTrustStart(name) {") :]
+    handler = handler[: handler.find("cancelTrust(name) {")]
+    # trust() stays awaited (we branch on whether it succeeded).
+    assert "await this.trust(name);" in handler
+    # start() is dispatched, NOT awaited — that was the lingering-popover bug.
+    assert "this.start(name);" in handler
+    assert "await this.start(name);" not in handler
+    # ...then the optimistic close, gated on no pending trust/bypass gate.
+    gated_close = (
+        "if (!this.confirmTrust[name] && !this.confirmBypass[name]) this._closeLaunchPop(name);"
+    )
+    assert gated_close in handler
+
+
 def test_gate_open_moves_focus_into_the_gate(write_config) -> None:
     # When a gate opens the Run button hides, so focus must move into the gate's first
     # control (WCAG 2.4.3 / 4.1.3) rather than orphaning on <body>. Each gate carries an
