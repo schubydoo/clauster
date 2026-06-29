@@ -173,10 +173,10 @@ Use header-only mode only when **all three** hold:
 - the proxy **strips `user_header` from every inbound client request** before
   re-adding its own authenticated value (otherwise a client can forge the user), and
 - `trusted_ips` lists **only the proxy's own peer IP** — never a host an attacker
-  can reach or originate traffic from. `peer_trusted` matches the socket peer
-  against each entry as an IP **or CIDR**, so an over-broad range (e.g. a whole
-  subnet, or `0.0.0.0/0`) admits any peer inside it to authenticate as any user on
-  the unsigned `user_header`. Pin the single proxy IP (or the tightest CIDR that
+  can reach or originate traffic from. Each entry is matched against the socket
+  peer as an IP **or CIDR**, so an over-broad range (e.g. a whole subnet, or
+  `0.0.0.0/0`) admits any peer inside it to authenticate as any user on the
+  unsigned `user_header`. Pin the single proxy IP (or the tightest CIDR that
   covers only it); a `trusted_ips` entry that includes attacker-reachable hosts is
   a full auth bypass, not a hardening knob.
 
