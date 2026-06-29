@@ -834,8 +834,8 @@ def test_trust_on_start_guards(write_config):
 
 
 def test_dashboard_renders_resume_mode_picker(write_config):
-    # Redesign: the Mode picker now lives in the launch popover's "Advanced"
-    # disclosure (Desktop launch). Its JS wiring is platform-independent
+    # Redesign: the Mode picker now lives in the launch popover's "More options"
+    # disclosure (Desktop launch, #686). Its JS wiring is platform-independent
     # (DEFAULT_RESUME_MODE seed + the resume_mode posted in the spawn body); the
     # <select> itself is gated on pty_supported (POSIX only).
     resp = _client(write_config).get("/")
@@ -846,7 +846,7 @@ def test_dashboard_renders_resume_mode_picker(write_config):
     # bridge's recorded mode, not silently post the global default.
     assert "existing.resume_mode" in resp.text
     if sys.platform != "win32":
-        assert "x-model=\"resumeMode['alpha']\"" in resp.text  # popover Advanced picker
+        assert "x-model=\"resumeMode['alpha']\"" in resp.text  # popover More-options picker
         assert "Interactive Session (single-session, true-resume)" in resp.text
         assert "!== 'pty'" in resp.text  # Spawn selector gated off in pty mode
         assert 'id="resume-hint-alpha"' in resp.text  # hint element rendered
