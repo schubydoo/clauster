@@ -322,6 +322,64 @@ def test_await_ready_pty_returns_on_ready_without_url(runner_config, tmp_path) -
     assert info.get("state") == "ready"  # returns promptly on "ready", not only connect_url
 
 
+def test_await_ready_pty_returns_when_keeper_exits_before_ready(runner_config, tmp_path) -> None:
+    # A keeper (and thus bridge) that dies before publishing a connect URL must NOT block
+    # _await_ready_pty until _READY_TIMEOUT — the dead-proc arm returns the last snapshot at
+    # once. Drive a dead _FakeProc with a sidecar still "starting" (no connect_url) and assert
+    # it returns that snapshot promptly, well under the 15s readiness deadline.
+    import time
+
+    runner, _ = _pty_runner(runner_config)
+    sidecar = tmp_path / "sc.json"
+    sidecar.write_text(json.dumps({"state": "starting", "bridge_pid": 11}))
+
+    start = time.monotonic()
+    info = runner._await_ready_pty(sidecar, _FakeProc(alive=False))
+    elapsed = time.monotonic() - start
+
+    assert info.get("state") == "starting"  # last snapshot, not a synthesized ready/error
+    assert info.get("connect_url") is None
+    assert elapsed < 1.0  # returned on the keeper-dead arm, did not block to _READY_TIMEOUT
+
+
+def test_keeper_pid_skips_sidecar_with_mismatched_proc_start(runner_config) -> None:
+    # PID-reuse defense: a sidecar whose bridge_pid matches but whose bridge_proc_start drifts
+    # beyond _PROC_START_TOLERANCE is a stale entry that merely recycled the pid — it must be
+    # rejected so stop()/poll_once never reap an unrelated process tree. With only that sidecar
+    # present, the lookup falls through to None.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 5555,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 100.0,
+                "state": "ready",
+            }
+        )
+    )
+
+    # same pid, but proc-start off by far more than _PROC_START_TOLERANCE (2.0s)
+    assert runner._recover_keeper_pid("alpha", bridge_pid=4242, bridge_proc_start=1000.0) is None
+    # the in-tolerance lookup still resolves the keeper, proving the skip is the proc-start guard
+    assert runner._recover_keeper_pid("alpha", bridge_pid=4242, bridge_proc_start=100.5) == 5555
+
+
+def test_recover_keeper_pid_returns_none_when_keeper_pid_missing(runner_config) -> None:
+    # A matched sidecar (pid + proc-start) that carries no usable keeper_pid yields None rather
+    # than a bogus pid — the runner must never hand stop()/poll_once a non-int to signal.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "beta-1700000000000-0.keeper.json").write_text(
+        json.dumps({"keeper_pid": None, "bridge_pid": 4242, "bridge_proc_start": 100.0})
+    )
+
+    assert runner._recover_keeper_pid("beta", bridge_pid=4242, bridge_proc_start=100.0) is None
+
+
 def _states_until_keeper_ready(tmp_path, monkeypatch, argv) -> list:
     """Run ``run_keeper`` until it publishes "ready", then reap the bridge so it returns.
 
