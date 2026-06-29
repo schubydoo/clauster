@@ -95,9 +95,11 @@
     ready: {{ browser_notify_on_ready | tojson }},
     stop: {{ browser_notify_on_stop | tojson }},
   };
-  // Pre-selected launch mode. Hosted ("browser") is opt-in and fails closed when
-  // claustrum is off, so on a default install we pre-select a working mode (#345).
-  const DEFAULT_LAUNCH_MODE = CLAUSTRUM_ENABLED ? "browser" : "desktop";
+  // Pre-selected launch mode. Always the stable safe default ("desktop" — the
+  // Desktop/bridge launch), never auto-flipped to the experimental hosted
+  // ("browser") channel even when claustrum is enabled (#686). Browser stays
+  // available + experimental-badged in launchModes(), just not the default pick.
+  const DEFAULT_LAUNCH_MODE = "desktop";
 
   // Humanize a token count for the compact badge (1.2M / 3.4k); the exact value
   // lives in the tooltip (usageTitle).
@@ -337,17 +339,20 @@
           { id: "detached", label: "Background", sub: "runs in the background — check back later" },
         ];
         // Hosted ("browser") needs claustrum; offering it on a default install pre-selects
-        // a fail-closed mode (#345). Only surface it — first, and badged experimental —
-        // when the channel is actually enabled.
+        // a fail-closed mode (#345). Surface it — badged experimental — only when the
+        // channel is actually enabled, and APPEND it (#686): the safe Desktop default stays
+        // the first/primary option rather than being displaced by the experimental channel.
         if (CLAUSTRUM_ENABLED) {
-          modes.unshift({ id: "browser", label: "Here in the browser",
-                          sub: "watch it work live, approve tools inline", badge: "experimental" });
+          modes.push({ id: "browser", label: "Here in the browser",
+                       sub: "watch it work live, approve tools inline", badge: "experimental" });
         }
         return modes;
       },
       // Route a launch by chosen mode: browser=hosted, desktop=bridge, detached=background.
+      // Returns false when a confirm gate (trust / bypass) is now pending so the caller keeps
+      // the launch popover OPEN to host it inline (#686); true otherwise (the popover closes).
       async launchRun(name, mode, perm, cloud, prompt) {
-        if (this.launching[name]) return;  // a launch is already in flight — ignore the double-click
+        if (this.launching[name]) return false;  // a launch is already in flight — ignore the double-click
         this.launching[name] = true;
         try {
           if (mode === "browser") { await this._launchHosted(name, perm); }
@@ -355,10 +360,17 @@
           // bridge: route through start() so the trust + bypassPermissions gates still apply.
           // await it (start is async) so launching[name] stays set across the spawn — else
           // the finally clears the guard immediately and a desktop double-click double-spawns.
-          else { if (perm) this.permMode[name] = perm; await this.start(name); }
+          else {
+            if (perm) this.permMode[name] = perm;
+            await this.start(name);
+            // start() opened a confirm gate (trust-on-start or bypass typed-confirm) → keep
+            // the popover open so the gate renders INSIDE it (no below-the-row alert).
+            if (this.confirmTrust[name] || this.confirmBypass[name]) return false;
+          }
         } finally {
           this.launching[name] = false;
         }
+        return true;
       },
       async _launchHosted(name, perm) {
         try {
@@ -1649,19 +1661,32 @@
         }
         if (this.permMode[name] === "bypassPermissions") {
           this.errors[name] = null;
+          this.bypassTyped[name] = "";   // require a fresh, deliberate re-type each time the gate opens
           this.confirmBypass[name] = true;
           return;
         }
         await this._spawn(name);
       },
+      // Close the row's launch popover (#686): the trust/bypass gates now live INSIDE it,
+      // so a resolved gate must dismiss the popover. lopen is row-local Alpine state, so we
+      // signal the row via a window event keyed by project name; the row listens and closes.
+      _closeLaunchPop(name) {
+        window.dispatchEvent(new CustomEvent("launch-pop-close", { detail: { name } }));
+      },
       async confirmTrustStart(name) {
         await this.trust(name);            // trusts; sets the inline error on failure
-        this.confirmTrust[name] = false;   // close the dialog either way
-        if (this.trustState[name] === "trusted") this.start(name);  // now-trusted → spawn
+        this.confirmTrust[name] = false;   // close the gate either way
+        if (this.trustState[name] === "trusted") {
+          // now-trusted → continue the launch. start() may re-open the bypass gate (still
+          // inside the popover); only close the popover once nothing further is pending.
+          await this.start(name);
+          if (!this.confirmTrust[name] && !this.confirmBypass[name]) this._closeLaunchPop(name);
+        }
       },
       cancelTrust(name) {
         this.confirmTrust[name] = false;
         this.trustConfirmed[name] = false;
+        this._closeLaunchPop(name);
       },
       confirmBypassStart(name) {
         if ((this.bypassTyped[name] || "") !== name) {
@@ -1671,10 +1696,12 @@
         this.confirmBypass[name] = false;
         this.bypassTyped[name] = "";
         this._spawn(name);
+        this._closeLaunchPop(name);   // gate resolved → dismiss the popover
       },
       cancelBypass(name) {
         this.confirmBypass[name] = false;
         this.bypassTyped[name] = "";
+        this._closeLaunchPop(name);
       },
       cmdUrl(name) { return ROOT + "/api/projects/" + encodeURIComponent(name) + "/claude-md"; },
       cmdBytes(name) {
