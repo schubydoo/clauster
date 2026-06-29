@@ -97,6 +97,27 @@ def test_trust_and_bypass_gates_fold_inside_the_popover(write_config) -> None:
     assert ":disabled=\"(bypassTyped['alpha'] || '') !== 'alpha'\"" in row
 
 
+def test_inline_action_error_has_a_stable_hook_outside_the_popover(write_config) -> None:
+    # The persistent action-error block (errorOf) renders OUTSIDE the launch popover
+    # (after the popover's end sentinel) and carries a stable `data-test="inline-error"`
+    # hook. This disambiguates it from the two sibling `.alert-danger.mb-0` blocks now in
+    # the row (the in-popover bypass-confirm and the spawn-failure detail) so a browser
+    # E2E targeting a trust-on-start failure can select THIS block, not the first match.
+    row = _client(write_config).get("/api/projects/alpha/row").text
+    pop_close = 'data-test="launch-pop-end"'
+    assert 'data-test="inline-error"' in row
+    assert row.count('data-test="inline-error"') == 1
+    # It lives below the popover, not inside it: the hook appears AFTER the end sentinel.
+    # Guard the ordering check below: str.find returns -1 for a missing needle, so
+    # without this the `> row.find(pop_close)` assertion passes vacuously if the
+    # launch-pop-end sentinel is ever removed/renamed.
+    assert pop_close in row
+    assert row.find('data-test="inline-error"') > row.find(pop_close)
+    # And it is the errorOf() alert (transient action error), x-text-escaped.
+    inline = row.find('data-test="inline-error"')
+    assert "errorOf('alpha')" in row[inline : inline + 200]
+
+
 def test_run_button_yields_to_a_pending_gate(write_config) -> None:
     # While a confirm gate is pending the primary Run action hides so the gate's own
     # confirm button is the single next step; on a clean launch (no gate) launchRun()

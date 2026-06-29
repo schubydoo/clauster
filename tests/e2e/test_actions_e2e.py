@@ -79,9 +79,13 @@ def test_failed_action_surfaces_inline_error(
     _open_desktop_launch(browser, "gamma")
     _trust_and_start(browser, "gamma")
 
-    # The inline error block (errorOf -> the `mb-0` alert-danger, distinct from the
-    # trust/bypass alerts) appears and carries a non-empty message...
-    error_block = '[data-project="gamma"] .alert-danger.mb-0'
+    # The inline error block (errorOf -> the persistent action-error alert, distinct from
+    # the in-popover trust/bypass alerts and the spawn-failure detail, which all also carry
+    # `.alert-danger.mb-0`) appears and carries a non-empty message. Target its stable
+    # `data-test="inline-error"` hook — a bare `.alert-danger.mb-0` matches three blocks in
+    # the row and `is visible` resolves the first (the hidden bypass-confirm), so it would
+    # spuriously time out.
+    error_block = '[data-project="gamma"] [data-test="inline-error"]'
     browser.expect_visible(error_block, timeout_ms=_STATUS_TIMEOUT)
     assert browser.get_text(error_block).strip(), "inline error block rendered empty"
 

@@ -285,8 +285,12 @@
               </template>
             </div>
             {# The trust-on-start + bypassPermissions confirm gates moved INSIDE the launch
-               popover (#686) — they no longer render as separate below-the-row alerts. #}
-            <div class="alert alert-danger mt-2 mb-0" x-show="errorOf('{{ p.name }}')" x-cloak x-text="errorOf('{{ p.name }}')"></div>
+               popover (#686) — they no longer render as separate below-the-row alerts. The
+               `data-test="inline-error"` hook is load-bearing: three `.alert-danger.mb-0`
+               blocks now share this row (the in-popover bypass-confirm, this transient-action
+               error, and the spawn-failure detail below), so a bare `.alert-danger.mb-0`
+               selector is ambiguous — tests must target this stable hook. #}
+            <div class="alert alert-danger mt-2 mb-0" data-test="inline-error" x-show="errorOf('{{ p.name }}')" x-cloak x-text="errorOf('{{ p.name }}')"></div>
 
             <!-- Spawn-failure reason (#313): a bridge that started then CRASHED/ERRORED has its
                  captured stderr tail in `error_detail` (None on success), so detailOf() being
