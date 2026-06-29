@@ -1681,6 +1681,11 @@
           // inside the popover); only close the popover once nothing further is pending.
           await this.start(name);
           if (!this.confirmTrust[name] && !this.confirmBypass[name]) this._closeLaunchPop(name);
+        } else {
+          // Trust failed: close the popover so the error alert (errorOf(), rendered OUTSIDE
+          // the popover) is visible. Leaving the card open would hide the failure reason
+          // behind it, stranding the user at a re-enabled Run button with no feedback (#686).
+          this._closeLaunchPop(name);
         }
       },
       cancelTrust(name) {

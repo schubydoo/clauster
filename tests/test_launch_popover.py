@@ -83,7 +83,10 @@ def test_trust_and_bypass_gates_fold_inside_the_popover(write_config) -> None:
     # of each (the old below-the-row copies are removed).
     row = _client(write_config, _BYPASS_CEILING).get("/api/projects/alpha/row").text
     pop = 'class="card launch-pop"'
-    pop_close = "</div>\n                  </div>"
+    # Semantic end marker (a rendered sentinel element), not template whitespace — so a
+    # reformat / nesting change can't silently turn these structural assertions into
+    # false-positives (the helper would otherwise not find a whitespace-coupled close).
+    pop_close = 'data-test="launch-pop-end"'
     assert _between(row, pop, 'data-test="trust-confirm"', pop_close)
     assert _between(row, pop, 'data-test="bypass-confirm"', pop_close)
     assert row.count('data-test="trust-confirm"') == 1
