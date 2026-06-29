@@ -108,6 +108,10 @@ def test_inline_action_error_has_a_stable_hook_outside_the_popover(write_config)
     assert 'data-test="inline-error"' in row
     assert row.count('data-test="inline-error"') == 1
     # It lives below the popover, not inside it: the hook appears AFTER the end sentinel.
+    # Guard the ordering check below: str.find returns -1 for a missing needle, so
+    # without this the `> row.find(pop_close)` assertion passes vacuously if the
+    # launch-pop-end sentinel is ever removed/renamed.
+    assert pop_close in row
     assert row.find('data-test="inline-error"') > row.find(pop_close)
     # And it is the errorOf() alert (transient action error), x-text-escaped.
     inline = row.find('data-test="inline-error"')
