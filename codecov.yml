@@ -1,9 +1,14 @@
 # Codecov config. Coverage is REPORTED here for visibility (PR comment + trend
-# graphs + per-component breakdown); the REAL gate is the local/CI 96% floor in
-# pyproject [tool.pytest.ini_options] (--cov-fail-under=96, enforced on the Linux
-# cell). Every Codecov status is `informational: true` — it nudges, never blocks
-# (it isn't a required check). Coverage uploads from ONE Linux 3.13 cell (see
-# ci.yml), so flags / carryforward / report-merging aren't needed.
+# graphs + per-component breakdown); the REAL project-total gate is the local/CI
+# 96% floor in pyproject [tool.pytest.ini_options] (--cov-fail-under=96, enforced
+# on the Linux cell). The `project` status mirrors that floor and stays
+# `informational: true` (it nudges, never blocks — pyproject is the source of
+# truth). The `patch` status is the one thing Codecov adds that pytest cannot —
+# per-PR-diff coverage at 80% with `informational: false`: a visible pass/fail
+# traffic light (green >= 80%, red X below) that nudges, never blocks (not a
+# required check). Coverage uploads from ONE
+# Linux 3.13 cell (see ci.yml), so flags / carryforward / report-merging aren't
+# needed.
 #
 # Validate before deploying changes:
 #   curl -X POST --data-binary @codecov.yml https://api.codecov.io/validate
@@ -11,11 +16,14 @@
 codecov:
   # ci.yml uploads coverage even when pytest FAILS (the `!cancelled()` guard), on
   # purpose: a coverage drop should surface exactly when a change breaks something.
-  # So don't gate the Codecov status on CI passing, and don't wait for CI before
-  # reporting — show coverage as soon as it's uploaded.
+  # So don't gate the Codecov status on CI passing — show coverage as soon as it's
+  # uploaded. `wait_for_ci` is intentionally omitted: it only takes effect when
+  # `require_ci_to_pass: true`, which we never set, so listing it would be a no-op.
   require_ci_to_pass: false
   notify:
-    wait_for_ci: false
+    # A single upload cell (ubuntu+3.13 in ci.yml) sends exactly one report. Make
+    # the assumption explicit so a future second uploader is forced to revisit it.
+    after_n_builds: 1
 
 coverage:
   precision: 2
@@ -29,7 +37,19 @@ coverage:
         informational: true # nudge, never block — pyproject is the source of truth
     patch:
       default:
-        informational: true # diff (new-code) coverage, advisory only
+        # Per-diff coverage (new/changed lines only). The project status mirrors
+        # the pytest gate and stays advisory; the patch is what Codecov adds that
+        # pytest --cov-fail-under cannot — visibility on the *new* code a PR adds.
+        # `informational: false` emits a pass/fail traffic light (green >= 80%, red
+        # X below) so a coverage drop is visually loud in the checks list. It is
+        # NOT a required check — the merge button stays green on a red X; docs-only
+        # PRs get no upload and no check at all. Add `codecov/patch` to branch
+        # protection later only if you want to block low-coverage PRs on merge.
+        target: 80% # new/changed lines in the PR should be well covered
+        threshold: 0% # no slack on the diff — if a PR drops new-code coverage
+                      # below 80% it should explain or add tests
+        informational: false # emit pass/fail traffic light; not a required check
+        if_not_found: success # docs-only PRs (no upload) emit success, never block
 
 # Informational setup: the per-line PR annotations are mostly visual clutter; the
 # comment + dashboard carry the signal.
@@ -57,6 +77,7 @@ component_management:
         - src/clauster/procutil.py
         - src/clauster/pointers.py
         - src/clauster/pty_keeper.py
+        - src/clauster/pty_screen.py # #534 — server-side pyte screen for live pty terminal
         - src/clauster/state.py
         - src/clauster/inspector.py
         - src/clauster/supervisor.py
@@ -82,6 +103,7 @@ component_management:
         - src/clauster/claude_md.py
         - src/clauster/logging_config.py
         - src/clauster/webhooks.py
+        - src/clauster/mcp_server.py # #527 — read-only clauster MCP stdio server
     - component_id: provisioning
       name: provisioning
       paths:
@@ -121,6 +143,23 @@ component_management:
         - src/clauster/db/migrations/env.py
         - src/clauster/db/migrations/versions/__init__.py
         - src/clauster/db/migrations/versions/0001_baseline.py
+        - src/clauster/db/migrations/versions/0002_session_events.py # #363 — session lifecycle table
+    - component_id: config_write
+      name: config-write (settings.json / .mcp.json)
+      # The config_write feature cluster (#687 / #690 / #732 / #738) — capability-gated
+      # writes to ~/.claude.json, .mcp.json, and permission rules. Behind its own
+      # fail-closed guard and tests; grouped separately from the read/edit cli_config
+      # component so the breakdown reflects the distinct capability boundary.
+      paths:
+        - src/clauster/config_write.py
+        - src/clauster/config_write_hooks.py
+        - src/clauster/config_write_mcp.py
+        - src/clauster/config_write_permissions.py
+        - src/clauster/claude_json.py
+    # The config_write_* family above mirrors the same pattern as the other
+    # explicit-path components (see persistence/hooks_recap notes) — Codecov's
+    # component matcher doesn't pick up src/clauster/config_write* globs, so list
+    # each module explicitly. Keep this list in sync as config_write grows.
     - component_id: cli_config
       name: cli & config
       paths:
@@ -130,5 +169,6 @@ component_management:
         - src/clauster/config_writer.py
         - src/clauster/models.py
         - src/clauster/claude_cli.py
+        - src/clauster/reconcile.py # #650 — `clauster config reconcile` subcommand
         - src/clauster/__main__.py
         - src/clauster/__init__.py
