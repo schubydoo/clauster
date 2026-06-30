@@ -663,7 +663,7 @@ class UsageConfig(BaseModel):
                 )
                 # Reuse the reconcile registry's transform so the false->off mapping is
                 # defined in exactly one place (clauster.reconcile.show_cost_to_mode).
-                self.mode = show_cost_to_mode(self.show_cost)
+                self.mode = show_cost_to_mode(self.show_cost)  # type: ignore[assignment]
         # A foreign currency with no FX rate paints a foreign symbol on a USD figure.
         if self.mode == "cost" and self.currency != "USD" and self.fx_rate == 1.0:
             _log.warning(
