@@ -17,6 +17,7 @@ import json
 import math
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -182,7 +183,7 @@ class ProjectUsage(_ByModelAggregate):
     by_model: dict[str, TokenTotals] = field(default_factory=dict)
 
 
-def _iter_transcript_lines(path: Path):
+def _iter_transcript_lines(path: Path) -> Iterator[str]:
     """Yield raw text lines from a transcript JSONL, opening with UTF-8 errors='replace'.
 
     Invalid UTF-8 bytes from the external claude bridge are replaced rather than

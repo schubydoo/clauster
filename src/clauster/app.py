@@ -1439,6 +1439,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         Order: capability/scope 404 gate → confirm (400, FIRST semantic gate) →
         payload shape check (422) → path resolve/contain → stale-hash guard (409) →
         atomic write. Any step aborts before the write.
+
+        ``user_fn_has_hash=False`` is only correct for writers that own their own
+        hash/locking mechanism (currently: MCP user scope via ``write_user_servers``).
+        Every other surface should leave it at the default ``True`` so the stale-hash
+        guard is enforced. Any ``"hash"`` key the client sends is intentionally not
+        forwarded when this flag is ``False``.
         """
         scope = body.get("scope", "project")
         if scope not in ("project", "user"):
@@ -1463,6 +1469,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 except config_write.ConfigWriteError as exc:
                     raise _map_config_write_error(exc) from exc
             else:
+                # writer owns its own hash/locking (e.g. MCP); "hash" from body is
+                # intentionally not forwarded — see user_fn_has_hash docstring above.
                 try:
                     await asyncio.to_thread(write_user_fn, user_path, payload)
                 except config_write.ConfigWriteError as exc:
