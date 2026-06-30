@@ -59,10 +59,6 @@
        surface so toasts stay opaque + readable while keeping their type colour. */
     .toast-stack .alert { background-color: color-mix(in srgb, var(--tblr-alert-color) 12%, var(--tblr-bg-surface)); }
     .cmd-text { font-family: var(--tblr-font-monospace); font-size: .82rem; }
-    .card-detail { font-family: var(--tblr-font-monospace); font-size: .72rem; margin: .4rem 0 0;
-                   padding: .4rem .6rem; border-radius: 6px; max-height: 8rem; overflow: auto;
-                   white-space: pre-wrap; overflow-wrap: break-word;
-                   background: var(--tblr-bg-surface-secondary); color: var(--tblr-secondary); }
     .ico { width: 1.05em; height: 1.05em; vertical-align: -.15em; flex: none; stroke-width: 1.5; }
     .project-meta { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem 0; }
     .project-meta > span:not(:first-child)::before { content: "•"; margin: 0 .4rem; font-size: .8em; vertical-align: middle; color: var(--tblr-body-color); }
@@ -190,6 +186,34 @@
 </head>
 <body>
 {% include "_tabler_sprite.html" %}
+
+{# Desktop bridge row header (#782 M-2): the badge + status pill + project name shared by
+   the Active-zone and Recent-zone desktop rows. `default_label` is the fallback text
+   before Alpine hydrates ("Running" for live, "Stopped" for ended). #}
+{% macro desktop_row_head(default_label) %}
+                <span class="badge bg-blue-lt mode-badge me-1">desktop</span>
+                <span class="badge" :class="statusBadgeClass(i.project)">
+                  <span class="status-dot" :class="statusDotClass(i.project)"></span>
+                  <span x-text="statusLabel(i.project)">{{ default_label }}</span>
+                </span>
+                <span class="fw-medium ms-1" x-text="i.project"></span>
+{% endmacro %}
+
+{# Modal scaffold (#782 M-1): the focus-trap / escape / backdrop a11y contract shared by
+   the config-editor and transcript modals. The caller supplies the data-test id, title
+   id, close/trap handler names, and the title content (which may include Alpine bindings). #}
+{% macro modal_shell(data_test, title_id, close_fn, trap_fn, title_content) %}
+    <div class="modal modal-blur d-block modal-backdrop-dim" tabindex="-1" data-test="{{ data_test }}"
+         @keydown.escape.window="{{ close_fn }}()" @keydown.tab="{{ trap_fn }}($event)"
+         @click.self="{{ close_fn }}()">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
+           aria-labelledby="{{ title_id }}">
+        <div class="modal-content" x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())">
+          <div class="modal-header">
+            <h3 class="modal-title" id="{{ title_id }}">{{ title_content | safe }}</h3>
+            <button type="button" class="btn-close" aria-label="Close" @click="{{ close_fn }}()"></button>
+          </div>
+{% endmacro %}
 
 {# Active-session row macros — reused by both the live list and the Recent group so a
    browser/detached row renders identically wherever it appears (live vs ended). The
@@ -525,12 +549,7 @@
           <template x-for="i in activeBridges()" :key="i.project">
             <div class="list-group-item sess-row" :class="bridgeRailClass(i.project)" x-show="activeFilter === 'all' || activeFilter === 'desktop'">
               <div class="d-flex align-items-center flex-wrap gap-1">
-                <span class="badge bg-blue-lt mode-badge me-1">desktop</span>
-                <span class="badge" :class="statusBadgeClass(i.project)">
-                  <span class="status-dot" :class="statusDotClass(i.project)"></span>
-                  <span x-text="statusLabel(i.project)">Running</span>
-                </span>
-                <span class="fw-medium ms-1" x-text="i.project"></span>
+                {{ desktop_row_head("Running") }}
                 <span class="text-secondary small ms-1" x-show="metricsLabel(i.project)" x-cloak
                       :title="metricsTitle(i.project)" x-text="metricsLabel(i.project)"></span>
                 <span class="ms-auto d-flex gap-1">
@@ -724,12 +743,7 @@
                  chips so ended rows always show and match recentCount() (#421). #}
               <div class="list-group-item sess-row" :class="bridgeRailClass(i.project)">
                 <div class="d-flex align-items-center flex-wrap gap-1">
-                  <span class="badge bg-blue-lt mode-badge me-1">desktop</span>
-                  <span class="badge" :class="statusBadgeClass(i.project)">
-                    <span class="status-dot" :class="statusDotClass(i.project)"></span>
-                    <span x-text="statusLabel(i.project)">Stopped</span>
-                  </span>
-                  <span class="fw-medium ms-1" x-text="i.project"></span>
+                  {{ desktop_row_head("Stopped") }}
                   <span class="text-secondary small ms-1" x-show="statusNote(i.project)" x-cloak x-text="statusNote(i.project)"></span>
                   <span class="ms-auto d-flex gap-1">
                     <button type="button" class="btn btn-sm btn-success" @click="resume(i.project)"
@@ -1020,16 +1034,7 @@
 
   <!-- Config editor modal (FE-3) — Tier-A operational settings only. -->
   <template x-if="configEditor.open">
-    <div class="modal modal-blur d-block modal-backdrop-dim" tabindex="-1" data-test="cfg-modal"
-         @keydown.escape.window="closeConfig()" @keydown.tab="trapConfigTab($event)"
-         @click.self="closeConfig()">
-      <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
-           aria-labelledby="cfg-editor-title">
-        <div class="modal-content" x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())">
-          <div class="modal-header">
-            <h3 class="modal-title" id="cfg-editor-title">Configuration</h3>
-            <button type="button" class="btn-close" aria-label="Close" @click="closeConfig()"></button>
-          </div>
+    {{ modal_shell("cfg-modal", "cfg-editor-title", "closeConfig", "trapConfigTab", "Configuration") }}
           <div class="modal-body">
             <p class="cfg-intro text-secondary small mb-2">
               Operational settings only. Authentication, secrets, network bind, and structural
@@ -1165,18 +1170,8 @@
        HTML would be stored XSS). Mirrors the config-editor modal's structure, focus
        trap, and scroll-lock. -->
   <template x-if="transcripts.open">
-    <div class="modal modal-blur d-block modal-backdrop-dim" tabindex="-1" data-test="transcript-modal"
-         @keydown.escape.window="closeTranscripts()" @keydown.tab="trapTranscriptTab($event)"
-         @click.self="closeTranscripts()">
-      <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
-           aria-labelledby="transcript-title">
-        <div class="modal-content" x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())">
-          <div class="modal-header">
-            <h3 class="modal-title" id="transcript-title">
-              Transcripts — <span x-text="transcripts.project"></span>
-            </h3>
-            <button type="button" class="btn-close" aria-label="Close" @click="closeTranscripts()"></button>
-          </div>
+    {{ modal_shell("transcript-modal", "transcript-title", "closeTranscripts", "trapTranscriptTab",
+       'Transcripts — <span x-text="transcripts.project"></span>') }}
           <div class="modal-body">
             <!-- shared loading / error states (mirror the usage + config fetchers) -->
             <div class="text-secondary" x-show="transcripts.loading" x-cloak>Loading…</div>
