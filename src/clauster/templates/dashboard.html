@@ -201,7 +201,9 @@
 
 {# Modal scaffold (#782 M-1): the focus-trap / escape / backdrop a11y contract shared by
    the config-editor and transcript modals. The caller supplies the data-test id, title
-   id, close/trap handler names, and the title content (which may include Alpine bindings). #}
+   id, close/trap handler names, and the title content (which may include Alpine bindings).
+   SECURITY: `title_content` is rendered with `| safe` so Alpine bindings survive; callers
+   MUST NEVER pass user-controlled data — only static developer strings + Alpine directives. #}
 {% macro modal_shell(data_test, title_id, close_fn, trap_fn, title_content) %}
     <div class="modal modal-blur d-block modal-backdrop-dim" tabindex="-1" data-test="{{ data_test }}"
          @keydown.escape.window="{{ close_fn }}()" @keydown.tab="{{ trap_fn }}($event)"

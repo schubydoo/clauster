@@ -86,7 +86,7 @@
   const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
   const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
   const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
-  const JSON_HEADERS = { "Content-Type": "application/json" };
+  const JSON_HEADERS = Object.freeze({ "Content-Type": "application/json" });
   // Browser (Web Notifications) channel (#541): the master switch + the per-event
   // toggles the client honours on a polled bridge status transition. crash/ready/stop
   // are the transitions the client can observe from /api/instances without a server push.
@@ -383,7 +383,7 @@
             this.toast(name + ": running in the browser", "success");
             await this.refresh();
             if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);  // watch it immediately
-          } else { this.toast(this._hostedFailMsgthis._errDetail(res, b), "error"); }
+          } else { this.toast(this._hostedFailMsg(this._errDetail(res, b)), "error"); }
         } catch (e) { this.toast(this._hostedFailMsg(), "error"); }
       },
       // Hosted runs need claustrum; a fail-closed launch otherwise dead-ends with a bare
