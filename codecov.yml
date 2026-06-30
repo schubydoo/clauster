@@ -24,6 +24,7 @@ codecov:
     # A single upload cell (ubuntu+3.13 in ci.yml) sends exactly one report. Make
     # the assumption explicit so a future second uploader is forced to revisit it.
     after_n_builds: 1
+    wait_for_ci: false # default is true — must be explicit to show coverage immediately
 
 coverage:
   precision: 2
