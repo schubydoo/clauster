@@ -182,6 +182,22 @@ class ProjectUsage(_ByModelAggregate):
     by_model: dict[str, TokenTotals] = field(default_factory=dict)
 
 
+def _iter_transcript_lines(path: Path):
+    """Yield raw text lines from a transcript JSONL, opening with UTF-8 errors='replace'.
+
+    Invalid UTF-8 bytes from the external claude bridge are replaced rather than
+    crashing the iterator — a replaced char either parses fine downstream or trips
+    the per-line JSON skip, never aborting the whole read. Raises
+    :class:`FileNotFoundError` on missing or unreadable file.
+    """
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except (FileNotFoundError, OSError) as exc:
+        raise FileNotFoundError(f"transcript not found: {path}") from exc
+    with fh:
+        yield from fh
+
+
 def parse_transcript(path: Path) -> TranscriptUsage:
     """Aggregate token usage from a transcript JSONL, grouped by model.
 
@@ -190,32 +206,22 @@ def parse_transcript(path: Path) -> TranscriptUsage:
     it is streamed line by line (never loaded whole).
     """
     result = TranscriptUsage(path=Path(path))
-    try:
-        # errors="replace": transcripts are written by the external claude bridge
-        # and can carry invalid UTF-8. Without this, a bad byte raises
-        # UnicodeDecodeError mid-iteration (not a JSONDecodeError, so the per-line
-        # guard below misses it), aborting the whole project tally. A replaced
-        # char either parses fine or trips the JSONDecodeError skip — never crashes.
-        fh = open(path, encoding="utf-8", errors="replace")
-    except (FileNotFoundError, OSError) as exc:
-        raise FileNotFoundError(f"transcript not found: {path}") from exc
-    with fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # skip a corrupt line rather than abort the whole tally
-            message = record.get("message")
-            if not isinstance(message, dict):
-                continue
-            usage = message.get("usage")
-            if not isinstance(usage, dict):
-                continue
-            model = message.get("model") or "unknown"
-            result.by_model.setdefault(model, TokenTotals()).add_usage(usage)
+    for line in _iter_transcript_lines(path):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # skip a corrupt line rather than abort the whole tally
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        model = message.get("model") or "unknown"
+        result.by_model.setdefault(model, TokenTotals()).add_usage(usage)
     return result
 
 
@@ -336,18 +342,10 @@ def read_transcript_turns(path: Path) -> list[dict]:
     being pure and blocking, the caller runs it off the event loop.
     """
     turns: list[dict] = []
-    try:
-        # errors="replace": see parse_transcript — transcripts come from the
-        # external claude bridge and can carry invalid UTF-8; a replaced char
-        # either parses or trips the per-line JSON skip, never crashing the page.
-        fh = open(path, encoding="utf-8", errors="replace")
-    except (FileNotFoundError, OSError) as exc:
-        raise FileNotFoundError(f"transcript not found: {path}") from exc
-    with fh:
-        for line in fh:
-            turn = _line_to_turn(line)
-            if turn is not None:
-                turns.append(turn)
+    for line in _iter_transcript_lines(path):
+        turn = _line_to_turn(line)
+        if turn is not None:
+            turns.append(turn)
     return turns
 
 

@@ -30,12 +30,10 @@ secret out and a returned ``"********"`` sentinel keeps the stored value.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from . import config_write as cw
-from .claude_json import locked_replace_json_file
 
 #: The top-level key holding the server map in both ``.mcp.json`` and ``mcpServers``.
 MCP_SERVERS_KEY = "mcpServers"
@@ -139,49 +137,21 @@ def validate_mcp_servers(candidate: Any) -> None:
         _validate_server_entry(name, entry)
 
 
-def _load_json_obj(raw: bytes) -> dict[str, Any]:
-    """Parse ``raw`` bytes as a JSON object, returning ``{}`` for empty/whitespace.
-
-    A non-object or malformed JSON is a structural error (→ caller maps to 422):
-    we will not overwrite a file we could not parse.
-    """
-    try:
-        text = raw.decode("utf-8").strip()
-    except UnicodeDecodeError as exc:
-        # Non-UTF-8 bytes are a structural error too (→ caller maps to 422), not an
-        # unhandled UnicodeDecodeError 500: we will not overwrite a file we can't read.
-        raise cw.InvalidCandidateError(f"existing config is not valid UTF-8: {exc}") from exc
-    if not text:
-        return {}
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise cw.InvalidCandidateError(f"existing config is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise cw.InvalidCandidateError("existing config is not a JSON object")
-    return data
-
-
-def _render_json(data: dict[str, Any]) -> str:
-    """Render ``data`` as pretty JSON with a trailing newline (matches CLI style)."""
-    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-
-
 def read_project_servers(project_dir: Path) -> tuple[dict[str, Any], str]:
     """Return ``(redacted_servers, content_hash)`` for a project's ``.mcp.json``.
 
     The hash is over the *current file bytes* (empty digest when absent) — the caller
-    echoes it back on write so :func:`config_write.guard_unchanged` can reject a stale
-    write (409). Secret-shaped values are masked by the Foundation's structural
-    redaction before they ever leave this function, so the browser never reads a
-    stored secret. A missing file reads as an empty server map.
+    echoes it back on write so the stale-hash guard can reject a stale write (409).
+    Secret-shaped values are masked by the Foundation's structural redaction before
+    they ever leave this function, so the browser never reads a stored secret. A
+    missing file reads as an empty server map.
     """
     path = project_dir / ".mcp.json"
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
         raw = b""
-    data = _load_json_obj(raw)
+    data = cw.load_settings_json_obj(raw)
     servers = data.get(MCP_SERVERS_KEY)
     servers = servers if isinstance(servers, dict) else {}
     return cw.redact_secrets(servers), cw.hash_bytes(raw)
@@ -198,7 +168,7 @@ def read_user_servers(claude_json: Path) -> dict[str, Any]:
         raw = claude_json.read_bytes()
     except FileNotFoundError:
         raw = b""
-    data = _load_json_obj(raw)
+    data = cw.load_settings_json_obj(raw)
     servers = data.get(MCP_SERVERS_KEY)
     servers = servers if isinstance(servers, dict) else {}
     return cw.redact_secrets(servers)
@@ -215,37 +185,20 @@ def write_project_servers(
     secret → atomic replace of the rendered file. The caller must have already run the
     capability gate, the type-the-name confirm, and path containment.
 
-    The whole read-merge-write runs inside the shared
-    :func:`~clauster.claude_json.locked_replace_json_file` transaction — the same
+    The whole read-merge-write runs inside the Foundation's
+    :func:`~clauster.config_write.write_settings_subtree` transaction — the same
     hardened ``flock`` + one-time ``.bak`` + unique-``mkstemp`` + mode-preserving +
-    atomic-``os.replace`` machinery the user-scope writer uses — so two concurrent
-    project writers can't lose an update and the file's permission bits are preserved.
-    The stale-hash check runs against the bytes read *under the lock*, so the guard and
-    the replace are one critical section (no TOCTOU window).
+    atomic-``os.replace`` machinery — so two concurrent project writers can't lose an
+    update and the file's permission bits are preserved. The stale-hash check runs
+    against the bytes read *under the lock* (no TOCTOU window).
 
     The candidate is **never executed**; only its shape is checked.
     """
-    # Validate before taking the lock — a bad shape must 422 with no I/O at all.
     cw.validate_candidate(incoming, validate_mcp_servers)
     path = project_dir / ".mcp.json"
-
-    def _mutate(current_bytes: bytes) -> dict[str, Any]:
-        # Stale-hash guard against the bytes read under the lock (raises → 409). An
-        # absent hash is only the legitimate first-write path: if the file already
-        # has content, refuse the unguarded overwrite (a client that drops `hash`
-        # must not be able to bypass the external-edit check on an existing file).
-        if expected_hash is None:
-            if current_bytes:
-                raise cw.StaleConfigWriteError(".mcp.json already exists; a hash is required")
-        elif cw.hash_bytes(current_bytes) != expected_hash:
-            raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
-        current = _load_json_obj(current_bytes)
-        stored_servers = current.get(MCP_SERVERS_KEY)
-        stored_servers = stored_servers if isinstance(stored_servers, dict) else {}
-        current[MCP_SERVERS_KEY] = cw.merge_redacted(incoming, stored_servers)
-        return current
-
-    locked_replace_json_file(path, _mutate, render=_render_json)
+    cw.write_settings_subtree(
+        path, MCP_SERVERS_KEY, incoming, expected_hash, merge=cw.merge_redacted
+    )
 
 
 def write_user_servers(claude_json: Path, incoming: dict[str, Any]) -> None:

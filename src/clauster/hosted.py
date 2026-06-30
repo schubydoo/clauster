@@ -52,15 +52,6 @@ from .state import KeyedStore
 
 logger = logging.getLogger(__name__)
 
-# HostedSession status string → the dashboard's InstanceStatus enum.
-_STATUS_MAP: dict[str, InstanceStatus] = {
-    "starting": InstanceStatus.STARTING,
-    "running": InstanceStatus.RUNNING,
-    "stopped": InstanceStatus.STOPPED,
-    "crashed": InstanceStatus.CRASHED,
-    "error": InstanceStatus.ERROR,
-}
-
 # The observed claude-ssh headless spawn contract (the "minimal mimic": no
 # --plugin-dir/--allowedTools/--settings, no --remote-control — adding
 # stream-json output is exactly what flips off the cloud door, so this channel is
@@ -172,7 +163,7 @@ class HostedSession:
         # leading gap marker, so even a full, already-evicted ring replays in full. (#422)
         self._queue_maxsize = max(queue_maxsize, ring_size + 1)
         self._stop_grace = stop_grace if stop_grace is not None else _STOP_GRACE_SECONDS
-        self.status = "starting"
+        self.status: InstanceStatus = InstanceStatus.STARTING
         self.exit_code: int | None = None
         self.claude_session_uuid: str | None = None
         self.agent_pid: int | None = None
@@ -242,7 +233,7 @@ class HostedSession:
         self.agent_pid = pid if isinstance(pid, int) else None
         start_time = result.get("startTime")
         self.agent_proc_start = float(start_time) if isinstance(start_time, (int, float)) else None
-        self.status = "running"
+        self.status = InstanceStatus.RUNNING
         self._pump_task = asyncio.create_task(self._pump())
 
     async def reattach(self, from_seq: int = 0) -> dict[str, Any]:
@@ -273,12 +264,12 @@ class HostedSession:
             # Session gone while we were down — drop the subscription we just made.
             self._stream.unsubscribe(self._source)
             self._stream, self._source = None, None
-            self.status = "crashed"
+            self.status = InstanceStatus.CRASHED
             return result
         self.daemon_last_seq = max(self.daemon_last_seq, from_seq)
         # If not running, the exit frame (seq > from_seq) replays through the pump,
         # which latches the terminal status; "stopped" is the neutral default until.
-        self.status = "running" if result.get("running") else "stopped"
+        self.status = InstanceStatus.RUNNING if result.get("running") else InstanceStatus.STOPPED
         self._pump_task = asyncio.create_task(self._pump())
         return result
 
@@ -393,7 +384,7 @@ class HostedSession:
                     except TimeoutError:
                         pass
         except ClaustrumError as exc:  # daemon loss during stop (CL-4b)
-            self.status = "error"
+            self.status = InstanceStatus.ERROR
             self._resolve_parked()  # a dead session must not leave a parked request stranded
             self._emit({"type": "lost", "reason": f"stop failed: {exc}"})
         finally:
@@ -456,7 +447,7 @@ class HostedSession:
             raise
         except ClaustrumError as exc:  # daemon loss mid-pump (CL-4b)
             # A daemon-side failure surfaced through the reader; report it, don't swallow.
-            self.status = "error"
+            self.status = InstanceStatus.ERROR
             self._resolve_parked()  # resolve any parked request so it isn't left stranded
             self._emit({"type": "lost", "reason": str(exc)})
         finally:
@@ -561,7 +552,7 @@ class HostedSession:
     def _on_exit(self, exit_code: Any) -> None:
         """Latch the terminal status, resolve parked requests, emit the exit event."""
         self.exit_code = exit_code if isinstance(exit_code, int) else None
-        self.status = "stopped" if self.exit_code == 0 else "crashed"
+        self.status = InstanceStatus.STOPPED if self.exit_code == 0 else InstanceStatus.CRASHED
         self._resolve_parked()
         self._emit({"type": "exit", "exit_code": self.exit_code})
 
@@ -1031,7 +1022,7 @@ class HostedManager:
         """Reflect the live session's status + captured uuid + reattach cursor onto the row."""
         session = self._sessions.get(instance.claustrum_process_id or "")
         if session is not None:
-            instance.status = _STATUS_MAP.get(session.status, instance.status)
+            instance.status = session.status
             if session.claude_session_uuid:
                 instance.claude_session_uuid = session.claude_session_uuid
             # The reattach cursor is the *daemon* seq, not the clauster ring seq.
