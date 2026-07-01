@@ -1218,11 +1218,18 @@
               <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
                 <button type="button" class="btn btn-ghost-secondary btn-sm"
                         data-test="transcript-back" @click="backToTranscriptList()"><svg class="ico me-1" aria-hidden="true"><use href="#ic-arrow-left"/></svg>All sessions</button>
-                {# Sort toggle (#612): flips newest-first ↔ oldest-first, re-fetching from the top. #}
+                {# Sort toggle (#612): flips newest-first ↔ oldest-first. The visible label
+                   and the aria-label BOTH describe the current STATE (not the action), so
+                   they never contradict (the old aria-label described the action and read
+                   as the opposite of the text); a caret shows the direction (down =
+                   newest-first, up = oldest-first). aria-pressed marks it as a toggle so a
+                   screen reader conveys that activating it flips the order. #}
                 <button type="button" class="btn btn-sm" data-test="transcript-order-toggle"
                         :disabled="transcripts.loading"
-                        :aria-label="transcripts.order === 'asc' ? 'Sort newest first' : 'Sort oldest first'"
+                        :aria-pressed="transcripts.order === 'desc' ? 'true' : 'false'"
+                        :aria-label="transcripts.order === 'asc' ? 'Sorted oldest first' : 'Sorted newest first'"
                         @click="toggleTranscriptOrder()">
+                  <svg class="ico me-1" aria-hidden="true"><use :href="transcripts.order === 'asc' ? '#ic-caret-up' : '#ic-caret-down'"/></svg>
                   <span x-text="transcripts.order === 'asc' ? 'Oldest first' : 'Newest first'">Newest first</span>
                 </button>
               </div>
@@ -1243,57 +1250,33 @@
                   Type at least 2 characters to search.
                 </div>
               </div>
-              {# Live tail (#614 Part 2): while the selected session is running, we poll
-                 the transcript from a byte offset and append new turns here, oldest-first.
-                 It lives ABOVE the loading-gated turn list (NOT inside the
-                 `!transcripts.loading` wrapper) so a sort flip / search keystroke — which
-                 toggles `loading` for the static-turn re-fetch — never hides the live feed.
-                 The panel stays mounted after the session ends (live flips false) so the
-                 streamed turns remain readable; it only shows once it has content. #}
-              <div class="card mb-3" data-test="transcript-tail"
-                   x-show="transcripts.tailTurns.length > 0 || transcripts.live" x-cloak>
-                {# aria-live so the live↔ended transition + first-turn arrival are announced. #}
+              {# Live header (#614 Part 2, single-list rework): a running session is ONE
+                 unified, tailing transcript — there is no separate tail box. This strip
+                 sits ABOVE the loading-gated list (a non-live re-fetch toggles `loading`,
+                 but a live session never sets it) and only shows while live. The turns
+                 themselves render in the single list below, with new turns appended into
+                 it per the active sort. aria-live announces the first-turn arrival. #}
+              <div class="card mb-3" data-test="transcript-tail" x-show="transcripts.live" x-cloak>
                 <div class="card-header py-2 d-flex align-items-center gap-2"
                      role="status" aria-live="polite">
-                  <span class="badge bg-green-lt" data-test="transcript-tail-live" x-show="transcripts.live"
-                        x-cloak title="Following this running session live."><span aria-hidden="true">●</span> following live</span>
-                  <span class="badge bg-secondary-lt" data-test="transcript-tail-ended" x-show="!transcripts.live"
-                        x-cloak>session ended</span>
-                  <span class="text-secondary small"
-                        x-text="transcripts.tailTurns.length + (transcripts.tailTurns.length === 1 ? ' new turn' : ' new turns')"></span>
+                  <span class="badge bg-green-lt" data-test="transcript-tail-live"
+                        title="Following this running session live."><span aria-hidden="true">●</span> following live</span>
+                  <span class="text-secondary small">Updates as the session runs.</span>
                 </div>
-                <div class="card-body p-2">
-                  <div class="alert alert-warning py-1 px-2 mb-2 small" data-test="transcript-tail-error"
+                <div class="card-body p-2" x-show="transcripts.tailError || transcripts.tailRaw.length === 0">
+                  <div class="alert alert-warning py-1 px-2 mb-0 small" data-test="transcript-tail-error"
                        role="status" aria-live="polite" x-show="transcripts.tailError" x-cloak
                        x-text="transcripts.tailError"></div>
                   <div class="text-secondary small" data-test="transcript-tail-waiting"
-                       x-show="transcripts.tailTurns.length === 0 && transcripts.live && !transcripts.tailError" x-cloak>
+                       x-show="transcripts.tailRaw.length === 0 && !transcripts.tailError" x-cloak>
                     Waiting for new activity…
-                  </div>
-                  {# Append-only, oldest-first: newest live turn lands at the bottom. #}
-                  <div class="d-flex flex-column gap-2">
-                    <template x-for="(t, i) in transcripts.tailTurns" :key="'tail-' + i">
-                      <div class="card transcript-turn" data-test="transcript-tail-turn"
-                           :class="t.role === 'assistant' ? 'align-self-start border-azure' : 'align-self-end border-secondary'">
-                        <div class="card-body p-2">
-                          <div class="d-flex justify-content-between align-items-baseline gap-2 mb-1"
-                               :class="t.role === 'user' ? 'flex-row-reverse' : ''">
-                            <span class="badge" :class="t.role === 'assistant' ? 'bg-azure-lt' : 'bg-secondary-lt'"
-                                  x-text="t.role === 'user' ? 'you' : t.role"></span>
-                            <span class="text-secondary small">
-                              <span x-show="t.model" x-cloak x-text="t.model"></span>
-                              <span x-show="t.timestamp" x-cloak x-text="t.timestamp"></span>
-                            </span>
-                          </div>
-                          {# x-text, NEVER x-html: turn content is untrusted (server-redacted) output. #}
-                          <div class="transcript-content small" x-text="t.content"></div>
-                        </div>
-                      </div>
-                    </template>
                   </div>
                 </div>
               </div>
-              {# Only the turn list is loading-gated; the controls above stay put on reload. #}
+              {# Only the turn list is loading-gated; the controls above stay put on reload.
+                 A live session never sets `loading` (its tail-derived list updates in
+                 place), so this wrapper shows immediately for live and gates only the
+                 non-live re-fetch. #}
               <div x-show="!transcripts.loading">
               <div class="text-secondary small mb-2">
                 <code x-text="transcripts.session"></code>
@@ -1306,11 +1289,14 @@
                 No messages match “<span x-text="transcripts.q.trim()"></span>”.
               </div>
               <div class="text-secondary small" data-test="transcript-no-turns"
-                   x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.q.trim().length < 2">
+                   x-show="transcripts.turns.length === 0 && !transcripts.error && !transcripts.queryTooShort && transcripts.q.trim().length < 2 && !transcripts.live">
                 This session has no turns.
               </div>
               <div class="d-flex flex-column gap-2">
-                <template x-for="(t, i) in transcripts.turns" :key="i">
+                {# ONE list for live + non-live. Keyed on the stable per-turn _key when the
+                   tail stamped one (live), else a timestamp+role+index composite (#720) —
+                   never the bare index, which rebinds nodes on reorder/append. #}
+                <template x-for="(t, i) in transcripts.turns" :key="t._key ?? ((t.timestamp || '') + ':' + t.role + ':' + i)">
                   <div class="card transcript-turn" data-test="transcript-turn"
                        :class="t.role === 'assistant' ? 'align-self-start border-azure' : 'align-self-end border-secondary'">
                     <div class="card-body p-2">
