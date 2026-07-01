@@ -10,7 +10,6 @@
    non-default sorts; all interactive controls are self-contained within each row so
    keyboard navigation is coherent regardless of visual position. #}
           <div class="list-group-item" data-project="{{ p.name }}"
-               aria-label="Project: {{ p.name }}"
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
                :style="projectSort !== 'name' ? { order: projectOrderRank('{{ p.name }}') } : {}"
                x-data="{ lopen: false, lmode: DEFAULT_LAUNCH_MODE, lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', mopen: false }"
