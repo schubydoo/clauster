@@ -58,6 +58,10 @@
     // leaving a stale scale on the early-return paths below (e.g. avail <= 0).
     inner.style.transform = "";
     inner.style.transformOrigin = "top left";
+    // Pin .xterm to the intrinsic grid width so it doesn't stretch as a block element to fill
+    // the host's content box when scale=1 (wide viewport). Without this, .xterm grows wider than
+    // .xterm-screen (the canvas), leaving a dark background strip to the right of the grid (#673).
+    inner.style.width = naturalW + "px";
     // Available width is the host's content box (clientWidth already excludes its padding).
     const cs = getComputedStyle(reg.host);
     const avail = reg.host.clientWidth -
@@ -65,9 +69,12 @@
     if (avail <= 0) return;
     const scale = Math.min(1, avail / naturalW);  // shrink-to-fit only; never upscale
     inner.style.transform = scale < 1 ? "scale(" + scale + ")" : "";
-    // The transform doesn't shrink the host's layout box, so reserve exactly the scaled height
-    // (the .xterm fills the host width naturally) — otherwise a gap or overflow would remain.
-    reg.host.style.height = Math.ceil(naturalH * scale) + "px";
+    // Reserve exactly the scaled content height. Subtract the host's bottom padding so the JS
+    // content-box height accounts for it: without this the bottom-padding renders as a dark strip
+    // below the scaled grid, because overflow:hidden clips at the padding-box edge but the padding
+    // itself remains visible as host background (#673).
+    const padBottom = parseFloat(cs.paddingBottom) || 0;
+    reg.host.style.height = Math.ceil(naturalH * scale - padBottom) + "px";
   }
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
