@@ -55,6 +55,21 @@ repos:
         pass_filenames: false
         files: '^(src/clauster/config\.py|scripts/gen_config_reference\.py|docs/configuration\.md)$'
 
+      - id: csp-expression-guard
+        name: CSP expression guard
+        # #533: the dashboard ships the @alpinejs/csp build (no 'unsafe-eval' in
+        # script-src). Its evaluator rejects arrow fns, template literals, ?./??,
+        # spread/new, if-statements, and multi-statement `;` sequences, and resolves
+        # bare identifiers only against registered components — a template edit that
+        # reintroduces any of those silently breaks the dashboard at runtime (unit
+        # tests only grep source). Mirrors the "CSP expression guard" CI step. Runs
+        # whenever a template or the sweep script itself changes. Node comes from the
+        # same PATH markdownlint-cli2 (npx, above) already relies on in this config.
+        entry: node scripts/check_csp_expressions.mjs
+        language: system
+        pass_filenames: false
+        files: '^(src/clauster/templates/.+\.html|scripts/check_csp_expressions\.mjs)$'
+
       - id: changeset-summary-lint
         name: changeset summary lint
         # knope uses a changeset's first line as the entry summary; a summary that

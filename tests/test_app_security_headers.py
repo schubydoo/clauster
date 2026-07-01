@@ -13,9 +13,9 @@ PASSWORD = "hunter2"
 _PW_HASH = auth.hash_password(auth.make_hasher(), PASSWORD)
 ORIGIN = "http://testserver"  # TestClient's default origin
 
-# script-src must list 'self', a per-request nonce, and 'unsafe-eval' (Alpine), and
-# must NOT carry 'unsafe-inline' (dropped in #442 — dead config once a nonce is present).
-_SCRIPT_SRC_RE = re.compile(r"script-src 'self' 'nonce-[A-Za-z0-9_-]+' 'unsafe-eval'")
+# script-src must list 'self' and a per-request nonce. 'unsafe-eval' was dropped in
+# issue 533 (CSP-friendly Alpine build); 'unsafe-inline' is dropped in issue 442.
+_SCRIPT_SRC_RE = re.compile(r"script-src 'self' 'nonce-[A-Za-z0-9_-]+'")
 # style-src must list 'self' + the same per-request nonce, and must NOT carry
 # 'unsafe-inline' (dropped in #533 — the inline <style> blocks are nonce-gated and the
 # former inline style="" attributes were lifted to classes).
@@ -58,13 +58,17 @@ def _login(client: TestClient) -> None:
 
 
 def _assert_nonce_script_src(csp: str) -> None:
-    """script-src is nonce-gated: 'self' + a nonce + 'unsafe-eval', never 'unsafe-inline'."""
+    """script-src is nonce-gated: 'self' + a nonce, no 'unsafe-eval', no 'unsafe-inline'."""
     script_src = next(
         (d for d in csp.split(";") if d.strip().startswith("script-src")), ""
     ).strip()
     assert _SCRIPT_SRC_RE.search(csp), csp
     assert "'unsafe-inline'" not in script_src, (
         f"script-src must NOT carry 'unsafe-inline' once a nonce is present: {script_src!r}"
+    )
+    assert "'unsafe-eval'" not in script_src, (
+        f"script-src must NOT carry 'unsafe-eval' "
+        f"(CSP-friendly Alpine build, issue 533): {script_src!r}"
     )
 
 
@@ -122,9 +126,9 @@ def test_csp_present_and_locked_down(runner_config):
     client = _open_client(runner_config)
     resp = client.get("/healthz")
     csp = resp.headers["Content-Security-Policy"]
-    # script-src is nonce-gated (#442): 'self' + a per-request nonce + 'unsafe-eval',
-    # and 'unsafe-inline' is gone (a nonce makes it dead config and blocks an injected
-    # inline script that lacks the per-request value).
+    # script-src is nonce-gated (#442) and eval-free (#533): 'self' + a per-request
+    # nonce; 'unsafe-inline' is gone (dead config once a nonce is present) and
+    # 'unsafe-eval' is gone (CSP-friendly Alpine build).
     _assert_nonce_script_src(csp)
     # The defence-in-depth essentials are spelled out.
     assert "frame-ancestors 'none'" in csp
@@ -138,9 +142,10 @@ def test_csp_present_and_locked_down(runner_config):
     assert "ws:" not in csp and "wss:" not in csp
     # style-src is nonce-gated (#533): 'self' + the per-request nonce, and
     # 'unsafe-inline' is gone (the inline <style> blocks carry the nonce; the former
-    # style="" attributes were lifted to classes). 'unsafe-eval' stays for Alpine.
+    # style="" attributes were lifted to classes).
     _assert_nonce_style_src(csp)
     assert "'unsafe-inline'" not in csp
+    assert "'unsafe-eval'" not in csp
 
 
 def test_csp_nonce_differs_per_request(runner_config):
@@ -202,7 +207,7 @@ def test_csp_with_nonce_fail_closed_when_none():
     ).strip()
     assert "'unsafe-inline'" not in script_src, script_src
     assert "'nonce-" not in script_src
-    assert script_src == "script-src 'self' 'unsafe-eval'"
+    assert script_src == "script-src 'self'"
     # style-src degrades the same way: no nonce source, but never looser — and
     # crucially never falls back to 'unsafe-inline' (#533).
     style_src = next((d for d in csp.split(";") if d.strip().startswith("style-src")), "").strip()
@@ -214,7 +219,8 @@ def test_csp_with_nonce_fail_closed_when_none():
 def test_csp_style_src_nonce_matches_script_src_nonce():
     """The style-src + script-src nonces are the SAME per-request value (one nonce, both)."""
     csp = _csp_with_nonce("deadbeefnonce")
-    assert "script-src 'self' 'nonce-deadbeefnonce' 'unsafe-eval'" in csp
+    assert "script-src 'self' 'nonce-deadbeefnonce'" in csp
+    assert "'unsafe-eval'" not in csp
     assert "style-src 'self' 'nonce-deadbeefnonce'" in csp
 
 

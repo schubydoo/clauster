@@ -12,8 +12,8 @@
           <div class="list-group-item" data-project="{{ p.name }}"
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
                :style="projectSort !== 'name' ? { order: projectOrderRank('{{ p.name }}') } : {}"
-               x-data="{ lopen: false, lmode: DEFAULT_LAUNCH_MODE, lperm: DEFAULT_PERMISSION_MODE, lcloud: false, lprompt: '', mopen: false }"
-               @launch-pop-close.window="if ($event.detail.name === '{{ p.name }}') { lopen = false; mopen = false }">
+               x-data="projectRow('{{ p.name }}')"
+               @launch-pop-close.window="onLaunchPopClose($event)">
             <div class="d-flex align-items-center flex-wrap gap-2">
               <svg class="ico text-success" role="img" aria-label="Directory trusted" x-cloak
                    x-show="trustState['{{ p.name }}'] === 'trusted'" title="Directory trusted"><use href="#ic-trust"/></svg>
@@ -67,7 +67,7 @@
                    the Spawn picker explains it. #}
                 <span class="launch-anchor">
                   <button type="button" class="btn btn-primary" data-test="run-launch"
-                          @click="lopen = !lopen; if (lopen) coerceSpawnMode('{{ p.name }}', {{ p.is_git_repo | tojson }})"
+                          @click="toggleLaunchPop({{ p.is_git_repo | tojson }})"
                           :aria-expanded="lopen">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run Claude here
                     <svg class="ico ms-1" aria-hidden="true" x-show="lopen"><use href="#ic-caret-up"/></svg><svg class="ico ms-1" aria-hidden="true" x-show="!lopen"><use href="#ic-caret-down"/></svg>
@@ -76,14 +76,14 @@
                      trust/bypass gate (#686) so a hidden gate never lingers — reopening starts
                      a fresh launch. mopen is reset too so More options collapses on reopen. #}
                   <div class="card launch-pop" x-show="lopen" x-cloak
-                       @click.outside="lopen = false; mopen = false; confirmTrust['{{ p.name }}'] = false; confirmBypass['{{ p.name }}'] = false"
-                       @keydown.escape.window="lopen = false; mopen = false; confirmTrust['{{ p.name }}'] = false; confirmBypass['{{ p.name }}'] = false">
+                       @click.outside="dismissLaunchPop()"
+                       @keydown.escape.window="dismissLaunchPop()">
                     <div class="card-body p-2">
                       <div class="form-label small mb-1">How do you want to drive it?</div>
                       <template x-for="m in launchModes()" :key="m.id">
                         <label class="launch-opt" :class="lmode === m.id ? 'is-sel' : ''">
                           <input type="radio" class="form-check-input mt-1 me-2" :name="'lm-{{ p.name }}'" :value="m.id" x-model="lmode"
-                                 @change="if (lmode !== 'desktop' && lperm === 'bypassPermissions') lperm = DEFAULT_PERMISSION_MODE">
+                                 @change="clampPermForMode()">
                           <span>
                             <span class="fw-medium d-block">
                               <span x-text="m.label"></span>
@@ -168,7 +168,7 @@
                              under the keeper with no `--spawn`, so it ignores these; hide them in pty
                              mode rather than offer no-op choices. #}
                           <div class="col-12"
-                               {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) !== 'pty'" x-cloak{% endif %}>
+                               {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) !== 'pty'" x-cloak{% endif %}>
                             <label class="form-label small mb-1" for="spawn-{{ p.name }}">Spawn</label>
                             <select id="spawn-{{ p.name }}" class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']"
                                     title="Where the session runs: same-dir = the project directory · worktree = an isolated git worktree (git repos only) · session = a fresh sandboxed session.">
@@ -189,7 +189,7 @@
                              even in standard mode (same bug as the live-tail banners). Flex goes on
                              the inner wrapper. #}
                           <div class="col-12"
-                               x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) === 'pty'" x-cloak>
+                               x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'pty'" x-cloak>
                             <div class="d-flex align-items-end">
                               <p id="resume-hint-{{ p.name }}" class="form-hint text-secondary small mb-1">Runs as one session in the project directory.</p>
                             </div>
@@ -208,7 +208,7 @@
                          x-effect re-runs when confirmTrust[name] flips; $nextTick waits for x-show. #}
                       <!-- trust-on-start confirm (bridge / Desktop launch path) -->
                       <div class="alert alert-warning mt-2 mb-0 trust-gate" data-test="trust-confirm" x-show="confirmTrust['{{ p.name }}']" x-cloak role="group" aria-labelledby="trust-head-{{ p.name }}"
-                           x-effect="if (confirmTrust['{{ p.name }}']) $nextTick(() => $refs.trustCheck && $refs.trustCheck.focus())">
+                           x-effect="focusTrustCheck(confirmTrust['{{ p.name }}'], $refs)">
                         <p id="trust-head-{{ p.name }}" class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>Trust the files in <code>{{ p.name }}</code>? Launching a session here
                           lets it run tools and execute any code in <code>CLAUDE.md</code> /
                           <code>.claude</code> in this directory.</p>
@@ -228,7 +228,7 @@
 
                       <!-- bypassPermissions typed-confirm -->
                       <div class="alert alert-danger mt-2 mb-0" data-test="bypass-confirm" x-show="confirmBypass['{{ p.name }}']" x-cloak role="group" aria-labelledby="bypass-head-{{ p.name }}"
-                           x-effect="if (confirmBypass['{{ p.name }}']) $nextTick(() => $refs.bypassInput && $refs.bypassInput.focus())">
+                           x-effect="focusBypassInput(confirmBypass['{{ p.name }}'], $refs)">
                         <p id="bypass-head-{{ p.name }}" class="mb-2"><svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg><strong>bypassPermissions</strong> lets sessions in <code>{{ p.name }}</code>
                           run tools without asking. Type the project name to confirm.</p>
                         <div class="input-group">
@@ -248,7 +248,7 @@
                       <button type="button" class="btn btn-primary w-100 mt-2" data-test="launch-run-go"
                               x-show="!confirmTrust['{{ p.name }}'] && !confirmBypass['{{ p.name }}']" x-cloak
                               :disabled="launching['{{ p.name }}']"
-                              @click="launchRun('{{ p.name }}', lmode, lperm, lcloud, lprompt).then(done => { if (done) lopen = false })">
+                              @click="launchRunAndClose('{{ p.name }}', lmode, lperm, lcloud, lprompt)">
                         <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="permLabel(lperm)"></span>
                       </button>
                       {# Semantic end-of-popover sentinel: a stable structural boundary for tests
@@ -264,7 +264,7 @@
                     <svg class="ico" aria-hidden="true"><use href="#ic-more"/></svg>
                   </button>
                   <div class="dropdown-menu" x-show="menu" x-cloak>
-                    <button type="button" class="dropdown-item" @click="toggleClaudeMd('{{ p.name }}'); menu = false">
+                    <button type="button" class="dropdown-item" @click="pickClaudeMd()">
                       <svg class="ico me-2" aria-hidden="true"><use href="#ic-edit"/></svg><span
                         x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</span>
                     </button>
