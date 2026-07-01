@@ -36,12 +36,10 @@ verbatim by the locked atomic replace (never a whole-file clobber).
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from . import config_write as cw
-from .claude_json import locked_replace_json_file
 
 #: The top-level key holding the hooks block in ``settings.json``.
 HOOKS_KEY = "hooks"
@@ -166,32 +164,6 @@ def validate_hooks(candidate: Any) -> None:
             _validate_matcher_group(group, f"hooks {event!r}[{i}]")
 
 
-def _load_json_obj(raw: bytes) -> dict[str, Any]:
-    """Parse ``raw`` bytes as a JSON object, returning ``{}`` for empty/whitespace.
-
-    A non-object or malformed JSON is a structural error (→ caller maps to 422): we
-    will not overwrite a file we could not parse.
-    """
-    try:
-        text = raw.decode("utf-8").strip()
-    except UnicodeDecodeError as exc:
-        raise cw.InvalidCandidateError(f"existing settings is not valid UTF-8: {exc}") from exc
-    if not text:
-        return {}
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise cw.InvalidCandidateError(f"existing settings is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise cw.InvalidCandidateError("existing settings is not a JSON object")
-    return data
-
-
-def _render_json(data: dict[str, Any]) -> str:
-    """Render ``data`` as pretty JSON with a trailing newline (matches CLI style)."""
-    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-
-
 def _read_hooks(path: Path) -> tuple[dict[str, Any], str]:
     """Return ``(hooks, content_hash)`` for a settings file at ``path``.
 
@@ -204,58 +176,15 @@ def _read_hooks(path: Path) -> tuple[dict[str, Any], str]:
         raw = path.read_bytes()
     except FileNotFoundError:
         raw = b""
-    data = _load_json_obj(raw)
+    data = cw.load_settings_json_obj(raw)
     hooks = data.get(HOOKS_KEY)
     hooks = hooks if isinstance(hooks, dict) else {}
     return hooks, cw.hash_bytes(raw)
 
 
-def _write_hooks(path: Path, incoming: dict[str, Any], expected_hash: str | None) -> None:
-    """Write the ``hooks`` subtree of ``path`` under the lock, fail-closed.
-
-    Pipeline (each step aborts before the write): stale-hash external-edit guard over
-    the current bytes read under the lock (→ 409) → replace **only** the ``hooks``
-    subtree, preserving every sibling key → atomic replace of the rendered file. The
-    caller must have already run the capability gate, the type-the-name confirm,
-    (project scope) path containment, **and the structural validation (→ 422)** — this
-    helper trusts an already-validated ``incoming`` (the public ``write_*`` entry points
-    validate before ``mkdir`` so a bad shape never creates a directory; mirrors the
-    single-validation shape of :func:`config_write_permissions.write_project_permissions`).
-
-    The whole read-merge-write runs inside the shared
-    :func:`~clauster.claude_json.locked_replace_json_file` transaction (``flock`` +
-    one-time ``.bak`` + unique-``mkstemp`` + mode-preserving + atomic-``os.replace``),
-    so the stale-hash check and the replace are one critical section (no TOCTOU window).
-
-    No command string is ever parsed, resolved, spawned, or executed; only the block's
-    shape is checked.
-    """
-
-    def _mutate(current_bytes: bytes) -> dict[str, Any]:
-        # Stale-hash guard against the bytes read under the lock (raises → 409). An
-        # absent hash is only the legitimate first-write path: if the file already has
-        # content, refuse the unguarded overwrite (a client that drops `hash` must not
-        # be able to bypass the external-edit check on an existing file).
-        if expected_hash is None:
-            if current_bytes:
-                raise cw.StaleConfigWriteError("settings.json already exists; a hash is required")
-        elif cw.hash_bytes(current_bytes) != expected_hash:
-            raise cw.StaleConfigWriteError("config file changed on disk since it was loaded")
-        current = _load_json_obj(current_bytes)
-        current[HOOKS_KEY] = incoming
-        return current
-
-    locked_replace_json_file(path, _mutate, render=_render_json)
-
-
-def project_settings_path(project_dir: Path) -> Path:
-    """Return the project-scope settings file path (``<project>/.claude/settings.json``)."""
-    return project_dir / ".claude" / "settings.json"
-
-
 def read_project_hooks(project_dir: Path) -> tuple[dict[str, Any], str]:
     """Return ``(hooks, content_hash)`` for a project's ``.claude/settings.json``."""
-    return _read_hooks(project_settings_path(project_dir))
+    return _read_hooks(cw.project_settings_path(project_dir))
 
 
 def write_project_hooks(
@@ -265,15 +194,15 @@ def write_project_hooks(
 
     Ensures the ``<project>/.claude`` parent exists (so a first write to a project that
     has no ``.claude`` dir yet does not fail the atomic writer's ``mkstemp`` in a
-    missing directory), then runs the fail-closed :func:`_write_hooks` pipeline. The
-    candidate is validated *before* the directory is created, so a bad shape (422)
-    leaves the filesystem untouched. **No command is ever executed** — only validated
-    for shape and stored as inert text.
+    missing directory), then runs the fail-closed Foundation pipeline. The candidate is
+    validated *before* the directory is created, so a bad shape (422) leaves the
+    filesystem untouched. **No command is ever executed** — only validated for shape
+    and stored as inert text.
     """
     cw.validate_candidate(incoming, validate_hooks)
-    path = project_settings_path(project_dir)
+    path = cw.project_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _write_hooks(path, incoming, expected_hash)
+    cw.write_settings_subtree(path, HOOKS_KEY, incoming, expected_hash)
 
 
 def read_user_hooks(settings_json: Path) -> tuple[dict[str, Any], str]:
@@ -286,13 +215,13 @@ def write_user_hooks(
 ) -> None:
     """Validate + write the user-scope ``~/.claude/settings.json`` ``hooks`` block.
 
-    Ensures the ``~/.claude`` parent exists, then runs the fail-closed
-    :func:`_write_hooks` pipeline. Like the #689 permission writer (and unlike the #688
-    user-scope MCP writer, which edits a ``~/.claude.json`` subtree), this writes a
-    *separate real file* and so carries the same stale-hash guard as the project scope.
-    The candidate is validated *before* the directory is created, so a bad shape (422)
-    writes nothing. **No command is ever executed** — only validated for shape.
+    Ensures the ``~/.claude`` parent exists, then runs the fail-closed Foundation
+    pipeline. Like the #689 permission writer (and unlike the #688 user-scope MCP
+    writer, which edits a ``~/.claude.json`` subtree), this writes a *separate real
+    file* and so carries the same stale-hash guard as the project scope. The candidate
+    is validated *before* the directory is created, so a bad shape (422) writes nothing.
+    **No command is ever executed** — only validated for shape.
     """
     cw.validate_candidate(incoming, validate_hooks)
     settings_json.parent.mkdir(parents=True, exist_ok=True)
-    _write_hooks(settings_json, incoming, expected_hash)
+    cw.write_settings_subtree(settings_json, HOOKS_KEY, incoming, expected_hash)

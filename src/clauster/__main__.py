@@ -17,6 +17,10 @@ import ssl
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .reconcile import Decision, Finding
 
 import uvicorn
 
@@ -377,7 +381,7 @@ def _format_value(value: object) -> str:
     return str(value)
 
 
-def _interactive_decide(finding):  # type: ignore[no-untyped-def]
+def _interactive_decide(finding: Finding) -> Decision:
     """Prompt the operator about one reconcile finding; return a Decision.
 
     Reads from stdin (the only I/O in this path, so :func:`reconcile.build_plan` stays
@@ -459,7 +463,7 @@ def _reconcile(config_path: str | None, *, dry_run: bool, assume_yes: bool) -> i
         print(f"clauster: no deprecated keys in {source_str}.", file=sys.stderr)
         return 0
 
-    def decide(finding):  # type: ignore[no-untyped-def]
+    def decide(finding: Finding) -> Decision:
         # --dry-run is a non-interactive PREVIEW: accept every proposal to show the full
         # would-be plan, never prompt. build_plan() runs decide() eagerly, BEFORE the
         # dry_run guard below, so without this a --dry-run blocks on input() on a real TTY
