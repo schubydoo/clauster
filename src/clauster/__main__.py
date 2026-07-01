@@ -32,6 +32,7 @@ from .db.persistence import Persistence
 from .logging_config import setup_logging
 from .procutil import KEEPER_SUBCOMMAND
 from .recap import RECAP_SUBCOMMAND
+from .tls_provision import generate_self_signed
 
 # setproctitle is a required dependency (so the retitle works out of the box). The
 # guard is defensive, not optionality: a cosmetic process-rename must never crash
@@ -723,20 +724,32 @@ def _warn_if_cookie_insecure(config) -> None:
 def _tls_files(config: ClausterConfig) -> tuple[str, str] | None:
     """Resolve the ``(ssl_certfile, ssl_keyfile)`` pair for uvicorn, or ``None`` if no TLS.
 
-    Defense-in-depth: the config validator already resolved + readability-checked both
-    paths at load, but a cert could be deleted or chmod-ed away between load and serve,
-    so re-resolve here and **abort** (never silently fall back to plain HTTP) if either
-    file is now missing/unreadable. A final pre-flight builds the SSL context exactly as
-    uvicorn will, so a malformed/mismatched cert (one that passes existence/readability
-    but won't parse) also aborts cleanly here — with our ``TLS error`` message and exit
-    2 — rather than crashing uvicorn with a raw traceback at serve time. The SSL error is
-    a generic PEM/parse message; it never carries key material. Returns the canonical
-    absolute paths uvicorn opens, or ``None`` when ``tls`` is unset.
+    For ``provision = off``: defense-in-depth re-resolve — the config validator already
+    checked both paths at load, but a cert could be deleted or chmod-ed away between
+    load and serve.  Aborts (never silently falls back to plain HTTP) if either file is
+    now missing/unreadable.  A final pre-flight builds the SSL context exactly as uvicorn
+    will, so a malformed/mismatched cert also aborts cleanly here — with our ``TLS
+    error`` message and exit 2 — rather than crashing uvicorn with a raw traceback.
+
+    For ``provision = self-signed``: calls the provisioner to generate (or reuse) the
+    cert+key under ``state_dir/tls/``, then runs the same pre-flight verify.
+
+    The SSL error message is a generic PEM/parse reason; it never carries key material.
+    Returns the canonical absolute paths uvicorn opens, or ``None`` when ``tls`` is
+    unset.
     """
     if config.tls is None:
         return None
-    cert = resolve_cert_path("cert_file", config.tls.cert_file)
-    key = resolve_cert_path("key_file", config.tls.key_file)
+    if config.tls.provision == "self-signed":
+        # Provisioner writes cert+key under state_dir/tls/ (or reuses them if still
+        # current).  A RuntimeError here means `cryptography` isn't installed — surface
+        # it the same way as a cert-resolve failure so the operator sees a clear message.
+        state_dir = config.state_dir.expanduser().resolve()
+        cert, key = generate_self_signed(state_dir, config.tls.hostnames)
+    else:
+        # provision = off: cert_file / key_file are guaranteed non-None by the validator.
+        cert = resolve_cert_path("cert_file", config.tls.cert_file)  # type: ignore[arg-type]
+        key = resolve_cert_path("key_file", config.tls.key_file)  # type: ignore[arg-type]
     _verify_cert_chain(cert, key)
     # After the fail-closed checks: a non-fatal hygiene warning if the private key is
     # readable beyond its owner. Advisory only — an over-permissive key still serves.
@@ -841,11 +854,13 @@ def _run(config_path: str | None) -> int:
 
     # Fail closed BEFORE serving: re-resolve the TLS material (the config validator
     # already checked it at load, but a cert could vanish or lose read permission
-    # between load and serve). A bad cert here aborts startup — Clauster must never
-    # silently fall back to plain HTTP when TLS was asked for.
+    # between load and serve). For self-signed, generate/renew the cert+key now.
+    # A bad cert here aborts startup — Clauster must never silently fall back to
+    # plain HTTP when TLS was asked for.  RuntimeError surfaces a missing
+    # `cryptography` package with a clear install hint.
     try:
         tls_files = _tls_files(config)
-    except ValueError as exc:
+    except (ValueError, RuntimeError, OSError) as exc:
         print(f"clauster: TLS error: {exc}", file=sys.stderr)
         return 2
 

@@ -79,7 +79,7 @@ unknown per-project keys are ignored.
 | `root_path` | str | `""` | ASGI `root_path` for serving under a reverse-proxy sub-path. |
 | `log_format` | `text` \| `json` | `text` | Application log format. `text` (default) is the human single-line format; `json` emits one structured JSON object per record. Both modes redact session URLs / bearer ids before the line is written. |
 | `instance_name` | str \| null | `null` | Optional label (≤32 chars, `[A-Za-z0-9_.-]`). When set, retitles the process to `clauster[<name>]` so co-resident instances are distinguishable in `ps`/`pgrep`. Cosmetic only. |
-| `tls` | TlsConfig \| null | `null` | Native HTTPS termination. Unset (default) = serve plain HTTP and rely on a reverse proxy / `tailscale serve` for TLS. Set `tls.cert_file` + `tls.key_file` to have Clauster terminate TLS itself (validated fail-closed at load and at server start). Self-signed/ACME provisioning is out of scope — supply an existing cert + key. |
+| `tls` | TlsConfig \| null | `null` | Native HTTPS termination. Unset (default) = serve plain HTTP and rely on a reverse proxy / `tailscale serve` for TLS. Set `tls` to have Clauster terminate TLS itself. Two modes: `provision = off` (default) requires `cert_file` + `key_file` pointing at an existing cert + key (validated fail-closed); `provision = self-signed` generates a self-signed cert+key under `state_dir/tls/` automatically (`cryptography` package required). ACME is deferred to issue 774. |
 <!-- END GEN: clauster -->
 
 Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
@@ -445,8 +445,10 @@ Notifications on a LAN IP — without a proxy.
 <!-- BEGIN GEN: tls -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `cert_file` | str | *(required)* | Path to the PEM certificate (chain) file. `~` is expanded and the path is resolved to an absolute file at load — it must exist and be readable. |
-| `key_file` | str | *(required)* | Path to the PEM private-key file. `~` is expanded and the path is resolved to an absolute file at load — it must exist and be readable. |
+| `provision` | `off` \| `self-signed` | `off` | TLS provisioning mode. `off` (default) = supply `cert_file` + `key_file` pointing at an already-provisioned cert + key. `self-signed` = Clauster generates a self-signed cert+key under `state_dir/tls/` at startup (requires the `cryptography` package; regenerates on expiry or SAN change). ACME / Let's Encrypt is deferred to issue 774. |
+| `hostnames` | list[str] | `[]` | Hostnames and/or IP addresses to include as Subject Alternative Names in the generated certificate. The first entry becomes the Common Name. Required when `provision = self-signed`; ignored otherwise. |
+| `cert_file` | str \| null | `null` | Path to the PEM certificate (chain) file. `~` is expanded and the path is resolved to an absolute file at load — it must exist and be readable. Required when `provision = off`; must be absent when `provision = self-signed` (the cert is written by the provisioner). |
+| `key_file` | str \| null | `null` | Path to the PEM private-key file. `~` is expanded and the path is resolved to an absolute file at load — it must exist and be readable. Required when `provision = off`; must be absent when `provision = self-signed` (the key is written by the provisioner). |
 <!-- END GEN: tls -->
 
 ```yaml

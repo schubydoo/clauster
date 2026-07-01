@@ -1035,29 +1035,82 @@ class TlsConfig(BaseModel):
 
     Off when absent. When set, uvicorn is handed ``ssl_certfile`` / ``ssl_keyfile``
     and terminates TLS itself — an alternative to an external reverse proxy or
-    ``tailscale serve`` for operators who want neither. Both paths are validated at
-    config-load (existence + readable + absolute, traversal collapsed) and re-checked
-    at server start; a missing/unreadable file aborts startup rather than silently
-    serving plain HTTP. Self-signed generation and ACME are intentionally out of
-    scope here — point this at an already-provisioned cert + key.
+    ``tailscale serve`` for operators who want neither.
+
+    Two operating modes, selected by ``provision``:
+
+    ``provision = off`` (default)
+        Supply an already-provisioned cert + key via ``cert_file`` / ``key_file``.
+        Both paths are validated at config-load (existence + readable + absolute,
+        traversal collapsed) and re-checked at server start; a missing/unreadable
+        file aborts startup rather than silently serving plain HTTP.
+
+    ``provision = self-signed``
+        Clauster generates a self-signed RSA-2048 cert+key pair under
+        ``state_dir/tls/`` at startup (``cryptography`` package required).
+        The cert is regenerated automatically when it is near-expiry or the
+        SAN set changes. ``hostnames`` must list at least one name or IP.
+        ``cert_file`` / ``key_file`` must be absent — they are written by the
+        provisioner and passed to uvicorn directly.
+
+    ACME / Let's Encrypt provisioning is deferred to issue 774.
     """
 
-    cert_file: str = Field(
-        description="Path to the PEM certificate (chain) file. `~` is expanded and the "
-        "path is resolved to an absolute file at load — it must exist and be readable.",
+    provision: Literal["off", "self-signed"] = Field(
+        default="off",
+        description="TLS provisioning mode. `off` (default) = supply `cert_file` + "
+        "`key_file` pointing at an already-provisioned cert + key. `self-signed` = "
+        "Clauster generates a self-signed cert+key under `state_dir/tls/` at startup "
+        "(requires the `cryptography` package; regenerates on expiry or SAN change). "
+        "ACME / Let's Encrypt is deferred to issue 774.",
     )
-    key_file: str = Field(
-        description="Path to the PEM private-key file. `~` is expanded and the path is "
-        "resolved to an absolute file at load — it must exist and be readable.",
+    hostnames: list[str] = Field(
+        default_factory=list,
+        description="Hostnames and/or IP addresses to include as Subject Alternative "
+        "Names in the generated certificate. The first entry becomes the Common Name. "
+        "Required when `provision = self-signed`; ignored otherwise.",
+    )
+    cert_file: str | None = Field(
+        default=None,
+        description="Path to the PEM certificate (chain) file. `~` is expanded and "
+        "the path is resolved to an absolute file at load — it must exist and be "
+        "readable. Required when `provision = off`; must be absent when "
+        "`provision = self-signed` (the cert is written by the provisioner).",
+    )
+    key_file: str | None = Field(
+        default=None,
+        description="Path to the PEM private-key file. `~` is expanded and the path "
+        "is resolved to an absolute file at load — it must exist and be readable. "
+        "Required when `provision = off`; must be absent when "
+        "`provision = self-signed` (the key is written by the provisioner).",
     )
 
     @model_validator(mode="after")
     def _validate_material(self) -> TlsConfig:
-        # Fail closed at load: resolve both paths to readable absolute files (or raise).
+        # Fail closed at load: validate config shape per provision mode and, for
+        # provision=off, resolve both paths to readable absolute files (or raise).
         # Store the resolved paths back so the server hands uvicorn canonical absolutes
         # and a second defense-in-depth check at start-up sees the same values.
-        self.cert_file = str(resolve_cert_path("cert_file", self.cert_file))
-        self.key_file = str(resolve_cert_path("key_file", self.key_file))
+        if self.provision == "self-signed":
+            if self.cert_file is not None or self.key_file is not None:
+                raise ValueError(
+                    "tls.cert_file / tls.key_file must not be set when "
+                    "tls.provision = self-signed — the provisioner writes them under "
+                    "state_dir/tls/; remove them from your config."
+                )
+            if not self.hostnames:
+                raise ValueError(
+                    "tls.hostnames must list at least one hostname or IP address "
+                    "when tls.provision = self-signed."
+                )
+        else:
+            # provision = off: both paths are required and must be resolvable now.
+            if self.cert_file is None:
+                raise ValueError("tls.cert_file is required when tls.provision = off.")
+            if self.key_file is None:
+                raise ValueError("tls.key_file is required when tls.provision = off.")
+            self.cert_file = str(resolve_cert_path("cert_file", self.cert_file))
+            self.key_file = str(resolve_cert_path("key_file", self.key_file))
         return self
 
 
@@ -1127,10 +1180,12 @@ class ClausterConfig(BaseModel):
     tls: TlsConfig | None = Field(
         default=None,
         description="Native HTTPS termination. Unset (default) = serve plain HTTP and "
-        "rely on a reverse proxy / `tailscale serve` for TLS. Set `tls.cert_file` + "
-        "`tls.key_file` to have Clauster terminate TLS itself (validated fail-closed at "
-        "load and at server start). Self-signed/ACME provisioning is out of scope — "
-        "supply an existing cert + key.",
+        "rely on a reverse proxy / `tailscale serve` for TLS. Set `tls` to have "
+        "Clauster terminate TLS itself. Two modes: `provision = off` (default) requires "
+        "`cert_file` + `key_file` pointing at an existing cert + key (validated "
+        "fail-closed); `provision = self-signed` generates a self-signed cert+key under "
+        "`state_dir/tls/` automatically (`cryptography` package required). ACME is "
+        "deferred to issue 774.",
     )
 
     _source_path: Path | None = PrivateAttr(default=None)
