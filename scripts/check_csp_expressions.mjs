@@ -32,16 +32,61 @@ const scriptSrc = readFileSync(join(TEMPLATES, "_dashboard_script.html"), "utf8"
 function componentProps(fnName) {
   const start = scriptSrc.indexOf(`function ${fnName}(`);
   if (start === -1) throw new Error(`component factory not found: ${fnName}`);
-  // Brace-match from the factory's opening brace to its close.
-  let i = scriptSrc.indexOf("{", start);
+  // Brace-match from the factory's opening brace to its close. Braces inside string
+  // literals ('...', "...", `...`), regex literals, and // or /* */ comments must NOT
+  // move `depth` — a small char-by-char state machine skips over them so a `{`/`}` in
+  // a string or comment can't truncate the extracted body at the wrong brace.
+  const open = scriptSrc.indexOf("{", start);
   let depth = 0;
-  let end = i;
+  let end = open;
+  let mode = "code"; // code | line-comment | block-comment | sq | dq | tpl | regex
   for (; end < scriptSrc.length; end++) {
     const ch = scriptSrc[end];
-    if (ch === "{") depth++;
-    else if (ch === "}") { depth--; if (depth === 0) break; }
+    const next = scriptSrc[end + 1];
+    const prevNonWs = () => {
+      let j = end - 1;
+      while (j >= 0 && /\s/.test(scriptSrc[j])) j--;
+      return scriptSrc[j];
+    };
+    switch (mode) {
+      case "line-comment":
+        if (ch === "\n") mode = "code";
+        break;
+      case "block-comment":
+        if (ch === "*" && next === "/") { mode = "code"; end++; }
+        break;
+      case "sq":
+        if (ch === "\\") end++;
+        else if (ch === "'") mode = "code";
+        break;
+      case "dq":
+        if (ch === "\\") end++;
+        else if (ch === '"') mode = "code";
+        break;
+      case "tpl":
+        if (ch === "\\") end++;
+        else if (ch === "`") mode = "code";
+        break;
+      case "regex":
+        if (ch === "\\") end++;
+        else if (ch === "/") mode = "code";
+        break;
+      default: // code
+        if (ch === "/" && next === "/") { mode = "line-comment"; end++; }
+        else if (ch === "/" && next === "*") { mode = "block-comment"; end++; }
+        else if (ch === "'") mode = "sq";
+        else if (ch === '"') mode = "dq";
+        else if (ch === "`") mode = "tpl";
+        // Regex literal vs division: a `/` starting a regex follows an operator, `(`,
+        // `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `;`, `return`, or line start —
+        // never a value/identifier/`)`/`]`. Good enough for this codebase's scripts.
+        else if (ch === "/" && !/[\w$)\].]/.test(prevNonWs() || "")) mode = "regex";
+        else if (ch === "{") depth++;
+        else if (ch === "}") { depth--; if (depth === 0) { end++; break; } }
+    }
+    if (mode === "code" && depth === 0 && end > open) break;
   }
-  const body = scriptSrc.slice(i, end + 1);
+  const body = scriptSrc.slice(open, end);
   // Top-level members of the returned object literal sit at exactly 6-space indent.
   const props = new Set();
   for (const m of body.matchAll(/^ {6}(?:async |get )?([$A-Za-z_][\w$]*)\s*[:(]/gm)) {
