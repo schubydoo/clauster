@@ -394,6 +394,7 @@ Planned work, roughly in priority order — the public-facing companion to the i
   tokens, distinct from the session cookie, already ship — see `clauster hash-token`).
 - **Session naming** — predictable/branded session display names instead of the
   random adjective-noun defaults; list active/resumable sessions in the UI.
+
 Not planned: clauster is a **single-operator** tool — multi-user accounts, OIDC login,
 and per-user GDPR tooling were considered and declined (one deployment serves one
 operator; isolate with separate instances instead). The UI is English-only and not
