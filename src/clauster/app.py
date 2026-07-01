@@ -106,7 +106,7 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 # `'nonce-<nonce>'` — so 'unsafe-inline' is dropped entirely. (CSP3: once a
 # `nonce-…` source is present, browsers IGNORE 'unsafe-inline', so leaving it in
 # would be dead config; dropping it is what blocks an injected inline <script>
-# that lacks the per-request nonce.) The external alpine.min.js is 'self'-allowed
+# that lacks the per-request nonce.) The external alpine.csp.min.js is 'self'-allowed
 # and needs no nonce.
 #
 # style-src is nonce-gated too (#533): the per-request nonce now also gates the
@@ -120,13 +120,12 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 # needs no nonce and is unaffected. A STRING `:style` is applied via the style
 # *attribute* and WOULD be blocked, so all dynamic styling uses the object form.)
 #
-# Tradeoff — one relaxation remains, deliberately out of scope and tracked under
-# the #533 epic:
-#   * 'unsafe-eval' stays: the vendored standard Alpine build evaluates x-*
-#     expressions via `new Function()`, which CSP classifies as eval, so it is
-#     required for the dashboard to render at all. Dropping it needs the
-#     CSP-friendly Alpine build (rewriting every inline x-* directive into
-#     Alpine.data() components + a build-tool swap) — an epic, not this slice.
+# script-src no longer carries 'unsafe-eval' (#533): switching to the
+# @alpinejs/csp build (alpine.csp.min.js) removes the `new Function()` evaluator
+# so Alpine no longer needs eval. Every inline x-* directive that required an
+# arrow function, nested property assignment, or .then() callback was moved into
+# named methods on the dashboard() / projectRow() component objects, which execute
+# in the nonce-gated <script> block — outside CSP's expression restriction.
 #
 # connect-src is just 'self': the live bridge-log + hosted-session streams open
 # same-origin WebSockets, and every browser this app targets matches same-origin
@@ -151,13 +150,14 @@ def _csp_with_nonce(nonce: str | None) -> str:
     Fail-closed: when ``nonce is None`` (a defensive degraded path that should not
     occur in normal request flow), both script-src and style-src still omit
     ``'unsafe-inline'`` — a degraded policy is *stricter*, never looser.
-    ``'unsafe-eval'`` is intentionally retained (see the comment above).
+    ``'unsafe-eval'`` is dropped (#533): the CSP-friendly Alpine build does not use
+    ``new Function()`` to evaluate directives.
     """
     nonce_src = f"'nonce-{nonce}' " if nonce else ""
     style_src = "style-src 'self'" + (f" 'nonce-{nonce}'" if nonce else "")
     return (
         "default-src 'self'; "
-        f"script-src 'self' {nonce_src}'unsafe-eval'; "
+        f"script-src 'self' {nonce_src}; "
         f"{style_src}; "
         "img-src 'self' data:; "
         "font-src 'self'; "

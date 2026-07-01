@@ -457,12 +457,18 @@ _BYPASS_OPTION = '<option value="bypassPermissions"'
 
 
 def test_run_button_enabled_and_coerces_spawn_on_open(write_config):
-    # Run is NOT disabled by any readiness blocker; opening it calls coerceSpawnMode(name,
-    # isGit) so a non-git+worktree default falls back to a valid mode. Per row from is_git_repo.
+    # Run is NOT disabled by any readiness blocker; opening it coerces the spawn mode so a
+    # non-git+worktree default falls back to a valid mode. #533: the inline two-statement
+    # handler became projectRow.toggleLaunchPop(isGit), which calls coerceSpawnMode(name,
+    # isGit) on open — the per-row is_git_repo flag still flows in as the argument.
     html = _client(write_config).get("/").text
     assert 'data-test="run-launch"' in html
-    assert "coerceSpawnMode('alpha', true)" in html  # alpha is a git repo
-    assert "coerceSpawnMode('beta', false)" in html  # beta is not
+    rows = html.split('data-project="')
+    alpha_row = next(r for r in rows if r.startswith('alpha"'))
+    beta_row = next(r for r in rows if r.startswith('beta"'))
+    assert "toggleLaunchPop(true)" in alpha_row  # alpha is a git repo
+    assert "toggleLaunchPop(false)" in beta_row  # beta is not
+    assert "this.coerceSpawnMode(name, isGitRepo)" in html  # the open path still coerces
     # The old disable-the-button approach is gone — the readiness-gated helper no longer exists.
     assert "runBlockReason" not in html
 

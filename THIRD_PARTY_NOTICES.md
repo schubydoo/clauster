@@ -47,8 +47,8 @@ THE SOFTWARE.
 - Project: <https://alpinejs.dev>
 - Source: <https://github.com/alpinejs/alpine>
 - Version: 3.15.12
-- Files: `src/clauster/static/alpine.min.js` (notice also retained at
-  `src/clauster/static/alpine.LICENSE`)
+- Files: `src/clauster/static/alpine.csp.min.js` (CSP-friendly build; notice also
+  retained at `src/clauster/static/alpine.LICENSE`)
 - License: MIT
 
 ```text

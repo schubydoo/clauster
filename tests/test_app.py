@@ -149,7 +149,7 @@ def test_tabler_sprites_for_structural_swap_present(write_config):
 
 def test_static_assets_carry_immutable_cache_control(write_config):
     # #353: vendored assets are cacheable forever (safe because URLs are version-busted).
-    resp = _client(write_config).get("/static/alpine.min.js")
+    resp = _client(write_config).get("/static/alpine.csp.min.js")
     assert resp.status_code == 200
     assert resp.headers["cache-control"] == "public, max-age=31536000, immutable"
 
@@ -166,9 +166,10 @@ def test_not_modified_static_response_has_no_immutable_cache(write_config):
     # A conditional request that resolves to 304 must not carry the immutable header
     # (only 200 file responses do) — exercises the non-200 branch of get_response.
     client = _client(write_config)
-    first = client.get("/static/alpine.min.js")
+    first = client.get("/static/alpine.csp.min.js")
     assert first.status_code == 200 and "etag" in first.headers
-    again = client.get("/static/alpine.min.js", headers={"if-none-match": first.headers["etag"]})
+    etag = first.headers["etag"]
+    again = client.get("/static/alpine.csp.min.js", headers={"if-none-match": etag})
     assert again.status_code == 304
     assert "immutable" not in again.headers.get("cache-control", "")
 
@@ -186,7 +187,7 @@ def test_asset_urls_are_version_busted(write_config):
 
     page = _client(write_config).get("/").text
     assert f"tabler.min.css?v={__version__}" in page
-    assert f"alpine.min.js?v={__version__}" in page
+    assert f"alpine.csp.min.js?v={__version__}" in page
     assert f"favicon.svg?v={__version__}" in page
 
 
@@ -272,7 +273,9 @@ def test_projects_show_more_toggle_appears_in_all_sorts(write_config):
     # rest. Regression: the x-show used to carry `projectSort === 'name'`, so the toggle vanished
     # whenever you sorted by last-used or cost.
     page = _client(write_config).get("/").text
-    m = re.search(r'x-show="(PROJECT_NAMES\.length > 6[^"]*)"', page)
+    # #533: the CSP build resolves bare identifiers against component state only, so the
+    # directive reads the scoped `projectNames` (surfaced from the PROJECT_NAMES const).
+    m = re.search(r'x-show="(projectNames\.length > 6[^"]*)"', page)
     assert m is not None, "Projects show-more toggle button (x-show) not found"
     assert "projectSort" not in m.group(1), (
         "the show-more toggle is gated on the name sort; it must appear in all sorts"
@@ -922,8 +925,12 @@ def test_dashboard_transcript_live_is_single_list(write_config):
     assert "transcripts.order === 'asc' ? 'Sorted oldest first' : 'Sorted newest first'" in page
     assert "transcripts.order === 'asc' ? 'Oldest first' : 'Newest first'" in page
     # Stable keys, not the bare index (#720): the single list keys on the per-turn _key
-    # when present (live), else a timestamp+role+index composite. The old `:key="i"` is gone.
-    assert "t._key ?? ((t.timestamp || '') + ':' + t.role + ':' + i)" in page
+    # when present (live), else a timestamp+role+index composite. The old `:key="i"` is
+    # gone. The fallback lives in keyOf() (#533: the CSP-build parser has no `??`, and
+    # `||` would wrongly discard a legitimate _key of 0).
+    assert ':key="keyOf(t, i)"' in page
+    assert "t._key !== undefined && t._key !== null" in page  # falsy-0 _key preserved
+    assert '(t.timestamp || "") + ":" + t.role + ":" + i' in page
     assert ':key="i"' not in page
     # Live path bumps t.gen before starting the tail (it no longer calls the paged loader
     # that used to do it) so an in-flight non-live fetch from a prior session is gen-voided
