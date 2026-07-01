@@ -87,37 +87,53 @@ def persistence(tmp_path):
     p.dispose()
 
 
+IID_A = "aaaaaaaa-0000-0000-0000-000000000001"
+IID_B = "bbbbbbbb-0000-0000-0000-000000000002"
+
+
 def test_state_round_trip_create_read_update(persistence):
     store = persistence.state_store()
     assert store.load() == {}
-    store.save({"alpha": {"label": "A", "spawn_mode": "session"}})
-    assert store.load() == {"alpha": {"label": "A", "spawn_mode": "session"}}
+    store.save({IID_A: {"project_name": "alpha", "label": "A", "spawn_mode": "session"}})
+    assert store.load() == {
+        IID_A: {"project_name": "alpha", "label": "A", "spawn_mode": "session"}
+    }
     # update in place (same key) preserves identity, changes fields
-    store.save({"alpha": {"label": "A2", "permission_mode": "plan"}})
-    assert store.load() == {"alpha": {"label": "A2", "permission_mode": "plan"}}
+    store.save({IID_A: {"project_name": "alpha", "label": "A2", "permission_mode": "plan"}})
+    assert store.load() == {
+        IID_A: {"project_name": "alpha", "label": "A2", "permission_mode": "plan"}
+    }
 
 
 def test_state_save_is_full_replace_pruning_absent_keys(persistence):
     store = persistence.state_store()
-    store.save({"a": {"label": "a"}, "b": {"label": "b"}})
-    store.save({"b": {"label": "b2"}})  # a dropped -> pruned
-    assert store.load() == {"b": {"label": "b2"}}
+    store.save(
+        {
+            IID_A: {"project_name": "a", "label": "a"},
+            IID_B: {"project_name": "b", "label": "b"},
+        }
+    )
+    store.save({IID_B: {"project_name": "b", "label": "b2"}})  # a dropped -> pruned
+    assert store.load() == {IID_B: {"project_name": "b", "label": "b2"}}
 
 
 def test_state_absent_fields_stay_absent(persistence):
     store = persistence.state_store()
-    store.save({"a": {"label": "a"}})  # no modes set
-    loaded = store.load()["a"]
-    assert loaded == {"label": "a"}  # None columns omitted, like the JSON store
+    store.save({IID_A: {"project_name": "a", "label": "a"}})  # no modes set
+    loaded = store.load()[IID_A]
+    # None columns omitted, like the JSON store (project_name is always present)
+    assert loaded == {"project_name": "a", "label": "a"}
 
 
 def test_state_persists_across_reopen(tmp_path):
     p1 = Persistence(tmp_path)
-    p1.state_store().save({"a": {"label": "kept", "resume_mode": "pty"}})
+    p1.state_store().save({IID_A: {"project_name": "a", "label": "kept", "resume_mode": "pty"}})
     p1.dispose()
     p2 = Persistence(tmp_path)
     try:
-        assert p2.state_store().load() == {"a": {"label": "kept", "resume_mode": "pty"}}
+        assert p2.state_store().load() == {
+            IID_A: {"project_name": "a", "label": "kept", "resume_mode": "pty"}
+        }
     finally:
         p2.dispose()
 
@@ -165,7 +181,7 @@ def test_state_save_raises_oserror_on_db_error(persistence):
     # (a stale cursor, never a failed spawn) keeps working unchanged.
     with mock.patch.object(store, "_sessions", side_effect=SQLAlchemyError("boom")):
         with pytest.raises(OSError, match="state save failed"):
-            store.save({"a": {"label": "a"}})
+            store.save({IID_A: {"project_name": "a", "label": "a"}})
 
 
 def test_hosted_save_raises_oserror_on_db_error(persistence):
@@ -251,12 +267,21 @@ def _seed_json(state_dir):
     )
 
 
+def _legacy_iid(project_name):
+    # Mirrors bootstrap._project_instance_id: the deterministic UUID the import
+    # derives for a legacy project-keyed record (issue 777).
+    import uuid as _uuid
+
+    return str(_uuid.uuid5(_uuid.NAMESPACE_DNS, f"clauster.instance.{project_name}"))
+
+
 def test_first_boot_imports_legacy_json_and_retires_files(tmp_path):
     _seed_json(tmp_path)
     p = Persistence(tmp_path)
     try:
         assert p.state_store().load() == {
-            "alpha": {
+            _legacy_iid("alpha"): {
+                "project_name": "alpha",
                 "label": "A",
                 "intentional_stop": True,
                 "spawn_mode": "session",
@@ -286,8 +311,9 @@ def test_import_is_one_time_not_repeated_on_reopen(tmp_path):
     p = Persistence(tmp_path)
     try:
         loaded = p.state_store().load()
-        assert "ghost" not in loaded  # not re-imported over existing rows
-        assert "alpha" in loaded
+        projects = {v.get("project_name") for v in loaded.values()}
+        assert "ghost" not in projects  # not re-imported over existing rows
+        assert "alpha" in projects
     finally:
         p.dispose()
     assert (tmp_path / "state.json").exists()  # left intact (no re-import)
@@ -309,7 +335,9 @@ def test_import_with_only_state_json_present(tmp_path):
     )
     p = Persistence(tmp_path)
     try:
-        assert p.state_store().load() == {"solo": {"label": "S"}}
+        assert p.state_store().load() == {
+            _legacy_iid("solo"): {"project_name": "solo", "label": "S"}
+        }
         assert p.hosted_state_store().load() == {}
     finally:
         p.dispose()

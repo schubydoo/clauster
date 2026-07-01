@@ -148,8 +148,9 @@ def _summarize_instance(inst: RemoteControlInstance, *, kind: str) -> dict[str, 
     """Summarize a :class:`RemoteControlInstance` (bridge or hosted) read-only.
 
     Only structural/lifecycle fields are surfaced — never log or transcript
-    content. The id is the bridge's project (its registry key) for a bridge, or
-    the ``claustrum_process_id`` for a hosted session.
+    content. The id is the bridge's project for a bridge (stable and
+    human-meaningful; the runner registry itself is keyed by instance_id since
+    issue 777), or the ``claustrum_process_id`` for a hosted session.
     """
     is_hosted = kind == "hosted"
     session_id = inst.claustrum_process_id if is_hosted else inst.project

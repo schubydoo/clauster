@@ -253,7 +253,14 @@ def test_cli_kill_refuses_db_carded_keeper_after_migration(tmp_path, capsys):
 
     persistence = Persistence(tmp_path / "state")
     try:
-        persistence.state_store().save({"alpha": {"label": "alpha"}})
+        persistence.state_store().save(
+            {
+                "aaaaaaaa-0000-0000-0000-000000000001": {
+                    "project_name": "alpha",
+                    "label": "alpha",
+                }
+            }
+        )
     finally:
         persistence.dispose()
     assert not (tmp_path / "state" / "state.json").exists()  # DB-only; no flat card file

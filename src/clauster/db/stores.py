@@ -24,6 +24,11 @@ per-project "last used / total cost" rollup. It follows the same fail-closed rea
 posture — every read degrades to empty on a DB error and never crashes a poll —
 while ``append`` is best-effort and swallows write errors (history is
 non-authoritative; a lost event row must never fail a spawn or stop).
+
+Since issue 777 the ``StateStore`` is keyed by ``instance_id`` (not project name):
+``load`` returns ``{instance_id: {persisted fields including project_name}}`` and
+``save`` takes the same shape.  The ``project_name`` field is always present so the
+runner can rebuild the per-project index after a restart.
 """
 
 from __future__ import annotations
@@ -50,7 +55,17 @@ _SORTMETA_CHUNK = 900
 
 # The fields each store round-trips, in the order the JSON ``_PERSISTED_FIELDS``
 # whitelist listed them. Kept here so the DB store drops the same unknown keys.
-_INSTANCE_FIELDS = ("label", "intentional_stop", "spawn_mode", "permission_mode", "resume_mode")
+# ``instance_id`` and ``project_name`` are the keys, not data fields, but they
+# are still included in the persisted payload so the runner can restore both after
+# a restart without querying a secondary index.
+_INSTANCE_FIELDS = (
+    "project_name",
+    "label",
+    "intentional_stop",
+    "spawn_mode",
+    "permission_mode",
+    "resume_mode",
+)
 _HOSTED_FIELDS = (
     "project",
     "label",
@@ -81,11 +96,15 @@ def _present(row: object, fields: tuple[str, ...]) -> dict:
 
 
 class StateStore:
-    """Per-project bridge intent, backed by the ``instances`` table.
+    """Per-instance bridge intent, backed by the ``instances`` table (#777).
 
-    Same contract as :class:`clauster.state.StateStore`: keyed by project name,
-    round-trips the label / intentional-stop / spawn-permission-resume modes,
-    fail-closed on read.
+    Keyed by ``instance_id`` (a stable UUID minted at spawn time).  Each record
+    carries ``project_name`` as a data field so the runner can rebuild the
+    per-project index after a restart without a secondary index.
+
+    Same contract as :class:`clauster.state.StateStore`:
+    ``load() → {instance_id: {persisted fields}}`` and
+    ``save({instance_id: {fields}})`` — fail-closed on read.
     """
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
@@ -93,11 +112,11 @@ class StateStore:
         self._sessions = session_factory
 
     def load(self) -> dict[str, dict]:
-        """Return ``{project_name: {persisted fields}}``; ``{}`` on any DB error."""
+        """Return ``{instance_id: {persisted fields}}``; ``{}`` on any DB error."""
         try:
             with self._sessions() as session:
                 rows = session.execute(select(Instance)).scalars().all()
-                return {row.project_name: _present(row, _INSTANCE_FIELDS) for row in rows}
+                return {row.instance_id: _present(row, _INSTANCE_FIELDS) for row in rows}
         except SQLAlchemyError as exc:
             # Fail-closed like the JSON store's corrupt-file path: a read failure
             # degrades to "forget the labels", never a crash on startup.
@@ -107,10 +126,10 @@ class StateStore:
     def save(self, records: dict[str, dict]) -> None:
         """Replace the ``instances`` map with ``records`` (full upsert + prune).
 
-        Ensures a :class:`Project` row exists for each key (foreign-key parent),
-        upserts the instance row, and deletes instance rows for projects no longer
-        in ``records``. Raises :class:`OSError` on failure so the callers'
-        best-effort ``except OSError`` still applies.
+        ``records`` is ``{instance_id: {fields}}``; each record must carry a
+        ``project_name`` key so the FK parent can be ensured. Raises
+        :class:`OSError` on failure so the callers' best-effort ``except OSError``
+        still applies.
         """
         try:
             with self._sessions() as session:
@@ -124,21 +143,26 @@ class StateStore:
         """Upsert every record and delete instance rows absent from ``records``."""
         keep = set(records)
         existing = {
-            row.project_name: row for row in session.execute(select(Instance)).scalars().all()
+            row.instance_id: row for row in session.execute(select(Instance)).scalars().all()
         }
         known_projects = set(session.execute(select(Project.name)).scalars().all())
-        for name, fields in records.items():
-            if name not in known_projects:
-                session.add(Project(name=name))
-                known_projects.add(name)
-            row = existing.get(name)
+        for instance_id, fields in records.items():
+            project_name = fields.get("project_name", "")
+            if project_name and project_name not in known_projects:
+                session.add(Project(name=project_name))
+                known_projects.add(project_name)
+            row = existing.get(instance_id)
             if row is None:
-                row = Instance(project_name=name)
+                row = Instance(instance_id=instance_id, project_name=project_name)
                 session.add(row)
+            else:
+                # project_name may change on import/migration; keep it current.
+                if project_name:
+                    row.project_name = project_name
             for field in _INSTANCE_FIELDS:
                 setattr(row, field, fields.get(field))
-        for name, row in existing.items():
-            if name not in keep:
+        for iid, row in existing.items():
+            if iid not in keep:
                 session.delete(row)
 
 

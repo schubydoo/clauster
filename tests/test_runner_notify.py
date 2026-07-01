@@ -224,10 +224,11 @@ async def test_webhook_stop_fires(runner_config):
     runner = _runner(runner_config)
     rec = _RecordingWebhooks()
     runner._webhooks = rec
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.RUNNING
     )  # no bridge_pid → the no-pid STOPPED path
-    await runner.stop("alpha")
+    runner._instances[fake.instance_id] = fake
+    await runner.stop(fake.instance_id)
     await asyncio.gather(*runner._notify_tasks)
     assert [e for e, _ in rec.calls] == ["stop"]  # exactly one stop, nothing else
 
@@ -236,14 +237,15 @@ async def test_webhook_crash_fires_on_poll_once(runner_config, monkeypatch):
     runner = _runner(runner_config)
     rec = _RecordingWebhooks()
     runner._webhooks = rec
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.RUNNING, bridge_pid=4242
     )
+    runner._instances[fake.instance_id] = fake
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
     monkeypatch.setattr("clauster.runner.procutil.reap_if_exited", lambda *a, **k: None)
     monkeypatch.setattr("clauster.runner.inspector.list_working_sessions", lambda *a, **k: [])
     await runner.poll_once()
-    assert runner._instances["alpha"].status is InstanceStatus.CRASHED
+    assert fake.status is InstanceStatus.CRASHED
     await asyncio.gather(*runner._notify_tasks)
     assert [e for e, _ in rec.calls] == ["crash"]  # exactly one crash event
 

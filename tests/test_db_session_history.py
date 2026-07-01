@@ -53,9 +53,10 @@ def test_migration_creates_session_events_table_and_indexes(persistence):
 
 
 def test_session_events_migration_downgrade_one_step_leaves_foundation(tmp_path):
-    # Upgrade to head, then downgrade a single step: session_events is dropped but the
-    # foundation tables (projects/instances/hosted_sessions) remain. Covers the new
-    # migration's downgrade() against an injected connection.
+    # Upgrade to head, then downgrade back to the 0001 baseline: session_events is
+    # dropped (0002's downgrade) and the instance-id re-key is reverted (0003's
+    # downgrade, issue 777) but the foundation tables (projects/instances/
+    # hosted_sessions) remain. Covers both downgrades against an injected connection.
     engine = create_db_engine(tmp_path)
     try:
         with engine.connect() as conn:
@@ -63,7 +64,7 @@ def test_session_events_migration_downgrade_one_step_leaves_foundation(tmp_path)
             cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
             cfg.attributes["connection"] = conn
             command.upgrade(cfg, "head")
-            command.downgrade(cfg, "-1")
+            command.downgrade(cfg, "f45313346555")  # back to the 0001 baseline
             names = set(
                 conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).scalars()
             )

@@ -94,11 +94,12 @@ def test_spawn_and_stop_via_api(runner_config, monkeypatch):
         body = resp.json()
         assert body["status"] == "running"
         assert body["environment_id"] == "env_01TESTENVAAAAAAAAAAAAAAAA"
+        instance_id = body["instance_id"]
 
         health = client.get("/healthz").json()
         assert health["instances_running"] == 1
 
-        stop = client.delete("/api/instances/alpha")
+        stop = client.delete(f"/api/instances/{instance_id}")
         assert stop.status_code == 200
         assert stop.json()["status"] == "stopped"
 
@@ -106,21 +107,23 @@ def test_spawn_and_stop_via_api(runner_config, monkeypatch):
 def test_forget_stopped_bridge_via_api(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     with _client(runner_config) as client:
-        client.post("/api/instances", json={"project": "alpha"})
-        client.delete("/api/instances/alpha")  # stop -> a stopped, resumable card
+        spawn = client.post("/api/instances", json={"project": "alpha"})
+        instance_id = spawn.json()["instance_id"]
+        client.delete(f"/api/instances/{instance_id}")  # stop -> a stopped, resumable card
         assert any(i["project"] == "alpha" for i in client.get("/api/instances").json())
 
-        forget = client.post("/api/instances/alpha/forget")
+        forget = client.post(f"/api/instances/{instance_id}/forget")
         assert forget.status_code == 200, forget.text
-        assert forget.json() == {"id": "alpha", "forgotten": True}
+        assert forget.json() == {"id": instance_id, "forgotten": True}
         assert client.get("/api/instances").json() == []  # gone from the list
 
 
 def test_forget_running_bridge_409(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     with _client(runner_config) as client:
-        client.post("/api/instances", json={"project": "alpha"})  # running
-        forget = client.post("/api/instances/alpha/forget")
+        spawn = client.post("/api/instances", json={"project": "alpha"})  # running
+        instance_id = spawn.json()["instance_id"]
+        forget = client.post(f"/api/instances/{instance_id}/forget")
         assert forget.status_code == 409  # Stop it first; forget never kills
         assert any(i["project"] == "alpha" for i in client.get("/api/instances").json())
 
@@ -133,11 +136,12 @@ def test_max_bridges_cap_returns_409(runner_config, monkeypatch):
     with TestClient(create_app(config, runner=runner)) as client:
         first = client.post("/api/instances", json={"project": "alpha"})
         assert first.status_code == 201, first.text
+        alpha_id = first.json()["instance_id"]
         second = client.post("/api/instances", json={"project": "beta"})  # 1 live >= cap
         assert second.status_code == 409, second.text
         assert "max_bridges" in second.json()["detail"]
-        client.delete("/api/instances/alpha")
-        client.delete("/api/instances/alpha")  # cleanup the fake process
+        client.delete(f"/api/instances/{alpha_id}")
+        client.delete(f"/api/instances/{alpha_id}")  # cleanup the fake process
 
 
 def test_forget_unknown_instance_404(runner_config):

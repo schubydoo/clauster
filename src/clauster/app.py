@@ -2404,7 +2404,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         raise HTTPException(status_code=404, detail=f"project {name!r} not found")
 
     def _bridge_running(name: str) -> bool:
-        inst = runner.get_instance(name)
+        inst = runner.get_instance_for_project(name)
         if inst is not None and inst.status is InstanceStatus.RUNNING:
             return True
         return name in runner.external_sessions_by_project()
