@@ -932,12 +932,44 @@ def test_dashboard_transcript_live_is_single_list(write_config):
     # Idle polls (no new turns, no reset) must NOT trigger the O(n) rebuild; the rebuild is
     # gated on the master actually changing.
     assert "if (changed) this._rebuildLiveTurns();" in page
-    # closeTranscripts clears tailOffset alongside the other live-state fields (matching
-    # backToTranscriptList) so the two teardown paths don't diverge.
+    # closeTranscripts clears tailOffset + tailTruncated alongside the other live-state
+    # fields (matching backToTranscriptList) so the two teardown paths don't diverge.
     assert (
         "t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; "
-        't.tailError = "";  // clear live state on close'
+        't.tailError = ""; t.tailTruncated = false;  // clear live state on close'
     ) in page
+
+
+def test_dashboard_live_tail_cap_bounds_tailraw(write_config):
+    # issue 735: tailRaw was append-only with no bound; a long-running session could grow
+    # the array and DOM unbounded. The poll loop now front-splices tailRaw to MAX_TAIL_TURNS
+    # after each push, and sets tailTruncated=true so the header can show a visible notice
+    # ("showing last N turns") rather than silently dropping history.
+    page = _client(write_config).get("/").text
+    # The cap constant must be defined in the script.
+    assert "const MAX_TAIL_TURNS = 1000;" in page
+    # tailTruncated field is declared on the transcripts state object.
+    assert "tailTruncated: false" in page
+    # After each push the poll loop slices tailRaw to the cap when it grows over the limit.
+    assert "t.tailRaw.length > MAX_TAIL_TURNS" in page
+    assert "t.tailRaw = t.tailRaw.slice(t.tailRaw.length - MAX_TAIL_TURNS);" in page
+    assert "t.tailTruncated = true;" in page
+    # On file-rotation (d.reset) the master is replaced from scratch — tailTruncated resets.
+    assert "t.tailTruncated = false; changed = true;" in page
+    # A visible indicator (not a silent drop): the cap span uses x-show on tailTruncated.
+    assert 'data-test="transcript-tail-cap"' in page
+    assert 'x-show="transcripts.tailTruncated"' in page
+    # Directives reference the SCOPED mirror (CSP-build-safe, issue 533), which is
+    # initialized from the JS constant.
+    assert "maxTailTurns: MAX_TAIL_TURNS" in page
+    assert "'— showing last ' + transcripts.maxTailTurns + ' turns'" in page
+    # live→ended on a CAPPED tail hands off to the paged backend path — a capped list
+    # can't pose as the complete static transcript (and hiding the live card hides the
+    # truncation banner), so the ended view reloads from the start instead.
+    assert (
+        "if (t.tailTruncated) { t.tailTruncated = false; this.loadTranscriptTurnsFromStart(); }"
+        in page
+    )
 
 
 def test_clone_cancel_has_confirm_before_cancel_dialog(write_config):

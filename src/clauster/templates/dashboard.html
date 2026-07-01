@@ -1254,11 +1254,15 @@
                  themselves render in the single list below, with new turns appended into
                  it per the active sort. aria-live announces the first-turn arrival. #}
               <div class="card mb-3" data-test="transcript-tail" x-show="transcripts.live" x-cloak>
-                <div class="card-header py-2 d-flex align-items-center gap-2"
+                <div class="card-header py-2 d-flex align-items-center gap-2 flex-wrap"
                      role="status" aria-live="polite">
                   <span class="badge bg-green-lt" data-test="transcript-tail-live"
                         title="Following this running session live."><span aria-hidden="true">●</span> following live</span>
                   <span class="text-secondary small">Updates as the session runs.</span>
+                  <span class="text-secondary small" data-test="transcript-tail-cap"
+                        x-show="transcripts.tailTruncated" x-cloak
+                        :title="'Long session — oldest turns dropped to stay within ' + transcripts.maxTailTurns + ' turn limit.'"
+                        x-text="'— showing last ' + transcripts.maxTailTurns + ' turns'"></span>
                 </div>
                 <div class="card-body p-2" x-show="transcripts.tailError || transcripts.tailRaw.length === 0">
                   <div class="alert alert-warning py-1 px-2 mb-0 small" data-test="transcript-tail-error"
