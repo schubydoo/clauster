@@ -172,6 +172,9 @@
         //   monotonic _key counter; _tailTimer + tailBusy: the single-flight poll lock.
         live: false, tailRaw: [], tailOffset: 0, tailGen: 0, tailKey: 0,
         tailBusy: false, tailError: "", tailTruncated: false, _tailTimer: null,
+        // Scoped mirror of MAX_TAIL_TURNS: directives must reference component state, not
+        // a bare script global — the CSP Alpine build (issue 533) can't resolve globals.
+        maxTailTurns: MAX_TAIL_TURNS,
       },
       agents: [],
       agentForm: { project: "", prompt: "", cloud: false, busy: false },

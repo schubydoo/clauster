@@ -959,7 +959,10 @@ def test_dashboard_live_tail_cap_bounds_tailraw(write_config):
     # A visible indicator (not a silent drop): the cap span uses x-show on tailTruncated.
     assert 'data-test="transcript-tail-cap"' in page
     assert 'x-show="transcripts.tailTruncated"' in page
-    assert "MAX_TAIL_TURNS" in page  # x-text renders the count from the JS constant
+    # Directives reference the SCOPED mirror (CSP-build-safe, issue 533), which is
+    # initialized from the JS constant.
+    assert "maxTailTurns: MAX_TAIL_TURNS" in page
+    assert "'— showing last ' + transcripts.maxTailTurns + ' turns'" in page
     # live→ended on a CAPPED tail hands off to the paged backend path — a capped list
     # can't pose as the complete static transcript (and hiding the live card hides the
     # truncation banner), so the ended view reloads from the start instead.
