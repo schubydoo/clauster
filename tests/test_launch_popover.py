@@ -127,8 +127,9 @@ def test_run_button_yields_to_a_pending_gate(write_config) -> None:
     assert run != -1
     seg = row[run : run + 500]
     assert "!confirmTrust['alpha'] && !confirmBypass['alpha']" in seg
-    # CSP build (#533): .then(arrow fn) replaced with launchRunAndClose (registered method)
-    assert "launchRunAndClose(lmode, lperm, lcloud, lprompt)" in seg
+    # CSP build (#533): .then(arrow fn) replaced with launchRunAndClose — a dashboard()
+    # method (launchRun is a sibling there) that closes via the launch-pop-close event.
+    assert "launchRunAndClose('alpha', lmode, lperm, lcloud, lprompt)" in seg
 
 
 def test_launch_run_keeps_popover_open_for_a_gate(write_config) -> None:

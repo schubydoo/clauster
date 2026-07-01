@@ -65,7 +65,7 @@
                    the Spawn picker explains it. #}
                 <span class="launch-anchor">
                   <button type="button" class="btn btn-primary" data-test="run-launch"
-                          @click="lopen = !lopen; if (lopen) coerceSpawnMode('{{ p.name }}', {{ p.is_git_repo | tojson }})"
+                          @click="toggleLaunchPop({{ p.is_git_repo | tojson }})"
                           :aria-expanded="lopen">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run Claude here
                     <svg class="ico ms-1" aria-hidden="true" x-show="lopen"><use href="#ic-caret-up"/></svg><svg class="ico ms-1" aria-hidden="true" x-show="!lopen"><use href="#ic-caret-down"/></svg>
@@ -74,14 +74,14 @@
                      trust/bypass gate (#686) so a hidden gate never lingers — reopening starts
                      a fresh launch. mopen is reset too so More options collapses on reopen. #}
                   <div class="card launch-pop" x-show="lopen" x-cloak
-                       @click.outside="lopen = false; mopen = false; confirmTrust['{{ p.name }}'] = false; confirmBypass['{{ p.name }}'] = false"
-                       @keydown.escape.window="lopen = false; mopen = false; confirmTrust['{{ p.name }}'] = false; confirmBypass['{{ p.name }}'] = false">
+                       @click.outside="dismissLaunchPop()"
+                       @keydown.escape.window="dismissLaunchPop()">
                     <div class="card-body p-2">
                       <div class="form-label small mb-1">How do you want to drive it?</div>
                       <template x-for="m in launchModes()" :key="m.id">
                         <label class="launch-opt" :class="lmode === m.id ? 'is-sel' : ''">
                           <input type="radio" class="form-check-input mt-1 me-2" :name="'lm-{{ p.name }}'" :value="m.id" x-model="lmode"
-                                 @change="if (lmode !== 'desktop' && lperm === 'bypassPermissions') lperm = DEFAULT_PERMISSION_MODE">
+                                 @change="clampPermForMode()">
                           <span>
                             <span class="fw-medium d-block">
                               <span x-text="m.label"></span>
@@ -166,7 +166,7 @@
                              under the keeper with no `--spawn`, so it ignores these; hide them in pty
                              mode rather than offer no-op choices. #}
                           <div class="col-12"
-                               {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) !== 'pty'" x-cloak{% endif %}>
+                               {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) !== 'pty'" x-cloak{% endif %}>
                             <label class="form-label small mb-1" for="spawn-{{ p.name }}">Spawn</label>
                             <select id="spawn-{{ p.name }}" class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']"
                                     title="Where the session runs: same-dir = the project directory · worktree = an isolated git worktree (git repos only) · session = a fresh sandboxed session.">
@@ -187,7 +187,7 @@
                              even in standard mode (same bug as the live-tail banners). Flex goes on
                              the inner wrapper. #}
                           <div class="col-12"
-                               x-show="(resumeMode['{{ p.name }}'] || DEFAULT_RESUME_MODE) === 'pty'" x-cloak>
+                               x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'pty'" x-cloak>
                             <div class="d-flex align-items-end">
                               <p id="resume-hint-{{ p.name }}" class="form-hint text-secondary small mb-1">Runs as one session in the project directory.</p>
                             </div>
@@ -246,7 +246,7 @@
                       <button type="button" class="btn btn-primary w-100 mt-2" data-test="launch-run-go"
                               x-show="!confirmTrust['{{ p.name }}'] && !confirmBypass['{{ p.name }}']" x-cloak
                               :disabled="launching['{{ p.name }}']"
-                              @click="launchRunAndClose(lmode, lperm, lcloud, lprompt)">
+                              @click="launchRunAndClose('{{ p.name }}', lmode, lperm, lcloud, lprompt)">
                         <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="permLabel(lperm)"></span>
                       </button>
                       {# Semantic end-of-popover sentinel: a stable structural boundary for tests
@@ -262,7 +262,7 @@
                     <svg class="ico" aria-hidden="true"><use href="#ic-more"/></svg>
                   </button>
                   <div class="dropdown-menu" x-show="menu" x-cloak>
-                    <button type="button" class="dropdown-item" @click="toggleClaudeMd('{{ p.name }}'); menu = false">
+                    <button type="button" class="dropdown-item" @click="pickClaudeMd()">
                       <svg class="ico me-2" aria-hidden="true"><use href="#ic-edit"/></svg><span
                         x-text="cmd['{{ p.name }}'] && cmd['{{ p.name }}'].open ? 'Close CLAUDE.md' : 'Edit CLAUDE.md'">Edit CLAUDE.md</span>
                     </button>

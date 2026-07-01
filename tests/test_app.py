@@ -273,7 +273,9 @@ def test_projects_show_more_toggle_appears_in_all_sorts(write_config):
     # rest. Regression: the x-show used to carry `projectSort === 'name'`, so the toggle vanished
     # whenever you sorted by last-used or cost.
     page = _client(write_config).get("/").text
-    m = re.search(r'x-show="(PROJECT_NAMES\.length > 6[^"]*)"', page)
+    # #533: the CSP build resolves bare identifiers against component state only, so the
+    # directive reads the scoped `projectNames` (surfaced from the PROJECT_NAMES const).
+    m = re.search(r'x-show="(projectNames\.length > 6[^"]*)"', page)
     assert m is not None, "Projects show-more toggle button (x-show) not found"
     assert "projectSort" not in m.group(1), (
         "the show-more toggle is gated on the name sort; it must appear in all sorts"
@@ -923,8 +925,12 @@ def test_dashboard_transcript_live_is_single_list(write_config):
     assert "transcripts.order === 'asc' ? 'Sorted oldest first' : 'Sorted newest first'" in page
     assert "transcripts.order === 'asc' ? 'Oldest first' : 'Newest first'" in page
     # Stable keys, not the bare index (#720): the single list keys on the per-turn _key
-    # when present (live), else a timestamp+role+index composite. The old `:key="i"` is gone.
-    assert "t._key ?? ((t.timestamp || '') + ':' + t.role + ':' + i)" in page
+    # when present (live), else a timestamp+role+index composite. The old `:key="i"` is
+    # gone. The fallback lives in keyOf() (#533: the CSP-build parser has no `??`, and
+    # `||` would wrongly discard a legitimate _key of 0).
+    assert ':key="keyOf(t, i)"' in page
+    assert "t._key !== undefined && t._key !== null" in page  # falsy-0 _key preserved
+    assert '(t.timestamp || "") + ":" + t.role + ":" + i' in page
     assert ':key="i"' not in page
     # Live path bumps t.gen before starting the tail (it no longer calls the paged loader
     # that used to do it) so an in-flight non-live fetch from a prior session is gen-voided

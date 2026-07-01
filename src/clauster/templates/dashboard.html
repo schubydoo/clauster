@@ -784,9 +784,9 @@
           <input type="search" class="form-control form-control-sm proj-search" placeholder="Search projects…"
                  x-model="projectFilter" aria-label="Search projects">
           <button type="button" class="btn btn-sm btn-ghost-secondary" x-cloak
-                  x-show="PROJECT_NAMES.length > 6 && !projectFilter.trim()"
+                  x-show="projectNames.length > 6 && !projectFilter.trim()"
                   @click="showAllProjects = !showAllProjects"
-                  x-text="showAllProjects ? 'Show fewer' : ('Show all ' + PROJECT_NAMES.length)"></button>
+                  x-text="showAllProjects ? 'Show fewer' : ('Show all ' + projectNames.length)"></button>
           <button type="button" class="btn btn-sm btn-primary" @click="toggleNewProject()">
             <span x-show="np.open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Cancel</span><span x-show="!np.open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>New project</span>
           </button>
@@ -1292,8 +1292,9 @@
               <div class="d-flex flex-column gap-2">
                 {# ONE list for live + non-live. Keyed on the stable per-turn _key when the
                    tail stamped one (live), else a timestamp+role+index composite (#720) —
-                   never the bare index, which rebinds nodes on reorder/append. #}
-                <template x-for="(t, i) in transcripts.turns" :key="t._key ?? ((t.timestamp || '') + ':' + t.role + ':' + i)">
+                   never the bare index, which rebinds nodes on reorder/append. keyOf() owns
+                   the ?? fallback (the CSP-build expression parser has no nullish operator). #}
+                <template x-for="(t, i) in transcripts.turns" :key="keyOf(t, i)">
                   <div class="card transcript-turn" data-test="transcript-turn"
                        :class="t.role === 'assistant' ? 'align-self-start border-azure' : 'align-self-end border-secondary'">
                     <div class="card-body p-2">
