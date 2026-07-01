@@ -125,6 +125,18 @@ def test_atomic_write_overrides_preexisting_0644_temp(tmp_path):
     assert dest.read_bytes() == b"KEY"
 
 
+def test_atomic_write_without_fchmod(tmp_path, monkeypatch):
+    """Cover the Windows path where os.fchmod is absent (the hasattr false branch).
+
+    Removing os.fchmod simulates the non-POSIX runtime; the write must still succeed
+    (the open() mode alone applies there). On POSIX the resulting mode is still checked.
+    """
+    monkeypatch.delattr("os.fchmod", raising=False)
+    dest = tmp_path / "cert.pem"
+    _atomic_write(dest, b"CERT", mode=0o644)
+    assert dest.read_bytes() == b"CERT"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="mode bits are POSIX-only")
 def test_generate_self_signed_key_0600_despite_stale_temp(tmp_path):
     """Defect 1 end-to-end: pre-plant a 0644 key temp, provision, assert key is 0600."""
@@ -176,6 +188,41 @@ def test_cert_needs_regen_no_churn_on_noncanonical_ipv6(tmp_path):
     # And a second full provision must reuse the existing key (no churn).
     _, key_path2 = generate_self_signed(tmp_path, ["2001:0db8::0:1"])
     assert key_path2.read_bytes() == key_before
+
+
+def test_cert_needs_regen_no_san_extension_regenerates(tmp_path):
+    """A cert with NO SubjectAlternativeName extension must trigger a regen.
+
+    Covers the ExtensionNotFound branch: a hand-crafted cert lacking a SAN yields an
+    empty existing-set, which differs from any requested SAN set, so regen is needed.
+    """
+    import datetime as _dt
+
+    from cryptography import x509  # type: ignore[import-not-found]
+    from cryptography.hazmat.primitives import (  # type: ignore[import-not-found]
+        hashes,
+        serialization,
+    )
+    from cryptography.hazmat.primitives.asymmetric import rsa  # type: ignore[import-not-found]
+    from cryptography.x509.oid import NameOID  # type: ignore[import-not-found]
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "no-san.example")])
+    now = _dt.datetime.now(tz=_dt.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now)
+        .not_valid_after(now + _dt.timedelta(days=800))
+        # deliberately NO add_extension(SubjectAlternativeName(...))
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = tmp_path / "no-san.crt"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    assert cert_needs_regen(cert_path, ["no-san.example"])
 
 
 def test_cert_needs_regen_near_expiry(tmp_path, monkeypatch):

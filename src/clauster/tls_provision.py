@@ -59,7 +59,9 @@ def _imports():
         )
         from cryptography.hazmat.primitives.asymmetric import rsa  # type: ignore[import-not-found]
         from cryptography.x509.oid import NameOID  # type: ignore[import-not-found]
-    except ModuleNotFoundError as exc:
+    # pragma: cryptography is a core dep, so this ModuleNotFoundError path can't be
+    # exercised in-suite (can't uninstall the package mid-run) — hence no cover.
+    except ModuleNotFoundError as exc:  # pragma: no cover
         raise RuntimeError(
             "tls.provision = self-signed requires the 'cryptography' package — "
             "install it with: pip install cryptography  (or pip install 'clauster[tls]')"
@@ -260,12 +262,15 @@ def _atomic_write(dest: Path, data: bytes, mode: int) -> None:
     can never leak the key through the wrong mode:
 
     - ``O_TRUNC`` applies ``mode`` only on *creation*; a pre-existing 0644 temp
-      would keep 0644 and ``rename()`` would carry that onto the key.  So we
+      would keep 0644 and the rename would carry that onto the key.  So we
       ``unlink`` any stale temp first, then open with ``O_CREAT | O_EXCL`` — the
       create is always fresh (``mode`` always applies), and ``O_EXCL`` also closes
       the symlink-follow vector on the predictable temp path.
     - ``os.fchmod(fd, mode)`` re-asserts the mode on the fd before writing, in
       case a restrictive process ``umask`` masked bits off the ``open`` mode.
+
+    The final swap uses ``os.replace`` (not ``Path.rename``) so it atomically
+    overwrites an existing destination on Windows too — the cert-regeneration path.
     """
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     try:
@@ -283,7 +288,10 @@ def _atomic_write(dest: Path, data: bytes, mode: int) -> None:
             os.write(fd, data)
         finally:
             os.close(fd)
-        tmp.rename(dest)
+        # os.replace atomically overwrites an existing dest on BOTH POSIX and
+        # Windows (Path.rename / os.rename raise on Windows if dest exists — which
+        # is exactly the cert-regeneration path: a second write over self-signed.key).
+        os.replace(str(tmp), str(dest))
     except BaseException:
         # Best-effort cleanup of the temp file on any failure.
         with contextlib.suppress(OSError):
