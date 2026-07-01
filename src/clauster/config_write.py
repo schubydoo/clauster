@@ -42,6 +42,7 @@ The gate ordering the children must follow (each step aborts before the write)::
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -49,7 +50,7 @@ from typing import Any, Literal
 
 from fastapi import HTTPException
 
-from .claude_json import update_claude_json
+from .claude_json import locked_replace_json_file, update_claude_json
 from .config import ClausterConfig
 from .discovery import is_valid_project_name
 
@@ -309,3 +310,82 @@ def capability_status(config: ClausterConfig) -> dict[str, bool]:
         "enabled": config.config_write.enabled,
         "allow_user_scope": config.config_write.allow_user_scope,
     }
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers used by child surfaces (MCP #688, permissions #689, hooks #690)
+# ---------------------------------------------------------------------------
+
+
+def load_settings_json_obj(raw: bytes) -> dict[str, Any]:
+    """Parse ``raw`` bytes as a JSON object, returning ``{}`` for empty/whitespace.
+
+    Shared by the child surfaces to parse an existing settings/config file before
+    merging into it. A non-object or malformed JSON is a structural error (→ caller
+    maps to 422): we will not overwrite a file we could not parse.
+    """
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise InvalidCandidateError(f"existing settings file is not valid UTF-8: {exc}") from exc
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise InvalidCandidateError(f"existing settings file is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise InvalidCandidateError("existing settings file is not a JSON object")
+    return data
+
+
+def render_json(data: dict[str, Any]) -> str:
+    """Render ``data`` as pretty JSON with a trailing newline (matches CLI style)."""
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
+def project_settings_path(project_dir: Path) -> Path:
+    """Return the project-scope settings file path (``<project>/.claude/settings.json``)."""
+    return project_dir / ".claude" / "settings.json"
+
+
+def write_settings_subtree(
+    path: Path,
+    subtree_key: str,
+    incoming: Any,
+    expected_hash: str | None,
+    *,
+    merge: Callable[[Any, Any], Any] | None = None,
+) -> None:
+    """Locked write of a named subtree of a settings/config JSON file, fail-closed.
+
+    Shared writer used by the child config-write surfaces (MCP #688, permissions #689,
+    hooks #690) to avoid duplicating the stale-hash / parse / merge / render pipeline:
+
+    1. Under the lock, read the current bytes.
+    2. Stale-hash guard (→ 409 :class:`StaleConfigWriteError`): a ``None`` hash is the
+       legitimate first-write path; an existing file refuses an unguarded overwrite.
+    3. Parse the bytes (→ 422 :class:`InvalidCandidateError` on malformed JSON).
+    4. Merge: if ``merge`` is given, call ``merge(incoming, current[subtree_key])`` so
+       the MCP surface can run :func:`merge_redacted` (keep-stored sentinel handling);
+       otherwise set ``current[subtree_key] = incoming`` directly.
+    5. Atomic replace via the shared :func:`~clauster.claude_json.locked_replace_json_file`
+       machinery (``flock`` + ``.bak`` + ``mkstemp`` + ``os.replace``).
+
+    The caller must have already run the capability gate, type-the-name confirm, path
+    containment, and structural validation — this helper trusts an already-validated
+    ``incoming``.
+    """
+
+    def _mutate(current_bytes: bytes) -> dict[str, Any]:
+        if expected_hash is None:
+            if current_bytes:
+                raise StaleConfigWriteError(f"{path.name} already exists; a hash is required")
+        elif hash_bytes(current_bytes) != expected_hash:
+            raise StaleConfigWriteError("config file changed on disk since it was loaded")
+        current = load_settings_json_obj(current_bytes)
+        stored = current.get(subtree_key)
+        current[subtree_key] = merge(incoming, stored) if merge is not None else incoming
+        return current
+
+    locked_replace_json_file(path, _mutate, render=render_json)

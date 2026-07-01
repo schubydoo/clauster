@@ -99,7 +99,7 @@ def test_bypass_as_rule_string_is_inert_data(tmp_path: Path) -> None:
     perms.write_project_permissions(
         tmp_path, {"allow": ["Bash(echo bypassPermissions)"]}, expected_hash=cw.hash_bytes(b"")
     )
-    stored = json.loads(perms.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    stored = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
     assert stored["permissions"]["allow"] == ["Bash(echo bypassPermissions)"]
     assert "defaultMode" not in stored["permissions"]
 
@@ -111,7 +111,7 @@ def test_write_stores_rule_verbatim_never_parsed(tmp_path: Path) -> None:
     candidate = {"deny": ["Bash(rm -rf /:*)"], "allow": ["Read(/etc/passwd)"]}
     perms.validate_permissions(candidate)
     perms.write_project_permissions(tmp_path, candidate, expected_hash=cw.hash_bytes(b""))
-    stored = json.loads(perms.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    stored = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
     assert stored["permissions"]["deny"] == ["Bash(rm -rf /:*)"]
     assert stored["permissions"]["allow"] == ["Read(/etc/passwd)"]
 
@@ -128,7 +128,7 @@ def test_project_write_then_read_round_trip(tmp_path: Path) -> None:
 
 
 def test_project_write_preserves_sibling_keys(tmp_path: Path) -> None:
-    settings = perms.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text(
         json.dumps({"permissions": {"allow": ["a"]}, "hooks": {"X": 1}, "model": "opus"}),
@@ -143,7 +143,7 @@ def test_project_write_preserves_sibling_keys(tmp_path: Path) -> None:
 
 
 def test_project_write_stale_hash_raises(tmp_path: Path) -> None:
-    settings = perms.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text('{"permissions": {}}', encoding="utf-8")
     stale = cw.hash_bytes(b'{"permissions": {"allow": ["old"]}}')
@@ -152,7 +152,7 @@ def test_project_write_stale_hash_raises(tmp_path: Path) -> None:
 
 
 def test_project_write_no_hash_on_existing_file_is_stale(tmp_path: Path) -> None:
-    settings = perms.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text('{"permissions": {}}', encoding="utf-8")
     with pytest.raises(cw.StaleConfigWriteError):
@@ -161,12 +161,12 @@ def test_project_write_no_hash_on_existing_file_is_stale(tmp_path: Path) -> None
 
 def test_project_write_no_hash_on_absent_file_ok(tmp_path: Path) -> None:
     perms.write_project_permissions(tmp_path, {"allow": ["x"]}, expected_hash=None)
-    out = json.loads(perms.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    out = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
     assert out["permissions"] == {"allow": ["x"]}
 
 
 def test_project_read_rejects_non_object_file(tmp_path: Path) -> None:
-    settings = perms.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text("[1, 2, 3]", encoding="utf-8")
     with pytest.raises(cw.InvalidCandidateError):
@@ -174,7 +174,7 @@ def test_project_read_rejects_non_object_file(tmp_path: Path) -> None:
 
 
 def test_project_read_rejects_malformed_json(tmp_path: Path) -> None:
-    settings = perms.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text("{not json", encoding="utf-8")
     with pytest.raises(cw.InvalidCandidateError):

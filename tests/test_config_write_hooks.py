@@ -118,7 +118,7 @@ def test_write_stores_command_verbatim_never_parsed(tmp_path: Path) -> None:
     }
     hooks.validate_hooks(candidate)
     hooks.write_project_hooks(tmp_path, candidate, expected_hash=cw.hash_bytes(b""))
-    stored = json.loads(hooks.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    stored = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
     assert stored["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "rm -rf /"
 
 
@@ -152,7 +152,7 @@ def test_validate_never_executes_the_command(tmp_path: Path) -> None:
     #    not vacuous. We spawn the marker via the Python interpreter rather than a shell so
     #    the proof is portable (Windows has no `sh`); it asserts nothing about HOW the
     #    stored `command` would run — only that a marker at this path is genuinely creatable.
-    stored = json.loads(hooks.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    stored = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
     assert stored["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == pwn
     make_marker = "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()"
     subprocess.run(  # noqa: S603 - prove the marker CAN be made (portable, no shell)
@@ -174,7 +174,7 @@ def test_project_write_then_read_round_trip(tmp_path: Path) -> None:
 
 
 def test_project_write_preserves_sibling_keys(tmp_path: Path) -> None:
-    settings = hooks.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text(
         json.dumps(
@@ -191,7 +191,7 @@ def test_project_write_preserves_sibling_keys(tmp_path: Path) -> None:
 
 
 def test_project_write_stale_hash_raises(tmp_path: Path) -> None:
-    settings = hooks.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text('{"hooks": {}}', encoding="utf-8")
     stale = cw.hash_bytes(b'{"hooks": {"Stop": []}}')
@@ -200,7 +200,7 @@ def test_project_write_stale_hash_raises(tmp_path: Path) -> None:
 
 
 def test_project_write_no_hash_on_existing_file_is_stale(tmp_path: Path) -> None:
-    settings = hooks.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text('{"hooks": {}}', encoding="utf-8")
     with pytest.raises(cw.StaleConfigWriteError):
@@ -209,12 +209,12 @@ def test_project_write_no_hash_on_existing_file_is_stale(tmp_path: Path) -> None
 
 def test_project_write_no_hash_on_absent_file_ok(tmp_path: Path) -> None:
     hooks.write_project_hooks(tmp_path, {"PreToolUse": [_GROUP]}, expected_hash=None)
-    out = json.loads(hooks.project_settings_path(tmp_path).read_text(encoding="utf-8"))
+    out = json.loads(cw.project_settings_path(tmp_path).read_text(encoding="utf-8"))
     assert out["hooks"] == {"PreToolUse": [_GROUP]}
 
 
 def test_project_read_rejects_non_object_file(tmp_path: Path) -> None:
-    settings = hooks.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text("[1, 2, 3]", encoding="utf-8")
     with pytest.raises(cw.InvalidCandidateError):
@@ -222,7 +222,7 @@ def test_project_read_rejects_non_object_file(tmp_path: Path) -> None:
 
 
 def test_project_read_rejects_malformed_json(tmp_path: Path) -> None:
-    settings = hooks.project_settings_path(tmp_path)
+    settings = cw.project_settings_path(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text("{not json", encoding="utf-8")
     with pytest.raises(cw.InvalidCandidateError):

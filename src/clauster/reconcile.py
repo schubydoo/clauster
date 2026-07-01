@@ -30,7 +30,7 @@ import yaml
 # these so the mapping is defined ONCE here, not copied into each validator.
 
 
-def resume_mode_to_launch_mode(value: Any) -> Any:
+def resume_mode_to_launch_mode(value: str | None) -> str | None:
     """Map a legacy ``claude.resume_mode`` value to ``claude.launch_mode`` (identity).
 
     The rename (#540) was cosmetic — the accepted values (``standard`` / ``pty``) are
@@ -39,7 +39,7 @@ def resume_mode_to_launch_mode(value: Any) -> Any:
     return value
 
 
-def show_cost_to_mode(value: Any) -> Any:
+def show_cost_to_mode(value: bool | None) -> str | None:
     """Map a legacy ``usage.show_cost`` value to ``usage.mode``.
 
     ``show_cost: false`` hid the badge, which is now ``mode: "off"``. ``show_cost: true``

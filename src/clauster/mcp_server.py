@@ -45,10 +45,13 @@ import json
 import logging
 import sys
 from datetime import UTC, datetime
-from typing import Any
+from typing import IO, TYPE_CHECKING, Any
 
 from . import __version__
 from .config import ClausterConfig, load_config
+
+if TYPE_CHECKING:
+    from .models import BackgroundJob, RemoteControlInstance, WorkingSession
 
 _log = logging.getLogger("clauster.mcp")
 
@@ -141,7 +144,7 @@ async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
     return sessions
 
 
-def _summarize_instance(inst: Any, *, kind: str) -> dict[str, Any]:
+def _summarize_instance(inst: RemoteControlInstance, *, kind: str) -> dict[str, Any]:
     """Summarize a :class:`RemoteControlInstance` (bridge or hosted) read-only.
 
     Only structural/lifecycle fields are surfaced — never log or transcript
@@ -182,7 +185,7 @@ def _ms_to_iso(ms: int | None) -> str | None:
     return datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat()
 
 
-def _summarize_working(ws: Any, *, kind: str) -> dict[str, Any]:
+def _summarize_working(ws: WorkingSession, *, kind: str) -> dict[str, Any]:
     """Summarize a :class:`WorkingSession` (`claude agents --json` item) read-only."""
     return {
         "id": ws.local_uuid,
@@ -199,7 +202,7 @@ def _summarize_working(ws: Any, *, kind: str) -> dict[str, Any]:
     }
 
 
-def _summarize_job(job: Any) -> dict[str, Any]:
+def _summarize_job(job: BackgroundJob) -> dict[str, Any]:
     """Summarize a :class:`BackgroundJob` (`claude --bg`) read-only.
 
     Free-text fields (``detail``, ``intent``, ``name``, …) are already redacted
@@ -339,7 +342,7 @@ class MCPServer:
             return await self._on_tools_call(msg_id, params)
         return _error(msg_id, _METHOD_NOT_FOUND, f"unknown method: {method}")
 
-    def _on_initialize(self, msg_id: Any, params: dict[str, Any]) -> dict[str, Any]:
+    def _on_initialize(self, msg_id: int | str | None, params: dict[str, Any]) -> dict[str, Any]:
         """Answer ``initialize``: negotiate the protocol version + advertise tools."""
         # Per the MCP lifecycle spec, echo the requested version only when we actually
         # support it; otherwise advertise the version we DO speak (never claim a version
@@ -355,7 +358,9 @@ class MCPServer:
             },
         )
 
-    async def _on_tools_call(self, msg_id: Any, params: dict[str, Any]) -> dict[str, Any]:
+    async def _on_tools_call(
+        self, msg_id: int | str | None, params: dict[str, Any]
+    ) -> dict[str, Any]:
         """Answer ``tools/call``: run a read-only tool and wrap its result.
 
         A handler that raises is reported as an ``isError`` tool result (per the
@@ -380,12 +385,12 @@ class MCPServer:
         )
 
 
-def _result(msg_id: Any, result: dict[str, Any]) -> dict[str, Any]:
+def _result(msg_id: int | str | None, result: dict[str, Any]) -> dict[str, Any]:
     """Build a JSON-RPC 2.0 success response."""
     return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
 
-def _error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
+def _error(msg_id: int | str | None, code: int, message: str) -> dict[str, Any]:
     """Build a JSON-RPC 2.0 error response."""
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
@@ -395,7 +400,7 @@ def _tool_error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
-async def serve(config: ClausterConfig, reader: asyncio.StreamReader, writer: Any) -> None:
+async def serve(config: ClausterConfig, reader: asyncio.StreamReader, writer: IO[str]) -> None:
     """Run the stdio MCP loop until EOF on ``reader``.
 
     Reads newline-delimited JSON-RPC messages, dispatches each through
@@ -440,7 +445,7 @@ async def serve(config: ClausterConfig, reader: asyncio.StreamReader, writer: An
             return  # client hung up mid-stream — stop cleanly
 
 
-def _write(writer: Any, payload: dict[str, Any]) -> bool:
+def _write(writer: IO[str], payload: dict[str, Any]) -> bool:
     """Write one JSON-RPC message as a single newline-terminated stdout line.
 
     Returns ``True`` on success and ``False`` if the client has closed its read end
