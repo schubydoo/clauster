@@ -127,7 +127,8 @@ def test_run_button_yields_to_a_pending_gate(write_config) -> None:
     assert run != -1
     seg = row[run : run + 500]
     assert "!confirmTrust['alpha'] && !confirmBypass['alpha']" in seg
-    assert ".then(done => { if (done) lopen = false })" in seg
+    # CSP build (#533): .then(arrow fn) replaced with launchRunAndClose (registered method)
+    assert "launchRunAndClose(lmode, lperm, lcloud, lprompt)" in seg
 
 
 def test_launch_run_keeps_popover_open_for_a_gate(write_config) -> None:
@@ -169,9 +170,10 @@ def test_gate_open_moves_focus_into_the_gate(write_config) -> None:
     # x-effect that focuses its x-ref'd first control when its confirm flag flips on.
     row = _client(write_config, _BYPASS_CEILING).get("/api/projects/alpha/row").text
     assert 'x-ref="trustCheck"' in row
-    assert "$refs.trustCheck && $refs.trustCheck.focus()" in row
+    # CSP build (#533): arrow fn replaced with focusTrustCheck / focusBypassInput methods
+    assert "focusTrustCheck(" in row
     assert 'x-ref="bypassInput"' in row
-    assert "$refs.bypassInput && $refs.bypassInput.focus()" in row
+    assert "focusBypassInput(" in row
 
 
 def test_bypass_typed_value_is_cleared_when_the_gate_opens(write_config) -> None:

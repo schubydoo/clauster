@@ -243,6 +243,46 @@
         try { localStorage.setItem("clauster-orientation-dismissed", "1"); }
         catch (e) { /* storage blocked/full — the in-memory flag still hides it this session */ }
       },
+      // --- CSP-friendly wrappers (#533): replace inline expressions that the ---
+      // --- @alpinejs/csp build forbids (arrow fns, nested prop assigns, .then). ---
+      // Focus the modal close button after mount. Replaces:
+      //   x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())"
+      focusModalClose(el) {
+        this.$nextTick(() => { const b = el.querySelector(".btn-close"); if (b) b.focus(); });
+      },
+      // Toggle the readiness panel open/closed. Replaces:
+      //   @click="readiness.showPanel = !readiness.showPanel"
+      toggleReadinessPanel() { this.readiness.showPanel = !this.readiness.showPanel; },
+      // Toggle showAll within the readiness panel. Replaces:
+      //   @click="readiness.showAll = !readiness.showAll"
+      toggleReadinessAll() { this.readiness.showAll = !this.readiness.showAll; },
+      // Close the readiness panel. Replaces:
+      //   @click="readiness.showPanel = false"
+      closeReadinessPanel() { this.readiness.showPanel = false; },
+      // Clear both np.error and np.warn (name / type-radio inputs). Replaces:
+      //   @input="np.error = null; np.warn = null"
+      clearNpErrors() { this.np.error = null; this.np.warn = null; },
+      // Clear only np.error (git-URL input). Replaces:
+      //   @input="np.error = null"
+      clearNpError() { this.np.error = null; },
+      // Open the new-project panel in create or clone mode. Replaces:
+      //   @click="np.open = true; np.mode = 'create'"  /  np.mode = 'clone'
+      openNewProject(mode) { this.np.open = true; this.np.mode = mode; },
+      // Returns true when the config editor has no visible fields (all filtered out).
+      // Replaces the .some(s => ...) arrow fn in the x-show directive.
+      configHasVisibleFields() {
+        return this.configSections().some((s) => this.configFieldsVisible(s).length > 0);
+      },
+      // Focus the trust checkbox after the trust gate opens. Replaces:
+      //   x-effect="if (confirmTrust[name]) $nextTick(() => $refs.trustCheck && ...focus())"
+      focusTrustCheck(active, refs) {
+        if (active) this.$nextTick(() => { if (refs.trustCheck) refs.trustCheck.focus(); });
+      },
+      // Focus the bypass input after the bypass gate opens. Replaces:
+      //   x-effect="if (confirmBypass[name]) $nextTick(() => $refs.bypassInput && ...focus())"
+      focusBypassInput(active, refs) {
+        if (active) this.$nextTick(() => { if (refs.bypassInput) refs.bypassInput.focus(); });
+      },
       async init() {
         for (const n of PROJECT_NAMES) {
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
@@ -2846,6 +2886,32 @@
           if (reg.term) { try { reg.term.dispose(); } catch (e) {} }
           delete _ptyScreens[name];
         }
+      },
+    };
+  }
+
+  // --- projectRow (#533): row-local Alpine component, replacing the inline x-data object.
+  // Needed for the CSP build: .then(done => ...) and if (...) { lopen = false } are
+  // arrow-fn / complex-block patterns the CSP evaluator can't handle inline; moving them
+  // into named methods keeps the directive attributes to simple method references.
+  function projectRow(name) {
+    return {
+      lopen: false,
+      lmode: DEFAULT_LAUNCH_MODE,
+      lperm: DEFAULT_PERMISSION_MODE,
+      lcloud: false,
+      lprompt: "",
+      mopen: false,
+      // Receive the "launch-pop-close" window event and close the popover for this row.
+      // Replaces: @launch-pop-close.window="if ($event.detail.name === name) { lopen = false; mopen = false }"
+      onLaunchPopClose(event) {
+        if (event.detail.name === name) { this.lopen = false; this.mopen = false; }
+      },
+      // Run launchRun (on the parent dashboard scope) and close on success.
+      // Replaces: @click="launchRun(name, ...).then(done => { if (done) lopen = false })"
+      async launchRunAndClose(lmode, lperm, lcloud, lprompt) {
+        const done = await this.launchRun(name, lmode, lperm, lcloud, lprompt);
+        if (done) this.lopen = false;
       },
     };
   }

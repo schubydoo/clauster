@@ -149,7 +149,7 @@ def test_tabler_sprites_for_structural_swap_present(write_config):
 
 def test_static_assets_carry_immutable_cache_control(write_config):
     # #353: vendored assets are cacheable forever (safe because URLs are version-busted).
-    resp = _client(write_config).get("/static/alpine.min.js")
+    resp = _client(write_config).get("/static/alpine.csp.min.js")
     assert resp.status_code == 200
     assert resp.headers["cache-control"] == "public, max-age=31536000, immutable"
 
@@ -166,9 +166,10 @@ def test_not_modified_static_response_has_no_immutable_cache(write_config):
     # A conditional request that resolves to 304 must not carry the immutable header
     # (only 200 file responses do) — exercises the non-200 branch of get_response.
     client = _client(write_config)
-    first = client.get("/static/alpine.min.js")
+    first = client.get("/static/alpine.csp.min.js")
     assert first.status_code == 200 and "etag" in first.headers
-    again = client.get("/static/alpine.min.js", headers={"if-none-match": first.headers["etag"]})
+    etag = first.headers["etag"]
+    again = client.get("/static/alpine.csp.min.js", headers={"if-none-match": etag})
     assert again.status_code == 304
     assert "immutable" not in again.headers.get("cache-control", "")
 
@@ -186,7 +187,7 @@ def test_asset_urls_are_version_busted(write_config):
 
     page = _client(write_config).get("/").text
     assert f"tabler.min.css?v={__version__}" in page
-    assert f"alpine.min.js?v={__version__}" in page
+    assert f"alpine.csp.min.js?v={__version__}" in page
     assert f"favicon.svg?v={__version__}" in page
 
 

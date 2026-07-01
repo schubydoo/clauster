@@ -38,7 +38,7 @@
     .help-trigger-z { z-index: 1080; }
     .brand-logo { height: 40px; width: auto; }
   </style>
-  <script defer src="{{ request.scope.root_path }}/static/alpine.min.js?v={{ asset_version }}"></script>
+  <script defer src="{{ request.scope.root_path }}/static/alpine.csp.min.js?v={{ asset_version }}"></script>
   <style nonce="{{ csp_nonce }}">
     .log-view { max-height: 320px; overflow: auto; font-size: .78rem; line-height: 1.35;
                 white-space: pre-wrap; word-break: break-word; margin: 0; }
@@ -210,7 +210,7 @@
          @click.self="{{ close_fn }}()">
       <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
            aria-labelledby="{{ title_id }}">
-        <div class="modal-content" x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())">
+        <div class="modal-content" x-init="focusModalClose($el)">
           <div class="modal-header">
             <h3 class="modal-title" id="{{ title_id }}">{{ title_content | safe }}</h3>
             <button type="button" class="btn-close" aria-label="Close" @click="{{ close_fn }}()"></button>
@@ -445,7 +445,7 @@
         <button type="button" class="btn btn-sm" x-cloak
                 x-show="readiness.loaded && readinessIssues().length > 0"
                 :class="readinessBlockers().length ? 'btn-danger' : 'btn-outline-warning'"
-                @click="readiness.showPanel = !readiness.showPanel"
+                @click="toggleReadinessPanel()"
                 :title="readinessBlockers().length
                   ? 'System readiness — a check is blocking; no session will start until it is fixed (affects every launch on this host)'
                   : 'System readiness — warnings only; sessions can still start (affects every launch on this host)'">
@@ -492,10 +492,10 @@
           <div class="card-header">
             <h3 class="card-title">Before you start a session</h3>
             <div class="card-actions btn-list">
-              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="readiness.showAll = !readiness.showAll"
+              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleReadinessAll()"
                       x-text="readiness.showAll ? 'Show only issues' : 'Show all checks'">Show all checks</button>
               <button type="button" class="btn btn-sm btn-ghost-secondary" @click="loadReadiness()"><svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Re-check</button>
-              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="readiness.showPanel = false">Close</button>
+              <button type="button" class="btn btn-sm btn-ghost-secondary" @click="closeReadinessPanel()">Close</button>
             </div>
           </div>
           <div class="list-group list-group-flush">
@@ -801,16 +801,16 @@
               <div class="col-md-5">
                 <label class="form-label" for="np-name">Name</label>
                 <input id="np-name" type="text" class="form-control" x-model="np.name" placeholder="my-project"
-                       pattern="[a-zA-Z0-9_-]+" @input="np.error = null; np.warn = null" @keyup.enter="submitNew()">
+                       pattern="[a-zA-Z0-9_-]+" @input="clearNpErrors()" @keyup.enter="submitNew()">
               </div>
               <div class="col-md-7">
                 <label class="form-label" id="np-type-label">Type</label>
                 <div class="btn-group w-100" role="group" aria-labelledby="np-type-label">
                   <input type="radio" class="btn-check" id="np-create" value="create" x-model="np.mode"
-                         @change="np.error = null; np.warn = null">
+                         @change="clearNpErrors()">
                   <label class="btn" for="np-create">Create empty</label>
                   <input type="radio" class="btn-check" id="np-clone" value="clone" x-model="np.mode"
-                         @change="np.error = null; np.warn = null">
+                         @change="clearNpErrors()">
                   <label class="btn" for="np-clone">Clone from git URL</label>
                 </div>
               </div>
@@ -822,7 +822,7 @@
             <div class="mt-2" x-show="np.mode === 'clone'">
               <label class="form-label" for="np-url">Git URL</label>
               <input id="np-url" type="text" class="form-control" x-model="np.url" autocomplete="off" spellcheck="false"
-                     placeholder="https://github.com/owner/repo.git" @input="np.error = null" @keyup.enter="submitNew()">
+                     placeholder="https://github.com/owner/repo.git" @input="clearNpError()" @keyup.enter="submitNew()">
               <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
                 <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>
               <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts need
@@ -916,10 +916,10 @@
           create or clone one below. Each becomes a card you can launch a bridge in.
         </p>
         <div class="empty-action">
-          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'">
+          <button type="button" class="btn btn-primary" @click="openNewProject('create')">
             <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
           </button>
-          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'">
+          <button type="button" class="btn" @click="openNewProject('clone')">
             <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
           </button>
           <button type="button" class="btn btn-ghost-secondary"
@@ -935,10 +935,10 @@
           Create one or clone a git repo to get started — or drop a directory there and it appears here.
         </p>
         <div class="empty-action">
-          <button type="button" class="btn btn-primary" @click="np.open = true; np.mode = 'create'">
+          <button type="button" class="btn btn-primary" @click="openNewProject('create')">
             <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
           </button>
-          <button type="button" class="btn" @click="np.open = true; np.mode = 'clone'">
+          <button type="button" class="btn" @click="openNewProject('clone')">
             <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
           </button>
         </div>
@@ -1137,7 +1137,7 @@
               </section>
             </template>
             <div class="text-secondary small" aria-live="polite"
-                 x-show="!configEditor.loading && !configSections().some(s => configFieldsVisible(s).length)" x-cloak>
+                 x-show="!configEditor.loading && !configHasVisibleFields()" x-cloak>
               No settings match “<span x-text="configQuery"></span>”.
             </div>
           </div>
