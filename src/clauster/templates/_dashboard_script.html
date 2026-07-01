@@ -86,6 +86,7 @@
   const METRICS_SHOW_DISK = {{ metrics_show_disk | tojson }};  // metrics.show_disk — disk-rate part
   const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
   const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
+  const JSON_HEADERS = Object.freeze({ "Content-Type": "application/json" });
   // Browser (Web Notifications) channel (#541): the master switch + the per-event
   // toggles the client honours on a polled bridge status transition. crash/ready/stop
   // are the transitions the client can observe from /api/instances without a server push.
@@ -172,7 +173,6 @@
         tailBusy: false, tailError: "", _tailTimer: null,
       },
       agents: [],
-      agentDispatchOpen: false,
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
       agentStopping: {},   // job id -> true while a stop request is in flight
       agentResuming: {},   // job id -> true while a resume request is in flight (#336)
@@ -180,7 +180,6 @@
       launching: {},       // project name -> true while a launch is in flight (double-submit guard)
       // --- hosted live-view sessions (claustrum stream-json channel, CL-4c) ---
       hosted: [],                 // GET /api/hosted snapshot (channel="hosted" instances)
-      hostedDispatchOpen: false,
       hostedForm: { project: "", permission_mode: DEFAULT_PERMISSION_MODE, busy: false },
       hostedStopping: {},         // hosted id -> true while a stop is in flight
       hostedResuming: {},         // hosted id -> true while a resume is in flight
@@ -326,7 +325,7 @@
       async loadReadiness() {
         try {
           const r = await fetch(ROOT + "/api/doctor");
-          if (r.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(r)) return;
           if (!r.ok) return;
           const d = await r.json();
           this.readiness.ok = !!d.ok;
@@ -385,16 +384,16 @@
       async _launchHosted(name, perm) {
         try {
           const res = await fetch(ROOT + "/api/instances", {
-            method: "POST", headers: { "Content-Type": "application/json" },
+            method: "POST", headers: JSON_HEADERS,
             body: JSON.stringify({ channel: "hosted", project: name, permission_mode: perm || DEFAULT_PERMISSION_MODE }),
           });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok) {
             this.toast(name + ": running in the browser", "success");
             await this.refresh();
             if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);  // watch it immediately
-          } else { this.toast(this._hostedFailMsg(b.detail || res.status), "error"); }
+          } else { this.toast(this._hostedFailMsg(this._errDetail(res, b)), "error"); }
         } catch (e) { this.toast(this._hostedFailMsg(), "error"); }
       },
       // Hosted runs need claustrum; a fail-closed launch otherwise dead-ends with a bare
@@ -411,9 +410,9 @@
           if (cloud) body.rc_name = name;  // "also register on claude.ai"
           if (perm) body.permission_mode = perm;  // background runs unattended — honor the choice
           const res = await fetch(ROOT + "/api/agents", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+            method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok) {
             // With claude.ai registration this isn't really a forget-about-it background run —
@@ -422,8 +421,8 @@
                              : name + ": started (background)", "success");
             await this.refresh();
           }
-          else { this.toast("start failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("start failed", "error"); }
+          else { this.toast("start failed — " + this._errDetail(res, b), "error"); }
+        } catch (e) { this._failToast("start"); }
       },
       // Per-project rollup of live sessions (bridge + hosted; background approximated out
       // for now — bg jobs are keyed by cwd, not project name).
@@ -554,7 +553,7 @@
         // the map in one assignment, so the cap stays applied throughout the transition.
         try {
           const res = await fetch(ROOT + "/api/projects/sortmeta");
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (!res.ok) return;  // advisory — sort silently falls back to the prior order
           this.sortMeta = await res.json();
           this.recomputeProjectRanks();
@@ -620,6 +619,28 @@
         if (type !== "error") setTimeout(() => this.dismissToast(id), 4500);
       },
       dismissToast(id) { this.toasts = this.toasts.filter((t) => t.id !== id); },
+      // Auth-expiry guard (#782): a 401 means the session cookie lapsed — bounce to login
+      // instead of silently showing stale data. Extracted from 25 copy-pasted sites so a
+      // new fetch handler can't forget the redirect (the "silent fail on expired auth" bug).
+      _authExpired(res) {
+        if (res.status === 401) { window.location.assign(ROOT + "/login"); return true; }
+        return false;
+      },
+      // WebSocket URL builder (#782 D-2): picks wss/ws from the current page protocol and
+      // prepends the root path. Mirrors the existing cmdUrl precedent; applied at the 4
+      // WebSocket open sites so the scheme select lives in one place.
+      _wsUrl(path) {
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        return proto + "://" + location.host + ROOT + path;
+      },
+      // Extract a human-readable error detail from a JSON error response body (#782 D-3).
+      // Falls back to the HTTP status when the body carries no `detail` field.
+      _errDetail(res, body) { return (body && body.detail) || res.status; },
+      // Catch-tail toast helper (#782 D-3 / R1): the trailing `catch(e) { this.toast("… failed", "error"); }`
+      // boilerplate that 19 action handlers share. A single helper keeps the wording
+      // consistent and — critically for R1 — ensures resume()'s catch toasts too (it
+      // previously set the inline error but skipped the toast, unlike every sibling action).
+      _failToast(action) { this.toast(action + " failed", "error"); },
       // --- config editor (FE-3) ---
       configSections() {
         const seen = [];
@@ -785,7 +806,7 @@
         document.body.style.overflow = "hidden";  // lock background scroll while modal is up
         try {
           const res = await fetch(ROOT + "/api/config");
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (!res.ok) { c.error = "Failed to load configuration."; return; }
           const d = await res.json();
           c.fields = d.fields || {}; c.specs = d.specs || {};
@@ -811,11 +832,11 @@
         c.saving = true; c.error = ""; c.saved = false;
         try {
           const res = await fetch(ROOT + "/api/config", {
-            method: "PUT", headers: { "Content-Type": "application/json" },
+            method: "PUT", headers: JSON_HEADERS,
             body: JSON.stringify({ edits, hash: c.hash }),
           });
           if (c.gen !== myGen) return;  // session was closed+reopened mid-save — drop this response
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (res.ok) {
             const d = await res.json();
             c.hash = d.hash; c.saved = true;
@@ -864,10 +885,10 @@
           // Re-enable before navigating: location.assign is async, so a slow/blocked
           // redirect would otherwise strand the button on "Restarting…" (the only exit
           // with no health-poll fallback).
-          if (res.status === 401) { c.restarting = false; window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) { c.restarting = false; return; }
           if (!res.ok) {  // a definite reject (e.g. 503 no live server): nothing restarted
             const b = await res.json().catch(() => ({}));
-            this.toast("Restart failed — " + (b.detail || res.status), "error");
+            this.toast("Restart failed — " + this._errDetail(res, b), "error");
             c.restarting = false;  // re-enable; the server is still up and unchanged
             return;
           }
@@ -962,7 +983,7 @@
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/transcripts");
           if (t.gen !== myGen) return;  // reopened mid-load — drop this response
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (!res.ok) { t.error = "Failed to load transcripts."; return; }
           const d = await res.json();
           t.sessions = Array.isArray(d.sessions) ? d.sessions : [];
@@ -1023,7 +1044,7 @@
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
             "/transcripts/" + encodeURIComponent(t.session) + this._transcriptQuery(t, 0));
           if (t.gen !== myGen) return;
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (!res.ok) { t.error = "Failed to load transcript."; return; }
           const d = await res.json();
           t.turns = Array.isArray(d.turns) ? d.turns : [];
@@ -1108,7 +1129,7 @@
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(t.project) +
             "/transcripts/" + encodeURIComponent(t.session) + this._transcriptQuery(t, cursor));
           if (t.gen !== myGen) return;  // session/order/query changed or closed mid-fetch — drop it
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (!res.ok) { t.error = "Failed to load more turns."; return; }
           const d = await res.json();
           if (Array.isArray(d.turns)) t.turns.push(...d.turns);
@@ -1165,7 +1186,7 @@
             "/transcripts/" + encodeURIComponent(t.session) +
             "/tail?offset=" + encodeURIComponent(t.tailOffset));
           if (t.tailGen !== myGen) return;  // session changed / closed mid-fetch — drop it
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (!res.ok) { t.tailError = "Live tail interrupted."; return; }
           const d = await res.json();
           if (t.tailGen !== myGen) return;  // re-check after the await on .json()
@@ -1224,7 +1245,7 @@
             fetch(ROOT + "/api/sessions/tracked"),
           ]);
           // Session expired mid-use -> bounce to login instead of silently showing stale data.
-          if (iRes.status === 401 || sRes.status === 401 || aRes.status === 401 || dRes.status === 401 || tRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(iRes) || this._authExpired(sRes) || this._authExpired(aRes) || this._authExpired(dRes) || this._authExpired(tRes)) return;
           if (iRes.ok) {
             const list = await iRes.json();
             const next = {};
@@ -1254,7 +1275,7 @@
           // them when the claustrum channel is configured.
           if (CLAUSTRUM_ENABLED) {
             const hRes = await fetch(ROOT + "/api/hosted");
-            if (hRes.status === 401) { window.location.assign(ROOT + "/login"); return; }
+            if (this._authExpired(hRes)) return;
             if (hRes.ok) this.hosted = await hRes.json();
             else { ok = false; }
           }
@@ -1298,17 +1319,17 @@
           // "cloud" opens a Remote Control session named after the project.
           if (f.cloud) body.rc_name = f.project;
           const res = await fetch(ROOT + "/api/agents", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+            method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
           });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok) {
             this.toast("background agent dispatched", "success");
             f.prompt = "";  // keep project + cloud for a quick repeat dispatch
           } else {
-            this.toast("dispatch failed — " + (b.detail || res.status), "error");
+            this.toast("dispatch failed — " + this._errDetail(res, b), "error");
           }
-        } catch (e) { this.toast("dispatch failed", "error"); }
+        } catch (e) { this._failToast("dispatch"); }
         // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
         finally { f.busy = false; }
         await this.refresh();
@@ -1328,7 +1349,7 @@
         this.agentStopping[j.id] = true;
         try {
           const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id), { method: "DELETE" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok && b.settled === false) {
             // settled:false means the cloud-deregistering stop wasn't confirmed. On an
@@ -1349,7 +1370,7 @@
           }
           else if (res.ok && b.removed) this.toast(label + ": stopped", "success");
           else if (res.ok) this.toast(label + ": stopped (cleanup pending — " + (b.detail || "supervisor restarting") + ")", "warning");
-          else this.toast(label + ": stop failed — " + (b.detail || res.status), "error");
+          else this.toast(label + ": stop failed — " + this._errDetail(res, b), "error");
         } catch (e) { this.toast(label + ": stop failed", "error"); }
         // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
         finally { this.agentStopping[j.id] = false; }
@@ -1363,10 +1384,10 @@
         this.agentResuming[j.id] = true;
         try {
           const res = await fetch(ROOT + "/api/agents/" + encodeURIComponent(j.id) + "/resume", { method: "POST" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok && b.id) this.toast(label + ": resumed as " + b.id, "success");
-          else this.toast(label + ": resume failed — " + (b.detail || res.status), "error");
+          else this.toast(label + ": resume failed — " + this._errDetail(res, b), "error");
         } catch (e) { this.toast(label + ": resume failed", "error"); }
         // finally: reset on EVERY path (incl. the 401 early-return) so the button can't
         // wedge on "Resuming…" if the login redirect is slow/blocked.
@@ -1383,7 +1404,7 @@
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/forget",
                                   { method: "POST" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok) this.toast(label + ": forgotten", "success");
           else this.toast(label + ": " + (b.detail || ("forget failed — " + res.status)), "error");
@@ -1412,20 +1433,6 @@
         if (s === "interrupted") return "Ended without a Stop (host restart or external exit) — Resume to continue.";
         if (s === "crashed") return "The bridge exited unexpectedly — Resume to continue.";
         return null;
-      },
-      // Hover hint on the status badge — what each state means (the recoverable
-      // states reuse statusNote so the wording stays in one place).
-      statusTitle(name) {
-        const s = this.displayStatus(name);
-        return {
-          running: "The bridge is live and managing sessions.",
-          starting: "The bridge is launching…",
-          stopping: "The bridge is shutting down…",
-          stopped: "Stopped — Resume the prior session or start a new one.",
-          interrupted: this.statusNote(name),
-          crashed: this.statusNote(name),
-          error: "The bridge failed to start — see the detail below.",
-        }[s] || null;
       },
       isRunning(name) { return this.statusOf(name) === "running"; },
       isBusy(name) { return this.statusOf(name) === "starting"; },
@@ -1459,7 +1466,6 @@
       connectStatusText(name) {
         return this.connectUrlMissing(name) ? "Preparing connect link…" : "";
       },
-      envUrlOf(name) { return (this.instances[name] || {}).url || null; },
       errorOf(name) { return this.errors[name] || null; },
       // A stopped/crashed bridge that still has an environment can reconnect to it —
       // show "Resume" instead of "Start" and reuse its stored permission mode.
@@ -1584,7 +1590,7 @@
       async loadPreflight(name) {
         try {
           const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/preflight");
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (res.ok) this.preflight[name] = await res.json();
           else delete this.preflight[name];  // drop a stale cache on a non-OK response
         } catch (e) { delete this.preflight[name]; /* advisory — pill hides on failure */ }
@@ -1594,7 +1600,7 @@
       async loadAllPreflight() {
         try {
           const res = await fetch(ROOT + "/api/projects/preflight");
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (!res.ok) return;  // advisory — leave per-project pills hidden
           const all = await res.json();
           for (const n of PROJECT_NAMES) {
@@ -1832,7 +1838,7 @@
         if (c.exists && c.sha) payload.base_sha256 = c.sha;
         try {
           const res = await fetch(this.cmdUrl(name), {
-            method: "PUT", headers: { "Content-Type": "application/json" },
+            method: "PUT", headers: JSON_HEADERS,
             body: JSON.stringify(payload),
           });
           const body = await res.json();
@@ -1974,7 +1980,7 @@
         if (np.mode === "clone") { await this.startClone(np, op); return; }  // async, watched over WS
         try {
           const res = await fetch(ROOT + "/api/projects", {
-            method: "POST", headers: { "Content-Type": "application/json" },
+            method: "POST", headers: JSON_HEADERS,
             body: JSON.stringify({ name: submittedName, git_init: np.gitInit }) });
           const body = await res.json();
           if (!res.ok) { if (this._npOwns(op)) { np.error = body.detail || "failed"; this.toast("Project create failed", "error"); } }
@@ -1988,7 +1994,7 @@
         np.cloning = true; np.progress = { percent: null, phase: "Starting…" };
         try {
           const res = await fetch(ROOT + "/api/projects/clone", {
-            method: "POST", headers: { "Content-Type": "application/json" },
+            method: "POST", headers: JSON_HEADERS,
             body: JSON.stringify({ name, url, shallow }) });
           const body = await res.json();
           if (!res.ok) {
@@ -2011,9 +2017,7 @@
         // can reach the #573 endpoint itself on a reattached watch (whose _abortClone won't POST).
         this._cloneJobId = jobId;
         this._cloneDetachOnly = detachOnly;
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        const ws = new WebSocket(proto + "://" + location.host + ROOT +
-                                 "/ws/clone-progress/" + encodeURIComponent(jobId));
+        const ws = new WebSocket(this._wsUrl("/ws/clone-progress/" + encodeURIComponent(jobId)));
         let settled = false;  // exactly one terminal handling across done/error/close/abort
         const lost = () => {
           if (settled) return;
@@ -2169,7 +2173,7 @@
         try {
           const res = await fetch(ROOT + "/api/instances", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: JSON_HEADERS,
             body: JSON.stringify({
               project: name,
               spawn_mode: this.spawnMode[name],
@@ -2202,6 +2206,7 @@
         } catch (e) {
           this.errors[name] = String(e);
           if (prev) this.instances[name] = prev; else delete this.instances[name];
+          this._failToast(name + ": restart");
         }
         await this.refresh();
       },
@@ -2299,19 +2304,19 @@
         f.busy = true;
         try {
           const res = await fetch(ROOT + "/api/instances", {
-            method: "POST", headers: { "Content-Type": "application/json" },
+            method: "POST", headers: JSON_HEADERS,
             body: JSON.stringify({ channel: "hosted", project: f.project, permission_mode: f.permission_mode }),
           });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok) {
             this.toast("hosted session started", "success");
             await this.refresh();
             if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);  // watch it immediately
           } else {
-            this.toast("hosted start failed — " + (b.detail || res.status), "error");
+            this.toast("hosted start failed — " + this._errDetail(res, b), "error");
           }
-        } catch (e) { this.toast("hosted start failed", "error"); }
+        } catch (e) { this._failToast("hosted start"); }
         // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
         finally { f.busy = false; }
       },
@@ -2321,10 +2326,10 @@
         this.hostedStopping[id] = true;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (res.ok) this.toast("hosted session stopped", "success");
-          else { const b = await res.json().catch(() => ({})); this.toast("stop failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("stop failed", "error"); }
+          else { const b = await res.json().catch(() => ({})); this.toast("stop failed — " + this._errDetail(res, b), "error"); }
+        } catch (e) { this._failToast("stop"); }
         // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
         finally { this.hostedStopping[id] = false; }
         this.closeHosted(id);
@@ -2340,10 +2345,10 @@
         let killed = false;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (res.ok) { killed = true; this.toast("orphaned session killed", "success"); }
-          else { const b = await res.json().catch(() => ({})); this.toast("kill failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("kill failed", "error"); }
+          else { const b = await res.json().catch(() => ({})); this.toast("kill failed — " + this._errDetail(res, b), "error"); }
+        } catch (e) { this._failToast("kill"); }
         // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
         finally { this.hostedStopping[id] = false; }
         // Only tear down the view on a successful kill; a failed kill leaves the orphan
@@ -2357,7 +2362,7 @@
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/resume",
                                   { method: "POST" });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           const b = await res.json().catch(() => ({}));
           if (res.ok) {
             this.toast("hosted session resumed", "success");
@@ -2367,9 +2372,9 @@
             this.closeHosted(id);
             if (b && b.claustrum_process_id) this.openHosted(b.claustrum_process_id);
           } else {
-            this.toast("resume failed — " + (b.detail || res.status), "error");
+            this.toast("resume failed — " + this._errDetail(res, b), "error");
           }
-        } catch (e) { this.toast("resume failed", "error"); }
+        } catch (e) { this._failToast("resume"); }
         // reset on EVERY path incl. the 401 early-return so the button can't wedge (#336 pattern; fixes #401).
         finally { this.hostedResuming[id] = false; }
       },
@@ -2416,9 +2421,8 @@
           const w = self.hostedView[id];
           return w && w.open && w.token === token ? w : null;
         };
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        const url = proto + "://" + location.host + ROOT + "/ws/hosted/" +
-                    encodeURIComponent(id) + "?after=" + after;
+        const url = this._wsUrl("/ws/hosted/" +
+                    encodeURIComponent(id) + "?after=" + after);
         const ws = new WebSocket(url);
         ws.onmessage = (ev) => {
           const w = liveView();
@@ -2606,12 +2610,12 @@
         v.sending = true;
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) + "/message", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
+            method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ text }),
           });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (res.ok) { v.input = ""; }
-          else { const b = await res.json().catch(() => ({})); this.toast("send failed — " + (b.detail || res.status), "error"); }
-        } catch (e) { this.toast("send failed", "error"); }
+          else { const b = await res.json().catch(() => ({})); this.toast("send failed — " + this._errDetail(res, b), "error"); }
+        } catch (e) { this._failToast("send"); }
         // reset on EVERY path incl. the 401 early-return so the input can't wedge (#336 pattern; fixes #401).
         finally { v.sending = false; }
       },
@@ -2621,12 +2625,12 @@
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id) +
                                   "/permissions/" + encodeURIComponent(requestId), {
-            method: "POST", headers: { "Content-Type": "application/json" },
+            method: "POST", headers: JSON_HEADERS,
             body: JSON.stringify({ decision }),
           });
-          if (res.status === 401) { window.location.assign(ROOT + "/login"); return; }
+          if (this._authExpired(res)) return;
           if (res.ok) { this._resolveHostedPermission(id, requestId, decision); }
-          else { const b = await res.json().catch(() => ({})); this.toast("permission " + decision + " failed — " + (b.detail || res.status), "error"); }
+          else { const b = await res.json().catch(() => ({})); this.toast("permission " + decision + " failed — " + this._errDetail(res, b), "error"); }
         } catch (e) { this.toast("permission " + decision + " failed", "error"); }
       },
       // --- log streaming ---
@@ -2650,8 +2654,7 @@
           prev.open = false;
           if (prev.ws) { try { prev.ws.close(); } catch (e) {} }
         }
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        const url = proto + "://" + location.host + ROOT + "/ws/bridge-log/" + encodeURIComponent(name);
+        const url = this._wsUrl("/ws/bridge-log/" + encodeURIComponent(name));
         // Tag this tail with a unique token; the retire check below compares the token, NOT
         // object identity — once Alpine wraps `state` in a reactive Proxy, comparing the raw
         // object against the stored proxy is ALWAYS unequal and would drop every frame (see
@@ -2779,8 +2782,7 @@
             convertEol: false, scrollback: 0, fontSize: 12,
           });
           term.open(host);
-          const proto = location.protocol === "https:" ? "wss" : "ws";
-          const url = proto + "://" + location.host + ROOT + "/ws/pty-screen/" + encodeURIComponent(name);
+          const url = this._wsUrl("/ws/pty-screen/" + encodeURIComponent(name));
           const ws = new WebSocket(url);
           const reg = { term, ws, token, host, fit: null };
           // Fit the fixed grid to the panel now and on every viewport resize (#641). The
@@ -2872,7 +2874,7 @@
         this.busy = true; this.error = null; this.result = null;
         try {
           const res = await fetch(ROOT + "/api/environments/reap", {
-            method: "POST", headers: { "Content-Type": "application/json" },
+            method: "POST", headers: JSON_HEADERS,
             body: JSON.stringify({ action, confirm, ids: this.ghosts.map((g) => g.id) }),
           });
           const body = await res.json();
