@@ -20,6 +20,7 @@
   const ROOT = "{{ request.scope.root_path }}";
   const MAX_LOG_LINES = 1000;
   const MAX_PENDING = 1000;   // cap the paused-log buffer so it can't grow without bound
+  const MAX_TAIL_TURNS = 1000;  // cap tailRaw so a long-running live-tail doesn't grow the array unbounded
   // Reconnect delay + consecutive-failure cap shared by both live streams: the bridge-log tail
   // (openLogs) and the hosted live-view (openHosted). Both auto-reconnect a dropped socket after
   // LOG_RECONNECT_MS while the bridge/session still reads live, and both give up after
@@ -174,7 +175,10 @@
         //   (so a stale in-flight poll for an old session is dropped); tailKey: the
         //   monotonic _key counter; _tailTimer + tailBusy: the single-flight poll lock.
         live: false, tailRaw: [], tailOffset: 0, tailGen: 0, tailKey: 0,
-        tailBusy: false, tailError: "", _tailTimer: null,
+        tailBusy: false, tailError: "", tailTruncated: false, _tailTimer: null,
+        // Scoped mirror of MAX_TAIL_TURNS: directives must reference component state, not
+        // a bare script global — the CSP Alpine build (issue 533) can't resolve globals.
+        maxTailTurns: MAX_TAIL_TURNS,
       },
       agents: [],
       agentForm: { project: "", prompt: "", cloud: false, busy: false },
@@ -1009,7 +1013,7 @@
         t.order = "desc"; t.q = ""; t.queryTooShort = false;
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         this._stopTranscriptTail();  // #614: kill the live-tail poll loop on close
-        t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = "";  // clear live state on close
+        t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = ""; t.tailTruncated = false;  // clear live state on close
         document.body.style.overflow = "";  // release the scroll lock
         if (t.trigger && t.trigger.focus) t.trigger.focus();  // restore focus to the opener
       },
@@ -1188,7 +1192,7 @@
         if (t._searchTimer) { clearTimeout(t._searchTimer); t._searchTimer = null; }
         this._stopTranscriptTail();  // #614: stop following the (now-deselected) session
         t.session = ""; t.turns = []; t.total = 0; t.nextCursor = null; t.error = ""; t.loadingMore = false;
-        t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = "";  // clear live state
+        t.live = false; t.tailRaw = []; t.tailOffset = 0; t.tailKey = 0; t.tailError = ""; t.tailTruncated = false;  // clear live state
         t.order = "desc"; t.q = ""; t.queryTooShort = false;
       },
       // --- live-tail poll loop (#614 Part 2) -----------------------------------
@@ -1212,7 +1216,7 @@
       _startTranscriptTail() {
         const t = this.transcripts;
         this._stopTranscriptTail();           // clear any prior loop + buffer state
-        t.tailRaw = []; t.tailOffset = 0; t.tailError = ""; t.tailKey = 0;
+        t.tailRaw = []; t.tailOffset = 0; t.tailError = ""; t.tailKey = 0; t.tailTruncated = false;
         t.turns = []; t.total = 0; t.nextCursor = null;
         t.tailGen = (t.tailGen || 0) + 1;
         this._pollTranscriptTail(t.tailGen);  // kick the first poll immediately
@@ -1240,13 +1244,20 @@
           let changed = false;
           // A truncated/rotated file restarts from 0: replace the master (and reset the
           // key counter so the re-read doesn't collide keys), don't append.
-          if (d.reset) { t.tailRaw = []; t.tailKey = 0; changed = true; }
+          if (d.reset) { t.tailRaw = []; t.tailKey = 0; t.tailTruncated = false; changed = true; }
           if (Array.isArray(d.turns) && d.turns.length) {
             // Stamp each turn with a monotonic _key so the x-for keys on a stable id, not
             // the positional index (#720) — the rendered list is reordered/filtered, so
             // an index key would rebind nodes to a different turn.
             for (const turn of d.turns) turn._key = t.tailKey++;
             t.tailRaw.push(...d.turns);
+            // Cap the master to keep a long-running session from growing tailRaw unbounded.
+            // Front-splice (drop oldest) so the rendered view always shows the newest turns.
+            // Surface a visible "showing last N" indicator rather than silently dropping.
+            if (t.tailRaw.length > MAX_TAIL_TURNS) {
+              t.tailRaw = t.tailRaw.slice(t.tailRaw.length - MAX_TAIL_TURNS);
+              t.tailTruncated = true;
+            }
             changed = true;
           }
           if (typeof d.offset === "number") t.tailOffset = d.offset;
@@ -1255,11 +1266,17 @@
           // idle polls that dominate a quiet session.
           if (changed) this._rebuildLiveTurns();
           // The session ended (no longer maps to a running bridge): drain this final
-          // delta (already applied above) and stop the loop. The one list stays — it now
-          // holds the full transcript; flipping live just swaps the header badge and lets
-          // the (already-derived) `turns` render as the static, complete list. No second
-          // box, so no duplication at the live→ended transition.
-          if (d.live === false) { t.live = false; this._stopTranscriptTail(); return; }
+          // delta (already applied above) and stop the loop. Uncapped, the one list stays —
+          // it holds the full transcript, so flipping live just swaps the header badge and
+          // the (already-derived) `turns` render as the static, complete list. A CAPPED
+          // tail can't serve as that "complete" view (the oldest turns were dropped, and
+          // hiding the live card hides the truncation banner too), so hand the ended
+          // session to the paged backend path instead of leaving a silently-short list.
+          if (d.live === false) {
+            t.live = false; this._stopTranscriptTail();
+            if (t.tailTruncated) { t.tailTruncated = false; this.loadTranscriptTurnsFromStart(); }
+            return;
+          }
         } catch (e) {
           if (t.tailGen !== myGen) return;
           t.tailError = "Live tail interrupted.";  // surface, never silently stall

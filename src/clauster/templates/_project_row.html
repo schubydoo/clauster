@@ -6,7 +6,9 @@
    The `:style` below reorders rows VISUALLY for a non-name sort via CSS `order` — it does
    NOT change DOM/tab order (focus + screen-reader order stay A–Z), the deliberate trade for
    an opt-in cosmetic sort. Don't turn this into a DOM reorder (the anti-pattern the Active
-   zone avoids). #}
+   zone avoids). WCAG 2.4.3 note: visual order diverges from DOM/tab order only on opt-in
+   non-default sorts; all interactive controls are self-contained within each row so
+   keyboard navigation is coherent regardless of visual position. #}
           <div class="list-group-item" data-project="{{ p.name }}"
                x-show="projectVisible('{{ p.name }}', {{ idx }})" x-cloak
                :style="projectSort !== 'name' ? { order: projectOrderRank('{{ p.name }}') } : {}"
