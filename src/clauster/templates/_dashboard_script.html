@@ -132,6 +132,10 @@
 
   function dashboard() {
     return {
+      // CSP build (#533): the expression evaluator resolves bare identifiers ONLY against
+      // the component data-stack (no window fallback), so script-level consts referenced
+      // from DIRECTIVES must be surfaced as component state under a scoped name.
+      projectNames: PROJECT_NAMES,
       instances: {},
       externalSessions: {},
       trackedSessions: {},  // instance id (project) -> live working sessions under its bridge (#570)
@@ -246,6 +250,46 @@
         this.orientationDismissed = true;
         try { localStorage.setItem("clauster-orientation-dismissed", "1"); }
         catch (e) { /* storage blocked/full — the in-memory flag still hides it this session */ }
+      },
+      // --- CSP-friendly wrappers (#533): replace inline expressions that the ---
+      // --- @alpinejs/csp build forbids (arrow fns, nested prop assigns, .then). ---
+      // Focus the modal close button after mount. Replaces:
+      //   x-init="$nextTick(() => $el.querySelector('.btn-close')?.focus())"
+      focusModalClose(el) {
+        this.$nextTick(() => { const b = el.querySelector(".btn-close"); if (b) b.focus(); });
+      },
+      // Toggle the readiness panel open/closed. Replaces:
+      //   @click="readiness.showPanel = !readiness.showPanel"
+      toggleReadinessPanel() { this.readiness.showPanel = !this.readiness.showPanel; },
+      // Toggle showAll within the readiness panel. Replaces:
+      //   @click="readiness.showAll = !readiness.showAll"
+      toggleReadinessAll() { this.readiness.showAll = !this.readiness.showAll; },
+      // Close the readiness panel. Replaces:
+      //   @click="readiness.showPanel = false"
+      closeReadinessPanel() { this.readiness.showPanel = false; },
+      // Clear both np.error and np.warn (name / type-radio inputs). Replaces:
+      //   @input="np.error = null; np.warn = null"
+      clearNpErrors() { this.np.error = null; this.np.warn = null; },
+      // Clear only np.error (git-URL input). Replaces:
+      //   @input="np.error = null"
+      clearNpError() { this.np.error = null; },
+      // Open the new-project panel in create or clone mode. Replaces:
+      //   @click="np.open = true; np.mode = 'create'"  /  np.mode = 'clone'
+      openNewProject(mode) { this.np.open = true; this.np.mode = mode; },
+      // Returns true when the config editor has no visible fields (all filtered out).
+      // Replaces the .some(s => ...) arrow fn in the x-show directive.
+      configHasVisibleFields() {
+        return this.configSections().some((s) => this.configFieldsVisible(s).length > 0);
+      },
+      // Focus the trust checkbox after the trust gate opens. Replaces:
+      //   x-effect="if (confirmTrust[name]) $nextTick(() => $refs.trustCheck && ...focus())"
+      focusTrustCheck(active, refs) {
+        if (active) this.$nextTick(() => { if (refs.trustCheck) refs.trustCheck.focus(); });
+      },
+      // Focus the bypass input after the bypass gate opens. Replaces:
+      //   x-effect="if (confirmBypass[name]) $nextTick(() => $refs.bypassInput && ...focus())"
+      focusBypassInput(active, refs) {
+        if (active) this.$nextTick(() => { if (refs.bypassInput) refs.bypassInput.focus(); });
       },
       async init() {
         for (const n of PROJECT_NAMES) {
@@ -1783,6 +1827,22 @@
       _closeLaunchPop(name) {
         window.dispatchEvent(new CustomEvent("launch-pop-close", { detail: { name } }));
       },
+      // Run launchRun and dismiss the popover on success (CSP build, #533): the old
+      // inline `.then(done => { if (done) lopen = false })` used an arrow fn the CSP
+      // evaluator rejects, and lopen is row-local — so this lives HERE (launchRun is a
+      // sibling method, safely `this.`-reachable) and closes via the same launch-pop-close
+      // window event the row already listens for.
+      async launchRunAndClose(name, lmode, lperm, lcloud, lprompt) {
+        const done = await this.launchRun(name, lmode, lperm, lcloud, lprompt);
+        if (done) this._closeLaunchPop(name);
+      },
+      // Stable transcript x-for key (#720). Owns the nullish fallback the template used
+      // to inline with `??` — the CSP-build parser has no nullish operator, and `||`
+      // would wrongly discard a legitimate _key of 0.
+      keyOf(t, i) {
+        if (t._key !== undefined && t._key !== null) return t._key;
+        return (t.timestamp || "") + ":" + t.role + ":" + i;
+      },
       async confirmTrustStart(name) {
         await this.trust(name);            // trusts; sets the inline error on failure
         this.confirmTrust[name] = false;   // close the gate either way
@@ -2867,6 +2927,66 @@
     };
   }
 
+  // --- projectRow (#533): row-local Alpine component, replacing the inline x-data object.
+  // Needed for the CSP build: arrow fns, `if (...) {}` statements, and multi-statement
+  // handlers are all rejected by its expression parser, and bare identifiers resolve only
+  // against the component data-stack — so the row's inline expressions become named
+  // methods here, and the script-level default consts its directives reference are
+  // surfaced as scoped state (defaultResumeMode).
+  function projectRow(name) {
+    return {
+      lopen: false,
+      lmode: DEFAULT_LAUNCH_MODE,
+      lperm: DEFAULT_PERMISSION_MODE,
+      lcloud: false,
+      lprompt: "",
+      mopen: false,
+      // Surfaced for the row's x-show directives ((resumeMode[name] || defaultResumeMode)):
+      // the CSP evaluator has no window fallback for the bare DEFAULT_RESUME_MODE global.
+      defaultResumeMode: DEFAULT_RESUME_MODE,
+      // NOTE on `this` in these methods: the CSP evaluator binds every function it
+      // resolves from a directive to that element's full merged data-stack
+      // (Identifier case: `value2.bind(scope2)`, verified in @alpinejs/csp@3.15.12
+      // dist), so parent dashboard() state/methods (confirmTrust, coerceSpawnMode,
+      // toggleClaudeMd) are reachable through `this` here.
+      // Receive the "launch-pop-close" window event and close the popover for this row.
+      // (The old inline handler was an if-statement, which the CSP parser rejects.)
+      onLaunchPopClose(event) {
+        if (event.detail.name === name) { this.lopen = false; this.mopen = false; }
+      },
+      // Toggle the launch popover; on open, coerce a non-git worktree default to a
+      // valid spawn mode. (Was a two-statement inline handler with an if.)
+      toggleLaunchPop(isGitRepo) {
+        this.lopen = !this.lopen;
+        if (this.lopen) this.coerceSpawnMode(name, isGitRepo);
+      },
+      // Dismiss the popover (outside-click / Escape) AND clear any pending trust/bypass
+      // gate (#686) so a hidden gate never lingers; mopen resets so More options
+      // collapses on reopen. (Was a four-statement inline handler.)
+      dismissLaunchPop() {
+        this.lopen = false;
+        this.mopen = false;
+        this.confirmTrust[name] = false;
+        this.confirmBypass[name] = false;
+      },
+      // Card-menu item: open/close the CLAUDE.md editor, then close the menu. `menu`
+      // lives on the card-menu's inline x-data scope, which sits ABOVE this component
+      // in the merged stack for the menu-item element, so the write lands there.
+      pickClaudeMd() {
+        this.toggleClaudeMd(name);
+        this.menu = false;
+      },
+      // bypassPermissions is only offered for desktop launches; leaving another mode with
+      // it selected must snap back to the default. Replaces the inline `if (...)` @change
+      // handler (the CSP parser has no if-statement support).
+      clampPermForMode() {
+        if (this.lmode !== "desktop" && this.lperm === "bypassPermissions") {
+          this.lperm = DEFAULT_PERMISSION_MODE;
+        }
+      },
+    };
+  }
+
   function reaper() {
     return {
       open: false, loading: false, loaded: false, error: null,
@@ -2910,4 +3030,14 @@
       del() { if (this.deleteTyped === "DELETE") this._reap("delete", "DELETE"); },
     };
   }
+
+  // CSP build (#533): x-data expressions resolve component factories ONLY through the
+  // Alpine.data() registry — a bare script-global function is "Undefined variable" to the
+  // CSP evaluator and the page would render nothing. This inline script runs before the
+  // deferred alpine.csp.min.js, so the listener is registered in time for alpine:init.
+  document.addEventListener("alpine:init", () => {
+    Alpine.data("dashboard", dashboard);
+    Alpine.data("projectRow", projectRow);
+    Alpine.data("reaper", reaper);
+  });
 </script>

@@ -59,3 +59,12 @@ jobs:
       # Markdown + YAML lint — the same script developers run locally.
       - name: markdown + yaml lint
         run: bash scripts/lint-docs.sh
+      # CSP directive-expression guard (#533): the dashboard ships the @alpinejs/csp
+      # build (script-src has no 'unsafe-eval'), whose evaluator rejects arrow fns,
+      # template literals, ?./??, spread/new, if-statements, and multi-statement `;`
+      # sequences, and resolves bare identifiers only against registered components.
+      # A template edit that reintroduces any of those silently breaks the dashboard at
+      # runtime — unit tests only grep source, they never execute Alpine — so this fails
+      # the build on any violation. Node 24 is already set up above (markdownlint).
+      - name: CSP expression guard
+        run: node scripts/check_csp_expressions.mjs

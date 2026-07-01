@@ -6,6 +6,10 @@
 # renovate: datasource=npm depName=@tabler/core
 tabler=1.4.0
 # renovate: datasource=npm depName=alpinejs
+# NOTE (#533): this pin now re-vendors @alpinejs/csp's dist/cdn.min.js (same version
+# line as alpinejs) into static/alpine.csp.min.js — NOT the standard alpinejs build,
+# whose new-Function evaluator needs script-src 'unsafe-eval'. On a version bump,
+# fetch @alpinejs/csp@<version>, never the standard package.
 alpine=3.15.12
 # renovate: datasource=npm depName=@tabler/icons
 tabler-icons=3.44.0
