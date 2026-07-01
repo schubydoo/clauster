@@ -69,12 +69,13 @@
     if (avail <= 0) return;
     const scale = Math.min(1, avail / naturalW);  // shrink-to-fit only; never upscale
     inner.style.transform = scale < 1 ? "scale(" + scale + ")" : "";
-    // Reserve exactly the scaled content height. Subtract the host's bottom padding so the JS
-    // content-box height accounts for it: without this the bottom-padding renders as a dark strip
-    // below the scaled grid, because overflow:hidden clips at the padding-box edge but the padding
-    // itself remains visible as host background (#673).
+    // Reserve the scaled grid height. The host is border-box (Tabler's * reset), so style.height
+    // sets the total box including padding — add both top and bottom padding so the content area
+    // available inside the host equals exactly naturalH*scale. Without this the padding eats into
+    // the content area and clips the bottom rows of the terminal (#673).
+    const padTop = parseFloat(cs.paddingTop) || 0;
     const padBottom = parseFloat(cs.paddingBottom) || 0;
-    reg.host.style.height = Math.ceil(naturalH * scale - padBottom) + "px";
+    reg.host.style.height = Math.max(0, Math.ceil(naturalH * scale) + padTop + padBottom) + "px";
   }
   const PROJECT_NAMES = [{% for p in projects %}{{ p.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
   const INITIAL_TRUST = { {% for p in projects %}{{ p.name | tojson }}: {{ p.trust_state.value | tojson }}{% if not loop.last %}, {% endif %}{% endfor %} };
