@@ -1098,6 +1098,18 @@ class TlsConfig(BaseModel):
                     "tls.provision = self-signed — the provisioner writes them under "
                     "state_dir/tls/; remove them from your config."
                 )
+            # Strip each entry and reject blank/whitespace-only ones: a "  " entry would
+            # otherwise survive into a bogus (blank) DNSName SAN. Malformed-but-nonempty
+            # entries are allowed through as DNS names (documented) — only truly empty
+            # SANs are rejected here. Zero-padded IPv4 like "192.168.001.010" is NOT a
+            # valid IP per ipaddress and becomes a DNS SAN (documented behaviour).
+            stripped = [h.strip() for h in self.hostnames]
+            if any(not h for h in stripped):
+                raise ValueError(
+                    "tls.hostnames contains a blank / whitespace-only entry; every "
+                    "hostname or IP address must be non-empty."
+                )
+            self.hostnames = stripped
             if not self.hostnames:
                 raise ValueError(
                     "tls.hostnames must list at least one hostname or IP address "

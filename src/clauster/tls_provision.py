@@ -7,11 +7,16 @@ hostname was added or the primary CN changed).
 
 Key-material handling guarantees
 ---------------------------------
-- Private key written 0600 (owner-read/write only); never logged, never
-  serialised to any API response; never carried in exception messages.
+- Private key written 0600 (owner-read/write only) via an ``O_CREAT | O_EXCL``
+  create (stale temp unlinked first) + ``fchmod`` — so a pre-existing/pre-planted
+  temp file can never leak the key through the wrong mode, and the predictable
+  temp path can't be symlink-followed.  Never logged, never serialised to any API
+  response, never carried in exception messages.
 - The only paths that leave this module are filesystem paths — not key bytes.
 - Serial numbers are time-based (microseconds since epoch) so no persistent
   state file is needed.
+- IP SANs are canonicalised on both write and read-back so a non-canonical input
+  (``2001:0db8::1``) doesn't force a spurious regen (and key churn) every boot.
 - Generation uses the ``cryptography`` package (pure-Python); no shell-out to
   ``openssl``.
 
@@ -22,6 +27,7 @@ v1 = self-signed only.  ACME / Let's Encrypt is deferred to issue 774.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import ipaddress
 import logging
@@ -69,8 +75,25 @@ def _tls_dir(state_dir: Path) -> Path:
 
 
 def _san_set(hostnames: list[str]) -> frozenset[str]:
-    """Normalise the SAN list to a comparable frozenset (lower-case, de-duped)."""
-    return frozenset(h.lower() for h in hostnames if h)
+    """Normalise the SAN list to a comparable frozenset (canonical, de-duped).
+
+    IP addresses are canonicalised through ``ipaddress`` so a non-canonical input
+    (``2001:0db8::1`` / ``fe80::0:1``) compares equal to the cert's stored
+    canonical form (``2001:db8::1`` / ``fe80::1``).  Without this, ``cert_needs_regen``
+    would flag a mismatch on every startup and churn a fresh private key each boot.
+    Non-IP entries are lower-cased DNS names (matching how the read-back compares
+    ``DNSName`` values).
+    """
+    out: set[str] = set()
+    for raw in hostnames:
+        h = raw.strip()
+        if not h:
+            continue
+        try:
+            out.add(str(ipaddress.ip_address(h)).lower())
+        except ValueError:
+            out.add(h.lower())
+    return frozenset(out)
 
 
 def cert_needs_regen(cert_path: Path, hostnames: list[str]) -> bool:
@@ -231,19 +254,38 @@ def _atomic_write(dest: Path, data: bytes, mode: int) -> None:
     leaves a half-written file.  The private-key file (mode=0600) is never
     world-readable, even transiently.  Key bytes are in *data* — the caller
     must not echo them.
+
+    Permission correctness is defended three ways so a **pre-existing** temp file
+    (a crashed prior run whose perms drifted, or one pre-planted by a local user)
+    can never leak the key through the wrong mode:
+
+    - ``O_TRUNC`` applies ``mode`` only on *creation*; a pre-existing 0644 temp
+      would keep 0644 and ``rename()`` would carry that onto the key.  So we
+      ``unlink`` any stale temp first, then open with ``O_CREAT | O_EXCL`` — the
+      create is always fresh (``mode`` always applies), and ``O_EXCL`` also closes
+      the symlink-follow vector on the predictable temp path.
+    - ``os.fchmod(fd, mode)`` re-asserts the mode on the fd before writing, in
+      case a restrictive process ``umask`` masked bits off the ``open`` mode.
     """
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     try:
-        fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, mode)
+        # Remove any stale/pre-planted temp so O_EXCL always creates fresh (applying
+        # `mode`) and refuses to follow a symlink planted on the predictable path.
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(str(tmp))
+        fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
         try:
+            # Belt-and-suspenders: umask can mask bits off the open() mode, so
+            # re-assert the intended mode on the fd before any key bytes land.
+            # os.fchmod is POSIX-only; the mode bits are meaningless on Windows.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, mode)
             os.write(fd, data)
         finally:
             os.close(fd)
         tmp.rename(dest)
     except BaseException:
         # Best-effort cleanup of the temp file on any failure.
-        try:
+        with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise

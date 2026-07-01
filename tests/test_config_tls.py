@@ -168,6 +168,20 @@ def test_tls_provision_unknown_value_fails(write_config):
         load_config(write_config(extra))
 
 
+def test_tls_provision_self_signed_rejects_blank_hostname(write_config):
+    # Defect 3: a whitespace-only hostname must be rejected (not become a blank SAN).
+    extra = 'tls:\n  provision: self-signed\n  hostnames: ["good", "  "]\n'
+    with pytest.raises(ValueError, match="blank / whitespace-only"):
+        load_config(write_config(extra))
+
+
+def test_tls_provision_self_signed_strips_hostnames(write_config):
+    # Surrounding whitespace is stripped so the SAN is clean.
+    extra = 'tls:\n  provision: self-signed\n  hostnames: ["  myhost  "]\n'
+    config = load_config(write_config(extra))
+    assert config.tls.hostnames == ["myhost"]
+
+
 # ----- env overrides ----------------------------------------------------
 
 

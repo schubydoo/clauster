@@ -44,7 +44,20 @@ def test_san_set_normalises_case():
 
 
 def test_san_set_skips_empty():
-    assert _san_set(["host", "", "  "]) == frozenset({"host", "  "})
+    # Empty AND whitespace-only entries are dropped (whitespace-only is not a real SAN).
+    assert _san_set(["host", "", "  "]) == frozenset({"host"})
+
+
+def test_san_set_canonicalises_ipv6():
+    # Non-canonical IPv6 must normalise to the same value the cert read-back stores,
+    # so cert_needs_regen does not churn a new key every boot (defect 2).
+    assert _san_set(["2001:0db8::1"]) == _san_set(["2001:db8::1"])
+    assert _san_set(["fe80::0:1"]) == _san_set(["fe80::1"])
+
+
+def test_san_set_canonicalises_ipv4():
+    # IPv4 canonicalisation is idempotent (a canonical address stays as-is).
+    assert _san_set(["192.168.1.1"]) == frozenset({"192.168.1.1"})
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +107,36 @@ def test_atomic_write_cleans_up_temp_on_failure(tmp_path):
     assert not (tmp_path / "key.pem.tmp").exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="mode bits are POSIX-only")
+def test_atomic_write_overrides_preexisting_0644_temp(tmp_path):
+    """Defect 1 regression: a stale 0644 temp must NOT leak the key's mode.
+
+    O_TRUNC keeps a pre-existing file's perms; the fix unlinks the stale temp and
+    opens with O_EXCL so `mode` always applies.  Pre-plant a 0644 temp, write the
+    key, and assert the result is 0600.
+    """
+    dest = tmp_path / "key.pem"
+    stale_tmp = tmp_path / "key.pem.tmp"
+    stale_tmp.write_bytes(b"pre-planted")
+    stale_tmp.chmod(0o644)
+    assert stat.S_IMODE(stale_tmp.stat().st_mode) == 0o644
+    _atomic_write(dest, b"KEY", mode=0o600)
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+    assert dest.read_bytes() == b"KEY"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="mode bits are POSIX-only")
+def test_generate_self_signed_key_0600_despite_stale_temp(tmp_path):
+    """Defect 1 end-to-end: pre-plant a 0644 key temp, provision, assert key is 0600."""
+    tls_dir = tmp_path / "tls"
+    tls_dir.mkdir()
+    stale = tls_dir / "self-signed.key.tmp"
+    stale.write_bytes(b"junk")
+    stale.chmod(0o644)
+    _, key_path = generate_self_signed(tmp_path, ["localhost"])
+    assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
+
+
 # ---------------------------------------------------------------------------
 # cert_needs_regen
 # ---------------------------------------------------------------------------
@@ -118,6 +161,21 @@ def test_cert_needs_regen_san_change(tmp_path):
     cert_path, _ = _gen_cert(tmp_path, ["localhost"])
     # Same cert, but now we want an extra hostname — must regen.
     assert cert_needs_regen(cert_path, ["localhost", "192.168.1.1"])
+
+
+def test_cert_needs_regen_no_churn_on_noncanonical_ipv6(tmp_path):
+    """Defect 2 regression: a non-canonical IPv6 input must NOT force a regen.
+
+    The cert is generated with a canonical IPv6 SAN; asking again with the same
+    address written non-canonically must compare equal, so no new key is churned.
+    """
+    cert_path, key_path = _gen_cert(tmp_path, ["2001:db8::1"])
+    key_before = key_path.read_bytes()
+    # Same address, non-canonical spelling — must NOT need regen.
+    assert not cert_needs_regen(cert_path, ["2001:0db8::0:1"])
+    # And a second full provision must reuse the existing key (no churn).
+    _, key_path2 = generate_self_signed(tmp_path, ["2001:0db8::0:1"])
+    assert key_path2.read_bytes() == key_before
 
 
 def test_cert_needs_regen_near_expiry(tmp_path, monkeypatch):
