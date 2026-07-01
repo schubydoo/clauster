@@ -89,9 +89,10 @@ class Instance(Base, TimestampMixin):
     level, while interactive (pty) sessions may have N rows per project.
 
     ``project_name`` is kept as a non-null FK so the session-history table can
-    join through it; a unique index on ``(project_name, resume_mode)`` is added
-    by migration 0003 and enforced at the app level (not the DB level) to keep
-    the standard-singleton rule soft and observable.
+    join through it.  There is no DB-level uniqueness constraint on the row: the
+    one-standard-bridge-per-project rule is enforced entirely at the app level
+    (``SessionRunner._live_standard_for_project`` returns the existing bridge
+    instead of spawning a second), keeping it soft and observable.
     """
 
     __tablename__ = "instances"

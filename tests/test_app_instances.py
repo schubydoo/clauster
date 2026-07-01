@@ -128,6 +128,71 @@ def test_forget_running_bridge_409(runner_config, monkeypatch):
         assert any(i["project"] == "alpha" for i in client.get("/api/instances").json())
 
 
+# ----- route identity: the client still sends the PROJECT NAME (#777) -----------
+# The registry is keyed by instance_id, but the current dashboard sends `i.project`
+# on Stop / Resume / Forget / QR / GET / bridge-log. These drive each route with the
+# project-name identity the UI actually uses (NOT the instance_id echo) so a real
+# deployment doesn't 404 on every standard-bridge action. Removing resolve_bridge_id
+# from any route must fail here even though CI stays green on the instance_id path.
+
+
+def test_stop_via_api_accepts_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        client.post("/api/instances", json={"project": "alpha"})
+        stop = client.delete("/api/instances/alpha")  # the identity the UI sends
+        assert stop.status_code == 200, stop.text
+        assert stop.json()["status"] == "stopped"
+
+
+def test_get_instance_via_api_accepts_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        spawn = client.post("/api/instances", json={"project": "alpha"})
+        got = client.get("/api/instances/alpha")  # project name, not instance_id
+        assert got.status_code == 200, got.text
+        assert got.json()["instance_id"] == spawn.json()["instance_id"]
+        client.delete("/api/instances/alpha")  # cleanup
+
+
+def test_resume_via_api_accepts_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        client.post("/api/instances", json={"project": "alpha"})
+        client.delete("/api/instances/alpha")  # stop -> a resumable STOPPED card
+        resume = client.post("/api/instances/alpha/resume")  # project name
+        assert resume.status_code == 200, resume.text
+        assert resume.json()["status"] == "running"
+        client.delete("/api/instances/alpha")  # cleanup
+
+
+def test_forget_via_api_accepts_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        client.post("/api/instances", json={"project": "alpha"})
+        client.delete("/api/instances/alpha")  # stop first (forget never kills)
+        forget = client.post("/api/instances/alpha/forget")  # project name
+        assert forget.status_code == 200, forget.text
+        assert forget.json()["forgotten"] is True
+        assert client.get("/api/instances").json() == []  # gone from the list
+
+
+def test_qr_via_api_accepts_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        client.post("/api/instances", json={"project": "alpha"})
+        qr = client.get("/api/instances/alpha/qr")  # project name
+        assert qr.status_code == 200, qr.text
+        assert qr.headers["content-type"] == "image/svg+xml"
+        client.delete("/api/instances/alpha")  # cleanup
+
+
+def test_stop_via_api_unknown_identity_404(runner_config):
+    with _client(runner_config) as client:
+        # Neither a known instance_id nor a managed project -> the same 404 as before.
+        assert client.delete("/api/instances/ghost").status_code == 404
+
+
 def test_max_bridges_cap_returns_409(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     config, claude_json = runner_config

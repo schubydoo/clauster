@@ -104,15 +104,6 @@ class CapacityExceeded(SpawnError):
     """A new bridge would exceed instance_defaults.max_bridges (clauster-enforced cap)."""
 
 
-class DuplicateStandardBridge(SpawnError):
-    """A second standard bridge was requested for a project that already has one.
-
-    Standard (server-mode) bridges are capped at one per project (#777). Stop or
-    forget the existing bridge before starting another, or use resume_mode="pty"
-    for concurrent interactive sessions.
-    """
-
-
 class InstanceStillLive(RuntimeError):
     """Raised when forget() is asked to drop a bridge that is still STARTING/RUNNING.
 
@@ -386,6 +377,25 @@ class SessionRunner:
                 return inst
         return None
 
+    def resolve_bridge_id(self, identity: str) -> str | None:
+        """Resolve a bridge identity (instance_id OR project name) to an instance_id.
+
+        The registry is keyed by ``instance_id`` (#777), but the current dashboard
+        client still sends the *project name* as the bridge identity on Stop /
+        Resume / Forget / QR (the #778 API split will move it to instance_id). This
+        keeps that client working: a known ``instance_id`` returns itself; otherwise
+        the identity is treated as a project name and mapped to its instance's id.
+
+        Returns ``None`` when the identity matches neither a known instance_id nor a
+        managed project — the caller raises the same 404 it would have raised before.
+        A project maps unambiguously today (one standard bridge per project); if that
+        ever loosens for pty, this returns the first live instance for the project.
+        """
+        if identity in self._instances:
+            return identity
+        inst = self.get_instance_for_project(identity)
+        return inst.instance_id if inst is not None else None
+
     def _live_instance_for_project(self, project_name: str) -> RemoteControlInstance | None:
         """Return the first STARTING/RUNNING instance for a project, or ``None``.
 
@@ -403,10 +413,9 @@ class SessionRunner:
     def _live_standard_for_project(self, project_name: str) -> RemoteControlInstance | None:
         """Return the first STARTING/RUNNING *standard* bridge for a project, or ``None``.
 
-        Used by :meth:`_spawn_locked` to enforce the one-standard-bridge-per-project cap:
-        if a live standard bridge exists, a second spawn raises
-        :class:`DuplicateStandardBridge` rather than silently no-op'ing or starting a
-        second environment server at the same project root.
+        Used by :meth:`_spawn_locked` to enforce the one-standard-bridge-per-project
+        cap: if a live standard bridge exists, a second spawn returns it idempotently
+        rather than starting a second environment server at the same project root.
         """
         for inst in self._instances.values():
             if (
@@ -652,10 +661,9 @@ class SessionRunner:
             # If a live standard bridge already exists — for any reason (idempotent
             # re-spawn, double-click, concurrent tabs) — return it without launching
             # a second bridge.  A live PTY instance at the same project does NOT
-            # block a standard spawn; the two modes are independent axes.
-            # DuplicateStandardBridge is exported for callers that want to
-            # distinguish "already live" from other SpawnError sub-types, and for
-            # a future API surface that explicitly rejects a second spawn (#778).
+            # block a standard spawn; the two modes are independent axes.  The cap
+            # is enforced by returning the existing bridge (not by raising): a
+            # second Start is a no-op the caller already sees as "still running".
             live_standard = self._live_standard_for_project(name)
             if live_standard is not None:
                 return live_standard

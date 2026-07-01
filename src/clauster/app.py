@@ -2246,7 +2246,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/instances/{instance_id}")
     async def api_instance(instance_id: str) -> RemoteControlInstance:
-        instance = runner.get_instance(instance_id) or app.state.hosted.get_instance(instance_id)
+        # Accept the project name the current client sends as a bridge identity, or a
+        # raw instance_id / hosted id (#777; the #778 API split moves fully to ids).
+        resolved = runner.resolve_bridge_id(instance_id)
+        instance = (
+            runner.get_instance(resolved) if resolved is not None else None
+        ) or app.state.hosted.get_instance(instance_id)
         if instance is None:
             raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
         return instance
@@ -2312,8 +2317,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # The row vanished between the existence check and the awaited call
                 # (concurrent stop/reattach) — treat as gone, not a 500.
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
+        resolved = runner.resolve_bridge_id(instance_id)
+        if resolved is None:
+            raise HTTPException(status_code=404, detail=f"no managed instance: {instance_id!r}")
         try:
-            return await runner.stop(instance_id)
+            return await runner.stop(resolved)
         except UnknownProject as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -2327,8 +2335,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         hosted = app.state.hosted.get_instance(instance_id)
         if hosted is not None:
             return await _resume_hosted(instance_id, hosted)
+        resolved = runner.resolve_bridge_id(instance_id)
+        if resolved is None:
+            raise HTTPException(
+                status_code=404, detail=f"no managed instance to resume: {instance_id!r}"
+            )
         try:
-            return await _spawn_or_http(runner.resume(instance_id))
+            return await _spawn_or_http(runner.resume(resolved))
         except HTTPException as exc:
             # Only a genuine spawn failure (SpawnError -> 409) means the bridge tried to
             # come back and could not — that is the case worth a #541 reconnect-failed
@@ -2359,7 +2372,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # hosted ids are None above and fall through to the bridge runner).
                 await app.state.hosted.forget(instance_id)
             else:
-                await runner.forget(instance_id)
+                # Accept the project name the current client sends as well as a raw
+                # instance_id (#777); fall back to the id verbatim so a purely-persisted
+                # (not-yet-materialized) record still reaches runner.forget's own lookup.
+                await runner.forget(runner.resolve_bridge_id(instance_id) or instance_id)
         except UnknownProject as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (InstanceStillLive, HostedSessionError) as exc:
@@ -2452,7 +2468,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.get("/api/instances/{instance_id}/qr")
     async def api_instance_qr(instance_id: str) -> Response:
         """SVG QR for the primary deep link (feature 5) — scan to open on mobile."""
-        instance = runner.get_instance(instance_id)
+        resolved = runner.resolve_bridge_id(instance_id)
+        instance = runner.get_instance(resolved) if resolved is not None else None
         if instance is None:
             raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
         target = instance.session_url or instance.url
@@ -2486,7 +2503,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )  # validate before accept — never open an unauthed socket
             return
         await websocket.accept()
-        instance = runner.get_instance(instance_id)
+        # The client tags the tail with the project name (#777); resolve it to the
+        # registry's instance_id before lookup so the socket doesn't 1008 for a live bridge.
+        resolved = runner.resolve_bridge_id(instance_id)
+        instance = runner.get_instance(resolved) if resolved is not None else None
         if instance is None or instance.bridge_debug_log_path is None:
             await websocket.close(code=1008)  # nothing to stream
             return
@@ -2592,7 +2612,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
-        instance = runner.get_instance(instance_id)
+        # The client tags the view with the project name (#777); resolve to instance_id.
+        resolved = runner.resolve_bridge_id(instance_id)
+        instance = runner.get_instance(resolved) if resolved is not None else None
         # The live screen exists only for a pty bridge with the (default-off) tap enabled;
         # anything else has no sidecar to stream, so refuse rather than hang silently.
         if (

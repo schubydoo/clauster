@@ -39,7 +39,9 @@ def _client_with(
     config.claude.pty_screen_enabled = screen_enabled
     runner = SessionRunner(config, claude_json=claude_json)
     if instance is not None:
-        runner._instances[instance.project] = instance
+        # Key by instance_id like the real registry (#777); the WS URL carries the
+        # project name and is resolved via runner.resolve_bridge_id.
+        runner._instances[instance.instance_id] = instance
     return TestClient(create_app(config, runner=runner))
 
 
