@@ -1219,11 +1219,17 @@
           // idle polls that dominate a quiet session.
           if (changed) this._rebuildLiveTurns();
           // The session ended (no longer maps to a running bridge): drain this final
-          // delta (already applied above) and stop the loop. The one list stays — it now
-          // holds the full transcript; flipping live just swaps the header badge and lets
-          // the (already-derived) `turns` render as the static, complete list. No second
-          // box, so no duplication at the live→ended transition.
-          if (d.live === false) { t.live = false; this._stopTranscriptTail(); return; }
+          // delta (already applied above) and stop the loop. Uncapped, the one list stays —
+          // it holds the full transcript, so flipping live just swaps the header badge and
+          // the (already-derived) `turns` render as the static, complete list. A CAPPED
+          // tail can't serve as that "complete" view (the oldest turns were dropped, and
+          // hiding the live card hides the truncation banner too), so hand the ended
+          // session to the paged backend path instead of leaving a silently-short list.
+          if (d.live === false) {
+            t.live = false; this._stopTranscriptTail();
+            if (t.tailTruncated) { t.tailTruncated = false; this.loadTranscriptTurnsFromStart(); }
+            return;
+          }
         } catch (e) {
           if (t.tailGen !== myGen) return;
           t.tailError = "Live tail interrupted.";  // surface, never silently stall

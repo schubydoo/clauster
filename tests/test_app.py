@@ -960,6 +960,13 @@ def test_dashboard_live_tail_cap_bounds_tailraw(write_config):
     assert 'data-test="transcript-tail-cap"' in page
     assert 'x-show="transcripts.tailTruncated"' in page
     assert "MAX_TAIL_TURNS" in page  # x-text renders the count from the JS constant
+    # live→ended on a CAPPED tail hands off to the paged backend path — a capped list
+    # can't pose as the complete static transcript (and hiding the live card hides the
+    # truncation banner), so the ended view reloads from the start instead.
+    assert (
+        "if (t.tailTruncated) { t.tailTruncated = false; this.loadTranscriptTurnsFromStart(); }"
+        in page
+    )
 
 
 def test_clone_cancel_has_confirm_before_cancel_dialog(write_config):
