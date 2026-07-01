@@ -1259,6 +1259,10 @@
                   <span class="badge bg-green-lt" data-test="transcript-tail-live"
                         title="Following this running session live."><span aria-hidden="true">●</span> following live</span>
                   <span class="text-secondary small">Updates as the session runs.</span>
+                  <span class="text-secondary small" data-test="transcript-tail-cap"
+                        x-show="transcripts.tailTruncated" x-cloak
+                        :title="'Long session — oldest turns dropped to stay within ' + MAX_TAIL_TURNS + ' turn limit.'"
+                        x-text="'— showing last ' + MAX_TAIL_TURNS + ' turns'"></span>
                 </div>
                 <div class="card-body p-2" x-show="transcripts.tailError || transcripts.tailRaw.length === 0">
                   <div class="alert alert-warning py-1 px-2 mb-0 small" data-test="transcript-tail-error"
