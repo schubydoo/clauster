@@ -343,7 +343,7 @@ def _hash_metrics_token() -> int:
 def _api_token_issue(config_path: str | None, label: str) -> int:
     """Mint a new named token; print the raw secret once (never persisted)."""
     config = _load_or_exit(config_path)
-    persistence = Persistence(config.state_dir, config.database_url)
+    persistence = Persistence(config.state_dir)
     try:
         raw, record = persistence.api_token_store().issue(label)
     except ValueError as exc:
@@ -368,7 +368,7 @@ def _api_token_issue(config_path: str | None, label: str) -> int:
 def _api_token_list(config_path: str | None) -> int:
     """List every named token — label / created / last-used, never the secret."""
     config = _load_or_exit(config_path)
-    persistence = Persistence(config.state_dir, config.database_url)
+    persistence = Persistence(config.state_dir)
     try:
         records = persistence.api_token_store().list_all()
     finally:
@@ -397,7 +397,7 @@ def _api_token_list(config_path: str | None) -> int:
 def _api_token_rotate(config_path: str | None, label: str) -> int:
     """Mint a fresh secret for an existing label; print the new raw secret once."""
     config = _load_or_exit(config_path)
-    persistence = Persistence(config.state_dir, config.database_url)
+    persistence = Persistence(config.state_dir)
     try:
         raw, record = persistence.api_token_store().rotate(label)
     except ValueError as exc:
@@ -421,7 +421,7 @@ def _api_token_rotate(config_path: str | None, label: str) -> int:
 def _api_token_revoke(config_path: str | None, label: str) -> int:
     """Permanently delete a named token by label."""
     config = _load_or_exit(config_path)
-    persistence = Persistence(config.state_dir, config.database_url)
+    persistence = Persistence(config.state_dir)
     try:
         found = persistence.api_token_store().revoke(label)
     except OSError as exc:
