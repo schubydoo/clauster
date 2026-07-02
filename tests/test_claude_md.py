@@ -216,6 +216,28 @@ def test_get_claude_md_absent(write_config, tmp_path):
     assert body["exists"] is False and body["content"] == "" and body["bridge_running"] is False
 
 
+def test_get_claude_md_reports_bridge_running_for_any_running_instance(write_config, tmp_path):
+    """bridge_running flips true off the any-RUNNING scan, even a display-hidden pty (#778).
+
+    A RUNNING pty registered before a stopped standard bridge is invisible to the
+    project-keyed card, but the editor's caution flag must still report it.
+    """
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    runner = client.app.state.runner
+    pty = RemoteControlInstance(
+        project="alpha", label="alpha", resume_mode="pty", status=InstanceStatus.RUNNING
+    )
+    stopped = RemoteControlInstance(
+        project="alpha", label="alpha", resume_mode="standard", status=InstanceStatus.STOPPED
+    )
+    runner._instances[pty.instance_id] = pty
+    runner._instances[stopped.instance_id] = stopped  # last-registered → the displayed card
+    body = client.get("/api/projects/alpha/claude-md").json()
+    assert body["bridge_running"] is True
+
+
 def test_get_claude_md_present(write_config, tmp_path):
     client = _client(write_config, tmp_path)
     resp = client.get("/api/projects/beta/claude-md")  # beta fixture has "# beta\n"

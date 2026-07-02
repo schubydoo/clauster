@@ -415,31 +415,23 @@ class SessionRunner:
         return self._instances.get(instance_id)
 
     def get_instance_for_project(self, project_name: str) -> RemoteControlInstance | None:
-        """Return the most relevant instance for a project, or None.
+        """Return the instance the project-keyed dashboard displays for this project.
 
         A project may hold one standard bridge plus N interactive (pty) sessions
-        (#777), so "the project's instance" is resolved deterministically (#778):
-        the live standard bridge first, then the first (oldest-registered) live pty
-        session, then the first instance in any status — so a caller checking
-        liveness (``_bridge_running`` in app.py) never misses a running bridge
-        behind a stopped one, while name-compat callers (``resolve_bridge_id``) can
-        still reach a stopped instance. Does not raise; ``None`` when no instance
-        matches.
+        (#777). The pre-#779 client folds ``GET /api/instances`` into a project-keyed
+        map (``map[project] = row``), so the LAST-registered row wins the project's
+        card — and its name-identity actions (Stop / Resume / Forget / QR send the
+        project name) must target exactly that displayed instance, in any status.
+        Preferring anything else (a live bridge, the oldest row) would act on a
+        bridge the operator cannot see. Callers that only need liveness use
+        :meth:`has_running_instance` instead (#778). Does not raise; ``None`` when
+        no instance matches.
         """
-        live = (InstanceStatus.STARTING, InstanceStatus.RUNNING)
-        first: RemoteControlInstance | None = None
-        first_live: RemoteControlInstance | None = None
+        found: RemoteControlInstance | None = None
         for inst in self._instances.values():
-            if inst.project != project_name:
-                continue
-            if first is None:
-                first = inst
-            if inst.status in live:
-                if inst.resume_mode == "standard":
-                    return inst  # the singleton standard bridge wins outright
-                if first_live is None:
-                    first_live = inst
-        return first_live or first
+            if inst.project == project_name:
+                found = inst  # keep scanning: the last-registered match wins
+        return found
 
     def has_running_instance(self, project_name: str) -> bool:
         """Report whether ANY managed instance for the project is RUNNING (#778).
@@ -465,10 +457,11 @@ class SessionRunner:
 
         Returns ``None`` when the identity matches neither a known instance_id nor a
         managed project — the caller raises the same 404 it would have raised before.
-        With N instances per project the name fallback resolves deterministically
-        via :meth:`get_instance_for_project` (#778): the live standard bridge first,
-        then the oldest live pty session, then the first instance in any status.
-        Per-session operations on a multi-session project must send the instance_id.
+        With N instances per project the name fallback resolves via
+        :meth:`get_instance_for_project` (#778) to the instance the project-keyed
+        client actually DISPLAYS (its map folds last-registered-wins), so a name
+        action never targets a bridge the operator cannot see. Per-session
+        operations on a multi-session project must send the instance_id.
         """
         if identity in self._instances:
             return identity

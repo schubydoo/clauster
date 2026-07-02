@@ -1940,7 +1940,7 @@ async def test_poll_forever_propagates_cancel_from_poll(runner_config, monkeypat
         await runner._poll_forever()
 
 
-# ----- get_instance_for_project determinism with N instances per project (#778) -----
+# ----- get_instance_for_project mirrors the project-keyed display (#778) -----
 
 
 def _seed(runner, project, *, mode, status):
@@ -1949,47 +1949,43 @@ def _seed(runner, project, *, mode, status):
     return inst
 
 
-def test_get_instance_for_project_prefers_live_standard(runner_config):
-    """The live standard bridge wins even when registered after stopped/live pty rows.
+def test_get_instance_for_project_mirrors_displayed_instance(runner_config):
+    """The name fallback targets the instance the project-keyed client displays.
 
-    Pre-#778 the first registry match won, so a stopped pty session registered first
-    hid a RUNNING standard bridge from ``_bridge_running`` (and the name-compat
-    ``resolve_bridge_id`` fallback picked an arbitrary session).
+    The pre-#779 dashboard folds ``GET /api/instances`` as ``map[project] = row`` —
+    the LAST-registered row wins the project card — and sends the project name on
+    Stop/Resume/Forget/QR. The resolver must pick exactly that displayed instance,
+    in ANY status: a "smarter" pick (a live bridge, the oldest row) can act on a
+    bridge the operator cannot see (Greptile P1 on #797) — e.g. Resume of the
+    displayed stopped pty card bouncing off a hidden live standard bridge.
     """
     runner = _make_runner(runner_config)
-    _seed(runner, "alpha", mode="pty", status=InstanceStatus.STOPPED)
-    live_pty = _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)
-    _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)  # a younger live session
-    standard = _seed(runner, "alpha", mode="standard", status=InstanceStatus.RUNNING)
-    assert runner.get_instance_for_project("alpha") is standard
-    # Without a live standard, the OLDEST live pty session wins — over the stopped
-    # row registered before it and over the younger live session after it.
-    standard.status = InstanceStatus.STOPPED
-    assert runner.get_instance_for_project("alpha") is live_pty
-
-
-def test_get_instance_for_project_falls_back_to_first_when_none_live(runner_config):
-    """With nothing live, the first (oldest-registered) instance is returned.
-
-    The name-compat fallback must still reach a STOPPED instance — Forget/Resume by
-    project name target exactly those.
-    """
-    runner = _make_runner(runner_config)
-    oldest = _seed(runner, "alpha", mode="pty", status=InstanceStatus.STOPPED)
-    _seed(runner, "alpha", mode="standard", status=InstanceStatus.STOPPED)
-    assert runner.get_instance_for_project("alpha") is oldest
+    _seed(runner, "alpha", mode="standard", status=InstanceStatus.RUNNING)
+    stopped_pty = _seed(runner, "alpha", mode="pty", status=InstanceStatus.STOPPED)
+    # The stopped pty registered LAST → it owns the project card (a resumable card
+    # in the UI); name-identity actions must target it, not the live standard.
+    assert runner.get_instance_for_project("alpha") is stopped_pty
+    # A newer registration takes over the card — and with it, name-identity actions.
+    newest = _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)
+    assert runner.get_instance_for_project("alpha") is newest
     assert runner.get_instance_for_project("ghost") is None
 
 
-def test_has_running_instance_sees_running_pty_behind_starting_standard(runner_config):
-    """The liveness flag must not miss a RUNNING pty while a standard bridge STARTS (#778).
+def test_has_running_instance_sees_running_pty_behind_stale_display(runner_config):
+    """The liveness flag must not miss a RUNNING pty hidden behind the displayed card (#778).
 
-    ``get_instance_for_project``'s canonical pick prefers the live standard bridge —
-    transiently STARTING — so ``_bridge_running`` routes through this any-RUNNING scan.
+    ``get_instance_for_project`` mirrors the client's last-registered display pick —
+    which can be a stopped/starting row while another instance for the project is
+    RUNNING — so ``_bridge_running`` routes through this any-RUNNING scan instead.
     """
     runner = _make_runner(runner_config)
     _seed(runner, "alpha", mode="standard", status=InstanceStatus.STARTING)
     assert runner.has_running_instance("alpha") is False  # nothing RUNNING yet
-    _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)
+    running_pty = _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)
+    stopped = _seed(runner, "alpha", mode="standard", status=InstanceStatus.STOPPED)
+    # The displayed (last-registered) card is the stopped standard — the RUNNING
+    # pty behind it must still flip the liveness flag.
+    assert runner.get_instance_for_project("alpha") is stopped
+    assert runner.get_instance_for_project("alpha") is not running_pty
     assert runner.has_running_instance("alpha") is True
     assert runner.has_running_instance("beta") is False
