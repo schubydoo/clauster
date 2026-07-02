@@ -206,11 +206,30 @@ def test_normalize_custom_name_rejects_too_long():
 
 @pytest.mark.parametrize(
     "bad",
-    ["bad\nname", "bad\rname", "bad\tname", "bad\x00name", "bad\x1fname", "bad\x7fname"],
+    [
+        "bad\nname",  # newline (Cc)
+        "bad\rname",  # carriage return (Cc)
+        "bad\tname",  # tab (Cc)
+        "bad\x00name",  # NUL (Cc)
+        "bad\x1fname",  # C0 control (Cc)
+        "bad\x7fname",  # DEL (Cc)
+        "bad\x9bname",  # C1 control (Cc)
+        "bad​name",  # zero-width space (Cf — a format char)
+        "bad‮name",  # right-to-left override — bidi spoof (Cf)
+        "bad⁦name",  # left-to-right isolate — bidi spoof (Cf)
+        "bad\u2028name",  # line separator (Zl, not category C)
+        "bad\u2029name",  # paragraph separator (Zp, not category C)
+    ],
 )
-def test_normalize_custom_name_rejects_control_characters(bad):
+def test_normalize_custom_name_rejects_display_unsafe_characters(bad):
     with pytest.raises(InvalidSpawnOption):
         _normalize_custom_name(bad, fallback="alpha")
+
+
+@pytest.mark.parametrize("good", ["Café-Bridge", "Über Session", "橋 bridge", "Bridge 🚀"])
+def test_normalize_custom_name_accepts_ordinary_unicode(good):
+    # Legitimate non-ASCII (accents, CJK, emoji) is category L/N/S — never over-rejected.
+    assert _normalize_custom_name(good, fallback="alpha") == good
 
 
 async def test_spawn_custom_name_reaches_argv_and_label(runner_config, monkeypatch):

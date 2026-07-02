@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -129,19 +130,39 @@ class AdoptionUnavailable(RuntimeError):
 _CUSTOM_NAME_MAX_LEN = 128
 
 
+def _is_display_unsafe(ch: str) -> bool:
+    """Whether ``ch`` is a control/format or line/paragraph-separator character (#780).
+
+    Rejects any Unicode *control* or *format* character — ``unicodedata.category``
+    starting with ``"C"`` (Cc, Cf, Cs, Co, Cn). That covers the C0/C1 controls, DEL,
+    and — critically for display safety — the bidi override/isolate format chars
+    (U+202A–202E, U+2066–2069) that can visually spoof a rendered name. It also
+    rejects the line (Zl, U+2028) and paragraph (Zp, U+2029) separators, which are
+    *not* category-C but still break a single-line log/JSON rendering. Ordinary
+    non-ASCII letters (accents, CJK, emoji) are category L/N/S/etc. and pass.
+    """
+    if unicodedata.category(ch).startswith("C"):
+        return True
+    return ch in ("\u2028", "\u2029")
+
+
 def _normalize_custom_name(raw: str | None, fallback: str) -> str:
     """Validate and normalize an optional custom bridge display name (#780).
 
     ``None``, or a string that is empty after stripping surrounding whitespace,
     falls back to ``fallback`` (today's behavior: the project name) — an operator
     who leaves the field blank sees no change. Otherwise the stripped name is
-    returned, having first been checked for length and control characters.
+    returned, having first been checked for length and for display-unsafe characters.
 
-    It's list-argv (never ``shell=True``), so this is not a shell-injection
-    concern — but a raw control character (an embedded newline/carriage-return/
-    escape) would corrupt --debug-file log lines and the dashboard's display of
-    the name, so we fail closed with :class:`InvalidSpawnOption` rather than
-    silently stripping or passing it through.
+    It's list-argv (never ``shell=True``), so this is not a shell-injection concern —
+    but the name is rendered in the Alpine dashboard and serialized to JSON, so a
+    control/format character would corrupt --debug-file log lines, spoof the rendered
+    name (bidi overrides), or break single-line rendering. We fail closed with
+    :class:`InvalidSpawnOption` for any Unicode control/format character
+    (``unicodedata.category`` category ``C*``, which includes the bidi overrides
+    U+202A–202E / U+2066–2069) plus the line/paragraph separators U+2028/U+2029,
+    rather than silently stripping or passing them through. Ordinary non-ASCII
+    letters (e.g. ``Café-Bridge``) are accepted.
     """
     if raw is None:
         return fallback
@@ -152,7 +173,7 @@ def _normalize_custom_name(raw: str | None, fallback: str) -> str:
         raise InvalidSpawnOption(
             f"custom bridge name too long ({len(stripped)} chars; max {_CUSTOM_NAME_MAX_LEN})"
         )
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in stripped):
+    if any(_is_display_unsafe(ch) for ch in stripped):
         raise InvalidSpawnOption("custom bridge name must not contain control characters")
     return stripped
 

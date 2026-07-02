@@ -2362,9 +2362,11 @@
           };
           // Custom bridge display name (#780) — standard/Server Mode only; the pty
           // (Interactive Session) flag form has no equivalent flag, so never send it
-          // there even if a name was typed before flipping Mode.
+          // there even if a name was typed before flipping Mode. Match the template's
+          // `=== 'standard'` gate exactly so the two can't diverge if a third resume
+          // mode is ever added.
           const customName = (this.customName[name] || "").trim();
-          if (effective !== "pty" && customName) reqBody.name = customName;
+          if (effective === "standard" && customName) reqBody.name = customName;
           const res = await fetch(ROOT + "/api/instances", {
             method: "POST",
             headers: JSON_HEADERS,
