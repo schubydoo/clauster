@@ -361,7 +361,9 @@ def run_keeper(
             # claude.ai/code/session_… line the scrape depends on. A bridge that
             # genuinely failed to start has already exited, so the loop has broken; we
             # only reach here while proc.poll() is None — i.e. the bridge is alive.
-            if base.get("state") == "starting":
+            # no branch: state is always "starting" here — the only other transition
+            # (URL found -> "ready") also sets url_found, which this arm excludes.
+            if base.get("state") == "starting":  # pragma: no branch
                 base["state"] = "ready"
                 _write_sidecar(sidecar, base)
 

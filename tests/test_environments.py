@@ -483,3 +483,21 @@ def test_cli_reap_list_error_exit_2(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr(environments, "EnvironmentsClient", FakeClient)
     rc = cli.main(["reap-environments", "-c", _cfg(write_config, tmp_path)])
     assert rc == 2
+
+
+def test_https_transport_forwards_valid_url_to_roundtrip(monkeypatch):
+    # environments.py 155->157: a well-formed https URL passes the scheme guard and
+    # reaches the (stubbed — never real network) round-trip with its parsed parts.
+    seen: dict = {}
+
+    def _fake_roundtrip(method, parts, headers, body):
+        seen.update(method=method, netloc=parts.netloc, path=parts.path, query=parts.query)
+        return (200, b"{}")
+
+    monkeypatch.setattr(environments, "_https_roundtrip", _fake_roundtrip)
+    status, body = environments._https_transport(
+        "GET", "https://api.example.com/v1/envs?limit=1", {"h": "v"}, None
+    )
+    assert (status, body) == (200, b"{}")
+    assert seen["method"] == "GET" and seen["netloc"] == "api.example.com"
+    assert seen["path"] == "/v1/envs" and seen["query"] == "limit=1"

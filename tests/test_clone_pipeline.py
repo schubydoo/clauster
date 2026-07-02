@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -362,3 +363,102 @@ def test_clone_active_excludes_finished_job(write_config, tmp_path, monkeypatch)
         active = client.get("/api/projects/clone/active")
         assert active.status_code == 200, active.text
         assert active.json() == {"jobs": []}  # the finished job is not listed
+
+
+# ----- audited coverage gaps (2026-07 audit) ----------------------------
+
+
+def test_clone_unexpected_error_streams_error_frame(write_config, tmp_path, monkeypatch):
+    # app.py 1671 + 1675: a NON-ProvisionError escaping the clone worker must never
+    # leave the job stuck "running" — the defensive arm lands a terminal error frame
+    # with the "unexpected error" prefix so the UI shows a reason, not a spinner.
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
+        raise RuntimeError("worker exploded")
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    with _client(write_config, tmp_path) as client:
+        resp = client.post(
+            "/api/projects/clone", json={"name": "unlucky", "url": "https://example.com/r.git"}
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job_id"]
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+            frames = _drain_to_done(ws)
+
+    assert frames[-1]["type"] == "done" and frames[-1]["status"] == "error"
+    assert "unexpected error: worker exploded" in frames[-1]["error"]
+
+
+def test_clone_cancel_with_unexpected_error_reports_cancelled(write_config, tmp_path, monkeypatch):
+    # app.py 1672-1673: a cancel whose terminated git surfaces as an UNEXPECTED
+    # exception (not the usual CloneFailed) still honors the "cancelling" contract —
+    # the job reports a clean `cancelled`, not a scary unexpected-error frame.
+    spawned = threading.Event()
+    terminated = threading.Event()
+
+    class _FakeProc:
+        def terminate(self) -> None:
+            terminated.set()
+
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
+        on_proc(_FakeProc())
+        spawned.set()
+        assert terminated.wait(timeout=5), "clone never terminated by cancel"
+        raise RuntimeError("terminated git died in a way the worker didn't map")
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+
+    with _client(write_config, tmp_path) as client:
+        resp = client.post(
+            "/api/projects/clone", json={"name": "cxl", "url": "https://example.com/r.git"}
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job_id"]
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}") as ws:
+            first = ws.receive_json()
+            assert first["type"] == "progress"
+            assert spawned.wait(timeout=5), "clone never spawned its process"
+            cancel = client.post(f"/api/projects/clone/{job_id}/cancel")
+            assert cancel.status_code == 202, cancel.text
+            frames = [first, *_drain_to_done(ws)]
+
+    assert frames[-1] == {"type": "done", "status": "cancelled", "error": None}
+
+
+def test_clone_ws_abrupt_disconnect_still_unsubscribes(write_config, tmp_path, monkeypatch):
+    # app.py 2651-2654: a disconnect surfacing as WebSocketDisconnect out of the
+    # stream helper is caught (the handler returns instead of erroring) AND the
+    # finally still unsubscribes the queue — an abrupt client must not leak a
+    # subscriber that every future progress push fans out to.
+    from starlette.websockets import WebSocketDisconnect
+
+    release = threading.Event()
+
+    def fake_clone(root, name, url, *, cfg, shallow, progress_cb, on_proc=None):
+        assert release.wait(timeout=10), "clone never released"
+
+    async def _abrupt(websocket, stream):
+        raise WebSocketDisconnect(1006)
+
+    monkeypatch.setattr("clauster.app.clone_project", fake_clone)
+    monkeypatch.setattr("clauster.app.validate_clone_url", lambda url, cfg: None)
+    monkeypatch.setattr("clauster.app.stream_until_disconnect", _abrupt)
+
+    with _client(write_config, tmp_path) as client:
+        resp = client.post(
+            "/api/projects/clone", json={"name": "leaky", "url": "https://example.com/r.git"}
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job_id"]
+        job = client.app.state.clone_jobs.get(job_id)
+        assert job is not None
+        with client.websocket_connect(f"/ws/clone-progress/{job_id}"):
+            pass  # the handler hit the abrupt-disconnect arm; no server error escaped
+        deadline = time.monotonic() + 2.0
+        while job._subscribers and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert job._subscribers == []  # the finally unsubscribed despite the disconnect
+        release.set()  # let the worker finish so lifespan shutdown stays clean

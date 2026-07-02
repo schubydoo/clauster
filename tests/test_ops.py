@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tarfile
 from pathlib import Path
@@ -17,8 +18,11 @@ from clauster.ops import (
     WARN,
     _check_auth,
     _check_claude_login,
+    _check_port,
     _check_repo_freshness,
+    _check_state_dir_writable,
     _check_systemd_killmode,
+    _safe_extract_tar,
     _version_ge,
     make_backup,
     migrate_state,
@@ -779,3 +783,207 @@ def test_default_service_path_unknown_kind():
 
     with pytest.raises(ValueError):
         default_service_path("upstart")
+
+
+# ----- audited coverage gaps (2026-07 audit) -----------------------------
+
+
+def test_repo_freshness_git_invocation_failure_warns(tmp_path, monkeypatch):
+    # ops.py 211-212: a git invocation that fails outright (OSError) must degrade to a
+    # WARN with the reason surfaced — never crash doctor or silently claim freshness.
+    (tmp_path / ".git").mkdir()
+
+    def _boom(*a, **k):
+        raise OSError("git exploded")
+
+    monkeypatch.setattr("clauster.ops.subprocess.run", _boom)
+    c = _check_repo_freshness(tmp_path)
+    assert c is not None and c.status == WARN
+    assert "git freshness check failed" in c.detail and "git exploded" in c.detail
+
+
+def test_repo_freshness_garbled_counts_still_ok(tmp_path, monkeypatch):
+    # ops.py 218-219: rev-list output that isn't two ints parses to a plain
+    # "source checkout" OK — an odd git build must not fail the whole doctor run.
+    (tmp_path / ".git").mkdir()
+    _fake_git(monkeypatch, returncode=0, stdout="not-a-count\n")
+    c = _check_repo_freshness(tmp_path)
+    assert c is not None and c.status == OK and c.detail == "source checkout"
+
+
+def test_doctor_skips_freshness_check_for_installed_package(write_config, tmp_path, monkeypatch):
+    # ops.py 149->153: a PyPI/Docker install (no source checkout) contributes no
+    # "version" freshness check at all — the doctor list simply omits it.
+    monkeypatch.setattr("clauster.ops._check_repo_freshness", lambda: None)
+    by = {c.name: c for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}
+    assert "version" not in by
+
+
+def test_check_port_probe_oserror_treated_as_free(monkeypatch):
+    # ops.py 367-371: a socket-layer OSError during the probe means "can't tell",
+    # which the check treats as free (OK) — a broken loopback must not FAIL doctor.
+    class _BoomSocket:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def settimeout(self, t) -> None:
+            pass
+
+        def connect_ex(self, addr):
+            raise OSError("no local sockets")
+
+    monkeypatch.setattr("clauster.ops.socket.socket", _BoomSocket)
+    c = _check_port("127.0.0.1", 7621)
+    assert c.status == OK and "free" in c.detail
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission semantics")
+def test_state_dir_uncreatable_ancestor_fails(tmp_path):
+    # ops.py 298->300 + 300: an absent state_dir whose nearest existing ancestor is
+    # not writable is a FAIL — doctor must say the dir can't even be created.
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses permission checks")
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o555)
+    try:
+        c = _check_state_dir_writable(ro / "a" / "b")
+    finally:
+        ro.chmod(0o755)
+    assert c.status == FAIL and "can't be created" in c.detail
+
+
+def test_backup_without_state_or_config_is_manifest_only(projects_root, tmp_path):
+    # ops.py 404->406 + 406->408: no state_dir on disk and no source config path ->
+    # the archive holds only the manifest (neither member is silently invented).
+    from clauster.config import ClausterConfig
+
+    config = ClausterConfig(projects_root=projects_root, state_dir=tmp_path / "never-created")
+    assert config.source_path is None  # built programmatically, not loaded from a file
+    out = tmp_path / "out"
+    out.mkdir()
+    archive = make_backup(config, out)
+    with tarfile.open(archive, "r:gz") as tar:
+        assert tar.getnames() == ["manifest.json"]
+
+    # ops.py 525->531: restoring that archive is an explicit no-op result, and the
+    # absent state member must not conjure a state_dir on disk.
+    result = restore_backup(archive, state_dir=tmp_path / "st", config_out=tmp_path / "c.yml")
+    assert result == {"state_files": 0, "config": None}
+    assert not (tmp_path / "st").exists()
+    assert not (tmp_path / "c.yml").exists()
+
+
+def test_restore_empty_config_dir_leaves_config_none(tmp_path):
+    # ops.py 534->538: an archive with a config/ directory member but no config file
+    # in it restores nothing and reports config: None (not a crash or a bogus path).
+    arch = tmp_path / "a.tar.gz"
+    with tarfile.open(arch, "w:gz") as tar:
+        d = tarfile.TarInfo("config")
+        d.type = tarfile.DIRTYPE
+        tar.addfile(d)
+    result = restore_backup(arch, state_dir=tmp_path / "st", config_out=tmp_path / "c.yml")
+    assert result == {"state_files": 0, "config": None}
+    assert not (tmp_path / "c.yml").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privilege on Windows")
+def test_safe_extract_refuses_member_escaping_through_dest_symlink(tmp_path):
+    # ops.py 433-434: a member whose parts are clean (no '..', not absolute) can still
+    # RESOLVE outside the destination through a pre-existing symlink inside it. The
+    # resolve()-based guard is the second traversal layer and must refuse — this is
+    # the classic tar symlink-escape that the parts check alone cannot catch.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "link").symlink_to(outside)
+    arch = tmp_path / "evil.tar.gz"
+    with tarfile.open(arch, "w:gz") as tar:
+        data = b"pwned"
+        info = tarfile.TarInfo("link/evil.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    with pytest.raises(ValueError, match="escapes destination"):
+        _safe_extract_tar(arch, dest)
+    assert not (outside / "evil.txt").exists()  # nothing landed outside dest
+
+
+def test_safe_extract_skips_member_without_file_object(tmp_path, monkeypatch):
+    # ops.py 440-441: extractfile() returning None for an isfile() member (a weird /
+    # truncated archive entry) is skipped, never dereferenced — no file is written
+    # and extraction continues instead of crashing on the None.
+    arch = tmp_path / "odd.tar.gz"
+    with tarfile.open(arch, "w:gz") as tar:
+        data = b"hi"
+        info = tarfile.TarInfo("state/ghost.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", lambda self, member: None)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _safe_extract_tar(arch, dest)
+    assert not (dest / "state" / "ghost.txt").exists()
+
+
+def test_restore_rolls_back_when_swap_fails(write_config, tmp_path, monkeypatch):
+    # ops.py 484-488: when the staged->live rename fails mid-swap (old dir already
+    # moved aside), the old state_dir must be moved BACK and the staged copy removed —
+    # a failed forced restore leaves the pre-restore state intact, never half-gone.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    dest = tmp_path / "live"
+    dest.mkdir()
+    (dest / "keepme.json").write_text("precious")
+
+    real_replace = os.replace
+
+    def _fail_swap_in(src, dst, *a, **k):
+        # Fail ONLY the staged->live swap; the move-aside and the rollback (whose
+        # source ends in ".old") must still work or the test would mask the recovery.
+        if Path(dst) == dest and not Path(src).name.endswith(".old"):
+            raise OSError("simulated: rename failed mid-swap")
+        return real_replace(src, dst, *a, **k)
+
+    import clauster.ops as ops
+
+    monkeypatch.setattr(ops.os, "replace", _fail_swap_in)
+    with pytest.raises(OSError, match="mid-swap"):
+        restore_backup(archive, state_dir=dest, force=True)
+
+    assert (dest / "keepme.json").read_text() == "precious"  # old dir rolled back
+    assert not (dest / "state.json").exists()  # nothing half-applied
+    assert not list(tmp_path.glob(".live.restore-*"))  # staged + aside dirs cleaned up
+
+
+def test_restore_swap_failure_into_fresh_dest_cleans_staging(write_config, tmp_path, monkeypatch):
+    # ops.py 485->487: the same swap failure when the destination did NOT pre-exist
+    # (moved_old False) — there is nothing to roll back, but the staged copy must
+    # still be removed and the error re-raised; the dest stays absent, never partial.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    dest = tmp_path / "fresh"  # intentionally never created
+
+    real_replace = os.replace
+
+    def _fail_swap_in(src, dst, *a, **k):
+        if Path(dst) == dest and not Path(src).name.endswith(".old"):
+            raise OSError("simulated: rename failed mid-swap")
+        return real_replace(src, dst, *a, **k)
+
+    import clauster.ops as ops
+
+    monkeypatch.setattr(ops.os, "replace", _fail_swap_in)
+    with pytest.raises(OSError, match="mid-swap"):
+        restore_backup(archive, state_dir=dest)
+
+    assert not dest.exists()  # never half-created
+    assert not list(tmp_path.glob(".fresh.restore-*"))  # staged dir cleaned up

@@ -561,3 +561,60 @@ def test_route_create_git_init_unavailable_503(write_config, monkeypatch):
     client = _client(write_config)
     resp = client.post("/api/projects", json={"name": "gg", "git_init": True})
     assert resp.status_code == 503
+
+
+# ----- audited coverage gaps (2026-07 audit) -----------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privilege on Windows")
+def test_create_project_symlink_escaping_root_rejected(tmp_path):
+    # provisioning.py 86-87: a validly-NAMED entry that RESOLVES outside projects_root
+    # (a symlink planted inside it) must be refused by the resolve()-based guard —
+    # the regex alone can't see through symlinks, this is the defense-in-depth layer.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "escapee").symlink_to(outside)
+    with pytest.raises(InvalidProjectName, match="escapes projects_root"):
+        create_project(root, "escapee")
+
+
+def test_create_project_git_init_without_git_binary(tmp_path, monkeypatch):
+    # provisioning.py 105-106: git_init requested but no git on PATH -> the explicit
+    # GitUnavailable (a 503 upstream), never a confusing FileNotFoundError.
+    monkeypatch.setattr("clauster.provisioning.shutil.which", lambda name: None)
+    with pytest.raises(GitUnavailable, match="not installed"):
+        create_project(tmp_path, "nogit", git_init=True)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission semantics")
+def test_dir_size_walk_warns_on_unstattable_file(tmp_path, caplog):
+    # provisioning.py 231-234: an unstattable file undercounts the post-clone size cap;
+    # the walk must log the gap (never silent) and keep counting the rest.
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses permission checks")
+    from clauster.provisioning import _dir_size_mb
+
+    d = tmp_path / "clone"
+    d.mkdir()
+    (d / "ok.bin").write_bytes(b"x" * 1024)
+    locked = d / "locked"
+    locked.mkdir()
+    (locked / "hidden.bin").write_bytes(b"y" * 4096)
+    locked.chmod(0o600)  # listable (r) but children unstattable (no x)
+    try:
+        with caplog.at_level("WARNING", logger="clauster.provisioning"):
+            size = _dir_size_mb(d)
+    finally:
+        locked.chmod(0o700)
+    assert any("could not stat" in r.message for r in caplog.records)  # surfaced, not silent
+    assert 0 < size < 0.01  # the stattable file still counted; the walk continued
+
+
+def test_stderr_tail_none_is_empty():
+    # provisioning.py 374-375: a clone that produced no stderr at all reports an empty
+    # tail, so CloneFailed messages never render a "None".
+    from clauster.provisioning import _stderr_tail
+
+    assert _stderr_tail(None) == ""

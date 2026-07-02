@@ -365,3 +365,23 @@ async def test_aemit_is_fail_open_on_client_setup_error(monkeypatch):
 
     monkeypatch.setattr(webhooks.httpx, "AsyncClient", _boom)
     await WebhookEmitter(_cfg(enabled=True, urls=["https://a.test/h"])).aemit("ready", {})
+
+
+def test_host_resolution_skips_unparsable_addrinfo_entries(monkeypatch):
+    # webhooks.py 115-116: an addrinfo row whose sockaddr isn't an IP literal (e.g. an
+    # AF_UNIX path) is skipped, and resolution continues — the SSRF guard still catches
+    # a later private entry instead of crashing on the odd row.
+    import socket as _socket
+
+    from clauster.webhooks import _host_resolves_private
+
+    def _gai(host, *args, **kwargs):
+        # family 0, not AF_UNIX: AF_UNIX doesn't exist on Windows, and the guard
+        # only ever reads info[4][0] anyway.
+        return [
+            (0, _socket.SOCK_STREAM, 0, "", ("/not/an/ip",)),
+            (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+        ]
+
+    monkeypatch.setattr("clauster.webhooks.socket.getaddrinfo", _gai)
+    assert _host_resolves_private("weird.example") is True

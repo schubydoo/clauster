@@ -722,3 +722,56 @@ def test_healthz_claude_probe_failure(runner_config):
     client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
     body = client.get("/healthz").json()
     assert body["claude_ok"] is False and body["claude_version"] is None
+
+
+# ----- audited coverage gaps (2026-07 audit) --------------------------------
+
+
+def test_cookie_secure_auto_over_https(runner_config):
+    # app.py 551-552: under cookie_secure "auto", a request that arrives over https
+    # (Clauster terminating TLS itself) ships the session cookie with Secure —
+    # the auto mode must never downgrade an https deployment to a sniffable cookie.
+    config, claude_json = runner_config
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = _PW_HASH
+    config.auth.allowed_origins = ["https://testserver"]
+    client = TestClient(
+        create_app(config, runner=SessionRunner(config, claude_json=claude_json)),
+        base_url="https://testserver",
+    )
+    resp = client.post(
+        "/login",
+        data={"password": PASSWORD},
+        headers={"origin": "https://testserver"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    assert "secure" in resp.headers["set-cookie"].lower()
+
+
+def test_throttle_shared_backoff_elapsed_allows():
+    # app.py 230->232: past the global ceiling but with the backoff interval already
+    # elapsed since the last shared failure, the attempt is allowed with no wait —
+    # the shared path throttles to a crawl, it never becomes a permanent lockout.
+    throttle = LoginThrottle(global_ceiling=1, backoff_cap_seconds=60.0)
+    now = time.monotonic()
+    throttle._global = [now - 50.0, now - 49.0, now - 48.0]  # over ceiling, long quiet
+    allowed, wait = throttle.allowed(None, shared=True)
+    assert allowed is True and wait == 0.0
+
+
+def test_throttle_record_failure_without_key_is_noop():
+    # app.py 252->exit: a non-shared failure with no distinguishable key records
+    # nothing — neither the per-key map nor the global window may grow.
+    throttle = LoginThrottle()
+    throttle.record_failure(None)
+    assert throttle._failures == {} and throttle._global == []
+
+
+def test_throttle_reset_none_is_noop():
+    # app.py 257->exit: reset(None) must not clear anyone else's failure window.
+    throttle = LoginThrottle()
+    throttle._failures["10.0.0.9"] = [1.0]
+    throttle.reset(None)
+    assert throttle._failures == {"10.0.0.9": [1.0]}

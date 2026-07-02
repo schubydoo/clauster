@@ -117,6 +117,7 @@ component_management:
         - src/clauster/trust.py
         - src/clauster/redact.py
         - src/clauster/environments.py
+        - src/clauster/tls_provision.py # #790 — cert/key provisioning for the TLS listener
     - component_id: hooks_recap
       name: hooks & recap
       # Same glob problem as persistence below: `src/clauster/hooks/**` compiles to
@@ -145,6 +146,7 @@ component_management:
         - src/clauster/db/migrations/versions/__init__.py
         - src/clauster/db/migrations/versions/0001_baseline.py
         - src/clauster/db/migrations/versions/0002_session_events.py # #363 — session lifecycle table
+        - src/clauster/db/migrations/versions/0003_instance_id.py # #789 — instance-identity column
     - component_id: config_write
       name: config-write (settings.json / .mcp.json)
       # The config_write feature cluster (#687 / #690 / #732 / #738) — capability-gated

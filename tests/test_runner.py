@@ -1989,3 +1989,214 @@ def test_has_running_instance_sees_running_pty_behind_stale_display(runner_confi
     assert runner.get_instance_for_project("alpha") is not running_pty
     assert runner.has_running_instance("alpha") is True
     assert runner.has_running_instance("beta") is False
+
+
+# ----- audited coverage gaps (2026-07 audit) ----------------------------
+
+
+async def test_spawn_ensure_helpers_unchanged_skips_info_logs(runner_config, monkeypatch):
+    # runner.py 832->845 + 850->862: when both pre-spawn ensure helpers report "no
+    # change" (flags already set, hook already installed), spawn proceeds without
+    # the changed-state info logs and still latches both once-per-runner gates.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.claude.resume_recap = True
+    monkeypatch.setattr("clauster.runner.ensure_remote_control_enabled", lambda p: False)
+    monkeypatch.setattr("clauster.runner.ensure_recap_hook_installed", lambda p: False)
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.RUNNING
+    assert runner._rc_setting_ensured and runner._recap_hook_ensured
+    await runner.stop(inst.instance_id)
+
+
+async def test_spawn_survives_ensure_helper_write_failures(runner_config, monkeypatch, caplog):
+    # runner.py 838-844 + 856-861: both pre-spawn writes are best-effort — an OSError
+    # writing either ~/.claude.json flag or the recap hook WARNS (never silent) and
+    # the spawn continues; the startup watch stays the honest failure gate.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    config.claude.resume_recap = True
+
+    def _readonly(path):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr("clauster.runner.ensure_remote_control_enabled", _readonly)
+    monkeypatch.setattr("clauster.runner.ensure_recap_hook_installed", _readonly)
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.RUNNING  # the spawn was not failed over it
+    assert any("could not pre-enable remote control" in r.message for r in caplog.records)
+    assert any("could not install resume-recap hook" in r.message for r in caplog.records)
+    await runner.stop(inst.instance_id)
+
+
+def test_read_markers_vanished_log_returns_empty(tmp_path):
+    # runner.py 1686-1687: a bridge log that vanished (rotation/cleanup race) parses
+    # to empty markers instead of raising — readiness polling must survive it.
+    markers = SessionRunner._read_markers(tmp_path / "gone.log")
+    assert markers == bridge_log.BridgeMarkers()
+
+
+async def test_start_startup_watch_replaces_prior_watch(runner_config, monkeypatch):
+    # runner.py 1795-1796: re-arming the watch for the same instance (respawn during
+    # a still-running watch) cancels the old task — never two watches racing to
+    # reconcile the same instance.
+    runner = _make_runner(runner_config)
+
+    async def _idle(_instance_id: str) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runner, "_watch_startup", _idle)
+    runner._start_startup_watch("iid-1")
+    first = runner._startup_watches["iid-1"]
+    runner._start_startup_watch("iid-1")
+    second = runner._startup_watches["iid-1"]
+    assert second is not first
+    with contextlib.suppress(asyncio.CancelledError):
+        await first
+    assert first.cancelled()
+    second.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await second
+
+
+async def test_watch_startup_returns_when_instance_vanishes(runner_config, monkeypatch):
+    # runner.py 1826-1827: the watch wakes to find the instance gone (stopped or
+    # forgotten mid-startup) and exits instead of watching a ghost forever.
+    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.01)
+    runner = _make_runner(runner_config)
+    await asyncio.wait_for(runner._watch_startup("ghost"), timeout=2.0)
+
+
+async def test_watch_startup_returns_when_log_path_missing(runner_config, monkeypatch):
+    # runner.py 1832-1834: a STARTING instance with a live proc but no debug-log path
+    # has nothing to read markers from — the watch defers to the poll loop (returns)
+    # rather than spinning or inventing a status.
+    monkeypatch.setattr("clauster.runner._STARTUP_WATCH_INTERVAL", 0.01)
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    runner._instances[inst.instance_id] = inst
+
+    class _Alive:
+        def poll(self):
+            return None
+
+    runner._procs[inst.instance_id] = cast(subprocess.Popen, _Alive())
+    await asyncio.wait_for(runner._watch_startup(inst.instance_id), timeout=2.0)
+    assert inst.status is InstanceStatus.STARTING  # untouched; the poll loop owns it now
+
+
+async def test_poll_once_reaps_keeper_pid(runner_config, monkeypatch):
+    # runner.py 2399-2400: a pty keeper is Clauster's direct child — poll_once must
+    # reap its pid when set, or an organically-exited keeper lingers as a zombie.
+    runner = _make_runner(runner_config)
+    inst = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="pty",
+        keeper_pid=54321,
+        bridge_pid=None,
+    )
+    runner._instances[inst.instance_id] = inst
+    reaped: list[int] = []
+    monkeypatch.setattr(procutil, "reap_if_exited", reaped.append)
+    monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [])
+    await runner.poll_once()
+    assert reaped == [54321]  # keeper reaped; bridge_pid None short-circuits the rest
+
+
+async def test_poll_once_crosscheck_failure_warns_and_returns(runner_config, monkeypatch, caplog):
+    # runner.py 2435-2436: a failing `claude agents --json` probe must not kill the
+    # poll loop NOR pass silently — it warns and returns, leaving liveness intact.
+    runner = _make_runner(runner_config)
+
+    def _boom(*a, **k):
+        raise OSError("agents probe wedged")
+
+    monkeypatch.setattr(inspector, "list_working_sessions", _boom)
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        await runner.poll_once()
+    assert any(
+        "cross-check failed" in r.message and "agents probe wedged" in r.message
+        for r in caplog.records
+    )
+
+
+async def test_shutdown_cancels_pending_startup_watches(runner_config, monkeypatch):
+    # runner.py 2854-2856: shutdown cancels in-flight startup watches (bridges stay
+    # running, detached) so uvicorn's graceful stop never waits on a watch task.
+    runner = _make_runner(runner_config)
+
+    async def _idle(_instance_id: str) -> None:
+        await asyncio.Event().wait()
+
+    async def _done(_instance_id: str) -> None:
+        return
+
+    monkeypatch.setattr(runner, "_watch_startup", _idle)
+    runner._start_startup_watch("iid-1")
+    task = runner._startup_watches["iid-1"]
+    # An already-finished watch sits beside the pending one: shutdown must skip
+    # cancelling it (no-op) while still cancelling the live watch and clearing both.
+    done_task = asyncio.create_task(_done("iid-2"))
+    await done_task
+    runner._startup_watches["iid-2"] = done_task
+    await runner.shutdown()
+    assert runner._startup_watches == {}
+    assert not done_task.cancelled()  # the finished watch was left alone
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
+def test_backfill_starter_session_without_log_path_is_noop(runner_config):
+    # runner.py 1760->exit: no pointer and no log path at all -> nothing to recover
+    # the session id from; the backfill leaves it None instead of raising.
+    inst = RemoteControlInstance(project="alpha", label="alpha")
+    SessionRunner._backfill_starter_session(inst, runner_config[0].projects_root / "alpha")
+    assert inst.starter_session_id is None
+
+
+def test_backfill_starter_session_log_without_marker_is_noop(runner_config, tmp_path):
+    # runner.py 1762->exit: a log that exists but carries no Unarchive/session marker
+    # yields an empty sid — the backfill must not invent one.
+    logf = tmp_path / "b.log"
+    logf.write_text("no session markers here\n")
+    inst = RemoteControlInstance(project="alpha", label="alpha", bridge_debug_log_path=logf)
+    SessionRunner._backfill_starter_session(inst, runner_config[0].projects_root / "alpha")
+    assert inst.starter_session_id is None
+
+
+def test_popen_win32_detaches_with_new_process_group(runner_config, monkeypatch, tmp_path):
+    # runner.py 1335-1344: the Windows spawn variant — CREATE_NEW_PROCESS_GROUP makes
+    # the bridge addressable by CTRL_BREAK for graceful stop, and stdin is detached
+    # so a wrapping cmd.exe can never block on an interactive prompt.
+    captured: dict = {}
+
+    class _FakeProc:
+        pid = 4321
+
+    def _fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeProc()
+
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr("clauster.runner.resolve_binary", lambda b: b)
+    monkeypatch.setattr(sys, "platform", "win32")
+    runner._popen(
+        runner_config[0].projects_root / "alpha",
+        tmp_path / "b.log",
+        "alpha",
+        "same-dir",
+        "default",
+    )
+    assert captured["creationflags"] == 0x00000200
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["stderr"] is subprocess.STDOUT

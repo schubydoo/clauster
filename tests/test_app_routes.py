@@ -2162,3 +2162,38 @@ def test_resume_non_spawn_failure_does_not_notify(write_config, tmp_path, monkey
     monkeypatch.setattr(runner, "resume", _gone)
     assert client.post("/api/instances/alpha/resume").status_code == 404
     assert notifier.calls == []
+
+
+# ----- audited coverage gaps (2026-07 audit) ----------------------------
+
+
+def test_create_project_missing_after_provision_500(write_config, tmp_path, monkeypatch):
+    # app.py 1615->1618: provisioning "succeeded" but the project isn't discoverable
+    # afterwards (dir vanished / never landed) — must surface as an explicit 500,
+    # never a silent success with a phantom Project body.
+    monkeypatch.setattr("clauster.app.create_project", lambda *a, **k: None)
+    with _client(write_config, tmp_path) as client:
+        r = client.post("/api/projects", json={"name": "phantom"})
+    assert r.status_code == 500
+    assert "missing after provisioning" in r.json()["detail"]
+
+
+def test_stop_unknown_project_race_maps_404(runner_config, monkeypatch):
+    # app.py 2377-2378: resolve_bridge_id found the instance but stop() raced a
+    # concurrent forget/removal (UnknownProject) — the route reports 404, not a 500.
+    from clauster.models import InstanceStatus, RemoteControlInstance
+    from clauster.runner import UnknownProject
+
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.RUNNING)
+    runner._instances[inst.instance_id] = inst
+
+    async def _gone(instance_id: str):
+        raise UnknownProject("alpha vanished mid-stop")
+
+    monkeypatch.setattr(runner, "stop", _gone)
+    with TestClient(create_app(config, runner=runner)) as client:
+        r = client.delete(f"/api/instances/{inst.instance_id}")
+    assert r.status_code == 404
+    assert "vanished" in r.json()["detail"]
