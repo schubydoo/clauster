@@ -768,3 +768,83 @@ def test_api_token_verbs_report_db_bootstrap_failure_cleanly(
             cli.main(verb)
         assert exc_info.value.code == 1
         assert "could not open the database" in capsys.readouterr().err
+
+
+# ----- audited coverage gaps (2026-07 audit) -----------------------------
+
+
+def test_restore_nonempty_dest_without_force_exit_1(write_config, tmp_path, capsys):
+    # __main__.py 353-355: `clauster restore` into a non-empty state dir without
+    # --force must refuse with exit 1 and say why — never overwrite live state.
+    cfg = _cfg(write_config, tmp_path)
+    state = Path(f"{tmp_path}/.cstate")
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "state.json").write_text('{"schema_version":1,"instances":{}}')
+    outdir = tmp_path / "bk"
+    outdir.mkdir()
+    assert cli.main(["backup", "-c", cfg, "-o", str(outdir)]) == 0
+    archive = capsys.readouterr().out.strip().splitlines()[-1]
+
+    dest = tmp_path / "occupied"
+    dest.mkdir()
+    (dest / "live.json").write_text("precious")
+    rc = cli.main(["restore", archive, "--state-dir", str(dest)])
+    assert rc == 1
+    assert "not empty" in capsys.readouterr().err
+    assert (dest / "live.json").read_text() == "precious"  # nothing was touched
+
+
+def test_restore_unsafe_archive_exit_1(tmp_path, capsys):
+    # __main__.py 356-358: a path-traversal member surfaces as an explicit refusal
+    # (exit 1 + "refused unsafe backup"), the CLI face of the tar traversal guard.
+    import io
+    import tarfile
+
+    bad = tmp_path / "bad.tar.gz"
+    with tarfile.open(bad, "w:gz") as tar:
+        data = b"pwned"
+        info = tarfile.TarInfo("../evil.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    rc = cli.main(["restore", str(bad), "--state-dir", str(tmp_path / "st")])
+    assert rc == 1
+    assert "refused unsafe backup" in capsys.readouterr().err
+    assert not (tmp_path / "evil.txt").exists()
+
+
+def test_run_version_probe_generic_failure_exit_2(write_config, tmp_path, monkeypatch, capsys):
+    # __main__.py 861-863: a non-ClaudeNotFound probe failure (hung/broken binary)
+    # aborts run with exit 2 and a clear message — fail closed before serving.
+    monkeypatch.setattr(
+        "clauster.__main__.claude_cli.claude_version",
+        lambda b: (_ for _ in ()).throw(RuntimeError("probe wedged")),
+    )
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 2
+    assert "could not probe claude version" in capsys.readouterr().err
+
+
+def _auth_config(projects_root) -> ClausterConfig:
+    config = ClausterConfig(projects_root=projects_root)
+    config.auth.enabled = True
+    config.auth.password_required = True
+    config.auth.password_hash = "$argon2id$fake"
+    return config
+
+
+def test_cookie_warning_silent_when_secure_always(projects_root, capsys):
+    # __main__.py 719-720: cookie_secure "always" forces the Secure flag regardless
+    # of scheme, so the plain-http warning must stay silent.
+    config = _auth_config(projects_root)
+    config.auth.cookie_secure = "always"
+    cli._warn_if_cookie_insecure(config)
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_cookie_warning_silent_behind_tls_reverse_proxy(projects_root, capsys):
+    # __main__.py 724-725: a configured reverse proxy is expected to terminate TLS
+    # (Secure ships via X-Forwarded-Proto), so the warning must stay silent.
+    config = _auth_config(projects_root)
+    config.auth.reverse_proxy.enabled = True
+    cli._warn_if_cookie_insecure(config)
+    assert "WARNING" not in capsys.readouterr().err

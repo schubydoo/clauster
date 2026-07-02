@@ -149,3 +149,32 @@ def test_backup_inherits_source_mode_not_umask(write_config) -> None:
     assert backups, "expected a backup file"
     assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600  # not the umask-wide 0o644
     assert stat.S_IMODE(path.stat().st_mode) == 0o600  # the rewritten config stays hardened
+
+
+def test_write_closes_backup_fd_when_fdopen_fails(write_config, monkeypatch) -> None:
+    # config_writer.py 141-143: if os.fdopen never takes ownership of the backup fd,
+    # the writer must close the raw fd itself (no leak) and re-raise — the config
+    # file stays untouched.
+    import os
+
+    import clauster.config_writer as cw
+
+    path = write_config("usage:\n  fx_rate: 1.0\n")
+    original = path.read_text(encoding="utf-8")
+
+    closed: list[int] = []
+    real_close = os.close
+
+    def _spy_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    def _boom_fdopen(fd, *a, **k):
+        raise RuntimeError("simulated fdopen failure")
+
+    monkeypatch.setattr(cw.os, "fdopen", _boom_fdopen)
+    monkeypatch.setattr(cw.os, "close", _spy_close)
+    with pytest.raises(RuntimeError, match="simulated fdopen"):
+        write_edits(path, {"usage.fx_rate": 2.0}, expected_hash=file_hash(path))
+    assert closed, "the backup fd must be closed when fdopen never took ownership"
+    assert path.read_text(encoding="utf-8") == original  # the config was never touched

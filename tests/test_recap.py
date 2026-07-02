@@ -484,3 +484,19 @@ def test_hook_command_frozen_quotes_a_windows_exe_path(monkeypatch) -> None:
     monkeypatch.setattr("sys.frozen", True, raising=False)
     monkeypatch.setattr("sys.executable", exe)
     assert hook_command() == f'"{exe}" {RECAP_SUBCOMMAND}'
+
+
+def test_atomic_write_swallows_cleanup_unlink_failure(tmp_path, monkeypatch):
+    # recap.py 83-84: the temp-file cleanup is best-effort — if unlink itself fails,
+    # the OSError is swallowed and the ORIGINAL write failure propagates (the cleanup
+    # must never mask the real error).
+    from clauster import recap
+
+    def _unlink_boom(p, *a, **k):
+        raise OSError("unlink refused")
+
+    monkeypatch.setattr(recap.os, "unlink", _unlink_boom)
+    with pytest.raises(TypeError):  # json.dump fails on the unserializable payload
+        recap._atomic_write_json(tmp_path / "settings.json", {"bad": object()})
+    assert not (tmp_path / "settings.json").exists()  # nothing half-written
+    assert list(tmp_path.glob(".settings.*.tmp"))  # cleanup ran and was tolerated

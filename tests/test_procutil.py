@@ -537,3 +537,52 @@ def test_resolve_nvm_default_node_bin_dir_none_on_oserror(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
     assert procutil.resolve_nvm_default_node_bin_dir() is None
+
+
+# ----- audited coverage gaps (2026-07 audit) -----------------------------
+
+
+def test_is_keeper_process_zombie_is_false(monkeypatch):
+    # procutil.py 275-276: a ZOMBIE with a matching keeper cmdline is dead — the
+    # cmdline gate must fail closed so orphan listing / hard-kill never act on it.
+    keeper_argv = (
+        sys.executable,
+        "-m",
+        "clauster.pty_keeper",
+        "--sidecar",
+        "/tmp/k.json",
+        "--",
+        "claude",
+        "--remote-control",
+    )
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(status=psutil.STATUS_ZOMBIE, cmdline=keeper_argv),
+    )
+    assert procutil.is_keeper_process(1234) is False
+    # Differential control: the identical cmdline while RUNNING is a live keeper —
+    # proves the zombie status (not the cmdline) is what failed the check above.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(status=psutil.STATUS_RUNNING, cmdline=keeper_argv),
+    )
+    assert procutil.is_keeper_process(1234) is True
+
+
+def test_reap_if_exited_without_wnohang_is_noop(monkeypatch):
+    # procutil.py 323-324: the Windows arm — no os.WNOHANG means no zombies to reap,
+    # so the function returns before ever calling waitpid.
+    calls: list[tuple] = []
+    monkeypatch.setattr(procutil.os, "waitpid", lambda *a: calls.append(a), raising=False)
+    monkeypatch.delattr(procutil.os, "WNOHANG", raising=False)
+    procutil.reap_if_exited(12345)
+    assert calls == []
+
+
+def test_bridge_env_overlay_blank_path_append_entries_ignored():
+    # procutil.py 408->414: path_append entries that are all empty/falsy expand to
+    # nothing — no PATH key is injected (an empty append must not clobber PATH).
+    overlay = procutil.bridge_env_overlay(path_append=["", ""])
+    assert "PATH" not in overlay

@@ -1191,3 +1191,66 @@ async def test_spawn_pty_worktree_passes_flag_and_resume_reuses_name(
         assert "--continue" in second
     finally:
         await runner.stop(resumed.instance_id)
+
+
+# ----- audited coverage gaps (2026-07 audit) ---------------------------------
+
+
+def test_recover_keeper_pid_none_without_bridge_pid(runner_config) -> None:
+    # runner.py 1530-1531: no bridge pid means no sidecar can be matched safely —
+    # the lookup returns None instead of guessing a keeper to signal.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    assert runner._recover_keeper_pid("alpha", bridge_pid=None, bridge_proc_start=None) is None
+
+
+def test_recover_keeper_pid_skips_foreign_and_corrupt_sidecars(runner_config) -> None:
+    # runner.py 1534-1535: a sidecar for a DIFFERENT bridge pid, and one that doesn't
+    # parse at all, are both skipped — the recovery must never adopt another
+    # bridge's keeper (that pid is what stop()/poll_once would later signal).
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "gamma-1700000000000-0.keeper.json").write_text(
+        json.dumps({"keeper_pid": 7777, "bridge_pid": 1111, "bridge_proc_start": 100.0})
+    )
+    (runner._log_dir / "gamma-1700000000000-1.keeper.json").write_text("not json {{{")
+
+    assert runner._recover_keeper_pid("gamma", bridge_pid=2222, bridge_proc_start=100.0) is None
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_error_surfaces_keeper_error_detail(
+    runner_config, tmp_path, monkeypatch
+) -> None:
+    # runner.py 1637->1640: a pty spawn that lands in ERROR must copy the keeper's
+    # recorded reason into error_detail — the UI shows WHY, not a bare "Error".
+    from clauster.models import Project, RemoteControlInstance
+
+    runner, _ = _pty_runner(runner_config)
+
+    async def _noop_persist() -> None:
+        pass
+
+    class _DeadProc:
+        pid = 4242
+
+        def poll(self):  # noqa: ANN202 — mimic subprocess.Popen.poll
+            return 70
+
+    monkeypatch.setattr(runner, "_persist", _noop_persist)
+    monkeypatch.setattr(runner, "_popen_keeper", lambda *a, **k: _DeadProc())
+    monkeypatch.setattr(
+        runner,
+        "_await_ready_pty",
+        lambda sidecar, proc: {"state": "error", "error": "openpty failed: boom"},
+    )
+    proj = Project(name="alpha", path=runner_config[0].projects_root / "alpha")
+    inst = RemoteControlInstance(project="alpha", label="alpha", resume_mode="pty")
+
+    out = await runner._spawn_pty(
+        inst, proj, "alpha", tmp_path / "alpha.log", "default", resume=False
+    )
+
+    assert out.status is InstanceStatus.ERROR
+    assert out.error_detail == "openpty failed: boom"  # the keeper's reason, surfaced

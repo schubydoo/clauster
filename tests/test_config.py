@@ -769,3 +769,16 @@ def test_legacy_resume_mode_file_env_alias_maps_to_launch_mode(
     secret.write_text("pty\n", encoding="utf-8")  # trailing newline is stripped by the reader
     monkeypatch.setenv("CLAUSTER_CLAUDE_RESUME_MODE_FILE", str(secret))
     assert load_config(write_config()).claude.launch_mode == "pty"
+
+
+def test_state_dir_validator_passes_through_non_path_types(projects_root):
+    # config.py 1262->1264: the expanduser pre-validator passes a non-str/Path value
+    # through untouched so pydantic's own type error surfaces (a masked crash inside
+    # the validator would hide WHICH field was wrong).
+    import pytest
+    from pydantic import ValidationError
+
+    from clauster.config import ClausterConfig
+
+    with pytest.raises(ValidationError, match="state_dir"):
+        ClausterConfig(projects_root=projects_root, state_dir=12345)

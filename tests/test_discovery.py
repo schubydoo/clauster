@@ -185,3 +185,27 @@ def test_module_cache_invalidate_forces_rescan(projects_root, tmp_path, monkeypa
     invalidate_discovery_cache()
     discover_projects_cached(projects_root, claude_json)
     assert calls["n"] == 2  # invalidation forced a fresh scan
+
+
+def test_load_trusted_paths_skips_non_dict_and_untrusted_entries(tmp_path):
+    # discovery.py 58->57: per-entry hardening — a non-dict projects value and a dict
+    # whose hasTrustDialogAccepted isn't exactly True are both skipped; only the
+    # explicit True entry lands in the trusted set (trust must never be inferred).
+    from pathlib import Path
+
+    from clauster.discovery import _load_trusted_paths
+
+    claude_json = tmp_path / ".claude.json"
+    claude_json.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    "/p/str-entry": "not-a-dict",
+                    "/p/declined": {"hasTrustDialogAccepted": False},
+                    "/p/absent-flag": {},
+                    "/p/trusted": {"hasTrustDialogAccepted": True},
+                }
+            }
+        )
+    )
+    assert _load_trusted_paths(claude_json) == {Path("/p/trusted")}
