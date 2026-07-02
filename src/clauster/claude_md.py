@@ -7,6 +7,35 @@ inside an operator-named project dir, the path is locked to exactly
 ``<project>/CLAUDE.md`` and rejected if it resolves outside that dir (symlink or
 traversal). Writes are atomic (temp + ``os.replace``, the same idiom as
 ``trust.py``) and appended to an audit log. A 64 KB cap matches the spec.
+
+This module also carries the **config-write** CLAUDE.md surface (#768, over the
+#347/#687 Foundation and the #766 file/dir-writer primitive) — folded in here
+rather than duplicated into a new module, since both surfaces read/write the same
+family of files. It is a *separate* surface from the trust-gated editor above: it
+sits behind the ``config_write.enabled`` capability gate + type-the-name confirm
+(see :mod:`clauster.config_write`), and covers all three of Claude Code's memory
+scopes:
+
+* **user** — ``~/.claude/CLAUDE.md``
+* **project** — ``<project>/CLAUDE.md`` *or* ``<project>/.claude/CLAUDE.md``
+  (whichever already exists; a fresh project defaults to the root location, the
+  same one the legacy trust-gated editor above uses)
+* **local** — ``<project>/CLAUDE.local.md``, gitignored on create via
+  :func:`~clauster.config_write.ensure_gitignored` (#766)
+
+**Threat model — content tier (resolved 2026-06-29):** CLAUDE.md is
+prompt-injection *content*, not executable configuration — Claude Code never
+executes it, only reads it into a prompt. It therefore gets the same off-by-default
+gate + type-the-name confirm as every other config-write surface, but
+**deliberately no secret redaction**: it is user-authored memory, not credential
+storage, and redacting it would be security theater that also corrupts the
+operator's own prose. The read path returns raw content, never
+:func:`~clauster.config_write.redact_secret_lines`.
+
+Ops are **edit** (write new content) and **blank** (write empty content) — there
+is no delete; :func:`~clauster.config_write.ensure_gitignored` is the create-time
+side effect for the local scope only. The size cap (:data:`MAX_BYTES`) and
+UTF-8 requirement are shared with the legacy editor.
 """
 
 from __future__ import annotations
@@ -15,16 +44,32 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from . import config_file_writer as fw
+from . import config_write as cw
 from .models import ClaudeMdDoc
 from .trust import is_trusted
 
 FILENAME = "CLAUDE.md"
-MAX_BYTES = 64 * 1024  # 64 KB cap (spec §5)
+#: The local-scope filename (project root, never inside ``.claude/``) — mirrors
+#: Claude Code's own ``CLAUDE.local.md`` convention.
+LOCAL_FILENAME = "CLAUDE.local.md"
+MAX_BYTES = 64 * 1024  # 64 KB cap (spec §5); shared by the config-write surface below
 _AUDIT_FILE = "claude_md_audit.log"
 _log = logging.getLogger("clauster.claude_md")
+
+# Serializes the config-write surface's read-hash→write critical section. Unlike the
+# JSON-subtree writers (whose stale-hash check runs *inside* the same lock as the
+# atomic replace, via `locked_replace_json_file`'s mutate callback),
+# `config_file_writer.write_file` takes already-computed content, not a mutate hook —
+# so the hash check here happens as a separate step before the call. A per-process
+# lock closes that window between two concurrent PUTs (each dispatched to a worker
+# thread via `asyncio.to_thread`, same reasoning as `config_writer._write_lock`).
+_write_lock = threading.Lock()
 
 
 class ClaudeMdError(RuntimeError):
@@ -176,3 +221,143 @@ def _append_audit(
     state_dir.mkdir(parents=True, exist_ok=True)
     with open(state_dir / _AUDIT_FILE, "a", encoding="utf-8", newline="") as fh:
         fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# config-write CLAUDE.md surface (#768) — user/project/local scope, gated by
+# clauster.config_write, built on the config_file_writer primitive (#766).
+# ---------------------------------------------------------------------------
+
+
+def validate_content(candidate: Any) -> None:
+    """Structural validator for CLAUDE.md content (the Foundation validate hook).
+
+    ``candidate`` must be a ``str`` no larger than :data:`MAX_BYTES` when UTF-8
+    encoded. This is the *only* check — CLAUDE.md is free-form prose, never
+    parsed or executed, so there is no shape beyond "small enough text".
+    """
+    if not isinstance(candidate, str):
+        raise cw.InvalidCandidateError("content must be a string")
+    size = len(candidate.encode("utf-8"))
+    if size > MAX_BYTES:
+        raise cw.InvalidCandidateError(f"content is {size} bytes, over the {MAX_BYTES} byte cap")
+
+
+def _resolve(root: Path, relative: str) -> Path:
+    """Resolve ``relative`` under ``root`` via the shared containment primitive.
+
+    Rewraps :class:`~clauster.config_file_writer.PathEscapeError` as
+    :class:`~clauster.config_write.PathEscapeError` so every failure from this
+    surface is a :class:`~clauster.config_write.ConfigWriteError`, matching the
+    other config-write children and letting the app layer's single error mapper
+    handle it uniformly.
+    """
+    try:
+        return fw.resolve_contained_path(root, relative)
+    except fw.PathEscapeError as exc:
+        raise cw.PathEscapeError(str(exc)) from exc
+
+
+def _project_relative(project_dir: Path) -> str:
+    """Return the project-scope CLAUDE.md path, preferring whichever already exists.
+
+    Claude Code accepts a project's CLAUDE.md at the project root *or* under
+    ``.claude/``. When neither exists yet (a fresh project), default to the root
+    location — the same one the legacy trust-gated editor above uses — so a first
+    "create" lands where an operator would expect to find it.
+    """
+    if not (project_dir / FILENAME).exists() and (project_dir / ".claude" / FILENAME).exists():
+        return f".claude/{FILENAME}"
+    return FILENAME
+
+
+def _read_scoped(root: Path, relative: str) -> tuple[str, str, bool]:
+    """Return ``(content, hash, exists)`` for a CLAUDE.md-family file at ``root/relative``.
+
+    Content-tier read: returns raw text, **never** redacted (this surface's
+    resolved threat model — CLAUDE.md is prose, not credential storage). A missing
+    file reads as empty content (hash of empty bytes, ``exists=False``) rather than
+    raising, so a not-yet-created scope shows as an empty, ready-to-fill editor
+    (create-if-missing), not a 404.
+    """
+    target = _resolve(root, relative)
+    try:
+        data = target.read_bytes()
+        exists = True
+    except FileNotFoundError:
+        data = b""
+        exists = False
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise cw.InvalidCandidateError(f"{relative} is not valid UTF-8") from exc
+    return text, cw.hash_bytes(data), exists
+
+
+def _write_scoped(root: Path, relative: str, content: str, expected_hash: str | None) -> None:
+    """Validate + stale-hash-guard + atomically write a CLAUDE.md-family file.
+
+    Mirrors the gate order the other config-write children use: structural
+    validation first (bad shape/oversize → 422, nothing written), then the
+    external-edit guard (``expected_hash`` mismatch, or an existing file with no
+    hash supplied, → 409), then the atomic write via
+    :func:`~clauster.config_file_writer.write_file`. ``expected_hash=None`` is the
+    legitimate first-write ("create") path only when nothing is on disk yet.
+    """
+    cw.validate_candidate(content, validate_content)
+    target = _resolve(root, relative)
+    with _write_lock:
+        try:
+            current = target.read_bytes()
+        except FileNotFoundError:
+            current = b""
+        if expected_hash is None:
+            if current:
+                raise cw.StaleConfigWriteError(f"{relative} already exists; a hash is required")
+        elif cw.hash_bytes(current) != expected_hash:
+            raise cw.StaleConfigWriteError(f"{relative} changed on disk since it was loaded")
+        fw.write_file(root, relative, content)
+
+
+def read_project_claude_md(project_dir: Path) -> tuple[str, str, bool]:
+    """Return ``(content, hash, exists)`` for the project-scope CLAUDE.md."""
+    return _read_scoped(project_dir, _project_relative(project_dir))
+
+
+def write_project_claude_md(project_dir: Path, content: str, expected_hash: str | None) -> None:
+    """Validate + write the project-scope CLAUDE.md (root or ``.claude/``, whichever exists)."""
+    _write_scoped(project_dir, _project_relative(project_dir), content, expected_hash)
+
+
+def read_user_claude_md(claude_json: Path) -> tuple[str, str, bool]:
+    """Return ``(content, hash, exists)`` for the user-scope ``~/.claude/CLAUDE.md``.
+
+    ``claude_json`` is the resolved ``~/.claude.json`` path (its parent is the
+    user's home dir), the same handle the other user-scope surfaces use to derive
+    ``~/.claude`` without hardcoding ``Path.home()`` (testable via HOME isolation).
+    """
+    return _read_scoped(claude_json.parent / ".claude", FILENAME)
+
+
+def write_user_claude_md(claude_json: Path, content: str, expected_hash: str | None) -> None:
+    """Validate + write the user-scope ``~/.claude/CLAUDE.md``."""
+    _write_scoped(claude_json.parent / ".claude", FILENAME, content, expected_hash)
+
+
+def read_project_local_claude_md(project_dir: Path) -> tuple[str, str, bool]:
+    """Return ``(content, hash, exists)`` for the local-scope ``CLAUDE.local.md``."""
+    return _read_scoped(project_dir, LOCAL_FILENAME)
+
+
+def write_project_local_claude_md(
+    project_dir: Path, content: str, expected_hash: str | None
+) -> None:
+    """Validate + write the local-scope ``CLAUDE.local.md``; gitignore it on success.
+
+    A successful write always runs
+    :func:`~clauster.config_write.ensure_gitignored` (idempotent — a no-op once the
+    entry exists) so a newly created ``CLAUDE.local.md`` is never accidentally
+    committed (#766), mirroring the local-scope JSON writers.
+    """
+    _write_scoped(project_dir, LOCAL_FILENAME, content, expected_hash)
+    cw.ensure_gitignored(project_dir, LOCAL_FILENAME)
