@@ -1894,11 +1894,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             if op == "remove":
                 config_write_mcp_cli.cli_remove_server(binary, cli_cwd, name, scope)  # type: ignore[arg-type]
                 return
-            # add / edit: an entry carrying an inline env/headers value (or a
-            # secret-shaped url) can never reach the CLI's argv — err toward the direct
-            # #766 writer (same file state, no subprocess). See entry_needs_direct_write.
-            if config_write_mcp_cli.entry_needs_direct_write(entry):  # type: ignore[arg-type]
-                _direct_write(entry, op)  # type: ignore[arg-type]
+            # add / edit always carry an `entry` (validated above); narrow it here so the
+            # writers see a concrete dict (defensive — the op-gate guarantees it is set).
+            if entry is None:  # pragma: no cover - add/edit always populate `entry` above
+                raise RuntimeError("internal: add/edit reached _work with no entry")
+            # An entry carrying an inline env/headers value (or a secret-shaped url) can
+            # never reach the CLI's argv — err toward the direct #766 writer (same file
+            # state, no subprocess). See entry_needs_direct_write.
+            if config_write_mcp_cli.entry_needs_direct_write(entry):
+                _direct_write(entry, op)
                 return
             if op == "add":
                 config_write_mcp_cli.cli_add_server(
@@ -1915,9 +1919,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # secret is thus never re-exposed on argv). op="edit" overwrites in place.
                 prior = _snapshot_prior()
 
-                def _restore() -> None:
-                    if prior is not None:
-                        _direct_write(prior, "edit")
+                def _restore() -> bool:
+                    # Return whether a prior actually existed and was restored, so
+                    # cli_edit_server reports "restored" only when that is true.
+                    if prior is None:
+                        return False
+                    _direct_write(prior, "edit")
+                    return True
 
                 config_write_mcp_cli.cli_edit_server(
                     binary,

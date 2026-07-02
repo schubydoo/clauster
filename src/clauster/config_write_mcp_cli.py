@@ -257,7 +257,7 @@ def cli_edit_server(
     scope: cw.Scope,
     *,
     client_secret: str | None = None,
-    restore: Callable[[], None] | None = None,
+    restore: Callable[[], bool] | None = None,
     run: RunFn = subprocess.run,
 ) -> None:
     """Edit one MCP server: CLI remove (ignoring "not found") + CLI re-add, with rollback.
@@ -272,13 +272,23 @@ def cli_edit_server(
     remove succeeded, the server is gone. ``restore`` (supplied by the route layer as a
     best-effort closure that writes the *previous* definition back through the direct,
     non-spawning writer — so a prior entry's real secret is never re-exposed on argv)
-    is invoked on a re-add failure:
+    is invoked on a re-add failure. It returns whether a prior definition actually
+    existed and was restored, so the raised message is accurate:
 
-    * re-add fails, restore succeeds ⇒ raise :class:`McpCliError` stating the edit
-      failed **and the previous definition was restored** (no loss).
-    * re-add fails, restore also fails (or no ``restore`` given) ⇒ raise
-      :class:`McpCliError` that **explicitly says the server was removed and could not
-      be restored** — the loss is surfaced loudly, never silent-by-omission.
+    * re-add fails, ``restore`` restored a real prior ⇒ :class:`McpCliError` stating the
+      edit failed **and the previous definition was restored** (no loss).
+    * re-add fails, but there was **no** prior to restore (``restore`` returns False, or
+      none was given) ⇒ :class:`McpCliError` stating the add failed and **no server is
+      present** — there was nothing to restore, so no loss is claimed falsely.
+    * re-add fails **and** ``restore`` itself raised ⇒ :class:`McpCliError` that
+      **explicitly says the server was removed and could not be restored** — the loss is
+      surfaced loudly, never silent-by-omission.
+
+    Catches ``ValueError`` as well as :class:`~clauster.config_write.ConfigWriteError`
+    around the re-add: :func:`cli_add_server` raises ``ValueError`` for an entry that
+    should have gone to the direct writer, and if that ever fired *after* the remove had
+    succeeded the restore path must still run (the route pre-checks, but this function is
+    public — close the defensive gap).
 
     The captured ``restore`` closure must snapshot the previous entry *before* this
     call runs the remove (the route layer does so), or there is nothing left to read.
@@ -288,21 +298,26 @@ def cli_edit_server(
         cli_add_server(
             binary, project_dir, name, entry, scope, client_secret=client_secret, run=run
         )
-    except cw.ConfigWriteError as exc:
+    except (cw.ConfigWriteError, ValueError) as exc:
         if restore is None:
             raise McpCliError(
                 f"MCP server {name!r} edit failed ({exc}); it was already REMOVED and no "
                 "restore of its previous definition was available — the server is now missing"
             ) from exc
         try:
-            restore()
+            restored = restore()
         except Exception as restore_exc:  # noqa: BLE001 - best-effort; surface loss loudly
             raise McpCliError(
                 f"MCP server {name!r} edit failed ({exc}); it was REMOVED and restoring its "
                 f"previous definition ALSO failed ({restore_exc}) — the server is now missing"
             ) from exc
+        if restored:
+            raise McpCliError(
+                f"MCP server {name!r} edit failed ({exc}); its previous definition was restored"
+            ) from exc
         raise McpCliError(
-            f"MCP server {name!r} edit failed ({exc}); its previous definition was restored"
+            f"MCP server {name!r} add failed ({exc}); it had no previous definition, so no "
+            "server is present (nothing to restore)"
         ) from exc
 
 

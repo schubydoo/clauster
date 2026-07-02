@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,16 @@ from clauster.config import load_config
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
+# The fake `claude` stub is an extensionless POSIX shebang script; on Windows it is not a
+# valid Win32 executable ([WinError 193]), so any test that actually SPAWNS it via a route
+# is POSIX-gated (same idiom as tests/test_app_hosted.py's _POSIX_ONLY). The pure-unit
+# tests below inject a fake `run=` callable and never exec the stub, so they stay
+# cross-platform; only the route tests that reach the real `claude mcp` subprocess are
+# gated with @_POSIX_ONLY.
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="fake_claude stub is a POSIX script, not a Win32 executable"
+)
+
 
 def _fake_run(rc: int = 0, stdout: str = "", stderr: str = ""):
     """Build a fake subprocess-runner + its call log, for injecting as ``run=``."""
@@ -44,7 +55,7 @@ def _fake_run(rc: int = 0, stdout: str = "", stderr: str = ""):
     return run, calls
 
 
-# --- entry_has_secret ---------------------------------------------------------------
+# --- entry_needs_direct_write (routing predicate) -----------------------------------
 
 
 def test_entry_needs_direct_write_detects_secret_keyed_env() -> None:
@@ -224,7 +235,7 @@ def test_cli_edit_server_calls_remove_then_add(tmp_path: Path) -> None:
 
 def test_cli_edit_server_readd_failure_restores_prior(tmp_path: Path) -> None:
     # MUST-FIX #4: remove succeeds, re-add fails -> the prior definition is restored via
-    # the injected `restore` closure, and the error says so (no silent data loss).
+    # the injected `restore` closure (which returns True), and the error says so.
     restored: list[bool] = []
 
     def run(argv, **_kwargs):
@@ -232,8 +243,9 @@ def test_cli_edit_server_readd_failure_restores_prior(tmp_path: Path) -> None:
             return subprocess.CompletedProcess(argv, 0, stdout="removed", stderr="")
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom: re-add failed")
 
-    def restore() -> None:
+    def restore() -> bool:
         restored.append(True)
+        return True  # a real prior existed and was restored
 
     with pytest.raises(mcp_cli.McpCliError, match="previous definition was restored"):
         mcp_cli.cli_edit_server(
@@ -248,6 +260,33 @@ def test_cli_edit_server_readd_failure_restores_prior(tmp_path: Path) -> None:
     assert restored == [True]  # restore WAS attempted
 
 
+def test_cli_edit_server_readd_failure_no_prior_says_nothing_to_restore(tmp_path: Path) -> None:
+    # GREPTILE P2a: remove succeeds (nothing there), re-add fails, restore reports NO prior
+    # (returns False) -> the message must NOT falsely claim a restore; it says no server is
+    # present / nothing to restore.
+    def run(argv, **_kwargs):
+        if argv[2] == "remove":
+            return subprocess.CompletedProcess(argv, 0, stdout="removed", stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    def restore() -> bool:
+        return False  # no prior definition existed
+
+    with pytest.raises(mcp_cli.McpCliError) as exc_info:
+        mcp_cli.cli_edit_server(
+            str(FAKE_CLAUDE),
+            tmp_path,
+            "srv",
+            {"command": "y"},
+            "project",
+            restore=restore,
+            run=run,
+        )
+    msg = str(exc_info.value)
+    assert "nothing to restore" in msg
+    assert "restored" not in msg  # never falsely claim a restoration
+
+
 def test_cli_edit_server_readd_and_restore_both_fail_surfaces_loss(tmp_path: Path) -> None:
     # remove succeeds, re-add fails, AND restore fails -> the error must explicitly state
     # the server is now missing (loss surfaced loudly, never silent-by-omission).
@@ -256,7 +295,7 @@ def test_cli_edit_server_readd_and_restore_both_fail_surfaces_loss(tmp_path: Pat
             return subprocess.CompletedProcess(argv, 0, stdout="removed", stderr="")
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
 
-    def restore() -> None:
+    def restore() -> bool:
         raise RuntimeError("disk full")
 
     with pytest.raises(mcp_cli.McpCliError, match="now missing"):
@@ -282,6 +321,36 @@ def test_cli_edit_server_readd_failure_no_restore_surfaces_loss(tmp_path: Path) 
         mcp_cli.cli_edit_server(
             str(FAKE_CLAUDE), tmp_path, "srv", {"command": "y"}, "project", run=run
         )
+
+
+def test_cli_edit_server_addserver_valueerror_after_remove_triggers_restore(
+    tmp_path: Path,
+) -> None:
+    # GREPTILE P2b: cli_add_server raises ValueError (entry needs the direct writer) — if
+    # that fires AFTER the remove succeeded, cli_edit_server must catch it so `restore`
+    # still runs (rather than the ValueError escaping and leaving the server deleted).
+    restored: list[bool] = []
+
+    # remove exits 0; the re-add never reaches the CLI because entry_needs_direct_write is
+    # True -> cli_add_server raises ValueError before spawning.
+    def run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    def restore() -> bool:
+        restored.append(True)
+        return True
+
+    with pytest.raises(mcp_cli.McpCliError, match="previous definition was restored"):
+        mcp_cli.cli_edit_server(
+            str(FAKE_CLAUDE),
+            tmp_path,
+            "srv",
+            {"command": "y", "env": {"API_TOKEN": "sk-real"}},  # -> needs direct write
+            "project",
+            restore=restore,
+            run=run,
+        )
+    assert restored == [True]  # the ValueError was caught and restore ran
 
 
 # --- cli_reset_project_choices -------------------------------------------------------
@@ -610,6 +679,7 @@ _ON = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
 _PROJECT_ONLY = "config_write:\n  enabled: true\n"
 
 
+@_POSIX_ONLY
 def test_route_server_add_project_scope_via_cli(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -641,6 +711,7 @@ def test_route_server_add_project_scope_via_cli(
     assert record["has_client_secret_env"] is False
 
 
+@_POSIX_ONLY
 def test_route_server_add_conflict_is_409(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -661,6 +732,7 @@ def test_route_server_add_conflict_is_409(
         assert resp.status_code == 409
 
 
+@_POSIX_ONLY
 def test_route_server_remove_not_found_is_404(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -704,6 +776,7 @@ def test_route_server_add_with_secret_bypasses_cli(
     assert on_disk["mcpServers"]["srv"]["env"]["API_TOKEN"] == "sk-live-real"
 
 
+@_POSIX_ONLY
 def test_route_server_edit_project_scope_reaches_cli_add(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -730,6 +803,7 @@ def test_route_server_edit_project_scope_reaches_cli_add(
     assert record["argv"][1] == "srv"
 
 
+@_POSIX_ONLY
 def test_route_server_remote_client_secret_via_env(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -755,6 +829,7 @@ def test_route_server_remote_client_secret_via_env(
     assert record["has_client_secret_env"] is True
 
 
+@_POSIX_ONLY
 def test_route_server_remove_success(write_config, tmp_path, projects_root, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_MCP_STDOUT", "Removed MCP server srv from project config")
     with _client(write_config, tmp_path, _ON) as c:
@@ -908,6 +983,7 @@ def test_route_server_option_like_name_is_422(write_config, tmp_path, projects_r
         assert resp.status_code == 422
 
 
+@_POSIX_ONLY
 def test_route_server_edit_readd_failure_restores_and_500s(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -941,12 +1017,13 @@ def test_route_server_edit_readd_failure_restores_and_500s(
     assert on_disk["mcpServers"]["srv"] == {"command": "OLD", "env": {"API_TOKEN": "sk-prior"}}
 
 
+@_POSIX_ONLY
 def test_route_server_edit_readd_failure_no_prior_still_400s(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
     # Edit of a name with NO prior definition whose CLI re-add fails: the restore closure
-    # is a no-op (nothing to snapshot), but the request must still surface the failure
-    # (400), never a silent 200.
+    # reports no prior (returns False), so the request surfaces the failure (400) with a
+    # message that does NOT falsely claim a restoration (GREPTILE P2a).
     monkeypatch.setenv("FAKE_CLAUDE_MCP_REMOVE_EXIT_CODE", "0")
     monkeypatch.setenv("FAKE_CLAUDE_MCP_ADDJSON_EXIT_CODE", "1")
     monkeypatch.setenv("FAKE_CLAUDE_MCP_STDERR", "boom: re-add failed")
@@ -963,6 +1040,9 @@ def test_route_server_edit_readd_failure_no_prior_still_400s(
             },
         )
         assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "nothing to restore" in detail
+        assert "restored" not in detail
 
 
 def test_route_server_404_when_disabled(write_config, tmp_path) -> None:
@@ -1116,6 +1196,7 @@ def test_route_server_missing_project_dir_is_404(write_config, tmp_path, project
         assert resp.status_code == 404
 
 
+@_POSIX_ONLY
 def test_route_server_user_scope_add_via_cli(write_config, tmp_path, monkeypatch) -> None:
     argv_file = tmp_path / "argv.json"
     monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
@@ -1201,6 +1282,7 @@ def test_route_approvals_read_missing_project_is_422(
 # --- reset-project-choices route ----------------------------------------------------
 
 
+@_POSIX_ONLY
 def test_route_reset_project_choices_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1238,6 +1320,7 @@ def test_route_reset_project_choices_confirm_mismatch_is_400(
         assert resp.status_code == 400
 
 
+@_POSIX_ONLY
 def test_route_reset_project_choices_cli_failure_is_400(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
