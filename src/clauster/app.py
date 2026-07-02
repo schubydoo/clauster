@@ -35,6 +35,7 @@ from . import (
     config_write,
     config_write_hooks,
     config_write_mcp,
+    config_write_mcp_cli,
     config_write_permissions,
     config_writer,
     environments,
@@ -1635,6 +1636,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return HTTPException(status_code=422, detail=str(exc))
         if isinstance(exc, config_write.StaleConfigWriteError):
             return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, config_write_mcp.ServerExistsError):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, config_write_mcp.ServerNotFoundError):
+            return HTTPException(status_code=404, detail=str(exc))
         return HTTPException(status_code=400, detail=str(exc))  # pragma: no cover - defensive
 
     @app.get("/api/config-write/mcp")
@@ -1801,6 +1806,200 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             local_fn_has_hash=False,
             get_local_target=lambda: runner.claude_json,
         )
+
+    @app.post("/api/config-write/mcp/server")
+    async def api_config_write_mcp_server(body: dict) -> dict:
+        # CLI-driven add/remove/edit (#769) over the same Foundation gate the PUT
+        # (whole-map) route uses. Order mirrors the Foundation docstring exactly:
+        # scope shape (422) -> capability (404) -> confirm (400, FIRST semantic gate,
+        # so it fires even against a garbled op/name/entry) -> op/name/entry shape
+        # (422) -> path resolve (400/404) -> the CLI/direct-write dispatch itself
+        # (409 already-exists, 404 not-found, or 400 for any other CLI failure).
+        scope = body.get("scope", "project")
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+
+        project = body.get("project")
+        config_write.require_confirm(
+            scope,
+            None if scope == "user" else project,
+            body.get("confirm"),  # type: ignore[arg-type]
+        )
+
+        op = body.get("op")
+        if op not in ("add", "remove", "edit"):
+            raise HTTPException(status_code=422, detail="op must be 'add', 'remove', or 'edit'")
+        name = body.get("name")
+        if not isinstance(name, str) or not name:
+            raise HTTPException(
+                status_code=422, detail="body must include a non-empty 'name' string"
+            )
+
+        entry = None
+        if op in ("add", "edit"):
+            entry = body.get("entry")
+            if not isinstance(entry, dict):
+                raise HTTPException(
+                    status_code=422, detail="body must include an 'entry' object for add/edit"
+                )
+            try:
+                config_write.validate_candidate(
+                    {name: entry}, config_write_mcp.validate_mcp_servers
+                )
+            except config_write.InvalidCandidateError as exc:
+                raise _map_config_write_error(exc) from exc
+
+        client_secret = body.get("client_secret")
+        if client_secret is not None and not isinstance(client_secret, str):
+            raise HTTPException(
+                status_code=422, detail="'client_secret' must be a string when present"
+            )
+
+        if scope == "user":
+            cli_cwd = runner.claude_json.parent
+        else:
+            cli_cwd = _resolve_cw_project(project, require_exists=True)
+        binary = config.claude.binary
+
+        def _direct_write(target_entry: dict, target_op: str) -> None:
+            # The #766 direct (non-spawning) writers, one per scope. Used for any entry
+            # that must never reach the CLI's argv, and as the edit-rollback restore.
+            if scope == "user":
+                config_write_mcp.write_user_server_entry(
+                    runner.claude_json, name, target_entry, op=target_op
+                )
+            elif scope == "local":
+                config_write_mcp.write_project_local_server_entry(
+                    runner.claude_json, cli_cwd, name, target_entry, op=target_op
+                )
+            else:
+                config_write_mcp.write_project_server_entry(
+                    cli_cwd, name, target_entry, op=target_op
+                )
+
+        def _snapshot_prior() -> dict | None:
+            # UNREDACTED single-entry read for the edit-rollback (in-memory, same request,
+            # never serialized to a response/log — see config_write_mcp.snapshot_server_entry).
+            return config_write_mcp.snapshot_server_entry(
+                scope,  # type: ignore[arg-type]
+                name,
+                claude_json=runner.claude_json,
+                project_dir=cli_cwd,
+            )
+
+        def _work() -> None:
+            if op == "remove":
+                config_write_mcp_cli.cli_remove_server(binary, cli_cwd, name, scope)  # type: ignore[arg-type]
+                return
+            # add / edit always carry an `entry` (validated above); narrow it here so the
+            # writers see a concrete dict (defensive — the op-gate guarantees it is set).
+            if entry is None:  # pragma: no cover - add/edit always populate `entry` above
+                raise RuntimeError("internal: add/edit reached _work with no entry")
+            # An entry carrying an inline env/headers value (or a secret-shaped url) can
+            # never reach the CLI's argv — err toward the direct #766 writer (same file
+            # state, no subprocess). See entry_needs_direct_write.
+            if config_write_mcp_cli.entry_needs_direct_write(entry):
+                _direct_write(entry, op)
+                return
+            if op == "add":
+                config_write_mcp_cli.cli_add_server(
+                    binary,
+                    cli_cwd,
+                    name,
+                    entry,
+                    scope,
+                    client_secret=client_secret,  # type: ignore[arg-type]
+                )
+            else:
+                # Capture the prior definition BEFORE cli_edit_server runs the remove, so
+                # a re-add failure can restore it verbatim via the direct writer (a prior
+                # secret is thus never re-exposed on argv). op="edit" overwrites in place.
+                prior = _snapshot_prior()
+
+                def _restore() -> bool:
+                    # Return whether a prior actually existed and was restored, so
+                    # cli_edit_server reports "restored" only when that is true.
+                    if prior is None:
+                        return False
+                    _direct_write(prior, "edit")
+                    return True
+
+                config_write_mcp_cli.cli_edit_server(
+                    binary,
+                    cli_cwd,
+                    name,
+                    entry,
+                    scope,
+                    client_secret=client_secret,  # type: ignore[arg-type]
+                    restore=_restore,
+                )
+
+        try:
+            await asyncio.to_thread(_work)
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+
+        result = {"scope": scope, "name": name, "op": op, "ok": True}
+        if scope != "user":
+            result["project"] = project
+        return result
+
+    @app.get("/api/config-write/mcp/approvals")
+    async def api_config_write_mcp_approvals_read(project: str = "") -> dict:
+        # Project `.mcp.json` server approvals (#769) are inherently project-scope
+        # only — local/user-scope servers carry no approval step, only a committed
+        # .mcp.json server does — so this reads/writes at "project" scope alone,
+        # gated exactly like the other config-write surfaces (404 when disabled).
+        config_write.require_capability(config, "project")
+        project_dir = _resolve_cw_project(project)
+        approvals = await asyncio.to_thread(
+            config_write_mcp.read_project_approvals, runner.claude_json, project_dir
+        )
+        return {"project": project, **approvals}
+
+    @app.put("/api/config-write/mcp/approvals")
+    async def api_config_write_mcp_approvals_write(body: dict) -> dict:
+        config_write.require_capability(config, "project")
+        project = body.get("project")
+        config_write.require_confirm("project", project, body.get("confirm"))
+        enabled = body.get("enabled")
+        disabled = body.get("disabled")
+        if not isinstance(enabled, list) or not isinstance(disabled, list):
+            raise HTTPException(
+                status_code=422, detail="body must include 'enabled' and 'disabled' lists"
+            )
+        project_dir = _resolve_cw_project(project, require_exists=True)
+        try:
+            await asyncio.to_thread(
+                config_write_mcp.write_project_approvals,
+                runner.claude_json,
+                project_dir,
+                enabled,
+                disabled,
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"project": project, "ok": True}
+
+    @app.post("/api/config-write/mcp/reset-project-choices")
+    async def api_config_write_mcp_reset_project_choices(body: dict) -> dict:
+        # The one enable/disable-adjacent operation with a real CLI verb (#769) —
+        # `claude mcp reset-project-choices` clears both approval lists for the
+        # project at `cli_cwd`. Gated + confirmed like the approvals routes above.
+        config_write.require_capability(config, "project")
+        project = body.get("project")
+        config_write.require_confirm("project", project, body.get("confirm"))
+        project_dir = _resolve_cw_project(project, require_exists=True)
+        try:
+            await asyncio.to_thread(
+                config_write_mcp_cli.cli_reset_project_choices, config.claude.binary, project_dir
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"project": project, "ok": True}
 
     def _user_settings_json() -> Path:
         # User-scope permission rules live in ~/.claude/settings.json (the settings

@@ -169,6 +169,49 @@ def run_bridge(args):
     return 0
 
 
+def run_mcp(args):
+    """Fake `claude mcp <verb> ...` for #769 route-level tests (never the real CLI).
+
+    Scripted entirely via env vars so a route test can drive success/conflict/
+    not-found without ever touching a real `claude`/account:
+      FAKE_CLAUDE_MCP_EXIT_CODE = default exit code to return (default "0")
+      FAKE_CLAUDE_MCP_REMOVE_EXIT_CODE  = per-verb override for `remove`
+      FAKE_CLAUDE_MCP_ADDJSON_EXIT_CODE = per-verb override for `add-json`
+                                  (both let an edit = remove+re-add test make the
+                                  remove succeed while the re-add fails — MUST-FIX #4)
+      FAKE_CLAUDE_MCP_STDOUT    = stdout text to emit (default "")
+      FAKE_CLAUDE_MCP_STDERR    = stderr text to emit (default "")
+      FAKE_CLAUDE_MCP_ARGV_FILE = path to record {"argv", "cwd",
+                                  "has_client_secret_env"} as JSON, so a test can
+                                  assert exactly what clauster invoked — including
+                                  that a secret rode the child env, never argv.
+    """
+    verb = args[0] if args else ""
+    if os.environ.get("FAKE_CLAUDE_MCP_ARGV_FILE"):
+        import json
+
+        record = {
+            "argv": args,
+            "cwd": os.getcwd(),
+            "has_client_secret_env": "MCP_CLIENT_SECRET" in os.environ,
+        }
+        with open(os.environ["FAKE_CLAUDE_MCP_ARGV_FILE"], "w") as fh:
+            json.dump(record, fh)
+    stdout = os.environ.get("FAKE_CLAUDE_MCP_STDOUT", "")
+    stderr = os.environ.get("FAKE_CLAUDE_MCP_STDERR", "")
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+    per_verb = {
+        "remove": "FAKE_CLAUDE_MCP_REMOVE_EXIT_CODE",
+        "add-json": "FAKE_CLAUDE_MCP_ADDJSON_EXIT_CODE",
+    }.get(verb)
+    if per_verb and os.environ.get(per_verb) is not None:
+        return int(os.environ[per_verb])
+    return int(os.environ.get("FAKE_CLAUDE_MCP_EXIT_CODE", "0"))
+
+
 def main():
     args = sys.argv[1:]
     if args and args[0] == "--version":
@@ -181,6 +224,8 @@ def main():
         return run_bridge(args)
     if args and args[0] == "--remote-control":
         return run_flag_bridge(args)
+    if args and args[0] == "mcp":
+        return run_mcp(args[1:])
     sys.stderr.write(f"fake-claude: unknown args {args}\n")
     return 2
 
