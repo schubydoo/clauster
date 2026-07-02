@@ -81,8 +81,8 @@ unknown per-project keys are ignored.
 | `tls` | TlsConfig \| null | `null` | Native HTTPS termination. Unset (default) = serve plain HTTP and rely on a reverse proxy / `tailscale serve` for TLS. Set `tls` to have Clauster terminate TLS itself. Two modes: `provision = off` (default) requires `cert_file` + `key_file` pointing at an existing cert + key (validated fail-closed); `provision = self-signed` generates a self-signed cert+key under `state_dir/tls/` automatically (`cryptography` package required). ACME is deferred to issue 774. |
 <!-- END GEN: clauster -->
 
-Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `api`, `logs`,
-`clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications`,
+Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `api`, `ui`,
+`logs`, `clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications`,
 `webhooks`, `claustrum`, `tls` — each documented below (`auth.reverse_proxy` is
 nested under `auth`).
 
@@ -234,6 +234,40 @@ resource subset (project list, session reads, instance spawn/stop/resume, agent
 spawn/stop/resume) under the same handlers and the same auth gate — see
 [the public API guide](public-api.md) for the full route list and the
 `clauster api-token` CLI.
+
+## `ui` — web-dashboard kill switch (`UiConfig`)
+
+<!-- BEGIN GEN: ui -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Serve the web dashboard (`/`, `/login`, `/logout`, `/static/*`) and the internal HTML-fragment / per-session interactive routes (`/api/projects/{name}/row`, `/api/widget`, the per-instance `message`/`permissions`/`forget`/`qr` routes). Default `true` — zero behavior change. Set `false` to serve only the JSON API (the rest of `/api/...`, `/api/v1/...`, `/healthz`, `/metrics`, and the WebSocket streams): the dashboard surface then 404s. Independent of `api.openapi_enabled` and `auth.*` — turning the API on never implies turning the UI off, or vice versa. Restart-required. |
+<!-- END GEN: ui -->
+
+Default `true` — zero behavior change. Set `ui.enabled: false` to serve **only**
+the JSON API: the dashboard page, `/login` + `/logout`, `/static/*`, and the
+internal HTML-fragment / per-session interactive routes (`/api/projects/{name}/row`,
+`/api/widget`, and the per-instance `message`/`permissions/{request_id}`/`forget`/
+`qr` routes — the same "internal, unversioned" set `api` above already excludes
+from `/api/v1`) all 404. Every other route — the rest of the bare `/api/...` JSON
+surface, `/api/v1/...`, `/healthz`, `/metrics`, and the WebSocket streams — keeps
+working, still behind whatever auth is configured.
+
+`ui.enabled` is **independent** of `api.openapi_enabled` and every `auth.*`
+setting: enabling the API never implies disabling the UI, or vice versa — you
+can run web-UI+API, API-only, UI-only (docs off), or any other combination.
+Restart-required, and **not** web-editable (a browser toggle that can kill the
+browser surface is a footgun with no way back in from the browser — see the
+[in-app config editor](#in-app-config-editor) section below).
+
+!!! warning "No login page means no session-cookie auth"
+    With the UI off there is no `/login` route, so session-cookie (and
+    password) auth is unreachable. Only a Bearer token (`auth.api_token_hash`
+    or a named `clauster api-token`) or a trusted reverse proxy can still
+    authenticate. If `auth.enabled` is on and neither is configured, Clauster
+    logs a loud startup warning — it does **not** refuse to start, since that
+    would brick a deployment that flips `ui.enabled` off before minting a
+    token. See [API-only deployment](public-api.md#api-only-deployment) in the
+    public API guide.
 
 ## `db` — persistence-layer knobs (`DbConfig`)
 

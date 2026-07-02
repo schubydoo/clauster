@@ -85,3 +85,37 @@ unauthenticated request gets a `401`, not a login-page redirect, and there is
 no way to expose docs without also exposing the API they document. See the
 `api` section in [Configuration](configuration.md) for the full toggle
 reference.
+
+## API-only deployment
+
+Set `ui.enabled: false` (default `true`, restart required) to run Clauster as a
+pure JSON API with no browser dashboard at all (#806):
+
+```yaml
+ui:
+  enabled: false
+```
+
+With the UI off, these all 404: the `/` dashboard page, `/login` + `/logout`,
+`/static/*`, and the internal HTML-fragment / per-session interactive routes
+(`/api/projects/{name}/row`, `/api/widget`, and the per-instance `message` /
+`permissions/{request_id}` / `forget` / `qr` routes) — the exact "internal,
+unversioned" set described above. Everything else is unaffected: the rest of
+the bare `/api/...` routes, `/api/v1/...`, `/healthz`, `/metrics` (per its own
+gate), and the WebSocket streams all keep working, still behind whatever auth
+is configured.
+
+`ui.enabled` is **independent** of `api.openapi_enabled` and every `auth.*`
+setting — none of them implies another. Every combination is valid: dashboard
+and API together (the default), API-only, a UI with `/docs` off, and so on.
+
+!!! warning "No login page means no session-cookie auth"
+    With the UI off there is no `/login` route, so session-cookie (and
+    password) auth is unreachable. Only a Bearer token — the legacy
+    `auth.api_token_hash` or a named `clauster api-token` — or a trusted
+    reverse proxy can still authenticate. If `auth.enabled` is on and neither
+    is configured, Clauster logs a loud startup warning rather than refusing to
+    start (refusing outright would brick a deployment that flips `ui.enabled`
+    off before minting a token — a stricter fail-closed refusal is a
+    reasonable alternative and open to revisiting). Mint a token first:
+    `clauster api-token issue --label ci-runner`.

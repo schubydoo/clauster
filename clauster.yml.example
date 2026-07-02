@@ -93,6 +93,18 @@ auth:
 api:
   openapi_enabled: false  # serve /docs + /openapi.json (Bearer-gated when auth.enabled)
 
+# Web-dashboard kill switch (#806, restart required). Default true = zero behavior
+# change. false = serve ONLY the JSON API: the dashboard page, /login + /logout,
+# /static/*, and the internal HTML-fragment / per-session routes (row, widget,
+# message/permissions/forget/qr) 404. Every other /api/... route, /api/v1/...,
+# /healthz, /metrics, and the WebSocket streams keep working. Independent of
+# api.openapi_enabled and auth.* — see docs/public-api.md#api-only-deployment.
+# With the UI off there's no login page, so session-cookie auth is unreachable;
+# if auth.enabled is true with no token/reverse-proxy configured, Clauster logs a
+# startup warning (does not refuse to start). NOT editable in the in-app editor.
+# ui:
+#   enabled: true
+
 # Native HTTPS: have Clauster terminate TLS itself (uvicorn ssl_certfile/keyfile),
 # instead of a reverse proxy / `tailscale serve`. Unset = plain HTTP. With TLS on,
 # cookie_secure: auto already marks the cookie Secure. TLS settings are structural

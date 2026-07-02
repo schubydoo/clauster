@@ -102,6 +102,9 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "instance_name": "structural: cosmetic process label, but structural/identity; left out v1",
     "db.backup_before_migrate": "structural: pre-migration snapshot safety net; file/CLI-managed "
     "only so it can't be silently disabled from the browser right before an upgrade",
+    "ui.enabled": "structural: restart-required web-UI kill switch; a browser toggle that can "
+    "404 the browser surface it's served from is a footgun with no way back in from the "
+    "browser — file/CLI-managed only",
     # bind — network bind; open-dashboard / restart-only.
     "host": "bind: bind address; 0.0.0.0 without auth = open dashboard",
     "port": "bind: bind port; restart-only, can collide / lock out",
