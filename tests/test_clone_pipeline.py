@@ -460,5 +460,10 @@ def test_clone_ws_abrupt_disconnect_still_unsubscribes(write_config, tmp_path, m
         deadline = time.monotonic() + 2.0
         while job._subscribers and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert job._subscribers == []  # the finally unsubscribed despite the disconnect
-        release.set()  # let the worker finish so lifespan shutdown stays clean
+        try:
+            assert job._subscribers == []  # the finally unsubscribed despite the disconnect
+        finally:
+            # Always release the worker, even on assert failure — otherwise it blocks on
+            # release.wait(timeout=10) for the full 10s, delaying lifespan shutdown and
+            # making the failure much slower to report.
+            release.set()
