@@ -184,6 +184,18 @@
     /* _project_row.html — project name cap + the failure-detail <pre>. */
     .project-name { font-size: 1.02rem; min-width: 0; max-width: clamp(10rem, 40vw, 28rem); }
     .detail-pre { white-space: pre-wrap; max-height: 12rem; overflow: auto; }
+    /* #750: the first-run orientation copy caps its line length for readability;
+       lifted out of a style="" attribute per the #533 CSP convention. */
+    .orientation-copy { max-width: 65ch; }
+    /* #750: post-dismiss empty state is deliberately LIGHTER than the orientation
+       card above it — a single quiet line beside the actions, not another bordered
+       block — so dismissing reads as "collapse to a reminder", not "swap cards".
+       Flex lives on this inner wrapper, never on #empty-state itself (that's the
+       x-show'd element — a d-flex there would fight x-show's inline display:none,
+       #538/#655). */
+    .empty-state-light { display: flex; flex-wrap: wrap; align-items: center;
+      gap: .5rem 1rem; padding: .75rem 0; }
+    .empty-state-light-actions { display: flex; gap: .5rem; margin-left: auto; }
   </style>
 </head>
 <body>
@@ -927,51 +939,59 @@
         </div>
       </div>
       {% else %}
-      <!-- First-run orientation (#692): a fresh self-hoster sees a plain-language
-           "what this is / how to start" card. Dismissal persists via localStorage
-           (orientationDismissed). Once dismissed, the quieter "No projects yet"
-           action block below takes over so Create/Clone stay reachable. The two
+      <!-- First-run orientation (#692, callout treatment #750): a fresh self-hoster
+           sees a plain-language "what this is / how to start" card. It's wrapped in
+           a bordered `.card` (Instrument-Panel callout) rather than the bare `.empty`
+           prose treatment so it visually stands out from the page instead of reading
+           like every other empty-state block. Dismissal persists via localStorage
+           (orientationDismissed). Once dismissed, the quieter "No projects yet" hint
+           row below takes over so Create/Clone stay reachable — deliberately LIGHTER
+           weight (no border, one line, small controls) so the dismiss reads as
+           "collapse to a quiet reminder," not "swap to the same card" (#750). The two
            are mutually exclusive on x-show, never via d-* (the documented Alpine
-           x-show-clobber gotcha). -->
-      <div class="empty" id="orientation-card" role="region"
+           x-show-clobber gotcha #538/#655) — orientation-card carries no d-* class,
+           and empty-state's own d-flex row lives on an INNER wrapper, not the
+           x-show'd element itself. -->
+      <div class="card" id="orientation-card" role="region"
            aria-labelledby="orientation-heading"
            x-show="!orientationDismissed" x-cloak>
-        <h2 class="empty-title" id="orientation-heading">Welcome to Clauster</h2>
-        <p class="empty-subtitle text-secondary" style="max-width: 65ch;">
-          Clauster spawns Claude Code into your project directories and lets you drive each
-          session from claude.ai/code or the Claude mobile app — no SSH session, no terminal
-          on the host.
-        </p>
-        <p class="empty-subtitle text-secondary" style="max-width: 65ch;">
-          Point <code>projects_root</code> at a folder whose subdirectories are projects, then
-          create or clone one below. Each becomes a card you can launch a bridge in.
-        </p>
-        <div class="empty-action">
-          <button type="button" class="btn btn-primary" @click="openNewProject('create')">
-            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
-          </button>
-          <button type="button" class="btn" @click="openNewProject('clone')">
-            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
-          </button>
-          <button type="button" class="btn btn-ghost-secondary"
-                  @click="dismissOrientation()" aria-label="Dismiss the welcome card">
-            Got it
-          </button>
+        <div class="empty">
+          <h2 class="empty-title" id="orientation-heading">Welcome to Clauster</h2>
+          <p class="empty-subtitle text-secondary orientation-copy">
+            Clauster spawns Claude Code into your project directories and lets you drive each
+            session from claude.ai/code or the Claude mobile app — no SSH session, no terminal
+            on the host.
+          </p>
+          <p class="empty-subtitle text-secondary orientation-copy">
+            Point <code>projects_root</code> at a folder whose subdirectories are projects, then
+            create or clone one below. Each becomes a card you can launch a bridge in.
+          </p>
+          <div class="empty-action">
+            <button type="button" class="btn btn-primary" @click="openNewProject('create')">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
+            </button>
+            <button type="button" class="btn" @click="openNewProject('clone')">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
+            </button>
+            <button type="button" class="btn btn-ghost-secondary"
+                    @click="dismissOrientation()" aria-label="Dismiss the welcome card">
+              Got it
+            </button>
+          </div>
         </div>
       </div>
-      <div class="empty" id="empty-state" x-show="orientationDismissed" x-cloak>
-        <p class="empty-title">No projects yet</p>
-        <p class="empty-subtitle text-secondary">
-          Clauster runs Claude in a project directory under <code>{{ projects_root }}</code>.
-          Create one or clone a git repo to get started — or drop a directory there and it appears here.
-        </p>
-        <div class="empty-action">
-          <button type="button" class="btn btn-primary" @click="openNewProject('create')">
-            <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>Create a project
-          </button>
-          <button type="button" class="btn" @click="openNewProject('clone')">
-            <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone from git URL
-          </button>
+      <div id="empty-state" x-show="orientationDismissed" x-cloak>
+        <div class="empty-state-light">
+          <span class="text-secondary">No projects yet — create one or clone a git repo under
+            <code>{{ projects_root }}</code> to get started.</span>
+          <div class="empty-state-light-actions">
+            <button type="button" class="btn btn-sm btn-primary" @click="openNewProject('create')">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>New project
+            </button>
+            <button type="button" class="btn btn-sm" @click="openNewProject('clone')">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-git"/></svg>Clone
+            </button>
+          </div>
         </div>
       </div>
       {% endif %}
