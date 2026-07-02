@@ -94,6 +94,38 @@ def test_build_cmd_appends_verbose_when_configured(runner_config):
         assert "--verbose" in cmd
 
 
+# ----- _build_cmd sandbox toggle (#780) --------------------------------
+
+
+def test_build_cmd_no_sandbox_flag_by_default(runner_config):
+    # Tri-state "default" (the _build_cmd param default) appends NEITHER flag.
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default")
+    assert "--sandbox" not in cmd
+    assert "--no-sandbox" not in cmd
+
+
+def test_build_cmd_appends_sandbox_when_on(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default", "on")
+    assert "--sandbox" in cmd
+    assert "--no-sandbox" not in cmd
+
+
+def test_build_cmd_appends_no_sandbox_when_off(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default", "off")
+    assert "--no-sandbox" in cmd
+    assert "--sandbox" not in cmd
+
+
+def test_build_cmd_explicit_default_appends_neither(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default", "default")
+    assert "--sandbox" not in cmd
+    assert "--no-sandbox" not in cmd
+
+
 # ----- validation -------------------------------------------------------
 
 
@@ -327,6 +359,154 @@ def test_api_spawn_custom_name_control_char_is_422(write_config):
 def test_api_spawn_non_string_custom_name_is_422(write_config):
     client = _client(write_config)
     resp = client.post("/api/instances", json={"project": "alpha", "name": 5})
+    assert resp.status_code == 422
+
+
+# ----- resume default-name round-trip (Greptile #811) -------------------
+#
+# A default-name standard bridge has label == the raw project name. resume() must
+# pass custom_name=None for that case (the trusted fast-path), NOT feed the project
+# name back through the validator — otherwise a project name containing a char the
+# validator now rejects would make resume raise even though the first launch
+# succeeded. Project names are constrained by PROJECT_NAME_RE so this is near-
+# unreachable in practice, but the round-trip must stay symmetric.
+
+
+async def test_resume_default_name_bridge_passes_none_not_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha")  # no custom name -> label == "alpha"
+    await runner.stop(inst.instance_id)
+
+    seen: dict = {}
+    real_spawn = runner.spawn
+
+    async def _spy(name, **kwargs):
+        seen.update(kwargs)
+        return await real_spawn(name, **kwargs)
+
+    monkeypatch.setattr(runner, "spawn", _spy)
+    resumed = await runner.resume(inst.instance_id)
+    try:
+        # The bare project-name label is forwarded as None (fallback path), not "alpha".
+        assert seen["custom_name"] is None
+        assert resumed.label == "alpha"
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+# ----- sandbox toggle (#780) -------------------------------------------
+
+
+async def test_spawn_sandbox_on_reaches_argv_and_instance(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="on")
+    try:
+        assert inst.sandbox_mode == "on"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" in argv
+        assert "--no-sandbox" not in argv
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_sandbox_off_reaches_argv(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="off")
+    try:
+        assert inst.sandbox_mode == "off"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--no-sandbox" in argv
+        assert "--sandbox" not in argv
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_sandbox_default_appends_neither(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha")  # sandbox omitted -> "default"
+    try:
+        assert inst.sandbox_mode == "default"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" not in argv
+        assert "--no-sandbox" not in argv
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_invalid_sandbox_rejected_before_any_spawn(runner_config):
+    runner = _runner(runner_config)
+    with pytest.raises(InvalidSpawnOption):
+        await runner.spawn("alpha", sandbox="bogus")
+    assert runner.running_count() == 0  # rejected before _popen ever ran
+
+
+async def test_resume_preserves_sandbox_choice(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="on")
+    await runner.stop(inst.instance_id)
+    resumed = await runner.resume(inst.instance_id)
+    try:
+        assert resumed.sandbox_mode == "on"
+        argv = json.loads(Path(str(resumed.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" in argv
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+def test_sandbox_persisted_in_subset(runner_config):
+    runner = _runner(runner_config)
+    fake = RemoteControlInstance(project="alpha", label="alpha", sandbox_mode="off")
+    runner._instances[fake.instance_id] = fake
+    subset = runner._persist_subset()
+    record = next(v for v in subset.values() if v.get("project_name") == "alpha")
+    assert record["sandbox_mode"] == "off"
+
+
+def test_stopped_from_persisted_restores_sandbox(runner_config):
+    # A gone standard bridge rebuilt from state.json keeps its sandbox choice so a
+    # resume re-applies it. Coerces an absent/bad value to "default".
+    runner = _runner(runner_config)
+    runner._persisted = {
+        "iid-1": {"project_name": "alpha", "label": "alpha", "sandbox_mode": "off"},
+    }
+    inst = runner._stopped_from_persisted("alpha")
+    assert inst is not None
+    assert inst.sandbox_mode == "off"
+
+
+def test_stopped_from_persisted_defaults_sandbox_when_absent(runner_config):
+    runner = _runner(runner_config)
+    runner._persisted = {"iid-1": {"project_name": "alpha", "label": "alpha"}}  # pre-#780
+    inst = runner._stopped_from_persisted("alpha")
+    assert inst is not None
+    assert inst.sandbox_mode == "default"
+
+
+def test_api_spawn_sandbox_on_reaches_argv(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _runner_client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "sandbox": "on"})
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["sandbox_mode"] == "on"
+        argv = json.loads(Path(str(body["bridge_debug_log_path"]) + ".argv.json").read_text())
+        assert "--sandbox" in argv
+
+
+def test_api_spawn_invalid_sandbox_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "sandbox": "bogus"})
+    assert resp.status_code == 422
+
+
+def test_api_spawn_non_string_sandbox_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "sandbox": 5})
     assert resp.status_code == 422
 
 
@@ -604,6 +784,19 @@ def test_dashboard_renders_pickers(write_config):
     # a Jinja-rendered perm option (value-stable; the label is plain-language copy)
     assert '<option value="default">Ask each time (default)</option>' in html
     assert '<option value="worktree">worktree</option>' in html  # alpha is a git repo
+
+
+def test_dashboard_renders_name_and_sandbox_controls(write_config):
+    # #780 launch popover controls (standard-only): the Session name input and the
+    # Sandbox select, both gated on the SAME `=== 'standard'` x-show predicate as each
+    # other. Assert on the binding markup (the contract), not the copy.
+    html = _client(write_config).get("/").text
+    assert "x-model=\"customName['alpha']\"" in html  # Session name input
+    assert "x-model=\"sandboxMode['alpha']\"" in html  # Sandbox select
+    assert '<option value="on">Enabled</option>' in html
+    assert '<option value="off">Disabled</option>' in html
+    # Both #780 controls share the standard-only gate (never shown in pty mode).
+    assert html.count("(resumeMode['alpha'] || defaultResumeMode) === 'standard'") >= 2
 
 
 # The picker <option> gained a `:disabled` binding restricting bypass to the Desktop

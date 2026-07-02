@@ -2435,12 +2435,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # side effect, surfaced here as a 422 via _spawn_or_http's InvalidSpawnOption
         # mapping.
         name = body.get("name")
+        # Optional per-launch sandbox toggle (#780) — tri-state "default"/"on"/"off"
+        # for a standard bridge (--sandbox / --no-sandbox / neither). Enum-validated by
+        # runner.spawn_detailed before any spawn side effect → 422 on a bad value.
+        sandbox = body.get("sandbox")
         channel = body.get("channel", "remote-control")
         for field, value in (
             ("spawn_mode", spawn_mode),
             ("permission_mode", permission_mode),
             ("resume_mode", resume_mode),
             ("name", name),
+            ("sandbox", sandbox),
             ("channel", channel),
         ):
             if value is not None and not isinstance(value, str):
@@ -2456,6 +2461,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
                 custom_name=name,
+                sandbox=sandbox,
             )
         )
         if not outcome.created:
