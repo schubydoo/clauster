@@ -81,6 +81,16 @@ def test_ui_disabled_static_directory_listing_also_404s(write_config):
     assert client.get("/static/").status_code == 404
 
 
+@pytest.mark.parametrize("path", ["/", "/login"])
+def test_ui_disabled_head_request_also_404s(write_config, path):
+    # Starlette auto-serves HEAD for every GET route (runs the handler, strips the
+    # body), so a HEAD to a GET-only _UI_ONLY_ROUTES entry must gate exactly like
+    # the GET — otherwise the kill switch leaks a confirmable 200 and still runs
+    # the dashboard handler. (Greptile P2 on #810.)
+    client = _client(write_config, "ui:\n  enabled: false\n")
+    assert client.head(path).status_code == 404
+
+
 # ----- ui.enabled=false: the JSON API keeps working -------------------------
 
 
@@ -119,6 +129,15 @@ def test_ui_enabled_default_dashboard_renders(write_config):
     client = _client(write_config)
     assert client.get("/").status_code == 200
     assert client.get("/login").status_code == 200
+
+
+def test_ui_enabled_default_head_request_returns_normal_status(write_config):
+    # The HEAD normalization only gates when ui.enabled is false. With the UI on,
+    # ui_guard is a no-op and HEAD / falls through to the router unchanged — a
+    # GET-only FastAPI route answers HEAD with 405 (its normal behavior). The
+    # point is that it is NOT the ui_guard's 404: the guard doesn't interfere.
+    client = _client(write_config)
+    assert client.head("/").status_code == 405
 
 
 def test_ui_enabled_default_fragment_and_widget_routes_render(write_config):

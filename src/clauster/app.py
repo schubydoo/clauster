@@ -182,8 +182,18 @@ _UI_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 
 
 def _is_ui_only_route(method: str, path: str) -> bool:
-    """Whether ``(method, path)`` matches an entry in :data:`_UI_ONLY_ROUTES`."""
-    return any(method == m and pattern.match(path) for m, pattern in _UI_ONLY_PATTERNS)
+    """Whether ``(method, path)`` matches an entry in :data:`_UI_ONLY_ROUTES`.
+
+    ``HEAD`` is normalized to ``GET`` before comparing so a ``HEAD`` to a
+    GET-only entry (e.g. ``HEAD /``) gates exactly like the ``GET``. Without it
+    the kill switch would let ``HEAD`` fall through to the router, which answers a
+    ``HEAD`` on a GET-only route with a ``405`` — a confirmable, non-404 response
+    that reveals the disabled surface still exists (and, for any route that DID
+    accept ``HEAD``, would run its handler). Normalizing makes every UI route
+    return a uniform ``404`` regardless of method.
+    """
+    normalized = "GET" if method == "HEAD" else method
+    return any(normalized == m and pattern.match(path) for m, pattern in _UI_ONLY_PATTERNS)
 
 
 def _ui_guard_matches(method: str, path: str) -> bool:
@@ -191,8 +201,11 @@ def _ui_guard_matches(method: str, path: str) -> bool:
 
     True for ``/static/*`` (a mounted sub-app, not a single route) or any exact
     match in :data:`_UI_ONLY_ROUTES` — the dashboard page, login/logout, and the
-    internal HTML-fragment / per-session interactive routes. Everything else
-    (the rest of the JSON API) is untouched.
+    internal HTML-fragment / per-session interactive routes. ``HEAD`` is treated
+    as ``GET`` for the route-set match (see :func:`_is_ui_only_route`), so a
+    ``HEAD`` can't slip past a GET-only entry as a 405; the ``/static/`` prefix
+    match already ignores the method. Everything else (the rest of the JSON API)
+    is untouched.
     """
     return path.startswith("/static/") or _is_ui_only_route(method, path)
 
