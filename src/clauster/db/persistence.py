@@ -28,12 +28,18 @@ from .stores import HostedStateStore, SessionHistoryStore, StateStore
 class Persistence:
     """Owns the engine + session factory and the migrated, imported database."""
 
-    def __init__(self, state_dir: Path) -> None:
+    def __init__(self, state_dir: Path, *, backup_before_migrate: bool = True) -> None:
         """Build the engine, migrate to head (fail-closed), and import legacy JSON.
 
         Raises :class:`clauster.db.bootstrap.MigrationError` if the schema can't be
         brought to head — the caller must let it propagate so the app refuses to
         start rather than run on a half-migrated database.
+
+        ``backup_before_migrate`` (wired to ``config.db.backup_before_migrate``,
+        default on) gates the pre-migration SQLite snapshot (#795): when a
+        migration is actually pending, the live database is copied to
+        ``state_dir/backups/`` before Alembic runs. It is a no-op on a plain
+        restart already at head.
 
         Runs the (possibly multi-second) Alembic migration synchronously, so it must
         be constructed *off* the event loop — as ``create_app`` → ``SessionRunner``
@@ -42,7 +48,7 @@ class Persistence:
         """
         self._engine: Engine = create_db_engine(state_dir)
         try:
-            upgrade_to_head(self._engine)
+            upgrade_to_head(self._engine, state_dir, backup_before_migrate=backup_before_migrate)
             self._session_factory: sessionmaker[Session] = make_session_factory(self._engine)
             # One-time, fail-closed: import a pre-existing JSON state on the first boot.
             # The returned "did import" bool is informational and logged inside the call.

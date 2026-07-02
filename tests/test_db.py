@@ -206,7 +206,7 @@ def test_upgrade_to_head_wraps_failure_in_migration_error(tmp_path):
     try:
         with mock.patch.object(bootstrap.command, "upgrade", side_effect=RuntimeError("boom")):
             with pytest.raises(MigrationError, match="boom"):
-                upgrade_to_head(engine)
+                upgrade_to_head(engine, tmp_path)
     finally:
         engine.dispose()
 
@@ -241,6 +241,141 @@ def test_migration_creates_all_foundation_tables(tmp_path):
                 ).scalars()
             )
         assert {"projects", "instances", "hosted_sessions"} <= names
+    finally:
+        p.dispose()
+
+
+# ----- pre-migration snapshot (#795) -------------------------------------
+
+
+def test_snapshot_written_when_migration_pending(tmp_path):
+    # Migrate only through 0002 (0003 left pending), then bring to head via
+    # upgrade_to_head: since current != head, a pre-migration snapshot must land
+    # in state_dir/backups/ before Alembic runs.
+    from alembic import command as alembic_command
+
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            alembic_command.upgrade(cfg, "f4424422f656")  # stop just before 0003
+        backups_dir = tmp_path / "backups"
+        assert not backups_dir.exists()
+        upgrade_to_head(engine, tmp_path)
+        snapshots = list(backups_dir.glob("pre-*.db"))
+        assert len(snapshots) == 1
+        assert snapshots[0].name.startswith("pre-f4424422f656-")
+    finally:
+        engine.dispose()
+
+
+def test_snapshot_not_written_on_already_at_head_restart(tmp_path):
+    # A fresh DB's very first migration IS pending (current=None != head), so the
+    # first upgrade_to_head writes one snapshot. A second call against the same,
+    # now-current schema must NOT write another — the plain-restart no-op case.
+    engine = create_db_engine(tmp_path)
+    try:
+        upgrade_to_head(engine, tmp_path)
+        backups_dir = tmp_path / "backups"
+        first = list(backups_dir.glob("pre-*.db"))
+        assert len(first) == 1
+        upgrade_to_head(engine, tmp_path)
+        assert list(backups_dir.glob("pre-*.db")) == first
+    finally:
+        engine.dispose()
+
+
+def test_backup_before_migrate_false_skips_snapshot_entirely(tmp_path):
+    engine = create_db_engine(tmp_path)
+    try:
+        upgrade_to_head(engine, tmp_path, backup_before_migrate=False)
+        assert not (tmp_path / "backups").exists()
+    finally:
+        engine.dispose()
+
+
+def test_prune_snapshots_keeps_only_the_newest_n(tmp_path):
+    backups_dir = tmp_path / "backups"
+    backups_dir.mkdir()
+    made = [backups_dir / f"pre-a-b-20260101T0000{i:02d}_000000Z.db" for i in range(8)]
+    for p in made:
+        p.write_text("x")
+    bootstrap._prune_snapshots(backups_dir, keep=5)
+    remaining = sorted(backups_dir.glob("pre-*.db"))
+    assert remaining == sorted(made)[-5:]
+
+
+def test_snapshot_prunes_pre_existing_snapshots_beyond_retention(tmp_path):
+    # 6 pre-existing snapshot files + 1 freshly written one must prune to the
+    # default retention of 5 — exercising the prune call inside the snapshot path.
+    engine = create_db_engine(tmp_path)
+    try:
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir()
+        for i in range(6):
+            (backups_dir / f"pre-old-old-2026010{i}T000000_000000Z.db").write_text("x")
+        with engine.connect() as conn:
+            current, head = bootstrap._pending_revision(conn)
+        bootstrap._snapshot_before_migrate(engine, tmp_path, current, head)
+        assert len(list(backups_dir.glob("pre-*.db"))) == 5
+    finally:
+        engine.dispose()
+
+
+def test_snapshot_failure_logs_warning_and_migration_still_proceeds(tmp_path, caplog):
+    # Failure policy (#795): a snapshot write failure is a WARNING, never fatal —
+    # the migration (already transactional/fail-closed) must still complete.
+    engine = create_db_engine(tmp_path)
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="clauster.db.bootstrap"),
+            mock.patch("sqlite3.connect", side_effect=OSError("disk full")),
+        ):
+            upgrade_to_head(engine, tmp_path)  # must not raise
+        assert "pre-migration snapshot failed" in caplog.text
+        with engine.connect() as conn:
+            current, head = bootstrap._pending_revision(conn)
+        assert current == head  # migration completed despite the snapshot failure
+    finally:
+        engine.dispose()
+
+
+def test_snapshot_skips_in_memory_engine(tmp_path):
+    engine = create_engine("sqlite://", future=True, connect_args={"check_same_thread": False})
+    try:
+        bootstrap._snapshot_before_migrate(engine, tmp_path, "a", "b")
+        assert not (tmp_path / "backups").exists()
+    finally:
+        engine.dispose()
+
+
+def test_snapshot_skips_when_db_file_not_yet_created(tmp_path):
+    # The engine is built but never connected, so sqlite hasn't created the file
+    # yet — nothing to snapshot.
+    db_path = tmp_path / "clauster.db"
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True)
+    try:
+        assert not db_path.exists()
+        bootstrap._snapshot_before_migrate(engine, tmp_path, "a", "b")
+        assert not (tmp_path / "backups").exists()
+    finally:
+        engine.dispose()
+
+
+def test_persistence_snapshots_on_first_boot_by_default(tmp_path):
+    p = Persistence(tmp_path)
+    try:
+        assert list((tmp_path / "backups").glob("pre-*.db"))
+    finally:
+        p.dispose()
+
+
+def test_persistence_backup_before_migrate_false_skips_snapshot(tmp_path):
+    p = Persistence(tmp_path, backup_before_migrate=False)
+    try:
+        assert not (tmp_path / "backups").exists()
     finally:
         p.dispose()
 
@@ -355,7 +490,7 @@ def test_import_with_only_state_json_present(tmp_path):
 def test_import_failure_leaves_json_intact(tmp_path):
     _seed_json(tmp_path)
     engine = create_db_engine(tmp_path)
-    upgrade_to_head(engine)
+    upgrade_to_head(engine, tmp_path)
     factory = make_session_factory(engine)
     try:
         with mock.patch.object(bootstrap.StateStore, "_sync", side_effect=SQLAlchemyError):
@@ -370,7 +505,7 @@ def test_import_failure_leaves_json_intact(tmp_path):
 def test_retire_tolerates_rename_failure(tmp_path, caplog):
     _seed_json(tmp_path)
     engine = create_db_engine(tmp_path)
-    upgrade_to_head(engine)
+    upgrade_to_head(engine, tmp_path)
     factory = make_session_factory(engine)
     try:
         with mock.patch("pathlib.Path.rename", side_effect=OSError("denied")):
@@ -388,7 +523,7 @@ def test_import_retires_empty_present_json_without_importing(tmp_path):
     (tmp_path / "state.json").write_text(json.dumps({"schema_version": 1, "instances": {}}))
     (tmp_path / "hosted_state.json").write_text(json.dumps({"schema_version": 1, "sessions": {}}))
     engine = create_db_engine(tmp_path)
-    upgrade_to_head(engine)
+    upgrade_to_head(engine, tmp_path)
     factory = make_session_factory(engine)
     try:
         assert import_legacy_json(tmp_path, factory) is False
