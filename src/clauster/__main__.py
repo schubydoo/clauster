@@ -632,7 +632,9 @@ def _keepers(config_path: str | None, kill_pid: int | None) -> int:
     # an EMPTY card set and mislabel every live keeper — including carded ones — as an
     # orphan, letting `--kill` reap a managed keeper. Build Persistence (the same
     # fail-closed migrate + legacy-import the app runs) and read the DB-backed store.
-    persistence = Persistence(config.state_dir)
+    persistence = Persistence(
+        config.state_dir, backup_before_migrate=config.db.backup_before_migrate
+    )
     try:
         # Since issue 777 the store is keyed by instance_id; the project name each
         # card belongs to lives in the record's project_name field. Reading keys()

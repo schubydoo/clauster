@@ -112,6 +112,13 @@ auth:
 #     - 192.168.1.10     # your LAN IP or NAS hostname (first = CN); also CLAUSTER_TLS_HOSTNAMES
 #     - clauster.local   # additional SANs
 
+# Pre-migration SQLite snapshot. On by default: before running a PENDING Alembic
+# migration (never on a plain restart already at head), copies clauster.db to
+# state_dir/backups/pre-<rev>-<rev>-<timestamp>.db via VACUUM INTO, keeping the
+# last 5. A snapshot write failure only logs a WARNING; startup still proceeds.
+# db:
+#   backup_before_migrate: true
+
 logs:
   bridge_log_max_size_mb: 10
   keep_rotated: 5

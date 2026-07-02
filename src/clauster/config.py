@@ -1138,6 +1138,20 @@ class TlsConfig(BaseModel):
         return self
 
 
+class DbConfig(BaseModel):
+    """Persistence-layer knobs (#795)."""
+
+    backup_before_migrate: bool = Field(
+        default=True,
+        description="Snapshot `clauster.db` (via `VACUUM INTO`) to `state_dir/backups/` "
+        "before running a **pending** Alembic migration — never on a plain restart "
+        "already at head. The last 5 pre-migration snapshots are kept, older ones "
+        "pruned. A snapshot write failure is logged as a WARNING and startup "
+        "proceeds (the migration itself is transactional and safe on its own); set "
+        "this to `false` to skip the snapshot attempt entirely.",
+    )
+
+
 class ClausterConfig(BaseModel):
     """Top-level Clauster configuration (the parsed, validated ``clauster.yml``)."""
 
@@ -1185,6 +1199,7 @@ class ClausterConfig(BaseModel):
         "unknown keys ignored). See the `projects` section.",
     )
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    db: DbConfig = Field(default_factory=DbConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
     clone: CloneConfig = Field(default_factory=CloneConfig)
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)

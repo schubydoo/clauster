@@ -99,6 +99,8 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "state_dir": "structural: DB/state path; a wrong value orphans state",
     "root_path": "structural: ASGI sub-path; a wrong value breaks routing/login",
     "instance_name": "structural: cosmetic process label, but structural/identity; left out v1",
+    "db.backup_before_migrate": "structural: pre-migration snapshot safety net; file/CLI-managed "
+    "only so it can't be silently disabled from the browser right before an upgrade",
     # bind — network bind; open-dashboard / restart-only.
     "host": "bind: bind address; 0.0.0.0 without auth = open dashboard",
     "port": "bind: bind port; restart-only, can collide / lock out",

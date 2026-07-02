@@ -220,6 +220,25 @@ projects:
 
 See [Security](security.md) and [Networking](networking.md) for the full matrix.
 
+## `db` — persistence-layer knobs (`DbConfig`)
+
+<!-- BEGIN GEN: db -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `backup_before_migrate` | bool | `true` | Snapshot `clauster.db` (via `VACUUM INTO`) to `state_dir/backups/` before running a **pending** Alembic migration — never on a plain restart already at head. The last 5 pre-migration snapshots are kept, older ones pruned. A snapshot write failure is logged as a WARNING and startup proceeds (the migration itself is transactional and safe on its own); set this to `false` to skip the snapshot attempt entirely. |
+<!-- END GEN: db -->
+
+**Recovery.** Each pre-migration snapshot is a self-contained copy of
+`clauster.db` named `pre-<revision-before>-<revision-after>-<timestamp>.db`
+under `state_dir/backups/`, written just before a migration that changed the
+schema. To roll back: stop Clauster, replace `state_dir/clauster.db` with the
+desired `state_dir/backups/pre-*.db` snapshot (and its `-wal`/`-shm` siblings if
+present), then start the matching (older) `clauster` binary — a newer binary
+would immediately re-run the same migration against the restored file. This is
+complementary to `clauster backup` / `restore` (a full `state_dir` + config
+tarball); the snapshot here is automatic, DB-only, and scoped to the migration
+path.
+
 ## `logs` — bridge-log rotation & redaction (`LogsConfig`)
 
 <!-- BEGIN GEN: logs -->
