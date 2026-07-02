@@ -68,6 +68,17 @@ class AgentBrowser:
         subcommands that use neither.
         """
         env = dict(os.environ)
+        # The root conftest pins HOME to a throwaway dir at import (live-account
+        # safety, #520) — but agent-browser is NOT clauster: its daemon socket and
+        # downloaded Chromium cache live under the REAL home, so the pin breaks
+        # every browser call on a host without a system Chrome ("Chrome not
+        # found"). Restore the stashed real home for the browser subprocess only;
+        # the clauster server under test keeps its isolated HOME. (CI never hit
+        # this: ubuntu runners carry a system Chrome the fallback search finds.)
+        real_home = os.environ.get("CLAUSTER_TEST_REAL_HOME")
+        if real_home:
+            env["HOME"] = real_home
+            env["USERPROFILE"] = real_home  # Windows resolves ~ from USERPROFILE
         init_scripts = [s for s in (_AXE_SCRIPT, _DIALOG_SCRIPT) if s.exists()]
         if init_scripts:
             env["AGENT_BROWSER_INIT_SCRIPTS"] = ",".join(str(s) for s in init_scripts)
