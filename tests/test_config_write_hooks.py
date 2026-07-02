@@ -109,6 +109,83 @@ def test_validate_rejects_non_command_type(bad_type: object) -> None:
         hooks.validate_hooks({"PreToolUse": [{"hooks": [entry]}]})
 
 
+# --- plugin hooks are read-only (#770): a plugin-owned command is rejected ----------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        '"${CLAUDE_PLUGIN_ROOT}"/scripts/format.sh',
+        "${CLAUDE_PLUGIN_ROOT}/scripts/format.sh",
+        "$CLAUDE_PLUGIN_ROOT/scripts/format.sh",
+        "echo CLAUDE_PLUGIN_ROOT",  # bare substring, no interpolation syntax at all
+    ],
+)
+def test_validate_rejects_plugin_root_marker(command: str) -> None:
+    """A command referencing the plugin-root marker is plugin-owned, not editable here."""
+    candidate = {"PostToolUse": [{"hooks": [{"type": "command", "command": command}]}]}
+    with pytest.raises(cw.InvalidCandidateError, match="plugin"):
+        hooks.validate_hooks(candidate)
+
+
+def test_write_rejects_plugin_root_marker_writes_nothing(tmp_path: Path) -> None:
+    """The write path re-runs validate_hooks, so a plugin-shaped candidate writes nothing."""
+    candidate = {
+        "PostToolUse": [
+            {
+                "matcher": "Write|Edit",
+                "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/x.sh"}],
+            }
+        ]
+    }
+    with pytest.raises(cw.InvalidCandidateError):
+        hooks.write_project_hooks(tmp_path, candidate, expected_hash=None)
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_local_write_rejects_plugin_root_marker(tmp_path: Path) -> None:
+    """The local-scope writer applies the same plugin-owned-command guard."""
+    candidate = {
+        "Stop": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/x.sh"}]}]
+    }
+    with pytest.raises(cw.InvalidCandidateError):
+        hooks.write_project_local_hooks(tmp_path, candidate, expected_hash=None)
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_user_write_rejects_plugin_root_marker(tmp_path: Path) -> None:
+    """The user-scope writer applies the same plugin-owned-command guard."""
+    settings = tmp_path / ".claude" / "settings.json"
+    candidate = {
+        "Stop": [{"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/x.sh"}]}]
+    }
+    with pytest.raises(cw.InvalidCandidateError):
+        hooks.write_user_hooks(settings, candidate, expected_hash=None)
+    assert not settings.exists()
+
+
+def test_route_write_rejects_plugin_root_marker_is_422(
+    write_config, tmp_path, projects_root
+) -> None:
+    """The full HTTP write path also rejects a plugin-owned command (422, nothing written)."""
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "hooks": {
+                    "PostToolUse": [
+                        {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/x.sh"}]}
+                    ]
+                },
+            },
+        )
+        assert resp.status_code == 422
+    assert not (projects_root / "alpha" / ".claude" / "settings.json").exists()
+
+
 # --- validate-never-execute: a command string is stored verbatim, never run --------
 
 

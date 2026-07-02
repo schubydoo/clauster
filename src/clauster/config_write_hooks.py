@@ -1,10 +1,18 @@
-"""Hooks config-write surface (#690) over the #347 Foundation seam.
+"""Hooks config-write surface (#690/#770) over the #347 Foundation seam.
 
 Sibling of the permission-rules surface (#689) and the MCP-server surface (#688): it
 adds exactly a **pure structural validator** for a ``hooks`` block and a **router**
 that runs the fail-closed Foundation pipeline (gate → confirm → validate → contain →
 stale-hash → atomic write) for a write. It owns no gate, no writer, and no redaction
 logic of its own — it *consumes* :mod:`clauster.config_write`.
+
+**Scope note (#770):** the ``local`` scope (``.claude/settings.local.json``) and the
+enable/disable model were resolved as part of the #766 Foundation extension — this
+module already has ``read_project_local_hooks``/``write_project_local_hooks`` below,
+and per the maintainer's 2026-06-29 decision, hooks v1 is **add/edit/remove only**
+(Claude Code has no native per-hook toggle, so no clauster "disabled" store is
+invented). #770's remaining delta is the **plugin-hooks-are-read-only** guard added
+to :func:`_validate_hook_entry` below.
 
 This is the **code-executing** config-write surface, and the most security-critical
 of the children: a hook is a shell command Claude runs on a lifecycle event, so
@@ -75,6 +83,21 @@ RECOGNIZED_EVENTS = frozenset(
 #: Allowed keys inside a single hook entry (the ``{type, command, timeout?}`` object).
 _HOOK_ENTRY_KEYS = frozenset({"type", "command", "timeout"})
 
+#: Marker identifying a ``command`` as **plugin-owned**, not project/user/local content.
+#: Claude Code plugins define their own hooks in a ``hooks/hooks.json`` bundled with the
+#: plugin — a file this surface never reads or writes (it only ever opens the three
+#: settings files behind :func:`read_project_hooks`/:func:`read_user_hooks`/
+#: :func:`read_project_local_hooks`) — and that plugin file resolves
+#: ``${CLAUDE_PLUGIN_ROOT}`` to the plugin's own install directory so its bundled
+#: scripts are portable. That interpolation is meaningless (and never resolved) outside
+#: a plugin's own hook definition, so a candidate ``command`` referencing it did not
+#: originate as project/user/local content — it was copied from (or intends to shadow)
+#: a plugin-owned hook. Plugin hooks are managed **only** by installing/enabling/
+#: disabling the plugin (a separate, not-yet-built surface, #342 scope), never by
+#: writing this subtree; a candidate carrying the marker is rejected fail-closed
+#: (whole write → 422) rather than silently accepted or silently stripped.
+_PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
+
 #: Allowed keys inside a matcher group (the ``{matcher?, hooks: [...]}`` object).
 _MATCHER_GROUP_KEYS = frozenset({"matcher", "hooks"})
 
@@ -106,6 +129,18 @@ def _validate_hook_entry(entry: Any, where: str) -> None:
     if not isinstance(command, str) or not command:
         # The command is OPAQUE data: validated for shape only, never run or resolved.
         raise cw.InvalidCandidateError(f"{where} 'command' must be a non-empty string")
+
+    if _PLUGIN_ROOT_MARKER in command:
+        # Fail closed (#770): a command referencing the plugin-root interpolation is
+        # plugin-owned content, not project/user/local content — reject the whole
+        # write rather than silently store (or silently strip) it. See
+        # _PLUGIN_ROOT_MARKER for why this substring is the concrete, structural
+        # signal (never a false negative from quoting/braces; a literal false
+        # positive would just be an unusual command string, safely rejected).
+        raise cw.InvalidCandidateError(
+            f"{where} 'command' references a plugin-owned path ({_PLUGIN_ROOT_MARKER}); "
+            "plugin hooks are read-only here — manage them via the plugin"
+        )
 
     if "timeout" in entry:
         timeout = entry["timeout"]
@@ -147,6 +182,10 @@ def validate_hooks(candidate: Any) -> None:
     timeout?: int}]}``. Unknown event keys, wrong types, a non-``command`` hook type,
     an empty command, or a non-integer timeout reject the whole write (→ 422 via
     :func:`config_write.validate_candidate`), so a partial/garbled block never lands.
+    A ``command`` referencing ``${CLAUDE_PLUGIN_ROOT}`` is likewise rejected (#770) —
+    that interpolation only resolves inside a plugin's own ``hooks/hooks.json``, so its
+    presence marks the entry as plugin-owned content, and plugin hooks are read-only
+    through this surface (see :data:`_PLUGIN_ROOT_MARKER`).
 
     **STRUCTURE ONLY.** No ``command`` string is ever resolved, spawned, shell-parsed,
     or run — storing it is fine; executing it (even to "check" it) would be the RCE
