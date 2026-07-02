@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Close the launch popover promptly after Trust & start instead of holding it open through the whole spawn round-trip.
+The launch popover now closes as soon as you hit Trust & start, instead of lingering through the whole spawn.

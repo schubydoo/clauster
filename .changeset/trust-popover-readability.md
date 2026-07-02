@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Widen the launch popover and give the in-popover trust-on-start gate comfortable padding and readable line length so its body text no longer wraps to a cramped one-to-two words per line.
+Widen the launch popover so the trust-on-start text reads comfortably instead of wrapping to a word or two per line.

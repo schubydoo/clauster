@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Add opt-in `claude.node_from_nvm` to resolve nvm's default node bin dir onto the bridge PATH at spawn, fixing npx/node MCP servers under systemd (#792).
+Add an opt-in `claude.node_from_nvm` setting that puts your nvm-managed Node on the bridge's PATH, fixing npx/node MCP servers that failed to start under systemd.

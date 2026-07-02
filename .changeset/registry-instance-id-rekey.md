@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Re-key the runner registry by instance_id — one standard bridge per project, N interactive (pty) sessions.
+Allow one standard bridge and several interactive sessions to run side by side within a single project.

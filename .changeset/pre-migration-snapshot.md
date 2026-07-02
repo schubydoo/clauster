@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Auto-snapshot `clauster.db` via `VACUUM INTO` before a pending migration only, retaining the last 5 under `state_dir/backups/`.
+Automatically back up `clauster.db` before running a database migration, keeping the last 5 snapshots under `state_dir/backups/`.
