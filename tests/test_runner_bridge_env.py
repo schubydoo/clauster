@@ -145,3 +145,22 @@ def test_popen_keeper_appends_resolved_nvm_bin_dir(runner_config, monkeypatch, t
     env = _capture_env("keeper", runner, monkeypatch, tmp_path)
     assert env is not None
     assert env["PATH"] == os.pathsep.join(["/usr/bin", "/home/u/.nvm/versions/node/v20/bin"])
+
+
+def test_nvm_bin_dir_resolved_once_and_cached(runner_config, monkeypatch):
+    # Greptile #803: the nvm lookup shells bash (seconds on a slow mount), so it must be
+    # resolved ONCE per process and cached — not re-run on every spawn. Count the calls
+    # across several _bridge_env_overlay builds; the resolver fires exactly once.
+    calls = {"n": 0}
+
+    def _counting():
+        calls["n"] += 1
+        return "/home/u/.nvm/versions/node/v20/bin"
+
+    monkeypatch.setattr(procutil, "resolve_nvm_default_node_bin_dir", _counting)
+    runner = _runner_with_env(runner_config, node_from_nvm=True)
+    first = runner._bridge_env_overlay()
+    runner._bridge_env_overlay()
+    runner._bridge_env_overlay()
+    assert calls["n"] == 1  # resolved once, then served from cache
+    assert "/home/u/.nvm/versions/node/v20/bin" in first["PATH"]

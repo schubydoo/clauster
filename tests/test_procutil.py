@@ -453,6 +453,7 @@ def test_resolve_nvm_default_node_bin_dir_resolves_node(monkeypatch, tmp_path):
     bin_dir.mkdir(parents=True)
     node = bin_dir / "node"
     node.write_text("#!/bin/sh\n")
+    node.chmod(0o755)  # must be executable — the resolver rejects a non-executable node
 
     captured: dict = {}
 
@@ -487,6 +488,24 @@ def test_resolve_nvm_default_node_bin_dir_none_when_resolved_path_missing(monkey
 
     def _fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout="/nonexistent/node\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert procutil.resolve_nvm_default_node_bin_dir() is None
+
+
+def test_resolve_nvm_default_node_bin_dir_none_when_node_not_executable(monkeypatch, tmp_path):
+    # nvm printed a real file, but it isn't executable — appending its dir would leave
+    # node/npx MCP servers failing with the same symptom this feature fixes, so fail closed.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/bash")
+    bin_dir = tmp_path / "v18" / "bin"
+    bin_dir.mkdir(parents=True)
+    node = bin_dir / "node"
+    node.write_text("#!/bin/sh\n")
+    node.chmod(0o644)  # regular file, NOT executable
+
+    def _fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"{node}\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
     assert procutil.resolve_nvm_default_node_bin_dir() is None

@@ -462,7 +462,12 @@ def resolve_nvm_default_node_bin_dir(
         _log.debug("node_from_nvm: nvm lookup failed (%s): %s", nvm_home, exc)
         return None
     node_path = result.stdout.strip().splitlines()[-1].strip() if result.stdout.strip() else ""
-    if not node_path or not os.path.isfile(node_path):
-        _log.debug("node_from_nvm: no resolvable nvm 'default' node (NVM_DIR=%s)", nvm_home)
+    # Require an EXECUTABLE regular file: a present-but-non-executable node would still get
+    # its dir appended to PATH, and node/npx MCP servers would then fail with the exact
+    # connection symptom this feature exists to fix — so treat non-executable as unresolved.
+    if not node_path or not os.path.isfile(node_path) or not os.access(node_path, os.X_OK):
+        _log.debug(
+            "node_from_nvm: no resolvable executable nvm 'default' node (NVM_DIR=%s)", nvm_home
+        )
         return None
     return os.path.dirname(node_path)

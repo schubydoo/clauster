@@ -205,6 +205,14 @@ class SessionRunner:
         # ``spawn``). Keyed by project name — the per-project standard-singleton check
         # and pty-warning logic must run serially for the same project.
         self._spawn_locks: dict[str, asyncio.Lock] = {}
+        # Resolved-once cache for nvm's default node bin dir (claude.node_from_nvm, #792).
+        # The lookup shells bash (up to a few seconds on a slow home mount), so resolve it
+        # ONCE per process instead of on every spawn; a restart re-resolves (picks up an
+        # nvm-default change). ``_nvm_resolved`` gates the one-time compute; the dir stays
+        # None when nvm is absent/unresolvable. Value is written BEFORE the flag so a
+        # concurrent reader that sees the flag always sees the dir.
+        self._nvm_bin_dir: str | None = None
+        self._nvm_resolved = False
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
         # Install the resume-recap SessionStart hook once, before the first spawn.
@@ -1251,13 +1259,29 @@ class SessionRunner:
         claude = self._config.claude
         path_append = list(claude.path_append)
         if claude.node_from_nvm:
-            nvm_bin_dir = procutil.resolve_nvm_default_node_bin_dir()
+            nvm_bin_dir = self._resolved_nvm_bin_dir()
             if nvm_bin_dir:
                 # Appended last, like path_append itself: never overrides a dir
                 # already on PATH (e.g. an operator-supplied path_append entry, or
                 # an already-resolvable node), only fills a gap.
                 path_append.append(nvm_bin_dir)
         return procutil.bridge_env_overlay(path_append=path_append, env=claude.env, extra=extra)
+
+    def _resolved_nvm_bin_dir(self) -> str | None:
+        """Resolve nvm's default node bin dir once per process, then serve from cache (#792).
+
+        The resolver shells bash (up to its timeout on a slow ``$NVM_DIR`` / home mount).
+        This runs inside the spawn's ``to_thread`` worker (``_popen``/``_popen_keeper``),
+        so it never blocks the event loop — but re-shelling it on every spawn is wasteful
+        and adds worst-case latency to each one, so memoize it (Greptile #803). A restart
+        re-resolves, picking up an nvm-default change. The cache is a scalar (not the
+        loop-guarded registry); a concurrent first-spawn double-resolve is harmless
+        (idempotent compute, atomic assignment), so no lock is needed.
+        """
+        if not self._nvm_resolved:
+            self._nvm_bin_dir = procutil.resolve_nvm_default_node_bin_dir()
+            self._nvm_resolved = True  # set AFTER the value, so a racing reader sees the dir
+        return self._nvm_bin_dir
 
     def _popen(
         self,
