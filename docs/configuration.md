@@ -81,7 +81,7 @@ unknown per-project keys are ignored.
 | `tls` | TlsConfig \| null | `null` | Native HTTPS termination. Unset (default) = serve plain HTTP and rely on a reverse proxy / `tailscale serve` for TLS. Set `tls` to have Clauster terminate TLS itself. Two modes: `provision = off` (default) requires `cert_file` + `key_file` pointing at an existing cert + key (validated fail-closed); `provision = self-signed` generates a self-signed cert+key under `state_dir/tls/` automatically (`cryptography` package required). ACME is deferred to issue 774. |
 <!-- END GEN: clauster -->
 
-Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
+Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `api`, `logs`,
 `clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications`,
 `webhooks`, `claustrum`, `tls` — each documented below (`auth.reverse_proxy` is
 nested under `auth`).
@@ -219,6 +219,21 @@ projects:
        lock everyone out or be silently skipped).
 
 See [Security](security.md) and [Networking](networking.md) for the full matrix.
+
+## `api` — the versioned `/api/v1` public surface (`ApiConfig`)
+
+<!-- BEGIN GEN: api -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `openapi_enabled` | bool | `false` | Serve the OpenAPI docs (`/docs`) and schema (`/openapi.json`). **Off by default** — the documented HTTP surface isn't exposed until explicitly opted in. When `true`, both paths still require the same authentication as any `/api/...` route (a session cookie, reverse-proxy auth, or a Bearer token) whenever `auth.enabled` is set; an unauthenticated request gets a `401`, not a login redirect. |
+<!-- END GEN: api -->
+
+The dashboard's ~60 unversioned `/api/...` routes are unchanged and keep serving
+the Alpine frontend. Alongside them, `/api/v1/...` aliases the public, stable
+resource subset (project list, session reads, instance spawn/stop/resume, agent
+spawn/stop/resume) under the same handlers and the same auth gate — see
+[the public API guide](public-api.md) for the full route list and the
+`clauster api-token` CLI.
 
 ## `db` — persistence-layer knobs (`DbConfig`)
 
@@ -550,6 +565,7 @@ the browser. These are the day-to-day knobs that are safe to change at runtime:
 | `(top-level)` | `log_format` |
 | `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode`, `pty_screen_enabled` |
 | `instance_defaults` | `spawn_mode`, `permission_mode`, `verbose`, `session_name_prefix`, `capacity`, `max_bridges` |
+| `api` | `openapi_enabled` |
 | `claustrum` | `enabled`, `socket_path`, `spawn_timeout_seconds`, `keep_children`, `request_timeout_seconds` |
 | `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream`, `retention_max_age_days`, `retention_max_files`, `retention_max_total_mb` |
 | `reaper` | `ui_enabled` |

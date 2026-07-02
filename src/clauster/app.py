@@ -18,6 +18,7 @@ from typing import TypeVar
 import segno
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from jinja2_fragments.fastapi import Jinja2Blocks
 from sqlalchemy.exc import SQLAlchemyError
@@ -100,6 +101,71 @@ _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 # Result type for _spawn_or_http: the create route awaits a SpawnOutcome, the
 # resume route a bare RemoteControlInstance (#778) — same exception mapping.
 _SpawnT = TypeVar("_SpawnT")
+
+# The OpenAPI docs UI + schema — off by default, gated like any other /api/...
+# route when enabled (#302). Kept as a single set so the guard middleware and the
+# app-factory wiring share one definition of "which paths are the docs surface".
+_DOCS_PATHS = frozenset({"/docs", "/openapi.json"})
+
+# The public, documented `/api/v1` resource subset (#302): projects list, session
+# reads, instance spawn/stop/resume, agent spawn/stop/resume. Deliberately
+# excludes every HTML-fragment/partial route (`/api/projects/{name}/row`,
+# `/api/widget`, template endpoints) and the per-session `message` /
+# `permissions` / `forget` / `qr` routes, which stay internal/unversioned only.
+_V1_PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/projects"),
+        ("GET", "/api/sessions"),
+        ("GET", "/api/sessions/tracked"),
+        ("GET", "/api/sessions/adoptable"),
+        ("GET", "/api/instances"),
+        ("POST", "/api/instances"),
+        ("GET", "/api/instances/{instance_id}"),
+        ("DELETE", "/api/instances/{instance_id}"),
+        ("POST", "/api/instances/{instance_id}/resume"),
+        ("GET", "/api/agents"),
+        ("POST", "/api/agents"),
+        ("DELETE", "/api/agents/{job_id}"),
+        ("POST", "/api/agents/{job_id}/resume"),
+    }
+)
+
+
+def _mirror_v1_routes(app: FastAPI, public: frozenset[tuple[str, str]]) -> None:
+    """Alias the public resource subset under ``/api/v1`` (#302), DRY.
+
+    Must run AFTER every ``/api/...`` route in ``public`` is registered — it
+    walks the routes already on ``app`` and, for each ``(method, path)`` match,
+    re-registers the SAME ``endpoint`` callable (and its ``status_code`` /
+    ``response_model``) under ``/api/v1/...``. No handler is copy-pasted, so the
+    v1 alias can never drift from the internal route's behaviour.
+
+    Fails loudly (``RuntimeError``) if any entry in ``public`` matches no
+    registered route — a renamed/removed internal route must break the build,
+    not silently vanish from the documented v1 surface.
+    """
+    found: set[tuple[str, str]] = set()
+    for route in list(app.router.routes):
+        if not isinstance(route, APIRoute):
+            continue
+        for method in (route.methods or set()) - {"HEAD"}:
+            key = (method, route.path)
+            if key not in public:
+                continue
+            found.add(key)
+            app.add_api_route(
+                "/api/v1" + route.path[len("/api") :],
+                route.endpoint,
+                methods=[method],
+                status_code=route.status_code,
+                response_model=route.response_model,
+                name=f"v1_{route.name}",
+                tags=["v1"],
+            )
+    missing = public - found
+    if missing:
+        raise RuntimeError(f"clauster: /api/v1 alias target(s) not found: {sorted(missing)}")
+
 
 # Content-Security-Policy for every response (defence-in-depth; #428). The CSRF
 # Origin gate already blocks cross-origin state changes, so this is a fallback
@@ -363,11 +429,22 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await runner.shutdown()  # cancel poll task; leave bridges running (survive re-exec)
             runner.persistence.dispose()  # close the DB engine's connection pool
 
+    # OpenAPI docs (#302): off by default (explicit, not the FastAPI implicit
+    # default) — `/docs` + `/openapi.json` simply aren't registered as routes
+    # unless `api.openapi_enabled` is set. `redoc_url` is always None: the docs
+    # surface is one UI (`/docs`), not two undocumented ones. When enabled, both
+    # paths are still gated by the `guard` middleware below like any other
+    # `/api/...` route.
+    _docs_url = "/docs" if config.api.openapi_enabled else None
+    _openapi_url = "/openapi.json" if config.api.openapi_enabled else None
     app = FastAPI(
         title="Clauster",
         version=__version__,
         root_path=config.root_path,
         lifespan=lifespan,
+        docs_url=_docs_url,
+        redoc_url=None,
+        openapi_url=_openapi_url,
     )
     app.state.config = config
     app.state.runner = runner
@@ -414,6 +491,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         runner.persistence.hosted_state_store(),
         on_permission_needed=_on_hosted_permission_needed,
     )
+    # Named public-API bearer tokens (#302): the CLI (`clauster api-token ...`)
+    # owns issue/list/rotate/revoke; the running app only ever reads it, on the
+    # request hot path via `_authenticate` below.
+    api_token_store = runner.persistence.api_token_store()
     # Let the poll loop's `agents --json` cross-check recognize our own hosted
     # sessions (claustrum channel) so it never mislabels them EXTERNAL/unmanaged (#592).
     runner.set_hosted_provider(app.state.hosted.list_instances)
@@ -489,7 +570,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # worker, so the in-memory value is authoritative.
     app.state.session_epoch = auth.read_epoch(config.state_dir)
 
-    def _authenticate(scope) -> tuple[str | None, bool, bool]:
+    async def _authenticate(scope) -> tuple[str | None, bool, bool]:
         """Return (user, via_proxy, via_token) for the request/connection.
 
         Works for both Request and WebSocket (both expose
@@ -521,12 +602,24 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # only as trustworthy as the proxy's must-strip-inbound discipline — see the
                 # require_hmac config doc and docs/networking.md.
                 return remote_user, True, False
-        # API token (#360): an Authorization: Bearer credential, hashed at rest.
-        # A token is one more enforced-auth METHOD behind the same auth.enabled
-        # master switch — never a bypass of it (the guard still gates on enabled).
+        # API token (#360, extended #302): an Authorization: Bearer credential,
+        # hashed at rest. A token is one more enforced-auth METHOD behind the same
+        # auth.enabled master switch — never a bypass of it (the guard still gates
+        # on enabled). Two sources, checked cheapest-first:
+        #   1. the legacy single `config.auth.api_token_hash` (in-memory, no DB —
+        #      kept working forever for backward compat, #302);
+        #   2. a named token from the `api_tokens` table (`clauster api-token
+        #      issue/rotate`), looked up by exact hash match off-loop so a
+        #      revoked/rotated token stops authenticating immediately — no
+        #      in-process cache to go stale.
         presented = auth.parse_bearer(scope.headers.get("authorization"))
-        if presented and auth.verify_token(presented, config.auth.api_token_hash):
-            return _SESSION_USER, False, True
+        if presented:
+            if auth.verify_token(presented, config.auth.api_token_hash):
+                return _SESSION_USER, False, True
+            presented_hash = auth.hash_token(presented)
+            if await asyncio.to_thread(api_token_store.is_active_hash, presented_hash):
+                await asyncio.to_thread(api_token_store.touch_last_used, presented_hash)
+                return _SESSION_USER, False, True
         user = auth.read_session(
             _serializer,
             scope.cookies.get(_SESSION_COOKIE),
@@ -613,7 +706,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def guard(request: Request, call_next):
         if not config.auth.enabled:
             return await call_next(request)
-        user, via_proxy, via_token = _authenticate(request)
+        user, via_proxy, via_token = await _authenticate(request)
         # CSRF: an unsafe method needs a trusted Origin — unless the credential is
         # non-cookie. A proxy HMAC is already bound to method+path; a Bearer token
         # carries no ambient cookie a cross-site page could ride, and a browser
@@ -627,6 +720,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         ):
             return JSONResponse({"detail": "origin check failed"}, status_code=403)
         if _is_public(request.url.path):
+            return await call_next(request)
+        if request.url.path in _DOCS_PATHS:
+            # OpenAPI docs (#302): disabled means the route was never registered
+            # (docs_url/openapi_url=None), so let the request fall through to the
+            # router's own 404 instead of the login redirect every other HTML path
+            # gets below. Enabled means gate exactly like the JSON API — a 401,
+            # not a browser redirect (the docs UI is for API clients).
+            if not config.api.openapi_enabled:
+                return await call_next(request)
+            if user is None:
+                return JSONResponse({"detail": "authentication required"}, status_code=401)
             return await call_next(request)
         if user is None:
             # A valid scrape token grants /metrics access without a session (Prometheus
@@ -691,7 +795,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_form(request: Request) -> Response:
-        if _authenticate(request)[0]:
+        if (await _authenticate(request))[0]:
             return RedirectResponse(f"{_root}/", status_code=303)
         return _render(request, "login.html", {"error": None})
 
@@ -756,7 +860,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def healthz(request: Request) -> dict:
         # Unauthenticated callers get only liveness when auth is enabled — don't
         # leak claude version / running count on a public reverse-proxy deploy.
-        if config.auth.enabled and _authenticate(request)[0] is None:
+        if config.auth.enabled and (await _authenticate(request))[0] is None:
             return {"status": "ok"}
         try:
             version = await asyncio.to_thread(claude_cli.claude_version, config.claude.binary)
@@ -2533,9 +2637,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         segno.make(target, error="m").save(buf, kind="svg", scale=4, border=2)
         return Response(content=buf.getvalue(), media_type="image/svg+xml")
 
-    def _ws_authorized(websocket: WebSocket) -> bool:
+    async def _ws_authorized(websocket: WebSocket) -> bool:
         """Strict Origin check + session/proxy/token auth, BEFORE accepting (D12)."""
-        user, _via_proxy, via_token = _authenticate(websocket)
+        user, _via_proxy, via_token = await _authenticate(websocket)
         if user is None:
             return False
         # The Origin allowlist is a cross-site WS-hijack defense for ambient
@@ -2551,7 +2655,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.websocket("/ws/bridge-log/{instance_id}")
     async def ws_bridge_log(websocket: WebSocket, instance_id: str) -> None:
         """Tail the bridge debug log — ANSI-stripped and ID-redacted (feature 6, D11)."""
-        if config.auth.enabled and not _ws_authorized(websocket):
+        if config.auth.enabled and not await _ws_authorized(websocket):
             await websocket.close(
                 code=1008
             )  # validate before accept — never open an unauthed socket
@@ -2594,7 +2698,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.websocket("/ws/hosted/{instance_id}")
     async def ws_hosted(websocket: WebSocket, instance_id: str) -> None:
         """Stream a hosted session's live events, replaying the ring past ``?after=``."""
-        if config.auth.enabled and not _ws_authorized(websocket):
+        if config.auth.enabled and not await _ws_authorized(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
@@ -2622,7 +2726,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.websocket("/ws/clone-progress/{job_id}")
     async def ws_clone_progress(websocket: WebSocket, job_id: str) -> None:
         """Stream a clone job's ``{phase, percent}`` progress, then a terminal frame."""
-        if config.auth.enabled and not _ws_authorized(websocket):
+        if config.auth.enabled and not await _ws_authorized(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
@@ -2662,7 +2766,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         The wire carries only pyte-rendered cells + cursor + state, never raw ANSI, so the
         at-rest redaction invariant holds end to end.
         """
-        if config.auth.enabled and not _ws_authorized(websocket):
+        if config.auth.enabled and not await _ws_authorized(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
@@ -2747,5 +2851,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request) -> Response:
         return _render(request, "dashboard.html", await _dashboard_context())
+
+    # Must run LAST: every /api/... route the public v1 surface aliases has to
+    # already be registered above (#302).
+    _mirror_v1_routes(app, _V1_PUBLIC_ROUTES)
 
     return app

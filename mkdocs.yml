@@ -54,6 +54,7 @@ nav:
   - Quickstart: quickstart.md
   - Installation: installation.md
   - Configuration: configuration.md
+  - Public API: public-api.md
   - Security: security.md
   - Privacy: privacy.md
   - Networking: networking.md

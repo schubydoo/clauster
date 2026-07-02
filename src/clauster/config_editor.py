@@ -30,6 +30,7 @@ from .config_write import hash_bytes
 # file/CLI-managed). Keep in sync with scratch/fe3-config-editor-spike.md.
 EDITABLE_FIELDS: tuple[str, ...] = (
     "log_format",
+    "api.openapi_enabled",
     "claude.min_version",
     "claude.agents_json_poll_interval_seconds",
     "claude.startup_grace_seconds",

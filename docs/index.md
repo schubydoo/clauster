@@ -86,6 +86,7 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 
 - [Installation](installation.md) — pip / uv, Docker / Compose, running.
 - [Configuration](configuration.md) — the complete `clauster.yml` reference.
+- [Public API](public-api.md) — the versioned `/api/v1` surface and `clauster api-token` CLI.
 - [Security](security.md) — trust model, auth, redaction.
 - [Privacy](privacy.md) — what Clauster keeps on disk, and how to purge it.
 - [Networking](networking.md) — the loopback / non-loopback auth matrix.

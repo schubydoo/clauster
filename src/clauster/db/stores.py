@@ -36,12 +36,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import HostedSession, Instance, Project, SessionEvent
+from ..auth import mint_token
+from .models import ApiToken, HostedSession, Instance, Project, SessionEvent
 
 _log = logging.getLogger("clauster.db.stores")
 
@@ -487,3 +489,161 @@ class SessionHistoryStore:
         except SQLAlchemyError as exc:
             _log.warning("batch sortmeta read failed, degrading to empty: %s", exc)
             return {}
+
+
+@dataclass(frozen=True)
+class ApiTokenRecord:
+    """One named API token as the read API hands it out — never the hash or raw secret.
+
+    ``clauster api-token list`` prints exactly these three fields; the SHA-256
+    ``token_hash`` backing the row is an internal verification detail and is
+    deliberately not part of this value object.
+    """
+
+    label: str
+    created_at: datetime
+    last_used_at: datetime | None = None
+
+
+def _to_token_record(row: ApiToken) -> ApiTokenRecord:
+    """Map a persisted row to the read API's value object (hash excluded on purpose)."""
+    return ApiTokenRecord(
+        label=row.label, created_at=row.created_at, last_used_at=row.last_used_at
+    )
+
+
+class ApiTokenStore:
+    """Named public-API bearer tokens, backed by the ``api_tokens`` table (#302).
+
+    CLI-first (``clauster api-token issue|list|rotate|revoke``): the running app
+    only ever calls :meth:`is_active_hash` (per-request auth check) and
+    :meth:`touch_last_used` (best-effort bookkeeping on a successful auth); every
+    mutating verb here is driven by the CLI, which owns its own short-lived
+    :class:`~clauster.db.persistence.Persistence`.
+
+    Reads are fail-closed: a DB error degrades ``is_active_hash`` to ``False``
+    (deny) and ``list_all`` to ``[]`` — mirroring :class:`StateStore` /
+    :class:`HostedStateStore`, never a crash on a hiccup. ``touch_last_used`` is
+    best-effort and swallows write errors — a lost bookkeeping update must never
+    fail the request it authenticated.
+    """
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        """Bind the store to a session factory (the shared engine's ``sessionmaker``)."""
+        self._sessions = session_factory
+
+    def list_all(self) -> list[ApiTokenRecord]:
+        """Return every named token, oldest first.
+
+        Raises :class:`OSError` on a DB failure (mirrors :meth:`revoke`) — a locked
+        or corrupt DB must surface as an error, never degrade to ``[]``: an operator
+        auditing tokens would read that as "no bearer tokens exist" while existing
+        rows may still authenticate once the DB recovers. Fail closed, never silently.
+        """
+        try:
+            with self._sessions() as session:
+                rows = (
+                    session.execute(select(ApiToken).order_by(ApiToken.created_at)).scalars().all()
+                )
+                return [_to_token_record(row) for row in rows]
+        except SQLAlchemyError as exc:
+            raise OSError(f"api-token list failed: {exc}") from exc
+
+    def issue(self, label: str) -> tuple[str, ApiTokenRecord]:
+        """Mint + persist a new named token; return ``(raw_token, record)``.
+
+        The raw token is generated here and returned to the caller exactly once
+        (mirrors :func:`clauster.auth.mint_token` everywhere else) — only its hash
+        is ever written to the table. Raises :class:`ValueError` if ``label`` is
+        already taken (never silently rotates an existing token under a caller's
+        back) and :class:`OSError` on any other DB failure.
+        """
+        raw, token_hash = mint_token()
+        try:
+            with self._sessions() as session, session.begin():
+                existing = session.execute(
+                    select(ApiToken.id).where(ApiToken.label == label)
+                ).scalar_one_or_none()
+                if existing is not None:
+                    raise ValueError(f"a token labeled {label!r} already exists")
+                row = ApiToken(label=label, token_hash=token_hash)
+                session.add(row)
+                session.flush()
+                record = _to_token_record(row)
+        except SQLAlchemyError as exc:
+            raise OSError(f"api-token issue failed: {exc}") from exc
+        return raw, record
+
+    def rotate(self, label: str) -> tuple[str, ApiTokenRecord]:
+        """Mint a fresh secret for an existing label; return ``(raw_token, record)``.
+
+        The label and ``created_at`` are preserved (the identity persists across a
+        rotation); ``last_used_at`` resets to ``None`` since the new secret is
+        unused. Raises :class:`ValueError` if no token has that label.
+        """
+        raw, token_hash = mint_token()
+        try:
+            with self._sessions() as session, session.begin():
+                row = session.execute(
+                    select(ApiToken).where(ApiToken.label == label)
+                ).scalar_one_or_none()
+                if row is None:
+                    raise ValueError(f"no token labeled {label!r}")
+                row.token_hash = token_hash
+                row.last_used_at = None
+                session.flush()
+                record = _to_token_record(row)
+        except SQLAlchemyError as exc:
+            raise OSError(f"api-token rotate failed: {exc}") from exc
+        return raw, record
+
+    def revoke(self, label: str) -> bool:
+        """Delete the token labeled ``label``; return whether one was found.
+
+        Raises :class:`OSError` on a DB failure so the CLI never reports a
+        successful revoke that didn't actually happen (fail-closed: a caller
+        must be able to trust a `True` return).
+        """
+        try:
+            with self._sessions() as session, session.begin():
+                result = session.execute(delete(ApiToken).where(ApiToken.label == label))
+                # Session.execute is typed Result[Any]; DML statements return a
+                # CursorResult at runtime, which is what carries rowcount.
+                return cast(CursorResult, result).rowcount > 0
+        except SQLAlchemyError as exc:
+            raise OSError(f"api-token revoke failed: {exc}") from exc
+
+    def is_active_hash(self, token_hash: str) -> bool:
+        """Whether ``token_hash`` matches a currently-issued named token.
+
+        Fail-closed: a DB error denies rather than authenticates. Called on the
+        request hot path (via ``asyncio.to_thread``), so this is a single indexed
+        equality lookup — no full-table scan.
+        """
+        try:
+            with self._sessions() as session:
+                row = session.execute(
+                    select(ApiToken.id).where(ApiToken.token_hash == token_hash)
+                ).scalar_one_or_none()
+                return row is not None
+        except SQLAlchemyError as exc:
+            _log.warning("api-token verify failed, denying: %s", exc)
+            return False
+
+    def touch_last_used(self, token_hash: str) -> None:
+        """Best-effort ``last_used_at`` bump for the token matching ``token_hash``.
+
+        Swallows any DB error (logged, not raised) — bookkeeping must never fail
+        the request it just authenticated. A no-op if ``token_hash`` matches no
+        row (e.g. the legacy ``config.auth.api_token_hash`` path, which has no
+        table row to update).
+        """
+        try:
+            with self._sessions() as session, session.begin():
+                session.execute(
+                    update(ApiToken)
+                    .where(ApiToken.token_hash == token_hash)
+                    .values(last_used_at=datetime.now(UTC))
+                )
+        except SQLAlchemyError as exc:
+            _log.warning("could not record api-token last-used: %s", exc)

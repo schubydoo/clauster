@@ -25,6 +25,7 @@ from typing import Literal, Union, get_args, get_origin
 from pydantic import BaseModel
 
 from clauster.config import (
+    ApiConfig,
     AuthConfig,
     ClaudeConfig,
     ClausterConfig,
@@ -57,6 +58,7 @@ SECTIONS: list[tuple[str, type[BaseModel]]] = [
     ("auth", AuthConfig),
     ("db", DbConfig),
     ("reverse_proxy", ReverseProxyConfig),
+    ("api", ApiConfig),
     ("logs", LogsConfig),
     ("clone", CloneConfig),
     ("reaper", ReaperConfig),
