@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 import psutil
 
@@ -428,3 +430,85 @@ def test_bridge_env_overlay_drops_secret_env_through_child_env(monkeypatch):
     assert env["FOO"] == "bar"
     assert env["PATH"] == os.pathsep.join(["/usr/bin", "/opt/tools"])
     assert "CLAUSTER_SESSION_SECRET" not in env  # scrubbed by child_env, never reaches the bridge
+
+
+# -- resolve_nvm_default_node_bin_dir (#792: npx/node MCP servers under systemd) -----------
+
+
+def test_resolve_nvm_default_node_bin_dir_none_on_windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert procutil.resolve_nvm_default_node_bin_dir() is None
+
+
+def test_resolve_nvm_default_node_bin_dir_none_without_bash(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert procutil.resolve_nvm_default_node_bin_dir() is None
+
+
+def test_resolve_nvm_default_node_bin_dir_resolves_node(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/bash")
+    bin_dir = tmp_path / "v18.20.4" / "bin"
+    bin_dir.mkdir(parents=True)
+    node = bin_dir / "node"
+    node.write_text("#!/bin/sh\n")
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"{node}\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    result = procutil.resolve_nvm_default_node_bin_dir(nvm_dir=str(tmp_path / ".nvm"))
+    assert result == str(bin_dir)
+    # NVM_DIR travels via the subprocess env, never interpolated into the script text.
+    assert captured["env"]["NVM_DIR"] == str(tmp_path / ".nvm")
+    assert captured["cmd"][0] == "/bin/bash"
+
+
+def test_resolve_nvm_default_node_bin_dir_none_when_no_default_alias(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/bash")
+
+    def _fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="N/A\n")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert procutil.resolve_nvm_default_node_bin_dir() is None
+
+
+def test_resolve_nvm_default_node_bin_dir_none_when_resolved_path_missing(monkeypatch):
+    # nvm printed a path but the file doesn't exist (stale/garbled output) — fail closed.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/bash")
+
+    def _fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="/nonexistent/node\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert procutil.resolve_nvm_default_node_bin_dir() is None
+
+
+def test_resolve_nvm_default_node_bin_dir_none_on_timeout(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/bash")
+
+    def _fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 5.0))
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert procutil.resolve_nvm_default_node_bin_dir() is None
+
+
+def test_resolve_nvm_default_node_bin_dir_none_on_oserror(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/bash")
+
+    def _fake_run(cmd, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert procutil.resolve_nvm_default_node_bin_dir() is None

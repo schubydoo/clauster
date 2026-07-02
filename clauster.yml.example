@@ -40,6 +40,11 @@ claude:
   # path_append:                   # dirs appended to the bridge subprocess PATH so a `claude`
   #   - "~/.local/bin"             # session can resolve user-local tools a minimal service PATH
   #                                # omits. `~` expanded; appended after (never replacing) PATH.
+  # node_from_nvm: false           # opt-in: resolve nvm's `default` node at each bridge spawn
+  #                                # and append its bin dir to the bridge PATH (after
+  #                                # path_append). Fixes npx/node MCP servers (codecov,
+  #                                # context7, ...) failing to connect under systemd — see
+  #                                # docs/configuration.md#claude-binary-bridge-spawn-claudeconfig
   # env:                           # extra env for the bridge; applied after the secret scrub,
   #   FOO: bar                     # so a key matching a Clauster secret name is dropped.
 

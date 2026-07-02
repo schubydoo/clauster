@@ -1242,14 +1242,22 @@ class SessionRunner:
 
         Returns an ``extra`` mapping for :func:`procutil.child_env`, merging the
         operator's ``claude.env`` and a ``PATH`` extended by ``claude.path_append``
-        with any caller ``extra`` (e.g. resume-recap flags). Passing it through
-        ``child_env`` re-scrubs Clauster secrets, so config can never re-introduce
-        a scrubbed credential name.
+        (plus, when ``claude.node_from_nvm`` is on, nvm's resolved ``default`` node
+        bin dir appended last — see :func:`procutil.resolve_nvm_default_node_bin_dir`
+        and issue #792) with any caller ``extra`` (e.g. resume-recap flags). Passing
+        it through ``child_env`` re-scrubs Clauster secrets, so config can never
+        re-introduce a scrubbed credential name.
         """
         claude = self._config.claude
-        return procutil.bridge_env_overlay(
-            path_append=claude.path_append, env=claude.env, extra=extra
-        )
+        path_append = list(claude.path_append)
+        if claude.node_from_nvm:
+            nvm_bin_dir = procutil.resolve_nvm_default_node_bin_dir()
+            if nvm_bin_dir:
+                # Appended last, like path_append itself: never overrides a dir
+                # already on PATH (e.g. an operator-supplied path_append entry, or
+                # an already-resolvable node), only fills a gap.
+                path_append.append(nvm_bin_dir)
+        return procutil.bridge_env_overlay(path_append=path_append, env=claude.env, extra=extra)
 
     def _popen(
         self,
