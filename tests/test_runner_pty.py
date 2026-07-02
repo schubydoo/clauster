@@ -1020,3 +1020,66 @@ def test_backfill_starter_session_from_debug_file_on_resume(runner_config, tmp_p
     runner._backfill_starter_session(inst, tmp_path / "noproj")  # no pointer at this path
     assert inst.starter_session_id == "session_01RESUMEDXYZABC"
     assert inst.session_url == "https://claude.ai/code/session_01RESUMEDXYZABC?from=cli"
+
+
+# ----- spawn_detailed outcome reporting (#778) --------------------------------------
+
+
+async def test_spawn_detailed_standard_cap_reports_reused(runner_config) -> None:
+    """The standard-singleton cap reports created=False + the cap reason (#778).
+
+    The first spawn reports created=True; the second comes back created=False with
+    the SAME instance and a reason naming the one-per-project cap — the signal the
+    API turns into a 200-with-reason instead of a silent no-op.
+    """
+    runner, _ = _pty_runner(runner_config)
+    first = await runner.spawn_detailed("alpha", resume_mode="standard")
+    assert first.created is True and first.reason is None and first.warnings == []
+    try:
+        second = await runner.spawn_detailed("alpha", resume_mode="standard")
+        assert second.created is False
+        assert second.instance is first.instance
+        assert "capped at one per project" in second.reason
+        assert runner.running_count() == 1  # nothing new was launched
+    finally:
+        await runner.stop(first.instance.instance_id)
+
+
+@_POSIX_ONLY
+async def test_spawn_detailed_pty_no_worktree_surfaces_warning(runner_config) -> None:
+    """A pty spawn without a worktree carries the collision advisory on the outcome (#778).
+
+    The warning is non-blocking (the session still launches, created=True); a spawn
+    WITH a worktree carries no advisory. This is what the API surfaces as warnings[].
+    """
+    runner, _ = _pty_runner(runner_config)
+    bare = await runner.spawn_detailed("alpha", resume_mode="pty")
+    try:
+        assert bare.created is True
+        assert any("without a worktree" in w for w in bare.warnings)
+        assert bare.instance.status is InstanceStatus.RUNNING  # warn, never block
+    finally:
+        await runner.stop(bare.instance.instance_id)
+    isolated = await runner.spawn_detailed("alpha", resume_mode="pty", spawn_mode="worktree")
+    try:
+        assert isolated.created is True and isolated.warnings == []
+    finally:
+        await runner.stop(isolated.instance.instance_id)
+
+
+@_POSIX_ONLY
+async def test_spawn_detailed_resume_of_live_pty_reports_reused(runner_config) -> None:
+    """An idempotent resume of an already-live pty session reports created=False (#778)."""
+    runner, _ = _pty_runner(runner_config)
+    pty = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
+    assert pty.status is InstanceStatus.RUNNING
+    try:
+        again = await runner.spawn_detailed(
+            "alpha", resume_mode="pty", resume=True, resume_target=pty
+        )
+        assert again.created is False
+        assert again.instance is pty
+        assert "already" in again.reason
+        assert runner.running_count() == 1  # no duplicate keeper
+    finally:
+        await runner.stop(pty.instance_id)
