@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
@@ -46,16 +47,14 @@ def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config):
     on = TestClient(create_app(load_config(write_config("claude:\n  pty_screen_enabled: true\n"))))
     body = on.get("/").text
     assert "/static/vendor/xterm/js/xterm.js" in body
-    assert (
-        "togglePtyScreen(i.project)" in body
-    )  # the button @click (Jinja-gated, not the JS method)
+    assert "togglePtyScreen(i.rk)" in body  # the button @click (Jinja-gated, not the JS method)
     assert "i.resume_mode === 'pty'" in body
     assert "#ic-terminal" in body
 
     off = TestClient(create_app(load_config(write_config())))  # default: flag off
     body_off = off.get("/").text
     assert "/static/vendor/xterm/js/xterm.js" not in body_off
-    assert "togglePtyScreen(i.project)" not in body_off
+    assert "togglePtyScreen(i.rk)" not in body_off
 
 
 def test_live_terminal_client_side_fit_wiring(write_config):
@@ -472,7 +471,7 @@ def test_dashboard_reconnect_button_resets_retry_cap(write_config):
     # `manual=true`, and openLogs resets attempts to 0 for a manual retry (carries it only on
     # the auto-reconnect re-entry, so the cap still bounds an unattended retry burst).
     page = _client(write_config).get("/").text
-    assert re.search(r"openLogs\(i\.project,\s*true\)", page)  # the Reconnect button
+    assert re.search(r"openLogs\(i\.rk,\s*true\)", page)  # the Reconnect button
     assert re.search(r"openLogs\(name,\s*manual\s*=\s*false\)", page)  # default = auto-reconnect
     assert re.search(r"attempts:\s*\(prev\s*&&\s*!manual\)\s*\?\s*prev\.attempts\s*:\s*0", page)
 
@@ -482,7 +481,7 @@ def test_dashboard_live_tail_banners_are_mutually_exclusive(write_config):
     # machine sets one and clears the other on every transition, the info banner is gated on
     # `!lost` too so a missed clear (an Alpine reactivity edge, cf. #310/#315) can't render BOTH.
     page = _client(write_config).get("/").text
-    assert re.search(r"logs\[i\.project\]\.reconnecting\s*&&\s*!logs\[i\.project\]\.lost", page)
+    assert re.search(r"logs\[i\.rk\]\.reconnecting\s*&&\s*!logs\[i\.rk\]\.lost", page)
 
 
 def test_dashboard_disconnect_copy_is_liveness_aware(write_config):
@@ -493,8 +492,8 @@ def test_dashboard_disconnect_copy_is_liveness_aware(write_config):
     assert "the bridge may have stopped" in page  # only when not alive
     assert "the bridge is still running" in page  # transient tail drop, bridge alive
     # The alarming copy must be liveness-gated, not unconditional.
-    assert re.search(r"!isRunning\(i\.project\)\s*&&\s*!isBusy\(i\.project\)", page)
-    assert re.search(r"isRunning\(i\.project\)\s*\|\|\s*isBusy\(i\.project\)", page)
+    assert re.search(r"!isRunning\(i\.rk\)\s*&&\s*!isBusy\(i\.rk\)", page)
+    assert re.search(r"isRunning\(i\.rk\)\s*\|\|\s*isBusy\(i\.rk\)", page)
 
 
 def test_dashboard_hosted_view_token_guard(write_config):
@@ -598,14 +597,14 @@ def test_dashboard_explains_missing_connect_url(write_config):
     assert "connectUrlMissing(name) {" in page  # the transient-gap helper
     assert "connectUrlUnavailable(name) {" not in page  # the pty 'no URL ever' split is removed
     assert "No web link" not in page  # the false 'permanent no link' copy is gone for good
-    assert 'x-show="connectUrlMissing(i.project)"' in page  # single placeholder gate, both modes
+    assert 'x-show="connectUrlMissing(i.rk)"' in page  # single placeholder gate, both modes
     assert "Preparing connect link" in page  # the transient spinner copy (visual chip)
     # The visual chip is aria-hidden; the SR announcement is a PERSISTENT aria-live region
     # (always mounted, content-toggled) — a live region shown in via x-show is silently skipped
     # by NVDA/VoiceOver (Greptile P2). Assert that wiring.
     assert "connectStatusText(name) {" in page  # the live-region text helper ships
     assert (
-        '<span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.project)">'
+        '<span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.rk)">'
         in page
     )
     # The announced string mirrors the visible chip label word-for-word, so the SR and sighted
@@ -792,7 +791,7 @@ def test_dashboard_resume_controls_render(write_config):
     resp = _client(write_config).get("/")
     assert resp.status_code == 200
     assert ">Resume</button>" in resp.text
-    assert "resume(i.project)" in resp.text  # bridge resume affordance
+    assert "resume(i.rk)" in resp.text  # bridge resume affordance
     assert ">Start new session</button>" not in resp.text  # the start-new button is gone
 
 
@@ -817,7 +816,7 @@ def test_recent_zone_rows_decoupled_from_live_filter(write_config):
     assert (
         'badge bg-purple-lt mode-badge me-1">background' in recent
     )  # detached_row(filtered=False)
-    assert "resume(i.project)" in recent  # ended-bridge row still present
+    assert "resume(i.rk)" in recent  # ended-bridge row still present
     # …but NONE of them carry the live-session-filter x-show.
     assert not live_filter.search(recent)
 
@@ -1036,15 +1035,65 @@ def test_dashboard_actions_deref_displayed_instance_id(write_config):
     possibly-hidden other bridge.
     """
     page = _client(write_config).get("/").text
-    assert "bridgeIdOf(name) {" in page  # the deref helper ships
+    assert "bridgeIdOf(key) {" in page  # the deref helper ships (key-aware, #779)
     assert ".instance_id || null; }" in page  # no name fallback — null means refuse
     # Every action entry point routes through the refuse-while-unminted guard:
     # resume / stop / forget / log-tail ws / pty-screen ws.
-    assert page.count("this._requireBridgeId(name)") >= 5
+    by_name = page.count("this._requireBridgeId(name)")
+    by_key = page.count("this._requireBridgeId(key)")
+    assert by_name + by_key >= 5
     assert "still starting — try again in a moment" in page  # the refusal is explained
     # No raw project-name identity remains on the instance API/ws call sites.
     assert 'fetch(ROOT + "/api/instances/" + encodeURIComponent(name)' not in page
     assert '"/ws/pty-screen/" + encodeURIComponent(name)' not in page
     assert '"/ws/bridge-log/" + encodeURIComponent(name)' not in page
-    # Resume must capture the id BEFORE swapping in the optimistic placeholder.
-    assert "pin the displayed row BEFORE the optimistic swap" in page
+
+
+def test_dashboard_multi_session_client_plumbing(write_config):
+    """The client splits pty sessions out of the project-keyed map (#779).
+
+    N interactive sessions per project render as id-keyed rows (rk = instance_id)
+    beside the single standard bridge; a pending pty launch shows an explicit stub;
+    spawn advisories (warnings[]) surface as toasts.
+    """
+    page = _client(write_config).get("/").text
+    # The fold: pty rows go to the flat id-keyed collection, never the project map.
+    assert "ptySessions" in page
+    assert 'if (i.resume_mode === "pty") pty.push(i); else next[i.project] = i;' in page
+    assert "_stamp(i) { i.rk = i.instance_id || i.project; return i; }" in page
+    # Rows key by rk in both zones (the project name is not unique any more).
+    assert page.count(':key="i.rk"') == 2  # Active + Recent bridge loops
+    # Pending interactive-launch stub (no row exists until the POST returns).
+    assert 'data-test="pty-pending-row"' in page
+    assert "Starting interactive session…" in page
+    # Spawn advisories from the outcome keys (#778) surface as toasts.
+    assert 'for (const w of body.warnings || []) this.toast(w, "warning");' in page
+    assert "body.created === false && body.reason" in page
+    # Session-shape chips: interactive + worktree markers on the row head.
+    assert ">interactive</span>" in page
+    assert ">worktree</span>" in page
+    # Project-level rollups see the split-out pty collection too (Greptile P2s on #800):
+    # the restart-impact count includes live interactive sessions, and _absorbRow drops
+    # a stale project-keyed placeholder from the id index.
+    assert "const pty = this.ptySessions.filter((s) => liveStatuses.includes(s.status));" in page
+    assert "delete this._byId[body.project];" in page
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the pty launch controls are POSIX-only")
+def test_launch_popover_pty_worktree_controls(write_config):
+    """The Spawn picker applies to interactive sessions; the collision hint warns (#779).
+
+    pty honors same-dir/worktree (worktree = `claude --worktree`), so the picker is no
+    longer hidden in pty mode; only the standard-only `session` option is disabled
+    (and coerced away). The no-worktree collision hint warns without blocking. The
+    whole block is `pty_supported`-gated markup, so it never renders on Windows.
+    """
+    page = _client(write_config).get("/").text
+    # The old pty gate hid the whole Spawn column — it must be gone.
+    assert '''x-show="(resumeMode['alpha'] || defaultResumeMode) !== 'pty'"''' not in page
+    # `session` stays standard-only: disabled in pty mode, coerced back to same-dir.
+    assert "coercePtySpawn(" in page
+    assert '''=== 'pty'"''' in page  # the :disabled gate renders
+    # The warn-don't-block collision hint (git projects, where worktree is offered).
+    assert 'data-test="pty-collision-hint"' in page
+    assert "choose\n                              Spawn: worktree to isolate this one." in page

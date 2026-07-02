@@ -1621,9 +1621,10 @@ def test_dashboard_busy_flags_reset_in_finally(write_config, tmp_path):
 
 def test_dashboard_renders_bridge_forget_button(write_config, tmp_path):
     html = _client(write_config, tmp_path).get("/").text
-    assert '@click="forget(i.project)"' in html  # bridge Forget in Recent/resumable
-    # Coerced so the busy-state binding isn't stuck-disabled on first paint.
-    assert ':disabled="!!forgetting[i.project]"' in html
+    assert '@click="forget(i.rk)"' in html  # bridge Forget in Recent/resumable
+    # Coerced so the busy-state binding isn't stuck-disabled on first paint; keyed
+    # by rk (= the instance_id _forget spins on) so the spinner tracks THIS row (#779).
+    assert ':disabled="!!forgetting[i.rk]"' in html
 
 
 def test_dashboard_renders_hosted_forget_button(write_config, tmp_path):

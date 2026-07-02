@@ -350,6 +350,28 @@ def log_extra_bridge_server(
 
 
 @pytest.fixture
+def multi_session_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A bridge_server whose fake ``claude`` delays each pty connect URL (``pty_slow``).
+
+    The multi-session E2E (#779) launches several interactive (pty) sessions per
+    project. ``FAKE_CLAUDE_MODE=pty_slow`` holds every pty spawn in its ready-wait for
+    ``FAKE_CLAUDE_SLOW`` seconds (the real ``claude`` takes seconds too), so the
+    pending-launch stub (``data-test="pty-pending-row"``) is reliably observable —
+    with the default instant-URL fake the spawn POST returns sub-second and the stub
+    would be a coin-flip to catch. ``run_bridge`` (the standard subcommand form)
+    ignores this mode, so the project's standard bridge spawns normally.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-multi-session")
+    yield from _start_server(
+        tmp,
+        mutable_projects_tree,
+        extra_env={"FAKE_CLAUDE_MODE": "pty_slow", "FAKE_CLAUDE_SLOW": "1.2"},
+    )
+
+
+@pytest.fixture
 def bridge_server_pty(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:
