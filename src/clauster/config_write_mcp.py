@@ -34,6 +34,29 @@ written. Secret-shaped ``env`` values and token-bearing ``url``/``headers`` flow
 through the Foundation's :func:`~clauster.config_write.redact_secrets` /
 :func:`~clauster.config_write.merge_redacted` so the browser never reads a stored
 secret out and a returned ``"********"`` sentinel keeps the stored value.
+
+**#769 additions** (CLI-driven writes + enable/disable, over this same Foundation):
+
+* :mod:`clauster.config_write_mcp_cli` drives add/remove/edit through the
+  ``claude mcp`` CLI (the design-doc-locked "hybrid" write strategy — CLI for
+  MCP/plugins, file writer for skills/subagents/hooks/CLAUDE.md/settings). It
+  calls back into this module's :func:`write_project_server_entry` /
+  :func:`write_user_server_entry` / :func:`write_project_local_server_entry` for
+  the one case the CLI cannot safely carry: an entry with a **literal** secret
+  value, which would otherwise sit in the ``claude mcp add-json`` argv (visible
+  via ``ps``/``/proc``) for the life of the call.
+* **Enable/disable** models project ``.mcp.json`` server approval exactly as
+  Claude Code itself does (verified against a live ``claude mcp add-json`` /
+  ``reset-project-choices`` run, see #769): two per-project lists,
+  ``enabledMcpjsonServers`` / ``disabledMcpjsonServers``, nested at
+  ``~/.claude.json`` ``projects[<abs-project-path>]`` — the *same* per-project
+  block :func:`read_project_local_servers` / :func:`write_project_local_servers`
+  already read/write for local-scope MCP servers (and :mod:`clauster.trust`'s
+  ``hasTrustDialogAccepted``). :func:`read_project_approvals` /
+  :func:`write_project_approvals` are the read/write pair; ``reset-project-choices``
+  has no file-level equivalent clauster models directly — it goes through the
+  CLI (:func:`clauster.config_write_mcp_cli.cli_reset_project_choices`), the one
+  native verb for it.
 """
 
 from __future__ import annotations
@@ -271,3 +294,157 @@ def write_project_local_servers(
         return cw.merge_redacted(incoming, stored)
 
     cw.write_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY, _mutate)
+
+
+# ---------------------------------------------------------------------------
+# #769: single-entry merge helpers (the secret-safe alternative to the CLI add)
+# ---------------------------------------------------------------------------
+
+
+class ServerExistsError(cw.ConfigWriteError):
+    """An ``add`` targeted a server name that already exists (→ 409, never clobber)."""
+
+
+class ServerNotFoundError(cw.ConfigWriteError):
+    """A ``remove``/edit-remove targeted a server name that doesn't exist (→ 404)."""
+
+
+def write_project_server_entry(
+    project_dir: Path, name: str, entry: dict[str, Any], *, op: str
+) -> None:
+    """Merge one server ``entry`` into the project's stored map, fail-closed.
+
+    The secret-safe twin of :func:`clauster.config_write_mcp_cli.cli_add_server`:
+    used when ``entry`` carries a literal secret value (see
+    :func:`clauster.config_write_mcp_cli.entry_has_secret`), which the CLI's
+    ``add-json`` argv cannot carry without exposing it via ``ps``/``/proc``. Reads
+    the current *redacted* map, folds ``entry`` in under ``name`` (every sibling
+    server's masked value round-trips to its real stored secret via
+    :func:`~clauster.config_write.merge_redacted`'s keep-stored rule inside
+    :func:`write_project_servers`), and writes atomically. ``op="add"`` refuses
+    (:class:`ServerExistsError`) to clobber a name that already exists — matching
+    ``claude mcp add-json``'s own "already exists" refusal on the CLI path;
+    ``op="edit"`` always overwrites (remove+re-add semantics collapsed into one
+    merge, since there is no separate value to remove first).
+    """
+    redacted, file_hash = read_project_servers(project_dir)
+    if op == "add" and name in redacted:
+        raise ServerExistsError(f"MCP server {name!r} already exists in project scope")
+    incoming = {**redacted, name: entry}
+    write_project_servers(project_dir, incoming, expected_hash=file_hash)
+
+
+def write_user_server_entry(
+    claude_json: Path, name: str, entry: dict[str, Any], *, op: str
+) -> None:
+    """User-scope twin of :func:`write_project_server_entry` — see its docstring."""
+    redacted = read_user_servers(claude_json)
+    if op == "add" and name in redacted:
+        raise ServerExistsError(f"MCP server {name!r} already exists in user scope")
+    incoming = {**redacted, name: entry}
+    write_user_servers(claude_json, incoming)
+
+
+def write_project_local_server_entry(
+    claude_json: Path, project_dir: Path, name: str, entry: dict[str, Any], *, op: str
+) -> None:
+    """Local-scope twin of :func:`write_project_server_entry` — see its docstring."""
+    redacted = read_project_local_servers(claude_json, project_dir)
+    if op == "add" and name in redacted:
+        raise ServerExistsError(f"MCP server {name!r} already exists in local scope")
+    incoming = {**redacted, name: entry}
+    write_project_local_servers(claude_json, project_dir, incoming)
+
+
+# ---------------------------------------------------------------------------
+# #769: project `.mcp.json` server approval state (enable/disable)
+# ---------------------------------------------------------------------------
+
+#: Per-project list of ``.mcp.json`` server names the operator has approved to load.
+ENABLED_KEY = "enabledMcpjsonServers"
+
+#: Per-project list of ``.mcp.json`` server names the operator has rejected.
+DISABLED_KEY = "disabledMcpjsonServers"
+
+
+def _validate_name_list(candidate: Any, label: str) -> None:
+    """Reject ``candidate`` unless it is a list of non-empty strings."""
+    if not isinstance(candidate, list) or not all(isinstance(v, str) and v for v in candidate):
+        raise cw.InvalidCandidateError(f"{label} must be a list of non-empty strings")
+
+
+def validate_approvals(candidate: Any) -> None:
+    """Structural validator for the ``{"enabled": [...], "disabled": [...]}`` shape.
+
+    Project ``.mcp.json`` servers require operator approval before Claude Code will
+    load them (an un-approved server shows as "⏸ Pending approval"); approval state
+    is exactly this pair of name lists (verified against a live ``claude mcp
+    add-json`` + ``reset-project-choices`` run, #769). A name may not appear in both
+    lists (a self-contradicting approve+reject) and neither list may contain a
+    duplicate — both reject (→ 422) so the stored lists stay clean sets. **Never**
+    resolves or spawns anything named in either list — shape only.
+    """
+    if not isinstance(candidate, dict):
+        raise cw.InvalidCandidateError("approvals must be an object")
+    unknown = set(candidate) - {"enabled", "disabled"}
+    if unknown:
+        raise cw.InvalidCandidateError(f"approvals has unknown keys: {sorted(unknown)}")
+    enabled = candidate.get("enabled", [])
+    disabled = candidate.get("disabled", [])
+    _validate_name_list(enabled, "'enabled'")
+    _validate_name_list(disabled, "'disabled'")
+    if len(set(enabled)) != len(enabled):
+        raise cw.InvalidCandidateError("'enabled' contains a duplicate server name")
+    if len(set(disabled)) != len(disabled):
+        raise cw.InvalidCandidateError("'disabled' contains a duplicate server name")
+    overlap = set(enabled) & set(disabled)
+    if overlap:
+        raise cw.InvalidCandidateError(f"server(s) both enabled and disabled: {sorted(overlap)}")
+
+
+def read_project_approvals(claude_json: Path, project_dir: Path) -> dict[str, list[str]]:
+    """Return ``{"enabled": [...], "disabled": [...]}`` for ``project_dir``.
+
+    No secret ever lives in an approval list (server *names* only), so unlike the
+    server-map readers above this needs no redaction. A missing project entry (or
+    missing file) reads as two empty lists — never approved, never rejected.
+    """
+    enabled = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), ENABLED_KEY)
+    disabled = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), DISABLED_KEY)
+    return {
+        "enabled": enabled if isinstance(enabled, list) else [],
+        "disabled": disabled if isinstance(disabled, list) else [],
+    }
+
+
+def write_project_approvals(
+    claude_json: Path, project_dir: Path, enabled: list[str], disabled: list[str]
+) -> None:
+    """Validate + write both approval lists for ``project_dir`` in one transaction.
+
+    Validates structurally (→ 422, nothing written), then sets **both**
+    ``enabledMcpjsonServers`` and ``disabledMcpjsonServers`` under
+    ``projects[<abs-project-path>]`` inside a single locked
+    :func:`~clauster.claude_json.update_claude_json` transaction — not two separate
+    :func:`~clauster.config_write.write_nested_subtree` calls — so the pair can
+    never be observed (or crash-interrupted) half-written. Every sibling key at
+    every level (this project's ``mcpServers``/trust flags, every other project,
+    every other top-level key) is preserved verbatim.
+    """
+    candidate = {"enabled": enabled, "disabled": disabled}
+    cw.validate_candidate(candidate, validate_approvals)
+    key = str(project_dir)
+
+    def _apply(data: dict) -> None:
+        outer = data.get(PROJECTS_KEY)
+        if not isinstance(outer, dict):
+            outer = {}
+            data[PROJECTS_KEY] = outer
+        inner = outer.get(key)
+        if not isinstance(inner, dict):
+            inner = {}
+        inner[ENABLED_KEY] = list(enabled)
+        inner[DISABLED_KEY] = list(disabled)
+        outer[key] = inner
+
+    cw.update_claude_json(claude_json, _apply)
