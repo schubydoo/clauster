@@ -215,6 +215,66 @@ def test_user_write_rejects_bad_shape_without_writing(tmp_path: Path) -> None:
     assert not settings.exists()  # nothing written on a validation failure
 
 
+# --- local-scope writer (settings.local.json, gitignore-on-create) -----------------
+
+
+def test_local_write_then_read_round_trip(tmp_path: Path) -> None:
+    _b, h0 = perms.read_project_local_permissions(tmp_path)
+    assert _b == {}
+    perms.write_project_local_permissions(tmp_path, {"defaultMode": "plan"}, expected_hash=h0)
+    block, _h1 = perms.read_project_local_permissions(tmp_path)
+    assert block == {"defaultMode": "plan"}
+
+
+def test_local_write_targets_settings_local_json_not_settings_json(tmp_path: Path) -> None:
+    perms.write_project_local_permissions(tmp_path, {"defaultMode": "plan"}, expected_hash=None)
+    assert (tmp_path / ".claude" / "settings.local.json").exists()
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_local_write_creates_gitignore_entry(tmp_path: Path) -> None:
+    perms.write_project_local_permissions(tmp_path, {"defaultMode": "plan"}, expected_hash=None)
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert ".claude/settings.local.json" in gitignore
+
+
+def test_local_write_gitignore_idempotent_across_writes(tmp_path: Path) -> None:
+    _b, h0 = perms.read_project_local_permissions(tmp_path)
+    perms.write_project_local_permissions(tmp_path, {"defaultMode": "plan"}, expected_hash=h0)
+    _b1, h1 = perms.read_project_local_permissions(tmp_path)
+    perms.write_project_local_permissions(tmp_path, {"defaultMode": "default"}, expected_hash=h1)
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert gitignore.count(".claude/settings.local.json") == 1
+
+
+def test_local_write_bad_shape_writes_nothing_and_no_gitignore(tmp_path: Path) -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        perms.write_project_local_permissions(
+            tmp_path, {"defaultMode": "nope"}, expected_hash=None
+        )
+    assert not (tmp_path / ".claude").exists()
+    assert not (tmp_path / ".gitignore").exists()  # validation failure never touches gitignore
+
+
+def test_local_write_stale_hash_raises(tmp_path: Path) -> None:
+    settings = tmp_path / ".claude" / "settings.local.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"permissions": {}}))
+    stale = cw.hash_bytes(b"something else")
+    with pytest.raises(cw.StaleConfigWriteError):
+        perms.write_project_local_permissions(tmp_path, {"defaultMode": "plan"}, stale)
+
+
+def test_local_scope_is_independent_of_project_scope_file(tmp_path: Path) -> None:
+    # Writing project scope must never touch the local-scope file, and vice versa.
+    perms.write_project_permissions(tmp_path, {"defaultMode": "acceptEdits"}, expected_hash=None)
+    perms.write_project_local_permissions(tmp_path, {"defaultMode": "plan"}, expected_hash=None)
+    project_block, _ = perms.read_project_permissions(tmp_path)
+    local_block, _ = perms.read_project_local_permissions(tmp_path)
+    assert project_block == {"defaultMode": "acceptEdits"}
+    assert local_block == {"defaultMode": "plan"}
+
+
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
@@ -614,3 +674,172 @@ def test_route_project_missing_name_is_400(write_config, tmp_path, projects_root
             json={"scope": "project", "confirm": "", "permissions": {"allow": ["x"]}},
         )
         assert resp.status_code == 400
+
+
+# --- local scope routes (own confirm token, project-only gate, gitignore-on-create) -
+
+
+def test_route_local_scope_works_without_allow_user_scope(
+    write_config, tmp_path, projects_root
+) -> None:
+    # Local scope needs no allow_user_scope opt-in — the base `enabled` flag alone
+    # gates it, same as project scope (#766 scope decision).
+    with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
+        read0 = c.get(f"{_URL}?scope=local&project=alpha")
+        assert read0.status_code == 200
+        body = read0.json()
+        assert body["scope"] == "local"
+        assert body["project"] == "alpha"
+        assert body["permissions"] == {}
+        assert body["hash"] == cw.hash_bytes(b"")  # local is a real file, like project scope
+        wr = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "permissions": {"defaultMode": "plan"},
+            },
+        )
+        assert wr.status_code == 200
+        read1 = c.get(f"{_URL}?scope=local&project=alpha")
+        assert read1.json()["permissions"] == {"defaultMode": "plan"}
+
+
+def test_route_local_confirm_rejects_plain_project_name(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha",  # the PROJECT-scope token, not the local one
+                "permissions": {"defaultMode": "plan"},
+            },
+        )
+        assert resp.status_code == 400
+
+
+def test_route_local_write_creates_gitignore_entry(write_config, tmp_path, projects_root) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        wr = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "permissions": {"defaultMode": "plan"},
+            },
+        )
+        assert wr.status_code == 200
+    gitignore = (projects_root / "alpha" / ".gitignore").read_text(encoding="utf-8")
+    assert ".claude/settings.local.json" in gitignore
+
+
+def test_route_local_scope_404_when_disabled(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, "") as c:
+        assert c.get(f"{_URL}?scope=local&project=alpha").status_code == 404
+        assert (
+            c.put(
+                _URL,
+                json={
+                    "scope": "local",
+                    "project": "alpha",
+                    "confirm": "alpha (local)",
+                    "permissions": {},
+                },
+            ).status_code
+            == 404
+        )
+
+
+def test_route_local_write_missing_project_dir_is_404(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "noexist",
+                "confirm": "noexist (local)",
+                "permissions": {"defaultMode": "plan"},
+            },
+        )
+        assert resp.status_code == 404
+
+
+def test_route_local_write_path_escape_is_400(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "../escape",
+                "confirm": "../escape (local)",
+                "permissions": {},
+            },
+        )
+        assert resp.status_code == 400
+        assert c.get(f"{_URL}?scope=local&project=../escape").status_code == 400
+
+
+def test_route_local_write_bad_shape_is_422_and_writes_nothing(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "permissions": {"defaultMode": "bypassPermissions"},
+            },
+        )
+        assert resp.status_code == 422
+    assert not (projects_root / "alpha" / ".claude" / "settings.local.json").exists()
+
+
+def test_route_local_write_missing_permissions_is_422(
+    write_config, tmp_path, projects_root
+) -> None:
+    # Local scope, valid confirm, no `permissions` -> the local-branch shape check 422s
+    # (the payload_key guard, distinct from the project/user branches' own copies).
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={"scope": "local", "project": "alpha", "confirm": "alpha (local)"},
+        )
+        assert resp.status_code == 422
+
+
+def test_route_local_write_non_string_hash_is_422(write_config, tmp_path, projects_root) -> None:
+    # A non-string `hash` on a local-scope write (has_hash=True path) is a 422 before
+    # any write, same guard as the project-scope branch.
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "permissions": {"defaultMode": "plan"},
+                "hash": 123,
+            },
+        )
+        assert resp.status_code == 422
+    assert not (projects_root / "alpha" / ".claude" / "settings.local.json").exists()
+
+
+def test_route_local_read_corrupt_file_is_422(write_config, tmp_path, projects_root) -> None:
+    # The local-scope read guard: a hand-edited settings.local.json that is not valid
+    # JSON must surface as a clean 422 from the GET route, never an unhandled 500 (same
+    # guard as the project/user reads above).
+    settings = projects_root / "alpha" / ".claude" / "settings.local.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{not json", encoding="utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get(f"{_URL}?scope=local&project=alpha").status_code == 422

@@ -167,6 +167,7 @@ component_management:
         - src/clauster/config_write_hooks.py
         - src/clauster/config_write_mcp.py
         - src/clauster/config_write_permissions.py
+        - src/clauster/config_file_writer.py # #766 — path-contained file/dir writer primitive
         - src/clauster/claude_json.py
     # The config_write_* family above mirrors the same pattern as the other
     # explicit-path components (see persistence/hooks_recap notes) — Codecov's

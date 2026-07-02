@@ -63,6 +63,20 @@ def test_require_capability_user_scope_ok_when_both_on(projects_root: Path) -> N
     cw.require_capability(cfg, "user")  # no raise
 
 
+def test_require_capability_local_scope_404_when_disabled(projects_root: Path) -> None:
+    cfg = _cfg(enabled=False, allow_user=False, projects_root=projects_root)
+    with pytest.raises(HTTPException) as ei:
+        cw.require_capability(cfg, "local")
+    assert ei.value.status_code == 404
+
+
+def test_require_capability_local_scope_ok_without_allow_user_scope(projects_root: Path) -> None:
+    # Local scope carries NO extra opt-in (unlike user scope) — the base `enabled` flag
+    # alone gates it, since (like project scope) it is confined to a single project.
+    cfg = _cfg(enabled=True, allow_user=False, projects_root=projects_root)
+    cw.require_capability(cfg, "local")  # no raise
+
+
 # --- type-the-name confirm (400 on mismatch, before any I/O) -----------------------
 
 
@@ -98,6 +112,32 @@ def test_confirm_project_without_project_is_400() -> None:
 def test_expected_token_is_server_derived() -> None:
     assert cw.expected_confirm_token("project", "alpha") == "alpha"
     assert cw.expected_confirm_token("user", None) == cw.USER_SCOPE_TOKEN
+
+
+def test_confirm_local_accepts_exact_suffixed_token() -> None:
+    cw.require_confirm("local", "alpha", "alpha (local)")  # no raise
+
+
+def test_confirm_local_rejects_plain_project_name() -> None:
+    # The whole point of the third token: the plain project-scope confirm ("alpha")
+    # must NOT also confirm a local-scope write on the same project.
+    with pytest.raises(HTTPException) as ei:
+        cw.require_confirm("local", "alpha", "alpha")
+    assert ei.value.status_code == 400
+
+
+def test_confirm_local_without_project_is_400() -> None:
+    with pytest.raises(HTTPException) as ei:
+        cw.require_confirm("local", None, "anything")
+    assert ei.value.status_code == 400
+
+
+def test_expected_token_local_is_suffixed_and_distinct_from_project() -> None:
+    project_token = cw.expected_confirm_token("project", "alpha")
+    local_token = cw.expected_confirm_token("local", "alpha")
+    assert local_token == "alpha (local)"
+    assert local_token != project_token
+    assert cw.LOCAL_SCOPE_SUFFIX in local_token
 
 
 # --- path containment (reject escape before I/O) -----------------------------------
@@ -300,6 +340,172 @@ def test_write_subtree_creates_missing_file(tmp_path: Path) -> None:
     cw.write_subtree(f, "mcpServers", lambda current: {"srv": {"command": "/bin/x"}})
     out = json.loads(f.read_text(encoding="utf-8"))
     assert out == {"mcpServers": {"srv": {"command": "/bin/x"}}}
+
+
+# --- nested-subtree writer (local-scope MCP: projects[<path>].mcpServers) ----------
+
+
+def test_write_nested_subtree_creates_missing_file(tmp_path: Path) -> None:
+    f = tmp_path / "claude.json"  # absent
+    cw.write_nested_subtree(
+        f, "projects", "/repo/alpha", "mcpServers", lambda current: {"s": {"command": "x"}}
+    )
+    out = json.loads(f.read_text(encoding="utf-8"))
+    assert out == {"projects": {"/repo/alpha": {"mcpServers": {"s": {"command": "x"}}}}}
+
+
+def test_write_nested_subtree_preserves_siblings_at_every_level(tmp_path: Path) -> None:
+    f = tmp_path / "claude.json"
+    f.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    "/repo/alpha": {"hasTrustDialogAccepted": True, "mcpServers": {"old": {}}},
+                    "/repo/beta": {"hasTrustDialogAccepted": True},
+                },
+                "misc": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def mutate(current: object) -> dict:
+        servers = dict(current or {})
+        servers["new"] = {"command": "/bin/x"}
+        return servers
+
+    cw.write_nested_subtree(f, "projects", "/repo/alpha", "mcpServers", mutate)
+
+    out = json.loads(f.read_text(encoding="utf-8"))
+    alpha = out["projects"]["/repo/alpha"]
+    assert set(alpha["mcpServers"]) == {"old", "new"}  # merged, not replaced
+    assert alpha["hasTrustDialogAccepted"] is True  # sibling subtree preserved
+    assert out["projects"]["/repo/beta"]["hasTrustDialogAccepted"] is True  # other project intact
+    assert out["misc"] == 1
+
+
+def test_read_nested_subtree_missing_levels_are_none(tmp_path: Path) -> None:
+    f = tmp_path / "claude.json"
+    assert cw.read_nested_subtree(f, "projects", "/repo/alpha", "mcpServers") is None
+    f.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+    assert cw.read_nested_subtree(f, "projects", "/repo/alpha", "mcpServers") is None
+    f.write_text(json.dumps({"projects": {"/repo/alpha": {}}}), encoding="utf-8")
+    assert cw.read_nested_subtree(f, "projects", "/repo/alpha", "mcpServers") is None
+
+
+def test_read_nested_subtree_round_trip(tmp_path: Path) -> None:
+    f = tmp_path / "claude.json"
+    cw.write_nested_subtree(
+        f, "projects", "/repo/alpha", "mcpServers", lambda current: {"s": {"command": "x"}}
+    )
+    assert cw.read_nested_subtree(f, "projects", "/repo/alpha", "mcpServers") == {
+        "s": {"command": "x"}
+    }
+
+
+# --- gitignore-on-create (idempotent append, never rewritten/reordered) ------------
+
+
+def test_ensure_gitignored_creates_missing_file(tmp_path: Path) -> None:
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".claude/settings.local.json\n"
+
+
+def test_ensure_gitignored_appends_to_existing_content(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text == "node_modules/\n.claude/settings.local.json\n"
+
+
+def test_ensure_gitignored_adds_missing_trailing_newline_before_append(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("node_modules/", encoding="utf-8")  # no trailing \n
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text == "node_modules/\n.claude/settings.local.json\n"
+
+
+def test_ensure_gitignored_idempotent_no_duplicate(tmp_path: Path) -> None:
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text.count(".claude/settings.local.json") == 1
+
+
+def test_ensure_gitignored_matches_entry_ignoring_surrounding_whitespace(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("  .claude/settings.local.json  \n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json")
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text.count(".claude/settings.local.json") == 1  # not double-appended
+
+
+def test_ensure_gitignored_never_reorders_existing_lines(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("b\na\nc\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, "d")
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text == "b\na\nc\nd\n"  # existing order untouched, only appended
+
+
+def test_project_local_settings_path() -> None:
+    project_dir = Path("/repo/alpha")
+    assert cw.project_local_settings_path(project_dir) == project_dir / ".claude" / (
+        "settings.local.json"
+    )
+
+
+# --- line-oriented text redaction (the file/dir writer's read path) ----------------
+
+
+def test_redact_secret_lines_masks_key_value_secret_line() -> None:
+    text = "API_TOKEN=sk-live-deadbeef\nHOST=localhost\n"
+    red = cw.redact_secret_lines(text)
+    assert "sk-live-deadbeef" not in red
+    assert f"API_TOKEN={cw.REDACTION_SENTINEL}\n" in red
+    assert "HOST=localhost\n" in red  # non-secret key untouched
+
+
+def test_redact_secret_lines_masks_colon_form() -> None:
+    text = "password: hunter2\nname: alice\n"
+    red = cw.redact_secret_lines(text)
+    assert "hunter2" not in red
+    assert f"password: {cw.REDACTION_SENTINEL}\n" in red
+    assert "name: alice\n" in red
+
+
+def test_redact_secret_lines_masks_interpolation_anywhere_in_line() -> None:
+    text = "run with token ${SECRET_TOKEN} please\n"
+    red = cw.redact_secret_lines(text)
+    assert "${SECRET_TOKEN}" not in red
+    assert cw.REDACTION_SENTINEL in red
+
+
+def test_redact_secret_lines_masks_credential_url() -> None:
+    text = "notify slack://T00000000@channel now\n"
+    red = cw.redact_secret_lines(text)
+    assert "T00000000" not in red
+    assert cw.REDACTION_SENTINEL in red
+
+
+def test_redact_secret_lines_preserves_line_count_and_endings() -> None:
+    text = "a\nAPI_KEY=x\nb\n"
+    red = cw.redact_secret_lines(text)
+    assert red.count("\n") == text.count("\n")
+    assert red.splitlines()[0] == "a"
+    assert red.splitlines()[2] == "b"
+
+
+def test_redact_secret_lines_passes_through_plain_text() -> None:
+    text = "just a normal line\nanother one\n"
+    assert cw.redact_secret_lines(text) == text
+
+
+def test_redact_secret_lines_preserves_crlf_endings() -> None:
+    text = "API_TOKEN=sk-live-x\r\nHOST=localhost\r\n"
+    red = cw.redact_secret_lines(text)
+    assert "sk-live-x" not in red
+    assert red.count("\r\n") == 2
+    assert f"API_TOKEN={cw.REDACTION_SENTINEL}\r\n" in red
+    assert "HOST=localhost\r\n" in red
 
 
 # --- the gated status route (404 off / flags on), with FastAPI lifespan ------------

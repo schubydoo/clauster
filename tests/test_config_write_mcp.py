@@ -227,6 +227,109 @@ def test_read_rejects_malformed_json(tmp_path: Path) -> None:
         mcp.read_project_servers(tmp_path)
 
 
+# --- local-scope writer (~/.claude.json projects[<abs-path>].mcpServers) -----------
+
+
+def test_local_write_then_read_round_trip(tmp_path: Path) -> None:
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    assert mcp.read_project_local_servers(cj, project_dir) == {}
+    mcp.write_project_local_servers(cj, project_dir, {"s": {"command": "/bin/x"}})
+    assert mcp.read_project_local_servers(cj, project_dir) == {"s": {"command": "/bin/x"}}
+
+
+def test_local_write_keyed_by_resolved_absolute_project_path(tmp_path: Path) -> None:
+    # Same shape trust.py uses for hasTrustDialogAccepted: projects[str(path.resolve())].
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    mcp.write_project_local_servers(cj, project_dir, {"s": {"command": "x"}})
+    out = json.loads(cj.read_text(encoding="utf-8"))
+    assert str(project_dir.resolve()) in out["projects"]
+    assert out["projects"][str(project_dir.resolve())]["mcpServers"] == {"s": {"command": "x"}}
+
+
+def test_local_write_preserves_other_projects_and_sibling_subtrees(tmp_path: Path) -> None:
+    cj = tmp_path / "claude.json"
+    proj_a = tmp_path / "a"
+    proj_a.mkdir()
+    proj_b = tmp_path / "b"
+    proj_b.mkdir()
+    cj.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(proj_a.resolve()): {
+                        "hasTrustDialogAccepted": True,
+                        "mcpServers": {"old": {"command": "x"}},
+                    },
+                    str(proj_b.resolve()): {"hasTrustDialogAccepted": True},
+                },
+                "misc": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    mcp.write_project_local_servers(cj, proj_a, {"new": {"command": "y"}})
+    out = json.loads(cj.read_text(encoding="utf-8"))
+    a_entry = out["projects"][str(proj_a.resolve())]
+    assert a_entry["mcpServers"] == {"new": {"command": "y"}}
+    assert a_entry["hasTrustDialogAccepted"] is True  # sibling subtree preserved
+    assert out["projects"][str(proj_b.resolve())]["hasTrustDialogAccepted"] is True
+    assert out["misc"] == 1
+
+
+def test_local_read_redacts_and_write_keeps_stored_secret(tmp_path: Path) -> None:
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    mcp.write_project_local_servers(
+        cj, project_dir, {"s": {"command": "x", "env": {"API_TOKEN": "sk-live-real"}}}
+    )
+    servers = mcp.read_project_local_servers(cj, project_dir)
+    assert servers["s"]["env"]["API_TOKEN"] == cw.REDACTION_SENTINEL
+    assert "sk-live-real" not in json.dumps(servers)
+    # Writing the masked view back unchanged keeps the stored secret (keep-stored).
+    mcp.write_project_local_servers(cj, project_dir, servers)
+    out = json.loads(cj.read_text(encoding="utf-8"))
+    assert (
+        out["projects"][str(project_dir.resolve())]["mcpServers"]["s"]["env"]["API_TOKEN"]
+        == "sk-live-real"
+    )
+
+
+def test_local_write_rejects_bad_shape_without_writing(tmp_path: Path) -> None:
+    cj = tmp_path / "claude.json"  # absent
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    with pytest.raises(cw.InvalidCandidateError):
+        mcp.write_project_local_servers(cj, project_dir, {"s": {"command": ""}})
+    assert not cj.exists()  # nothing written on a validation failure
+
+
+def test_local_read_missing_file_is_empty(tmp_path: Path) -> None:
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    assert mcp.read_project_local_servers(tmp_path / "absent.json", project_dir) == {}
+
+
+def test_local_scope_independent_of_project_and_user_scope(tmp_path: Path) -> None:
+    # Local scope lives in ~/.claude.json's per-project block; it must never collide
+    # with the project-scope .mcp.json file or the flat user-scope mcpServers subtree.
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    mcp.write_project_servers(project_dir, {"p": {"command": "proj"}}, expected_hash=None)
+    mcp.write_user_servers(cj, {"u": {"command": "user"}})
+    mcp.write_project_local_servers(cj, project_dir, {"l": {"command": "local"}})
+
+    project_servers, _ = mcp.read_project_servers(project_dir)
+    assert project_servers == {"p": {"command": "proj"}}
+    assert mcp.read_user_servers(cj) == {"u": {"command": "user"}}
+    assert mcp.read_project_local_servers(cj, project_dir) == {"l": {"command": "local"}}
+
+
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
@@ -568,3 +671,150 @@ def test_route_project_missing_name_is_400(write_config, tmp_path, projects_root
             json={"scope": "project", "confirm": "", "servers": {"s": {"command": "x"}}},
         )
         assert resp.status_code == 400
+
+
+# --- local scope routes (own confirm token, project-only gate, no gitignore) -------
+
+
+def test_route_local_scope_works_without_allow_user_scope(
+    write_config, tmp_path, projects_root
+) -> None:
+    # Local scope needs no allow_user_scope opt-in — the base `enabled` flag alone
+    # gates it, same as project scope (#766 scope decision).
+    with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
+        read0 = c.get("/api/config-write/mcp?scope=local&project=alpha")
+        assert read0.status_code == 200
+        assert read0.json() == {
+            "scope": "local",
+            "project": "alpha",
+            "servers": {},
+            "hash": None,
+        }
+        wr = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "servers": {"srv": {"command": "/bin/foo"}},
+            },
+        )
+        assert wr.status_code == 200
+        read1 = c.get("/api/config-write/mcp?scope=local&project=alpha")
+        assert read1.json()["servers"] == {"srv": {"command": "/bin/foo"}}
+    # The write landed in the ISOLATED home (autouse fixture), never the real account,
+    # keyed by the resolved absolute project path — never the project-scope .mcp.json.
+    isolated = Path(os.environ["HOME"]) / ".claude.json"
+    out = json.loads(isolated.read_text(encoding="utf-8"))
+    resolved_project = str((projects_root / "alpha").resolve())
+    assert out["projects"][resolved_project]["mcpServers"]["srv"]["command"] == "/bin/foo"
+    assert not (projects_root / "alpha" / ".mcp.json").exists()
+
+
+def test_route_local_confirm_rejects_plain_project_name(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha",  # the PROJECT-scope token, not the local one
+                "servers": {"srv": {"command": "/bin/foo"}},
+            },
+        )
+        assert resp.status_code == 400
+
+
+def test_route_local_scope_404_when_disabled(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, "") as c:
+        assert c.get("/api/config-write/mcp?scope=local&project=alpha").status_code == 404
+        assert (
+            c.put(
+                "/api/config-write/mcp",
+                json={
+                    "scope": "local",
+                    "project": "alpha",
+                    "confirm": "alpha (local)",
+                    "servers": {},
+                },
+            ).status_code
+            == 404
+        )
+
+
+def test_route_local_write_missing_project_dir_is_404(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "local",
+                "project": "noexist",
+                "confirm": "noexist (local)",
+                "servers": {"s": {"command": "x"}},
+            },
+        )
+        assert resp.status_code == 404
+
+
+def test_route_local_write_path_escape_is_400(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "local",
+                "project": "../escape",
+                "confirm": "../escape (local)",
+                "servers": {},
+            },
+        )
+        assert resp.status_code == 400
+        assert c.get("/api/config-write/mcp?scope=local&project=../escape").status_code == 400
+
+
+def test_route_local_write_bad_shape_is_422_and_writes_nothing(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "servers": {"s": {"command": "x", "bogus": 1}},
+            },
+        )
+        assert resp.status_code == 422
+    isolated = Path(os.environ["HOME"]) / ".claude.json"
+    assert not isolated.exists()  # nothing written on a validation failure
+
+
+def test_route_local_write_no_hash_forwarded(write_config, tmp_path, projects_root) -> None:
+    # MCP local scope owns its own locking (nested subtree merge) — a client-supplied
+    # "hash" must be silently ignored, never forwarded/enforced (mirrors user scope).
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            "/api/config-write/mcp",
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "servers": {"s": {"command": "x"}},
+                "hash": "bogus-hash-value",
+            },
+        )
+        assert resp.status_code == 200
+
+
+def test_route_local_read_corrupt_claude_json_is_422(
+    write_config, tmp_path, projects_root
+) -> None:
+    # A hand-edited/corrupt ~/.claude.json must surface as a clean 422 from the local-
+    # scope GET route too, never an unhandled 500 (same guard as the user-scope read).
+    (Path(os.environ["HOME"]) / ".claude.json").write_text("{not json", encoding="utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get("/api/config-write/mcp?scope=local&project=alpha").status_code == 422
