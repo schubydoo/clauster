@@ -17,10 +17,16 @@ degrades gracefully on other platforms.
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import subprocess
+import sys
 from collections.abc import Callable
 
 import psutil
+
+_log = logging.getLogger("clauster.procutil")
 
 # The token sequence that identifies a managed bridge in a process cmdline.
 _BRIDGE_CMDLINE = ("remote-control",)
@@ -406,3 +412,62 @@ def bridge_env_overlay(
             parts = ([inherited] if inherited else []) + expanded
             overlay["PATH"] = os.pathsep.join(parts)
     return overlay
+
+
+def resolve_nvm_default_node_bin_dir(
+    nvm_dir: str | None = None, *, timeout: float = 5.0
+) -> str | None:
+    """Resolve nvm's ``default`` node version's bin dir, or ``None`` if unavailable.
+
+    Claude Code spawns MCP **stdio** servers by exec'ing the configured ``command``
+    directly (``execvp`` / ``sh -c``; ``sh`` is dash and ignores ``BASH_ENV``), not
+    through a login or non-interactive bash shell. So a `command: "npx"` MCP server
+    can only resolve `npx`/`node` from the bridge subprocess's own ``PATH`` — and
+    nvm's bin dir is version-specific, so it is deliberately never baked into a
+    static ``path_append`` (issue #792). This resolves it dynamically, the same way
+    the verified stable-shim workaround does: source ``$NVM_DIR/nvm.sh`` and ask
+    ``nvm which default``, so the result tracks nvm's current default across node
+    upgrades instead of pinning a version string that rots.
+
+    POSIX-only (nvm is a bash shell function, not a binary) — always ``None`` on
+    Windows. Best-effort everywhere else: returns ``None`` rather than raising when
+    ``bash`` isn't on ``PATH``, no nvm install exists at ``nvm_dir``, no `default`
+    alias is set, or the lookup errors/times out — a broken/absent nvm must never
+    block a bridge spawn. ``nvm_dir`` defaults to ``$NVM_DIR`` then ``~/.nvm``,
+    mirroring nvm's own resolution order.
+    """
+    if sys.platform == "win32":
+        return None
+    bash = shutil.which("bash")
+    if not bash:
+        return None
+    nvm_home = os.path.expanduser(nvm_dir or os.environ.get("NVM_DIR") or "~/.nvm")
+    # NVM_DIR is passed via the subprocess env, never interpolated into the script
+    # text, so a path containing shell metacharacters can't inject into the script.
+    script = (
+        '[ -s "$NVM_DIR/nvm.sh" ] || exit 1; '
+        '. "$NVM_DIR/nvm.sh" --no-use >/dev/null 2>&1; '
+        "nvm which default 2>/dev/null"
+    )
+    try:
+        result = subprocess.run(
+            [bash, "-c", script],
+            env={**os.environ, "NVM_DIR": nvm_home},
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _log.debug("node_from_nvm: nvm lookup failed (%s): %s", nvm_home, exc)
+        return None
+    node_path = result.stdout.strip().splitlines()[-1].strip() if result.stdout.strip() else ""
+    # Require an EXECUTABLE regular file: a present-but-non-executable node would still get
+    # its dir appended to PATH, and node/npx MCP servers would then fail with the exact
+    # connection symptom this feature exists to fix — so treat non-executable as unresolved.
+    if not node_path or not os.path.isfile(node_path) or not os.access(node_path, os.X_OK):
+        _log.debug(
+            "node_from_nvm: no resolvable executable nvm 'default' node (NVM_DIR=%s)", nvm_home
+        )
+        return None
+    return os.path.dirname(node_path)

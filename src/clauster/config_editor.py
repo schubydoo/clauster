@@ -107,6 +107,8 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "claustrum.binary": "binary-path: what executes (daemon binary); RCE surface",
     # list-or-dict — not addressable as a single scalar editor field (some also security).
     "claude.path_append": "list-or-dict: list; also influences tool resolution (supply-chain)",
+    "claude.node_from_nvm": "supply-chain: toggles whether an nvm-resolved node/npx bin dir "
+    "joins the bridge PATH; same tool-resolution concern as path_append",
     "claude.env": "list-or-dict: dict; injects subprocess env (can leak/alter behavior)",
     "projects": "list-or-dict: per-project map; not addressable as a single editor field",
     "auth.reverse_proxy.trusted_ips": "list-or-dict + auth: IP/CIDR allowlist (list); trust",

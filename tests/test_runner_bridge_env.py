@@ -6,11 +6,14 @@ import os
 import subprocess
 from pathlib import Path
 
+from clauster import procutil
 from clauster.config import ClausterConfig
 from clauster.runner import SessionRunner
 
 
-def _runner_with_env(runner_config, *, path_append=None, env=None) -> SessionRunner:
+def _runner_with_env(
+    runner_config, *, path_append=None, env=None, node_from_nvm=False
+) -> SessionRunner:
     config, claude_json = runner_config
     extended = ClausterConfig(
         projects_root=config.projects_root,
@@ -19,6 +22,7 @@ def _runner_with_env(runner_config, *, path_append=None, env=None) -> SessionRun
             "binary": config.claude.binary,
             "path_append": path_append or [],
             "env": env or {},
+            "node_from_nvm": node_from_nvm,
         },
     )
     return SessionRunner(extended, claude_json=claude_json)
@@ -85,3 +89,78 @@ def test_popen_leaves_path_untouched_without_path_append(runner_config, monkeypa
     env = _capture_env("popen", runner, monkeypatch, tmp_path)
     assert env is not None
     assert env["PATH"] == "/usr/bin"  # inherited PATH passes through unchanged
+
+
+def test_popen_appends_resolved_nvm_bin_dir_after_path_append(
+    runner_config, monkeypatch, tmp_path
+):
+    # #792: claude.node_from_nvm=True appends the RESOLVED nvm default node bin dir,
+    # last (after path_append) — never overriding an operator-supplied entry.
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(
+        procutil, "resolve_nvm_default_node_bin_dir", lambda: "/home/u/.nvm/versions/node/v20/bin"
+    )
+    runner = _runner_with_env(runner_config, path_append=["/opt/tools"], node_from_nvm=True)
+    env = _capture_env("popen", runner, monkeypatch, tmp_path)
+    assert env is not None
+    assert env["PATH"] == os.pathsep.join(
+        ["/usr/bin", "/opt/tools", "/home/u/.nvm/versions/node/v20/bin"]
+    )
+
+
+def test_popen_node_from_nvm_off_never_resolves(runner_config, monkeypatch, tmp_path):
+    # Off (the default): the resolver must not even be called — no bash/nvm subprocess
+    # spawned on a hot path when the operator hasn't opted in.
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    def _boom():
+        raise AssertionError("resolve_nvm_default_node_bin_dir must not be called when off")
+
+    monkeypatch.setattr(procutil, "resolve_nvm_default_node_bin_dir", _boom)
+    runner = _runner_with_env(runner_config, node_from_nvm=False)
+    env = _capture_env("popen", runner, monkeypatch, tmp_path)
+    assert env is not None
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_popen_node_from_nvm_no_op_when_unresolvable(runner_config, monkeypatch, tmp_path):
+    # nvm/default unavailable: resolver returns None, PATH is left exactly as path_append
+    # alone would produce it — the knob never blocks or corrupts a spawn.
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(procutil, "resolve_nvm_default_node_bin_dir", lambda: None)
+    runner = _runner_with_env(runner_config, path_append=["/opt/tools"], node_from_nvm=True)
+    env = _capture_env("popen", runner, monkeypatch, tmp_path)
+    assert env is not None
+    assert env["PATH"] == os.pathsep.join(["/usr/bin", "/opt/tools"])
+
+
+def test_popen_keeper_appends_resolved_nvm_bin_dir(runner_config, monkeypatch, tmp_path):
+    # The pty spawn path (_popen_keeper) goes through the same _bridge_env_overlay, so
+    # the pty bridge gets the same nvm-resolved PATH as the standard bridge.
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(
+        procutil, "resolve_nvm_default_node_bin_dir", lambda: "/home/u/.nvm/versions/node/v20/bin"
+    )
+    runner = _runner_with_env(runner_config, node_from_nvm=True)
+    env = _capture_env("keeper", runner, monkeypatch, tmp_path)
+    assert env is not None
+    assert env["PATH"] == os.pathsep.join(["/usr/bin", "/home/u/.nvm/versions/node/v20/bin"])
+
+
+def test_nvm_bin_dir_resolved_once_and_cached(runner_config, monkeypatch):
+    # Greptile #803: the nvm lookup shells bash (seconds on a slow mount), so it must be
+    # resolved ONCE per process and cached — not re-run on every spawn. Count the calls
+    # across several _bridge_env_overlay builds; the resolver fires exactly once.
+    calls = {"n": 0}
+
+    def _counting():
+        calls["n"] += 1
+        return "/home/u/.nvm/versions/node/v20/bin"
+
+    monkeypatch.setattr(procutil, "resolve_nvm_default_node_bin_dir", _counting)
+    runner = _runner_with_env(runner_config, node_from_nvm=True)
+    first = runner._bridge_env_overlay()
+    runner._bridge_env_overlay()
+    runner._bridge_env_overlay()
+    assert calls["n"] == 1  # resolved once, then served from cache
+    assert "/home/u/.nvm/versions/node/v20/bin" in first["PATH"]

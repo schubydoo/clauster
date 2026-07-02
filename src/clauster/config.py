@@ -177,6 +177,18 @@ class ClaudeConfig(BaseModel):
         "`PATH` omits. `~` is expanded; entries are appended in order after the inherited "
         "`PATH`, never replacing it. Applies to both standard and pty bridges.",
     )
+    node_from_nvm: bool = Field(
+        default=False,
+        description="Resolve nvm's `default` node version at each bridge spawn and append "
+        "its bin dir to the bridge subprocess `PATH` (after `path_append`). Fixes "
+        "`npx`/`node`-based MCP servers (e.g. codecov, context7) showing `✘ Failed to "
+        "connect` under a systemd deployment: Claude Code spawns MCP stdio servers by "
+        "exec'ing the configured `command` directly, not through a shell, so neither "
+        "`BASH_ENV` nor a login-shell nvm init ever reaches that spawn — only the bridge "
+        "process `PATH` does. Off by default; a no-op (never raises) when nvm, its "
+        "`default` alias, or POSIX `bash` aren't available — spawn is never blocked by "
+        "this. POSIX-only (nvm is a bash function); ignored on Windows.",
+    )
     env: dict[str, str] = Field(
         default_factory=dict,
         description="Extra environment variables overlaid on the bridge subprocess. Applied "
