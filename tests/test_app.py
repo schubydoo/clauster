@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
@@ -1078,12 +1079,14 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     assert "delete this._byId[body.project];" in page
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the pty launch controls are POSIX-only")
 def test_launch_popover_pty_worktree_controls(write_config):
     """The Spawn picker applies to interactive sessions; the collision hint warns (#779).
 
     pty honors same-dir/worktree (worktree = `claude --worktree`), so the picker is no
     longer hidden in pty mode; only the standard-only `session` option is disabled
-    (and coerced away). The no-worktree collision hint warns without blocking.
+    (and coerced away). The no-worktree collision hint warns without blocking. The
+    whole block is `pty_supported`-gated markup, so it never renders on Windows.
     """
     page = _client(write_config).get("/").text
     # The old pty gate hid the whole Spawn column — it must be gone.
