@@ -1028,15 +1028,23 @@ def test_dashboard_actions_deref_displayed_instance_id(write_config):
     """Name-keyed actions pin the DISPLAYED row's instance_id at click time (#778).
 
     Re-resolving a project name server-side can drift to a bridge registered after
-    the client's last poll (Greptile P1 on #797) — so Stop/Resume/Forget/QR and the
+    the client's last poll (Greptile P1s on #797) — so Stop/Resume/Forget/QR and the
     log/pty websockets all deref ``bridgeIdOf(name)`` (instance_id of the rendered
-    row, name-fallback only for a not-yet-polled optimistic row).
+    row). There is NO name fallback: the only id-less row is start()'s optimistic
+    placeholder — an identity not yet minted — so actions on it refuse with a toast
+    (``_requireBridgeId``) instead of letting the server re-resolve the name onto a
+    possibly-hidden other bridge.
     """
     page = _client(write_config).get("/").text
     assert "bridgeIdOf(name) {" in page  # the deref helper ships
-    # Every name-identity call site routes through it (no raw-name fetches remain).
-    assert page.count("encodeURIComponent(this.bridgeIdOf(name))") >= 4  # resume/stop/qr/ws-log
-    assert '"/ws/pty-screen/" + encodeURIComponent(this.bridgeIdOf(name))' in page
-    assert "this._forget(this.bridgeIdOf(name), name)" in page
+    assert ".instance_id || null; }" in page  # no name fallback — null means refuse
+    # Every action entry point routes through the refuse-while-unminted guard:
+    # resume / stop / forget / log-tail ws / pty-screen ws.
+    assert page.count("this._requireBridgeId(name)") >= 5
+    assert "still starting — try again in a moment" in page  # the refusal is explained
+    # No raw project-name identity remains on the instance API/ws call sites.
+    assert 'fetch(ROOT + "/api/instances/" + encodeURIComponent(name)' not in page
+    assert '"/ws/pty-screen/" + encodeURIComponent(name)' not in page
+    assert '"/ws/bridge-log/" + encodeURIComponent(name)' not in page
     # Resume must capture the id BEFORE swapping in the optimistic placeholder.
     assert "pin the displayed row BEFORE the optimistic swap" in page
