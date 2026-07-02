@@ -33,8 +33,10 @@ def insert_compare_link(text: str, version: str) -> str:
     """Return ``text`` with a compare link added under the newest (top) version heading.
 
     Raises ``ValueError`` if the top version heading is missing or doesn't match
-    ``version``. Returns ``text`` unchanged when the link already exists or there is no
-    older version to compare against.
+    ``version``, or if a compare link sits directly under the heading with no blank
+    line (an unexpected shape worth failing loudly on rather than silently skipping).
+    Returns ``text`` unchanged when the link already exists or there is no older
+    version to compare against.
     """
     lines = text.split("\n")
     heads = [i for i, ln in enumerate(lines) if HEADING_RE.match(ln)]
@@ -55,7 +57,10 @@ def insert_compare_link(text: str, version: str) -> str:
     link = f"[Compare with {prev}]({REPO}/compare/v{prev}...v{version})"
     # Heading is followed by a blank line; the compare link (if present) sits after it.
     if lines[top + 1 : top + 2] and lines[top + 1].startswith("[Compare with "):
-        return text  # a stray link on the blank line -- unexpected, leave it alone
+        raise ValueError(
+            f"unexpected changelog shape: compare link found at line {top + 1} "
+            "(directly after heading, no blank line) -- fix manually"
+        )
     if lines[top + 2 : top + 3] and lines[top + 2].startswith("[Compare with "):
         return text  # already inserted -- idempotent no-op
     lines[top + 2 : top + 2] = [link, ""]

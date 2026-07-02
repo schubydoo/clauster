@@ -59,6 +59,21 @@ def test_no_heading_fails_loud() -> None:
         mod.insert_compare_link("# Changelog\n\nNothing here yet.\n", "0.1.0")
 
 
+def test_stray_link_with_no_blank_line_fails_loud() -> None:
+    # A compare link jammed directly under the heading (no blank line) is a shape this
+    # script never writes itself -- something else produced it, so fail loud rather than
+    # silently treating it as "already inserted" and skipping.
+    text = (
+        "# Changelog\n\n"
+        "## 0.12.10 (2026-07-02)\n"
+        "[Compare with 0.12.9](https://x/compare/v0.12.9...v0.12.10)\n\n"
+        "### Fixes\n\n- Something\n\n"
+        "## 0.12.9 (2026-06-29)\n\n### Fixes\n\n- Something older\n"
+    )
+    with pytest.raises(ValueError, match="unexpected changelog shape"):
+        mod.insert_compare_link(text, "0.12.10")
+
+
 def test_cli_writes_file(tmp_path: Path) -> None:
     p = tmp_path / "CHANGELOG.md"
     p.write_text(_changelog("0.12.10", "0.12.9"), encoding="utf-8")
