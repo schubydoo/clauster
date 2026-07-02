@@ -768,6 +768,8 @@ def test_api_token_verbs_report_db_bootstrap_failure_cleanly(
             cli.main(verb)
         assert exc_info.value.code == 1
         assert "could not open the database" in capsys.readouterr().err
+
+
 # ----- audited coverage gaps (2026-07 audit) -----------------------------
 
 
