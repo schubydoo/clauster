@@ -21,6 +21,7 @@ from clauster.runner import (
     InvalidSpawnOption,
     PermissionModeNotAllowed,
     SessionRunner,
+    _normalize_custom_name,
 )
 
 
@@ -163,6 +164,151 @@ async def test_spawn_uses_config_defaults(runner_config, monkeypatch):
     assert inst.permission_mode == "plan"
     assert inst.spawn_mode == "same-dir"
     await runner.stop(inst.instance_id)
+
+
+# ----- custom bridge name (#780) -----------------------------------------
+#
+# --name is user-customizable for a *standard* (server-mode) bridge only: the
+# pty (Interactive Session) flag form has no equivalent flag (verified: `claude
+# remote-control --help` documents --name, `claude --help`'s --remote-control
+# entry does not), so a custom name is a no-op there (see test_runner_pty.py's
+# test_spawn_pty_ignores_custom_name).
+
+
+def test_normalize_custom_name_none_falls_back_to_project_name():
+    assert _normalize_custom_name(None, fallback="alpha") == "alpha"
+
+
+def test_normalize_custom_name_blank_after_strip_falls_back():
+    assert _normalize_custom_name("   ", fallback="alpha") == "alpha"
+
+
+def test_normalize_custom_name_empty_string_falls_back():
+    assert _normalize_custom_name("", fallback="alpha") == "alpha"
+
+
+def test_normalize_custom_name_strips_surrounding_whitespace():
+    assert _normalize_custom_name("  my session  ", fallback="alpha") == "my session"
+
+
+def test_normalize_custom_name_passes_through_valid_value():
+    assert _normalize_custom_name("my session", fallback="alpha") == "my session"
+
+
+def test_normalize_custom_name_accepts_exactly_the_length_cap():
+    assert _normalize_custom_name("x" * 128, fallback="alpha") == "x" * 128
+
+
+def test_normalize_custom_name_rejects_too_long():
+    with pytest.raises(InvalidSpawnOption):
+        _normalize_custom_name("x" * 129, fallback="alpha")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["bad\nname", "bad\rname", "bad\tname", "bad\x00name", "bad\x1fname", "bad\x7fname"],
+)
+def test_normalize_custom_name_rejects_control_characters(bad):
+    with pytest.raises(InvalidSpawnOption):
+        _normalize_custom_name(bad, fallback="alpha")
+
+
+async def test_spawn_custom_name_reaches_argv_and_label(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", custom_name="My Custom Bridge")
+    try:
+        assert inst.label == "My Custom Bridge"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--name") + 1] == "My Custom Bridge"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_blank_custom_name_falls_back_to_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", custom_name="   ")
+    try:
+        assert inst.label == "alpha"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--name") + 1] == "alpha"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_omitted_custom_name_keeps_default_behavior(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.label == "alpha"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_invalid_custom_name_rejected_before_any_spawn(runner_config):
+    runner = _runner(runner_config)
+    with pytest.raises(InvalidSpawnOption):
+        await runner.spawn("alpha", custom_name="bad\nname")
+    assert runner.running_count() == 0  # rejected before _popen ever ran
+
+
+async def test_resume_preserves_custom_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", custom_name="My Custom Bridge")
+    await runner.stop(inst.instance_id)
+    resumed = await runner.resume(inst.instance_id)
+    try:
+        assert resumed.label == "My Custom Bridge"
+        argv = json.loads(Path(str(resumed.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--name") + 1] == "My Custom Bridge"
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+def _runner_client(runner_config) -> TestClient:
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    return TestClient(create_app(config, runner=runner))
+
+
+def test_api_spawn_custom_name_reaches_label_and_argv(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _runner_client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "name": "My Custom Bridge"})
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["label"] == "My Custom Bridge"
+        argv = json.loads(Path(str(body["bridge_debug_log_path"]) + ".argv.json").read_text())
+        assert argv[argv.index("--name") + 1] == "My Custom Bridge"
+
+
+def test_api_spawn_blank_custom_name_falls_back(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _runner_client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "name": "   "})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["label"] == "alpha"
+
+
+def test_api_spawn_custom_name_too_long_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "name": "x" * 129})
+    assert resp.status_code == 422
+
+
+def test_api_spawn_custom_name_control_char_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "name": "bad\nname"})
+    assert resp.status_code == 422
+
+
+def test_api_spawn_non_string_custom_name_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "name": 5})
+    assert resp.status_code == 422
 
 
 # ----- max_bridges (clauster-enforced concurrent-bridge cap) -----------

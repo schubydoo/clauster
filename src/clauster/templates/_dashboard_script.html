@@ -213,6 +213,9 @@
       spawnMode: {},
       permMode: {},
       resumeMode: {},
+      // project name -> operator-typed custom bridge/session display name (#780,
+      // standard/Server Mode only — blank keeps the project-name default).
+      customName: {},
       confirmBypass: {},
       bypassTyped: {},
       confirmTrust: {},
@@ -307,6 +310,7 @@
           this.spawnMode[n] = DEFAULT_SPAWN_MODE;
           this.permMode[n] = DEFAULT_PERMISSION_MODE;
           this.resumeMode[n] = DEFAULT_RESUME_MODE;
+          this.customName[n] = "";
         }
         this.trustState = { ...INITIAL_TRUST };
         await this.refresh();
@@ -2295,6 +2299,7 @@
         if (!(name in this.spawnMode)) this.spawnMode[name] = DEFAULT_SPAWN_MODE;
         if (!(name in this.permMode)) this.permMode[name] = DEFAULT_PERMISSION_MODE;
         if (!(name in this.resumeMode)) this.resumeMode[name] = DEFAULT_RESUME_MODE;
+        if (!(name in this.customName)) this.customName[name] = "";
         if (proj && proj.trust_state) this.trustState[name] = proj.trust_state;
         // The rows list only exists once there is ≥1 project; the very first project has no
         // #project-grid yet (the empty-state renders instead), so reload to render it.
@@ -2349,15 +2354,21 @@
         if (effective === "pty") this.ptyPending[name] = true;
         else this.instances[name] = this._stamp({ project: name, status: "starting" });
         try {
+          const reqBody = {
+            project: name,
+            spawn_mode: this.spawnMode[name],
+            permission_mode: this.permMode[name],
+            resume_mode: mode,
+          };
+          // Custom bridge display name (#780) — standard/Server Mode only; the pty
+          // (Interactive Session) flag form has no equivalent flag, so never send it
+          // there even if a name was typed before flipping Mode.
+          const customName = (this.customName[name] || "").trim();
+          if (effective !== "pty" && customName) reqBody.name = customName;
           const res = await fetch(ROOT + "/api/instances", {
             method: "POST",
             headers: JSON_HEADERS,
-            body: JSON.stringify({
-              project: name,
-              spawn_mode: this.spawnMode[name],
-              permission_mode: this.permMode[name],
-              resume_mode: mode,
-            }),
+            body: JSON.stringify(reqBody),
           });
           const body = await res.json();
           if (!res.ok) {
