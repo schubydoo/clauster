@@ -61,9 +61,10 @@ change_templates = [
 
 # --- prepare-release: open/refresh the release PR (run on every push to main) -
 # PrepareRelease consumes the .changeset fragments, bumps pyproject.toml +
-# src/clauster/__init__.py + CHANGELOG.md, and stages them. We then resync
-# uv.lock to the new version, commit, force-push the `release` branch, and
-# open/update the release PR. A human merging that PR is the approval gate.
+# src/clauster/__init__.py + CHANGELOG.md, and stages them. We then add the
+# compare link under the new heading, resync uv.lock to the new version, commit,
+# force-push the `release` branch, and open/update the release PR. A human merging
+# that PR is the approval gate.
 [[workflows]]
 name = "prepare-release"
 
@@ -73,6 +74,16 @@ command = "git switch -C release"
 
 [[workflows.steps]]
 type = "PrepareRelease"
+
+# knope writes a plain `## X.Y.Z (date)` heading with no diff link (it has no
+# template for the heading, and a linked heading is one knope stops recognizing as
+# a release — which silently mis-ordered this changelog after the release-please ->
+# knope move). So we add the compare link on its own line UNDER the heading, where
+# knope preserves it. Idempotent; a no-op for the first release. `git commit -am`
+# below re-stages the edited CHANGELOG.md.
+[[workflows.steps]]
+type = "Command"
+command = "python3 scripts/changelog_compare_link.py $version"
 
 [[workflows.steps]]
 type = "Command"
