@@ -41,14 +41,22 @@ coverage:
         # Per-diff coverage (new/changed lines only). The project status mirrors
         # the pytest gate and stays advisory; the patch is what Codecov adds that
         # pytest --cov-fail-under cannot — visibility on the *new* code a PR adds.
-        # `informational: false` emits a pass/fail traffic light (green >= 80%, red
-        # X below) so a coverage drop is visually loud in the checks list. It is
+        # `informational: false` emits a pass/fail traffic light (green >= target,
+        # red X below) so a coverage drop is visually loud in the checks list. It is
         # NOT a required check — the merge button stays green on a red X; docs-only
         # PRs get no upload and no check at all. Add `codecov/patch` to branch
         # protection later only if you want to block low-coverage PRs on merge.
-        target: 80% # new/changed lines in the PR should be well covered
-        threshold: 0% # no slack on the diff — if a PR drops new-code coverage
-                      # below 80% it should explain or add tests
+        target: 95% # new/changed lines must be well covered. Raised 80 -> 95 once
+                    # the repo hit 100% (the audit PR): at 80% a PR could add a fifth
+                    # of its new lines untested and stay green, and the project status
+                    # (96% + 1% slack, informational) wouldn't flag erosion in the
+                    # 96-100% band — so patch is the real per-PR sentinel. 95 (not
+                    # 100) leaves headroom for the occasional genuinely-hard line so
+                    # the red X stays meaningful, not chronic (alert fatigue on a
+                    # non-required check). Codecov honours our `# pragma` excludes, so
+                    # truly-unreachable branches never trip it.
+        threshold: 0% # no slack on the diff — a PR under 95% new-code coverage
+                      # should add a test or a justified pragma
         informational: false # emit pass/fail traffic light; not a required check
         if_not_found: success # docs-only PRs (no upload) emit success, never block
 
