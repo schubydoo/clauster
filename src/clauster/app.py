@@ -148,7 +148,7 @@ def _mirror_v1_routes(app: FastAPI, public: frozenset[tuple[str, str]]) -> None:
     for route in list(app.router.routes):
         if not isinstance(route, APIRoute):
             continue
-        for method in route.methods - {"HEAD"}:
+        for method in (route.methods or set()) - {"HEAD"}:
             key = (method, route.path)
             if key not in public:
                 continue

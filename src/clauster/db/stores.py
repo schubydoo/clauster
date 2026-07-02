@@ -36,8 +36,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -601,7 +602,9 @@ class ApiTokenStore:
         try:
             with self._sessions() as session, session.begin():
                 result = session.execute(delete(ApiToken).where(ApiToken.label == label))
-                return result.rowcount > 0
+                # Session.execute is typed Result[Any]; DML statements return a
+                # CursorResult at runtime, which is what carries rowcount.
+                return cast(CursorResult, result).rowcount > 0
         except SQLAlchemyError as exc:
             raise OSError(f"api-token revoke failed: {exc}") from exc
 
