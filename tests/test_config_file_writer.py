@@ -9,6 +9,7 @@ serializing concurrent writers on the same target.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,30 @@ from pathlib import Path
 import pytest
 
 from clauster import config_file_writer as fw
+
+# POSIX-only markers, mirroring test_claude_json.py / test_trust.py: on Windows the
+# advisory flock (fcntl) is absent so `_locked` is a documented best-effort no-op (no
+# `.lock` sidecar), and Unix permission bits aren't honored (stat reports 0o666). Gate
+# the assertions that check those two POSIX-specific behaviors; the leftover-file tests
+# instead assert the *cross-platform* invariant (no stray .tmp/.staging/.trash), the
+# same idiom test_claude_json.py uses (assert the bad file is absent, not exact
+# directory contents).
+needs_posix = pytest.mark.skipif(os.name != "posix", reason="POSIX file-mode semantics")
+
+
+def _no_orphans(parent: Path) -> None:
+    """Assert no stray temp/staging/trash artifacts linger in ``parent`` (any platform).
+
+    The advisory-lock ``.lock`` sidecar is expected to linger on POSIX (same as the
+    Foundation's ``claude_json._locked``) and is simply absent on Windows, so it is not
+    checked here; only the transient write artifacts, which must NEVER be orphaned, are.
+    """
+    for child in parent.iterdir():
+        name = child.name
+        assert not name.endswith(".tmp"), f"orphaned temp file: {name}"
+        assert ".staging-" not in name, f"orphaned staging dir: {name}"
+        assert ".trash-" not in name, f"orphaned trash dir: {name}"
+
 
 # --- path containment (reject escape before I/O) -----------------------------------
 
@@ -99,13 +124,13 @@ def test_write_file_rejects_path_escape_before_any_io(tmp_path: Path) -> None:
 
 def test_write_file_no_leftover_temp_file(tmp_path: Path) -> None:
     fw.write_file(tmp_path, "note.txt", "hello")
-    # The advisory-lock sidecar (note.txt.lock) is expected to linger — same as the
-    # Foundation's claude_json._locked technique — but no stray .tmp is ever left.
-    names = {p.name for p in tmp_path.iterdir()}
-    assert names == {"note.txt", "note.txt.lock"}
-    assert not any(name.endswith(".tmp") for name in names)
+    # No stray .tmp is ever left (cross-platform); the .lock sidecar may linger on POSIX
+    # and is absent on Windows, so _no_orphans deliberately ignores it.
+    assert (tmp_path / "note.txt").exists()
+    _no_orphans(tmp_path)
 
 
+@needs_posix
 def test_write_file_new_file_gets_requested_mode(tmp_path: Path) -> None:
     fw.write_file(tmp_path, "secret.txt", "s", mode=0o600)
     mode = (tmp_path / "secret.txt").stat().st_mode & 0o777
@@ -129,6 +154,7 @@ def test_write_file_replace_failure_cleans_up_temp_file(tmp_path: Path, monkeypa
     assert "note.txt" not in names  # nothing was ever promoted
 
 
+@needs_posix
 def test_write_file_replace_preserves_existing_mode(tmp_path: Path) -> None:
     fw.write_file(tmp_path, "note.txt", "first", mode=0o600)
     (tmp_path / "note.txt").chmod(0o640)
@@ -193,10 +219,8 @@ def test_replace_tree_creates_new_directory(tmp_path: Path) -> None:
 
 def test_replace_tree_no_staging_leftover_on_success(tmp_path: Path) -> None:
     fw.replace_tree(tmp_path, "skill", _populate({"SKILL.md": "# hi"}))
-    # The lock sidecar (skill.lock) is expected to linger (see write_file's equivalent
-    # test); no .staging-* is ever left behind.
-    names = {p.name for p in tmp_path.iterdir()}
-    assert names == {"skill", "skill.lock"}
+    assert (tmp_path / "skill").is_dir()
+    _no_orphans(tmp_path)  # no .staging-* left behind (cross-platform)
 
 
 def test_replace_tree_replaces_existing_directory_wholesale(tmp_path: Path) -> None:
@@ -210,8 +234,8 @@ def test_replace_tree_replaces_existing_directory_wholesale(tmp_path: Path) -> N
 def test_replace_tree_no_trash_leftover_after_replace(tmp_path: Path) -> None:
     fw.replace_tree(tmp_path, "skill", _populate({"SKILL.md": "old"}))
     fw.replace_tree(tmp_path, "skill", _populate({"SKILL.md": "new"}))
-    names = {p.name for p in tmp_path.iterdir()}
-    assert names == {"skill", "skill.lock"}
+    assert (tmp_path / "skill").is_dir()
+    _no_orphans(tmp_path)  # no .trash-* / .staging-* left behind (cross-platform)
 
 
 def test_replace_tree_build_failure_leaves_target_untouched(tmp_path: Path) -> None:
@@ -226,10 +250,7 @@ def test_replace_tree_build_failure_leaves_target_untouched(tmp_path: Path) -> N
 
     target = tmp_path / "skill"
     assert (target / "SKILL.md").read_text(encoding="utf-8") == "original"  # unchanged
-    # No half-built staging directory left behind (the lock sidecar from the first,
-    # successful replace_tree call lingers, same as every other test here).
-    names = {p.name for p in tmp_path.iterdir()}
-    assert names == {"skill", "skill.lock"}
+    _no_orphans(tmp_path)  # no half-built .staging-* left behind (cross-platform)
 
 
 def test_replace_tree_build_failure_on_create_leaves_no_target(tmp_path: Path) -> None:
@@ -243,9 +264,10 @@ def test_replace_tree_build_failure_on_create_leaves_no_target(tmp_path: Path) -
 
 
 def test_replace_tree_promote_failure_restores_displaced_tree(tmp_path: Path, monkeypatch) -> None:
-    # If the second (promote) rename fails after the first (swap-out) rename already
-    # succeeded, the displaced original tree must be restored — the target path is
-    # never left permanently missing — and the failure still propagates.
+    # Greptile P1: if the second (promote) rename fails after the first (swap-out) rename
+    # already succeeded, the displaced original tree must be restored — the target path is
+    # never left permanently missing — the un-promoted staging dir must NOT be orphaned,
+    # and the failure still propagates.
     fw.replace_tree(tmp_path, "skill", _populate({"SKILL.md": "original"}))
 
     real_replace = fw.os.replace
@@ -265,6 +287,22 @@ def test_replace_tree_promote_failure_restores_displaced_tree(tmp_path: Path, mo
     target = tmp_path / "skill"
     assert target.exists()  # never left missing
     assert (target / "SKILL.md").read_text(encoding="utf-8") == "original"  # restored
+    _no_orphans(tmp_path)  # P1: staging dir removed, trash restored — no .staging-*/.trash-*
+
+
+def test_replace_tree_create_promote_failure_removes_staging(tmp_path: Path, monkeypatch) -> None:
+    # Greptile P1, create branch: when the single create-path rename fails (no existing
+    # target to displace), the un-promoted staging dir must be removed, never orphaned,
+    # and the failure still propagates. monkeypatch auto-restores os.replace at teardown.
+    def boom(src, dst):
+        raise OSError("simulated: create-promote failed")
+
+    monkeypatch.setattr(fw.os, "replace", boom)
+    with pytest.raises(OSError, match="create-promote failed"):
+        fw.replace_tree(tmp_path, "skill", _populate({"SKILL.md": "new"}))
+
+    assert not (tmp_path / "skill").exists()  # nothing promoted
+    _no_orphans(tmp_path)  # P1: no orphaned .staging-*
 
 
 def test_replace_tree_rejects_path_escape_before_building(tmp_path: Path) -> None:
@@ -306,10 +344,11 @@ def test_delete_path_rejects_path_escape(tmp_path: Path) -> None:
 def test_delete_path_no_trash_leftover(tmp_path: Path) -> None:
     fw.replace_tree(tmp_path, "skill", _populate({"SKILL.md": "x"}))
     fw.delete_path(tmp_path, "skill")
-    # The target directory is gone; only its lock sidecar lingers (never a
-    # `.trash-*` directory — that is always cleaned up after the swap).
-    names = {p.name for p in tmp_path.iterdir()}
-    assert names == {"skill.lock"}
+    # The target directory is gone; no `.trash-*` lingers (it is always cleaned up after
+    # the swap). The `.lock` sidecar may linger on POSIX / is absent on Windows, so
+    # _no_orphans deliberately ignores it.
+    assert not (tmp_path / "skill").exists()
+    _no_orphans(tmp_path)
 
 
 # --- flock: serializes concurrent writers on the SAME target -----------------------

@@ -225,6 +225,11 @@ def replace_tree(root: Path, relative: str, build: Callable[[Path], None]) -> Pa
       write). The displaced old tree is then removed; if that cleanup itself fails,
       the live path is already correct and only the ``.trash-<uuid>`` sibling lingers
       for manual cleanup — a disk-space leak, never a correctness issue.
+
+    If the promote rename itself fails (ENOSPC, permission), the displaced original is
+    restored to the target path AND the un-promoted staging directory is removed, so a
+    failure never orphans a ``.staging-<uuid>`` dir in the parent (the same cleanup is
+    applied to the single-rename create path).
     """
     target = resolve_contained_path(root, relative)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -244,14 +249,22 @@ def replace_tree(root: Path, relative: str, build: Callable[[Path], None]) -> Pa
                 os.replace(staging, target)
             except BaseException:
                 # Best-effort restore of the displaced tree so a failed promote never
-                # leaves the target path missing.
+                # leaves the target path missing, AND remove the un-promoted staging dir
+                # so a promote failure (ENOSPC, permission) never orphans it in the parent.
                 with contextlib.suppress(OSError):
                     os.replace(trash, target)
+                shutil.rmtree(staging, ignore_errors=True)
                 raise
             else:
                 shutil.rmtree(trash, ignore_errors=True)
         else:
-            os.replace(staging, target)
+            try:
+                os.replace(staging, target)
+            except BaseException:
+                # Same orphan guard on the create path: a failed single rename must not
+                # leave the staging dir behind.
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
     return target
 
 
