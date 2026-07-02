@@ -90,6 +90,16 @@ def test_live_terminal_client_side_fit_wiring(write_config):
     # the host clips overflow (the transform shrinks the grid; no scrollbars)
     assert ".pty-screen-host {" in body
     assert "overflow: hidden" in body
+    # #673: .xterm is pinned to naturalW so it doesn't stretch past the canvas as a block element
+    # on wide viewports (which would leave a dark background strip to the right of the grid).
+    assert 'inner.style.width = naturalW + "px";' in body
+    # #673: host is border-box (Tabler reset), so style.height = total box including padding;
+    # both padTop and padBottom are added so the content area inside equals the scaled grid height.
+    assert "const padTop = parseFloat(cs.paddingTop) || 0;" in body
+    assert "const padBottom = parseFloat(cs.paddingBottom) || 0;" in body
+    assert (
+        'reg.host.style.height = Math.ceil(naturalH * scale) + padTop + padBottom + "px";'
+    ) in body
 
 
 def test_transcript_viewer_has_sort_toggle_and_search(write_config):
