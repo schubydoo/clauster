@@ -2,8 +2,10 @@
 
 Generates a self-signed RSA-2048 cert+key pair under ``state_dir/tls/`` when
 ``tls.provision = self-signed``.  The cert is regenerated on expiry (within
-``_RENEW_BEFORE_DAYS`` of expiry) or when the Subject / SAN set changes (a
-hostname was added or the primary CN changed).
+``_RENEW_BEFORE_DAYS`` of expiry) or when the SAN set changes (a hostname was
+added or removed).  Reordering ``hostnames`` changes the CN but not the SAN set,
+so no regen fires — intentional, since modern TLS clients verify against the SANs,
+not the CN.
 
 Key-material handling guarantees
 ---------------------------------
@@ -64,7 +66,7 @@ def _imports():
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise RuntimeError(
             "tls.provision = self-signed requires the 'cryptography' package — "
-            "install it with: pip install cryptography  (or pip install 'clauster[tls]')"
+            "install it with: pip install cryptography  (or reinstall: pip install clauster)"
         ) from exc
     return x509, hashes, serialization, rsa, NameOID
 
@@ -173,7 +175,7 @@ def generate_self_signed(
     cert_path = tls_dir / "self-signed.crt"
     key_path = tls_dir / "self-signed.key"
 
-    if not cert_needs_regen(cert_path, hostnames):
+    if not cert_needs_regen(cert_path, hostnames) and key_path.is_file():
         _log.debug("tls: self-signed cert is current, reusing %s", cert_path)
         return cert_path.resolve(), key_path.resolve()
 

@@ -351,6 +351,16 @@ def test_generate_self_signed_reuses_current_cert(tmp_path):
     assert mtime1 == mtime2  # file not rewritten
 
 
+def test_generate_self_signed_regens_when_key_missing(tmp_path):
+    # A valid cert whose key was deleted must transparently regenerate rather
+    # than return a path to a non-existent key (which would abort downstream).
+    cert_path, key_path = generate_self_signed(tmp_path, ["localhost"])
+    key_path.unlink()
+    cert_path2, key_path2 = generate_self_signed(tmp_path, ["localhost"])
+    assert key_path2.is_file()
+    assert cert_path2 == cert_path
+
+
 def test_generate_self_signed_regens_on_san_change(tmp_path):
     cert_path, _ = generate_self_signed(tmp_path, ["localhost"])
     mtime1 = cert_path.stat().st_mtime
