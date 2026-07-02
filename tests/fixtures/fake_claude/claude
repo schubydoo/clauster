@@ -174,7 +174,11 @@ def run_mcp(args):
 
     Scripted entirely via env vars so a route test can drive success/conflict/
     not-found without ever touching a real `claude`/account:
-      FAKE_CLAUDE_MCP_EXIT_CODE = exit code to return (default "0")
+      FAKE_CLAUDE_MCP_EXIT_CODE = default exit code to return (default "0")
+      FAKE_CLAUDE_MCP_REMOVE_EXIT_CODE  = per-verb override for `remove`
+      FAKE_CLAUDE_MCP_ADDJSON_EXIT_CODE = per-verb override for `add-json`
+                                  (both let an edit = remove+re-add test make the
+                                  remove succeed while the re-add fails — MUST-FIX #4)
       FAKE_CLAUDE_MCP_STDOUT    = stdout text to emit (default "")
       FAKE_CLAUDE_MCP_STDERR    = stderr text to emit (default "")
       FAKE_CLAUDE_MCP_ARGV_FILE = path to record {"argv", "cwd",
@@ -182,6 +186,7 @@ def run_mcp(args):
                                   assert exactly what clauster invoked — including
                                   that a secret rode the child env, never argv.
     """
+    verb = args[0] if args else ""
     if os.environ.get("FAKE_CLAUDE_MCP_ARGV_FILE"):
         import json
 
@@ -198,6 +203,12 @@ def run_mcp(args):
         sys.stdout.write(stdout)
     if stderr:
         sys.stderr.write(stderr)
+    per_verb = {
+        "remove": "FAKE_CLAUDE_MCP_REMOVE_EXIT_CODE",
+        "add-json": "FAKE_CLAUDE_MCP_ADDJSON_EXIT_CODE",
+    }.get(verb)
+    if per_verb and os.environ.get(per_verb) is not None:
+        return int(os.environ[per_verb])
     return int(os.environ.get("FAKE_CLAUDE_MCP_EXIT_CODE", "0"))
 
 

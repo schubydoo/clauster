@@ -42,9 +42,12 @@ secret out and a returned ``"********"`` sentinel keeps the stored value.
   MCP/plugins, file writer for skills/subagents/hooks/CLAUDE.md/settings). It
   calls back into this module's :func:`write_project_server_entry` /
   :func:`write_user_server_entry` / :func:`write_project_local_server_entry` for
-  the one case the CLI cannot safely carry: an entry with a **literal** secret
-  value, which would otherwise sit in the ``claude mcp add-json`` argv (visible
-  via ``ps``/``/proc``) for the life of the call.
+  every case the CLI cannot safely carry: any entry with a non-empty ``env`` or
+  ``headers`` value (or a token-bearing ``url``), which would otherwise sit in the
+  ``claude mcp add-json`` argv (visible via ``ps``/``/proc``) for the life of the
+  call. Redaction detects secrets by *key name* only, so the routing predicate
+  (:func:`clauster.config_write_mcp_cli.entry_needs_direct_write`) deliberately errs
+  on ANY inline ``env``/``headers`` value rather than trusting key-name detection.
 * **Enable/disable** models project ``.mcp.json`` server approval exactly as
   Claude Code itself does (verified against a live ``claude mcp add-json`` /
   ``reset-project-choices`` run, see #769): two per-project lists,
@@ -61,6 +64,7 @@ secret out and a returned ``"********"`` sentinel keeps the stored value.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +72,19 @@ from . import config_write as cw
 
 #: The top-level key holding the server map in both ``.mcp.json`` and ``mcpServers``.
 MCP_SERVERS_KEY = "mcpServers"
+
+#: Allowed shape for an MCP **server name**. A name flows through to a positional
+#: argument of ``claude mcp add-json <name> …`` / ``claude mcp remove <name> …`` (see
+#: :mod:`clauster.config_write_mcp_cli`), so a name that *looks like an option* —
+#: ``--scope``, ``--client-secret``, ``-e`` — would be consumed by the CLI's argument
+#: parser as a flag rather than the positional name (arg-injection / positional shift;
+#: verified against a live ``claude`` 2.1.198, which errors or mis-binds such a name).
+#: Constrain it to a conservative identifier charset that CANNOT begin with ``-``: an
+#: alphanumeric/underscore first char, then alphanumerics/underscore/dot/hyphen. This is
+#: validated structurally (validate-never-execute), so a bad name is a 422 with nothing
+#: written, and it is enforced for the direct (non-CLI) writers too so the two write
+#: paths never diverge on which names they accept.
+_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*$")
 
 #: The top-level ``~/.claude.json`` key holding per-project state, keyed by the
 #: resolved absolute project path (the same shape :mod:`clauster.trust` uses for
@@ -121,10 +138,18 @@ def _validate_server_entry(name: Any, entry: Any) -> None:
     Stdio entries require a non-empty string ``command`` (``args`` a list of
     strings, ``env`` a string→string map); remote entries require a non-empty
     string ``url`` (``headers`` a string→string map). Unknown keys are rejected.
-    **Nothing here resolves, spawns, or runs the command/url** — shape only.
+    The ``name`` must additionally match :data:`_SERVER_NAME_RE` (no leading ``-``,
+    identifier charset) so it can never be mis-parsed as a CLI option when it reaches
+    ``claude mcp``'s argv — see that constant. **Nothing here resolves, spawns, or
+    runs the command/url** — shape only.
     """
     if not isinstance(name, str) or not name:
         raise cw.InvalidCandidateError("server name must be a non-empty string")
+    if not _SERVER_NAME_RE.match(name):
+        raise cw.InvalidCandidateError(
+            f"server name {name!r} must match {_SERVER_NAME_RE.pattern} "
+            "(identifier chars, no leading '-')"
+        )
     if not isinstance(entry, dict):
         raise cw.InvalidCandidateError(f"server {name!r} must be an object")
 
@@ -315,8 +340,8 @@ def write_project_server_entry(
     """Merge one server ``entry`` into the project's stored map, fail-closed.
 
     The secret-safe twin of :func:`clauster.config_write_mcp_cli.cli_add_server`:
-    used when ``entry`` carries a literal secret value (see
-    :func:`clauster.config_write_mcp_cli.entry_has_secret`), which the CLI's
+    used when ``entry`` carries a potential inline secret (see
+    :func:`clauster.config_write_mcp_cli.entry_needs_direct_write`), which the CLI's
     ``add-json`` argv cannot carry without exposing it via ``ps``/``/proc``. Reads
     the current *redacted* map, folds ``entry`` in under ``name`` (every sibling
     server's masked value round-trips to its real stored secret via
@@ -354,6 +379,71 @@ def write_project_local_server_entry(
         raise ServerExistsError(f"MCP server {name!r} already exists in local scope")
     incoming = {**redacted, name: entry}
     write_project_local_servers(claude_json, project_dir, incoming)
+
+
+# ---------------------------------------------------------------------------
+# #769: UNREDACTED single-entry snapshots (edit-rollback ONLY — never client-facing)
+# ---------------------------------------------------------------------------
+#
+# The public readers above all redact before returning, so a stored secret never
+# leaves the process on the display path. The edit orchestration
+# (:func:`clauster.config_write_mcp_cli.cli_edit_server`) removes-then-re-adds; if the
+# re-add fails after the remove succeeded, the previous definition must be restored
+# *verbatim* — which needs its real (unredacted) value. These snapshot readers exist
+# solely for that same-request, in-memory rollback: their result is written straight
+# back to disk by the direct writer on failure and is NEVER serialized into a response
+# or a log. Keep them private to the edit path.
+
+
+def _raw_project_server(project_dir: Path, name: str) -> dict[str, Any] | None:
+    """Return the UNREDACTED stored ``.mcp.json`` entry for ``name`` (rollback snapshot)."""
+    path = project_dir / ".mcp.json"
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    servers = cw.load_settings_json_obj(raw).get(MCP_SERVERS_KEY)
+    value = servers.get(name) if isinstance(servers, dict) else None
+    return value if isinstance(value, dict) else None
+
+
+def _raw_user_server(claude_json: Path, name: str) -> dict[str, Any] | None:
+    """Return the UNREDACTED stored user-scope entry for ``name`` (rollback snapshot)."""
+    try:
+        raw = claude_json.read_bytes()
+    except FileNotFoundError:
+        return None
+    servers = cw.load_settings_json_obj(raw).get(MCP_SERVERS_KEY)
+    value = servers.get(name) if isinstance(servers, dict) else None
+    return value if isinstance(value, dict) else None
+
+
+def _raw_project_local_server(
+    claude_json: Path, project_dir: Path, name: str
+) -> dict[str, Any] | None:
+    """Return the UNREDACTED stored local-scope entry for ``name`` (rollback snapshot)."""
+    servers = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY)
+    value = servers.get(name) if isinstance(servers, dict) else None
+    return value if isinstance(value, dict) else None
+
+
+def snapshot_server_entry(
+    scope: cw.Scope, name: str, *, claude_json: Path, project_dir: Path
+) -> dict[str, Any] | None:
+    """Return the UNREDACTED stored entry for ``(scope, name)``, or ``None`` if absent.
+
+    The single public entry point for the edit-rollback snapshot — dispatches to the
+    per-scope raw readers above. **For same-request, in-memory rollback ONLY:** the
+    result is written straight back to disk by the direct writer if a remove+re-add
+    edit fails partway, and must NEVER be serialized into a response or a log (that is
+    what the redacted public readers are for). ``project_dir`` is ignored for user
+    scope.
+    """
+    if scope == "user":
+        return _raw_user_server(claude_json, name)
+    if scope == "local":
+        return _raw_project_local_server(claude_json, project_dir, name)
+    return _raw_project_server(project_dir, name)
 
 
 # ---------------------------------------------------------------------------

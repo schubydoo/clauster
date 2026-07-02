@@ -1864,36 +1864,41 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             cli_cwd = _resolve_cw_project(project, require_exists=True)
         binary = config.claude.binary
 
+        def _direct_write(target_entry: dict, target_op: str) -> None:
+            # The #766 direct (non-spawning) writers, one per scope. Used for any entry
+            # that must never reach the CLI's argv, and as the edit-rollback restore.
+            if scope == "user":
+                config_write_mcp.write_user_server_entry(
+                    runner.claude_json, name, target_entry, op=target_op
+                )
+            elif scope == "local":
+                config_write_mcp.write_project_local_server_entry(
+                    runner.claude_json, cli_cwd, name, target_entry, op=target_op
+                )
+            else:
+                config_write_mcp.write_project_server_entry(
+                    cli_cwd, name, target_entry, op=target_op
+                )
+
+        def _snapshot_prior() -> dict | None:
+            # UNREDACTED single-entry read for the edit-rollback (in-memory, same request,
+            # never serialized to a response/log — see config_write_mcp.snapshot_server_entry).
+            return config_write_mcp.snapshot_server_entry(
+                scope,  # type: ignore[arg-type]
+                name,
+                claude_json=runner.claude_json,
+                project_dir=cli_cwd,
+            )
+
         def _work() -> None:
             if op == "remove":
                 config_write_mcp_cli.cli_remove_server(binary, cli_cwd, name, scope)  # type: ignore[arg-type]
                 return
-            # add / edit: a literal secret anywhere in `entry` can never reach the
-            # CLI's argv (see config_write_mcp_cli's module docstring), so it is
-            # routed to the #766 direct writer instead — same file, no subprocess.
-            if config_write_mcp_cli.entry_has_secret(entry):  # type: ignore[arg-type]
-                if scope == "user":
-                    config_write_mcp.write_user_server_entry(
-                        runner.claude_json,
-                        name,
-                        entry,
-                        op=op,  # type: ignore[arg-type]
-                    )
-                elif scope == "local":
-                    config_write_mcp.write_project_local_server_entry(
-                        runner.claude_json,
-                        cli_cwd,
-                        name,
-                        entry,
-                        op=op,  # type: ignore[arg-type]
-                    )
-                else:
-                    config_write_mcp.write_project_server_entry(
-                        cli_cwd,
-                        name,
-                        entry,
-                        op=op,  # type: ignore[arg-type]
-                    )
+            # add / edit: an entry carrying an inline env/headers value (or a
+            # secret-shaped url) can never reach the CLI's argv — err toward the direct
+            # #766 writer (same file state, no subprocess). See entry_needs_direct_write.
+            if config_write_mcp_cli.entry_needs_direct_write(entry):  # type: ignore[arg-type]
+                _direct_write(entry, op)  # type: ignore[arg-type]
                 return
             if op == "add":
                 config_write_mcp_cli.cli_add_server(
@@ -1905,6 +1910,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     client_secret=client_secret,  # type: ignore[arg-type]
                 )
             else:
+                # Capture the prior definition BEFORE cli_edit_server runs the remove, so
+                # a re-add failure can restore it verbatim via the direct writer (a prior
+                # secret is thus never re-exposed on argv). op="edit" overwrites in place.
+                prior = _snapshot_prior()
+
+                def _restore() -> None:
+                    if prior is not None:
+                        _direct_write(prior, "edit")
+
                 config_write_mcp_cli.cli_edit_server(
                     binary,
                     cli_cwd,
@@ -1912,6 +1926,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     entry,
                     scope,
                     client_secret=client_secret,  # type: ignore[arg-type]
+                    restore=_restore,
                 )
 
         try:

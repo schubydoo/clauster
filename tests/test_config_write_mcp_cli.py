@@ -47,24 +47,47 @@ def _fake_run(rc: int = 0, stdout: str = "", stderr: str = ""):
 # --- entry_has_secret ---------------------------------------------------------------
 
 
-def test_entry_has_secret_detects_env_token() -> None:
-    assert mcp_cli.entry_has_secret({"command": "x", "env": {"API_TOKEN": "sk-real"}})
+def test_entry_needs_direct_write_detects_secret_keyed_env() -> None:
+    assert mcp_cli.entry_needs_direct_write({"command": "x", "env": {"API_TOKEN": "sk-real"}})
 
 
-def test_entry_has_secret_detects_secretish_header() -> None:
-    assert mcp_cli.entry_has_secret(
+def test_entry_needs_direct_write_detects_secretish_header() -> None:
+    assert mcp_cli.entry_needs_direct_write(
         {"type": "http", "url": "https://x/mcp", "headers": {"Authorization": "Bearer sk-x"}}
     )
 
 
-def test_entry_has_secret_false_for_clean_entry() -> None:
-    assert not mcp_cli.entry_has_secret({"command": "x", "args": ["--flag"]})
+def test_entry_needs_direct_write_false_for_clean_entry() -> None:
+    assert not mcp_cli.entry_needs_direct_write({"command": "x", "args": ["--flag"]})
 
 
-def test_entry_has_secret_true_for_interpolation_placeholder() -> None:
+def test_entry_needs_direct_write_true_for_interpolation_placeholder() -> None:
     # A `${VAR}` placeholder is secret-SHAPED (conservative masking direction) even
     # though it holds no literal value -- it still gets routed away from the CLI.
-    assert mcp_cli.entry_has_secret({"command": "x", "env": {"TOKEN": "${MY_TOKEN}"}})
+    assert mcp_cli.entry_needs_direct_write({"command": "x", "env": {"TOKEN": "${MY_TOKEN}"}})
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # HIGH must-fix: a real secret under a BENIGN key — redact_secrets (key-name
+        # detection) misses these, so they must still be forced off the CLI argv.
+        {"command": "srv", "env": {"DEPLOY_KEY": "AKIAEXAMPLE1234567890"}},
+        {"command": "srv", "env": {"GH_PAT": "ghp_exampletokenvalue000"}},
+        {"type": "http", "url": "https://x/mcp", "headers": {"X-Custom": "Bearer sk-benignkey"}},
+    ],
+)
+def test_entry_needs_direct_write_true_for_benign_keyed_env_or_headers(entry: dict) -> None:
+    # redact_secrets alone would NOT flag these (proving the key-name gap is real),
+    # yet the routing predicate must — err toward has-secret on any env/headers value.
+    assert cw.redact_secrets(entry) == entry  # key-name detection misses it
+    assert mcp_cli.entry_needs_direct_write(entry)  # but the predicate still routes it away
+
+
+def test_entry_needs_direct_write_false_for_empty_env_and_headers() -> None:
+    # An empty (or blank-valued) env/headers block carries no secret -> CLI path is fine.
+    assert not mcp_cli.entry_needs_direct_write({"command": "x", "env": {}})
+    assert not mcp_cli.entry_needs_direct_write({"command": "x", "env": {"K": ""}})
 
 
 # --- cli_add_server: argv shape, secret refusal, error classification --------------
@@ -109,9 +132,9 @@ def test_cli_add_server_client_secret_via_env_never_argv(tmp_path: Path) -> None
     assert kwargs["env"]["MCP_CLIENT_SECRET"] == "sk-oauth-secret"
 
 
-def test_cli_add_server_refuses_entry_with_literal_secret(tmp_path: Path) -> None:
+def test_cli_add_server_refuses_entry_with_inline_env(tmp_path: Path) -> None:
     run, calls = _fake_run()
-    with pytest.raises(ValueError, match="literal secret"):
+    with pytest.raises(ValueError, match="inline env/headers"):
         mcp_cli.cli_add_server(
             str(FAKE_CLAUDE),
             tmp_path,
@@ -199,6 +222,68 @@ def test_cli_edit_server_calls_remove_then_add(tmp_path: Path) -> None:
     assert calls[1][2] == "add-json"
 
 
+def test_cli_edit_server_readd_failure_restores_prior(tmp_path: Path) -> None:
+    # MUST-FIX #4: remove succeeds, re-add fails -> the prior definition is restored via
+    # the injected `restore` closure, and the error says so (no silent data loss).
+    restored: list[bool] = []
+
+    def run(argv, **_kwargs):
+        if argv[2] == "remove":
+            return subprocess.CompletedProcess(argv, 0, stdout="removed", stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom: re-add failed")
+
+    def restore() -> None:
+        restored.append(True)
+
+    with pytest.raises(mcp_cli.McpCliError, match="previous definition was restored"):
+        mcp_cli.cli_edit_server(
+            str(FAKE_CLAUDE),
+            tmp_path,
+            "srv",
+            {"command": "y"},
+            "project",
+            restore=restore,
+            run=run,
+        )
+    assert restored == [True]  # restore WAS attempted
+
+
+def test_cli_edit_server_readd_and_restore_both_fail_surfaces_loss(tmp_path: Path) -> None:
+    # remove succeeds, re-add fails, AND restore fails -> the error must explicitly state
+    # the server is now missing (loss surfaced loudly, never silent-by-omission).
+    def run(argv, **_kwargs):
+        if argv[2] == "remove":
+            return subprocess.CompletedProcess(argv, 0, stdout="removed", stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    def restore() -> None:
+        raise RuntimeError("disk full")
+
+    with pytest.raises(mcp_cli.McpCliError, match="now missing"):
+        mcp_cli.cli_edit_server(
+            str(FAKE_CLAUDE),
+            tmp_path,
+            "srv",
+            {"command": "y"},
+            "project",
+            restore=restore,
+            run=run,
+        )
+
+
+def test_cli_edit_server_readd_failure_no_restore_surfaces_loss(tmp_path: Path) -> None:
+    # remove succeeds, re-add fails, no restore closure given -> loss surfaced loudly.
+    def run(argv, **_kwargs):
+        if argv[2] == "remove":
+            return subprocess.CompletedProcess(argv, 0, stdout="removed", stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    with pytest.raises(mcp_cli.McpCliError, match="now missing"):
+        mcp_cli.cli_edit_server(
+            str(FAKE_CLAUDE), tmp_path, "srv", {"command": "y"}, "project", run=run
+        )
+
+
 # --- cli_reset_project_choices -------------------------------------------------------
 
 
@@ -233,6 +318,80 @@ def test_run_timeout_raises_mcp_cli_error(tmp_path: Path) -> None:
         mcp_cli.cli_add_server(
             str(FAKE_CLAUDE), tmp_path, "srv", {"command": "x"}, "project", run=run
         )
+
+
+def test_run_oserror_raises_redacted_mcp_cli_error(tmp_path: Path) -> None:
+    # A spawn OSError (e.g. exec of a non-executable) -> McpCliError, str(exc) redacted.
+    def run(argv, **_kwargs):
+        raise OSError("TOKEN: sk-should-not-leak")
+
+    with pytest.raises(mcp_cli.McpCliError) as exc_info:
+        mcp_cli.cli_add_server(
+            str(FAKE_CLAUDE), tmp_path, "srv", {"command": "x"}, "project", run=run
+        )
+    assert "sk-should-not-leak" not in str(exc_info.value)
+    assert "failed to run" in str(exc_info.value)
+
+
+def test_run_timeout_message_never_leaks_argv(tmp_path: Path) -> None:
+    # MUST-FIX #2: TimeoutExpired.__str__ embeds the whole command (incl. the entry JSON,
+    # which for an OAuth add could carry a secret). The raised message must be built from
+    # the verb only, never str(exc). Prove it: a secret-shaped value in the entry (routed
+    # here only because we call cli_add_server directly with a client_secret) must not
+    # appear in the error text.
+    entry = {"type": "http", "url": "https://x/mcp"}
+
+    def run(argv, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
+
+    with pytest.raises(mcp_cli.McpCliError) as exc_info:
+        mcp_cli.cli_add_server(
+            str(FAKE_CLAUDE),
+            tmp_path,
+            "remote",
+            entry,
+            "local",
+            client_secret="sk-oauth-should-not-leak",  # noqa: S106 - test literal
+            run=run,
+        )
+    msg = str(exc_info.value)
+    assert "sk-oauth-should-not-leak" not in msg
+    assert "https://x/mcp" not in msg  # the argv (entry JSON) is not in the message
+    assert "add-json" in msg  # but the verb is
+    assert "timed out" in msg
+
+
+# --- MUST-FIX #3: server-name arg-injection validation (at the VALIDATOR level) -----
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["--scope", "--client-secret", "-e", "-s", "--transport", "-", "--"],
+)
+def test_validator_rejects_option_like_server_name(name: str) -> None:
+    # A name that looks like a CLI option would be parsed by `claude mcp` as a flag
+    # (arg-injection / positional shift, verified live). The structural validator must
+    # reject it -> 422, nothing spawned. Tested at the validator (the fake stub ignores
+    # argv semantics, so an end-to-end test couldn't prove the parser behavior).
+    with pytest.raises(cw.InvalidCandidateError):
+        mcp.validate_mcp_servers({name: {"command": "x"}})
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["srv", "github", "context-mode", "my_server", "srv.v2", "A1", "_x"],
+)
+def test_validator_accepts_sane_server_names(name: str) -> None:
+    mcp.validate_mcp_servers({name: {"command": "x"}})  # no raise
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["has space", "semi;colon", "pipe|x", "quote'x", "back`tick", "dollar$x", "slash/x"],
+)
+def test_validator_rejects_shell_metachar_server_names(name: str) -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        mcp.validate_mcp_servers({name: {"command": "x"}})
 
 
 # --- config_write_mcp #769 additions: approval-list validator ----------------------
@@ -370,6 +529,73 @@ def test_write_project_local_server_entry_add_and_edit(tmp_path: Path) -> None:
         mcp.write_project_local_server_entry(cj, project_dir, "a", {"command": "y"}, op="add")
     mcp.write_project_local_server_entry(cj, project_dir, "a", {"command": "y"}, op="edit")
     assert mcp.read_project_local_servers(cj, project_dir)["a"]["command"] == "y"
+
+
+def test_direct_writer_matches_cli_file_state_for_env_entry(tmp_path: Path) -> None:
+    # MUST-FIX #1 confirmation: the direct writer yields the same stored mcpServers entry
+    # the real `claude mcp add-json` produces for an env-bearing (non-OAuth) server, so
+    # routing it away from the CLI loses nothing. (The live CLI adds a cosmetic "args": []
+    # for stdio; the stored env/command are identical, which is what matters.)
+    entry = {"command": "/bin/echo", "env": {"DEPLOY_KEY": "AKIAEXAMPLE"}}
+    mcp.write_project_server_entry(tmp_path, "srv", entry, op="add")
+    stored = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["srv"]
+    assert stored["command"] == "/bin/echo"
+    assert stored["env"] == {"DEPLOY_KEY": "AKIAEXAMPLE"}
+
+
+def test_snapshot_server_entry_returns_unredacted_by_scope(tmp_path: Path) -> None:
+    # snapshot_server_entry is the edit-rollback reader: it must return the UNREDACTED
+    # stored entry (the rollback writes it back verbatim) for each scope, and None absent.
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    # project scope
+    mcp.write_project_server_entry(
+        project_dir, "p", {"command": "x", "env": {"API_TOKEN": "sk-real"}}, op="add"
+    )
+    snap = mcp.snapshot_server_entry("project", "p", claude_json=cj, project_dir=project_dir)
+    assert snap["env"]["API_TOKEN"] == "sk-real"  # unredacted
+    # user + local scope
+    mcp.write_user_server_entry(cj, "u", {"command": "x", "env": {"TOKEN": "sk-u"}}, op="add")
+    mcp.write_project_local_server_entry(
+        cj, project_dir, "l", {"command": "x", "env": {"TOKEN": "sk-l"}}, op="add"
+    )
+    assert (
+        mcp.snapshot_server_entry("user", "u", claude_json=cj, project_dir=project_dir)["env"][
+            "TOKEN"
+        ]
+        == "sk-u"
+    )
+    assert (
+        mcp.snapshot_server_entry("local", "l", claude_json=cj, project_dir=project_dir)["env"][
+            "TOKEN"
+        ]
+        == "sk-l"
+    )
+    # absent name -> None, in every scope
+    assert (
+        mcp.snapshot_server_entry("project", "absent", claude_json=cj, project_dir=project_dir)
+        is None
+    )
+    assert (
+        mcp.snapshot_server_entry("user", "absent", claude_json=cj, project_dir=project_dir)
+        is None
+    )
+    assert (
+        mcp.snapshot_server_entry("local", "absent", claude_json=cj, project_dir=project_dir)
+        is None
+    )
+
+
+def test_snapshot_server_entry_missing_files_are_none(tmp_path: Path) -> None:
+    cj = tmp_path / "absent.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    assert (
+        mcp.snapshot_server_entry("project", "x", claude_json=cj, project_dir=project_dir) is None
+    )
+    assert mcp.snapshot_server_entry("user", "x", claude_json=cj, project_dir=project_dir) is None
+    assert mcp.snapshot_server_entry("local", "x", claude_json=cj, project_dir=project_dir) is None
 
 
 # --- gated routes (full FastAPI lifespan, fake `claude` binary) --------------------
@@ -630,6 +856,113 @@ def test_route_server_local_scope_add_with_secret_bypasses_cli(
     assert (
         out["projects"][resolved_project]["mcpServers"]["l"]["env"]["API_TOKEN"] == "sk-live-real"
     )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # MUST-FIX #1: real secrets under BENIGN keys (redact_secrets misses these) must
+        # still route to the direct writer and NEVER appear in the fake_claude argv capture.
+        {"command": "node", "env": {"DEPLOY_KEY": "AKIAEXAMPLE1234567890"}},
+        {"command": "node", "env": {"GH_PAT": "ghp_exampletokenvalue000"}},
+        {"type": "http", "url": "https://x/mcp", "headers": {"X-Custom": "Bearer sk-benign"}},
+    ],
+)
+def test_route_server_benign_keyed_secret_never_reaches_cli_argv(
+    write_config, tmp_path, projects_root, monkeypatch, entry
+) -> None:
+    argv_file = tmp_path / "argv.json"
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "add",
+                "name": "srv",
+                "entry": entry,
+            },
+        )
+        assert resp.status_code == 200
+    assert not argv_file.exists()  # CLI never spawned -> no secret in any argv
+    on_disk = json.loads((projects_root / "alpha" / ".mcp.json").read_text(encoding="utf-8"))
+    assert on_disk["mcpServers"]["srv"] == entry  # written verbatim by the direct writer
+
+
+def test_route_server_option_like_name_is_422(write_config, tmp_path, projects_root) -> None:
+    # MUST-FIX #3 at the route: an option-like server name is rejected (422), never spawned.
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "add",
+                "name": "--scope",
+                "entry": {"command": "x"},
+            },
+        )
+        assert resp.status_code == 422
+
+
+def test_route_server_edit_readd_failure_restores_and_500s(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # MUST-FIX #4 end-to-end: seed a prior server, then drive an edit whose CLI re-add
+    # fails after the remove. The prior definition must be restored on disk, and the
+    # request surfaces the failure (not a silent 200).
+    (projects_root / "alpha" / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"srv": {"command": "OLD", "env": {"API_TOKEN": "sk-prior"}}}}),
+        encoding="utf-8",
+    )
+    # remove exits 0, add-json exits 1 -> re-add fails after a successful remove.
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_REMOVE_EXIT_CODE", "0")
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ADDJSON_EXIT_CODE", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_STDERR", "boom: re-add failed")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "edit",
+                "name": "srv",
+                "entry": {"command": "NEW"},
+            },
+        )
+        assert resp.status_code == 400  # McpCliError -> 400, not a silent success
+        assert "restored" in resp.json()["detail"]
+    # The prior definition (incl. its real secret) was restored verbatim on disk.
+    on_disk = json.loads((projects_root / "alpha" / ".mcp.json").read_text(encoding="utf-8"))
+    assert on_disk["mcpServers"]["srv"] == {"command": "OLD", "env": {"API_TOKEN": "sk-prior"}}
+
+
+def test_route_server_edit_readd_failure_no_prior_still_400s(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # Edit of a name with NO prior definition whose CLI re-add fails: the restore closure
+    # is a no-op (nothing to snapshot), but the request must still surface the failure
+    # (400), never a silent 200.
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_REMOVE_EXIT_CODE", "0")
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_ADDJSON_EXIT_CODE", "1")
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_STDERR", "boom: re-add failed")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "edit",
+                "name": "srv",
+                "entry": {"command": "NEW"},
+            },
+        )
+        assert resp.status_code == 400
 
 
 def test_route_server_404_when_disabled(write_config, tmp_path) -> None:

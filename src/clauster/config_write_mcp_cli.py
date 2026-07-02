@@ -30,13 +30,19 @@ memory or docs alone, per #769:
   reads Claude Code's own ``MCP_CLIENT_SECRET`` env var instead of prompting
   (confirmed: with the env var set and stdin closed, the OAuth flow does not hang)
   — used for a remote server's OAuth client secret, passed here via the child
-  process's environment, never as a CLI argument. A **stdio server's own env-map
-  secret** has no such escape hatch in the upstream CLI (``-e``/``add-json``'s JSON
-  argument are both ordinary argv), so :func:`entry_has_secret` routes any entry
-  carrying a literal secret value away from this module entirely, into
-  :mod:`clauster.config_write_mcp`'s direct (non-spawning) writers instead — see
-  that module's "#769 additions" docstring section for the reconciliation this was
-  asked to make with the design doc's "hybrid" strategy.
+  process's environment, never as a CLI argument. A server's own ``env``/``headers``
+  values (and a token-bearing ``url``) have **no** such escape hatch in the upstream
+  CLI (``-e`` and ``add-json``'s JSON argument are both ordinary argv), so
+  :func:`entry_needs_direct_write` routes any entry carrying an inline ``env`` or
+  ``headers`` value — or a secret-shaped ``url`` — away from this module entirely,
+  into :mod:`clauster.config_write_mcp`'s direct (non-spawning) writers instead. The
+  predicate deliberately errs toward "keep it off the CLI": key-name-based redaction
+  (:func:`clauster.config_write.redact_secrets`) cannot see a real secret stored under
+  a benign key (``{"env": {"DEPLOY_KEY": "AKIA…"}}``), so we treat *any* non-empty
+  ``env``/``headers`` value as potentially secret rather than trusting the key name.
+  The direct writer yields the same ``mcpServers`` file state as the CLI would, minus
+  the CLI's cosmetic ``"args": []`` normalization. See that module's "#769 additions"
+  docstring for the reconciliation with the design doc's "hybrid" strategy.
 
 Every spawn here is validate-before-spawn: the binary is resolved to an absolute
 path (:func:`clauster.claude_cli.resolve_binary`), argv is always a list (never
@@ -74,16 +80,36 @@ class McpCliError(cw.ConfigWriteError):
     """A ``claude mcp`` invocation failed unexpectedly (→ 400; not a shape/conflict error)."""
 
 
-def entry_has_secret(entry: dict[str, Any]) -> bool:
-    """Whether MCP server ``entry`` carries a literal secret-shaped value anywhere.
+def _has_nonempty_value(block: Any) -> bool:
+    """Whether ``block`` is a dict holding at least one non-empty string value."""
+    return isinstance(block, dict) and any(isinstance(v, str) and v for v in block.values())
 
-    Reuses the Foundation's structural secret detector
-    (:func:`clauster.config_write.redact_secrets`): if masking the entry changes it,
-    a live secret is present somewhere in it (an ``env``/``headers`` value, or a
-    token-bearing ``url``). A caller routes such an entry to
-    :mod:`clauster.config_write_mcp`'s direct writer instead of this module's CLI
-    add — see the module docstring for why.
+
+def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
+    """Whether ``entry`` must be written by the direct file writer, never the CLI.
+
+    Returns True when the entry carries anything that could place a **secret in
+    ``claude mcp add-json``'s argv** (visible via ``ps``/``/proc``):
+
+    * any non-empty ``env`` value (stdio or remote), **or**
+    * any non-empty ``headers`` value (remote), **or**
+    * a token-bearing / interpolated value the Foundation's structural detector
+      catches anywhere else (e.g. a ``scheme://user@host`` ``url``, a ``${VAR}``).
+
+    Errs firmly toward True: key-name-based redaction
+    (:func:`clauster.config_write.redact_secrets`) can only spot a secret by its KEY
+    (``token``/``secret``/…), so a real secret under a benign key
+    (``{"DEPLOY_KEY": "AKIA…"}``, ``{"GH_PAT": "ghp_…"}``,
+    ``{"X-Custom": "Bearer sk-…"}``) would slip past a key-only check and land in
+    argv. Treating *every* non-empty ``env``/``headers`` value as
+    must-not-touch-the-CLI closes that gap — the CLI ``add-json`` path is thereby
+    reserved for entries with no ``env``/``headers`` at all (plus the OAuth
+    ``--client-secret`` case, whose secret rides ``MCP_CLIENT_SECRET`` in the child
+    env, not argv). The cost is only that a genuinely non-secret ``env`` also skips
+    the CLI — harmless, since the direct writer produces equivalent file state.
     """
+    if _has_nonempty_value(entry.get("env")) or _has_nonempty_value(entry.get("headers")):
+        return True
     return cw.redact_secrets(entry) != entry
 
 
@@ -108,7 +134,15 @@ def _run(
     timeout); a nonzero exit is returned to the caller to classify (see
     :func:`_raise_for_failure`), since "already exists" / "not found" are expected,
     handled outcomes, not this function's problem to interpret.
+
+    **Never lets the argv leak into the error text.** ``TimeoutExpired.__str__``
+    embeds the full command — including ``json.dumps(entry)``, which for an OAuth add
+    could carry a header/env value — so the timeout branch builds its message from the
+    *verb only* (``args[0]``) and the timeout seconds, never ``str(exc)``. The generic
+    spawn-failure branch (an ``OSError`` such as a missing/undexecutable binary) prints
+    only a redacted ``str(exc)`` (the binary path, not the argv) as defense in depth.
     """
+    verb = args[0] if args else ""
     resolved = claude_cli.resolve_binary(binary)
     argv = [resolved, "mcp", *args]
     try:
@@ -122,8 +156,14 @@ def _run(
             stdin=subprocess.DEVNULL,
             check=False,
         )
+    except subprocess.TimeoutExpired as exc:
+        # exc's repr contains the whole argv (incl. the json entry) — build from the
+        # verb + timeout only, never str(exc).
+        raise McpCliError(f"claude mcp {verb} timed out after {exc.timeout}s") from exc
     except (OSError, subprocess.SubprocessError) as exc:
-        raise McpCliError(f"claude mcp {args[0] if args else ''} failed to run: {exc}") from exc
+        raise McpCliError(
+            f"claude mcp {verb} failed to run: {cw.redact_secret_lines(str(exc))}"
+        ) from exc
 
 
 def _raise_for_failure(op: str, name: str, proc: subprocess.CompletedProcess) -> None:
@@ -157,21 +197,22 @@ def cli_add_server(
 ) -> None:
     """Add one MCP server via ``claude mcp add-json ... --scope <scope>``.
 
-    ``entry`` must already be a structurally-valid, **non-secret-bearing** server
-    entry (see :func:`entry_has_secret`) — refuses (``ValueError``, a programming
-    error, not a 4xx) otherwise, since a secret-bearing entry must never reach this
-    function's argv. Re-validates structurally regardless (belt + suspenders: the
-    route layer validates first, but this is the last line before a spawn).
-    ``client_secret``, when given, is passed via the ``MCP_CLIENT_SECRET`` child-env
-    var (never argv, never a TTY prompt) alongside ``--client-secret`` — the OAuth
-    client-secret path for a remote server, the one secret ``claude mcp`` itself
-    knows how to take out-of-argv. Raises
+    ``entry`` must already be a structurally-valid server entry that does **not**
+    need the direct writer (see :func:`entry_needs_direct_write`) — refuses
+    (``ValueError``, a programming error, not a 4xx) otherwise, since an entry with an
+    inline ``env``/``headers`` value must never reach this function's argv. Re-validates
+    structurally regardless (belt + suspenders: the route layer validates first, but
+    this is the last line before a spawn). ``client_secret``, when given, is passed via
+    the ``MCP_CLIENT_SECRET`` child-env var (never argv, never a TTY prompt) alongside
+    ``--client-secret`` — the OAuth client-secret path for a remote server, the one
+    secret ``claude mcp`` itself knows how to take out-of-argv. Raises
     :class:`clauster.config_write_mcp.ServerExistsError` if the name is already
     taken in that scope; :class:`McpCliError` on any other nonzero exit.
     """
-    if entry_has_secret(entry):
+    if entry_needs_direct_write(entry):
         raise ValueError(
-            f"cli_add_server refuses to add {name!r}: entry carries a literal secret value"
+            f"cli_add_server refuses to add {name!r}: entry carries an inline env/headers "
+            "value that must not reach the CLI argv (route to the direct writer instead)"
         )
     cw.validate_candidate({name: entry}, mcp.validate_mcp_servers)
     args = ["add-json", name, json.dumps(entry), "--scope", scope]
@@ -216,19 +257,53 @@ def cli_edit_server(
     scope: cw.Scope,
     *,
     client_secret: str | None = None,
+    restore: Callable[[], None] | None = None,
     run: RunFn = subprocess.run,
 ) -> None:
-    """Edit one MCP server: CLI remove (ignoring "not found") + CLI re-add.
+    """Edit one MCP server: CLI remove (ignoring "not found") + CLI re-add, with rollback.
 
     There is no native ``claude mcp edit`` — confirmed absent from ``claude mcp
     --help`` — so this is the design doc's own "Parity verdict" reconciliation:
-    edit = read-then-remove+add. Only used when ``entry`` carries no literal secret
-    (see :func:`entry_has_secret`); the route layer routes a secret-bearing edit to
-    :func:`clauster.config_write_mcp.write_project_server_entry` (et al.) instead,
-    which performs the equivalent merge without ever spawning anything.
+    edit = remove+re-add. Only used when ``entry`` carries no inline ``env``/``headers``
+    value (see :func:`entry_needs_direct_write`); the route layer routes such an edit to
+    :func:`clauster.config_write_mcp.write_project_server_entry` (et al.) instead.
+
+    **Data-loss guard.** remove-then-add has a window: if the re-add fails after the
+    remove succeeded, the server is gone. ``restore`` (supplied by the route layer as a
+    best-effort closure that writes the *previous* definition back through the direct,
+    non-spawning writer — so a prior entry's real secret is never re-exposed on argv)
+    is invoked on a re-add failure:
+
+    * re-add fails, restore succeeds ⇒ raise :class:`McpCliError` stating the edit
+      failed **and the previous definition was restored** (no loss).
+    * re-add fails, restore also fails (or no ``restore`` given) ⇒ raise
+      :class:`McpCliError` that **explicitly says the server was removed and could not
+      be restored** — the loss is surfaced loudly, never silent-by-omission.
+
+    The captured ``restore`` closure must snapshot the previous entry *before* this
+    call runs the remove (the route layer does so), or there is nothing left to read.
     """
     cli_remove_server(binary, project_dir, name, scope, ignore_missing=True, run=run)
-    cli_add_server(binary, project_dir, name, entry, scope, client_secret=client_secret, run=run)
+    try:
+        cli_add_server(
+            binary, project_dir, name, entry, scope, client_secret=client_secret, run=run
+        )
+    except cw.ConfigWriteError as exc:
+        if restore is None:
+            raise McpCliError(
+                f"MCP server {name!r} edit failed ({exc}); it was already REMOVED and no "
+                "restore of its previous definition was available — the server is now missing"
+            ) from exc
+        try:
+            restore()
+        except Exception as restore_exc:  # noqa: BLE001 - best-effort; surface loss loudly
+            raise McpCliError(
+                f"MCP server {name!r} edit failed ({exc}); it was REMOVED and restoring its "
+                f"previous definition ALSO failed ({restore_exc}) — the server is now missing"
+            ) from exc
+        raise McpCliError(
+            f"MCP server {name!r} edit failed ({exc}); its previous definition was restored"
+        ) from exc
 
 
 def cli_reset_project_choices(

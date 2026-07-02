@@ -77,11 +77,15 @@ LOCAL_SCOPE_SUFFIX = " (local)"
 #: it back is treated as "keep the stored value" (a no-op merge for that key).
 REDACTION_SENTINEL = "********"
 
-# Secret-shaped value detection (structural redaction). A value is masked when it
-# *looks* like credential material: a ``${...}`` interpolation, a token-bearing URL
-# scheme (e.g. ``slack://TOKEN@host``), or a long high-entropy-ish opaque string. This
-# is deliberately conservative — over-masking a non-secret only forces the caller to
-# resend it; under-masking would leak. Keys are matched case-insensitively.
+# Secret-shaped value detection (structural redaction). A value is masked when EITHER
+# its KEY looks credential-shaped (the vocabulary below) OR its VALUE looks like
+# credential material: a ``${...}`` interpolation or a token-bearing URL scheme (e.g.
+# ``slack://TOKEN@host``). There is **no value-entropy check** — a real secret stored
+# under a benign key (``{"DEPLOY_KEY": "AKIA…"}``) is NOT detected here, so redaction
+# alone must never be relied on to decide whether a value is safe to place in argv (see
+# ``config_write_mcp_cli.entry_needs_direct_write``, which errs on any env/headers value
+# instead). This is deliberately conservative — over-masking a non-secret only forces the
+# caller to resend it; under-masking would leak. Keys are matched case-insensitively.
 _SECRET_KEY_RE = re.compile(
     r"(?:token|secret|password|passwd|api[-_]?key|apikey|auth|credential|bearer)",
     re.IGNORECASE,
