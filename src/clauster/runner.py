@@ -906,8 +906,16 @@ class SessionRunner:
             # policy checks could run before any side effects. Assign it now.
             resume_mode=effective_resume_mode,
         )
+        if resume and resume_target is not None:
+            # A resume REVIVES the same logical session: keep its instance_id so the
+            # registry row (and the state-store row keyed on it) is REPLACED instead
+            # of a fresh id leaving the old STOPPED row behind as a ghost duplicate.
+            # Identity stability is also what keeps per-instance derivations (e.g.
+            # the pty worktree name, #779) the same across a stop→resume cycle.
+            instance.instance_id = resume_target.instance_id
         # Register under instance_id — the stable UUID minted by RemoteControlInstance
-        # (via _new_instance_id default_factory), NOT the project name.
+        # (via _new_instance_id default_factory) or carried over from the instance
+        # being resumed, NOT the project name.
         self._instances[instance.instance_id] = instance  # on the loop
 
         # One spawn-event chokepoint for both modes: the instance is registered, STARTING,
