@@ -145,6 +145,10 @@ EXCLUDED_FIELDS: dict[str, str] = {
     # structural + binary-path — TLS material paths; load-validated, mis-set aborts HTTPS boot.
     "tls.cert_file": "structural + binary-path: TLS material path; mis-set aborts HTTPS boot",
     "tls.key_file": "structural + binary-path: TLS key path; security-material path",
+    "tls.provision": "structural: TLS provisioning mode; changes cert generation strategy; "
+    "file/CLI-managed only (mis-set could switch provisioning mode silently)",
+    "tls.hostnames": "structural: SAN list for self-signed cert; triggers cert regen on change; "
+    "file/CLI-managed only (changing SANs via the browser would regen the served cert)",
     # config-write — code-executing config-write capability (#347/#687); the single most
     # important invariant is that these NEVER become web-editable. Turning them on from the
     # browser would let a browser session grant itself RCE — file/CLI-managed only.
