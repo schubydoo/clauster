@@ -433,6 +433,44 @@ class ApiConfig(BaseModel):
     )
 
 
+class UiConfig(BaseModel):
+    """Web-dashboard kill switch (#806): serve the JSON API without the browser UI.
+
+    ``enabled: false`` 404s the dashboard surface: the ``/`` page, ``/login`` +
+    ``/logout``, ``/static/*``, and the internal HTML-fragment / per-session
+    interactive routes (`/api/projects/{name}/row`, `/api/widget`, and the
+    per-instance ``message`` / ``permissions/{request_id}`` / ``forget`` / ``qr``
+    routes) that #302 already classified as "internal/unversioned only". Every
+    other route — the rest of the bare ``/api/...`` JSON surface, ``/api/v1/...``,
+    ``/healthz``, ``/metrics`` (per its own gate), and the WebSocket streams —
+    keeps working exactly as before, behind whatever auth is configured.
+
+    Deliberately **decoupled** from ``api.openapi_enabled`` and every ``auth.*``
+    knob: this is an independent axis (web-UI+API, API-only, UI-only, docs
+    on/off — any combination), never implied by another setting. Read once when
+    the app is built, so a change needs a restart; **not** web-editable (see
+    ``config_editor.EXCLUDED_FIELDS``) — a browser toggle that can kill the
+    browser surface is a footgun with no way back in from the browser itself.
+
+    With the UI off there is no login page, so session-cookie (and password)
+    auth is unreachable — only a Bearer token or a trusted reverse proxy can
+    authenticate. If ``auth.enabled`` is on with neither configured, Clauster
+    logs a loud startup warning (never refuses to start; see ``app.py``).
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Serve the web dashboard (`/`, `/login`, `/logout`, `/static/*`) and "
+        "the internal HTML-fragment / per-session interactive routes (`/api/projects/"
+        "{name}/row`, `/api/widget`, the per-instance `message`/`permissions`/`forget`/"
+        "`qr` routes). Default `true` — zero behavior change. Set `false` to serve only "
+        "the JSON API (the rest of `/api/...`, `/api/v1/...`, `/healthz`, `/metrics`, and "
+        "the WebSocket streams): the dashboard surface then 404s. Independent of "
+        "`api.openapi_enabled` and `auth.*` — turning the API on never implies turning "
+        "the UI off, or vice versa. Restart-required.",
+    )
+
+
 def _missing_enforced_auth(host: str, auth: AuthConfig) -> bool:
     """Return True when binding ``host`` would NOT actually enforce authentication.
 
@@ -1214,6 +1252,7 @@ class ClausterConfig(BaseModel):
     )
     auth: AuthConfig = Field(default_factory=AuthConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    ui: UiConfig = Field(default_factory=UiConfig)
     db: DbConfig = Field(default_factory=DbConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
     clone: CloneConfig = Field(default_factory=CloneConfig)

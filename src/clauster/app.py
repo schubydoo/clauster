@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import secrets
 import shutil
 import subprocess
@@ -55,6 +56,7 @@ from .claustrum_client import ClaustrumError
 from .claustrum_daemon import ClaustrumDaemon
 from .clone_jobs import CloneJob, CloneJobManager
 from .config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS, PERMISSION_MODES, ClausterConfig
+from .db.stores import ApiTokenStore
 from .discovery import (
     discover_projects_cached,
     invalidate_discovery_cache,
@@ -129,6 +131,110 @@ _V1_PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/agents/{job_id}/resume"),
     }
 )
+
+# The web-UI surface (#806): the dashboard page, login/logout, and the exact
+# "internal HTML-fragment / per-session interactive" route list #302 already
+# named above (`/api/projects/{name}/row`, `/api/widget`, and the per-instance
+# `message`/`permissions/{request_id}`/`forget`/`qr` routes) — never a superset.
+# Every OTHER `/api/...` route (public or internal-but-JSON, e.g. `/api/doctor`,
+# `/api/config`, `/api/environments/...`) stays reachable when `ui.enabled` is
+# false: this list is deliberately narrow so "API-only" mode keeps the full JSON
+# API working, only the browser-rendered surface goes away. `/static/*` is
+# gated separately (a path prefix, not a single route) by `_ui_guard_matches`.
+_UI_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/"),
+        ("GET", "/login"),
+        ("POST", "/login"),
+        ("POST", "/logout"),
+        ("GET", "/api/projects/{name}/row"),
+        ("GET", "/api/widget"),
+        ("POST", "/api/instances/{instance_id}/message"),
+        ("POST", "/api/instances/{instance_id}/permissions/{request_id}"),
+        ("POST", "/api/instances/{instance_id}/forget"),
+        ("GET", "/api/instances/{instance_id}/qr"),
+    }
+)
+
+_ROUTE_PARAM_RE = re.compile(r"\{[^{}]+\}")
+
+
+def _compile_route_pattern(template: str) -> re.Pattern[str]:
+    """Compile a FastAPI-style path template (``{name}``) into an anchored regex.
+
+    Each ``{param}`` segment becomes a ``[^/]+`` match — enough to recognize the
+    small, fixed :data:`_UI_ONLY_ROUTES` set against a live request path without
+    pulling in Starlette's full route-matching machinery.
+    """
+    parts: list[str] = []
+    last = 0
+    for m in _ROUTE_PARAM_RE.finditer(template):
+        parts.append(re.escape(template[last : m.start()]))
+        parts.append(r"[^/]+")
+        last = m.end()
+    parts.append(re.escape(template[last:]))
+    return re.compile("^" + "".join(parts) + "$")
+
+
+_UI_ONLY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (method, _compile_route_pattern(path)) for method, path in _UI_ONLY_ROUTES
+)
+
+
+def _is_ui_only_route(method: str, path: str) -> bool:
+    """Whether ``(method, path)`` matches an entry in :data:`_UI_ONLY_ROUTES`."""
+    return any(method == m and pattern.match(path) for m, pattern in _UI_ONLY_PATTERNS)
+
+
+def _ui_guard_matches(method: str, path: str) -> bool:
+    """Whether a request hits the web-UI surface gated by ``ui.enabled`` (#806).
+
+    True for ``/static/*`` (a mounted sub-app, not a single route) or any exact
+    match in :data:`_UI_ONLY_ROUTES` — the dashboard page, login/logout, and the
+    internal HTML-fragment / per-session interactive routes. Everything else
+    (the rest of the JSON API) is untouched.
+    """
+    return path.startswith("/static/") or _is_ui_only_route(method, path)
+
+
+def _warn_if_ui_off_locks_out_auth(config: ClausterConfig, api_token_store: ApiTokenStore) -> None:
+    """Log a loud startup warning for a `ui.enabled=false` deployment nothing can reach (#806).
+
+    With the web UI off there is no login page, so session-cookie (and password)
+    auth is unreachable — only a Bearer token (the legacy ``auth.api_token_hash``
+    or a named ``clauster api-token``) or a trusted reverse proxy can still
+    authenticate. If ``auth.enabled`` is on and none of those is configured, no
+    request could ever pass the guard: a self-inflicted lockout.
+
+    Deliberately **warns, never refuses to start** — the stricter fail-closed
+    choice would also brick a deployment that flips `ui.enabled` off before
+    minting a token, and there is no way to fix that short of hand-editing the
+    config back. This is a judgment call the PR body calls out explicitly for
+    the maintainer to reconsider; today it only logs.
+
+    Fail-open on a token-store read error (a DB hiccup): the check degrades to
+    "assume no named tokens" rather than raising, since this is advisory only —
+    a broken DB already surfaces via other startup/health checks.
+    """
+    if config.ui.enabled or not config.auth.enabled:
+        return
+    if config.auth.reverse_proxy.enabled or config.auth.api_token_hash:
+        return
+    try:
+        has_named_token = bool(api_token_store.list_all())
+    except OSError:
+        has_named_token = False
+    if has_named_token:
+        return
+    logger.warning(
+        "clauster: WARNING — ui.enabled is false and auth.enabled is true, but no "
+        "credential is configured: no auth.api_token_hash, no named `clauster api-token` "
+        "token, and auth.reverse_proxy is off. With the web UI disabled there is no login "
+        "page, so session-cookie/password auth is unreachable — nothing can currently "
+        "authenticate to this deployment. Mint one with `clauster api-token issue` (or "
+        "`clauster hash-token` for the legacy single-token field), or configure "
+        "auth.reverse_proxy, before relying on this."
+    )
 
 
 def _mirror_v1_routes(app: FastAPI, public: frozenset[tuple[str, str]]) -> None:
@@ -495,6 +601,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # owns issue/list/rotate/revoke; the running app only ever reads it, on the
     # request hot path via `_authenticate` below.
     api_token_store = runner.persistence.api_token_store()
+    _warn_if_ui_off_locks_out_auth(config, api_token_store)
     # Let the poll loop's `agents --json` cross-check recognize our own hosted
     # sessions (claustrum channel) so it never mislabels them EXTERNAL/unmanaged (#592).
     runner.set_hosted_provider(app.state.hosted.list_instances)
@@ -742,9 +849,23 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return RedirectResponse(f"{_root}/login", status_code=303)
         return await call_next(request)
 
-    # Registered AFTER `guard` on purpose: Starlette runs the last-added http
-    # middleware OUTERMOST, so this wraps the guard and stamps the headers even on
-    # the guard's own early 401/403/redirect responses (not just route responses).
+    # Registered AFTER `guard` on purpose (#806): added second, so it is the
+    # OUTER of the two and its check runs BEFORE `guard`'s auth logic — the
+    # web-UI kill switch must 404 the dashboard surface regardless of
+    # `auth.enabled` (including when auth is off entirely, where `guard` itself
+    # returns immediately and never reaches this check). Still INNER of
+    # `security_headers` below (added third/last), so the standard security
+    # headers land on this 404 too, same as every other response.
+    @app.middleware("http")
+    async def ui_guard(request: Request, call_next):
+        if not config.ui.enabled and _ui_guard_matches(request.method, request.url.path):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return await call_next(request)
+
+    # Registered AFTER `guard` (and `ui_guard`) on purpose: Starlette runs the
+    # last-added http middleware OUTERMOST, so this wraps both and stamps the
+    # headers even on their early 401/403/404/redirect responses (not just
+    # route responses).
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         """Stamp defence-in-depth security headers on every response (#428).

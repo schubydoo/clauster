@@ -42,6 +42,7 @@ from clauster.config import (
     ReaperConfig,
     ReverseProxyConfig,
     TlsConfig,
+    UiConfig,
     UsageConfig,
     WebhooksConfig,
 )
@@ -59,6 +60,7 @@ SECTIONS: list[tuple[str, type[BaseModel]]] = [
     ("db", DbConfig),
     ("reverse_proxy", ReverseProxyConfig),
     ("api", ApiConfig),
+    ("ui", UiConfig),
     ("logs", LogsConfig),
     ("clone", CloneConfig),
     ("reaper", ReaperConfig),

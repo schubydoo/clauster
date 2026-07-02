@@ -782,3 +782,22 @@ def test_state_dir_validator_passes_through_non_path_types(projects_root):
 
     with pytest.raises(ValidationError, match="state_dir"):
         ClausterConfig(projects_root=projects_root, state_dir=12345)
+
+
+# ----- ui — web-dashboard kill switch (#806) --------------------------------
+
+
+def test_ui_enabled_default_true(write_config):
+    # Default true = zero behavior change unless an operator opts out.
+    assert load_config(write_config()).ui.enabled is True
+
+
+def test_ui_enabled_false_via_config(write_config):
+    config = load_config(write_config("ui:\n  enabled: false\n"))
+    assert config.ui.enabled is False
+
+
+def test_ui_enabled_env_override(write_config, monkeypatch):
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_UI_ENABLED", "false")
+    assert load_config(cfg_path).ui.enabled is False
