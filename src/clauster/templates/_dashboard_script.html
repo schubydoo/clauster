@@ -835,9 +835,14 @@
       // copy.
       restartImpactCount() {
         const liveStatuses = ["running", "starting"];
+        // Standard bridges + interactive (pty) sessions + hosted: all clauster-managed,
+        // all survive the re-exec and reattach — the pty collection split out of the
+        // project map in #779, so count it explicitly or interactive-only deployments
+        // read "0 sessions" in the restart confirmation.
         const bridges = Object.values(this.instances).filter((i) => liveStatuses.includes(i.status));
+        const pty = this.ptySessions.filter((s) => liveStatuses.includes(s.status));
         const hosted = this.hosted.filter((h) => liveStatuses.includes(h.status));
-        return bridges.length + hosted.length;
+        return bridges.length + pty.length + hosted.length;
       },
       configDirty() {
         const c = this.configEditor;
@@ -1546,6 +1551,11 @@
           if (at >= 0) this.ptySessions.splice(at, 1, body); else this.ptySessions.push(body);
         } else {
           this.instances[body.project] = body;
+          // A refresh during the in-flight launch may have indexed the optimistic
+          // project-keyed placeholder; drop it or rowOf(project) keeps returning the
+          // stale "starting" row until the next poll (rowOf falls back to the fresh
+          // this.instances[project] once the entry is gone).
+          delete this._byId[body.project];
         }
         this._byId[body.rk] = body;
         return body;

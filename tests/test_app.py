@@ -1071,6 +1071,11 @@ def test_dashboard_multi_session_client_plumbing(write_config):
     # Session-shape chips: interactive + worktree markers on the row head.
     assert ">interactive</span>" in page
     assert ">worktree</span>" in page
+    # Project-level rollups see the split-out pty collection too (Greptile P2s on #800):
+    # the restart-impact count includes live interactive sessions, and _absorbRow drops
+    # a stale project-keyed placeholder from the id index.
+    assert "const pty = this.ptySessions.filter((s) => liveStatuses.includes(s.status));" in page
+    assert "delete this._byId[body.project];" in page
 
 
 def test_launch_popover_pty_worktree_controls(write_config):
