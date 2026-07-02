@@ -24,7 +24,8 @@ def _running(runner, project="alpha", *, pid=None, start=None):
     inst.status = InstanceStatus.RUNNING
     inst.bridge_pid = os.getpid() if pid is None else pid
     inst.bridge_proc_start = start
-    runner._instances[project] = inst
+    # Registry keyed by instance_id (#777) — several instances may share a project.
+    runner._instances[inst.instance_id] = inst
     return inst
 
 
@@ -161,7 +162,7 @@ async def test_refresh_isolates_one_failing_bridge_from_the_rest(runner_config, 
     # path, not by a guard short-circuit.
     runner = _runner(runner_config)
     _running(runner, project="good")
-    _running(runner, project="bad")
+    bad = _running(runner, project="bad")
 
     def _selective(pid, **k):
         # The "bad" bridge is identified by a sentinel pid set below.
@@ -169,7 +170,7 @@ async def test_refresh_isolates_one_failing_bridge_from_the_rest(runner_config, 
             raise RuntimeError("boom")
         return {"cpu_percent": 1.0, "procs": 1}
 
-    runner._instances["bad"].bridge_pid = 999_999
+    bad.bridge_pid = 999_999
     monkeypatch.setattr("clauster.runner.metrics.sample_tree", _selective)
     await runner._refresh_metrics_cache()  # must not raise
     assert runner.metrics_snapshot("good") is not None
@@ -244,3 +245,68 @@ def test_warn_if_refresh_slow(runner_config, caplog):
     with caplog.at_level(logging.WARNING, logger="clauster.runner"):
         runner._warn_if_refresh_slow(0.0)
     assert not caplog.records
+
+
+# ----- per-project aggregation over the instance_id-keyed cache (#778) ----------
+
+
+async def test_snapshots_aggregate_bridges_of_one_project(runner_config, monkeypatch):
+    """N bridges of one project fold into a single per-project figure (#778).
+
+    The cache holds one sample per instance; the public readers sum procs/cpu/rss,
+    sum a disk rate when any bridge reports it, and count the covered ``bridges`` —
+    a project key would have kept only whichever bridge sampled last.
+    """
+    runner = _runner(runner_config)
+    _running(runner, project="alpha", pid=101)
+    _running(runner, project="alpha", pid=102)
+    _running(runner, project="beta", pid=103)
+
+    samples = {
+        101: {
+            "procs": 2,
+            "cpu_percent": 1.5,
+            "cpu_normalized": False,
+            "rss_bytes": 100,
+            "disk_read_bps": 10,
+            "disk_write_bps": None,
+        },
+        102: {
+            "procs": 3,
+            "cpu_percent": 2.3,
+            "cpu_normalized": False,
+            "rss_bytes": 200,
+            "disk_read_bps": None,
+            "disk_write_bps": 5,
+        },
+        103: {
+            "procs": 1,
+            "cpu_percent": 9.0,
+            "cpu_normalized": False,
+            "rss_bytes": 50,
+            "disk_read_bps": None,
+            "disk_write_bps": None,
+        },
+    }
+    monkeypatch.setattr("clauster.runner.metrics.sample_tree", lambda pid, **k: dict(samples[pid]))
+    await runner._refresh_metrics_cache()
+
+    snaps = runner.metrics_snapshots()
+    alpha = snaps["alpha"]
+    assert alpha["bridges"] == 2
+    assert alpha["procs"] == 5
+    assert alpha["cpu_percent"] == 3.8
+    assert alpha["rss_bytes"] == 300
+    assert alpha["disk_read_bps"] == 10  # one bridge reported → None treated as 0
+    assert alpha["disk_write_bps"] == 5
+    # The other project stays separate, uncontaminated by alpha's fold.
+    assert snaps["beta"]["bridges"] == 1 and snaps["beta"]["rss_bytes"] == 50
+    assert runner.metrics_snapshot("alpha") == alpha  # single read agrees with batch
+
+
+async def test_snapshots_drop_sample_for_vanished_instance(runner_config):
+    """A cached sample whose instance left the registry between refreshes is dropped (#778)."""
+    runner = _runner(runner_config)
+    runner._metrics_cache = {"gone-iid": {"procs": 1, "cpu_percent": 1.0, "rss_bytes": 10}}
+    assert runner.metrics_snapshots() == {}
+    assert runner.metrics_snapshot("alpha") is None

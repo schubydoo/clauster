@@ -357,3 +357,56 @@ def test_adopt_endpoint_unknown_project_returns_404(runner_config):
     with _client(runner_config) as client:
         resp = client.post("/api/projects/does-not-exist/adopt")
         assert resp.status_code == 404
+
+
+# ----- spawn outcome surfaced through the API (#778) -----------------------------
+
+
+def test_spawn_response_carries_outcome_keys(runner_config, monkeypatch):
+    """A real launch answers 201 with created=True and the additive outcome keys (#778)."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha"})
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["created"] is True
+        assert body["reason"] is None
+        assert body["warnings"] == []  # standard spawn: no worktree advisory
+        # The instance fields stay at the top level (pre-#778 clients read them there).
+        assert body["status"] == "running" and body["project"] == "alpha"
+        client.delete(f"/api/instances/{body['instance_id']}")
+
+
+def test_second_standard_spawn_returns_200_reused(runner_config, monkeypatch):
+    """The standard-singleton cap answers 200 + created=False + reason, not a second 201 (#778)."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        first = client.post("/api/instances", json={"project": "alpha"})
+        assert first.status_code == 201, first.text
+        second = client.post("/api/instances", json={"project": "alpha"})
+        assert second.status_code == 200, second.text
+        body = second.json()
+        assert body["created"] is False
+        assert "capped at one per project" in body["reason"]
+        assert body["instance_id"] == first.json()["instance_id"]  # the same bridge came back
+        # Only one bridge actually runs.
+        assert client.get("/healthz").json()["instances_running"] == 1
+        client.delete(f"/api/instances/{body['instance_id']}")
+
+
+def test_spawn_response_passes_runner_warnings_through(runner_config, monkeypatch):
+    """warnings[] from the spawn outcome land on the response body verbatim (#778)."""
+    from clauster.runner import SpawnOutcome
+
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.RUNNING)
+
+    async def _canned(name, **kwargs):
+        return SpawnOutcome(instance=inst, created=True, warnings=["no worktree — beware"])
+
+    monkeypatch.setattr(runner, "spawn_detailed", _canned)
+    with TestClient(create_app(config, runner=runner)) as client:
+        resp = client.post("/api/instances", json={"project": "alpha"})
+        assert resp.status_code == 201
+        assert resp.json()["warnings"] == ["no worktree — beware"]
