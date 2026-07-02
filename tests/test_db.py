@@ -125,6 +125,17 @@ def test_state_absent_fields_stay_absent(persistence):
     assert loaded == {"project_name": "a", "label": "a"}
 
 
+def test_state_update_with_blank_project_name_keeps_existing(persistence):
+    # Re-saving an existing instance_id whose record omits project_name must NOT blank
+    # the row's project_name (the _sync `if project_name:` guard on the update path).
+    store = persistence.state_store()
+    store.save({IID_A: {"project_name": "a", "label": "one"}})
+    store.save({IID_A: {"label": "two"}})  # no project_name -> keep the prior "a"
+    loaded = store.load()[IID_A]
+    assert loaded["project_name"] == "a"
+    assert loaded["label"] == "two"
+
+
 def test_state_persists_across_reopen(tmp_path):
     p1 = Persistence(tmp_path)
     p1.state_store().save({IID_A: {"project_name": "a", "label": "kept", "resume_mode": "pty"}})
@@ -468,6 +479,52 @@ def test_env_offline_mode_emits_sql(tmp_path, capsys):
     assert "CREATE TABLE" in out
     assert "projects" in out
     assert not (tmp_path / "offline.db").exists()  # offline never touched a real DB
+    # Migration 0003's offline branch: the instance-id re-key emits its set-based
+    # copy into instances_new (no per-row Python INSERT, since there's no connection
+    # to read rows through). Asserting it proves the is_offline_mode() branch ran.
+    assert "INSERT INTO instances_new" in out
+    assert "randomblob" in out  # the offline-only random-UUID id expression
+
+
+def test_instance_id_migration_rekeys_existing_row_with_deterministic_uuid(tmp_path):
+    # Online upgrade THROUGH 0003 with a pre-existing (project-name-keyed) instances
+    # row: the re-key copies it to the new instance_id PK using the deterministic
+    # UUID5 (namespace=DNS, name="clauster.instance.<project>"). Covers 0003's online
+    # copy loop + _project_instance_id — a fresh-empty-DB upgrade has no rows to copy.
+    import uuid
+
+    from alembic import command
+
+    expected_iid = str(uuid.uuid5(uuid.NAMESPACE_DNS, "clauster.instance.alpha"))
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            # Stop just before 0003 (0002 is the session_events revision), then seed a
+            # legacy row keyed by project_name (the pre-777 shape).
+            command.upgrade(cfg, "f4424422f656")
+            conn.execute(
+                text(
+                    "INSERT INTO projects (name, created_at, updated_at) "
+                    "VALUES ('alpha', '2026-01-01', '2026-01-01')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO instances "
+                    "(project_name, label, resume_mode, created_at, updated_at) "
+                    "VALUES ('alpha', 'Alpha', 'pty', '2026-01-01', '2026-01-01')"
+                )
+            )
+            command.upgrade(cfg, "head")  # runs 0003's re-key over the seeded row
+            rows = conn.execute(
+                text("SELECT instance_id, project_name, label, resume_mode FROM instances")
+            ).all()
+        assert rows == [(expected_iid, "alpha", "Alpha", "pty")]
+    finally:
+        engine.dispose()
 
 
 def test_baseline_downgrade_drops_all_tables(tmp_path):

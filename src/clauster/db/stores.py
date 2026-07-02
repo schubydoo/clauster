@@ -66,6 +66,10 @@ _INSTANCE_FIELDS = (
     "permission_mode",
     "resume_mode",
 )
+# The mutable-payload subset: ``project_name`` is the non-null FK, set explicitly in
+# _sync (guarded so a record that omits it can't blank an existing row's parent), so
+# it is NOT in this loop-set. The rest are nullable and mirrored straight from the record.
+_INSTANCE_PAYLOAD_FIELDS = tuple(f for f in _INSTANCE_FIELDS if f != "project_name")
 _HOSTED_FIELDS = (
     "project",
     "label",
@@ -157,9 +161,11 @@ class StateStore:
                 session.add(row)
             else:
                 # project_name may change on import/migration; keep it current.
+                # Guarded: a record that omits it must NOT blank the non-null FK
+                # (the setattr loop below no longer touches project_name).
                 if project_name:
                     row.project_name = project_name
-            for field in _INSTANCE_FIELDS:
+            for field in _INSTANCE_PAYLOAD_FIELDS:
                 setattr(row, field, fields.get(field))
         for iid, row in existing.items():
             if iid not in keep:

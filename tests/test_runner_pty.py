@@ -559,6 +559,94 @@ async def test_spawn_pty_promoted_by_startup_watch(runner_config, monkeypatch) -
         await runner.stop(inst.instance_id)
 
 
+@_POSIX_ONLY
+async def test_resume_pty_while_standard_live_returns_pty_not_standard(runner_config) -> None:
+    """Resuming a STOPPED pty session must revive the pty — never a live standard bridge.
+
+    #777 allows a standard bridge and pty sessions to coexist in one project. The mode
+    resolution + pty idempotency must key on the SPECIFIC instance being resumed, not a
+    mode-agnostic "first live instance for the project" scan — otherwise a resume of the
+    stopped pty silently hands back the running standard bridge (Greptile P1).
+    """
+    runner, _ = _pty_runner(runner_config)  # config default = pty
+    # A live standard bridge for the project (explicit picker overrides the pty default).
+    standard = await runner.spawn("alpha", resume_mode="standard")
+    assert standard.resume_mode == "standard" and standard.status is InstanceStatus.RUNNING
+    # A pty session for the SAME project, then stop it -> a resumable STOPPED pty card.
+    pty = await runner.spawn("alpha", resume_mode="pty")
+    assert pty.resume_mode == "pty" and pty.instance_id != standard.instance_id
+    stopped = await runner.stop(pty.instance_id)
+    assert stopped.status is InstanceStatus.STOPPED
+    # The standard bridge is still live at this point (independent axis).
+    assert runner.get_instance(standard.instance_id).status is InstanceStatus.RUNNING
+    try:
+        resumed = await runner.resume(pty.instance_id)  # resume the STOPPED pty
+        # The invariant: the resume comes back as a PTY bridge, and is NOT the live
+        # standard bridge handed back. (The pre-fix bug returned `standard` verbatim.)
+        assert resumed.resume_mode == "pty"
+        assert resumed is not standard
+        assert resumed.instance_id != standard.instance_id
+        assert resumed.status is InstanceStatus.RUNNING
+        # The live standard bridge is untouched by the pty resume.
+        assert runner.get_instance(standard.instance_id).status is InstanceStatus.RUNNING
+    finally:
+        await runner.stop(resumed.instance_id)
+        await runner.stop(standard.instance_id)
+
+
+@_POSIX_ONLY
+async def test_resume_standard_only_still_returns_standard(runner_config) -> None:
+    """Mirror of the P1 case: resume while only a standard bridge exists resolves standard.
+
+    Guards against an over-correction — the mode-aware fix must not misfire the other way
+    (e.g. treat a standard resume as pty) when no pty session exists for the project.
+    """
+    runner, _ = _pty_runner(runner_config)
+    standard = await runner.spawn("alpha", resume_mode="standard")
+    stopped = await runner.stop(standard.instance_id)
+    assert stopped.status is InstanceStatus.STOPPED
+    try:
+        resumed = await runner.resume(standard.instance_id)
+        assert resumed.resume_mode == "standard"
+        assert resumed.status is InstanceStatus.RUNNING
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+@_POSIX_ONLY
+async def test_resume_already_live_pty_is_idempotent(runner_config) -> None:
+    """Resuming an already-RUNNING pty returns that same instance (no second bridge).
+
+    Exercises the pty idempotency branch keyed on resume_target: a resume of a live
+    session must hand back the exact instance, not spawn a duplicate keeper.
+    """
+    runner, _ = _pty_runner(runner_config)
+    pty = await runner.spawn("alpha", resume_mode="pty")
+    assert pty.status is InstanceStatus.RUNNING
+    try:
+        again = await runner.resume(pty.instance_id)  # still live -> idempotent return
+        assert again is pty
+        assert again.instance_id == pty.instance_id
+        assert runner.running_count() == 1  # no duplicate bridge
+    finally:
+        await runner.stop(pty.instance_id)
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_with_worktree_skips_collision_warning(runner_config, caplog) -> None:
+    """A pty spawn WITH a worktree isolates each session, so no no-worktree warning fires."""
+    import logging
+
+    runner, _ = _pty_runner(runner_config)  # "alpha" is a git repo -> worktree allowed
+    with caplog.at_level(logging.WARNING, logger="clauster.runner"):
+        inst = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
+    try:
+        assert inst.spawn_mode == "worktree" and inst.resume_mode == "pty"
+        assert not any("without a worktree" in r.message for r in caplog.records)
+    finally:
+        await runner.stop(inst.instance_id)
+
+
 async def test_stop_cleans_keeper_when_bridge_pid_absent(runner_config, monkeypatch) -> None:
     """Stopping a pty bridge whose bridge pid is already gone still reaps the keeper."""
     from clauster.models import RemoteControlInstance

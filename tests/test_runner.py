@@ -713,6 +713,28 @@ async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeyp
     assert inst.status is InstanceStatus.CRASHED
 
 
+async def test_startup_watch_done_callback_logs_task_exception(runner_config, monkeypatch, caplog):
+    # The startup-watch's done-callback logs (never swallows) an unexpected exception
+    # raised by _watch_startup, keyed by instance_id (#777). Force the watch coroutine
+    # to raise and assert the warning fires with the instance_id.
+    runner = _make_runner(runner_config)
+
+    async def _boom(_instance_id: str) -> None:
+        raise RuntimeError("watch exploded")
+
+    monkeypatch.setattr(runner, "_watch_startup", _boom)
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        runner._start_startup_watch("iid-xyz")
+        task = runner._startup_watches["iid-xyz"]
+        with contextlib.suppress(RuntimeError):
+            await task  # let the coroutine raise; the done-callback then logs it
+        await asyncio.sleep(0)  # let the done-callback run
+    assert any(
+        "startup-watch for iid-xyz failed" in r.message and "watch exploded" in r.message
+        for r in caplog.records
+    )
+
+
 async def test_spawn_auto_enables_remote_control(runner_config, monkeypatch):
     """Before launching a bridge, the runner marks remote control acknowledged in
     ~/.claude.json (hasUsedRemoteControl/remoteDialogSeen) so the bridge skips the
@@ -748,6 +770,29 @@ async def test_stop_unknown_instance_raises(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
         await runner.stop("00000000-0000-0000-0000-000000000000")  # never spawned
+
+
+async def test_stop_raises_if_forgotten_after_lock_acquire(runner_config, monkeypatch):
+    # TOCTOU defense: stop() re-looks-up the instance INSIDE the per-project lock so a
+    # concurrent forget() between the first lookup and the lock can't leave it signalling
+    # a de-registered instance. Simulate that race — drop the row as the lock is taken —
+    # and assert the inner guard raises UnknownProject rather than proceeding on a stale ref.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    iid = inst.instance_id
+
+    real_lock_for = runner._spawn_lock_for
+
+    def _evicting_lock_for(name):
+        # Stand in for a concurrent forget() landing between stop()'s first lookup and
+        # its re-lookup under the lock: remove the registry row here.
+        runner._instances.pop(iid, None)
+        return real_lock_for(name)
+
+    monkeypatch.setattr(runner, "_spawn_lock_for", _evicting_lock_for)
+    with pytest.raises(UnknownProject):
+        await runner.stop(iid)
 
 
 def test_external_sessions_by_project(runner_config):

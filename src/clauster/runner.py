@@ -396,20 +396,6 @@ class SessionRunner:
         inst = self.get_instance_for_project(identity)
         return inst.instance_id if inst is not None else None
 
-    def _live_instance_for_project(self, project_name: str) -> RemoteControlInstance | None:
-        """Return the first STARTING/RUNNING instance for a project, or ``None``.
-
-        Used by :meth:`_spawn_locked` to detect whether an idempotent re-spawn request
-        can return the existing instance without spawning a new process.
-        """
-        for inst in self._instances.values():
-            if inst.project == project_name and inst.status in (
-                InstanceStatus.STARTING,
-                InstanceStatus.RUNNING,
-            ):
-                return inst
-        return None
-
     def _live_standard_for_project(self, project_name: str) -> RemoteControlInstance | None:
         """Return the first STARTING/RUNNING *standard* bridge for a project, or ``None``.
 
@@ -589,6 +575,7 @@ class SessionRunner:
         permission_mode: PermissionMode | None = None,
         resume_mode: ResumeMode | None = None,
         resume: bool = False,
+        resume_target: RemoteControlInstance | None = None,
     ) -> RemoteControlInstance:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
 
@@ -609,6 +596,12 @@ class SessionRunner:
         idempotency check and launch two bridges, because the second would clobber
         the first in ``self._instances``/``self._procs`` and orphan an untracked,
         unreapable process. Different projects still spawn concurrently.
+
+        ``resume_target`` is the SPECIFIC instance a :meth:`resume` is reviving. It
+        pins mode resolution and the pty idempotency check to that instance instead
+        of a mode-agnostic project scan — otherwise a resume of a stopped pty session
+        while a standard bridge is concurrently live (both allowed per project since
+        #777) would resolve against the standard bridge and hand it back instead.
         """
         async with self._spawn_lock_for(name):
             return await self._spawn_locked(
@@ -617,6 +610,7 @@ class SessionRunner:
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
                 resume=resume,
+                resume_target=resume_target,
             )
 
     def _spawn_lock_for(self, name: str) -> asyncio.Lock:
@@ -637,19 +631,19 @@ class SessionRunner:
         permission_mode: PermissionMode | None = None,
         resume_mode: ResumeMode | None = None,
         resume: bool = False,
+        resume_target: RemoteControlInstance | None = None,
     ) -> RemoteControlInstance:
         # Body of spawn(), always run under the per-project lock (see spawn()).
-        # Find any live instance for this project in the registry.
-        existing = self._live_instance_for_project(name)
-
         proj = self._resolve_project(name)
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode
         # Resolve resume_mode early so we can apply the per-mode policy checks below
         # before spending side-effect budget (trust writes, log file creation, etc.).
-        # _is_pty_mode needs `prior` for a resume; prior is `existing` when resume=True.
-        prior_for_mode = existing if resume else None
+        # For a resume the prior instance is the SPECIFIC one being revived
+        # (resume_target) — NOT a mode-agnostic project scan, which could return a
+        # coincidentally-live standard bridge and flip a pty resume to standard (#777).
+        prior_for_mode = resume_target if resume else None
         effective_resume_mode: ResumeMode = (
             "pty" if self._is_pty_mode(prior_for_mode, requested=resume_mode) else "standard"
         )
@@ -668,15 +662,16 @@ class SessionRunner:
             if live_standard is not None:
                 return live_standard
         else:
-            # PTY sessions: N per project allowed; idempotent only for the specific
-            # instance being resumed (resume=True carries the prior instance's id via
-            # `existing`).
+            # PTY sessions: N per project allowed; idempotent ONLY for the specific
+            # instance being resumed (resume_target), never a coincidentally-live
+            # other-mode/other instance — returning that would hand back the wrong
+            # bridge for "resume my stopped pty session".
             if (
-                existing is not None
-                and resume
-                and existing.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+                resume
+                and resume_target is not None
+                and resume_target.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
             ):
-                return existing
+                return resume_target
             # Warn (don't block) when spawning a pty session without a worktree:
             # two pty sessions sharing the same cwd risk conflicting file edits.
             if spawn_mode != "worktree":
@@ -846,6 +841,10 @@ class SessionRunner:
             # In pty mode this adds --continue so the flag-form bridge restores the
             # prior conversation; the standard subcommand path ignores it.
             resume=True,
+            # Pin mode resolution + the pty idempotency check to THIS instance, so a
+            # resume of a stopped pty session isn't misresolved against a concurrently
+            # live standard bridge in the same project (#777).
+            resume_target=existing,
         )
 
     def _validate_spawn_options(

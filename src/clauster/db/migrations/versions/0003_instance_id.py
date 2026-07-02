@@ -143,6 +143,11 @@ def downgrade() -> None:
     # Collapse any multi-row-per-project state: take the most-recently-updated
     # row per project (deterministic; today's pty rows are post-777 only).
     # Set-based, so it works identically online and offline.
+    # SQLite-only: the bare non-aggregated columns paired with MAX(updated_at)
+    # rely on SQLite's documented "bare columns come from the row that supplied
+    # the MAX" behavior. clauster has no other DB backend (db/ is SQLite via
+    # SQLAlchemy), so the standard-SQL ambiguity that would fail on PostgreSQL
+    # does not apply here.
     op.execute(
         "INSERT INTO instances_old "
         "(project_name, label, intentional_stop, spawn_mode, "

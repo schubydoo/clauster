@@ -193,6 +193,17 @@ def test_stop_via_api_unknown_identity_404(runner_config):
         assert client.delete("/api/instances/ghost").status_code == 404
 
 
+def test_resume_via_api_unknown_identity_404(runner_config):
+    with _client(runner_config) as client:
+        # resolve_bridge_id -> None for an unknown identity -> 404 (not a spawn attempt).
+        assert client.post("/api/instances/ghost/resume").status_code == 404
+
+
+def test_qr_via_api_unknown_identity_404(runner_config):
+    with _client(runner_config) as client:
+        assert client.get("/api/instances/ghost/qr").status_code == 404
+
+
 def test_max_bridges_cap_returns_409(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     config, claude_json = runner_config
