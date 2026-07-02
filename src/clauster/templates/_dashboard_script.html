@@ -1481,9 +1481,14 @@
         finally { this.forgetting[id] = false; }
         await this.refresh();
       },
-      forget(name) { return this._forget(name, name); },
+      forget(name) { return this._forget(this.bridgeIdOf(name), name); },
       forgetHosted(h) { return this._forget(h.claustrum_process_id, h.project || h.claustrum_process_id); },
       statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
+      // Stable action identity (#778): target the instance_id of the row this client
+      // is DISPLAYING, resolved at click time — a project name re-resolved server-side
+      // can drift to a bridge registered after the last poll. Falls back to the
+      // project name only for a not-yet-polled optimistic row (server name-compat).
+      bridgeIdOf(name) { return (this.instances[name] || {}).instance_id || name; },
       // Display status: an "interrupted" bridge is one that stopped WITHOUT a
       // deliberate Stop (host restart / external kill). It's the same backend status
       // as "stopped" (intentional_stop tells them apart), but reads + acts differently:
@@ -1787,7 +1792,8 @@
         return s + ".";
       },
       qrSrc(name) {
-        return ROOT + "/api/instances/" + encodeURIComponent(name) + "/qr?t=" + (this.qrNonce[name] || 0);
+        return ROOT + "/api/instances/" + encodeURIComponent(this.bridgeIdOf(name))
+          + "/qr?t=" + (this.qrNonce[name] || 0);
       },
       toggleQr(name) {
         const opening = !this.qrOpen[name];
@@ -2275,10 +2281,11 @@
       async resume(name) {
         this.errors[name] = null;
         const prev = this.instances[name];
-        this.instances[name] = { project: name, status: "starting" };  // optimistic
+        const id = this.bridgeIdOf(name);  // pin the displayed row BEFORE the optimistic swap
+        this.instances[name] = { ...(prev || { project: name }), status: "starting" };  // optimistic
         try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name) + "/resume",
-                                  { method: "POST" });
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id)
+                                  + "/resume", { method: "POST" });
           const body = await res.json();
           if (!res.ok) {
             this.errors[name] = body.detail || "failed to resume";
@@ -2339,7 +2346,8 @@
         const prev = this.instances[name];
         this.instances[name] = { ...(prev || { project: name }), status: "stopping" };  // optimistic
         try {
-          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(name), { method: "DELETE" });
+          const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(this.bridgeIdOf(name)),
+                                  { method: "DELETE" });
           if (res.ok) { this.instances[name] = await res.json(); this.toast(name + ": stopped", "success"); }
           else {
             const b = await res.json().catch(() => ({}));
@@ -2739,7 +2747,7 @@
           prev.open = false;
           if (prev.ws) { try { prev.ws.close(); } catch (e) {} }
         }
-        const url = this._wsUrl("/ws/bridge-log/" + encodeURIComponent(name));
+        const url = this._wsUrl("/ws/bridge-log/" + encodeURIComponent(this.bridgeIdOf(name)));
         // Tag this tail with a unique token; the retire check below compares the token, NOT
         // object identity — once Alpine wraps `state` in a reactive Proxy, comparing the raw
         // object against the stored proxy is ALWAYS unequal and would drop every frame (see
@@ -2867,7 +2875,7 @@
             convertEol: false, scrollback: 0, fontSize: 12,
           });
           term.open(host);
-          const url = this._wsUrl("/ws/pty-screen/" + encodeURIComponent(name));
+          const url = this._wsUrl("/ws/pty-screen/" + encodeURIComponent(this.bridgeIdOf(name)));
           const ws = new WebSocket(url);
           const reg = { term, ws, token, host, fit: null };
           // Fit the fixed grid to the panel now and on every viewport resize (#641). The
