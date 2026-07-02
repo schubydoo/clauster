@@ -45,9 +45,10 @@
     /* Host for the read-only xterm.js live pty-screen (#534): dark in both themes (a
        terminal reads as dark). The wire geometry stays a fixed 120x40 (#641) — the client
        shrinks the rendered grid with a CSS transform to fit the panel width on narrow
-       viewports. JS pins .xterm to the intrinsic grid width and sets the host height to the
-       scaled grid height minus the bottom padding so no dark gap shows below or beside the
-       grid (#673). The host clips overflow so the untransformed layout box is hidden. */
+       viewports. JS pins .xterm to the intrinsic grid width and (the host being border-box
+       under Tabler's reset) sets the host height to the scaled grid height plus its vertical
+       padding, so the content area equals the grid and no dark gap shows below or beside it
+       (#673). The host clips overflow so the untransformed layout box is hidden. */
     .pty-screen-host { background: #000; border-radius: 8px; padding: 6px; overflow: hidden; }
     .pty-screen-host .xterm { padding: 0; }
     /* #fff is required — a QR code needs a light field + quiet zone to scan reliably;
