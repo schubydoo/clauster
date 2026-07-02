@@ -296,15 +296,31 @@ def test_backup_before_migrate_false_skips_snapshot_entirely(tmp_path):
         engine.dispose()
 
 
-def test_prune_snapshots_keeps_only_the_newest_n(tmp_path):
+def test_prune_snapshots_keeps_only_the_newest_n_by_mtime(tmp_path):
+    # Retention must key on mtime, NOT filename: the name is pre-<current>-<head>-<stamp>
+    # and the leading revision ids are arbitrary Alembic hashes. Here the revision-id
+    # prefixes are deliberately ordered OPPOSITE to time (the newest file has the
+    # lexicographically-smallest prefix), so a name-sort would wrongly prune the newest.
+    import os
+
     backups_dir = tmp_path / "backups"
     backups_dir.mkdir()
-    made = [backups_dir / f"pre-a-b-20260101T0000{i:02d}_000000Z.db" for i in range(8)]
-    for p in made:
+    # index 0 = oldest (prefix "zzz"), index 7 = newest (prefix "sss") — prefix order is
+    # the REVERSE of time order, so a lexicographic sort disagrees with mtime.
+    prefixes = ["zzz", "yyy", "xxx", "www", "vvv", "uuu", "ttt", "sss"]
+    made = []
+    for i, pfx in enumerate(prefixes):
+        p = backups_dir / f"pre-{pfx}-head-2026010{i}T000000_000000Z.db"
         p.write_text("x")
+        os.utime(p, (1_700_000_000 + i, 1_700_000_000 + i))  # ascending mtime = increasing recency
+        made.append(p)
     bootstrap._prune_snapshots(backups_dir, keep=5)
-    remaining = sorted(backups_dir.glob("pre-*.db"))
-    assert remaining == sorted(made)[-5:]
+    remaining = set(backups_dir.glob("pre-*.db"))
+    assert remaining == set(made[-5:])  # the 5 newest-by-mtime survive
+    # Regression guard vs a name-sort: the newest file (smallest-sorting prefix) must live,
+    # the oldest (largest-sorting prefix) must be pruned.
+    assert made[-1] in remaining
+    assert made[0] not in remaining
 
 
 def test_snapshot_prunes_pre_existing_snapshots_beyond_retention(tmp_path):

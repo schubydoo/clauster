@@ -105,8 +105,15 @@ def _pending_revision(connection: Connection) -> tuple[str | None, str | None]:
 
 
 def _prune_snapshots(backups_dir: Path, keep: int = _DEFAULT_SNAPSHOT_RETENTION) -> None:
-    """Keep only the newest ``keep`` pre-migration snapshots, oldest-first pruned."""
-    snapshots = sorted(backups_dir.glob("pre-*.db"))
+    """Keep only the newest ``keep`` pre-migration snapshots (by mtime), oldest pruned.
+
+    Sort by **mtime**, not filename: a snapshot is named
+    ``pre-<current>-<head>-<stamp>.db`` whose leading ``<current>``/``<head>`` are
+    arbitrary Alembic revision hashes, so a lexicographic sort is dominated by the
+    revision id and does NOT track age across migration boundaries — it could prune
+    the *newest* snapshot. mtime is the true recency key.
+    """
+    snapshots = sorted(backups_dir.glob("pre-*.db"), key=lambda p: p.stat().st_mtime)
     for old in snapshots[:-keep] if keep > 0 else snapshots:
         old.unlink(missing_ok=True)
 
