@@ -88,6 +88,11 @@ auth:
     #                                # oauth2-proxy) that sign no HMAC — set true (the
     #                                # default) when using a shared_secret HMAC proxy instead
 
+# The versioned /api/v1 public surface (see docs/public-api.md). The internal
+# bare /api/... routes the dashboard uses are always present, unaffected by this.
+api:
+  openapi_enabled: false  # serve /docs + /openapi.json (Bearer-gated when auth.enabled)
+
 # Native HTTPS: have Clauster terminate TLS itself (uvicorn ssl_certfile/keyfile),
 # instead of a reverse proxy / `tailscale serve`. Unset = plain HTTP. With TLS on,
 # cookie_secure: auto already marks the cookie Secure. TLS settings are structural

@@ -419,6 +419,20 @@ class AuthConfig(BaseModel):
         return v
 
 
+class ApiConfig(BaseModel):
+    """The versioned `/api/v1` public API surface (#302)."""
+
+    openapi_enabled: bool = Field(
+        default=False,
+        description="Serve the OpenAPI docs (`/docs`) and schema (`/openapi.json`). "
+        "**Off by default** — the documented HTTP surface isn't exposed until "
+        "explicitly opted in. When `true`, both paths still require the same "
+        "authentication as any `/api/...` route (a session cookie, reverse-proxy "
+        "auth, or a Bearer token) whenever `auth.enabled` is set; an unauthenticated "
+        "request gets a `401`, not a login redirect.",
+    )
+
+
 def _missing_enforced_auth(host: str, auth: AuthConfig) -> bool:
     """Return True when binding ``host`` would NOT actually enforce authentication.
 
@@ -1199,6 +1213,7 @@ class ClausterConfig(BaseModel):
         "unknown keys ignored). See the `projects` section.",
     )
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
     db: DbConfig = Field(default_factory=DbConfig)
     logs: LogsConfig = Field(default_factory=LogsConfig)
     clone: CloneConfig = Field(default_factory=CloneConfig)

@@ -15,6 +15,10 @@ the DB-backed stores round-trip the same ``dict[str, dict]`` the callers already
   one row per ``spawned`` / ``ready`` / ``ended`` / ``crashed`` transition, with a
   terminal-row cost/token snapshot. Survives a restart, so a per-project "last used
   / total cost" is readable straight from the DB; unblocks #298 and #303.
+* :class:`ApiToken` — a named, hashed public-API bearer credential (#302): the
+  ``clauster api-token`` CLI mints/revokes rows here. Only the SHA-256 hash is
+  stored (parity with ``auth.api_token_hash``); the raw token is shown once at
+  issue/rotate time and never persisted.
 
 Only portable column types are used (no SQLite-only types). Timestamps are
 timezone-aware.
@@ -187,3 +191,23 @@ class SessionEvent(Base, TimestampMixin):
     cache_read_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="session_events")
+
+
+class ApiToken(Base, TimestampMixin):
+    """A named public-API bearer token (#302), backed by the ``api_tokens`` table.
+
+    ``label`` is the operator-facing name (unique — ``clauster api-token issue``
+    refuses a duplicate rather than silently shadowing an existing token).
+    ``token_hash`` is the SHA-256 hex digest of the raw token (unique — the same
+    at-rest form ``auth.api_token_hash`` uses); the raw value is minted by
+    :func:`clauster.auth.mint_token`, shown to the operator exactly once, and
+    never stored. ``last_used_at`` is best-effort — a write failure there must
+    never block the request it authenticated.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

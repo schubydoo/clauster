@@ -3,7 +3,7 @@
 Subcommands: ``run`` (default), ``hash-password``, ``hash-token``,
 ``hash-metrics-token``, ``doctor``, ``backup``, ``restore``, ``migrate``,
 ``install-service``, ``reap-environments``, ``keepers``, ``usage``,
-``config reconcile``, ``mcp``.
+``config reconcile``, ``mcp``, ``api-token issue/list/rotate/revoke``.
 Bare ``clauster`` and ``clauster -c <cfg>`` still mean ``run`` for
 backward compatibility.
 """
@@ -58,6 +58,7 @@ _COMMANDS = {
     "usage",
     "config",
     "mcp",
+    "api-token",
 }
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
@@ -185,6 +186,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     mcp_p.add_argument("-c", "--config", help="path to clauster.yml")
 
+    token_p = sub.add_parser(
+        "api-token", help="issue / list / rotate / revoke named public-API bearer tokens (#302)"
+    )
+    token_sub = token_p.add_subparsers(dest="token_verb")
+    token_issue_p = token_sub.add_parser("issue", help="mint a new named token")
+    token_issue_p.add_argument("-c", "--config", help="path to clauster.yml")
+    token_issue_p.add_argument(
+        "--label", required=True, help="unique operator-facing name for the token"
+    )
+    token_list_p = token_sub.add_parser(
+        "list", help="list named tokens (label / created / last-used — never the secret)"
+    )
+    token_list_p.add_argument("-c", "--config", help="path to clauster.yml")
+    token_rotate_p = token_sub.add_parser(
+        "rotate", help="mint a fresh secret for an existing label"
+    )
+    token_rotate_p.add_argument("-c", "--config", help="path to clauster.yml")
+    token_rotate_p.add_argument("label", help="the token's label")
+    token_revoke_p = token_sub.add_parser("revoke", help="permanently delete a named token")
+    token_revoke_p.add_argument("-c", "--config", help="path to clauster.yml")
+    token_revoke_p.add_argument("label", help="the token's label")
+
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
     if argv and argv[0] not in _COMMANDS and argv[0] not in _TOP_LEVEL_FLAGS:
         argv = ["run", *argv]
@@ -223,6 +246,17 @@ def main(argv: list[str] | None = None) -> int:
         from .mcp_server import main as mcp_main
 
         return mcp_main(["-c", args.config] if args.config else [])
+    if args.command == "api-token":
+        if args.token_verb == "issue":  # noqa: S105 — a subcommand name, not a secret
+            return _api_token_issue(args.config, args.label)
+        if args.token_verb == "list":  # noqa: S105 — a subcommand name, not a secret
+            return _api_token_list(args.config)
+        if args.token_verb == "rotate":  # noqa: S105 — a subcommand name, not a secret
+            return _api_token_rotate(args.config, args.label)
+        if args.token_verb == "revoke":  # noqa: S105 — a subcommand name, not a secret
+            return _api_token_revoke(args.config, args.label)
+        token_p.print_help(sys.stderr)
+        return 2
     return _run(getattr(args, "config", None))
 
 
@@ -294,6 +328,111 @@ def _hash_metrics_token() -> int:
         file=sys.stderr,
     )
     print(f"  metrics_token_hash: {token_hash}", file=sys.stderr)
+    return 0
+
+
+# ----- api-token: named public-API bearer tokens (#302) --------------------
+#
+# CLI-first token management: the running app never mints/rotates/revokes a
+# token itself, only verifies one on the request hot path (see app.py's
+# `_authenticate`). Each verb here opens its own short-lived `Persistence` (the
+# same fail-closed migrate-to-head + legacy-import the server runs) and
+# disposes it before returning — there is no long-lived DB connection in the CLI.
+
+
+def _api_token_issue(config_path: str | None, label: str) -> int:
+    """Mint a new named token; print the raw secret once (never persisted)."""
+    config = _load_or_exit(config_path)
+    persistence = Persistence(config.state_dir, config.database_url)
+    try:
+        raw, record = persistence.api_token_store().issue(label)
+    except ValueError as exc:
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"clauster: api-token issue failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        persistence.dispose()
+    print("Token (shown once — copy it into your client now):", file=sys.stderr)
+    print(raw)
+    print(file=sys.stderr)
+    print(
+        f"clauster: issued {record.label!r} "
+        f"(created {record.created_at.isoformat(timespec='seconds')})",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _api_token_list(config_path: str | None) -> int:
+    """List every named token — label / created / last-used, never the secret."""
+    config = _load_or_exit(config_path)
+    persistence = Persistence(config.state_dir, config.database_url)
+    try:
+        records = persistence.api_token_store().list_all()
+    finally:
+        persistence.dispose()
+    if not records:
+        print("clauster: no named tokens", file=sys.stderr)
+    else:
+        print(f"{'LABEL':<24} {'CREATED':<21} LAST USED")
+        for record in records:
+            created = record.created_at.isoformat(timespec="seconds")
+            last_used = (
+                record.last_used_at.isoformat(timespec="seconds")
+                if record.last_used_at
+                else "never"
+            )
+            print(f"{record.label:<24} {created:<21} {last_used}")
+    if config.auth.api_token_hash:
+        print(
+            "clauster: a legacy auth.api_token_hash is also configured and still "
+            "authenticates (not listed above — it carries no label).",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _api_token_rotate(config_path: str | None, label: str) -> int:
+    """Mint a fresh secret for an existing label; print the new raw secret once."""
+    config = _load_or_exit(config_path)
+    persistence = Persistence(config.state_dir, config.database_url)
+    try:
+        raw, record = persistence.api_token_store().rotate(label)
+    except ValueError as exc:
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"clauster: api-token rotate failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        persistence.dispose()
+    print("Token (shown once — copy it into your client now):", file=sys.stderr)
+    print(raw)
+    print(file=sys.stderr)
+    print(
+        f"clauster: rotated {record.label!r} — the previous secret no longer works",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _api_token_revoke(config_path: str | None, label: str) -> int:
+    """Permanently delete a named token by label."""
+    config = _load_or_exit(config_path)
+    persistence = Persistence(config.state_dir, config.database_url)
+    try:
+        found = persistence.api_token_store().revoke(label)
+    except OSError as exc:
+        print(f"clauster: api-token revoke failed: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        persistence.dispose()
+    if not found:
+        print(f"clauster: no token labeled {label!r}", file=sys.stderr)
+        return 2
+    print(f"clauster: revoked {label!r}", file=sys.stderr)
     return 0
 
 

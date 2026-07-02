@@ -288,6 +288,120 @@ def test_hash_metrics_token_prints_raw_to_stdout_and_hash_to_stderr(capsys):
     assert auth.verify_token(raw, auth.hash_token(raw)) is True
 
 
+# ----- api-token: named public-API bearer tokens (#302) -----------------
+
+
+def test_api_token_issue_prints_raw_once_and_lists_the_label(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "--label", "ci", "-c", cfg]) == 0
+    captured = capsys.readouterr()
+    raw = captured.out.strip()
+    assert raw.startswith("clauster_pat_")
+    assert raw not in captured.err  # raw secret is never echoed into the guidance
+    assert "issued 'ci'" in captured.err
+
+    assert cli.main(["api-token", "list", "-c", cfg]) == 0
+    out = capsys.readouterr().out
+    assert "ci" in out
+    assert "never" in out  # not used yet
+    assert raw not in out  # the secret itself is never listed
+
+
+def test_api_token_issue_duplicate_label_exits_2(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "--label", "ci", "-c", cfg]) == 0
+    capsys.readouterr()
+    assert cli.main(["api-token", "issue", "--label", "ci", "-c", cfg]) == 2
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_api_token_list_empty_says_so(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "list", "-c", cfg]) == 0
+    assert "no named tokens" in capsys.readouterr().err
+
+
+def test_api_token_list_notes_legacy_hash_when_configured(write_config, tmp_path, capsys):
+    _raw, token_hash = auth.mint_token()
+    cfg = _cfg(write_config, tmp_path, f"auth:\n  api_token_hash: {token_hash}\n")
+    assert cli.main(["api-token", "list", "-c", cfg]) == 0
+    assert "legacy auth.api_token_hash" in capsys.readouterr().err
+
+
+def test_api_token_rotate_replaces_the_secret(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    cli.main(["api-token", "issue", "--label", "ci", "-c", cfg])
+    raw1 = capsys.readouterr().out.strip()
+
+    assert cli.main(["api-token", "rotate", "ci", "-c", cfg]) == 0
+    captured = capsys.readouterr()
+    raw2 = captured.out.strip()
+    assert raw2.startswith("clauster_pat_")
+    assert raw2 != raw1
+    assert "rotated 'ci'" in captured.err
+
+
+def test_api_token_rotate_unknown_label_exits_2(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "rotate", "ghost", "-c", cfg]) == 2
+    assert "no token labeled 'ghost'" in capsys.readouterr().err
+
+
+def test_api_token_revoke_removes_the_label(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    cli.main(["api-token", "issue", "--label", "ci", "-c", cfg])
+    capsys.readouterr()
+
+    assert cli.main(["api-token", "revoke", "ci", "-c", cfg]) == 0
+    assert "revoked 'ci'" in capsys.readouterr().err
+
+    assert cli.main(["api-token", "list", "-c", cfg]) == 0
+    assert "no named tokens" in capsys.readouterr().err
+
+
+def test_api_token_revoke_unknown_label_exits_2(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "revoke", "ghost", "-c", cfg]) == 2
+    assert "no token labeled 'ghost'" in capsys.readouterr().err
+
+
+def test_api_token_no_verb_prints_help_exits_2(capsys):
+    assert cli.main(["api-token"]) == 2
+
+
+def test_api_token_issue_oserror_exits_1(write_config, tmp_path, capsys, monkeypatch):
+    from clauster.db.stores import ApiTokenStore
+
+    cfg = _cfg(write_config, tmp_path)
+    monkeypatch.setattr(
+        ApiTokenStore, "issue", lambda self, label: (_ for _ in ()).throw(OSError("boom"))
+    )
+    assert cli.main(["api-token", "issue", "--label", "ci", "-c", cfg]) == 1
+    assert "api-token issue failed" in capsys.readouterr().err
+
+
+def test_api_token_rotate_oserror_exits_1(write_config, tmp_path, capsys, monkeypatch):
+    from clauster.db.stores import ApiTokenStore
+
+    cfg = _cfg(write_config, tmp_path)
+    monkeypatch.setattr(
+        ApiTokenStore, "rotate", lambda self, label: (_ for _ in ()).throw(OSError("boom"))
+    )
+    assert cli.main(["api-token", "rotate", "ci", "-c", cfg]) == 1
+    assert "api-token rotate failed" in capsys.readouterr().err
+
+
+def test_api_token_revoke_oserror_exits_1(write_config, tmp_path, capsys, monkeypatch):
+    from clauster.db.stores import ApiTokenStore
+
+    cfg = _cfg(write_config, tmp_path)
+    monkeypatch.setattr(
+        ApiTokenStore, "revoke", lambda self, label: (_ for _ in ()).throw(OSError("boom"))
+    )
+    assert cli.main(["api-token", "revoke", "ci", "-c", cfg]) == 1
+    assert "api-token revoke failed" in capsys.readouterr().err
+
+
 # ----- doctor -----------------------------------------------------------
 
 

@@ -81,7 +81,7 @@ unknown per-project keys are ignored.
 | `tls` | TlsConfig \| null | `null` | Native HTTPS termination. Unset (default) = serve plain HTTP and rely on a reverse proxy / `tailscale serve` for TLS. Set `tls` to have Clauster terminate TLS itself. Two modes: `provision = off` (default) requires `cert_file` + `key_file` pointing at an existing cert + key (validated fail-closed); `provision = self-signed` generates a self-signed cert+key under `state_dir/tls/` automatically (`cryptography` package required). ACME is deferred to issue 774. |
 <!-- END GEN: clauster -->
 
-Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `logs`,
+Nested sections: `claude`, `instance_defaults`, `projects`, `auth`, `api`, `logs`,
 `clone`, `reaper`, `usage`, `metrics`, `observability`, `notifications`,
 `webhooks`, `claustrum`, `tls` — each documented below (`auth.reverse_proxy` is
 nested under `auth`).
@@ -101,7 +101,6 @@ nested under `auth`).
 | `launch_mode` | `standard` \| `pty` | `standard` | Launch mode for **new** bridges. `pty` = native true-resume under a PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the mode it launched with — editing this never re-modes a running or stopped bridge. (Renamed from `resume_mode`, still accepted as a deprecated alias.) |
 | `pty_screen_enabled` | bool | `false` | (pty mode) Publish a redacted, read-only render of the bridge's live terminal screen for the dashboard's live-terminal view (#534). Off by default; needs the optional `pyte` dependency (`pip install 'clauster[pty]'`) — without it the feature stays dormant. The standalone binary does not bundle `pyte` (LGPL): either run clauster from a `pip`/`uv` install with the `[pty]` extra, or keep the binary and side-load `pyte` by setting `CLAUSTER_PYTE_PATH` to a directory holding an installed `pyte` (#702) — the binary appends it to `sys.path` only when set. The render is best-effort secret-redacted, so treat the live view as auth-gated, not secret-proof. |
 | `path_append` | list[str] | `[]` | Directories appended to the bridge subprocess `PATH` so a `claude` session can resolve user-local tools (e.g. `~/.local/bin`) that a minimal service `PATH` omits. `~` is expanded; entries are appended in order after the inherited `PATH`, never replacing it. Applies to both standard and pty bridges. |
-| `node_from_nvm` | bool | `false` | Resolve nvm's `default` node version at each bridge spawn and append its bin dir to the bridge subprocess `PATH` (after `path_append`). Fixes `npx`/`node`-based MCP servers (e.g. codecov, context7) showing `✘ Failed to connect` under a systemd deployment: Claude Code spawns MCP stdio servers by exec'ing the configured `command` directly, not through a shell, so neither `BASH_ENV` nor a login-shell nvm init ever reaches that spawn — only the bridge process `PATH` does. Off by default; a no-op (never raises) when nvm, its `default` alias, or POSIX `bash` aren't available — spawn is never blocked by this. POSIX-only (nvm is a bash function); ignored on Windows. |
 <!-- END GEN: claude -->
 
 The `claude.env` map (filtered from the generated table because it's a dict) overlays
@@ -132,20 +131,59 @@ An `npx`- or `node`-based MCP server in your `~/.claude.json` (e.g. `codecov`,
 `context7`, and most published servers) can show `✘ Failed to connect` in a bridge
 — visible via `claude mcp list` run inside one — while connecting fine in an
 interactive `claude` TUI. This bites the **systemd deployment mode** specifically:
-Claude Code launches MCP **stdio** servers by spawning their configured `command`
-**directly** (`execvp` / `sh -c`; `sh` is dash and ignores `BASH_ENV`), not through
-a login or non-interactive bash shell, so only the bridge subprocess `PATH` itself
-matters — and nvm's bin dir is version-specific, so it's never baked into a static
-`path_append`. Interactive-launch deployments inherit `node` from your shell and
-never hit this.
 
-Set `claude.node_from_nvm: true` (off by default) to fix it: at each bridge spawn,
-Clauster resolves nvm's `default` node version (`nvm which default`, same
-resolution nvm itself uses) and appends its bin dir to the bridge `PATH`, after
-`path_append`. It tracks nvm's current default across node upgrades — no shim
-script to maintain — and is a no-op (never blocks a spawn) when nvm or a `default`
-alias isn't found. POSIX-only (nvm is a bash function); see the `node_from_nvm`
-row in the table above.
+- Claude Code launches MCP **stdio** servers by spawning their configured
+  `command` **directly** (`execvp` / `sh -c`; `sh` is dash and ignores `BASH_ENV`),
+  **not** through a login or non-interactive bash shell. So neither `path_append`'s
+  companion `BASH_ENV` trick nor a login-shell nvm init reaches the MCP spawn.
+- The only `PATH` that matters for that spawn is the bridge subprocess `PATH` —
+  the minimal service `PATH` plus `path_append` — and nvm's bin directory is
+  version-specific (it rots on every node upgrade), so it's deliberately not in
+  `path_append`. `npx`/`node` therefore aren't found, and the server can't start.
+
+`path_append`ing an nvm bin dir directly is fragile for that same version-pinning
+reason. The robust workaround is a small stable `npx` shim in a directory that
+*is* already on the bridge `PATH` (e.g. `~/.local/bin`, baked in by the generated
+unit) that resolves nvm's `default` **at runtime** and prepends its bin dir before
+exec — so both `npx` and the `node` it and the MCP server invoke resolve:
+
+```bash
+#!/usr/bin/env bash
+# ~/.local/bin/npx  — chmod +x. Puts npx on the PATH of processes that DON'T
+# source a login shell / BASH_ENV, notably Claude Code's MCP stdio spawns.
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+if command -v node >/dev/null 2>&1; then
+  # node already on PATH (interactive / active `nvm use`) — don't override it.
+  _bindir="$(dirname "$(command -v node)")"
+else
+  # bare PATH (bridge / MCP spawn): resolve the `default` alias, no PATH mutation.
+  _node="$( { \. "$NVM_DIR/nvm.sh" --no-use && nvm which default; } 2>/dev/null )"
+  _bindir="$(dirname "$_node")"
+fi
+if [ ! -x "$_bindir/npx" ]; then
+  echo "npx shim: could not resolve nvm 'default' node (NVM_DIR=$NVM_DIR)" >&2
+  exit 127
+fi
+export PATH="$_bindir:$PATH"
+exec "$_bindir/npx" "$@"
+```
+
+Save it as `~/.local/bin/npx` and **make it executable** —
+`chmod +x ~/.local/bin/npx`. Without the executable bit the spawn fails with
+`Permission denied`, the same silent symptom this is meant to fix. Then restart
+the service (or start a fresh bridge) for it to take effect and re-check
+`claude mcp list` inside a bridge.
+
+The shim intercepts `command: "npx"` servers — the common case for published
+servers. A server configured with `command: "node"` directly (e.g.
+`node /path/to/server.js`) is spawned the same way and also finds no `node` on
+the bridge `PATH`; cover it with a parallel `~/.local/bin/node` shim built on the
+same pattern (resolve nvm's `default`, prepend its bin dir, then
+`exec "$_bindir/node" "$@"`).
+
+Interactive-launch deployments inherit `node` from your shell and never hit this.
+A first-class opt-in knob is tracked in
+[issue #792](https://github.com/schubydoo/clauster/issues/792).
 
 ## `instance_defaults` — new-bridge defaults (`InstanceDefaults`)
 
@@ -220,24 +258,20 @@ projects:
 
 See [Security](security.md) and [Networking](networking.md) for the full matrix.
 
-## `db` — persistence-layer knobs (`DbConfig`)
+## `api` — the versioned `/api/v1` public surface (`ApiConfig`)
 
-<!-- BEGIN GEN: db -->
+<!-- BEGIN GEN: api -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `backup_before_migrate` | bool | `true` | Snapshot `clauster.db` (via `VACUUM INTO`) to `state_dir/backups/` before running a **pending** Alembic migration — never on a plain restart already at head. The last 5 pre-migration snapshots are kept, older ones pruned. A snapshot write failure is logged as a WARNING and startup proceeds (the migration itself is transactional and safe on its own); set this to `false` to skip the snapshot attempt entirely. |
-<!-- END GEN: db -->
+| `openapi_enabled` | bool | `false` | Serve the OpenAPI docs (`/docs`) and schema (`/openapi.json`). **Off by default** — the documented HTTP surface isn't exposed until explicitly opted in. When `true`, both paths still require the same authentication as any `/api/...` route (a session cookie, reverse-proxy auth, or a Bearer token) whenever `auth.enabled` is set; an unauthenticated request gets a `401`, not a login redirect. |
+<!-- END GEN: api -->
 
-**Recovery.** Each pre-migration snapshot is a self-contained copy of
-`clauster.db` named `pre-<revision-before>-<revision-after>-<timestamp>.db`
-under `state_dir/backups/`, written just before a migration that changed the
-schema. To roll back: stop Clauster, replace `state_dir/clauster.db` with the
-desired `state_dir/backups/pre-*.db` snapshot (and its `-wal`/`-shm` siblings if
-present), then start the matching (older) `clauster` binary — a newer binary
-would immediately re-run the same migration against the restored file. This is
-complementary to `clauster backup` / `restore` (a full `state_dir` + config
-tarball); the snapshot here is automatic, DB-only, and scoped to the migration
-path.
+The dashboard's ~60 unversioned `/api/...` routes are unchanged and keep serving
+the Alpine frontend. Alongside them, `/api/v1/...` aliases the public, stable
+resource subset (project list, session reads, instance spawn/stop/resume, agent
+spawn/stop/resume) under the same handlers and the same auth gate — see
+[the public API guide](public-api.md) for the full route list and the
+`clauster api-token` CLI.
 
 ## `logs` — bridge-log rotation & redaction (`LogsConfig`)
 
@@ -548,6 +582,7 @@ the browser. These are the day-to-day knobs that are safe to change at runtime:
 | Section | Editable fields |
 | --- | --- |
 | `(top-level)` | `log_format` |
+| `api` | `openapi_enabled` |
 | `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode`, `pty_screen_enabled` |
 | `instance_defaults` | `spawn_mode`, `permission_mode`, `verbose`, `session_name_prefix`, `capacity`, `max_bridges` |
 | `claustrum` | `enabled`, `socket_path`, `spawn_timeout_seconds`, `keep_children`, `request_timeout_seconds` |
