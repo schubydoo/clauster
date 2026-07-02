@@ -24,7 +24,7 @@ async def test_spawn_installs_recap_hook_when_enabled(runner_config, monkeypatch
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner, _ = _runner_with_recap(runner_config, enabled=True)
 
-    await runner.spawn("alpha")
+    inst = await runner.spawn("alpha")
     try:
         settings = runner._settings_json
         assert settings.is_file()
@@ -32,18 +32,18 @@ async def test_spawn_installs_recap_hook_when_enabled(runner_config, monkeypatch
         commands = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
         assert any("resume_recap.py" in c for c in commands)
     finally:
-        await runner.stop("alpha")
+        await runner.stop(inst.instance_id)
 
 
 async def test_spawn_skips_recap_hook_when_disabled(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner, _ = _runner_with_recap(runner_config, enabled=False)
 
-    await runner.spawn("alpha")
+    inst = await runner.spawn("alpha")
     try:
         assert not runner._settings_json.exists()
     finally:
-        await runner.stop("alpha")
+        await runner.stop(inst.instance_id)
 
 
 async def test_spawn_survives_recap_hook_install_failure(runner_config, monkeypatch):
@@ -59,7 +59,7 @@ async def test_spawn_survives_recap_hook_install_failure(runner_config, monkeypa
     try:
         assert inst.status.name == "RUNNING"
     finally:
-        await runner.stop("alpha")
+        await runner.stop(inst.instance_id)
 
 
 def _capture_popen_env(runner: SessionRunner, monkeypatch, tmp_path: Path) -> dict | None:

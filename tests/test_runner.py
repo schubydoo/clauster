@@ -28,6 +28,10 @@ from clauster.runner import (
 )
 from conftest import _raise_cancelled
 
+# Fixed instance_id UUIDs for seeding StateStore (keyed by instance_id since #777).
+_IID_ALPHA = "aaaaaaaa-0000-0000-0000-000000000001"
+_IID_ALPHA2 = "aaaaaaaa-0000-0000-0000-000000000002"
+
 
 def _make_runner(runner_config) -> SessionRunner:
     config, claude_json = runner_config
@@ -80,7 +84,7 @@ async def test_persist_tolerates_store_write_failure(runner_config, monkeypatch,
     # stop-path warning is asserted independently of the spawn-path one.
     caplog.clear()
     with caplog.at_level("WARNING"):
-        stopped = await runner.stop("alpha")
+        stopped = await runner.stop(inst.instance_id)
     assert stopped.status is InstanceStatus.STOPPED
     assert stopped.intentional_stop is True
     assert any("could not persist" in r.message for r in caplog.records)
@@ -145,7 +149,7 @@ async def test_spawn_ready_then_stop(runner_config, monkeypatch):
     assert inst.url and inst.url.endswith("env_01TESTENVAAAAAAAAAAAAAAAA")
     assert runner.running_count() == 1
 
-    stopped = await runner.stop("alpha")
+    stopped = await runner.stop(inst.instance_id)
     assert stopped.status is InstanceStatus.STOPPED
     assert stopped.intentional_stop is True
     assert runner.running_count() == 0
@@ -155,12 +159,12 @@ async def test_forget_drops_stopped_bridge_from_memory_and_disk(runner_config, m
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
-    await runner.spawn("alpha")
-    await runner.stop("alpha")
-    assert runner.get_instance("alpha") is not None  # a stopped, resumable card
+    inst = await runner.spawn("alpha")
+    await runner.stop(inst.instance_id)
+    assert runner.get_instance_for_project("alpha") is not None  # a stopped, resumable card
 
-    await runner.forget("alpha")
-    assert runner.get_instance("alpha") is None
+    await runner.forget(inst.instance_id)
+    assert runner.get_instance_for_project("alpha") is None
     assert "alpha" not in runner._persisted  # dropped from the overlay base too
     # On disk: a fresh runner loads no record, so rediscover can't resurrect a card.
     assert "alpha" not in SessionRunner(config, claude_json=claude_json)._persisted
@@ -173,23 +177,23 @@ async def test_forget_drops_persisted_only_record(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
-    await runner.spawn("alpha")
-    await runner.stop("alpha")
-    runner._instances.pop("alpha")  # keep only the persisted overlay
-    assert "alpha" in runner._persisted
+    inst = await runner.spawn("alpha")
+    await runner.stop(inst.instance_id)
+    runner._instances.pop(inst.instance_id)  # keep only the persisted overlay
+    assert inst.instance_id in runner._persisted
 
-    await runner.forget("alpha")
-    assert "alpha" not in runner._persisted
+    await runner.forget(inst.instance_id)
+    assert inst.instance_id not in runner._persisted
 
 
 async def test_forget_refuses_running_bridge(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _make_runner(runner_config)
-    await runner.spawn("alpha")
+    inst = await runner.spawn("alpha")
     with pytest.raises(InstanceStillLive):
-        await runner.forget("alpha")
-    assert runner.get_instance("alpha") is not None  # left intact, never killed
-    await runner.stop("alpha")  # cleanup the fake process
+        await runner.forget(inst.instance_id)
+    assert runner.get_instance_for_project("alpha") is not None  # left intact, never killed
+    await runner.stop(inst.instance_id)  # cleanup the fake process
 
 
 async def test_forget_refuses_when_bridge_process_still_live_despite_status(
@@ -198,22 +202,20 @@ async def test_forget_refuses_when_bridge_process_still_live_despite_status(
     # Defense in depth: a STOPPED status with a still-live process must not be forgotten.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _make_runner(runner_config)
-    await runner.spawn("alpha")
-    inst = runner.get_instance("alpha")
+    inst = await runner.spawn("alpha")
     assert inst is not None
     inst.status = InstanceStatus.STOPPED  # lagging status (e.g. a missed poll)
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     with pytest.raises(InstanceStillLive):
-        await runner.forget("alpha")
+        await runner.forget(inst.instance_id)
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
-    await runner.stop("alpha")  # cleanup
+    await runner.stop(inst.instance_id)  # cleanup
 
 
 async def test_forget_refuses_when_keeper_process_still_live(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _make_runner(runner_config)
-    await runner.spawn("alpha")
-    inst = runner.get_instance("alpha")
+    inst = await runner.spawn("alpha")
     assert inst is not None
     original_bridge_pid = inst.bridge_pid
     inst.status = InstanceStatus.STOPPED
@@ -222,11 +224,11 @@ async def test_forget_refuses_when_keeper_process_still_live(runner_config, monk
     monkeypatch.setattr("clauster.runner.procutil.proc_create_time", lambda pid: 123.0)
     try:
         with pytest.raises(InstanceStillLive):
-            await runner.forget("alpha")
+            await runner.forget(inst.instance_id)
     finally:
         inst.bridge_pid = original_bridge_pid
         inst.keeper_pid = None  # clear fake pid so stop() skips _cleanup_keeper(4242)
-        await runner.stop("alpha")
+        await runner.stop(inst.instance_id)
 
 
 async def test_forget_unknown_project_raises(runner_config):
@@ -263,7 +265,7 @@ async def test_redact_session_url_splits_raw_and_redacted_on_disk(runner_config,
     assert "env_01TESTENVAAAAAAAAAAAAAAAA" not in public_text
     assert "_<redacted>" in public_text
 
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 async def test_no_redaction_keeps_a_single_verbatim_bridge_log(runner_config, monkeypatch):
@@ -285,7 +287,7 @@ async def test_no_redaction_keeps_a_single_verbatim_bridge_log(runner_config, mo
     assert "session_01TESTSTARTERAAAAAAAAAA" in inst.bridge_debug_log_path.read_text(
         encoding="utf-8"
     )
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 def test_unique_log_path_distinct_within_same_millisecond(runner_config, monkeypatch):
@@ -353,10 +355,10 @@ async def test_stop_releases_proc_handle(runner_config, monkeypatch):
     # removed, leaking dead handles across spawn/stop cycles.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _make_runner(runner_config)
-    await runner.spawn("alpha")
-    assert "alpha" in runner._procs
-    await runner.stop("alpha")
-    assert "alpha" not in runner._procs
+    inst = await runner.spawn("alpha")
+    assert inst.instance_id in runner._procs
+    await runner.stop(inst.instance_id)
+    assert inst.instance_id not in runner._procs
 
 
 async def test_stop_signals_graceful_shutdown(runner_config, monkeypatch):
@@ -369,7 +371,7 @@ async def test_stop_signals_graceful_shutdown(runner_config, monkeypatch):
     log_path = inst.bridge_debug_log_path
     assert log_path is not None
 
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
     assert "[bridge:shutdown]" in log_path.read_text()
 
 
@@ -397,7 +399,7 @@ async def test_stop_force_kills_when_signal_ignored(runner_config, monkeypatch):
 
     monkeypatch.setattr("clauster.runner.asyncio.sleep", _nosleep)
 
-    stopped = await runner.stop("alpha")
+    stopped = await runner.stop(inst.instance_id)
     assert stopped.status is InstanceStatus.STOPPED
     assert killed == [pid]  # force-kill fallback fired
 
@@ -426,7 +428,7 @@ async def test_spawn_is_idempotent_while_running(runner_config, monkeypatch):
     second = await runner.spawn("alpha")  # already running -> returns the same instance
     assert second is first
     assert runner.running_count() == 1
-    await runner.stop("alpha")
+    await runner.stop(first.instance_id)
 
 
 async def test_concurrent_spawn_launches_one_bridge(runner_config, monkeypatch):
@@ -453,7 +455,7 @@ async def test_concurrent_spawn_launches_one_bridge(runner_config, monkeypatch):
     assert first is second  # both callers get the same instance
     assert len(runner._procs) == 1  # no orphaned, untracked process
     assert runner.running_count() == 1
-    await runner.stop("alpha")
+    await runner.stop(first.instance_id)
 
 
 async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_config):
@@ -466,7 +468,8 @@ async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_con
     _db_save(
         config.state_dir,
         {
-            "alpha": {
+            _IID_ALPHA: {
+                "project_name": "alpha",
                 "label": "Custom Label",
                 "permission_mode": "plan",
                 "spawn_mode": "same-dir",
@@ -478,7 +481,8 @@ async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_con
     runner = SessionRunner(config, claude_json=claude_json)
     await runner.rediscover()  # bridge gone, but a persisted record exists
 
-    inst = runner._instances["alpha"]
+    inst = runner.get_instance_for_project("alpha")
+    assert inst is not None
     assert inst.status is InstanceStatus.STOPPED  # surfaced as a resumable card
     assert inst.bridge_pid is None and inst.keeper_pid is None  # process is gone
     assert inst.permission_mode == "plan"  # persisted modes preserved
@@ -487,10 +491,11 @@ async def test_rediscover_resurrects_dead_bridge_and_retains_metadata(runner_con
     assert inst.intentional_stop is True  # carried through
 
     reloaded = _db_load(config.state_dir)
-    assert reloaded["alpha"]["permission_mode"] == "plan"
-    assert reloaded["alpha"]["spawn_mode"] == "same-dir"
-    assert reloaded["alpha"]["resume_mode"] == "standard"
-    assert reloaded["alpha"]["label"] == "Custom Label"
+    alpha_rec = next(v for v in reloaded.values() if v.get("project_name") == "alpha")
+    assert alpha_rec["permission_mode"] == "plan"
+    assert alpha_rec["spawn_mode"] == "same-dir"
+    assert alpha_rec["resume_mode"] == "standard"
+    assert alpha_rec["label"] == "Custom Label"
 
 
 async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_config):
@@ -502,7 +507,8 @@ async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_conf
     _db_save(
         config.state_dir,
         {
-            "alpha": {
+            _IID_ALPHA: {
+                "project_name": "alpha",
                 "label": "alpha",
                 "spawn_mode": "same-dir",
                 "resume_mode": "pty",
@@ -513,22 +519,25 @@ async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_conf
     runner = SessionRunner(config, claude_json=claude_json)
     await runner.rediscover()
 
-    alpha = runner._instances["alpha"]
+    alpha = runner.get_instance_for_project("alpha")
+    assert alpha is not None
     assert alpha.status is InstanceStatus.STOPPED
     assert alpha.resume_mode == "pty"  # true-resume affordance survives the reboot
     assert alpha.intentional_stop is False  # interrupted, not a deliberate stop
-    assert "beta" not in runner._instances  # discovered but unpersisted -> no phantom
+    # Discovered but unpersisted -> no phantom.
+    assert runner.get_instance_for_project("beta") is None
 
 
 async def test_stop_instance_without_pid_marks_stopped(runner_config):
     runner = _make_runner(runner_config)
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha",
         label="alpha",
         status=InstanceStatus.RUNNING,
         bridge_pid=None,
     )
-    inst = await runner.stop("alpha")
+    runner._instances[fake.instance_id] = fake
+    inst = await runner.stop(fake.instance_id)
     assert inst.status is InstanceStatus.STOPPED and inst.intentional_stop is True
 
 
@@ -538,18 +547,19 @@ async def test_stop_serializes_on_spawn_lock(runner_config):
     # marking it STOPPED. Hold the lock (standing in for an in-flight spawn) and assert stop()
     # blocks until it's released — without the lock, stop() would complete immediately.
     runner = _make_runner(runner_config)
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha",
         label="alpha",
         status=InstanceStatus.STARTING,
         bridge_pid=None,
     )
+    runner._instances[fake.instance_id] = fake
     lock = runner._spawn_lock_for("alpha")
     await lock.acquire()  # stand in for spawn() holding the lock during to_thread(_popen)
-    stop_task = asyncio.create_task(runner.stop("alpha"))
+    stop_task = asyncio.create_task(runner.stop(fake.instance_id))
     await asyncio.sleep(0.05)
     assert not stop_task.done()  # blocked on the spawn lock
-    assert runner._instances["alpha"].status is InstanceStatus.STARTING  # not yet stopped
+    assert fake.status is InstanceStatus.STARTING  # not yet stopped
     lock.release()  # spawn finished and released the lock
     inst = await asyncio.wait_for(stop_task, timeout=1.0)
     assert inst.status is InstanceStatus.STOPPED
@@ -649,14 +659,14 @@ async def test_watch_startup_alive_unregistered_becomes_error(runner_config, mon
     inst = await runner.spawn("alpha")
     assert inst.status is InstanceStatus.STARTING  # NOT a false RUNNING
     assert inst.url is None and inst.environment_id is None
-    watch = runner._startup_watches["alpha"]
+    watch = runner._startup_watches[inst.instance_id]
 
     await watch
     assert inst.status is InstanceStatus.ERROR  # honest: alive but never usable
     assert inst.url is None and inst.environment_id is None
     assert runner.running_count() == 0
 
-    await runner.stop("alpha")  # clean up the still-idling fake bridge
+    await runner.stop(inst.instance_id)  # clean up the still-idling fake bridge
 
 
 async def test_watch_startup_promotes_on_late_registration(runner_config, monkeypatch):
@@ -674,14 +684,14 @@ async def test_watch_startup_promotes_on_late_registration(runner_config, monkey
     inst = await runner.spawn("alpha")
     assert inst.status is InstanceStatus.STARTING  # not ready within the 0.2s wait
     assert inst.url is None
-    watch = runner._startup_watches["alpha"]
+    watch = runner._startup_watches[inst.instance_id]
 
     await watch
     assert inst.status is InstanceStatus.RUNNING
     assert inst.environment_id == "env_01TESTENVAAAAAAAAAAAAAAAA"
     assert inst.url and inst.url.endswith("env_01TESTENVAAAAAAAAAAAAAAAA")
 
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeypatch):
@@ -696,11 +706,33 @@ async def test_watch_startup_marks_crashed_if_bridge_dies(runner_config, monkeyp
 
     inst = await runner.spawn("alpha")
     assert inst.status is InstanceStatus.STARTING
-    watch = runner._startup_watches["alpha"]
+    watch = runner._startup_watches[inst.instance_id]
 
-    runner._procs["alpha"].kill()  # die during startup (cross-platform hard kill)
+    runner._procs[inst.instance_id].kill()  # die during startup (cross-platform hard kill)
     await watch
     assert inst.status is InstanceStatus.CRASHED
+
+
+async def test_startup_watch_done_callback_logs_task_exception(runner_config, monkeypatch, caplog):
+    # The startup-watch's done-callback logs (never swallows) an unexpected exception
+    # raised by _watch_startup, keyed by instance_id (#777). Force the watch coroutine
+    # to raise and assert the warning fires with the instance_id.
+    runner = _make_runner(runner_config)
+
+    async def _boom(_instance_id: str) -> None:
+        raise RuntimeError("watch exploded")
+
+    monkeypatch.setattr(runner, "_watch_startup", _boom)
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        runner._start_startup_watch("iid-xyz")
+        task = runner._startup_watches["iid-xyz"]
+        with contextlib.suppress(RuntimeError):
+            await task  # let the coroutine raise; the done-callback then logs it
+        await asyncio.sleep(0)  # let the done-callback run
+    assert any(
+        "startup-watch for iid-xyz failed" in r.message and "watch exploded" in r.message
+        for r in caplog.records
+    )
 
 
 async def test_spawn_auto_enables_remote_control(runner_config, monkeypatch):
@@ -713,13 +745,13 @@ async def test_spawn_auto_enables_remote_control(runner_config, monkeypatch):
 
     assert "hasUsedRemoteControl" not in json.loads(claude_json.read_text())
 
-    await runner.spawn("alpha")
+    inst = await runner.spawn("alpha")
     after = json.loads(claude_json.read_text())
     assert after["hasUsedRemoteControl"] is True
     assert after["remoteDialogSeen"] is True
     assert after["projects"]  # existing trust entries preserved
 
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 async def test_spawn_auto_enable_can_be_disabled(runner_config, monkeypatch):
@@ -728,16 +760,39 @@ async def test_spawn_auto_enable_can_be_disabled(runner_config, monkeypatch):
     config.claude.auto_enable_remote_control = False
     runner = SessionRunner(config, claude_json=claude_json)
 
-    await runner.spawn("alpha")
+    inst = await runner.spawn("alpha")
     assert "hasUsedRemoteControl" not in json.loads(claude_json.read_text())
 
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 async def test_stop_unknown_instance_raises(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
-        await runner.stop("alpha")  # never spawned
+        await runner.stop("00000000-0000-0000-0000-000000000000")  # never spawned
+
+
+async def test_stop_raises_if_forgotten_after_lock_acquire(runner_config, monkeypatch):
+    # TOCTOU defense: stop() re-looks-up the instance INSIDE the per-project lock so a
+    # concurrent forget() between the first lookup and the lock can't leave it signalling
+    # a de-registered instance. Simulate that race — drop the row as the lock is taken —
+    # and assert the inner guard raises UnknownProject rather than proceeding on a stale ref.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _make_runner(runner_config)
+    inst = await runner.spawn("alpha")
+    iid = inst.instance_id
+
+    real_lock_for = runner._spawn_lock_for
+
+    def _evicting_lock_for(name):
+        # Stand in for a concurrent forget() landing between stop()'s first lookup and
+        # its re-lookup under the lock: remove the registry row here.
+        runner._instances.pop(iid, None)
+        return real_lock_for(name)
+
+    monkeypatch.setattr(runner, "_spawn_lock_for", _evicting_lock_for)
+    with pytest.raises(UnknownProject):
+        await runner.stop(iid)
 
 
 def test_external_sessions_by_project(runner_config):
@@ -897,10 +952,10 @@ async def test_adopt_promotes_external_standard_session(runner_config, monkeypat
     assert inst.keeper_pid is None  # no keeper for a standard bridge
     assert inst.environment_id == "env_x"
     assert "env_x" in (inst.url or "")
-    assert runner.get_instance("alpha") is inst
+    assert runner.get_instance_for_project("alpha") is inst
     # Persisted so a clauster restart keeps managing it.
     fresh = SessionRunner(config, claude_json=claude_json)
-    assert "alpha" in fresh._persisted
+    assert any(v.get("project_name") == "alpha" for v in fresh._persisted.values())
 
 
 async def test_adopt_refuses_pty_or_dead_external(runner_config, monkeypatch):
@@ -911,7 +966,7 @@ async def test_adopt_refuses_pty_or_dead_external(runner_config, monkeypatch):
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: False)
     with pytest.raises(AdoptionUnavailable):
         await runner.adopt("alpha")
-    assert runner.get_instance("alpha") is None
+    assert runner.get_instance_for_project("alpha") is None
 
 
 async def test_adopt_refuses_when_no_pointer(runner_config, monkeypatch):
@@ -919,14 +974,13 @@ async def test_adopt_refuses_when_no_pointer(runner_config, monkeypatch):
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: None)
     with pytest.raises(AdoptionUnavailable):
         await runner.adopt("alpha")
-    assert runner.get_instance("alpha") is None
+    assert runner.get_instance_for_project("alpha") is None
 
 
 async def test_adopt_refuses_already_managed(runner_config):
     runner = _make_runner(runner_config)
-    runner._instances["alpha"] = RemoteControlInstance(
-        project="alpha", label="alpha", status=InstanceStatus.RUNNING
-    )
+    fake = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.RUNNING)
+    runner._instances[fake.instance_id] = fake
     with pytest.raises(InstanceStillLive):
         await runner.adopt("alpha")
 
@@ -944,7 +998,14 @@ async def test_adopt_pins_standard_over_stale_persisted_pty_mode(runner_config, 
     config, claude_json = runner_config
     _db_save(
         config.state_dir,
-        {"alpha": {"label": "my-alpha", "resume_mode": "pty", "spawn_mode": "same-dir"}},
+        {
+            _IID_ALPHA: {
+                "project_name": "alpha",
+                "label": "my-alpha",
+                "resume_mode": "pty",
+                "spawn_mode": "same-dir",
+            }
+        },
     )
     runner = SessionRunner(config, claude_json=claude_json)
     monkeypatch.setattr(
@@ -1004,7 +1065,7 @@ async def test_adopt_then_stop_uses_single_sigint(runner_config, monkeypatch):
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
-    await runner.adopt("alpha")
+    adopted = await runner.adopt("alpha")
 
     calls: list[tuple[int, bool]] = []
     monkeypatch.setattr(
@@ -1018,7 +1079,7 @@ async def test_adopt_then_stop_uses_single_sigint(runner_config, monkeypatch):
         return None
 
     monkeypatch.setattr(SessionRunner, "_await_exit", _noop_exit)
-    inst = await runner.stop("alpha")
+    inst = await runner.stop(adopted.instance_id)
     assert inst.status is InstanceStatus.STOPPED
     assert calls == [(4242, False)]  # single SIGINT to the adopted bridge's pid
 
@@ -1033,23 +1094,26 @@ async def test_poll_does_not_prune_freshly_adopted_running_instance(runner_confi
     runner = _make_runner(runner_config)
     cwd = config.projects_root / "alpha"
 
+    _fake_adopted = RemoteControlInstance(
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        resume_mode="standard",
+        bridge_pid=4242,
+    )
+
     def list_then_adopt(*a, **k):
         # adopt() completes mid-suspension: a RUNNING instance for alpha appears AFTER
         # live_projects (empty — no managed bridge existed at snapshot) was computed.
-        runner._instances["alpha"] = RemoteControlInstance(
-            project="alpha",
-            label="alpha",
-            status=InstanceStatus.RUNNING,
-            resume_mode="standard",
-            bridge_pid=4242,
-        )
+        runner._instances[_fake_adopted.instance_id] = _fake_adopted
         return [
             WorkingSession(pid=999, cwd=cwd, kind="interactive", started_at=999, local_uuid="u")
         ]
 
     monkeypatch.setattr(inspector, "list_working_sessions", list_then_adopt)
     await runner.poll_once()
-    assert "alpha" in runner._instances  # adopted RUNNING instance survived the prune
+    # The adopted RUNNING instance survived the prune.
+    assert runner.get_instance_for_project("alpha") is not None
 
 
 async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monkeypatch):
@@ -1058,9 +1122,10 @@ async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monk
     # drops it so the card shows "external session active" instead of Stopped/Resume.
     config = runner_config[0]
     runner = _make_runner(runner_config)
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.STOPPED, resume_mode="pty"
     )
+    runner._instances[fake.instance_id] = fake
     sess = WorkingSession(
         pid=999,
         cwd=config.projects_root / "alpha",
@@ -1070,7 +1135,7 @@ async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monk
     )
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
     await runner.poll_once()
-    assert "alpha" not in runner._instances  # phantom dropped
+    assert runner.get_instance_for_project("alpha") is None  # phantom dropped
     assert "alpha" in runner.external_sessions_by_project()  # now surfaced as external
 
 
@@ -1083,9 +1148,10 @@ async def test_poll_attributes_starting_bridge_session_not_external(runner_confi
     config = runner_config[0]
     runner = _make_runner(runner_config)
     # bridge_pid is None -> the live-projects loop skips it, so alpha is NOT in live_projects.
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.STARTING, resume_mode="pty"
     )
+    runner._instances[fake.instance_id] = fake
     sess = WorkingSession(
         pid=843868,
         cwd=config.projects_root / "alpha",
@@ -1098,7 +1164,8 @@ async def test_poll_attributes_starting_bridge_session_not_external(runner_confi
     assert runner.external_sessions_by_project() == {}  # NOT a phantom external row
     tracked = runner.tracked_sessions_by_instance()
     assert tracked.get("alpha") and [s.local_uuid for s in tracked["alpha"]] == ["u-starting"]
-    assert runner._instances["alpha"].status is InstanceStatus.STARTING  # still starting, kept
+    inst = runner.get_instance_for_project("alpha")
+    assert inst is not None and inst.status is InstanceStatus.STARTING  # still starting, kept
 
 
 async def test_poll_attributes_starting_worktree_bridge_session_not_external(
@@ -1109,12 +1176,13 @@ async def test_poll_attributes_starting_worktree_bridge_session_not_external(
     # to the bridge by containment (TRACKED), not read EXTERNAL — same race as the same-dir arm.
     config = runner_config[0]
     runner = _make_runner(runner_config)
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha",
         label="alpha",
         status=InstanceStatus.STARTING,
         spawn_mode="worktree",
     )  # bridge_pid None -> not in live_projects
+    runner._instances[fake.instance_id] = fake
     wt = config.projects_root / "alpha" / ".claude" / "worktrees" / "bridge-cse_x"
     wt.mkdir(parents=True, exist_ok=True)
     sess = WorkingSession(
@@ -1137,9 +1205,10 @@ async def test_poll_ignores_background_session_at_stopped_cwd(runner_config, mon
     # (Resume stays available) and nothing surfaces as "external session active".
     config = runner_config[0]
     runner = _make_runner(runner_config)
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.STOPPED, resume_mode="pty"
     )
+    runner._instances[fake.instance_id] = fake
     sess = WorkingSession(
         pid=999,
         cwd=config.projects_root / "alpha",
@@ -1150,7 +1219,8 @@ async def test_poll_ignores_background_session_at_stopped_cwd(runner_config, mon
     )
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
     await runner.poll_once()
-    assert "alpha" in runner._instances  # kept — a bg session is not a bridge
+    # Kept — a bg session is not a bridge.
+    assert runner.get_instance_for_project("alpha") is not None
     assert runner.external_sessions_by_project() == {}
 
 
@@ -1158,12 +1228,13 @@ async def test_poll_keeps_stopped_instance_without_external_session(runner_confi
     # The reboot-orphan path still works: a STOPPED-resumable instance with NO live
     # session at its cwd is preserved (so Resume stays available).
     runner = _make_runner(runner_config)
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha", label="alpha", status=InstanceStatus.STOPPED, resume_mode="pty"
     )
+    runner._instances[fake.instance_id] = fake
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [])
     await runner.poll_once()
-    assert "alpha" in runner._instances  # kept — nothing live to yield to
+    assert runner.get_instance_for_project("alpha") is not None  # kept — nothing live to yield to
 
 
 async def test_poll_attributes_hosted_session_not_external(runner_config, monkeypatch):
@@ -1406,7 +1477,7 @@ async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
         [sys.executable, "-c", "import time; time.sleep(30)", "claude", "remote-control"]
     )
     try:
-        runner._instances["alpha"] = RemoteControlInstance(
+        fake = RemoteControlInstance(
             project="alpha",
             label="alpha",
             status=InstanceStatus.ERROR,
@@ -1414,6 +1485,7 @@ async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
             bridge_pid=proc.pid,
             bridge_proc_start=procutil.proc_create_time(proc.pid),
         )
+        runner._instances[fake.instance_id] = fake
         sess = WorkingSession(
             pid=999,
             cwd=config.projects_root / "alpha",
@@ -1423,7 +1495,8 @@ async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
         )
         monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
         await runner.poll_once()
-        assert "alpha" in runner._instances  # live bridge: NOT phantom-deleted
+        # Live bridge: NOT phantom-deleted.
+        assert runner.get_instance_for_project("alpha") is not None
         # the session at its cwd is managed (TRACKED), so it is not surfaced as external
         assert "alpha" not in runner.external_sessions_by_project()
     finally:
@@ -1434,15 +1507,18 @@ async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
 async def test_rediscover_overlays_persisted_state(runner_config, monkeypatch):
     config, claude_json = runner_config
     # alpha was intentionally stopped with a custom label; zeta is stale/persisted.
+    _IID_ZETA = "cccccccc-0000-0000-0000-000000000001"
     _db_save(
         config.state_dir,
         {
-            "alpha": {
+            _IID_ALPHA: {
+                "project_name": "alpha",
                 "label": "my-alpha",
                 "intentional_stop": True,
                 "spawn_mode": "same-dir",
             },
-            "zeta": {
+            _IID_ZETA: {
+                "project_name": "zeta",
                 "label": "zeta",
                 "intentional_stop": True,
                 "spawn_mode": "same-dir",
@@ -1506,7 +1582,8 @@ async def test_rediscover_standard_rebinds_newest_debug_log(runner_config, monke
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
 
     await runner.rediscover()
-    inst = runner.get_instance("alpha")
+    inst = runner.get_instance_for_project("alpha")
+    assert inst is not None
     assert inst.status is InstanceStatus.RUNNING
     assert inst.bridge_debug_log_path == new  # highest <ms>-<seq>, not a sibling
     assert inst.bridge_raw_log_path == new  # redaction off → raw == debug
@@ -1562,7 +1639,8 @@ async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkey
     _db_save(
         config.state_dir,
         {
-            "alpha": {
+            _IID_ALPHA: {
+                "project_name": "alpha",
                 "label": "alpha",
                 "intentional_stop": True,
                 "spawn_mode": "BOGUS",
@@ -1583,7 +1661,7 @@ async def test_rediscover_tolerates_invalid_persisted_mode(runner_config, monkey
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
 
     await runner.rediscover()
-    inst = runner.get_instance("alpha")
+    inst = runner.get_instance_for_project("alpha")
     assert inst is not None  # didn't crash on the bad persisted modes
     assert inst.spawn_mode == "same-dir" and inst.permission_mode == "default"  # fell back
 
@@ -1605,7 +1683,7 @@ async def test_rediscover_tolerates_unparseable_proc_start(runner_config, monkey
     monkeypatch.setattr("clauster.pointers.is_live", lambda ptr: True)
 
     await runner.rediscover()  # must not raise
-    inst = runner.get_instance("alpha")
+    inst = runner.get_instance_for_project("alpha")
     assert inst is not None  # rediscovered despite the unparseable procStart
     assert inst.bridge_proc_start is None  # degraded, not crashed
 
@@ -1656,7 +1734,7 @@ async def test_resume_reuses_modes_and_backfills_session(runner_config, monkeypa
     first = await runner.spawn("alpha", permission_mode="acceptEdits")
     assert first.status is InstanceStatus.RUNNING
     assert first.error_detail is None  # a clean start records no failure reason
-    await runner.stop("alpha")
+    await runner.stop(first.instance_id)
 
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "resume")
 
@@ -1667,7 +1745,7 @@ async def test_resume_reuses_modes_and_backfills_session(runner_config, monkeypa
 
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: FakePtr())
 
-    resumed = await runner.resume("alpha")
+    resumed = await runner.resume(first.instance_id)
     assert resumed.status is InstanceStatus.RUNNING
     # session id backfilled from the pointer (the resume log omitted it)…
     assert resumed.starter_session_id == "session_01RESUMEDBBBBBBBBBBB"
@@ -1675,7 +1753,7 @@ async def test_resume_reuses_modes_and_backfills_session(runner_config, monkeypa
     # …and resume reused the stored permission mode rather than the config default.
     argv = _argv_of(resumed)
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
-    await runner.stop("alpha")
+    await runner.stop(first.instance_id)
 
 
 async def test_resume_keeps_recorded_mode_when_config_flips(runner_config, monkeypatch):
@@ -1689,7 +1767,7 @@ async def test_resume_keeps_recorded_mode_when_config_flips(runner_config, monke
     first = await runner.spawn("alpha")
     assert first.resume_mode == "standard"
     assert first.status is InstanceStatus.RUNNING
-    await runner.stop("alpha")
+    await runner.stop(first.instance_id)
 
     # Simulate editing clauster.yml -> launch_mode: pty underneath the stopped bridge.
     runner._config.claude.launch_mode = "pty"
@@ -1703,20 +1781,21 @@ async def test_resume_keeps_recorded_mode_when_config_flips(runner_config, monke
 
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: FakePtr())
 
-    resumed = await runner.resume("alpha")
+    resumed = await runner.resume(first.instance_id)
     # Honored the recorded mode: stayed standard, did not cross to the pty
     # flag form / keeper despite the config now saying pty.
     assert resumed.resume_mode == "standard"
     assert resumed.keeper_pid is None
     argv = _argv_of(resumed)
     assert "remote-control" in argv and "--remote-control" not in argv
-    await runner.stop("alpha")
+    await runner.stop(first.instance_id)
 
 
 async def test_resume_unknown_instance_rejected(runner_config):
     runner = _make_runner(runner_config)
     with pytest.raises(UnknownProject):
-        await runner.resume("alpha")  # never spawned -> nothing to resume
+        # Never spawned -> nothing to resume.
+        await runner.resume("00000000-0000-0000-0000-000000000000")
 
 
 async def test_spawn_captures_stderr_detail_on_failure(runner_config, monkeypatch):

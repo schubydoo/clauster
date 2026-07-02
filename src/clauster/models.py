@@ -13,6 +13,7 @@ nullable so a row of either channel validates.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -20,6 +21,11 @@ from pathlib import Path
 from pydantic import BaseModel, Field, computed_field
 
 from .config import PermissionMode, ResumeMode, SessionChannel, SpawnMode
+
+
+def _new_instance_id() -> str:
+    """Generate a fresh RFC 4122 UUID for a new managed instance."""
+    return str(uuid.uuid4())
 
 
 class InstanceStatus(StrEnum):
@@ -55,8 +61,15 @@ class Project(BaseModel):
 
 
 class RemoteControlInstance(BaseModel):
-    """A bridge Clauster manages — one per project (spec §8)."""
+    """A bridge Clauster manages — keyed by instance_id in the runner registry (#777).
 
+    Standard (server-mode) bridges are capped at one per project.  Interactive
+    (pty) sessions may run any number per project (especially with ``--worktree``).
+    The ``instance_id`` is a stable RFC 4122 UUID generated at spawn time and
+    persisted so a restart can reconstruct the same key.
+    """
+
+    instance_id: str = Field(default_factory=_new_instance_id)
     project: str
     label: str  # passed as --name to claude remote-control
     bridge_pid: int | None = None  # bridge parent PID (matches bridge-pointer pid)

@@ -634,7 +634,15 @@ def _keepers(config_path: str | None, kill_pid: int | None) -> int:
     # fail-closed migrate + legacy-import the app runs) and read the DB-backed store.
     persistence = Persistence(config.state_dir)
     try:
-        carded = set(persistence.state_store().load())
+        # Since issue 777 the store is keyed by instance_id; the project name each
+        # card belongs to lives in the record's project_name field. Reading keys()
+        # here would yield UUIDs, match no sidecar, and mislabel every carded
+        # keeper an orphan — the exact fail-open this block exists to prevent.
+        carded = {
+            fields["project_name"]
+            for fields in persistence.state_store().load().values()
+            if fields.get("project_name")
+        }
     finally:
         persistence.dispose()
     orphans = pty_keeper.find_orphan_keepers(log_dir, carded)

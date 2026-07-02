@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -11,10 +12,30 @@ import pytest
 
 from clauster import procutil
 from clauster.config import ClausterConfig
+from clauster.db.persistence import Persistence
 from clauster.models import InstanceStatus
 from clauster.runner import SessionRunner
 
 _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="pty mode is POSIX-only")
+
+# Fixed instance_id UUID for seeding StateStore (keyed by instance_id since #777).
+
+
+@contextlib.contextmanager
+def _db_persistence(state_dir):
+    """Yield a ``Persistence`` on ``state_dir``, disposing its engine on exit."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    persistence = Persistence(state_dir)
+    try:
+        yield persistence
+    finally:
+        persistence.dispose()
+
+
+def _db_save(state_dir, records):
+    """Seed ``records`` into a DB-backed StateStore on ``state_dir``, then dispose."""
+    with _db_persistence(state_dir) as persistence:
+        persistence.state_store().save(records)
 
 
 def _pty_runner(runner_config) -> tuple[SessionRunner, Path]:
@@ -184,7 +205,7 @@ async def test_spawn_explicit_pty_overrides_standard_config(runner_config) -> No
         assert inst.url is not None and "/code/session_" in inst.url
         assert isinstance(inst.keeper_pid, int)
     finally:
-        await runner.stop("alpha")
+        await runner.stop(inst.instance_id)
 
 
 @_POSIX_ONLY
@@ -493,7 +514,7 @@ async def test_spawn_pty_reaches_running_then_stops(runner_config) -> None:
         # the keeper-tracked bridge passes the same liveness check as a subcommand bridge
         assert procutil.is_live_bridge(inst.bridge_pid, inst.bridge_proc_start) is True
     finally:
-        stopped = await runner.stop("alpha")
+        stopped = await runner.stop(inst.instance_id)
     assert stopped.status is InstanceStatus.STOPPED
     # both the bridge and its keeper are gone after stop
     assert procutil.proc_create_time(inst.bridge_pid) is None
@@ -515,7 +536,7 @@ async def test_spawn_pty_no_url_does_not_falsely_run(runner_config, monkeypatch)
     try:
         assert inst.status is not InstanceStatus.RUNNING  # STARTING (watch will ERROR it)
     finally:
-        await runner.stop("alpha")
+        await runner.stop(inst.instance_id)
 
 
 @_POSIX_ONLY
@@ -535,7 +556,95 @@ async def test_spawn_pty_promoted_by_startup_watch(runner_config, monkeypatch) -
         assert inst.status is InstanceStatus.RUNNING
         assert inst.url is not None and "/code/session_" in inst.url
     finally:
-        await runner.stop("alpha")
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_resume_pty_while_standard_live_returns_pty_not_standard(runner_config) -> None:
+    """Resuming a STOPPED pty session must revive the pty — never a live standard bridge.
+
+    #777 allows a standard bridge and pty sessions to coexist in one project. The mode
+    resolution + pty idempotency must key on the SPECIFIC instance being resumed, not a
+    mode-agnostic "first live instance for the project" scan — otherwise a resume of the
+    stopped pty silently hands back the running standard bridge (Greptile P1).
+    """
+    runner, _ = _pty_runner(runner_config)  # config default = pty
+    # A live standard bridge for the project (explicit picker overrides the pty default).
+    standard = await runner.spawn("alpha", resume_mode="standard")
+    assert standard.resume_mode == "standard" and standard.status is InstanceStatus.RUNNING
+    # A pty session for the SAME project, then stop it -> a resumable STOPPED pty card.
+    pty = await runner.spawn("alpha", resume_mode="pty")
+    assert pty.resume_mode == "pty" and pty.instance_id != standard.instance_id
+    stopped = await runner.stop(pty.instance_id)
+    assert stopped.status is InstanceStatus.STOPPED
+    # The standard bridge is still live at this point (independent axis).
+    assert runner.get_instance(standard.instance_id).status is InstanceStatus.RUNNING
+    try:
+        resumed = await runner.resume(pty.instance_id)  # resume the STOPPED pty
+        # The invariant: the resume comes back as a PTY bridge, and is NOT the live
+        # standard bridge handed back. (The pre-fix bug returned `standard` verbatim.)
+        assert resumed.resume_mode == "pty"
+        assert resumed is not standard
+        assert resumed.instance_id != standard.instance_id
+        assert resumed.status is InstanceStatus.RUNNING
+        # The live standard bridge is untouched by the pty resume.
+        assert runner.get_instance(standard.instance_id).status is InstanceStatus.RUNNING
+    finally:
+        await runner.stop(resumed.instance_id)
+        await runner.stop(standard.instance_id)
+
+
+@_POSIX_ONLY
+async def test_resume_standard_only_still_returns_standard(runner_config) -> None:
+    """Mirror of the P1 case: resume while only a standard bridge exists resolves standard.
+
+    Guards against an over-correction — the mode-aware fix must not misfire the other way
+    (e.g. treat a standard resume as pty) when no pty session exists for the project.
+    """
+    runner, _ = _pty_runner(runner_config)
+    standard = await runner.spawn("alpha", resume_mode="standard")
+    stopped = await runner.stop(standard.instance_id)
+    assert stopped.status is InstanceStatus.STOPPED
+    try:
+        resumed = await runner.resume(standard.instance_id)
+        assert resumed.resume_mode == "standard"
+        assert resumed.status is InstanceStatus.RUNNING
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+@_POSIX_ONLY
+async def test_resume_already_live_pty_is_idempotent(runner_config) -> None:
+    """Resuming an already-RUNNING pty returns that same instance (no second bridge).
+
+    Exercises the pty idempotency branch keyed on resume_target: a resume of a live
+    session must hand back the exact instance, not spawn a duplicate keeper.
+    """
+    runner, _ = _pty_runner(runner_config)
+    pty = await runner.spawn("alpha", resume_mode="pty")
+    assert pty.status is InstanceStatus.RUNNING
+    try:
+        again = await runner.resume(pty.instance_id)  # still live -> idempotent return
+        assert again is pty
+        assert again.instance_id == pty.instance_id
+        assert runner.running_count() == 1  # no duplicate bridge
+    finally:
+        await runner.stop(pty.instance_id)
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_with_worktree_skips_collision_warning(runner_config, caplog) -> None:
+    """A pty spawn WITH a worktree isolates each session, so no no-worktree warning fires."""
+    import logging
+
+    runner, _ = _pty_runner(runner_config)  # "alpha" is a git repo -> worktree allowed
+    with caplog.at_level(logging.WARNING, logger="clauster.runner"):
+        inst = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
+    try:
+        assert inst.spawn_mode == "worktree" and inst.resume_mode == "pty"
+        assert not any("without a worktree" in r.message for r in caplog.records)
+    finally:
+        await runner.stop(inst.instance_id)
 
 
 async def test_stop_cleans_keeper_when_bridge_pid_absent(runner_config, monkeypatch) -> None:
@@ -551,11 +660,11 @@ async def test_stop_cleans_keeper_when_bridge_pid_absent(runner_config, monkeypa
         bridge_pid=None,
         status=InstanceStatus.RUNNING,
     )
-    runner._instances["alpha"] = inst
+    runner._instances[inst.instance_id] = inst
     cleaned: list[int] = []
     monkeypatch.setattr(runner, "_cleanup_keeper", lambda pid: cleaned.append(pid))
 
-    stopped = await runner.stop("alpha")
+    stopped = await runner.stop(inst.instance_id)
     assert cleaned == [4242]
     assert stopped.status is InstanceStatus.STOPPED
 
@@ -581,7 +690,7 @@ async def test_rediscover_restores_persisted_resume_mode(runner_config, monkeypa
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
 
     await runner.rediscover()
-    assert runner.get_instance("alpha").resume_mode == "pty"
+    assert runner.get_instance_for_project("alpha").resume_mode == "pty"
 
 
 async def test_rediscover_recovers_keeper_pid_from_sidecar(runner_config, monkeypatch) -> None:
@@ -623,7 +732,7 @@ async def test_rediscover_recovers_keeper_pid_from_sidecar(runner_config, monkey
     monkeypatch.setattr("clauster.procutil.jiffies_to_epoch", lambda j: 12345.0)
 
     await runner.rediscover()
-    inst = runner.get_instance("alpha")
+    inst = runner.get_instance_for_project("alpha")
     assert inst.resume_mode == "pty"
     assert inst.keeper_pid == 9999
 
@@ -667,7 +776,7 @@ async def test_rediscover_reattaches_live_pty_keeper_without_pointer(
 
     await runner.rediscover()
 
-    inst = runner.get_instance("alpha")
+    inst = runner.get_instance_for_project("alpha")
     assert inst.status is InstanceStatus.RUNNING  # re-managed, not orphaned
     assert inst.resume_mode == "pty"
     assert inst.keeper_pid == 9999  # so stop()/poll_once own the survivor
@@ -711,7 +820,7 @@ async def test_rediscover_pty_missing_log_leaves_tail_unbound(runner_config, mon
 
     await runner.rediscover()
 
-    inst = runner.get_instance("alpha")
+    inst = runner.get_instance_for_project("alpha")
     assert inst.status is InstanceStatus.RUNNING  # still re-managed (Stop/observe restored)
     assert inst.bridge_debug_log_path is None  # no dangling path → WS 1008s, banner shows
     assert inst.bridge_raw_log_path is None
@@ -749,7 +858,7 @@ async def test_rediscover_pty_dead_keeper_falls_back_to_stopped(
 
     await runner.rediscover()
 
-    inst = runner.get_instance("alpha")
+    inst = runner.get_instance_for_project("alpha")
     assert inst.status is InstanceStatus.STOPPED
     assert inst.resume_mode == "pty"  # resume affordance preserved
     assert inst.keeper_pid is None
@@ -788,7 +897,7 @@ async def test_rediscover_pty_unready_sidecar_falls_back_to_stopped(
 
     await runner.rediscover()
 
-    assert runner.get_instance("alpha").status is InstanceStatus.STOPPED
+    assert runner.get_instance_for_project("alpha").status is InstanceStatus.STOPPED
 
 
 async def test_rediscover_pty_reattach_rejects_stale_bridge_pid(
@@ -820,7 +929,7 @@ async def test_rediscover_pty_reattach_rejects_stale_bridge_pid(
 
     await runner.rediscover()
 
-    assert runner.get_instance("alpha").status is InstanceStatus.STOPPED
+    assert runner.get_instance_for_project("alpha").status is InstanceStatus.STOPPED
 
 
 async def test_rediscover_pty_reattach_skips_malformed_sidecar_pids(
@@ -844,7 +953,7 @@ async def test_rediscover_pty_reattach_skips_malformed_sidecar_pids(
 
     await runner.rediscover()
 
-    assert runner.get_instance("alpha").status is InstanceStatus.STOPPED
+    assert runner.get_instance_for_project("alpha").status is InstanceStatus.STOPPED
 
 
 async def test_rediscover_pty_reattach_without_proc_start_uses_cmdline_liveness(
@@ -877,7 +986,7 @@ async def test_rediscover_pty_reattach_without_proc_start_uses_cmdline_liveness(
 
     await runner.rediscover()
 
-    inst = runner.get_instance("alpha")
+    inst = runner.get_instance_for_project("alpha")
     assert inst.status is InstanceStatus.RUNNING
     assert inst.keeper_pid == 9999 and inst.bridge_pid == 4242
     assert inst.bridge_proc_start is None  # matched by cmdline+alive, no proc-start recorded

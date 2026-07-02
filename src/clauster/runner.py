@@ -1,9 +1,8 @@
 """SessionRunner — spawn/stop/observe `claude remote-control` bridges (features 2-4).
 
-One managed bridge per project; the instance id IS the project name. The
-in-memory registry is the source of truth for bridges Clauster spawned this
-process-lifetime; a startup pointer-walk re-detects bridges that are already
-running (read-only — see ``pointers``).
+The in-memory registry (``_instances``) is keyed by **instance_id** (a stable RFC
+4122 UUID minted at spawn time, #777).  Standard (server-mode) bridges are capped
+at one per project; interactive (pty) sessions may run any number per project.
 
 Concurrency contract: the registry is mutated ONLY on the event loop. Blocking
 work (Popen, os.kill, psutil, log reads, `claude agents --json`) runs in
@@ -161,11 +160,14 @@ class SessionRunner:
         self._log_dir = (config.state_dir / "logs").expanduser()
         # Monotonic spawn counter → unique log filenames even for two same-ms spawns.
         self._log_seq = 0
+        # Registry keyed by instance_id (stable UUID, #777). Standard bridges keep
+        # one entry per project; pty sessions may have N entries per project.
         self._instances: dict[str, RemoteControlInstance] = {}
         # Per-project bridge-crash tally since process start, exposed as the
         # clauster_bridge_crashes_total counter (#352) — a crash that resumes between
         # scrapes still leaves a trace, unlike the current-status gauge.
         self._crash_counts: dict[str, int] = {}
+        # Popen handles keyed by instance_id (parallel to _instances).
         self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
         self._poll_task: asyncio.Task | None = None
@@ -176,10 +178,11 @@ class SessionRunner:
         self._metrics_task: asyncio.Task | None = None
         # Per-spawn background tasks that watch a STARTING bridge until it either
         # registers an environment (-> RUNNING) or proves stuck (-> ERROR).
+        # Keyed by instance_id (one watch per spawned instance).
         self._startup_watches: dict[str, asyncio.Task] = {}
         # Per-project locks serializing concurrent spawns of the SAME project (see
-        # ``spawn``). One bridge per project is an invariant; without this, two
-        # near-simultaneous spawns race across the awaits in ``_spawn_locked``.
+        # ``spawn``). Keyed by project name — the per-project standard-singleton check
+        # and pty-warning logic must run serially for the same project.
         self._spawn_locks: dict[str, asyncio.Lock] = {}
         # Mark remote control as acknowledged once, before the first spawn.
         self._rc_setting_ensured = False
@@ -358,8 +361,56 @@ class SessionRunner:
             await asyncio.sleep(self._config.metrics.poll_seconds)
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
-        """Return the instance with this id, or None if unknown."""
+        """Return the instance with this instance_id, or None if unknown."""
         return self._instances.get(instance_id)
+
+    def get_instance_for_project(self, project_name: str) -> RemoteControlInstance | None:
+        """Return the first live instance for a project, or None.
+
+        For standard bridges this is always the unique instance. For pty sessions
+        it returns the first (oldest) live one. Used by callers that only need to
+        know *whether* a managed bridge exists for a project (e.g. ``_bridge_running``
+        in app.py). Does not raise; returns ``None`` when no instance matches.
+        """
+        for inst in self._instances.values():
+            if inst.project == project_name:
+                return inst
+        return None
+
+    def resolve_bridge_id(self, identity: str) -> str | None:
+        """Resolve a bridge identity (instance_id OR project name) to an instance_id.
+
+        The registry is keyed by ``instance_id`` (#777), but the current dashboard
+        client still sends the *project name* as the bridge identity on Stop /
+        Resume / Forget / QR (the #778 API split will move it to instance_id). This
+        keeps that client working: a known ``instance_id`` returns itself; otherwise
+        the identity is treated as a project name and mapped to its instance's id.
+
+        Returns ``None`` when the identity matches neither a known instance_id nor a
+        managed project — the caller raises the same 404 it would have raised before.
+        A project maps unambiguously today (one standard bridge per project); if that
+        ever loosens for pty, this returns the first live instance for the project.
+        """
+        if identity in self._instances:
+            return identity
+        inst = self.get_instance_for_project(identity)
+        return inst.instance_id if inst is not None else None
+
+    def _live_standard_for_project(self, project_name: str) -> RemoteControlInstance | None:
+        """Return the first STARTING/RUNNING *standard* bridge for a project, or ``None``.
+
+        Used by :meth:`_spawn_locked` to enforce the one-standard-bridge-per-project
+        cap: if a live standard bridge exists, a second spawn returns it idempotently
+        rather than starting a second environment server at the same project root.
+        """
+        for inst in self._instances.values():
+            if (
+                inst.project == project_name
+                and inst.resume_mode == "standard"
+                and inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+            ):
+                return inst
+        return None
 
     def running_count(self) -> int:
         """Count instances currently in the RUNNING state."""
@@ -435,21 +486,22 @@ class SessionRunner:
 
     def _persist_subset(self) -> dict[str, dict]:
         live = {
-            name: {
+            inst.instance_id: {
+                "project_name": inst.project,
                 "label": inst.label,
                 "intentional_stop": inst.intentional_stop,
                 "spawn_mode": inst.spawn_mode,
                 "permission_mode": inst.permission_mode,
                 "resume_mode": inst.resume_mode,
             }
-            for name, inst in self._instances.items()
+            for inst in self._instances.values()
         }
         # Overlay live instances onto the previously-persisted map rather than
-        # replacing it: a project whose bridge isn't currently tracked — its bridge
+        # replacing it: an instance whose bridge isn't currently tracked — its bridge
         # died while Clauster was down, or rediscover hasn't (re)detected it — keeps
         # its saved label/modes/intentional_stop instead of being silently wiped on
         # the next save (which would later resume it with default modes). Live entries
-        # win for tracked projects. An entry whose project directory was removed
+        # win for tracked instances. An entry whose project directory was removed
         # lingers harmlessly (discovery is filesystem-based, so it's never consumed)
         # until state.json is reset.
         return {**self._persisted, **live}
@@ -523,6 +575,7 @@ class SessionRunner:
         permission_mode: PermissionMode | None = None,
         resume_mode: ResumeMode | None = None,
         resume: bool = False,
+        resume_target: RemoteControlInstance | None = None,
     ) -> RemoteControlInstance:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
 
@@ -543,6 +596,12 @@ class SessionRunner:
         idempotency check and launch two bridges, because the second would clobber
         the first in ``self._instances``/``self._procs`` and orphan an untracked,
         unreapable process. Different projects still spawn concurrently.
+
+        ``resume_target`` is the SPECIFIC instance a :meth:`resume` is reviving. It
+        pins mode resolution and the pty idempotency check to that instance instead
+        of a mode-agnostic project scan — otherwise a resume of a stopped pty session
+        while a standard bridge is concurrently live (both allowed per project since
+        #777) would resolve against the standard bridge and hand it back instead.
         """
         async with self._spawn_lock_for(name):
             return await self._spawn_locked(
@@ -551,6 +610,7 @@ class SessionRunner:
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
                 resume=resume,
+                resume_target=resume_target,
             )
 
     def _spawn_lock_for(self, name: str) -> asyncio.Lock:
@@ -571,20 +631,57 @@ class SessionRunner:
         permission_mode: PermissionMode | None = None,
         resume_mode: ResumeMode | None = None,
         resume: bool = False,
+        resume_target: RemoteControlInstance | None = None,
     ) -> RemoteControlInstance:
         # Body of spawn(), always run under the per-project lock (see spawn()).
-        existing = self._instances.get(name)
-        if existing is not None and existing.status in (
-            InstanceStatus.STARTING,
-            InstanceStatus.RUNNING,
-        ):
-            return existing
-
         proj = self._resolve_project(name)
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode
+        # Resolve resume_mode early so we can apply the per-mode policy checks below
+        # before spending side-effect budget (trust writes, log file creation, etc.).
+        # For a resume the prior instance is the SPECIFIC one being revived
+        # (resume_target) — NOT a mode-agnostic project scan, which could return a
+        # coincidentally-live standard bridge and flip a pty resume to standard (#777).
+        prior_for_mode = resume_target if resume else None
+        effective_resume_mode: ResumeMode = (
+            "pty" if self._is_pty_mode(prior_for_mode, requested=resume_mode) else "standard"
+        )
         self._validate_spawn_options(proj, spawn_mode, permission_mode, resume_mode)
+
+        # --- per-mode spawn policy (#777) -----------------------------------
+        if effective_resume_mode == "standard":
+            # Standard bridges: cap at one per project.
+            # If a live standard bridge already exists — for any reason (idempotent
+            # re-spawn, double-click, concurrent tabs) — return it without launching
+            # a second bridge.  A live PTY instance at the same project does NOT
+            # block a standard spawn; the two modes are independent axes.  The cap
+            # is enforced by returning the existing bridge (not by raising): a
+            # second Start is a no-op the caller already sees as "still running".
+            live_standard = self._live_standard_for_project(name)
+            if live_standard is not None:
+                return live_standard
+        else:
+            # PTY sessions: N per project allowed; idempotent ONLY for the specific
+            # instance being resumed (resume_target), never a coincidentally-live
+            # other-mode/other instance — returning that would hand back the wrong
+            # bridge for "resume my stopped pty session".
+            if (
+                resume
+                and resume_target is not None
+                and resume_target.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+            ):
+                return resume_target
+            # Warn (don't block) when spawning a pty session without a worktree:
+            # two pty sessions sharing the same cwd risk conflicting file edits.
+            if spawn_mode != "worktree":
+                _log.warning(
+                    "pty session for %r launched without a worktree — concurrent interactive "
+                    "sessions sharing the same working directory may cause conflicting file "
+                    "edits. Use spawn_mode='worktree' to isolate each session (#777).",
+                    name,
+                )
+        # --- end per-mode spawn policy ---------------------------------------
 
         if not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
             raise NotTrusted(
@@ -633,8 +730,8 @@ class SessionRunner:
         if max_bridges is not None:
             live = sum(
                 1
-                for other, inst in self._instances.items()
-                if other != name
+                for inst in self._instances.values()
+                if inst.project != name
                 and inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
             )
             if live >= max_bridges:
@@ -677,18 +774,14 @@ class SessionRunner:
             # these str inputs are known-good members of the Literal types.
             spawn_mode=cast(SpawnMode, spawn_mode),
             permission_mode=cast(PermissionMode, permission_mode),
+            # resume_mode was resolved above (effective_resume_mode) so the per-mode
+            # policy checks could run before any side effects. Assign it now.
+            resume_mode=effective_resume_mode,
         )
-        self._instances[name] = instance  # on the loop
+        # Register under instance_id — the stable UUID minted by RemoteControlInstance
+        # (via _new_instance_id default_factory), NOT the project name.
+        self._instances[instance.instance_id] = instance  # on the loop
 
-        # A bridge's resume_mode is fixed at first launch and recorded on the
-        # instance. An explicit resume_mode (the per-launch picker) wins for a
-        # fresh start; otherwise a resume honors the prior instance's mode and a
-        # brand-new bridge falls back to the config default — so stop() and
-        # resume() can't disagree (see _is_pty_mode).
-        prior = existing if resume else None
-        instance.resume_mode = (
-            "pty" if self._is_pty_mode(prior, requested=resume_mode) else "standard"
-        )
         # One spawn-event chokepoint for both modes: the instance is registered, STARTING,
         # and its resume_mode is now resolved. A "ready" follows iff it reaches RUNNING.
         self._emit_lifecycle("spawn", instance)
@@ -706,7 +799,7 @@ class SessionRunner:
             instance.status = InstanceStatus.ERROR
             await self._persist()
             return instance
-        self._procs[name] = proc
+        self._procs[instance.instance_id] = proc
         instance.bridge_pid = proc.pid
         instance.bridge_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
 
@@ -720,10 +813,10 @@ class SessionRunner:
         # authenticate to the controller). Watch it off the request path so it is
         # only ever promoted to RUNNING once it actually registers an environment.
         if instance.status is InstanceStatus.STARTING:
-            self._start_startup_watch(name)
+            self._start_startup_watch(instance.instance_id)
         return instance
 
-    async def resume(self, name: str) -> RemoteControlInstance:
+    async def resume(self, instance_id: str) -> RemoteControlInstance:
         """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.
 
         Re-running ``claude remote-control`` in the same cwd reconnects to the
@@ -734,16 +827,24 @@ class SessionRunner:
         default 'ask'). The session id, which a reconnecting bridge does NOT
         re-log, is recovered from the pointer by :meth:`spawn`'s enrich step.
         """
-        existing = self._instances.get(name)
+        existing = self._instances.get(instance_id)
         if existing is None:
-            raise UnknownProject(f"no managed instance to resume: {name!r}")
+            raise UnknownProject(f"no managed instance to resume: {instance_id!r}")
         return await self.spawn(
-            name,
+            existing.project,
             spawn_mode=existing.spawn_mode,
             permission_mode=existing.permission_mode,
+            # Honor the mode recorded at first launch so stop() and resume() always
+            # agree: a config flip (e.g. launch_mode: pty) must not silently change the
+            # mode of an already-running/stopped bridge (#777).
+            resume_mode=existing.resume_mode,
             # In pty mode this adds --continue so the flag-form bridge restores the
             # prior conversation; the standard subcommand path ignores it.
             resume=True,
+            # Pin mode resolution + the pty idempotency check to THIS instance, so a
+            # resume of a stopped pty session isn't misresolved against a concurrently
+            # live standard bridge in the same project (#777).
+            resume_target=existing,
         )
 
     def _validate_spawn_options(
@@ -1320,7 +1421,7 @@ class SessionRunner:
             instance.status = InstanceStatus.ERROR
             await self._persist()
             return instance
-        self._procs[name] = proc
+        self._procs[instance.instance_id] = proc
         instance.keeper_pid = proc.pid
         info = await asyncio.to_thread(self._await_ready_pty, sidecar, proc)
         self._apply_pty_info(instance, info, proc)
@@ -1331,7 +1432,7 @@ class SessionRunner:
             instance.error_detail = info.get("error")
         await self._persist()
         if instance.status is InstanceStatus.STARTING:
-            self._start_startup_watch(name)
+            self._start_startup_watch(instance.instance_id)
         return instance
 
     def _cleanup_keeper(self, pid: int) -> None:
@@ -1480,23 +1581,25 @@ class SessionRunner:
 
     # ----- startup watch --------------------------------------------------
 
-    def _start_startup_watch(self, name: str) -> None:
+    def _start_startup_watch(self, instance_id: str) -> None:
         """Launch (or replace) the background watch for a STARTING bridge."""
-        old = self._startup_watches.pop(name, None)
+        old = self._startup_watches.pop(instance_id, None)
         if old is not None and not old.done():
             old.cancel()
-        task = asyncio.create_task(self._watch_startup(name), name=f"startup-watch:{name}")
-        self._startup_watches[name] = task
+        task = asyncio.create_task(
+            self._watch_startup(instance_id), name=f"startup-watch:{instance_id}"
+        )
+        self._startup_watches[instance_id] = task
 
-        def _done(t: asyncio.Task, _name: str = name) -> None:
-            if self._startup_watches.get(_name) is t:
-                self._startup_watches.pop(_name, None)
+        def _done(t: asyncio.Task, _iid: str = instance_id) -> None:
+            if self._startup_watches.get(_iid) is t:
+                self._startup_watches.pop(_iid, None)
             if not t.cancelled() and (exc := t.exception()) is not None:
-                _log.warning("startup-watch for %s failed: %s", _name, exc)
+                _log.warning("startup-watch for %s failed: %s", _iid, exc)
 
         task.add_done_callback(_done)
 
-    async def _watch_startup(self, name: str) -> None:
+    async def _watch_startup(self, instance_id: str) -> None:
         """Resolve a STARTING bridge off the request path.
 
         Re-reads the bridge log until the bridge registers an environment (-> the
@@ -1510,8 +1613,8 @@ class SessionRunner:
         deadline = time.monotonic() + grace
         while True:
             await asyncio.sleep(_STARTUP_WATCH_INTERVAL)
-            instance = self._instances.get(name)
-            proc = self._procs.get(name)
+            instance = self._instances.get(instance_id)
+            proc = self._procs.get(instance_id)
             if instance is None or proc is None or instance.status is not InstanceStatus.STARTING:
                 return  # already resolved, stopped, or gone
             if proc.poll() is not None:  # exited during startup
@@ -1541,16 +1644,19 @@ class SessionRunner:
                 self._apply_markers(instance, markers, proc)
                 await asyncio.to_thread(self._flush_redacted_mirror, instance)  # at-rest log
                 if instance.status is not InstanceStatus.STARTING:  # promoted, or trust ERROR
-                    await self._post_spawn_enrich(instance, self._project_path(name) or log_path)
+                    await self._post_spawn_enrich(
+                        instance, self._project_path(instance.project) or log_path
+                    )
                     await self._persist()
                     return
             if time.monotonic() >= deadline:
                 instance.status = InstanceStatus.ERROR
                 _log.warning(
-                    "bridge %s is alive but never registered an environment within %.0fs; "
+                    "bridge %s (%s) is alive but never registered an environment within %.0fs; "
                     "marking ERROR (it is not connectable). Check the bridge debug log — a "
                     "common cause is the claude user lacking readable remote-control credentials.",
-                    name,
+                    instance.project,
+                    instance_id,
                     grace,
                 )
                 await asyncio.to_thread(self._capture_error_detail, instance)
@@ -1559,8 +1665,13 @@ class SessionRunner:
 
     # ----- stop -----------------------------------------------------------
 
-    async def stop(self, name: str) -> RemoteControlInstance:
+    async def stop(self, instance_id: str) -> RemoteControlInstance:
         """Signal a managed bridge to shut down and mark the stop as intentional."""
+        # Look up the instance first (outside any lock) to get the project name for the lock.
+        instance = self._instances.get(instance_id)
+        if instance is None:
+            raise UnknownProject(f"no managed instance: {instance_id!r}")
+        project_name = instance.project
         # Serialize against an in-flight spawn() for this project. Without the lock, stop() can
         # read bridge_pid=None while _spawn_locked is suspended in to_thread(_popen), mark the
         # instance STOPPED, and return — orphaning the bridge spawn is about to start tracking.
@@ -1569,11 +1680,12 @@ class SessionRunner:
         # internal callers and nothing it awaits re-takes this lock. Look the instance up INSIDE
         # the lock (like forget()) so a concurrent forget() can't de-register it between the
         # lookup and the signalling.
-        async with self._spawn_lock_for(name):
-            instance = self._instances.get(name)
+        async with self._spawn_lock_for(project_name):
+            instance = self._instances.get(instance_id)
             if instance is None:
-                raise UnknownProject(f"no managed instance: {name!r}")
-            self._cancel_startup_watch(name)  # stop racing the watch over this instance's status
+                raise UnknownProject(f"no managed instance: {instance_id!r}")
+            # Stop racing the startup watch over this instance's status.
+            self._cancel_startup_watch(instance_id)
             instance.intentional_stop = True  # mark intent BEFORE signalling (spec §3 feat 4)
             await self._persist()  # persist the intent so a restart doesn't mislabel it CRASHED
 
@@ -1585,7 +1697,7 @@ class SessionRunner:
                 if keeper_pid is not None:
                     await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
                 instance.status = InstanceStatus.STOPPED
-                self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
+                self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
                 self._emit_lifecycle("stop", instance)
                 return instance
 
@@ -1595,15 +1707,15 @@ class SessionRunner:
                 # again to exit"; a second confirms. The subcommand bridge stops on one.
                 twice = instance.resume_mode == "pty"
                 await asyncio.to_thread(self._signal_stop, pid, twice=twice)
-                await self._await_exit(name, pid, instance.bridge_proc_start)
+                await self._await_exit(project_name, pid, instance.bridge_proc_start)
             if keeper_pid is not None:
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
-            self._procs.pop(name, None)  # release the dead Popen handle; resume re-adds it
+            self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
             self._emit_lifecycle("stop", instance)
             return instance
 
-    async def forget(self, name: str) -> None:
+    async def forget(self, instance_id: str) -> None:
         """Drop a NON-LIVE bridge's record from memory and state.json (fail closed).
 
         Lets the operator clear a stopped / crashed / interrupted bridge out of the
@@ -1618,36 +1730,44 @@ class SessionRunner:
         :class:`InstanceStillLive` — it must be Stopped first; forget never kills a
         process. Raises :class:`UnknownProject` when there's no such record at all.
         """
+        # Determine project name before taking the lock (needed for per-project lock).
+        instance = self._instances.get(instance_id)
+        project_name = instance.project if instance is not None else None
         # Hold the per-project spawn lock so a concurrent spawn()/resume() can't
         # repopulate _instances/_procs between the liveness check and the pop() —
         # forgetting must never remove tracking for a just-spawned live process.
-        async with self._spawn_lock_for(name):
-            instance = self._instances.get(name)
-            if instance is None and name not in self._persisted:
-                raise UnknownProject(f"no managed instance: {name!r}")
+        lock_name = project_name or instance_id  # fall back to instance_id if not in registry
+        async with self._spawn_lock_for(lock_name):
+            instance = self._instances.get(instance_id)
+            if instance is None and instance_id not in self._persisted:
+                raise UnknownProject(f"no managed instance: {instance_id!r}")
             if instance is not None:
                 if instance.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING):
                     raise InstanceStillLive(
-                        f"{name!r} is {instance.status.value} — Stop it before forgetting"
+                        f"{instance_id!r} is {instance.status.value} — Stop it before forgetting"
                     )
                 # Defense in depth: never drop a record whose process is actually alive even
                 # if the status lags a missed poll — that would orphan a live bridge/keeper.
                 if instance.bridge_pid is not None and await asyncio.to_thread(
                     procutil.is_live_bridge, instance.bridge_pid, instance.bridge_proc_start
                 ):
-                    raise InstanceStillLive(f"{name!r} still has a live bridge — Stop it first")
+                    raise InstanceStillLive(
+                        f"{instance_id!r} still has a live bridge — Stop it first"
+                    )
                 if (
                     instance.keeper_pid is not None
                     and await asyncio.to_thread(procutil.proc_create_time, instance.keeper_pid)
                     is not None
                 ):
-                    raise InstanceStillLive(f"{name!r} still has a live keeper — Stop it first")
-                self._instances.pop(name, None)
-                self._procs.pop(name, None)
+                    raise InstanceStillLive(
+                        f"{instance_id!r} still has a live keeper — Stop it first"
+                    )
+                self._instances.pop(instance_id, None)
+                self._procs.pop(instance_id, None)
             # Rebuild as a NEW dict rather than .pop() in place: _persist aliases _persisted
             # and _last_saved to the same object, so mutating _persisted would also mutate the
             # dedup baseline and _persist would skip the write (leaving the row on disk).
-            self._persisted = {k: v for k, v in self._persisted.items() if k != name}
+            self._persisted = {k: v for k, v in self._persisted.items() if k != instance_id}
             await self._persist()
 
     @staticmethod
@@ -1683,6 +1803,19 @@ class SessionRunner:
 
     # ----- background poll (source #2 + liveness reconcile) ---------------
 
+    def _persisted_for_project(self, project_name: str) -> tuple[str, dict] | None:
+        """Return ``(instance_id, fields)`` for the first persisted record for ``project_name``.
+
+        Since issue 777 ``_persisted`` is keyed by ``instance_id``; the project name lives
+        in the ``"project_name"`` field of each value dict.  Returns ``None`` when no match.
+        Used by :meth:`_stopped_from_persisted` and :meth:`_reattach_pty_from_sidecar` to
+        look up a persisted record by project without assuming a project-keyed dict.
+        """
+        for iid, fields in self._persisted.items():
+            if fields.get("project_name") == project_name:
+                return iid, fields
+        return None
+
     def _saved_modes(self, saved: dict) -> tuple[SpawnMode, PermissionMode, ResumeMode]:
         """Coerce persisted spawn/permission/resume modes against the allowed sets.
 
@@ -1715,11 +1848,13 @@ class SessionRunner:
         when nothing was persisted for ``name`` — then there's genuinely no prior
         session to offer, so we don't invent a phantom card.
         """
-        saved = self._persisted.get(name)
-        if not saved:
+        hit = self._persisted_for_project(name)
+        if hit is None:
             return None
+        instance_id, saved = hit
         spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
         return RemoteControlInstance(
+            instance_id=instance_id,
             project=name,
             label=saved.get("label") or name,
             spawn_mode=spawn_mode,
@@ -1735,7 +1870,9 @@ class SessionRunner:
             keeper_pid=None,
         )
 
-    def _reattach_pty_from_sidecar(self, name: str, saved: dict) -> RemoteControlInstance | None:
+    def _reattach_pty_from_sidecar(
+        self, name: str, saved: dict, instance_id: str | None = None
+    ) -> RemoteControlInstance | None:
         """Reattach a self-spawned pty bridge from its keeper sidecar after a restart.
 
         A pty (flag-form ``claude --remote-control``) bridge writes no Anthropic
@@ -1799,7 +1936,7 @@ class SessionRunner:
             # path symmetric with the standard path's `_latest_debug_log_for` (#584).
             tail_source = raw_path if raw_path.exists() else None
             log_path = log_path if tail_source is not None else None
-            return RemoteControlInstance(
+            kwargs: dict = dict(
                 project=name,
                 label=saved.get("label") or name,
                 spawn_mode=spawn_mode,
@@ -1815,6 +1952,9 @@ class SessionRunner:
                 starter_session_id=info.get("session_id") or None,
                 url=info.get("connect_url") or None,
             )
+            if instance_id is not None:
+                kwargs["instance_id"] = instance_id
+            return RemoteControlInstance(**kwargs)
         return None
 
     async def rediscover(self) -> None:
@@ -1827,7 +1967,7 @@ class SessionRunner:
         left absent (nothing to resume).
         """
         for proj in self._discovered().values():
-            if proj.name in self._instances:
+            if self.get_instance_for_project(proj.name) is not None:
                 continue
             ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
             if ptr is None or not await asyncio.to_thread(pointers.is_live, ptr):
@@ -1836,19 +1976,25 @@ class SessionRunner:
                 # sidecar so a live keeper is re-managed (Stop/observe restored)
                 # rather than leaking behind a STOPPED card; fall through to the
                 # STOPPED resurrection when no live keeper remains.
+                persisted_hit = self._persisted_for_project(proj.name)
+                persisted_saved = persisted_hit[1] if persisted_hit is not None else {}
+                persisted_iid = persisted_hit[0] if persisted_hit is not None else None
                 reattached = await asyncio.to_thread(
                     self._reattach_pty_from_sidecar,
                     proj.name,
-                    self._persisted.get(proj.name, {}),
+                    persisted_saved,
+                    persisted_iid,
                 )
                 if reattached is not None:
-                    self._instances[proj.name] = reattached
+                    self._instances[reattached.instance_id] = reattached
                 elif (stopped := self._stopped_from_persisted(proj.name)) is not None:
-                    self._instances[proj.name] = stopped
+                    self._instances[stopped.instance_id] = stopped
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge
             # found alive is by definition NOT intentionally stopped.
-            saved = self._persisted.get(proj.name, {})
+            persisted_hit = self._persisted_for_project(proj.name)
+            saved = persisted_hit[1] if persisted_hit is not None else {}
+            persisted_iid = persisted_hit[0] if persisted_hit is not None else None
             spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
             # _expected_epoch (not bare int()) so an unparseable procStart degrades to
             # None (cmdline-only liveness) instead of raising ValueError out of startup.
@@ -1870,7 +2016,7 @@ class SessionRunner:
             # Re-bind the live tail to the log this survivor was already writing before the
             # restart, so `/ws/bridge-log` resolves a real path instead of 1008-ing (#584).
             log_path = await asyncio.to_thread(self._latest_debug_log_for, proj.name)
-            self._instances[proj.name] = self._instance_from_pointer(
+            instance = self._instance_from_pointer(
                 proj.name,
                 ptr,
                 label=saved.get("label") or proj.name,
@@ -1883,7 +2029,9 @@ class SessionRunner:
                 bridge_raw_log_path=(
                     self._raw_log_path_for(log_path) if log_path is not None else None
                 ),
+                instance_id=persisted_iid,
             )
+            self._instances[instance.instance_id] = instance
         await self._persist()
 
     @staticmethod
@@ -1899,6 +2047,7 @@ class SessionRunner:
         keeper_pid: int | None,
         bridge_debug_log_path: Path | None = None,
         bridge_raw_log_path: Path | None = None,
+        instance_id: str | None = None,
     ) -> RemoteControlInstance:
         """Build a RUNNING managed instance from a live Anthropic-written pointer.
 
@@ -1913,8 +2062,13 @@ class SessionRunner:
         log a *Clauster-spawned* survivor was already writing (rediscover passes the
         recovered set); they stay None for :meth:`adopt`, whose external bridge Clauster
         never spawned and has no log of (#584).
+
+        ``instance_id`` — when supplied (re-discovered survivor whose id was persisted),
+        the returned instance carries the same stable UUID so the registry key is
+        consistent across restarts.  When ``None`` a fresh UUID is minted (adopt path,
+        or a rediscovered bridge with no prior persisted record).
         """
-        return RemoteControlInstance(
+        kwargs: dict = dict(
             project=name,
             label=label,
             spawn_mode=spawn_mode,
@@ -1931,6 +2085,9 @@ class SessionRunner:
             starter_session_id=ptr.session_id,
             url=f"https://claude.ai/code?environment={ptr.environment_id}",
         )
+        if instance_id is not None:
+            kwargs["instance_id"] = instance_id
+        return RemoteControlInstance(**kwargs)
 
     async def adopt(self, name: str) -> RemoteControlInstance:
         """Take over a live *standard* external bridge as a managed instance (#330).
@@ -1958,7 +2115,7 @@ class SessionRunner:
         # Hold the per-project spawn lock so a concurrent spawn()/resume()/forget()
         # can't race the registry between the liveness check and the insert.
         async with self._spawn_lock_for(name):
-            if name in self._instances:
+            if self.get_instance_for_project(name) is not None:
                 raise InstanceStillLive(f"{name!r} is already managed — nothing to adopt")
             proj = self._discovered().get(name)
             if proj is None:
@@ -1975,7 +2132,8 @@ class SessionRunner:
                     f"{name!r} has no live standard bridge to adopt — it may have ended, "
                     "or it's a pty (true-resume) bridge, which can't be adopted"
                 )
-            saved = self._persisted.get(name, {})
+            persisted_hit = self._persisted_for_project(name)
+            saved = persisted_hit[1] if persisted_hit is not None else {}
             spawn_mode, permission_mode, _resume_mode = self._saved_modes(saved)
             instance = self._instance_from_pointer(
                 name,
@@ -1990,7 +2148,7 @@ class SessionRunner:
                 bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
                 keeper_pid=None,
             )
-            self._instances[name] = instance
+            self._instances[instance.instance_id] = instance
             await self._persist()
             return instance
 
@@ -2476,8 +2634,8 @@ class SessionRunner:
                 _log.exception("poll_once failed; continuing")
             await asyncio.sleep(interval)
 
-    def _cancel_startup_watch(self, name: str) -> None:
-        task = self._startup_watches.pop(name, None)
+    def _cancel_startup_watch(self, instance_id: str) -> None:
+        task = self._startup_watches.pop(instance_id, None)
         if task is not None and not task.done():
             task.cancel()
 

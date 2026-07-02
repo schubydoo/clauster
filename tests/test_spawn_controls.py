@@ -121,7 +121,7 @@ async def test_worktree_on_git_allowed(runner_config, monkeypatch):
     inst = await runner.spawn("alpha", spawn_mode="worktree")  # alpha has .git
     assert inst.status is InstanceStatus.RUNNING
     assert inst.spawn_mode == "worktree"
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 async def test_bypass_without_ceiling_rejected(runner_config):
@@ -138,7 +138,7 @@ async def test_bypass_with_ceiling_allowed(runner_config, monkeypatch):
     inst = await runner.spawn("alpha", permission_mode="bypassPermissions")
     assert inst.status is InstanceStatus.RUNNING
     assert inst.permission_mode == "bypassPermissions"
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 # ----- flags actually reach the spawned process ------------------------
@@ -151,7 +151,7 @@ async def test_spawned_argv_records_modes(runner_config, monkeypatch):
     argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
     assert argv[argv.index("--spawn") + 1] == "session"
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 async def test_spawn_uses_config_defaults(runner_config, monkeypatch):
@@ -162,7 +162,7 @@ async def test_spawn_uses_config_defaults(runner_config, monkeypatch):
     inst = await runner.spawn("alpha")
     assert inst.permission_mode == "plan"
     assert inst.spawn_mode == "same-dir"
-    await runner.stop("alpha")
+    await runner.stop(inst.instance_id)
 
 
 # ----- max_bridges (clauster-enforced concurrent-bridge cap) -----------
@@ -173,10 +173,10 @@ async def test_max_bridges_refuses_over_cap(runner_config, monkeypatch):
     config, claude_json = runner_config
     config.instance_defaults.max_bridges = 1
     runner = SessionRunner(config, claude_json=claude_json)
-    await runner.spawn("alpha", spawn_mode="same-dir")  # 1st: 0 live others -> ok
+    first = await runner.spawn("alpha", spawn_mode="same-dir")  # 1st: 0 live others -> ok
     with pytest.raises(CapacityExceeded):
         await runner.spawn("beta", spawn_mode="same-dir")  # 2nd: 1 live >= cap -> refused
-    await runner.stop("alpha")
+    await runner.stop(first.instance_id)
 
 
 async def test_max_bridges_unset_allows_concurrent(runner_config, monkeypatch):
@@ -184,11 +184,11 @@ async def test_max_bridges_unset_allows_concurrent(runner_config, monkeypatch):
     config, claude_json = runner_config
     assert config.instance_defaults.max_bridges is None  # default: no limit
     runner = SessionRunner(config, claude_json=claude_json)
-    await runner.spawn("alpha", spawn_mode="same-dir")
-    await runner.spawn("beta", spawn_mode="same-dir")  # no cap -> both live
+    inst_a = await runner.spawn("alpha", spawn_mode="same-dir")
+    inst_b = await runner.spawn("beta", spawn_mode="same-dir")  # no cap -> both live
     assert runner.running_count() == 2
-    await runner.stop("alpha")
-    await runner.stop("beta")
+    await runner.stop(inst_a.instance_id)
+    await runner.stop(inst_b.instance_id)
 
 
 # ----- session-mode reconcile ------------------------------------------
@@ -224,13 +224,16 @@ def test_same_dir_unexpected_exit_still_crashes():
 def test_permission_mode_persists(runner_config):
     config, _ = runner_config
     runner = _runner(runner_config)
-    runner._instances["alpha"] = RemoteControlInstance(
+    fake = RemoteControlInstance(
         project="alpha",
         label="alpha",
         spawn_mode="worktree",
         permission_mode="acceptEdits",
     )
-    assert runner._persist_subset()["alpha"]["permission_mode"] == "acceptEdits"
+    runner._instances[fake.instance_id] = fake
+    subset = runner._persist_subset()
+    record = next(v for v in subset.values() if v.get("project_name") == "alpha")
+    assert record["permission_mode"] == "acceptEdits"
 
 
 # ----- config -----------------------------------------------------------

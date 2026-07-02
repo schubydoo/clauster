@@ -87,37 +87,64 @@ def persistence(tmp_path):
     p.dispose()
 
 
+IID_A = "aaaaaaaa-0000-0000-0000-000000000001"
+IID_B = "bbbbbbbb-0000-0000-0000-000000000002"
+
+
 def test_state_round_trip_create_read_update(persistence):
     store = persistence.state_store()
     assert store.load() == {}
-    store.save({"alpha": {"label": "A", "spawn_mode": "session"}})
-    assert store.load() == {"alpha": {"label": "A", "spawn_mode": "session"}}
+    store.save({IID_A: {"project_name": "alpha", "label": "A", "spawn_mode": "session"}})
+    assert store.load() == {
+        IID_A: {"project_name": "alpha", "label": "A", "spawn_mode": "session"}
+    }
     # update in place (same key) preserves identity, changes fields
-    store.save({"alpha": {"label": "A2", "permission_mode": "plan"}})
-    assert store.load() == {"alpha": {"label": "A2", "permission_mode": "plan"}}
+    store.save({IID_A: {"project_name": "alpha", "label": "A2", "permission_mode": "plan"}})
+    assert store.load() == {
+        IID_A: {"project_name": "alpha", "label": "A2", "permission_mode": "plan"}
+    }
 
 
 def test_state_save_is_full_replace_pruning_absent_keys(persistence):
     store = persistence.state_store()
-    store.save({"a": {"label": "a"}, "b": {"label": "b"}})
-    store.save({"b": {"label": "b2"}})  # a dropped -> pruned
-    assert store.load() == {"b": {"label": "b2"}}
+    store.save(
+        {
+            IID_A: {"project_name": "a", "label": "a"},
+            IID_B: {"project_name": "b", "label": "b"},
+        }
+    )
+    store.save({IID_B: {"project_name": "b", "label": "b2"}})  # a dropped -> pruned
+    assert store.load() == {IID_B: {"project_name": "b", "label": "b2"}}
 
 
 def test_state_absent_fields_stay_absent(persistence):
     store = persistence.state_store()
-    store.save({"a": {"label": "a"}})  # no modes set
-    loaded = store.load()["a"]
-    assert loaded == {"label": "a"}  # None columns omitted, like the JSON store
+    store.save({IID_A: {"project_name": "a", "label": "a"}})  # no modes set
+    loaded = store.load()[IID_A]
+    # None columns omitted, like the JSON store (project_name is always present)
+    assert loaded == {"project_name": "a", "label": "a"}
+
+
+def test_state_update_with_blank_project_name_keeps_existing(persistence):
+    # Re-saving an existing instance_id whose record omits project_name must NOT blank
+    # the row's project_name (the _sync `if project_name:` guard on the update path).
+    store = persistence.state_store()
+    store.save({IID_A: {"project_name": "a", "label": "one"}})
+    store.save({IID_A: {"label": "two"}})  # no project_name -> keep the prior "a"
+    loaded = store.load()[IID_A]
+    assert loaded["project_name"] == "a"
+    assert loaded["label"] == "two"
 
 
 def test_state_persists_across_reopen(tmp_path):
     p1 = Persistence(tmp_path)
-    p1.state_store().save({"a": {"label": "kept", "resume_mode": "pty"}})
+    p1.state_store().save({IID_A: {"project_name": "a", "label": "kept", "resume_mode": "pty"}})
     p1.dispose()
     p2 = Persistence(tmp_path)
     try:
-        assert p2.state_store().load() == {"a": {"label": "kept", "resume_mode": "pty"}}
+        assert p2.state_store().load() == {
+            IID_A: {"project_name": "a", "label": "kept", "resume_mode": "pty"}
+        }
     finally:
         p2.dispose()
 
@@ -165,7 +192,7 @@ def test_state_save_raises_oserror_on_db_error(persistence):
     # (a stale cursor, never a failed spawn) keeps working unchanged.
     with mock.patch.object(store, "_sessions", side_effect=SQLAlchemyError("boom")):
         with pytest.raises(OSError, match="state save failed"):
-            store.save({"a": {"label": "a"}})
+            store.save({IID_A: {"project_name": "a", "label": "a"}})
 
 
 def test_hosted_save_raises_oserror_on_db_error(persistence):
@@ -251,12 +278,21 @@ def _seed_json(state_dir):
     )
 
 
+def _legacy_iid(project_name):
+    # Mirrors bootstrap._project_instance_id: the deterministic UUID the import
+    # derives for a legacy project-keyed record (issue 777).
+    import uuid as _uuid
+
+    return str(_uuid.uuid5(_uuid.NAMESPACE_DNS, f"clauster.instance.{project_name}"))
+
+
 def test_first_boot_imports_legacy_json_and_retires_files(tmp_path):
     _seed_json(tmp_path)
     p = Persistence(tmp_path)
     try:
         assert p.state_store().load() == {
-            "alpha": {
+            _legacy_iid("alpha"): {
+                "project_name": "alpha",
                 "label": "A",
                 "intentional_stop": True,
                 "spawn_mode": "session",
@@ -286,8 +322,9 @@ def test_import_is_one_time_not_repeated_on_reopen(tmp_path):
     p = Persistence(tmp_path)
     try:
         loaded = p.state_store().load()
-        assert "ghost" not in loaded  # not re-imported over existing rows
-        assert "alpha" in loaded
+        projects = {v.get("project_name") for v in loaded.values()}
+        assert "ghost" not in projects  # not re-imported over existing rows
+        assert "alpha" in projects
     finally:
         p.dispose()
     assert (tmp_path / "state.json").exists()  # left intact (no re-import)
@@ -309,7 +346,9 @@ def test_import_with_only_state_json_present(tmp_path):
     )
     p = Persistence(tmp_path)
     try:
-        assert p.state_store().load() == {"solo": {"label": "S"}}
+        assert p.state_store().load() == {
+            _legacy_iid("solo"): {"project_name": "solo", "label": "S"}
+        }
         assert p.hosted_state_store().load() == {}
     finally:
         p.dispose()
@@ -440,6 +479,52 @@ def test_env_offline_mode_emits_sql(tmp_path, capsys):
     assert "CREATE TABLE" in out
     assert "projects" in out
     assert not (tmp_path / "offline.db").exists()  # offline never touched a real DB
+    # Migration 0003's offline branch: the instance-id re-key emits its set-based
+    # copy into instances_new (no per-row Python INSERT, since there's no connection
+    # to read rows through). Asserting it proves the is_offline_mode() branch ran.
+    assert "INSERT INTO instances_new" in out
+    assert "randomblob" in out  # the offline-only random-UUID id expression
+
+
+def test_instance_id_migration_rekeys_existing_row_with_deterministic_uuid(tmp_path):
+    # Online upgrade THROUGH 0003 with a pre-existing (project-name-keyed) instances
+    # row: the re-key copies it to the new instance_id PK using the deterministic
+    # UUID5 (namespace=DNS, name="clauster.instance.<project>"). Covers 0003's online
+    # copy loop + _project_instance_id — a fresh-empty-DB upgrade has no rows to copy.
+    import uuid
+
+    from alembic import command
+
+    expected_iid = str(uuid.uuid5(uuid.NAMESPACE_DNS, "clauster.instance.alpha"))
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            # Stop just before 0003 (0002 is the session_events revision), then seed a
+            # legacy row keyed by project_name (the pre-777 shape).
+            command.upgrade(cfg, "f4424422f656")
+            conn.execute(
+                text(
+                    "INSERT INTO projects (name, created_at, updated_at) "
+                    "VALUES ('alpha', '2026-01-01', '2026-01-01')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO instances "
+                    "(project_name, label, resume_mode, created_at, updated_at) "
+                    "VALUES ('alpha', 'Alpha', 'pty', '2026-01-01', '2026-01-01')"
+                )
+            )
+            command.upgrade(cfg, "head")  # runs 0003's re-key over the seeded row
+            rows = conn.execute(
+                text("SELECT instance_id, project_name, label, resume_mode FROM instances")
+            ).all()
+        assert rows == [(expected_iid, "alpha", "Alpha", "pty")]
+    finally:
+        engine.dispose()
 
 
 def test_baseline_downgrade_drops_all_tables(tmp_path):

@@ -15,11 +15,16 @@ fail-closed per the maintainer's directive:
    file to ``*.imported`` (kept, not deleted — the same conservatism as the JSON
    store's ``.bak``). An import error logs and leaves the JSON untouched; it never
    crashes boot and never half-imports (the import runs in one transaction).
+
+Since issue 777, ``StateStore`` is keyed by ``instance_id``.  Legacy JSON files
+are still keyed by project name, so ``import_legacy_json`` converts them via the
+same deterministic UUID5 derivation the migration uses.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 
 from alembic import command
@@ -32,6 +37,15 @@ from ..hosted_state import HostedStateStore as JsonHostedStateStore
 from ..state import StateStore as JsonStateStore
 from .models import HostedSession, Instance
 from .stores import HostedStateStore, StateStore
+
+# Same namespace as migration 0003 — must match so restart sees the same key.
+_NS = uuid.NAMESPACE_DNS
+
+
+def _project_instance_id(project_name: str) -> str:
+    """Derive the same deterministic instance_id migration 0003 would assign."""
+    return str(uuid.uuid5(_NS, f"clauster.instance.{project_name}"))
+
 
 _log = logging.getLogger("clauster.db.bootstrap")
 
@@ -103,7 +117,12 @@ def import_legacy_json(state_dir: Path, session_factory: sessionmaker[Session]) 
                 # Already migrated or in use — never re-import on top of live rows.
                 # The transaction is an empty no-op; it commits nothing on block exit.
                 return False
-            instance_records = JsonStateStore(state_dir).load() if state_path.exists() else {}
+            raw_instances = JsonStateStore(state_dir).load() if state_path.exists() else {}
+            # Legacy JSON is keyed by project name; convert to instance_id-keyed shape.
+            instance_records = {
+                _project_instance_id(project_name): {**fields, "project_name": project_name}
+                for project_name, fields in raw_instances.items()
+            }
             hosted_records = JsonHostedStateStore(state_dir).load() if hosted_path.exists() else {}
             StateStore._sync(session, instance_records)
             HostedStateStore._sync(session, hosted_records)

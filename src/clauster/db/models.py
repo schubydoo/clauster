@@ -78,18 +78,28 @@ class Project(Base, TimestampMixin):
 
 
 class Instance(Base, TimestampMixin):
-    """Per-project bridge intent — the ``state.json`` ``instances`` record.
+    """Per-instance bridge intent — the ``state.json`` ``instances`` record (#777).
 
-    Holds only the fields the startup pointer-walk can't re-derive (label, the
-    intentional-stop flag, and the spawn/permission/resume modes). One row per
-    project; the project name is both the foreign key and the natural key the
-    store round-trips.
+    Holds only the fields the startup pointer-walk can't re-derive (instance_id,
+    label, the intentional-stop flag, and the spawn/permission/resume modes).
+
+    Since issue 777 the primary key is ``instance_id`` (a stable RFC 4122 UUID
+    minted at spawn time), not ``project_name``.  This allows multiple rows per
+    project — a standard bridge keeps its 1-per-project constraint at the runner
+    level, while interactive (pty) sessions may have N rows per project.
+
+    ``project_name`` is kept as a non-null FK so the session-history table can
+    join through it.  There is no DB-level uniqueness constraint on the row: the
+    one-standard-bridge-per-project rule is enforced entirely at the app level
+    (``SessionRunner._live_standard_for_project`` returns the existing bridge
+    instead of spawning a second), keeping it soft and observable.
     """
 
     __tablename__ = "instances"
 
+    instance_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_name: Mapped[str] = mapped_column(
-        String(255), ForeignKey("projects.name", ondelete="CASCADE"), primary_key=True
+        String(255), ForeignKey("projects.name", ondelete="CASCADE"), nullable=False
     )
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     intentional_stop: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

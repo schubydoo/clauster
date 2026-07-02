@@ -468,7 +468,13 @@ def test_gather_sessions_includes_persisted_bridge(cfg):
     from clauster.runner import SessionRunner
 
     SessionRunner(cfg).persistence.state_store().save(
-        {"alpha": {"label": "alpha", "intentional_stop": True}}
+        {
+            "aaaaaaaa-0000-0000-0000-000000000001": {
+                "project_name": "alpha",
+                "label": "alpha",
+                "intentional_stop": True,
+            }
+        }
     )
     sessions = asyncio.run(mcp_server.gather_sessions(cfg))
     bridges = [s for s in sessions if s["kind"] == "bridge"]

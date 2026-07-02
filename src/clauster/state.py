@@ -135,6 +135,7 @@ class StateStore(KeyedJsonStore):
     FILENAME = "state.json"
     _MAP_KEY = "instances"
     _PERSISTED_FIELDS = (
+        "project_name",
         "label",
         "intentional_stop",
         "spawn_mode",
