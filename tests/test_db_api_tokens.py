@@ -69,9 +69,13 @@ def test_list_all_oldest_first(store):
     assert labels == ["first", "second"]
 
 
-def test_list_all_degrades_to_empty_on_db_error(store):
+def test_list_all_raises_on_db_error(store):
+    # Fail closed, never silently (Greptile P1 on #805): a locked/corrupt DB must
+    # surface as an error — a degrade-to-[] would read as "no bearer tokens exist"
+    # while existing rows may still authenticate once the DB recovers.
     with mock.patch.object(store, "_sessions", side_effect=SQLAlchemyError("boom")):
-        assert store.list_all() == []
+        with pytest.raises(OSError, match="api-token list failed"):
+            store.list_all()
 
 
 def test_is_active_hash_true_for_issued_token(store):

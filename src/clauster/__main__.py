@@ -28,6 +28,7 @@ from . import __version__, claude_cli, environments, ops, pty_keeper, usage
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
 from .config import ClausterConfig, load_config, resolve_cert_path
+from .db.bootstrap import MigrationError
 from .db.persistence import Persistence
 from .logging_config import setup_logging
 from .procutil import KEEPER_SUBCOMMAND
@@ -340,10 +341,26 @@ def _hash_metrics_token() -> int:
 # disposes it before returning — there is no long-lived DB connection in the CLI.
 
 
+def _open_persistence_or_exit(config) -> Persistence:
+    """Open the DB (migrate-to-head + legacy import) or exit with a clean CLI error.
+
+    ``Persistence(...)`` is fail-closed and can raise before any verb-level error
+    handling runs (a failed migration -> :class:`MigrationError`, an unreadable
+    state_dir -> :class:`OSError`). Without this guard every ``api-token`` verb
+    would crash with a traceback instead of a command error (mirrors
+    :func:`_load_or_exit`).
+    """
+    try:
+        return Persistence(config.state_dir)
+    except (MigrationError, OSError) as exc:
+        print(f"clauster: could not open the database: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+
 def _api_token_issue(config_path: str | None, label: str) -> int:
     """Mint a new named token; print the raw secret once (never persisted)."""
     config = _load_or_exit(config_path)
-    persistence = Persistence(config.state_dir)
+    persistence = _open_persistence_or_exit(config)
     try:
         raw, record = persistence.api_token_store().issue(label)
     except ValueError as exc:
@@ -368,9 +385,13 @@ def _api_token_issue(config_path: str | None, label: str) -> int:
 def _api_token_list(config_path: str | None) -> int:
     """List every named token — label / created / last-used, never the secret."""
     config = _load_or_exit(config_path)
-    persistence = Persistence(config.state_dir)
+    persistence = _open_persistence_or_exit(config)
     try:
         records = persistence.api_token_store().list_all()
+    except OSError as exc:
+        # A locked/corrupt DB must NOT read as "no named tokens" — fail loudly.
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 1
     finally:
         persistence.dispose()
     if not records:
@@ -397,7 +418,7 @@ def _api_token_list(config_path: str | None) -> int:
 def _api_token_rotate(config_path: str | None, label: str) -> int:
     """Mint a fresh secret for an existing label; print the new raw secret once."""
     config = _load_or_exit(config_path)
-    persistence = Persistence(config.state_dir)
+    persistence = _open_persistence_or_exit(config)
     try:
         raw, record = persistence.api_token_store().rotate(label)
     except ValueError as exc:
@@ -421,7 +442,7 @@ def _api_token_rotate(config_path: str | None, label: str) -> int:
 def _api_token_revoke(config_path: str | None, label: str) -> int:
     """Permanently delete a named token by label."""
     config = _load_or_exit(config_path)
-    persistence = Persistence(config.state_dir)
+    persistence = _open_persistence_or_exit(config)
     try:
         found = persistence.api_token_store().revoke(label)
     except OSError as exc:

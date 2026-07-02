@@ -533,7 +533,13 @@ class ApiTokenStore:
         self._sessions = session_factory
 
     def list_all(self) -> list[ApiTokenRecord]:
-        """Return every named token, oldest first; ``[]`` on any DB error."""
+        """Return every named token, oldest first.
+
+        Raises :class:`OSError` on a DB failure (mirrors :meth:`revoke`) — a locked
+        or corrupt DB must surface as an error, never degrade to ``[]``: an operator
+        auditing tokens would read that as "no bearer tokens exist" while existing
+        rows may still authenticate once the DB recovers. Fail closed, never silently.
+        """
         try:
             with self._sessions() as session:
                 rows = (
@@ -541,8 +547,7 @@ class ApiTokenStore:
                 )
                 return [_to_token_record(row) for row in rows]
         except SQLAlchemyError as exc:
-            _log.warning("api-token list failed, degrading to empty: %s", exc)
-            return []
+            raise OSError(f"api-token list failed: {exc}") from exc
 
     def issue(self, label: str) -> tuple[str, ApiTokenRecord]:
         """Mint + persist a new named token; return ``(raw_token, record)``.
