@@ -1125,3 +1125,69 @@ async def test_resume_standard_revives_same_instance_identity(runner_config) -> 
         assert rows[0] is resumed and resumed.status is InstanceStatus.RUNNING
     finally:
         await runner.stop(resumed.instance_id)
+
+
+# ----- worktree passthrough for interactive sessions (#779) -------------------------
+
+
+def test_pty_argv_carries_worktree_name_when_given() -> None:
+    """spawn_mode="worktree" adds `--worktree <name>` to the flag-form argv (#779)."""
+    runner = SessionRunner.__new__(SessionRunner)  # argv builder is pure — no init needed
+    runner._binary = "claude"
+    base = runner._build_pty_bridge_argv(Path("/l.log"), "alpha", "default", resume=False)
+    assert "--worktree" not in base  # same-dir spawn: no worktree flag
+    wt = runner._build_pty_bridge_argv(
+        Path("/l.log"), "alpha", "default", resume=True, worktree_name="clauster-abcd1234"
+    )
+    i = wt.index("--worktree")
+    assert wt[i + 1] == "clauster-abcd1234"
+    assert wt[-1] == "--continue"  # resume keeps --continue alongside the worktree
+
+
+def test_pty_worktree_name_stable_and_mode_gated() -> None:
+    """The derived worktree name keys off the stable instance_id; same-dir gets None."""
+    from clauster.models import RemoteControlInstance
+
+    wt = RemoteControlInstance(project="alpha", label="alpha", spawn_mode="worktree")
+    name = SessionRunner._pty_worktree_name(wt)
+    assert name == f"clauster-{wt.instance_id[:8]}"
+    assert SessionRunner._pty_worktree_name(wt) == name  # deterministic
+    same_dir = RemoteControlInstance(project="alpha", label="alpha", spawn_mode="same-dir")
+    assert SessionRunner._pty_worktree_name(same_dir) is None
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_worktree_passes_flag_and_resume_reuses_name(
+    runner_config, monkeypatch
+) -> None:
+    """A worktree pty spawn passes --worktree, and its resume reuses the SAME name.
+
+    The name derives from the instance_id, which a resume revives — so
+    `claude --continue --worktree <name>` restores the conversation in the same
+    worktree (claude reuses an existing name; empirically verified).
+    """
+    runner, _ = _pty_runner(runner_config)
+    seen: list[list[str]] = []
+    real = SessionRunner._popen_keeper
+
+    def _capture(self, cwd, sidecar, bridge_argv, screen_sidecar=None):
+        seen.append(list(bridge_argv))
+        return real(self, cwd, sidecar, bridge_argv, screen_sidecar)
+
+    monkeypatch.setattr(SessionRunner, "_popen_keeper", _capture)
+    pty = await runner.spawn("alpha", resume_mode="pty", spawn_mode="worktree")
+    assert pty.status is InstanceStatus.RUNNING
+    first = seen[-1]
+    i = first.index("--worktree")
+    expected = f"clauster-{pty.instance_id[:8]}"
+    assert first[i + 1] == expected
+
+    await runner.stop(pty.instance_id)
+    resumed = await runner.resume(pty.instance_id)
+    try:
+        second = seen[-1]
+        j = second.index("--worktree")
+        assert second[j + 1] == expected  # same identity -> same worktree
+        assert "--continue" in second
+    finally:
+        await runner.stop(resumed.instance_id)

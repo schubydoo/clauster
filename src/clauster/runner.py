@@ -1358,13 +1358,24 @@ class SessionRunner:
         return pty_screen.screen_sidecar_path(log_path)
 
     def _build_pty_bridge_argv(
-        self, log_path: Path, name: str, permission_mode: PermissionMode, *, resume: bool
+        self,
+        log_path: Path,
+        name: str,
+        permission_mode: PermissionMode,
+        *,
+        resume: bool,
+        worktree_name: str | None = None,
     ) -> list[str]:
         """Build the flag-form bridge argv (`claude --remote-control …`). Pure/testable.
 
         Unlike the subcommand (`_build_cmd`), the flag form is a single interactive
         session — no `--spawn`/`--capacity`. ``--continue`` (on resume) is what makes
         the restarted session restore its prior conversation context.
+        ``worktree_name`` (spawn_mode="worktree", #779) adds ``--worktree <name>`` so
+        claude runs the session in its own git worktree under
+        ``<repo>/.claude/worktrees/<name>`` — a repeated name REUSES that worktree
+        (empirically verified), so the same instance's resume (``--continue`` +
+        the same name, stable via its instance_id) restores the conversation IN it.
         """
         argv = [
             self._binary,
@@ -1375,9 +1386,23 @@ class SessionRunner:
             "--permission-mode",
             permission_mode,
         ]
+        if worktree_name is not None:
+            argv += ["--worktree", worktree_name]
         if resume:
             argv.append("--continue")
         return argv
+
+    @staticmethod
+    def _pty_worktree_name(instance: RemoteControlInstance) -> str | None:
+        """Derive the stable per-session worktree name for a worktree-mode pty spawn.
+
+        Derived from the instance_id — which survives stop→resume (a resume revives
+        the same identity) — so the revived session lands back in ITS worktree.
+        ``None`` for non-worktree spawns (the session runs in the project dir).
+        """
+        if instance.spawn_mode != "worktree":
+            return None
+        return f"clauster-{instance.instance_id[:8]}"
 
     @staticmethod
     def _keeper_launch_cmd(
@@ -1553,7 +1578,13 @@ class SessionRunner:
             else None
         )
         debug_path = instance.bridge_raw_log_path or log_path
-        bridge_argv = self._build_pty_bridge_argv(debug_path, name, permission_mode, resume=resume)
+        bridge_argv = self._build_pty_bridge_argv(
+            debug_path,
+            name,
+            permission_mode,
+            resume=resume,
+            worktree_name=self._pty_worktree_name(instance),
+        )
         try:
             bridge_argv[0] = resolve_binary(bridge_argv[0])
             proc = await asyncio.to_thread(
