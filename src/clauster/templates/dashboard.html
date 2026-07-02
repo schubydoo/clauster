@@ -194,11 +194,19 @@
    before Alpine hydrates ("Running" for live, "Stopped" for ended). #}
 {% macro desktop_row_head(default_label) %}
                 <span class="badge bg-blue-lt mode-badge me-1">desktop</span>
-                <span class="badge" :class="statusBadgeClass(i.project)">
-                  <span class="status-dot" :class="statusDotClass(i.project)"></span>
-                  <span x-text="statusLabel(i.project)">{{ default_label }}</span>
+                <span class="badge" :class="statusBadgeClass(i.rk)">
+                  <span class="status-dot" :class="statusDotClass(i.rk)"></span>
+                  <span x-text="statusLabel(i.rk)">{{ default_label }}</span>
                 </span>
                 <span class="fw-medium ms-1" x-text="i.project"></span>
+                {# Session-shape chips (#779): a project can run one standard bridge plus N
+                   interactive sessions, so mark which one this row is — and whether the
+                   interactive session is isolated in its own git worktree. #}
+                <span class="badge bg-cyan-lt ms-1" x-show="i.resume_mode === 'pty'" x-cloak
+                      title="Interactive Session (single-session, true-resume)">interactive</span>
+                <span class="badge bg-secondary-lt text-secondary ms-1"
+                      x-show="i.resume_mode === 'pty' && i.spawn_mode === 'worktree'" x-cloak
+                      title="Runs in its own git worktree — isolated from other sessions' edits.">worktree</span>
 {% endmacro %}
 
 {# Modal scaffold (#782 M-1): the focus-trap / escape / backdrop a11y contract shared by
@@ -550,18 +558,18 @@
           {% endif %}
 
           <!-- desktop (claude.ai / Desktop bridge) sessions -->
-          <template x-for="i in activeBridges()" :key="i.project">
-            <div class="list-group-item sess-row" :class="bridgeRailClass(i.project)" x-show="activeFilter === 'all' || activeFilter === 'desktop'">
+          <template x-for="i in activeBridges()" :key="i.rk">
+            <div class="list-group-item sess-row" :class="bridgeRailClass(i.rk)" x-show="activeFilter === 'all' || activeFilter === 'desktop'">
               <div class="d-flex align-items-center flex-wrap gap-1">
                 {{ desktop_row_head("Running") }}
                 <span class="text-secondary small ms-1" x-show="metricsLabel(i.project)" x-cloak
                       :title="metricsTitle(i.project)" x-text="metricsLabel(i.project)"></span>
                 <span class="ms-auto d-flex gap-1">
                   <a class="btn btn-sm btn-primary" target="_blank" rel="noopener"
-                     x-show="sessionUrlOf(i.project)" x-cloak :href="sessionUrlOf(i.project)"
+                     x-show="sessionUrlOf(i.rk)" x-cloak :href="sessionUrlOf(i.rk)"
                      title="Open this session in the Claude web app"><svg class="ico me-1" aria-hidden="true"><use href="#ic-open"/></svg>Open in Claude</a>
-                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleQr(i.project)"
-                          x-show="sessionUrlOf(i.project)" x-cloak title="Show a QR code to open on your phone">
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleQr(i.rk)"
+                          x-show="sessionUrlOf(i.rk)" x-cloak title="Show a QR code to open on your phone">
                     <svg class="ico" aria-hidden="true"><use href="#ic-qr"/></svg></button>
                   {# Running but no connect URL yet: explain the transient capture gap instead
                      of silently dropping the headline "open on your phone" affordance (#427
@@ -572,33 +580,33 @@
                      live region toggled in via x-show (display:none→visible) is silently
                      skipped by NVDA/VoiceOver. #}
                   <span class="btn btn-sm btn-ghost-secondary disabled text-secondary" aria-hidden="true"
-                        x-show="connectUrlMissing(i.project)" x-cloak
+                        x-show="connectUrlMissing(i.rk)" x-cloak
                         title="The connect link is being captured from the bridge…">
                     <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Preparing connect link…</span>
                   {# Persistent live region — always mounted, empty when idle — so the
                      announcement fires on a content change, not a display toggle (#427 UX-02). #}
-                  <span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.project)"></span>
-                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleLogs(i.project)">
+                  <span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.rk)"></span>
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleLogs(i.rk)">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-logs"/></svg><span
-                      x-text="logs[i.project] && logs[i.project].open ? 'Hide logs' : 'Logs'">Logs</span></button>
+                      x-text="logs[i.rk] && logs[i.rk].open ? 'Hide logs' : 'Logs'">Logs</span></button>
                   {% if pty_screen_enabled %}
                   {# Read-only live terminal (#534): pty bridges only — standard bridges have no PTY.
                      The whole control is server-gated on pty_screen_enabled (no markup when off). #}
                   <template x-if="i.resume_mode === 'pty'">
-                    <button type="button" class="btn btn-sm btn-ghost-secondary" @click="togglePtyScreen(i.project)"
-                            :aria-expanded="!!(ptyScreen[i.project] && ptyScreen[i.project].open)"
+                    <button type="button" class="btn btn-sm btn-ghost-secondary" @click="togglePtyScreen(i.rk)"
+                            :aria-expanded="!!(ptyScreen[i.rk] && ptyScreen[i.rk].open)"
                             {# Only reference the host id while the panel is mounted — the div lives
                                inside the open-gated x-if, so a static aria-controls would dangle. #}
-                            :aria-controls="(ptyScreen[i.project] && ptyScreen[i.project].open) ? ('pty-screen-' + i.project) : null"
+                            :aria-controls="(ptyScreen[i.rk] && ptyScreen[i.rk].open) ? ('pty-screen-' + i.rk) : null"
                             title="Read-only live view of this bridge's terminal screen.">
                       <svg class="ico me-1" aria-hidden="true"><use href="#ic-terminal"/></svg><span
-                        x-text="ptyScreen[i.project] && ptyScreen[i.project].open ? 'Hide terminal' : 'Live terminal'">Live terminal</span></button>
+                        x-text="ptyScreen[i.rk] && ptyScreen[i.rk].open ? 'Hide terminal' : 'Live terminal'">Live terminal</span></button>
                   </template>
                   {% endif %}
-                  <button type="button" class="btn btn-sm btn-outline-danger" @click="stop(i.project)"
-                          :disabled="isStopping(i.project)">
-                    <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.project)" x-cloak></span>
-                    <span x-text="isStopping(i.project) ? 'Stopping…' : 'Stop'">Stop</span></button>
+                  <button type="button" class="btn btn-sm btn-outline-danger" @click="stop(i.rk)"
+                          :disabled="isStopping(i.rk)">
+                    <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.rk)" x-cloak></span>
+                    <span x-text="isStopping(i.rk) ? 'Stopping…' : 'Stop'">Stop</span></button>
                 </span>
               </div>
               {# Live-session list (#570): a STANDARD remote-control bridge can host several
@@ -608,7 +616,7 @@
                  live session (hasBridgeSessions); pty bridges are single-session and keep their
                  own link. Short-UUID labels only — friendly names deferred. x-text everywhere
                  (NEVER x-html): the sessionId is untrusted CLI output. #}
-              <div class="mt-1" x-show="hasBridgeSessions(i.project)" x-cloak>
+              <div class="mt-1" x-show="i.resume_mode !== 'pty' && hasBridgeSessions(i.project)" x-cloak>
                 <button type="button" data-test="bridge-sessions-toggle"
                         class="btn btn-link btn-sm p-0 text-secondary text-decoration-none d-inline-flex align-items-center"
                         @click="toggleBridgeSessions(i.project)"
@@ -640,17 +648,17 @@
                   </div>
                 </div>
               </div>
-              <template x-if="qrOpen[i.project]">
-                <div class="qr-box mt-2"><img :src="qrSrc(i.project)" alt="QR code for the session deep link" width="160" height="160"></div>
+              <template x-if="qrOpen[i.rk]">
+                <div class="qr-box mt-2"><img :src="qrSrc(i.rk)" alt="QR code for the session deep link" width="160" height="160"></div>
               </template>
-              <template x-if="logs[i.project] && logs[i.project].open">
+              <template x-if="logs[i.rk] && logs[i.rk].open">
                 <div class="mt-2">
                   <div class="btn-list mb-1">
-                    <button type="button" class="btn btn-sm" @click="logs[i.project].paused ? resumeLogs(i.project) : pauseLogs(i.project)"
-                            x-text="logs[i.project].paused ? 'Resume' : 'Pause'"></button>
-                    <button type="button" class="btn btn-sm" @click="jumpToLatest(i.project)">Jump to latest</button>
-                    <span class="text-secondary small inline-flex-center" x-show="logs[i.project].paused" x-cloak>paused
-                      (<span x-text="logs[i.project].pending.length"></span> buffered)</span>
+                    <button type="button" class="btn btn-sm" @click="logs[i.rk].paused ? resumeLogs(i.rk) : pauseLogs(i.rk)"
+                            x-text="logs[i.rk].paused ? 'Resume' : 'Pause'"></button>
+                    <button type="button" class="btn btn-sm" @click="jumpToLatest(i.rk)">Jump to latest</button>
+                    <span class="text-secondary small inline-flex-center" x-show="logs[i.rk].paused" x-cloak>paused
+                      (<span x-text="logs[i.rk].pending.length"></span> buffered)</span>
                   </div>
                   {# The reconnecting/lost banners are mutually exclusive: the state machine sets one
                      and clears the other on every transition, but gate the info banner on
@@ -663,7 +671,7 @@
                      on an inner wrapper instead, like the connLost banner above does. #}
                   <div class="alert alert-info py-1 px-2 mb-1"
                        role="status" aria-live="polite"
-                       x-show="logs[i.project].reconnecting && !logs[i.project].lost" x-cloak>
+                       x-show="logs[i.rk].reconnecting && !logs[i.rk].lost" x-cloak>
                     <span>⏳ Live tail dropped — reconnecting…</span>
                   </div>
                   {# Liveness-aware copy: only claim the bridge "may have stopped" when the snapshot
@@ -673,17 +681,17 @@
                      running/starting test mirrors the reconnect liveness gate in openLogs. #}
                   <div class="alert alert-warning py-1 px-2 mb-1"
                        role="alert"
-                       x-show="logs[i.project].lost" x-cloak>
+                       x-show="logs[i.rk].lost" x-cloak>
                     <div class="d-flex align-items-center">
-                      <span class="me-2" x-show="!isRunning(i.project) && !isBusy(i.project)"><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live tail disconnected — the bridge may have stopped.</span>
-                      <span class="me-2" x-show="isRunning(i.project) || isBusy(i.project)" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live tail disconnected — the bridge is still running; click Reconnect to resume the tail.</span>
-                      <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.project, true)">Reconnect</button>
+                      <span class="me-2" x-show="!isRunning(i.rk) && !isBusy(i.rk)"><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live tail disconnected — the bridge may have stopped.</span>
+                      <span class="me-2" x-show="isRunning(i.rk) || isBusy(i.rk)" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live tail disconnected — the bridge is still running; click Reconnect to resume the tail.</span>
+                      <button type="button" class="btn btn-sm btn-warning ms-auto" @click="openLogs(i.rk, true)">Reconnect</button>
                     </div>
                   </div>
                   {# bg-dark/text-white: terminal-style log view, intentionally dark in both
                      themes (a console reads as dark) — not a theming straggler to "fix". #}
-                  <pre class="log-view bg-dark text-white rounded p-2" :id="'log-' + i.project"
-                       x-text="logs[i.project].lines.join('\n')"></pre>
+                  <pre class="log-view bg-dark text-white rounded p-2" :id="'log-' + i.rk"
+                       x-text="logs[i.rk].lines.join('\n')"></pre>
                 </div>
               </template>
               {% if pty_screen_enabled %}
@@ -691,15 +699,15 @@
                  disposed on hide; it lives in a module-level registry, NOT Alpine state, so its
                  internals are never wrapped in a reactive Proxy (cf. #310/#315). The wire is
                  cells-only + redacted server-side — no raw ANSI ever reaches the browser. #}
-              <template x-if="ptyScreen[i.project] && ptyScreen[i.project].open">
+              <template x-if="ptyScreen[i.rk] && ptyScreen[i.rk].open">
                 <div class="mt-2">
                   <div class="d-flex align-items-center mb-1 small text-secondary">
                     <span class="me-2">Live terminal</span>
-                    <span class="badge bg-secondary-lt text-secondary" x-text="ptyScreen[i.project].status"></span>
-                    <span class="text-danger ms-2" x-show="ptyScreen[i.project].error" x-cloak
-                          x-text="ptyScreen[i.project].error"></span>
+                    <span class="badge bg-secondary-lt text-secondary" x-text="ptyScreen[i.rk].status"></span>
+                    <span class="text-danger ms-2" x-show="ptyScreen[i.rk].error" x-cloak
+                          x-text="ptyScreen[i.rk].error"></span>
                   </div>
-                  <div :id="'pty-screen-' + i.project" class="pty-screen-host" role="img"
+                  <div :id="'pty-screen-' + i.rk" class="pty-screen-host" role="img"
                        aria-label="Read-only live terminal view"></div>
                   {# Restart/disconnect affordance: a pty bridge restart writes a final "exited"
                      frame (the view freezes on the old session) and a dropped socket reads
@@ -708,13 +716,29 @@
                   {# role="alert" (assertive) matches the sibling log-tail disconnect banner — this
                      "session ended / toggle to reattach" message needs action, like that one. #}
                   <div class="alert alert-warning py-1 px-2 mt-1 mb-0" role="alert"
-                       x-show="['exited','disconnected'].includes(ptyScreen[i.project].status)" x-cloak>
-                    <span x-show="ptyScreen[i.project].status === 'exited'" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Session ended — toggle Live terminal to reattach.</span>
-                    <span x-show="ptyScreen[i.project].status === 'disconnected'" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live terminal disconnected — toggle to reconnect.</span>
+                       x-show="['exited','disconnected'].includes(ptyScreen[i.rk].status)" x-cloak>
+                    <span x-show="ptyScreen[i.rk].status === 'exited'" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Session ended — toggle Live terminal to reattach.</span>
+                    <span x-show="ptyScreen[i.rk].status === 'disconnected'" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>Live terminal disconnected — toggle to reconnect.</span>
                   </div>
                 </div>
               </template>
               {% endif %}
+            </div>
+          </template>
+
+          {# Pending interactive launch (#779): a pty spawn has no row (and no minted
+             instance_id) until the POST returns — surface an explicit stub instead of
+             leaving the click apparently ignored for the ready-wait seconds. #}
+          <template x-for="p in ptyPendingNames()" :key="p">
+            <div class="list-group-item sess-row" x-show="activeFilter === 'all' || activeFilter === 'desktop'"
+                 data-test="pty-pending-row">
+              <div class="d-flex align-items-center flex-wrap gap-1">
+                <span class="badge bg-blue-lt mode-badge me-1">desktop</span>
+                <span class="badge bg-cyan-lt">interactive</span>
+                <span class="fw-medium ms-1" x-text="p"></span>
+                <span class="text-secondary small ms-2" role="status">
+                  <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Starting interactive session…</span>
+              </div>
             </div>
           </template>
 
@@ -742,23 +766,25 @@
             {% if claustrum_enabled %}
             <template x-for="h in endedHosted()" :key="h.claustrum_process_id">{{ hosted_row(filtered=False) }}</template>
             {% endif %}
-            <template x-for="i in endedBridges()" :key="i.project">
+            <template x-for="i in endedBridges()" :key="i.rk">
               {# No live-session-filter x-show here: the Recent zone is decoupled from the
                  chips so ended rows always show and match recentCount() (#421). #}
-              <div class="list-group-item sess-row" :class="bridgeRailClass(i.project)">
+              <div class="list-group-item sess-row" :class="bridgeRailClass(i.rk)">
                 <div class="d-flex align-items-center flex-wrap gap-1">
                   {{ desktop_row_head("Stopped") }}
-                  <span class="text-secondary small ms-1" x-show="statusNote(i.project)" x-cloak x-text="statusNote(i.project)"></span>
+                  <span class="text-secondary small ms-1" x-show="statusNote(i.rk)" x-cloak x-text="statusNote(i.rk)"></span>
                   <span class="ms-auto d-flex gap-1">
-                    <button type="button" class="btn btn-sm btn-success" @click="resume(i.project)"
-                            :title="'Resume — reconnects the prior session (keeps ' + (resumeModeOf(i.project) || 'standard') + ' mode).'">
+                    <button type="button" class="btn btn-sm btn-success" @click="resume(i.rk)"
+                            :title="'Resume — reconnects the prior session (keeps ' + (resumeModeOf(i.rk) || 'standard') + ' mode).'">
                       <svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Resume</button>
                     {# `!!` coercion: a busy-map key absent on first paint renders this DISABLED
-                       under Alpine 3.15.x inside an x-for clone — coerce to a concrete bool. #}
-                    <button type="button" class="btn btn-sm btn-ghost-secondary" :disabled="!!forgetting[i.project]"
-                            @click="forget(i.project)"
+                       under Alpine 3.15.x inside an x-for clone — coerce to a concrete bool.
+                       Keyed by rk (= the instance_id _forget spins on), so the spinner tracks
+                       THIS row (#779). #}
+                    <button type="button" class="btn btn-sm btn-ghost-secondary" :disabled="!!forgetting[i.rk]"
+                            @click="forget(i.rk)"
                             title="Forget — drop this stopped session from the list to start fresh. Does not stop a live session.">
-                      <span x-text="forgetting[i.project] ? 'Forgetting…' : 'Forget'">Forget</span></button>
+                      <span x-text="forgetting[i.rk] ? 'Forgetting…' : 'Forget'">Forget</span></button>
                   </span>
                 </div>
               </div>

@@ -156,25 +156,26 @@
                           <div class="col-12">
                             <label class="form-label small mb-1" for="resume-{{ p.name }}">Mode</label>
                             <select id="resume-{{ p.name }}" class="form-select form-select-sm" x-model="resumeMode['{{ p.name }}']"
-                                    aria-describedby="resume-hint-{{ p.name }}"
-                                    title="Server Mode (multi-session bridge) = the claude remote-control server; supports the Spawn options. Interactive Session (single-session, true-resume) = one interactive session that restores its prior conversation on Resume; always runs in the project directory.">
+                                    aria-describedby="resume-hint-{{ p.name }}" @change="coercePtySpawn('{{ p.name }}')"
+                                    title="Server Mode (multi-session bridge) = the claude remote-control server; supports every Spawn option. Interactive Session (single-session, true-resume) = one interactive session that restores its prior conversation on Resume; several can run per project — in the project directory, or isolated in a git worktree (Spawn: worktree).">
                               <option value="standard">Server Mode (multi-session bridge)</option>
                               <option value="pty">Interactive Session (single-session, true-resume)</option>
                             </select>
                           </div>
                           {% endif %}
-                          {# Spawn only applies to the standard (multi-session) bridge — it maps to
-                             `claude remote-control --spawn`. pty is a single interactive session run
-                             under the keeper with no `--spawn`, so it ignores these; hide them in pty
-                             mode rather than offer no-op choices. #}
-                          <div class="col-12"
-                               {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) !== 'pty'" x-cloak{% endif %}>
+                          {# Spawn applies to BOTH modes (#779): standard maps to
+                             `claude remote-control --spawn`; an Interactive Session honors
+                             same-dir/worktree (worktree = `claude --worktree`, its own isolated
+                             git worktree that survives Resume). Only `session` is standard-only —
+                             it stays visible but disabled in pty mode (coercePtySpawn resets it). #}
+                          <div class="col-12">
                             <label class="form-label small mb-1" for="spawn-{{ p.name }}">Spawn</label>
                             <select id="spawn-{{ p.name }}" class="form-select form-select-sm" x-model="spawnMode['{{ p.name }}']"
-                                    title="Where the session runs: same-dir = the project directory · worktree = an isolated git worktree (git repos only) · session = a fresh sandboxed session.">
+                                    title="Where the session runs: same-dir = the project directory · worktree = an isolated git worktree (git repos only) · session = a fresh sandboxed session (Server Mode only).">
                               <option value="same-dir">same-dir</option>
                               {% if p.is_git_repo %}<option value="worktree">worktree</option>{% endif %}
-                              <option value="session">session</option>
+                              <option value="session"
+                                      {% if pty_supported %}:disabled="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'pty'"{% endif %}>session</option>
                             </select>
                             {# #578: surface (don't disable) — a non-git dir can't worktree, so
                                note it here and coerceSpawnMode() falls back to same-dir on open.
@@ -191,8 +192,17 @@
                           <div class="col-12"
                                x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'pty'" x-cloak>
                             <div class="d-flex align-items-end">
-                              <p id="resume-hint-{{ p.name }}" class="form-hint text-secondary small mb-1">Runs as one session in the project directory.</p>
+                              <p id="resume-hint-{{ p.name }}" class="form-hint text-secondary small mb-1">Runs as one interactive session — several can run per project.</p>
                             </div>
+                            {% if p.is_git_repo %}
+                            {# No-worktree collision warning (#779): warn, never block — the launch
+                               proceeds; the server echoes the same advisory (warnings[], #778).
+                               No d-* class on the x-show element (Tabler !important, cf. #538). #}
+                            <p class="form-hint text-warning small mb-1" data-test="pty-collision-hint" x-cloak
+                               x-show="spawnMode['{{ p.name }}'] !== 'worktree'">
+                              Sessions sharing the project directory can make conflicting edits — choose
+                              Spawn: worktree to isolate this one.</p>
+                            {% endif %}
                           </div>
                           {% endif %}
                         </div>

@@ -144,7 +144,10 @@
       // the component data-stack (no window fallback), so script-level consts referenced
       // from DIRECTIVES must be surfaced as component state under a scoped name.
       projectNames: PROJECT_NAMES,
-      instances: {},
+      instances: {},          // project -> its STANDARD bridge row (or an optimistic placeholder)
+      ptySessions: [],        // interactive (pty) session rows, N per project (#779)
+      _byId: {},              // rk -> row, across both collections (key-aware lookups)
+      ptyPending: {},         // project -> true while a pty launch awaits its first row (#779)
       externalSessions: {},
       trackedSessions: {},  // instance id (project) -> live working sessions under its bridge (#570)
       bridgeSessOpen: {},   // instance id -> true while its multi-session list is expanded (#570)
@@ -365,7 +368,7 @@
           if (!after || after === before) continue;  // no transition for this bridge
           const event = this._statusToNotifyEvent(after);
           if (!event || !BROWSER_NOTIFY[event]) continue;  // not a notifiable/enabled event
-          this._showBrowserNotification(event, name);
+          this._showBrowserNotification(event, (next[name] && next[name].project) || name);
         }
       },
       _showBrowserNotification(event, name) {
@@ -486,12 +489,15 @@
         let n = 0;
         const i = this.instances[name];
         if (i && ["running", "starting", "stopping"].includes(i.status)) n++;
+        n += this.ptySessions.filter((s) => s.project === name && ["running", "starting", "stopping"].includes(s.status)).length;
         n += this.hosted.filter((h) => h.project === name && ["running", "starting"].includes(h.status)).length;
         return n;
       },
-      // Bridges currently alive (the instances map is project-keyed -> values array).
+      // Bridge rows currently alive: each project's standard bridge PLUS every live
+      // interactive (pty) session — one row per instance, keyed by rk (#779).
       activeBridges() {
-        return Object.values(this.instances).filter((i) => ["running", "starting", "stopping"].includes(i.status));
+        const live = ["running", "starting", "stopping"];
+        return [...Object.values(this.instances), ...this.ptySessions].filter((i) => live.includes(i.status));
       },
       // --- Zone 2 split: a live-only main list + a collapsed "Recent / resumable" group ---
       // so the Active zone (fixed at the top) only ever shows what's genuinely running.
@@ -503,8 +509,10 @@
       liveAgents() { return this.agents.filter((j) => this.agentLive(j)); },
       endedAgents() { return this.agents.filter((j) => !this.agentLive(j)); },
       // Stopped/crashed bridges that can be reconnected (Resume) — surfaced in Recent.
-      endedBridges() { return Object.values(this.instances).filter((i) => this.isResumable(i.project)); },
-      hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length > 0; },
+      endedBridges() {
+        return [...Object.values(this.instances), ...this.ptySessions].filter((i) => this.isResumable(i.rk));
+      },
+      hasLive() { return this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length + this.ptyPendingNames().length > 0; },
       // #357: only offer filter chips for session types actually present, so a chip can
       // never select an empty set on open.
       presentFilters() {
@@ -1317,16 +1325,32 @@
           if (this._authExpired(iRes) || this._authExpired(sRes) || this._authExpired(aRes) || this._authExpired(dRes) || this._authExpired(tRes)) return;
           if (iRes.ok) {
             const list = await iRes.json();
+            // Split the flat instance list (#779): the project-keyed map holds each
+            // project's single STANDARD bridge; interactive (pty) sessions are a flat
+            // id-keyed collection — a project map would clobber N sessions to one.
             const next = {};
-            for (const i of list) next[i.project] = i;
+            const pty = [];
+            for (const i of list) {
+              this._stamp(i);
+              if (i.resume_mode === "pty") pty.push(i); else next[i.project] = i;
+            }
             // Preserve a local optimistic "stopping" until the server confirms it's gone.
             for (const n of Object.keys(this.instances)) {
               if (this.instances[n] && this.instances[n].status === "stopping" && !next[n]) next[n] = this.instances[n];
             }
-            // Browser notifications (#541): fire on a bridge status TRANSITION, before we
-            // swap in the new map. No-op unless the channel is on (gated inside the helper).
-            this.notifyOnTransitions(this.instances, next);
+            const byId = {};
+            for (const i of Object.values(next)) byId[i.rk] = i;
+            for (const i of pty) byId[i.rk] = i;
+            // Browser notifications (#541): fire on a status TRANSITION, before we swap
+            // in the new maps — diffed by rk so every pty session is tracked (#779).
+            this.notifyOnTransitions(this._byId, byId);
             this.instances = next;
+            this.ptySessions = pty;
+            this._byId = byId;
+            // A pending pty-launch stub clears once its live row shows up.
+            for (const n of this.ptyPendingNames()) {
+              if (pty.some((s) => s.project === n && ["running", "starting"].includes(s.status))) delete this.ptyPending[n];
+            }
           } else { ok = false; }
           if (sRes.ok) this.externalSessions = await sRes.json();
           else { ok = false; }
@@ -1481,12 +1505,12 @@
         finally { this.forgetting[id] = false; }
         await this.refresh();
       },
-      forget(name) {
-        const id = this._requireBridgeId(name);
-        return id ? this._forget(id, name) : undefined;
+      forget(key) {
+        const id = this._requireBridgeId(key);
+        return id ? this._forget(id, this.labelOf(key)) : undefined;
       },
       forgetHosted(h) { return this._forget(h.claustrum_process_id, h.project || h.claustrum_process_id); },
-      statusOf(name) { return (this.instances[name] || {}).status || "stopped"; },
+      statusOf(key) { return (this.rowOf(key) || {}).status || "stopped"; },
       // Stable action identity (#778): target the instance_id of the row this client
       // is DISPLAYING, resolved at click time — a project name re-resolved server-side
       // can drift to a bridge registered after the last poll. Server rows ALWAYS carry
@@ -1494,19 +1518,50 @@
       // a bridge whose identity hasn't been minted yet. NO name fallback: actions on
       // that transient row refuse (see _requireBridgeId) instead of letting the server
       // re-resolve the name onto a possibly-hidden other bridge.
-      bridgeIdOf(name) { return (this.instances[name] || {}).instance_id || null; },
+      bridgeIdOf(key) { return (this.rowOf(key) || {}).instance_id || null; },
       // Action guard for the placeholder window: null id -> explain + refuse.
-      _requireBridgeId(name) {
-        const id = this.bridgeIdOf(name);
-        if (!id) this.toast(name + ": still starting — try again in a moment", "warning");
+      _requireBridgeId(key) {
+        const id = this.bridgeIdOf(key);
+        if (!id) this.toast(this.labelOf(key) + ": still starting — try again in a moment", "warning");
         return id;
+      },
+      // --- multi-session row plumbing (#779) -----------------------------------
+      // Every row is stamped with a unique row key `rk` at ingest: the instance_id
+      // for server rows, the project name for a not-yet-minted optimistic
+      // placeholder. Templates bind state and actions by `i.rk`, so N interactive
+      // sessions of one project can't collide; the key-aware helpers below resolve
+      // either a project name (the standard bridge, project-row callers) or an rk.
+      _stamp(i) { i.rk = i.instance_id || i.project; return i; },
+      rowOf(key) { return this._byId[key] || this.instances[key] || null; },
+      labelOf(key) { return (this.rowOf(key) || {}).project || key; },
+      // Replace/insert one fresh server row into the right collection (+ the id index),
+      // so an action's response lands without waiting for the next poll.
+      _absorbRow(body) {
+        this._stamp(body);
+        if (body.resume_mode === "pty") {
+          const at = this.ptySessions.findIndex((s) => s.instance_id === body.instance_id);
+          if (at >= 0) this.ptySessions.splice(at, 1, body); else this.ptySessions.push(body);
+        } else {
+          this.instances[body.project] = body;
+        }
+        this._byId[body.rk] = body;
+        return body;
+      },
+      ptyPendingNames() { return Object.keys(this.ptyPending); },
+      // Interactive sessions honor same-dir/worktree but not `session` (that spawn
+      // shape is the standard bridge's) — flipping the Mode picker to pty with
+      // `session` selected coerces back to same-dir instead of posting a no-op (#779).
+      coercePtySpawn(name) {
+        if ((this.resumeMode[name] || DEFAULT_RESUME_MODE) === "pty" && this.spawnMode[name] === "session") {
+          this.spawnMode[name] = "same-dir";
+        }
       },
       // Display status: an "interrupted" bridge is one that stopped WITHOUT a
       // deliberate Stop (host restart / external kill). It's the same backend status
       // as "stopped" (intentional_stop tells them apart), but reads + acts differently:
       // amber + Resume-forward, vs a neutral "you stopped this" -> Start.
-      displayStatus(name) {
-        const i = this.instances[name] || {};
+      displayStatus(key) {
+        const i = this.rowOf(key) || {};
         const s = i.status || "stopped";
         return (s === "stopped" && i.intentional_stop === false) ? "interrupted" : s;
       },
@@ -1527,8 +1582,8 @@
       // always an https claude.ai URL, never user input. It's bound to `:href` in the Active list,
       // so ENFORCE the scheme here rather than merely trust it: a non-http(s) value can never
       // become a `javascript:`/`data:` href sink. `rel="noopener" target="_blank"` covers the rest.
-      sessionUrlOf(name) {
-        const u = (this.instances[name] || {}).session_url;
+      sessionUrlOf(key) {
+        const u = (this.rowOf(key) || {}).session_url;
         return u && /^https?:\/\//i.test(u) ? u : null;
       },
       // A running bridge whose connect URL hasn't arrived yet. session_url is captured
@@ -1555,15 +1610,15 @@
       errorOf(name) { return this.errors[name] || null; },
       // A stopped/crashed bridge that still has an environment can reconnect to it —
       // show "Resume" instead of "Start" and reuse its stored permission mode.
-      isResumable(name) {
-        const i = this.instances[name] || {};
+      isResumable(key) {
+        const i = this.rowOf(key) || {};
         // A pty (flag-form) bridge has no environment_id — true-resume works via
         // `claude --continue`, not an environment reconnect — so treat a stopped pty
         // instance as resumable too, else the Resume button (the only path to
         // /resume → --continue) never renders and true-resume is unreachable.
         return (i.status === "stopped" || i.status === "crashed") && (!!i.environment_id || i.resume_mode === "pty");
       },
-      resumeModeOf(name) { return (this.instances[name] || {}).resume_mode || ""; },
+      resumeModeOf(key) { return (this.rowOf(key) || {}).resume_mode || ""; },
       // Plain-language effect of each permission mode, surfaced inline so it's visible
       // on touch (this is a phone-first product; hover tooltips never fire there).
       // Reads the canonical PERMISSION_LABELS map (#685) — no second copy to drift.
@@ -1580,7 +1635,7 @@
       filterLabel(f) {
         return { all: "All", desktop: "Desktop", browser: "Browser", detached: "Background", external: "External" }[f] || f;
       },
-      detailOf(name) { return (this.instances[name] || {}).error_detail || null; },
+      detailOf(key) { return (this.rowOf(key) || {}).error_detail || null; },
       externalCount(name) {
         const s = this.externalSessions[name];
         return Array.isArray(s) ? s.length : 0;
@@ -2268,13 +2323,18 @@
       reloadToProject() { window.location.reload(); },
       async _spawn(name) {
         this.errors[name] = null;
-        // Pick the launch mode BEFORE the optimistic overwrite below. A resumable
-        // card hides the Mode picker, so relaunching a stopped bridge keeps its own
-        // recorded mode rather than silently dropping to the global default; a
-        // brand-new card (no instance) uses the visible picker.
+        // Launch mode: the visible picker wins (it's how a second, interactive
+        // session is launched next to a live standard bridge, #779); a resumable
+        // card hides the picker, so an untouched picker falls back to the stopped
+        // standard bridge's recorded mode rather than the global default.
         const existing = this.instances[name];
-        const mode = (existing && existing.resume_mode) || this.resumeMode[name];
-        this.instances[name] = { project: name, status: "starting" };
+        const mode = this.resumeMode[name] || (existing && existing.resume_mode);
+        const effective = mode || DEFAULT_RESUME_MODE;
+        // Optimistic feedback: a standard launch owns the project card; an
+        // interactive (pty) launch renders a pending stub row in the Active zone —
+        // writing it into the project-keyed map would masquerade as a standard row.
+        if (effective === "pty") this.ptyPending[name] = true;
+        else this.instances[name] = this._stamp({ project: name, status: "starting" });
         try {
           const res = await fetch(ROOT + "/api/instances", {
             method: "POST",
@@ -2287,33 +2347,53 @@
             }),
           });
           const body = await res.json();
-          if (!res.ok) { this.errors[name] = body.detail || "failed to start"; delete this.instances[name]; this.toast(name + ": start failed", "error"); }
-          else { this.instances[name] = body; if (body.status === "running") this.toast(name + ": running", "success"); }
-        } catch (e) { this.errors[name] = String(e); delete this.instances[name]; this.toast(name + ": start failed", "error"); }
+          if (!res.ok) {
+            this.errors[name] = body.detail || "failed to start";
+            if (effective === "pty") delete this.ptyPending[name]; else delete this.instances[name];
+            this.toast(name + ": start failed", "error");
+          } else {
+            delete this.ptyPending[name];
+            this._absorbRow(body);
+            // Non-blocking spawn advisories (#778): e.g. an interactive session
+            // launched without a worktree risks conflicting concurrent edits.
+            for (const w of body.warnings || []) this.toast(w, "warning");
+            if (body.created === false && body.reason) this.toast(body.reason, "info");
+            else if (body.status === "running") this.toast(name + ": running", "success");
+          }
+        } catch (e) {
+          this.errors[name] = String(e);
+          if (effective === "pty") delete this.ptyPending[name]; else delete this.instances[name];
+          this.toast(name + ": start failed", "error");
+        }
         await this.refresh();
       },
-      async resume(name) {
-        this.errors[name] = null;
-        const prev = this.instances[name];
-        const id = this._requireBridgeId(name);  // pin the displayed row BEFORE the optimistic swap
+      async resume(key) {
+        const row = this.rowOf(key);
+        const label = this.labelOf(key);
+        this.errors[label] = null;
+        const id = this._requireBridgeId(key);  // pin the row's identity up front
         if (!id) return;
-        this.instances[name] = { ...(prev || { project: name }), status: "starting" };  // optimistic
+        // Optimistic, collection-agnostic: mutate the row in place (both the map and
+        // the pty array hold reactive proxies), so a resumed Recent card moves to the
+        // Active zone immediately; the response/refresh below settles the truth.
+        const prevStatus = row ? row.status : null;
+        if (row) row.status = "starting";
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(id)
                                   + "/resume", { method: "POST" });
           const body = await res.json();
           if (!res.ok) {
-            this.errors[name] = body.detail || "failed to resume";
-            if (prev) this.instances[name] = prev; else delete this.instances[name];
-            this.toast(name + ": restart failed", "error");
+            this.errors[label] = body.detail || "failed to resume";
+            if (row && prevStatus) row.status = prevStatus;
+            this.toast(label + ": restart failed", "error");
           } else {
-            this.instances[name] = body;
-            if (body.status === "running") this.toast(name + ": running", "success");
+            this._absorbRow(body);
+            if (body.status === "running") this.toast(label + ": running", "success");
           }
         } catch (e) {
-          this.errors[name] = String(e);
-          if (prev) this.instances[name] = prev; else delete this.instances[name];
-          this._failToast(name + ": restart");
+          this.errors[label] = String(e);
+          if (row && prevStatus) row.status = prevStatus;
+          this._failToast(label + ": restart");
         }
         await this.refresh();
       },
@@ -2351,29 +2431,30 @@
         }
         await this.refresh();
       },
-      async stop(name) {
+      async stop(key) {
         // Confirm like every sibling destructive action (forget/stopAgent/stopHosted/
         // killHosted) — the desktop bridge is the default session type yet was the only
         // unguarded Stop. Recoverable via Resume, so a plain confirm (not a warning).
-        const stopId = this._requireBridgeId(name);
+        const row = this.rowOf(key);
+        const label = this.labelOf(key);
+        const stopId = this._requireBridgeId(key);
         if (!stopId) return;
-        if (!window.confirm("Stop the session in \"" + name + "\"?")) return;
-        this.closeLogs(name);
-        this.errors[name] = null;  // clear any stale inline error from a prior failed action
-        const prev = this.instances[name];
-        this.instances[name] = { ...(prev || { project: name }), status: "stopping" };  // optimistic
+        if (!window.confirm("Stop the session in \"" + label + "\"?")) return;
+        this.closeLogs(key);
+        this.errors[label] = null;  // clear any stale inline error from a prior failed action
+        if (row) row.status = "stopping";  // optimistic, in place — works for both collections
         try {
           const res = await fetch(ROOT + "/api/instances/" + encodeURIComponent(stopId),
                                   { method: "DELETE" });
-          if (res.ok) { this.instances[name] = await res.json(); this.toast(name + ": stopped", "success"); }
+          if (res.ok) { this._absorbRow(await res.json()); this.toast(label + ": stopped", "success"); }
           else {
             const b = await res.json().catch(() => ({}));
-            this.errors[name] = b.detail || "stop failed";  // inline, not just a 4.5s toast
-            this.toast(name + ": stop failed", "error");
+            this.errors[label] = b.detail || "stop failed";  // inline, not just a 4.5s toast
+            this.toast(label + ": stop failed", "error");
           }
-        } catch (e) { this.errors[name] = String(e); this.toast(name + ": stop failed", "error"); }
+        } catch (e) { this.errors[label] = String(e); this.toast(label + ": stop failed", "error"); }
         await this.refresh();
-        this.loadUsage(name);
+        this.loadUsage(label);
       },
       async trust(name) {
         this.errors[name] = null;  // clear any stale inline error from a prior failed action
