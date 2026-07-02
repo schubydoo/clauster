@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 import psutil
+import pytest
 
 from clauster import procutil
 
@@ -493,6 +494,11 @@ def test_resolve_nvm_default_node_bin_dir_none_when_resolved_path_missing(monkey
     assert procutil.resolve_nvm_default_node_bin_dir() is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX execute-bit semantics; os.access(X_OK) is ~existence on Windows (the "
+    "feature itself is POSIX-only and returns None on win32 before the X_OK check)",
+)
 def test_resolve_nvm_default_node_bin_dir_none_when_node_not_executable(monkeypatch, tmp_path):
     # nvm printed a real file, but it isn't executable — appending its dir would leave
     # node/npx MCP servers failing with the same symptom this feature fixes, so fail closed.
