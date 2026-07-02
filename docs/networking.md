@@ -65,11 +65,16 @@ auth:
 
 ## Native HTTPS (built-in TLS)
 
-Instead of an external TLS proxy, Clauster can terminate HTTPS itself — point it
-at an existing certificate + key and uvicorn serves TLS directly. This is the
-simplest way to get a **secure context** (required for browser features like Web
-Notifications on a LAN IP) when you don't want a reverse proxy or `tailscale
-serve`.
+Instead of an external TLS proxy, Clauster can terminate HTTPS itself via
+uvicorn. This is the simplest way to get a **secure context** (required for
+browser features like Web Notifications on a LAN IP) when you don't want a
+reverse proxy or `tailscale serve`.
+
+Two provisioning modes are available via `tls.provision`:
+
+### Bring your own cert (`provision = off`, default)
+
+Point Clauster at an existing certificate + key:
 
 ```yaml
 projects_root: ~/code
@@ -89,22 +94,52 @@ file (any `..` is collapsed). If TLS is configured but a file is missing or
 unreadable, Clauster **aborts startup with a clear error** rather than silently
 falling back to plain HTTP. The key material is never logged.
 
-With native TLS the connection is `https`, so `auth.cookie_secure: auto` already
-marks the session cookie `Secure` — no `cookie_secure: always` needed, and the
-plain-http cookie warning above is suppressed. The bind/auth rules are unchanged:
-HTTPS does not relax the non-loopback "enforced auth" requirement.
+### Self-signed cert generation (`provision = self-signed`)
 
-!!! note "Scope — cert provisioning is out of scope"
-    This wires an **existing** cert + key into uvicorn only. Self-signed-cert
-    generation and ACME/Let's Encrypt automation are **not** part of this feature —
-    obtain the cert with your own tool (mkcert, `openssl`, `certbot`, your CA) and
-    point `tls.cert_file`/`tls.key_file` at it.
+Clauster can generate and manage a self-signed RSA-2048 cert+key pair for you,
+no external tools required. This requires the `cryptography` package (already a
+core dependency from v0.13 onwards):
+
+```yaml
+projects_root: ~/code
+host: 0.0.0.0
+auth:
+  enabled: true
+  password_required: true
+  password_hash: "$argon2id$v=19$..."   # clauster hash-password
+tls:
+  provision: self-signed
+  hostnames:
+    - 192.168.1.10     # LAN IP (or your NAS hostname)
+    - clauster.local   # optional additional name
+```
+
+At startup, Clauster writes `state_dir/tls/self-signed.crt` and
+`state_dir/tls/self-signed.key` (private key: 0600) and serves from them.
+The cert is regenerated automatically when it is within 30 days of expiry (825-day
+lifetime) or the SAN set changes. **Do not set `cert_file` / `key_file` in this
+mode** — they are managed by Clauster.
+
+!!! note "Browser trust"
+    A self-signed cert is not trusted by browsers by default. You can add a
+    security exception in the browser, or install the cert into your OS / browser
+    trust store once. This is intentional: the cert is only for securing the wire
+    on your LAN — it does not provide public-CA-level identity assurance.
+
+!!! info "ACME / Let's Encrypt"
+    Automated certificate renewal via ACME is deferred to a follow-up issue
+    (issue 774).
+
+With native TLS (either mode) the connection is `https`, so `auth.cookie_secure:
+auto` already marks the session cookie `Secure` — no `cookie_secure: always`
+needed, and the plain-http cookie warning is suppressed. The bind/auth rules are
+unchanged: HTTPS does not relax the non-loopback "enforced auth" requirement.
 
 !!! warning "`tls` is file/CLI-managed only"
-    `tls.cert_file`/`tls.key_file` are structural filesystem paths, so — like the
-    bind host and secret hashes — they are **not** editable from the in-app config
-    editor. Set them in `clauster.yml` (or via `CLAUSTER_TLS_CERT_FILE` /
-    `CLAUSTER_TLS_KEY_FILE`).
+    `tls` fields are structural settings, so — like the bind host and secret
+    hashes — they are **not** editable from the in-app config editor. Set them in
+    `clauster.yml` (or via env vars: `CLAUSTER_TLS_CERT_FILE` /
+    `CLAUSTER_TLS_KEY_FILE` / `CLAUSTER_TLS_PROVISION`).
 
 ## Behind a reverse proxy
 

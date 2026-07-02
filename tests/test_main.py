@@ -177,6 +177,43 @@ def test_run_aborts_when_tls_cert_missing_at_start(write_config, tmp_path, monke
     assert captured == {}
 
 
+def test_run_self_signed_provision_generates_and_serves(write_config, tmp_path, monkeypatch):
+    # provision = self-signed: _run must call the provisioner and hand the generated
+    # cert+key to uvicorn. The provisioner is real (cryptography is a core dep), so this
+    # exercises the actual generate path (self-signed branch in _tls_files).
+    extra = "tls:\n  provision: self-signed\n  hostnames: [localhost]\n"
+    captured = _stub_server(monkeypatch)
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)])
+    assert rc == 0
+    # A real cert+key were generated under state_dir/tls/ and reach uvicorn.
+    assert captured.get("ssl_certfile", "").endswith("self-signed.crt")
+    assert captured.get("ssl_keyfile", "").endswith("self-signed.key")
+    assert Path(captured["ssl_certfile"]).is_file()
+    assert Path(captured["ssl_keyfile"]).is_file()
+
+
+def test_run_self_signed_provision_aborts_on_provisioner_error(
+    write_config, tmp_path, monkeypatch, capsys
+):
+    # A RuntimeError from the provisioner (e.g. cryptography missing) must abort cleanly
+    # (exit 2, our TLS error message) — never a silent plain-HTTP fallback. Simulate it
+    # by stubbing the provisioner to raise.
+    extra = "tls:\n  provision: self-signed\n  hostnames: [localhost]\n"
+    captured = _stub_server(monkeypatch)
+
+    def _boom(state_dir, hostnames):
+        raise RuntimeError("tls.provision = self-signed requires the 'cryptography' package")
+
+    monkeypatch.setattr(cli, "generate_self_signed", _boom)
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path, extra)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "TLS error" in err
+    assert "cryptography" in err
+    # The server was never constructed (no plain-HTTP fallback).
+    assert captured == {}
+
+
 def test_bare_args_default_to_run(write_config, tmp_path, monkeypatch):
     # Backward compat: `clauster -c x` means `run`.
     ran = {}
