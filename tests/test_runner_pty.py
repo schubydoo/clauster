@@ -1083,3 +1083,45 @@ async def test_spawn_detailed_resume_of_live_pty_reports_reused(runner_config) -
         assert runner.running_count() == 1  # no duplicate keeper
     finally:
         await runner.stop(pty.instance_id)
+
+
+# ----- resume revives the SAME instance identity (#779 precursor) -------------------
+
+
+@_POSIX_ONLY
+async def test_resume_pty_revives_same_instance_identity(runner_config) -> None:
+    """A pty stop→resume keeps the instance_id and REPLACES the registry row.
+
+    Pre-fix, resume minted a fresh id and the old STOPPED row lingered as a ghost
+    duplicate — invisible to the project-keyed client (its fold collapsed the two),
+    but a phantom card in any instance-keyed view (#779), and it broke per-instance
+    derivations that must survive a stop→resume cycle (the pty worktree name).
+    """
+    runner, _ = _pty_runner(runner_config)
+    pty = await runner.spawn("alpha", resume_mode="pty")
+    assert pty.status is InstanceStatus.RUNNING
+    await runner.stop(pty.instance_id)
+    resumed = await runner.resume(pty.instance_id)
+    try:
+        assert resumed.instance_id == pty.instance_id  # same logical session
+        rows = [i for i in runner.list_instances() if i.project == "alpha"]
+        assert len(rows) == 1  # replaced, not duplicated
+        assert rows[0] is resumed and resumed.status is InstanceStatus.RUNNING
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+async def test_resume_standard_revives_same_instance_identity(runner_config) -> None:
+    """Same identity contract for a standard bridge stop→resume."""
+    runner, _ = _pty_runner(runner_config)
+    std = await runner.spawn("alpha", resume_mode="standard")
+    assert std.status is InstanceStatus.RUNNING
+    await runner.stop(std.instance_id)
+    resumed = await runner.resume(std.instance_id)
+    try:
+        assert resumed.instance_id == std.instance_id
+        rows = [i for i in runner.list_instances() if i.project == "alpha"]
+        assert len(rows) == 1
+        assert rows[0] is resumed and resumed.status is InstanceStatus.RUNNING
+    finally:
+        await runner.stop(resumed.instance_id)
