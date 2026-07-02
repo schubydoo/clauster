@@ -98,8 +98,7 @@ def test_live_terminal_client_side_fit_wiring(write_config):
     assert "const padTop = parseFloat(cs.paddingTop) || 0;" in body
     assert "const padBottom = parseFloat(cs.paddingBottom) || 0;" in body
     assert (
-        "reg.host.style.height ="
-        ' Math.max(0, Math.ceil(naturalH * scale) + padTop + padBottom) + "px";'
+        'reg.host.style.height = Math.ceil(naturalH * scale) + padTop + padBottom + "px";'
     ) in body
 
 
