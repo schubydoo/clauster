@@ -190,9 +190,17 @@ def read_file(root: Path, relative: str) -> str:
     unredacted. Raises ``FileNotFoundError`` for a missing file (propagated, never
     silently treated as empty — a missing file and an empty file are different facts
     for a caller deciding whether to show "create" or "edit").
+
+    Reads **bytes then decodes** rather than ``read_text`` so line endings survive
+    byte-exactly on every OS: ``Path.read_text`` enables universal-newline
+    translation (CRLF / lone-CR collapse to LF on read), which would MUTATE a
+    consumer's content — unacceptable when the file is user-authored content (a
+    skill script, a subagent prompt, a ``CLAUDE.md``) rather than a config we own.
+    :func:`write_file` already writes bytes verbatim (``"wb"``), so this closes the
+    round trip: what a consumer wrote is exactly what it reads back, CRLF included.
     """
     target = resolve_contained_path(root, relative)
-    text = target.read_text(encoding="utf-8")
+    text = target.read_bytes().decode("utf-8")
     return redact_secret_lines(text)
 
 
