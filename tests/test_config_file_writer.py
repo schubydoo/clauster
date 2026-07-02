@@ -180,6 +180,15 @@ def test_read_file_round_trips_plain_content(tmp_path: Path) -> None:
     assert fw.read_file(tmp_path, "note.txt") == "hello world"
 
 
+def test_read_file_preserves_line_endings_byte_exactly(tmp_path: Path) -> None:
+    # read_file reads bytes-then-decodes (NOT read_text), so CRLF/mixed line endings
+    # survive verbatim on every OS — read_text would collapse \r\n -> \n on read and
+    # mutate a consumer's content (a skill script, a subagent prompt, a CLAUDE.md).
+    payload = "line1\r\nline2\nline3\r\n"
+    fw.write_file(tmp_path, "crlf.txt", payload)
+    assert fw.read_file(tmp_path, "crlf.txt") == payload
+
+
 def test_read_file_redacts_secret_shaped_lines(tmp_path: Path) -> None:
     fw.write_file(tmp_path, "config.env", "API_TOKEN=sk-live-deadbeef\nHOST=localhost\n")
     text = fw.read_file(tmp_path, "config.env")

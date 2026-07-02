@@ -80,7 +80,7 @@ def test_project_write_then_read_round_trip(tmp_path: Path) -> None:
     content, _h1, exists = cm.read_project_claude_md(tmp_path)
     assert content == "# hello\n"
     assert exists is True
-    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "# hello\n"
+    assert (tmp_path / "CLAUDE.md").read_bytes() == b"# hello\n"  # written byte-exact (binary)
 
 
 def test_project_write_defaults_to_root_when_neither_exists(tmp_path: Path) -> None:
@@ -93,39 +93,72 @@ def test_project_prefers_existing_dot_claude_location(tmp_path: Path) -> None:
     # No root CLAUDE.md, but one already lives under .claude/ — reads and writes must
     # target that existing file, never silently create a second one at the root.
     (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "CLAUDE.md").write_text("dotclaude content\n", encoding="utf-8")
+    # Byte-exact fixture write (write_bytes, not write_text): Path.write_text uses
+    # text mode, which on Windows translates \n -> \r\n, mutating the on-disk content
+    # the byte-exact reader then faithfully returns. Writing bytes keeps the fixture
+    # exactly \n on every OS so the round-trip assertion holds cross-platform.
+    (tmp_path / ".claude" / "CLAUDE.md").write_bytes(b"dotclaude content\n")
     content, h, exists = cm.read_project_claude_md(tmp_path)
     assert content == "dotclaude content\n"
     assert exists is True
     cm.write_project_claude_md(tmp_path, "updated\n", h)
-    assert (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8") == "updated\n"
+    assert (tmp_path / ".claude" / "CLAUDE.md").read_bytes() == b"updated\n"
     assert not (tmp_path / "CLAUDE.md").exists()
 
 
 def test_project_prefers_root_when_both_exist(tmp_path: Path) -> None:
-    (tmp_path / "CLAUDE.md").write_text("root\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_bytes(b"root\n")
     (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude" / "CLAUDE.md").write_text("dotclaude\n", encoding="utf-8")
+    (tmp_path / ".claude" / "CLAUDE.md").write_bytes(b"dotclaude\n")
     content, _h, _exists = cm.read_project_claude_md(tmp_path)
     assert content == "root\n"
 
 
 def test_project_write_stale_hash_raises(tmp_path: Path) -> None:
-    (tmp_path / "CLAUDE.md").write_text("original\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_bytes(b"original\n")
     stale = cw.hash_bytes(b"something else")
     with pytest.raises(cw.StaleConfigWriteError):
         cm.write_project_claude_md(tmp_path, "new\n", stale)
 
 
 def test_project_write_no_hash_on_existing_file_is_stale(tmp_path: Path) -> None:
-    (tmp_path / "CLAUDE.md").write_text("original\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_bytes(b"original\n")
     with pytest.raises(cw.StaleConfigWriteError):
         cm.write_project_claude_md(tmp_path, "new\n", None)
 
 
 def test_project_write_no_hash_on_absent_file_ok(tmp_path: Path) -> None:
     cm.write_project_claude_md(tmp_path, "fresh\n", None)
-    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "fresh\n"
+    assert (tmp_path / "CLAUDE.md").read_bytes() == b"fresh\n"
+
+
+def test_project_blanked_file_still_requires_hash(tmp_path: Path) -> None:
+    # Regression (Greptile P1): an existing-but-EMPTY file — exactly what the "blank"
+    # op writes — must NOT be mistaken for an absent file. A subsequent PUT with
+    # expected_hash=None must still 409 (lost-update protection), never silently
+    # overwrite the blanked file as if it were a fresh create.
+    _c, h0, _e = cm.read_project_claude_md(tmp_path)
+    cm.write_project_claude_md(tmp_path, "some memory\n", h0)  # create
+    _c1, h1, exists1 = cm.read_project_claude_md(tmp_path)
+    assert exists1 is True
+    cm.write_project_claude_md(tmp_path, "", h1)  # blank it (empty content)
+    content, _h2, exists2 = cm.read_project_claude_md(tmp_path)
+    assert content == ""
+    assert exists2 is True  # blanked, not absent
+    with pytest.raises(cw.StaleConfigWriteError):
+        cm.write_project_claude_md(tmp_path, "sneaky\n", None)
+
+
+def test_project_write_preserves_crlf_byte_exactly(tmp_path: Path) -> None:
+    # Byte-exact content: CLAUDE.md is user content, so a caller's line endings must
+    # survive verbatim — write \r\n and mixed endings, read them back UNCHANGED (no
+    # universal-newline normalization to \n). Guards the writer/reader round trip on
+    # every OS (the fix that made config_file_writer.read_file byte-exact).
+    payload = "line1\r\nline2\nline3\r\n"
+    cm.write_project_claude_md(tmp_path, payload, None)
+    content, _h, _e = cm.read_project_claude_md(tmp_path)
+    assert content == payload
+    assert (tmp_path / "CLAUDE.md").read_bytes() == payload.encode("utf-8")
 
 
 def test_project_write_bad_shape_writes_nothing(tmp_path: Path) -> None:
@@ -158,7 +191,7 @@ def test_user_write_then_read_round_trip(tmp_path: Path) -> None:
     content, _h1, exists = cm.read_user_claude_md(claude_json)
     assert content == "# my memory\n"
     assert exists is True
-    assert (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8") == "# my memory\n"
+    assert (tmp_path / ".claude" / "CLAUDE.md").read_bytes() == b"# my memory\n"
 
 
 def test_user_write_rejects_bad_shape_without_writing(tmp_path: Path) -> None:
@@ -208,7 +241,7 @@ def test_local_write_bad_shape_writes_nothing_and_no_gitignore(tmp_path: Path) -
 
 
 def test_local_write_stale_hash_raises(tmp_path: Path) -> None:
-    (tmp_path / "CLAUDE.local.md").write_text("original\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.local.md").write_bytes(b"original\n")
     stale = cw.hash_bytes(b"something else")
     with pytest.raises(cw.StaleConfigWriteError):
         cm.write_project_local_claude_md(tmp_path, "new\n", stale)
@@ -266,6 +299,16 @@ def test_route_invalid_scope_is_422(write_config, tmp_path) -> None:
     with _client(write_config, tmp_path, _ON) as c:
         assert c.get(f"{_URL}?scope=bogus").status_code == 422
         assert c.put(_URL, json={"scope": "bogus", "content": ""}).status_code == 422
+
+
+def test_route_bogus_scope_404_when_disabled(write_config, tmp_path) -> None:
+    # Invisible-surface invariant (Greptile P2): the capability gate runs BEFORE the
+    # scope-enum check, so a bogus scope returns 404 (not 422) when config-write is
+    # off — a differing 422 would leak that the endpoint exists. Contrast with the
+    # test above, where the surface IS enabled and a bogus scope is a safe 422.
+    with _client(write_config, tmp_path, "") as c:
+        assert c.get(f"{_URL}?scope=bogus").status_code == 404
+        assert c.put(_URL, json={"scope": "bogus", "content": ""}).status_code == 404
 
 
 def test_route_confirm_mismatch_is_400(write_config, tmp_path) -> None:
@@ -339,7 +382,7 @@ def test_route_path_escape_is_400(write_config, tmp_path) -> None:
 
 
 def test_route_stale_hash_is_409(write_config, tmp_path, projects_root) -> None:
-    (projects_root / "alpha" / "CLAUDE.md").write_text("original\n", encoding="utf-8")
+    (projects_root / "alpha" / "CLAUDE.md").write_bytes(b"original\n")
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.put(
             _URL,
@@ -355,7 +398,7 @@ def test_route_stale_hash_is_409(write_config, tmp_path, projects_root) -> None:
 
 
 def test_route_no_hash_on_existing_file_is_409(write_config, tmp_path, projects_root) -> None:
-    (projects_root / "alpha" / "CLAUDE.md").write_text("original\n", encoding="utf-8")
+    (projects_root / "alpha" / "CLAUDE.md").write_bytes(b"original\n")
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.put(
             _URL,
@@ -392,14 +435,69 @@ def test_route_project_write_read_round_trip(write_config, tmp_path, projects_ro
         assert read1.json()["exists"] is True
 
 
+def test_route_blank_then_recreate_without_hash_is_409(
+    write_config, tmp_path, projects_root
+) -> None:
+    # End-to-end of the Greptile P1 fix over the route: create, blank (write empty),
+    # then a hashless PUT must 409 — the blanked file is existing state, not a fresh
+    # create, so lost-update protection still applies through the HTTP surface.
+    with _client(write_config, tmp_path, _ON) as c:
+        h0 = c.get(f"{_URL}?project=alpha").json()["hash"]
+        assert (
+            c.put(
+                _URL,
+                json={
+                    "scope": "project",
+                    "project": "alpha",
+                    "confirm": "alpha",
+                    "content": "memory\n",
+                    "hash": h0,
+                },
+            ).status_code
+            == 200
+        )
+        blanked = c.get(f"{_URL}?project=alpha")
+        assert blanked.json()["exists"] is True
+        h1 = blanked.json()["hash"]
+        assert (
+            c.put(
+                _URL,
+                json={
+                    "scope": "project",
+                    "project": "alpha",
+                    "confirm": "alpha",
+                    "content": "",
+                    "hash": h1,
+                },
+            ).status_code
+            == 200
+        )
+        # File is now blank-but-present; a hashless PUT must be refused (409).
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "content": "sneaky\n",
+            },
+        )
+        assert resp.status_code == 409
+
+
 def test_route_project_read_picks_up_existing_root_fixture(
     write_config, tmp_path, projects_root
 ) -> None:
     # The `beta` fixture project already has a root CLAUDE.md (conftest.projects_root).
+    # Compare against the file's byte-exact on-disk content rather than a hardcoded
+    # "# beta\n": conftest writes that fixture via text-mode write_text, so on Windows
+    # the bytes are "# beta\r\n" and the byte-exact reader (correctly) returns them
+    # verbatim — asserting against the real bytes keeps this cross-platform.
+    expected = (projects_root / "beta" / "CLAUDE.md").read_bytes().decode("utf-8")
     with _client(write_config, tmp_path, _ON) as c:
         read = c.get(f"{_URL}?project=beta")
         assert read.status_code == 200
-        assert read.json()["content"] == "# beta\n"
+        assert read.json()["content"] == expected
         assert read.json()["exists"] is True
 
 
@@ -439,7 +537,7 @@ def test_route_user_write_round_trip(write_config, tmp_path) -> None:
         assert read1.json()["content"] == "# user memory\n"
     # Lands in the ISOLATED home (autouse fixture), never the real account.
     isolated = Path(os.environ["HOME"]) / ".claude" / "CLAUDE.md"
-    assert isolated.read_text(encoding="utf-8") == "# user memory\n"
+    assert isolated.read_bytes() == b"# user memory\n"  # byte-exact, no newline mangling
 
 
 def test_route_read_does_not_redact_secret_shaped_content(
@@ -449,7 +547,7 @@ def test_route_read_does_not_redact_secret_shaped_content(
     # unlike every other config-write read route, this one must NEVER mask a
     # secret-shaped line.
     secret_line = "api_key: sk-super-secret-value\n"
-    (projects_root / "alpha" / "CLAUDE.md").write_text(secret_line, encoding="utf-8")
+    (projects_root / "alpha" / "CLAUDE.md").write_bytes(secret_line.encode("utf-8"))
     with _client(write_config, tmp_path, _ON) as c:
         read = c.get(f"{_URL}?project=alpha")
         assert read.json()["content"] == secret_line
@@ -639,7 +737,7 @@ def test_route_user_write_stale_hash_is_409(write_config, tmp_path) -> None:
     # the write route's error mapping (distinct from the project/local branch above).
     user_claude_md = Path(os.environ["HOME"]) / ".claude" / "CLAUDE.md"
     user_claude_md.parent.mkdir(parents=True, exist_ok=True)
-    user_claude_md.write_text("original\n", encoding="utf-8")
+    user_claude_md.write_bytes(b"original\n")
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.put(
             _URL,

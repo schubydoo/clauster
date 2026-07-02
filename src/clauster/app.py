@@ -1940,11 +1940,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # allow_user_scope is off — the surface is invisible, never 403. Content-tier:
         # the returned text is RAW, never redacted (#768 threat-model decision) — this
         # is the one config-write read route that deliberately skips secret masking.
+        #
+        # The capability gate runs FIRST, BEFORE the scope-enum check: a disabled
+        # surface must 404 for ANY request (including a bogus scope), or a differing
+        # 422 would leak that the endpoint exists. A bogus scope never matches "user",
+        # so require_capability only trips the base `enabled` flag; when enabled, the
+        # enum check below then rejects it as a 422 (the surface is reachable, so the
+        # shape error is safe to reveal).
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user", "local"):
             raise HTTPException(
                 status_code=422, detail="scope must be 'project', 'user', or 'local'"
             )
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope == "user":
             try:
                 content, file_hash, exists = await asyncio.to_thread(
@@ -1993,12 +2000,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # route can't reuse `_put_config_write` (which assumes a dict payload) — the
         # gate order is identical though: capability -> confirm -> shape -> path
         # resolve/contain -> stale-hash guard (inside the writer) -> atomic write.
+        #
+        # Capability gate FIRST, before the scope-enum check, so a disabled surface
+        # 404s for ANY request (a bogus scope included) instead of leaking existence
+        # via a differing 422 — same invisible-surface invariant as the GET route.
         scope = body.get("scope", "project")
+        config_write.require_capability(config, scope)
         if scope not in ("project", "user", "local"):
             raise HTTPException(
                 status_code=422, detail="scope must be 'project', 'user', or 'local'"
             )
-        config_write.require_capability(config, scope)
         project = body.get("project") if scope != "user" else None
         config_write.require_confirm(scope, project, body.get("confirm"))  # type: ignore[arg-type]
         content = body.get("content")

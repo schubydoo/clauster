@@ -302,17 +302,25 @@ def _write_scoped(root: Path, relative: str, content: str, expected_hash: str | 
     external-edit guard (``expected_hash`` mismatch, or an existing file with no
     hash supplied, → 409), then the atomic write via
     :func:`~clauster.config_file_writer.write_file`. ``expected_hash=None`` is the
-    legitimate first-write ("create") path only when nothing is on disk yet.
+    legitimate first-write ("create") path only when the file is genuinely absent.
+
+    Existence is tracked *separately from content* (``found``): an existing but
+    **empty** file — exactly what the "blank" op writes — must still require a hash,
+    so a subsequent ``expected_hash=None`` PUT is a 409, not a silent overwrite. An
+    empty-bytes hash is a real hash a caller can echo back; only a genuinely missing
+    file has no prior state to guard.
     """
     cw.validate_candidate(content, validate_content)
     target = _resolve(root, relative)
     with _write_lock:
         try:
             current = target.read_bytes()
+            found = True
         except FileNotFoundError:
             current = b""
+            found = False
         if expected_hash is None:
-            if current:
+            if found:
                 raise cw.StaleConfigWriteError(f"{relative} already exists; a hash is required")
         elif cw.hash_bytes(current) != expected_hash:
             raise cw.StaleConfigWriteError(f"{relative} changed on disk since it was loaded")
