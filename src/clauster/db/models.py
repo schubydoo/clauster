@@ -16,8 +16,8 @@ the DB-backed stores round-trip the same ``dict[str, dict]`` the callers already
   terminal-row cost/token snapshot. Survives a restart, so a per-project "last used
   / total cost" is readable straight from the DB; unblocks #298 and #303.
 
-Only portable column types are used (no SQLite-only types), so the same metadata
-runs on Postgres for the multi-user work (#364). Timestamps are timezone-aware.
+Only portable column types are used (no SQLite-only types). Timestamps are
+timezone-aware.
 """
 
 from __future__ import annotations
@@ -151,8 +151,7 @@ class SessionEvent(Base, TimestampMixin):
     ``ready`` rows. They are an approximate, informational dollar figure (the
     price table is hand-maintained) — never an authoritative ledger.
 
-    Only portable column types are used (no SQLite-only types), so the same
-    metadata runs on Postgres for the multi-user work (#364).
+    Only portable column types are used (no SQLite-only types).
     """
 
     __tablename__ = "session_events"

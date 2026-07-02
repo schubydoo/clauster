@@ -1146,12 +1146,6 @@ class ClausterConfig(BaseModel):
         description="Where `clauster.db` and runtime state live (`state.json` is a "
         "legacy import source). `~` is expanded.",
     )
-    database_url: str | None = Field(
-        default=None,
-        description="SQLAlchemy URL for the persistence database. Unset (the "
-        "default) uses a SQLite file `clauster.db` under `state_dir`. Set a Postgres "
-        "DSN (e.g. `postgresql+psycopg://…`) for a shared/multi-user deployment.",
-    )
     root_path: str = Field(
         default="",
         description="ASGI `root_path` for serving under a reverse-proxy sub-path.",
@@ -1439,4 +1433,23 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
     raw = _apply_env_overrides(raw)
     config = ClausterConfig.model_validate(raw)
     config._source_path = found
+    # database_url was removed in 0.13 (#796): clauster is SQLite-only. The old setting is
+    # dropped so an old config still LOADS (additive-only), but do NOT drop it silently — an
+    # operator who set a Postgres DSN would otherwise believe their data lives there while
+    # every write goes to local SQLite ("fail closed, never silently"). Catch BOTH sources:
+    # the YAML key AND the CLAUSTER_DATABASE_URL[_FILE] env override — removing the model
+    # field also drops the env var from `_scalar_env_map`, so it never reaches `raw` and the
+    # `in raw` check alone would miss the env path (Greptile #801 R2).
+    env_dsn_set = "CLAUSTER_DATABASE_URL" in os.environ or bool(
+        os.environ.get("CLAUSTER_DATABASE_URL_FILE", "").strip()
+    )
+    if "database_url" in raw or env_dsn_set:
+        from .db.engine import resolve_url  # local import: avoid a config->db import cycle
+
+        _log.warning(
+            "`database_url` (config key or CLAUSTER_DATABASE_URL env) is no longer supported "
+            "and was IGNORED — clauster is SQLite-only since 0.13 (#796). Data is stored at "
+            "%s. Remove it to silence this warning.",
+            resolve_url(config.state_dir),
+        )
     return config

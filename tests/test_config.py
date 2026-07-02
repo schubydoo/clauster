@@ -25,6 +25,36 @@ def test_instance_defaults_verbose_round_trips(write_config):
     assert config.instance_defaults.verbose is True
 
 
+def test_legacy_database_url_key_still_loads_with_warning(write_config, caplog):
+    # #796: clauster is SQLite-only now — the `database_url` field was removed from
+    # ClausterConfig. Schema is additive-only (old configs must always validate against
+    # newer versions), so a leftover `database_url` key from a pre-#796 config must LOAD,
+    # not be rejected. But it must NOT be dropped silently ("fail closed, never silently"):
+    # an operator who set a Postgres DSN would otherwise think their data lives there while
+    # writes go to local SQLite — so load emits a WARNING naming the real data location.
+    cfg_path = write_config("database_url: postgresql+psycopg://x/y\n")
+    with caplog.at_level("WARNING", logger="clauster.config"):
+        config = load_config(cfg_path)
+    assert not hasattr(config, "database_url")
+    msgs = [r.message for r in caplog.records]
+    assert any("database_url" in m and "no longer supported" in m for m in msgs)
+    assert any("clauster.db" in m for m in msgs)  # points at the real SQLite location
+
+
+def test_legacy_database_url_env_var_warns(write_config, caplog, monkeypatch):
+    # The removed field also drops CLAUSTER_DATABASE_URL from _scalar_env_map, so a DSN set
+    # ONLY via the env override never reaches `raw` — the YAML-key check alone would miss it
+    # and the setting would be silently ignored (Greptile #801 R2). The warning must fire for
+    # the env path too, not just the YAML key.
+    monkeypatch.setenv("CLAUSTER_DATABASE_URL", "postgresql+psycopg://x/y")
+    cfg_path = write_config("")  # no database_url key in the file — env-only
+    with caplog.at_level("WARNING", logger="clauster.config"):
+        config = load_config(cfg_path)
+    assert not hasattr(config, "database_url")
+    msgs = [r.message for r in caplog.records]
+    assert any("CLAUSTER_DATABASE_URL" in m and "no longer supported" in m for m in msgs)
+
+
 def test_missing_projects_root_rejected(tmp_path):
     cfg = tmp_path / "clauster.yml"
     cfg.write_text(f"projects_root: {tmp_path / 'does-not-exist'}\n")

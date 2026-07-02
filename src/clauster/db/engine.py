@@ -1,15 +1,13 @@
 """Engine + session-factory construction for the persistence layer (#362).
 
-Resolves the database URL (config override, else SQLite under ``state_dir``),
-builds a SQLAlchemy 2.0 :class:`~sqlalchemy.engine.Engine`, and hands out a
-``sessionmaker``. SQLite gets the durability/concurrency PRAGMAs the JSON store's
-atomic-write posture implied: write-ahead logging (concurrent reads during a
-write), enforced foreign keys (off by default in SQLite), and a busy-timeout so a
-brief writer overlap waits instead of raising ``database is locked``.
+Builds the SQLite URL under ``state_dir``, builds a SQLAlchemy 2.0
+:class:`~sqlalchemy.engine.Engine`, and hands out a ``sessionmaker``. SQLite gets
+the durability/concurrency PRAGMAs the JSON store's atomic-write posture implied:
+write-ahead logging (concurrent reads during a write), enforced foreign keys (off
+by default in SQLite), and a busy-timeout so a brief writer overlap waits instead
+of raising ``database is locked``.
 
-The URL is the only substrate switch — no SQLite-only column types are used in
-:mod:`clauster.db.models`, so the same schema runs on Postgres for the
-multi-user work (#364) without a model change.
+Clauster is SQLite-only (#796) — there is no remote-database substrate switch.
 """
 
 from __future__ import annotations
@@ -34,15 +32,12 @@ DB_FILENAME = "clauster.db"
 _SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
-def resolve_url(state_dir: Path, database_url: str | None) -> str:
-    """Return the SQLAlchemy URL: the configured one, else SQLite under ``state_dir``.
+def resolve_url(state_dir: Path) -> str:
+    """Return the SQLAlchemy URL: SQLite under ``state_dir``.
 
-    A configured ``database_url`` (e.g. a Postgres DSN) wins verbatim. Otherwise we
-    build a SQLite URL pointing at ``<state_dir>/clauster.db`` with the path resolved
-    to absolute so it's stable regardless of the process working directory.
+    Builds a SQLite URL pointing at ``<state_dir>/clauster.db`` with the path
+    resolved to absolute so it's stable regardless of the process working directory.
     """
-    if database_url:
-        return database_url
     db_path = (state_dir.expanduser() / DB_FILENAME).resolve()
     # as_posix() so the URL uses forward slashes on every platform: on Windows a raw
     # str(path) is ``C:\...\clauster.db``, which yields a backslash URL that is both
@@ -51,33 +46,24 @@ def resolve_url(state_dir: Path, database_url: str | None) -> str:
     return f"sqlite:///{db_path.as_posix()}"
 
 
-def _is_sqlite(url: str) -> bool:
-    """Whether ``url`` targets SQLite (so the SQLite-only PRAGMAs apply)."""
-    return url.startswith("sqlite:")
+def create_db_engine(state_dir: Path) -> Engine:
+    """Build the SQLite engine for ``state_dir``.
 
-
-def create_db_engine(state_dir: Path, database_url: str | None = None) -> Engine:
-    """Build the engine for ``state_dir`` (or the configured URL).
-
-    For SQLite, registers a ``connect`` listener that sets WAL journaling, enforces
-    foreign keys, and arms the busy-timeout on every pooled connection. Non-SQLite
-    URLs are returned as a plain engine — the PRAGMAs are SQLite-specific and a
-    server database manages these concerns itself.
+    Registers a ``connect`` listener that sets WAL journaling, enforces foreign
+    keys, and arms the busy-timeout on every pooled connection.
     """
-    url = resolve_url(state_dir, database_url)
-    if _is_sqlite(url):
-        # SQLite can't create the parent directory for its file; ensure it exists and
-        # is 0700 first (it also holds session.secret) — the same posture the JSON
-        # store got from atomicio.ensure_private_dir before its first write.
-        ensure_private_dir(state_dir.expanduser())
-        # The stores run synchronously inside ``asyncio.to_thread`` (runner/hosted
-        # persist off-loop), so a pooled connection is checked out from a worker
-        # thread. Set check_same_thread=False explicitly to make that contract
-        # visible here rather than relying on the dialect's URL-shape default.
-        engine = create_engine(url, future=True, connect_args={"check_same_thread": False})
-        _arm_sqlite_pragmas(engine)
-        return engine
-    return create_engine(url, future=True)
+    url = resolve_url(state_dir)
+    # SQLite can't create the parent directory for its file; ensure it exists and
+    # is 0700 first (it also holds session.secret) — the same posture the JSON
+    # store got from atomicio.ensure_private_dir before its first write.
+    ensure_private_dir(state_dir.expanduser())
+    # The stores run synchronously inside ``asyncio.to_thread`` (runner/hosted
+    # persist off-loop), so a pooled connection is checked out from a worker
+    # thread. Set check_same_thread=False explicitly to make that contract
+    # visible here rather than relying on the dialect's URL-shape default.
+    engine = create_engine(url, future=True, connect_args={"check_same_thread": False})
+    _arm_sqlite_pragmas(engine)
+    return engine
 
 
 def _arm_sqlite_pragmas(engine: Engine) -> None:
