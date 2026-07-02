@@ -1,4 +1,4 @@
 ---
 default: minor
 ---
-Switch to the @alpinejs/csp build and drop 'unsafe-eval' from script-src.
+Harden the dashboard's Content-Security-Policy by removing `unsafe-eval` from script-src.

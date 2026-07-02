@@ -2,4 +2,4 @@
 default: minor
 ---
 
-The dashboard lists N interactive sessions per project beside the standard bridge, with per-session controls, a no-worktree collision warning, and real worktree isolation via claude --worktree.
+Run several interactive sessions per project from the dashboard, each with its own controls and isolated git worktree, plus a warning when two would share the same working copy.

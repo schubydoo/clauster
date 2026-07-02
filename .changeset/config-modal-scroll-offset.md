@@ -2,4 +2,4 @@
 default: patch
 ---
 
-Fix the config modal's category jump so the clicked section heading lands just below the sticky nav instead of scrolling under it.
+Fix the config editor's section jumps so the heading you click lands below the sticky nav instead of hiding under it.

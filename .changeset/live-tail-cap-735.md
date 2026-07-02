@@ -1,4 +1,4 @@
 ---
 default: patch
 ---
-Cap live-tail transcript growth at 1000 turns with a visible "showing last N" indicator; document project-row focus-order tradeoff (issue 735).
+Cap the live transcript at the most recent 1000 turns, with a "showing last N" indicator, so long sessions stay responsive.
