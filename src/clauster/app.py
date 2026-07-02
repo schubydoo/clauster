@@ -1641,8 +1641,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # Read the (structurally redacted) MCP server map for a surface. Gated exactly
         # like the status route: 404 when config-write is off, and 404 for user scope
         # when allow_user_scope is off — the surface is invisible, never 403.
-        if scope not in ("project", "user"):
-            raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope == "user":
             try:
@@ -1655,6 +1657,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # rather than letting it escape as an unhandled 500.
                 raise _map_config_write_error(exc) from exc
             return {"scope": "user", "servers": servers, "hash": None}
+        if scope == "local":
+            project_dir = _resolve_cw_project(project)
+            try:
+                servers = await asyncio.to_thread(
+                    config_write_mcp.read_project_local_servers, runner.claude_json, project_dir
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "local", "project": project, "servers": servers, "hash": None}
         project_dir = _resolve_cw_project(project)
         try:
             servers, file_hash = await asyncio.to_thread(
@@ -1673,9 +1684,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         payload_key: str,
         write_user_fn: Callable[..., None],
         write_project_fn: Callable[[Path, dict, str | None], None],
+        write_local_fn: Callable[..., None],
         *,
         get_user_path: Callable[[], Path],
         user_fn_has_hash: bool = True,
+        local_fn_has_hash: bool = True,
+        get_local_target: Callable[[], Path] | None = None,
     ) -> dict:
         """Shared Foundation pipeline for the three PUT /api/config-write/* routes.
 
@@ -1685,13 +1699,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
         ``user_fn_has_hash=False`` is only correct for writers that own their own
         hash/locking mechanism (currently: MCP user scope via ``write_user_servers``).
-        Every other surface should leave it at the default ``True`` so the stale-hash
+        ``local_fn_has_hash=False`` is the same shape for the local-scope twin (MCP
+        local scope via ``write_project_local_servers``, which nests into
+        ``~/.claude.json`` rather than a separate hashable file) — when set,
+        ``get_local_target`` supplies the extra positional argument (the
+        ``~/.claude.json`` path) the writer needs ahead of ``project_dir``. Every other
+        surface should leave both hash flags at the default ``True`` so the stale-hash
         guard is enforced. Any ``"hash"`` key the client sends is intentionally not
-        forwarded when this flag is ``False``.
+        forwarded when the relevant flag is ``False``.
         """
         scope = body.get("scope", "project")
-        if scope not in ("project", "user"):
-            raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
         config_write.require_capability(config, scope)
         if scope == "user":
             config_write.require_confirm("user", None, body.get("confirm"))
@@ -1719,6 +1740,36 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 except config_write.ConfigWriteError as exc:
                     raise _map_config_write_error(exc) from exc
             return {"scope": "user", "ok": True}
+        if scope == "local":
+            project = body.get("project")
+            config_write.require_confirm("local", project, body.get("confirm"))
+            payload = body.get(payload_key)
+            if not isinstance(payload, dict):
+                raise HTTPException(
+                    status_code=422, detail=f"body must include a '{payload_key}' object"
+                )
+            project_dir = _resolve_cw_project(project, require_exists=True)
+            if local_fn_has_hash:
+                expected = body.get("hash")
+                if expected is not None and not isinstance(expected, str):
+                    raise HTTPException(
+                        status_code=422, detail="'hash' must be a string when present"
+                    )
+                try:
+                    await asyncio.to_thread(write_local_fn, project_dir, payload, expected)
+                except config_write.ConfigWriteError as exc:
+                    raise _map_config_write_error(exc) from exc
+            else:
+                # writer owns its own hash/locking (MCP local scope, nested into
+                # ~/.claude.json); "hash" from body is intentionally not forwarded.
+                if get_local_target is None:  # pragma: no cover - wiring bug, not user-reachable
+                    raise HTTPException(status_code=500, detail="local scope writer misconfigured")
+                local_target = get_local_target()
+                try:
+                    await asyncio.to_thread(write_local_fn, local_target, project_dir, payload)
+                except config_write.ConfigWriteError as exc:
+                    raise _map_config_write_error(exc) from exc
+            return {"scope": "local", "project": project, "ok": True}
         project = body.get("project")
         config_write.require_confirm("project", project, body.get("confirm"))
         payload = body.get(payload_key)
@@ -1743,8 +1794,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "servers",
             write_user_fn=config_write_mcp.write_user_servers,
             write_project_fn=config_write_mcp.write_project_servers,
+            write_local_fn=config_write_mcp.write_project_local_servers,
             get_user_path=lambda: runner.claude_json,
             user_fn_has_hash=False,
+            local_fn_has_hash=False,
+            get_local_target=lambda: runner.claude_json,
         )
 
     def _user_settings_json() -> Path:
@@ -1769,8 +1823,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # is off — the surface is invisible, never 403. A corrupt/non-object on-disk
         # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
         # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
-        if scope not in ("project", "user"):
-            raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope == "user":
             try:
@@ -1780,6 +1836,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
             return {"scope": "user", "permissions": permissions, "hash": file_hash}
+        if scope == "local":
+            project_dir = _resolve_cw_project(project)
+            try:
+                permissions, file_hash = await asyncio.to_thread(
+                    config_write_permissions.read_project_local_permissions, project_dir
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {
+                "scope": "local",
+                "project": project,
+                "permissions": permissions,
+                "hash": file_hash,
+            }
         project_dir = _resolve_cw_project(project)
         try:
             permissions, file_hash = await asyncio.to_thread(
@@ -1803,6 +1873,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "permissions",
             write_user_fn=config_write_permissions.write_user_permissions,
             write_project_fn=config_write_permissions.write_project_permissions,
+            write_local_fn=config_write_permissions.write_project_local_permissions,
             get_user_path=_user_settings_json,
         )
 
@@ -1814,8 +1885,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
         # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
         # READ never runs a command — it only reflects the stored (inert) hook structure.
-        if scope not in ("project", "user"):
-            raise HTTPException(status_code=422, detail="scope must be 'project' or 'user'")
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
         config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope == "user":
             try:
@@ -1825,6 +1898,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
             return {"scope": "user", "hooks": hooks, "hash": file_hash}
+        if scope == "local":
+            project_dir = _resolve_cw_project(project)
+            try:
+                hooks, file_hash = await asyncio.to_thread(
+                    config_write_hooks.read_project_local_hooks, project_dir
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "local", "project": project, "hooks": hooks, "hash": file_hash}
         project_dir = _resolve_cw_project(project)
         try:
             hooks, file_hash = await asyncio.to_thread(
@@ -1846,6 +1928,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "hooks",
             write_user_fn=config_write_hooks.write_user_hooks,
             write_project_fn=config_write_hooks.write_project_hooks,
+            write_local_fn=config_write_hooks.write_project_local_hooks,
             get_user_path=_user_settings_json,
         )
 

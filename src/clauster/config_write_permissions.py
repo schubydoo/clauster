@@ -11,10 +11,15 @@ code-executing children. The validator is **structural only**: it checks shape a
 the recognized ``defaultMode`` vocabulary; it **never resolves, parses, or evaluates
 a rule string** (a rule like ``Bash(rm:*)`` is stored verbatim as inert text).
 
-Two surfaces, one entry shape (mirroring Claude Code's own ``settings.json``):
+Three surfaces, one entry shape (mirroring Claude Code's own ``settings.json``):
 
 * **project** scope ⇒ ``<project>/.claude/settings.json``, guarded by the stale-hash
   external-edit check + path containment.
+* **local** scope ⇒ ``<project>/.claude/settings.local.json`` — you, this project
+  only, never shared or committed. Same stale-hash guard + path containment as
+  project scope; a successful write also runs
+  :func:`~clauster.config_write.ensure_gitignored` so a newly created file is never
+  accidentally committed (#766).
 * **user** scope ⇒ ``~/.claude/settings.json`` (the settings file — *not*
   ``~/.claude.json``), gated additionally on ``allow_user_scope`` and likewise guarded
   by the stale-hash check (it is a real file, not a ``~/.claude.json`` subtree).
@@ -165,3 +170,27 @@ def write_user_permissions(
     cw.validate_candidate(incoming, validate_permissions)
     settings_json.parent.mkdir(parents=True, exist_ok=True)
     cw.write_settings_subtree(settings_json, PERMISSIONS_KEY, incoming, expected_hash)
+
+
+def read_project_local_permissions(project_dir: Path) -> tuple[dict[str, Any], str]:
+    """Return ``(permissions, content_hash)`` for a project's ``settings.local.json``."""
+    return _read_permissions(cw.project_local_settings_path(project_dir))
+
+
+def write_project_local_permissions(
+    project_dir: Path, incoming: dict[str, Any], expected_hash: str | None
+) -> None:
+    """Validate + write the local-scope ``.claude/settings.local.json`` ``permissions`` block.
+
+    Third (local) scope, sibling of the project/user writers above: same fail-closed
+    Foundation pipeline and stale-hash guard, targeting a *third* file that is you,
+    this project only. A successful write additionally runs
+    :func:`~clauster.config_write.ensure_gitignored` so a newly created
+    ``settings.local.json`` is never accidentally committed (#766) — idempotent, so a
+    write to an already-gitignored file is a no-op there.
+    """
+    cw.validate_candidate(incoming, validate_permissions)
+    path = cw.project_local_settings_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cw.write_settings_subtree(path, PERMISSIONS_KEY, incoming, expected_hash)
+    cw.ensure_gitignored(project_dir, ".claude/settings.local.json")

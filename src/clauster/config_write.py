@@ -6,12 +6,18 @@ its own**. Everything here is fail-closed by construction:
 
 * :func:`require_capability` — the route-level 404 gate. Capability off ⇒ 404; a
   user-scope request with ``allow_user_scope`` off ⇒ 404 (a disabled capability is
-  *invisible*, exactly like the reaper UI). Use 404, never 403.
+  *invisible*, exactly like the reaper UI). Use 404, never 403. ``local`` scope is
+  gated identically to ``project`` scope (no extra opt-in): like project scope it is
+  confined to a single project directory, so it does not carry the account-wide blast
+  radius that justifies the separate ``allow_user_scope`` gate (#766 scope decision).
 * :func:`expected_confirm_token` / :func:`require_confirm` — the per-write
   type-the-name confirm. The server re-derives the expected token (the literal
-  resolved project name, or the literal ``USER SCOPE`` for user scope) and rejects a
-  mismatch with 400 **before any validation or I/O**, so a CSRF / accidental-click
-  write is structurally impossible.
+  resolved project name for project scope, the same name suffixed with
+  :data:`LOCAL_SCOPE_SUFFIX` for local scope, or the literal ``USER SCOPE`` for user
+  scope) and rejects a mismatch with 400 **before any validation or I/O**, so a CSRF /
+  accidental-click write is structurally impossible. Local scope gets its own,
+  distinct token so a confirm typed for a project-scope write can never be replayed
+  to confirm a local-scope write on the same project (or vice versa).
 * :func:`resolve_project_dir` — path containment for project-scope writes (resolve,
   reject ``..``/symlink escape) before touching disk.
 * :func:`validate_candidate` — the validate-never-execute seam. Validation is
@@ -54,12 +60,18 @@ from .claude_json import locked_replace_json_file, update_claude_json
 from .config import ClausterConfig
 from .discovery import is_valid_project_name
 
-Scope = Literal["project", "user"]
+Scope = Literal["project", "user", "local"]
 
 #: The literal token the UI shows (and the caller must retype) for a user-scope write.
 #: Not a credential — it is a fixed, public type-the-name confirm string the user reads
 #: off the screen and retypes, so the hardcoded-password lint is a false positive here.
 USER_SCOPE_TOKEN = "USER SCOPE"  # noqa: S105 - public confirm literal, not a secret
+
+#: Suffix appended to the project name to build the **local**-scope confirm token
+#: (e.g. ``"myproject (local)"``). Deliberately distinct from the plain project name
+#: (the project-scope token) so a confirm typed for one scope can never be replayed to
+#: confirm a write in the other scope on the same project.
+LOCAL_SCOPE_SUFFIX = " (local)"
 
 #: The masked sentinel emitted in place of any secret-shaped value. A write that sends
 #: it back is treated as "keep the stored value" (a no-op merge for that key).
@@ -76,6 +88,14 @@ _SECRET_KEY_RE = re.compile(
 )
 _INTERP_RE = re.compile(r"\$\{[^}]+\}")
 _SECRETISH_URL_RE = re.compile(r"^[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNORECASE)
+# The line-scanning (non-anchored) twin of _SECRETISH_URL_RE, for masking a
+# credential-bearing URL that appears *anywhere* in a line of free text (see
+# redact_secret_lines), not just when the whole value is the URL.
+_SECRETISH_URL_INLINE_RE = re.compile(r"[a-z][a-z0-9+.\-]*://[^/@\s]+@", re.IGNORECASE)
+# A `key: value` / `key = value` line (the shape of a settings.json-adjacent config
+# line, a frontmatter field, or a shell-style env assignment) — used to mask the value
+# side of a secret-shaped key in free text that has no JSON/dict structure to recurse.
+_KV_LINE_RE = re.compile(r"^(?P<prefix>\s*[\w.\-]+\s*[:=]\s*)(?P<value>\S.*?)(?P<trail>\s*)$")
 
 
 class ConfigWriteError(Exception):
@@ -107,22 +127,27 @@ def require_capability(config: ClausterConfig, scope: Scope) -> None:
         raise HTTPException(status_code=404, detail="config-write is disabled")
     if scope == "user" and not config.config_write.allow_user_scope:
         raise HTTPException(status_code=404, detail="config-write user scope is disabled")
+    # local scope carries no additional opt-in: like project scope it is confined to a
+    # single project directory, so the base `enabled` flag alone gates it.
 
 
 def expected_confirm_token(scope: Scope, project_name: str | None) -> str:
     """Re-derive the confirmation token the caller must retype for this write.
 
-    Project-scope ⇒ the literal resolved project name; user-scope ⇒ the literal
-    :data:`USER_SCOPE_TOKEN`. The server *always* derives this itself and never trusts
-    a client-supplied "expected" value — that is what makes the confirm a real CSRF /
-    accidental-click guard.
+    Project-scope ⇒ the literal resolved project name; local-scope ⇒ that same name
+    suffixed with :data:`LOCAL_SCOPE_SUFFIX` (a distinct third token); user-scope ⇒ the
+    literal :data:`USER_SCOPE_TOKEN`. The server *always* derives this itself and never
+    trusts a client-supplied "expected" value — that is what makes the confirm a real
+    CSRF / accidental-click guard.
     """
     if scope == "user":
         return USER_SCOPE_TOKEN
     if not project_name:
-        # A project-scope write with no resolved project can have no valid token, so it
-        # can never be confirmed — fail closed rather than accept an empty match.
-        raise HTTPException(status_code=400, detail="project-scope write requires a project")
+        # A project/local-scope write with no resolved project can have no valid token,
+        # so it can never be confirmed — fail closed rather than accept an empty match.
+        raise HTTPException(status_code=400, detail=f"{scope}-scope write requires a project")
+    if scope == "local":
+        return f"{project_name}{LOCAL_SCOPE_SUFFIX}"
     return project_name
 
 
@@ -236,6 +261,46 @@ def redact_secrets(data: Any, _key: str = "") -> Any:
     return data
 
 
+def redact_secret_lines(text: str) -> str:
+    """Return ``text`` with secret-shaped content masked, line by line.
+
+    :func:`redact_secrets` is *structural* — it recurses a parsed dict/list, using each
+    key as the secret-hint. Free-form text (a skill script, a subagent's frontmatter, a
+    ``CLAUDE.md``) has no such structure to recurse, so this is the line-oriented twin
+    the file/dir writer primitive (:mod:`clauster.config_file_writer`) uses on its read
+    path: each line is scanned independently and never assembled into anything else.
+
+    Per line:
+
+    * Any ``${...}`` interpolation is masked in place (same shape as the structural
+      check).
+    * Any credential-bearing URL (``scheme://user@host``) occurring anywhere in the
+      line is masked in place.
+    * A ``key: value`` / ``key = value`` line whose key looks secret-shaped (the same
+      :data:`_SECRET_KEY_RE` vocabulary) has its value replaced with the sentinel.
+
+    Deliberately conservative in the same direction as :func:`redact_secrets`:
+    over-masking a non-secret line only costs a resend; under-masking would leak.
+    Preserves the original line endings and count exactly (a caller diffing line
+    numbers against the source never sees a shift).
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    for line in lines:
+        body, eol = line, ""
+        if body.endswith("\r\n"):
+            body, eol = body[:-2], "\r\n"
+        elif body.endswith("\n"):
+            body, eol = body[:-1], "\n"
+        masked = _INTERP_RE.sub(REDACTION_SENTINEL, body)
+        masked = _SECRETISH_URL_INLINE_RE.sub(f"{REDACTION_SENTINEL}@", masked)
+        kv = _KV_LINE_RE.match(masked)
+        if kv and _SECRET_KEY_RE.search(kv.group("prefix")):
+            masked = f"{kv.group('prefix')}{REDACTION_SENTINEL}{kv.group('trail')}"
+        out.append(masked + eol)
+    return "".join(out)
+
+
 def merge_redacted(incoming: Any, stored: Any) -> Any:
     """Merge a write-side ``incoming`` value over ``stored``, honoring keep-stored.
 
@@ -298,6 +363,67 @@ def write_subtree(claude_json: Path, subtree_key: str, mutate: Callable[[Any], A
     update_claude_json(claude_json, _apply)
 
 
+def read_nested_subtree(
+    claude_json: Path, outer_key: str, inner_key: str, subtree_key: str
+) -> Any:
+    """Return ``data[outer_key][inner_key][subtree_key]`` from ``claude_json``, or ``None``.
+
+    The read-side twin of :func:`write_nested_subtree` — the per-project local-scope
+    shape Claude Code's own ``~/.claude.json`` uses (``projects[<abs-project-path>]
+    .mcpServers`` for local-scope MCP servers, mirroring the existing trust flags at
+    ``projects[<abs-project-path>].hasTrustDialogAccepted``, see :mod:`clauster.trust`).
+    Any missing level (file, ``outer_key``, ``inner_key``, or a non-dict at any level)
+    reads as ``None`` — never an error; a missing local config is simply empty.
+    """
+    try:
+        raw = claude_json.read_bytes()
+    except FileNotFoundError:
+        raw = b""
+    data = load_settings_json_obj(raw)
+    outer = data.get(outer_key)
+    if not isinstance(outer, dict):
+        return None
+    inner = outer.get(inner_key)
+    if not isinstance(inner, dict):
+        return None
+    return inner.get(subtree_key)
+
+
+def write_nested_subtree(
+    claude_json: Path,
+    outer_key: str,
+    inner_key: str,
+    subtree_key: str,
+    mutate: Callable[[Any], Any],
+) -> None:
+    """Locked read → set **only** ``data[outer_key][inner_key][subtree_key]`` → atomic replace.
+
+    The per-project nested twin of :func:`write_subtree`. Claude Code's own
+    ``~/.claude.json`` keys per-project state under ``projects[<abs-project-path>]``
+    (trust flags today; local-scope MCP servers here) — this writes exactly one leaf of
+    that nested shape. ``mutate`` receives the *current* value of the inner subtree (or
+    ``None`` when absent) and returns the replacement; every sibling — every other
+    project's entry, every other subtree of *this* project's entry, every other
+    top-level key — is preserved verbatim by the atomic replace. Runs through the same
+    :func:`~clauster.claude_json.update_claude_json` transaction (``flock`` + one-time
+    ``.bak`` + mode-preserving atomic replace) the flat :func:`write_subtree` and
+    :mod:`clauster.trust` use.
+    """
+
+    def _apply(data: dict) -> None:
+        outer = data.get(outer_key)
+        if not isinstance(outer, dict):
+            outer = {}
+            data[outer_key] = outer
+        inner = outer.get(inner_key)
+        if not isinstance(inner, dict):
+            inner = {}
+        inner[subtree_key] = mutate(inner.get(subtree_key))
+        outer[inner_key] = inner
+
+    update_claude_json(claude_json, _apply)
+
+
 def capability_status(config: ClausterConfig) -> dict[str, bool]:
     """Return the config-write capability flags for the (gated) status surface.
 
@@ -347,6 +473,46 @@ def render_json(data: dict[str, Any]) -> str:
 def project_settings_path(project_dir: Path) -> Path:
     """Return the project-scope settings file path (``<project>/.claude/settings.json``)."""
     return project_dir / ".claude" / "settings.json"
+
+
+def project_local_settings_path(project_dir: Path) -> Path:
+    """Return the local-scope settings file path (``<project>/.claude/settings.local.json``).
+
+    Mirrors :func:`project_settings_path` for the third (local) scope: a real file
+    that is **you, this project only** — never shared, never committed (see
+    :func:`ensure_gitignored`, called by the local-scope writers after a successful
+    write). Same stale-hash / atomic-write discipline as the project file.
+    """
+    return project_dir / ".claude" / "settings.local.json"
+
+
+def ensure_gitignored(project_dir: Path, relative_path: str) -> None:
+    """Idempotently append ``relative_path`` to ``<project_dir>/.gitignore``.
+
+    Mirrors Claude Code's own behavior: a project-local file (``.claude/settings.local
+    .json``, ``CLAUDE.local.md``) is private to the operator and must never be
+    accidentally committed. Called by the local-scope writers *after* a successful
+    write, so a validation failure never touches ``.gitignore``.
+
+    Idempotent: a ``relative_path`` already present as an exact line (surrounding
+    whitespace ignored) is left untouched — no duplicate append, and the existing
+    content is never rewritten or reordered (only ever appended to). A missing
+    ``.gitignore`` is created. This is deliberately a simple exact-line check, not a
+    full gitignore-pattern matcher — good enough for the fixed, known entries this
+    surface writes, and conservative (a near-duplicate pattern is harmless, just
+    untidy, never unsafe).
+    """
+    gitignore = project_dir / ".gitignore"
+    try:
+        existing = gitignore.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        existing = ""
+    if relative_path in (line.strip() for line in existing.splitlines()):
+        return
+    with gitignore.open("a", encoding="utf-8") as fh:
+        if existing and not existing.endswith("\n"):
+            fh.write("\n")
+        fh.write(relative_path + "\n")
 
 
 def write_settings_subtree(

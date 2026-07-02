@@ -12,10 +12,18 @@ anything malformed; it **never resolves, spawns, or "test-runs" the ``command``*
 (or any value). Running the candidate to "verify" it would make the validator
 itself the RCE the whole trust tier exists to prevent — so it does not.
 
-Two surfaces, one entry shape (mirroring Claude Code's own ``.mcp.json``):
+Three surfaces, one entry shape (mirroring Claude Code's own ``.mcp.json``):
 
 * **project** scope ⇒ ``<project>/.mcp.json`` (top-level ``mcpServers`` object),
   guarded by the stale-hash external-edit check + path containment.
+* **local** scope ⇒ ``~/.claude.json`` ``projects[<abs-project-path>].mcpServers`` —
+  you, this project only, private to the operator's account (mirrors Claude Code's own
+  ``claude mcp add --scope local``, and the existing per-project trust flag at
+  ``projects[<abs-project-path>].hasTrustDialogAccepted``, see :mod:`clauster.trust`).
+  Written through the locked nested-subtree-merge writer
+  (:func:`~clauster.config_write.write_nested_subtree`); no separate file, so no
+  gitignore concern (unlike the local-scope permissions/hooks files, this never lives
+  inside the project directory).
 * **user** scope ⇒ ``~/.claude.json`` ``mcpServers`` subtree, written through the
   locked subtree-merge writer (gated additionally on ``allow_user_scope``).
 
@@ -37,6 +45,11 @@ from . import config_write as cw
 
 #: The top-level key holding the server map in both ``.mcp.json`` and ``mcpServers``.
 MCP_SERVERS_KEY = "mcpServers"
+
+#: The top-level ``~/.claude.json`` key holding per-project state, keyed by the
+#: resolved absolute project path (the same shape :mod:`clauster.trust` uses for
+#: ``hasTrustDialogAccepted``).
+PROJECTS_KEY = "projects"
 
 #: The two recognized remote transports (stdio servers carry no transport).
 _REMOTE_TRANSPORTS = frozenset({"sse", "http"})
@@ -217,3 +230,44 @@ def write_user_servers(claude_json: Path, incoming: dict[str, Any]) -> None:
         return cw.merge_redacted(incoming, stored)
 
     cw.write_subtree(claude_json, MCP_SERVERS_KEY, _mutate)
+
+
+def read_project_local_servers(claude_json: Path, project_dir: Path) -> dict[str, Any]:
+    """Return the redacted local-scope ``mcpServers`` map for ``project_dir``.
+
+    Reads ``~/.claude.json`` ``projects[<abs-project-path>].mcpServers`` — private to
+    the operator's account for this one project, never a shared file. Read is for
+    display only (no stale-hash token, same as :func:`read_user_servers`: the locked
+    nested-subtree writer reads the file under its own ``flock`` at write time), with
+    the Foundation's structural redaction applied so no stored secret is surfaced. A
+    missing project entry (or a missing file) reads as an empty server map.
+    """
+    servers = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY)
+    servers = servers if isinstance(servers, dict) else {}
+    return cw.redact_secrets(servers)
+
+
+def write_project_local_servers(
+    claude_json: Path, project_dir: Path, incoming: dict[str, Any]
+) -> None:
+    """Validate + write the local-scope ``mcpServers`` map for ``project_dir``, fail-closed.
+
+    Third (local) scope, sibling of the project/user writers above: validates
+    structurally (→ 422), then runs the Foundation's locked *nested*-subtree-merge
+    writer (:func:`~clauster.config_write.write_nested_subtree`) — it reads the
+    *current* ``projects[<abs-project-path>].mcpServers`` under the ``flock``, merges
+    via :func:`~clauster.config_write.merge_redacted` (so a ``"********"`` keeps the
+    stored secret), and atomically replaces only that one nested leaf — every other
+    project's entry, every other subtree of *this* project's entry, and every other
+    top-level key in ``~/.claude.json`` (trust grants, tokens) is preserved. Never
+    executes the candidate. ``project_dir`` must already be the *resolved* absolute
+    path (the caller's path-containment step), so the ``projects`` key it writes under
+    matches the one :mod:`clauster.trust` reads/writes for the same project.
+    """
+    cw.validate_candidate(incoming, validate_mcp_servers)
+
+    def _mutate(current: Any) -> dict[str, Any]:
+        stored = current if isinstance(current, dict) else {}
+        return cw.merge_redacted(incoming, stored)
+
+    cw.write_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), MCP_SERVERS_KEY, _mutate)

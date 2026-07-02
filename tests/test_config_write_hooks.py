@@ -263,6 +263,74 @@ def test_user_write_rejects_bad_shape_without_writing(tmp_path: Path) -> None:
     assert not settings.exists()  # nothing written on a validation failure
 
 
+# --- local-scope writer (settings.local.json, gitignore-on-create) -----------------
+
+
+def test_local_write_then_read_round_trip(tmp_path: Path) -> None:
+    _b, h0 = hooks.read_project_local_hooks(tmp_path)
+    assert _b == {}
+    hooks.write_project_local_hooks(tmp_path, {"Stop": [_GROUP]}, expected_hash=h0)
+    block, _h1 = hooks.read_project_local_hooks(tmp_path)
+    assert block == {"Stop": [_GROUP]}
+
+
+def test_local_write_targets_settings_local_json_not_settings_json(tmp_path: Path) -> None:
+    hooks.write_project_local_hooks(tmp_path, {"Stop": [_GROUP]}, expected_hash=None)
+    assert (tmp_path / ".claude" / "settings.local.json").exists()
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_local_write_creates_gitignore_entry(tmp_path: Path) -> None:
+    hooks.write_project_local_hooks(tmp_path, {"Stop": [_GROUP]}, expected_hash=None)
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert ".claude/settings.local.json" in gitignore
+
+
+def test_local_write_gitignore_idempotent_across_writes(tmp_path: Path) -> None:
+    _b, h0 = hooks.read_project_local_hooks(tmp_path)
+    hooks.write_project_local_hooks(tmp_path, {"Stop": [_GROUP]}, expected_hash=h0)
+    _b1, h1 = hooks.read_project_local_hooks(tmp_path)
+    hooks.write_project_local_hooks(tmp_path, {"PreToolUse": [_GROUP]}, expected_hash=h1)
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert gitignore.count(".claude/settings.local.json") == 1
+
+
+def test_local_write_bad_shape_writes_nothing_and_no_gitignore(tmp_path: Path) -> None:
+    with pytest.raises(cw.InvalidCandidateError):
+        hooks.write_project_local_hooks(
+            tmp_path, {"PreToolUse": [{"hooks": [{"type": "agent"}]}]}, expected_hash=None
+        )
+    assert not (tmp_path / ".claude").exists()
+    assert not (tmp_path / ".gitignore").exists()  # validation failure never touches gitignore
+
+
+def test_local_write_stale_hash_raises(tmp_path: Path) -> None:
+    settings = tmp_path / ".claude" / "settings.local.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {}}))
+    stale = cw.hash_bytes(b"something else")
+    with pytest.raises(cw.StaleConfigWriteError):
+        hooks.write_project_local_hooks(tmp_path, {"Stop": [_GROUP]}, stale)
+
+
+def test_local_scope_is_independent_of_project_scope_file(tmp_path: Path) -> None:
+    hooks.write_project_hooks(tmp_path, {"Stop": [_GROUP]}, expected_hash=None)
+    hooks.write_project_local_hooks(tmp_path, {"PreToolUse": [_GROUP]}, expected_hash=None)
+    project_block, _ = hooks.read_project_hooks(tmp_path)
+    local_block, _ = hooks.read_project_local_hooks(tmp_path)
+    assert project_block == {"Stop": [_GROUP]}
+    assert local_block == {"PreToolUse": [_GROUP]}
+
+
+def test_local_write_never_executes_command(tmp_path: Path) -> None:
+    marker = tmp_path / "MARKER_SHOULD_NOT_EXIST"
+    evil = {"Stop": [{"hooks": [{"type": "command", "command": f"touch {marker}"}]}]}
+    hooks.write_project_local_hooks(tmp_path, evil, expected_hash=None)
+    assert not marker.exists(), "local-scope write executed the command (RCE!)"
+    stored, _ = hooks.read_project_local_hooks(tmp_path)
+    assert stored["Stop"][0]["hooks"][0]["command"] == f"touch {marker}"
+
+
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
@@ -708,3 +776,162 @@ def test_route_validate_never_executes_command(write_config, tmp_path, projects_
         (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
     )
     assert stored["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == pwn
+
+
+# --- local scope routes (own confirm token, project-only gate, gitignore-on-create) -
+
+
+def test_route_local_scope_works_without_allow_user_scope(
+    write_config, tmp_path, projects_root
+) -> None:
+    # Local scope needs no allow_user_scope opt-in — the base `enabled` flag alone
+    # gates it, same as project scope (#766 scope decision).
+    with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
+        read0 = c.get(f"{_URL}?scope=local&project=alpha")
+        assert read0.status_code == 200
+        body = read0.json()
+        assert body["scope"] == "local"
+        assert body["project"] == "alpha"
+        assert body["hooks"] == {}
+        assert body["hash"] == cw.hash_bytes(b"")
+        wr = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "hooks": {"Stop": [_GROUP]},
+            },
+        )
+        assert wr.status_code == 200
+        read1 = c.get(f"{_URL}?scope=local&project=alpha")
+        assert read1.json()["hooks"] == {"Stop": [_GROUP]}
+
+
+def test_route_local_confirm_rejects_plain_project_name(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha",  # the PROJECT-scope token, not the local one
+                "hooks": {"Stop": [_GROUP]},
+            },
+        )
+        assert resp.status_code == 400
+
+
+def test_route_local_write_creates_gitignore_entry(write_config, tmp_path, projects_root) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        wr = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "hooks": {"Stop": [_GROUP]},
+            },
+        )
+        assert wr.status_code == 200
+    gitignore = (projects_root / "alpha" / ".gitignore").read_text(encoding="utf-8")
+    assert ".claude/settings.local.json" in gitignore
+
+
+def test_route_local_scope_404_when_disabled(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, "") as c:
+        assert c.get(f"{_URL}?scope=local&project=alpha").status_code == 404
+        assert (
+            c.put(
+                _URL,
+                json={
+                    "scope": "local",
+                    "project": "alpha",
+                    "confirm": "alpha (local)",
+                    "hooks": {},
+                },
+            ).status_code
+            == 404
+        )
+
+
+def test_route_local_write_missing_project_dir_is_404(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "noexist",
+                "confirm": "noexist (local)",
+                "hooks": {"Stop": [_GROUP]},
+            },
+        )
+        assert resp.status_code == 404
+
+
+def test_route_local_write_path_escape_is_400(write_config, tmp_path) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "../escape",
+                "confirm": "../escape (local)",
+                "hooks": {},
+            },
+        )
+        assert resp.status_code == 400
+        assert c.get(f"{_URL}?scope=local&project=../escape").status_code == 400
+
+
+def test_route_local_write_bad_shape_is_422_and_writes_nothing(
+    write_config, tmp_path, projects_root
+) -> None:
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "hooks": {"PreToolUse": [{"hooks": [{"type": "agent"}]}]},
+            },
+        )
+        assert resp.status_code == 422
+    assert not (projects_root / "alpha" / ".claude" / "settings.local.json").exists()
+
+
+def test_route_local_write_never_executes_command(write_config, tmp_path, projects_root) -> None:
+    marker = tmp_path / "LOCAL_ROUTE_PWNED"
+    pwn = f"touch {marker}"
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.put(
+            _URL,
+            json={
+                "scope": "local",
+                "project": "alpha",
+                "confirm": "alpha (local)",
+                "hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": pwn}]}]},
+            },
+        )
+        assert resp.status_code == 200
+    assert not marker.exists()  # the command was stored, never executed
+    stored = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.local.json").read_text(encoding="utf-8")
+    )
+    assert stored["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == pwn
+
+
+def test_route_local_read_corrupt_file_is_422(write_config, tmp_path, projects_root) -> None:
+    # The local-scope read guard: a hand-edited settings.local.json that is not valid
+    # JSON must surface as a clean 422 from the GET route, never an unhandled 500 (same
+    # guard as the project/user reads above).
+    settings = projects_root / "alpha" / ".claude" / "settings.local.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{not json", encoding="utf-8")
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get(f"{_URL}?scope=local&project=alpha").status_code == 422
