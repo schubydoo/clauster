@@ -528,6 +528,45 @@ async def test_rediscover_pty_orphan_resumable_and_skips_unpersisted(runner_conf
     assert runner.get_instance_for_project("beta") is None
 
 
+def test_reattach_pty_from_sidecar_without_instance_id_autogenerates(runner_config, monkeypatch):
+    # #789 follow-up: _reattach_pty_from_sidecar takes an optional instance_id. rediscover
+    # always passes the persisted record's id, so the `instance_id is None` default branch
+    # (skip the kwarg -> the model auto-generates one) was left uncovered. Call it directly
+    # without an instance_id and assert the reattached instance still gets a valid id.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log_dir = config.state_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 4321,
+                "bridge_pid": 5678,
+                "bridge_proc_start": 111.0,
+                "state": "ready",
+            }
+        )
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    saved = {
+        "project_name": "alpha",
+        "label": "alpha",
+        "spawn_mode": "same-dir",
+        "resume_mode": "pty",
+        "intentional_stop": False,
+    }
+
+    inst = runner._reattach_pty_from_sidecar("alpha", saved)  # no instance_id -> None branch
+
+    assert inst is not None
+    assert inst.status is InstanceStatus.RUNNING
+    assert inst.resume_mode == "pty"
+    assert inst.keeper_pid == 4321 and inst.bridge_pid == 5678
+    # The None branch skipped kwargs["instance_id"], so the model supplied its own.
+    assert inst.instance_id  # non-empty auto-generated id
+
+
 async def test_stop_instance_without_pid_marks_stopped(runner_config):
     runner = _make_runner(runner_config)
     fake = RemoteControlInstance(
