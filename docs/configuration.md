@@ -126,6 +126,54 @@ is for what a static directory can't cover — **shell-managed** toolchains like
 `node`, `cargo`, or Go — and for deployments that don't use the generated unit (Docker,
 manual launch). Entries append to (never replace) the inherited `PATH`.
 
+### npx/node MCP servers under systemd (nvm)
+
+An `npx`- or `node`-based MCP server in your `~/.claude.json` (e.g. `codecov`,
+`context7`, and most published servers) can show `✘ Failed to connect` in a bridge
+— visible via `claude mcp list` run inside one — while connecting fine in an
+interactive `claude` TUI. This bites the **systemd deployment mode** specifically:
+
+- Claude Code launches MCP **stdio** servers by spawning their configured
+  `command` **directly** (`execvp` / `sh -c`; `sh` is dash and ignores `BASH_ENV`),
+  **not** through a login or non-interactive bash shell. So neither `path_append`'s
+  companion `BASH_ENV` trick nor a login-shell nvm init reaches the MCP spawn.
+- The only `PATH` that matters for that spawn is the bridge subprocess `PATH` —
+  the minimal service `PATH` plus `path_append` — and nvm's bin directory is
+  version-specific (it rots on every node upgrade), so it's deliberately not in
+  `path_append`. `npx`/`node` therefore aren't found, and the server can't start.
+
+`path_append`ing an nvm bin dir directly is fragile for that same version-pinning
+reason. The robust workaround is a small stable `npx` shim in a directory that
+*is* already on the bridge `PATH` (e.g. `~/.local/bin`, baked in by the generated
+unit) that resolves nvm's `default` **at runtime** and prepends its bin dir before
+exec — so both `npx` and the `node` it and the MCP server invoke resolve:
+
+```bash
+#!/usr/bin/env bash
+# ~/.local/bin/npx  — chmod +x. Puts npx on the PATH of processes that DON'T
+# source a login shell / BASH_ENV, notably Claude Code's MCP stdio spawns.
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+if command -v node >/dev/null 2>&1; then
+  # node already on PATH (interactive / active `nvm use`) — don't override it.
+  _bindir="$(dirname "$(command -v node)")"
+else
+  # bare PATH (bridge / MCP spawn): resolve the `default` alias, no PATH mutation.
+  _node="$( { \. "$NVM_DIR/nvm.sh" --no-use && nvm which default; } 2>/dev/null )"
+  _bindir="$(dirname "$_node")"
+fi
+if [ ! -x "$_bindir/npx" ]; then
+  echo "npx shim: could not resolve nvm 'default' node (NVM_DIR=$NVM_DIR)" >&2
+  exit 127
+fi
+export PATH="$_bindir:$PATH"
+exec "$_bindir/npx" "$@"
+```
+
+Restart the service (or start a fresh bridge) for the shim to take effect, then
+re-check `claude mcp list` inside a bridge. Interactive-launch deployments inherit
+`node` from your shell and never hit this. A first-class opt-in knob is tracked in
+[issue #792](https://github.com/schubydoo/clauster/issues/792).
+
 ## `instance_defaults` — new-bridge defaults (`InstanceDefaults`)
 
 <!-- BEGIN GEN: instance_defaults -->
