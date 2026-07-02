@@ -84,15 +84,28 @@ auth:
     #                                # default) when using a shared_secret HMAC proxy instead
 
 # Native HTTPS: have Clauster terminate TLS itself (uvicorn ssl_certfile/keyfile),
-# instead of a reverse proxy / `tailscale serve`. Unset = plain HTTP. Both paths are
-# validated fail-closed at load AND at server start (exist + readable + absolute, `..`
-# collapsed); a missing/unreadable file aborts startup — it never falls back to plain
-# HTTP. With TLS on, cookie_secure: auto already marks the cookie Secure. Self-signed
-# generation and ACME are out of scope here — supply an already-provisioned cert + key.
-# These are structural paths: file/CLI-managed only, NOT editable in the in-app editor.
+# instead of a reverse proxy / `tailscale serve`. Unset = plain HTTP. With TLS on,
+# cookie_secure: auto already marks the cookie Secure. TLS settings are structural
+# (file/CLI-managed only, NOT editable in the in-app editor).
+#
+# Two provisioning modes:
+#
+# provision = off (default): supply an existing cert + key. Both paths validated
+# fail-closed at load AND server start; a missing/unreadable file aborts startup —
+# never falls back to plain HTTP.
 # tls:
 #   cert_file: /etc/clauster/tls/fullchain.pem   # PEM cert (chain); also CLAUSTER_TLS_CERT_FILE
 #   key_file: /etc/clauster/tls/privkey.pem       # PEM private key; also CLAUSTER_TLS_KEY_FILE
+#
+# provision = self-signed: Clauster generates a self-signed RSA-2048 cert+key under
+# state_dir/tls/ (private key: 0600). Regenerated on expiry or SAN change.
+# Requires `cryptography` package (core dep since v0.13). Do NOT set cert_file/key_file.
+# ACME / Let's Encrypt is deferred to issue 774.
+# tls:
+#   provision: self-signed
+#   hostnames:
+#     - 192.168.1.10     # your LAN IP or NAS hostname (first = CN); also CLAUSTER_TLS_HOSTNAMES
+#     - clauster.local   # additional SANs
 
 logs:
   bridge_log_max_size_mb: 10
