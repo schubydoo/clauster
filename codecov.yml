@@ -146,6 +146,7 @@ component_management:
         - src/clauster/db/migrations/versions/__init__.py
         - src/clauster/db/migrations/versions/0001_baseline.py
         - src/clauster/db/migrations/versions/0002_session_events.py # #363 — session lifecycle table
+        - src/clauster/db/migrations/versions/0004_api_tokens.py # #302 — named public-API bearer tokens
         - src/clauster/db/migrations/versions/0003_instance_id.py # #789 — instance-identity column
     - component_id: config_write
       name: config-write (settings.json / .mcp.json)
