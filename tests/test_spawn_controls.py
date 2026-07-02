@@ -8,6 +8,7 @@ validation before any process is spawned — so they never invoke a real binary.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -786,10 +787,16 @@ def test_dashboard_renders_pickers(write_config):
     assert '<option value="worktree">worktree</option>' in html  # alpha is a git repo
 
 
-def test_dashboard_renders_name_and_sandbox_controls(write_config):
+def test_dashboard_renders_name_and_sandbox_controls(write_config, monkeypatch):
     # #780 launch popover controls (standard-only): the Session name input and the
     # Sandbox select, both gated on the SAME `=== 'standard'` x-show predicate as each
     # other. Assert on the binding markup (the contract), not the copy.
+    #
+    # The `=== 'standard'` x-show gate is emitted only inside `{% if pty_supported %}`
+    # (there's nothing to hide when there's no pty mode), and pty_supported is
+    # `sys.platform != "win32"` — so force a non-win32 platform to make the predicate
+    # render (and the count assertion hold) on EVERY OS, not just POSIX CI.
+    monkeypatch.setattr(sys, "platform", "linux")
     html = _client(write_config).get("/").text
     assert "x-model=\"customName['alpha']\"" in html  # Session name input
     assert "x-model=\"sandboxMode['alpha']\"" in html  # Sandbox select
