@@ -25,6 +25,16 @@ def test_instance_defaults_verbose_round_trips(write_config):
     assert config.instance_defaults.verbose is True
 
 
+def test_legacy_database_url_key_still_loads(write_config):
+    # #796: clauster is SQLite-only now — the `database_url` field was removed from
+    # ClausterConfig. Schema is additive-only (old configs must always validate
+    # against newer versions), so a leftover `database_url` key from a pre-#796
+    # config must be silently ignored, not rejected, on load.
+    cfg_path = write_config("database_url: postgresql+psycopg://x/y\n")
+    config = load_config(cfg_path)
+    assert not hasattr(config, "database_url")
+
+
 def test_missing_projects_root_rejected(tmp_path):
     cfg = tmp_path / "clauster.yml"
     cfg.write_text(f"projects_root: {tmp_path / 'does-not-exist'}\n")

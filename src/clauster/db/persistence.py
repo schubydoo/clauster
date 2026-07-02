@@ -28,7 +28,7 @@ from .stores import HostedStateStore, SessionHistoryStore, StateStore
 class Persistence:
     """Owns the engine + session factory and the migrated, imported database."""
 
-    def __init__(self, state_dir: Path, database_url: str | None = None) -> None:
+    def __init__(self, state_dir: Path) -> None:
         """Build the engine, migrate to head (fail-closed), and import legacy JSON.
 
         Raises :class:`clauster.db.bootstrap.MigrationError` if the schema can't be
@@ -40,7 +40,7 @@ class Persistence:
         does today, before ``uvicorn.run``. Don't move construction into an
         already-running loop without offloading it, or the migration blocks the loop.
         """
-        self._engine: Engine = create_db_engine(state_dir, database_url)
+        self._engine: Engine = create_db_engine(state_dir)
         try:
             upgrade_to_head(self._engine)
             self._session_factory: sessionmaker[Session] = make_session_factory(self._engine)

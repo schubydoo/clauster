@@ -218,7 +218,7 @@ class SessionRunner:
         self._claude_projects_dir = self._claude_json.parent / ".claude" / "projects"
         # Persistence of label / intentional_stop / spawn_mode (D14), now DB-backed
         # (#362) behind the same load()/save() dict contract the JSON store had.
-        self._persistence = persistence or Persistence(config.state_dir, config.database_url)
+        self._persistence = persistence or Persistence(config.state_dir)
         self._state = self._persistence.state_store()
         # Append-only session lifecycle / event history (#363). Records spawn/ready/
         # end/crash transitions for the Projects-zone "last used" sort (#298) and the

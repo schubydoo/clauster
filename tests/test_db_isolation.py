@@ -53,10 +53,8 @@ def test_default_config_state_dir_and_db_are_isolated():
     # Alembic ``upgrade`` could never reach the real ``clauster.db``.
     db_path = (state_dir / DB_FILENAME).resolve()
     assert _REAL_HOME not in db_path.parents
-    assert resolve_url(cfg.state_dir, cfg.database_url).startswith("sqlite:///")
-    assert str(_REAL_HOME / ".clauster" / DB_FILENAME) not in resolve_url(
-        cfg.state_dir, cfg.database_url
-    )
+    assert resolve_url(cfg.state_dir).startswith("sqlite:///")
+    assert str(_REAL_HOME / ".clauster" / DB_FILENAME) not in resolve_url(cfg.state_dir)
 
 
 @pytest.fixture(scope="module", autouse=True)

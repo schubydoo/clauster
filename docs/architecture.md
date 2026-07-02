@@ -24,7 +24,7 @@ Key modules under `src/clauster/`:
 | `procutil.py` | `psutil`-based process introspection: liveness with PID-reuse defense (create-time + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery. |
 | `auth.py` | Auth foundation (fail-closed; pure functions, no FastAPI import). |
 | `config.py` | Config load, env-override, and validation (`ClausterConfig`). |
-| `db/` | Persistence layer: `engine.py` (resolves the DB URL — SQLite `clauster.db` under `state_dir` by default, or a configured `database_url`), `models.py`/`stores.py` (SQLAlchemy schema + record stores), `bootstrap.py` (startup Alembic-to-head + one-time legacy-JSON import, both fail-closed), and the packaged Alembic `migrations/`; the `stores.py` layer includes an append-only `session_events` lifecycle history (`SessionHistoryStore`) that backs the Projects last-used / cost sort. |
+| `db/` | Persistence layer: `engine.py` (resolves the SQLite `clauster.db` URL under `state_dir`), `models.py`/`stores.py` (SQLAlchemy schema + record stores), `bootstrap.py` (startup Alembic-to-head + one-time legacy-JSON import, both fail-closed), and the packaged Alembic `migrations/`; the `stores.py` layer includes an append-only `session_events` lifecycle history (`SessionHistoryStore`) that backs the Projects last-used / cost sort. |
 | `state.py` | Legacy `state.json` store — now an import source only (the live store is `clauster.db`). |
 | `models.py` | Domain models. |
 | `metrics.py` | Per-bridge resource sampling (CPU / memory / disk). |
@@ -162,12 +162,11 @@ resume always honour the recorded mode.
 - `config.py` loads `clauster.yml` (search order + `CLAUSTER_<UPPER_SNAKE_PATH>`
     env overrides), applies the fail-closed validators, and produces a validated
     `ClausterConfig`. See [Configuration](configuration.md).
-- `db/` is the persistence layer: `db/engine.py` resolves the database URL
-    (a SQLite `clauster.db` under the `state_dir` by default, or a configured
-    `database_url` such as Postgres) and `db/bootstrap.py` runs the Alembic
-    migrations to head on startup — fail-closed, refusing to start on a failed
-    migration — then performs a one-time import of any legacy `state.json` /
-    `hosted_state.json` (renaming each to `*.imported`). `state.py` /
+- `db/` is the persistence layer: `db/engine.py` resolves the SQLite `clauster.db`
+    URL under `state_dir` (Clauster is SQLite-only, #796) and `db/bootstrap.py`
+    runs the Alembic migrations to head on startup — fail-closed, refusing to
+    start on a failed migration — then performs a one-time import of any legacy
+    `state.json` / `hosted_state.json` (renaming each to `*.imported`). `state.py` /
     `hosted_state.py` remain only as those legacy JSON stores and import sources.
 - `clauster migrate` is a legacy helper that upgrades an older `state.json` to
     the current JSON schema (the database schema is migrated automatically at

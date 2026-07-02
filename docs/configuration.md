@@ -75,7 +75,6 @@ unknown per-project keys are ignored.
 | `host` | str | `127.0.0.1` | Bind address. A non-loopback host requires enforced auth (see Networking). |
 | `port` | int | `7621` | Bind port (1–65535). |
 | `state_dir` | path | `~/.clauster` | Where `clauster.db` and runtime state live (`state.json` is a legacy import source). `~` is expanded. |
-| `database_url` | str \| null | `null` | SQLAlchemy URL for the persistence database. Unset (the default) uses a SQLite file `clauster.db` under `state_dir`. Set a Postgres DSN (e.g. `postgresql+psycopg://…`) for a shared/multi-user deployment. |
 | `root_path` | str | `""` | ASGI `root_path` for serving under a reverse-proxy sub-path. |
 | `log_format` | `text` \| `json` | `text` | Application log format. `text` (default) is the human single-line format; `json` emits one structured JSON object per record. Both modes redact session URLs / bearer ids before the line is written. |
 | `instance_name` | str \| null | `null` | Optional label (≤32 chars, `[A-Za-z0-9_.-]`). When set, retitles the process to `clauster[<name>]` so co-resident instances are distinguishable in `ps`/`pgrep`. Cosmetic only. |

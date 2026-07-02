@@ -97,7 +97,6 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "schema_version": "structural: schema version; a wrong value breaks load/migration",
     "projects_root": "structural: core path; existence-validated, a wrong value breaks boot",
     "state_dir": "structural: DB/state path; a wrong value orphans state",
-    "database_url": "structural: persistence DSN; may embed a DB password",
     "root_path": "structural: ASGI sub-path; a wrong value breaks routing/login",
     "instance_name": "structural: cosmetic process label, but structural/identity; left out v1",
     # bind — network bind; open-dashboard / restart-only.

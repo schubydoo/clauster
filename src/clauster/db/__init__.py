@@ -1,9 +1,9 @@
 """Database persistence foundation (issue #362, persistence epic #308).
 
 Replaces the lightweight ``state.json`` + ``hosted_state.json`` JSON stores with a
-real SQLAlchemy 2.0 database (SQLite by default; Postgres-capable via URL) behind
-the *exact same* ``load()`` / ``save()`` dict contract the JSON stores exposed —
-so :mod:`clauster.runner` and :mod:`clauster.hosted` are unchanged.
+real SQLAlchemy 2.0 database (SQLite; #796 committed to SQLite-only) behind the
+*exact same* ``load()`` / ``save()`` dict contract the JSON stores exposed — so
+:mod:`clauster.runner` and :mod:`clauster.hosted` are unchanged.
 
 Layout:
 

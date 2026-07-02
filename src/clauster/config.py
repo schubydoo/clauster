@@ -1146,12 +1146,6 @@ class ClausterConfig(BaseModel):
         description="Where `clauster.db` and runtime state live (`state.json` is a "
         "legacy import source). `~` is expanded.",
     )
-    database_url: str | None = Field(
-        default=None,
-        description="SQLAlchemy URL for the persistence database. Unset (the "
-        "default) uses a SQLite file `clauster.db` under `state_dir`. Set a Postgres "
-        "DSN (e.g. `postgresql+psycopg://…`) for a shared/multi-user deployment.",
-    )
     root_path: str = Field(
         default="",
         description="ASGI `root_path` for serving under a reverse-proxy sub-path.",

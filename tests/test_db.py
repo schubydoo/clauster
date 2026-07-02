@@ -31,13 +31,9 @@ from clauster.db.persistence import Persistence
 
 
 def test_resolve_url_defaults_to_sqlite_under_state_dir(tmp_path):
-    url = resolve_url(tmp_path, None)
+    url = resolve_url(tmp_path)
     assert url.startswith("sqlite:///")
     assert url.endswith(f"/{DB_FILENAME}")
-
-
-def test_resolve_url_honors_explicit_database_url(tmp_path):
-    assert resolve_url(tmp_path, "postgresql+psycopg://x/y") == "postgresql+psycopg://x/y"
 
 
 def test_sqlite_pragmas_are_armed(tmp_path):
@@ -404,28 +400,6 @@ def test_import_retires_empty_present_json_without_importing(tmp_path):
     assert not (tmp_path / "hosted_state.json").exists()
 
 
-# ----- engine: non-SQLite branch -----------------------------------------
-
-
-def test_create_db_engine_non_sqlite_skips_pragma_path(tmp_path, monkeypatch):
-    # A non-SQLite URL returns a plain engine via the bare create_engine(url, future=True)
-    # branch — no pragma listener, no dir creation. Patch create_engine to a sentinel so we
-    # never import a real driver (psycopg isn't installed). Covers engine.py line 73.
-    sentinel = object()
-    captured: dict[str, object] = {}
-
-    def fake_create_engine(url, **kwargs):
-        captured["url"] = url
-        captured["kwargs"] = kwargs
-        return sentinel
-
-    monkeypatch.setattr("clauster.db.engine.create_engine", fake_create_engine)
-    result = create_db_engine(tmp_path, "postgresql+psycopg://x/y")
-    assert result is sentinel  # returned unchanged: the SQLite pragma path was not taken
-    assert captured["url"] == "postgresql+psycopg://x/y"
-    assert "connect_args" not in captured["kwargs"]  # the SQLite-only check_same_thread arg
-
-
 # ----- packaged migration env: standalone + offline paths ----------------
 
 
@@ -445,7 +419,9 @@ def test_env_standalone_online_builds_own_engine(tmp_path):
     db_path = tmp_path / "standalone.db"
     cfg = _standalone_cfg(db_path)
     command.upgrade(cfg, "head")
-    engine = create_db_engine(tmp_path, f"sqlite:///{db_path.as_posix()}")
+    # Connect directly at db_path (not create_db_engine, which always targets
+    # <state_dir>/clauster.db) — this only verifies the migration wrote the tables.
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True)
     try:
         with engine.connect() as conn:
             names = set(
