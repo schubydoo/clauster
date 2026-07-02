@@ -2429,11 +2429,23 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         spawn_mode = body.get("spawn_mode")
         permission_mode = body.get("permission_mode")
         resume_mode = body.get("resume_mode")
+        # Optional custom bridge/session display name (#780) — --name for a standard
+        # bridge in place of the project name. Blank/omitted keeps today's default;
+        # runner.spawn_detailed validates it (length/control chars) before any spawn
+        # side effect, surfaced here as a 422 via _spawn_or_http's InvalidSpawnOption
+        # mapping.
+        name = body.get("name")
+        # Optional per-launch sandbox toggle (#780) — tri-state "default"/"on"/"off"
+        # for a standard bridge (--sandbox / --no-sandbox / neither). Enum-validated by
+        # runner.spawn_detailed before any spawn side effect → 422 on a bad value.
+        sandbox = body.get("sandbox")
         channel = body.get("channel", "remote-control")
         for field, value in (
             ("spawn_mode", spawn_mode),
             ("permission_mode", permission_mode),
             ("resume_mode", resume_mode),
+            ("name", name),
+            ("sandbox", sandbox),
             ("channel", channel),
         ):
             if value is not None and not isinstance(value, str):
@@ -2448,6 +2460,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 spawn_mode=spawn_mode,
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
+                custom_name=name,
+                sandbox=sandbox,
             )
         )
         if not outcome.created:

@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -35,10 +36,12 @@ from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
     RESUME_MODES,
+    SANDBOX_MODES,
     SPAWN_MODES,
     ClausterConfig,
     PermissionMode,
     ResumeMode,
+    SandboxMode,
     SpawnMode,
 )
 from .db.persistence import Persistence
@@ -121,6 +124,60 @@ class AdoptionUnavailable(RuntimeError):
     to adopt (no recoverable keeper, terminal-coupled Stop). A lifecycle op, not a
     spawn; the caller maps it to 409.
     """
+
+
+# Cap on the operator-supplied custom bridge/session display name (#780). Generous
+# enough for a real label, small enough to keep argv/log lines and the dashboard's
+# name chip sane; the bridge binary itself imposes no documented limit on --name.
+_CUSTOM_NAME_MAX_LEN = 128
+
+
+def _is_display_unsafe(ch: str) -> bool:
+    """Whether ``ch`` is a control/format or line/paragraph-separator character (#780).
+
+    Rejects any Unicode *control* or *format* character — ``unicodedata.category``
+    starting with ``"C"`` (Cc, Cf, Cs, Co, Cn). That covers the C0/C1 controls, DEL,
+    and — critically for display safety — the bidi override/isolate format chars
+    (U+202A–202E, U+2066–2069) that can visually spoof a rendered name. It also
+    rejects the line (Zl, U+2028) and paragraph (Zp, U+2029) separators, which are
+    *not* category-C but still break a single-line log/JSON rendering. Ordinary
+    non-ASCII letters (accents, CJK, emoji) are category L/N/S/etc. and pass.
+    """
+    if unicodedata.category(ch).startswith("C"):
+        return True
+    return ch in ("\u2028", "\u2029")
+
+
+def _normalize_custom_name(raw: str | None, fallback: str) -> str:
+    """Validate and normalize an optional custom bridge display name (#780).
+
+    ``None``, or a string that is empty after stripping surrounding whitespace,
+    falls back to ``fallback`` (today's behavior: the project name) — an operator
+    who leaves the field blank sees no change. Otherwise the stripped name is
+    returned, having first been checked for length and for display-unsafe characters.
+
+    It's list-argv (never ``shell=True``), so this is not a shell-injection concern —
+    but the name is rendered in the Alpine dashboard and serialized to JSON, so a
+    control/format character would corrupt --debug-file log lines, spoof the rendered
+    name (bidi overrides), or break single-line rendering. We fail closed with
+    :class:`InvalidSpawnOption` for any Unicode control/format character
+    (``unicodedata.category`` category ``C*``, which includes the bidi overrides
+    U+202A–202E / U+2066–2069) plus the line/paragraph separators U+2028/U+2029,
+    rather than silently stripping or passing them through. Ordinary non-ASCII
+    letters (e.g. ``Café-Bridge``) are accepted.
+    """
+    if raw is None:
+        return fallback
+    stripped = raw.strip()
+    if not stripped:
+        return fallback
+    if len(stripped) > _CUSTOM_NAME_MAX_LEN:
+        raise InvalidSpawnOption(
+            f"custom bridge name too long ({len(stripped)} chars; max {_CUSTOM_NAME_MAX_LEN})"
+        )
+    if any(_is_display_unsafe(ch) for ch in stripped):
+        raise InvalidSpawnOption("custom bridge name must not contain control characters")
+    return stripped
 
 
 @dataclass(slots=True)
@@ -575,6 +632,7 @@ class SessionRunner:
                 "spawn_mode": inst.spawn_mode,
                 "permission_mode": inst.permission_mode,
                 "resume_mode": inst.resume_mode,
+                "sandbox_mode": inst.sandbox_mode,
             }
             for inst in self._instances.values()
         }
@@ -658,6 +716,8 @@ class SessionRunner:
         resume_mode: ResumeMode | None = None,
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
+        custom_name: str | None = None,
+        sandbox: SandboxMode | None = None,
     ) -> RemoteControlInstance:
         """Spawn a bridge for ``name`` and return the instance (see :meth:`spawn_detailed`).
 
@@ -672,6 +732,8 @@ class SessionRunner:
             resume_mode=resume_mode,
             resume=resume,
             resume_target=resume_target,
+            custom_name=custom_name,
+            sandbox=sandbox,
         )
         return outcome.instance
 
@@ -684,6 +746,8 @@ class SessionRunner:
         resume_mode: ResumeMode | None = None,
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
+        custom_name: str | None = None,
+        sandbox: SandboxMode | None = None,
     ) -> SpawnOutcome:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
 
@@ -698,6 +762,21 @@ class SessionRunner:
         ``--continue`` so the restarted session restores its prior context. The mode
         is fixed at first launch and recorded on the instance, so a resume always
         keeps it (see :meth:`_is_pty_mode`).
+
+        ``custom_name`` (#780) is an optional operator-supplied display name for a
+        *standard* (server-mode) bridge, passed as ``claude remote-control --name``
+        in place of the project name. Blank/``None`` keeps today's default (the
+        project name); it is validated by :func:`_normalize_custom_name` before any
+        spawn side effect. The pty (Interactive Session) launch form has no
+        equivalent flag, so it's ignored there (see #780 disposition).
+
+        ``sandbox`` (#780) is the per-launch OS-level filesystem/network isolation
+        toggle for a *standard* bridge — tri-state ``"default"``/``"on"``/``"off"``
+        (``None`` == ``"default"``). ``"default"`` appends neither flag (claude's
+        own off-by-default / ``sandbox.*`` settings win — zero behavior change),
+        ``"on"`` appends ``--sandbox``, ``"off"`` appends ``--no-sandbox``. Validated
+        before any spawn side effect. Like ``custom_name`` it is standard-only; the
+        pty form is out of scope for #780.
 
         Concurrent spawns of the *same* project are serialized by a per-project lock:
         a double-click, retry, or second browser tab must not both pass the
@@ -724,6 +803,8 @@ class SessionRunner:
                 resume_mode=resume_mode,
                 resume=resume,
                 resume_target=resume_target,
+                custom_name=custom_name,
+                sandbox=sandbox,
             )
 
     def _spawn_lock_for(self, name: str) -> asyncio.Lock:
@@ -745,12 +826,17 @@ class SessionRunner:
         resume_mode: ResumeMode | None = None,
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
+        custom_name: str | None = None,
+        sandbox: SandboxMode | None = None,
     ) -> SpawnOutcome:
         # Body of spawn_detailed(), always run under the per-project lock (see spawn()).
         proj = self._resolve_project(name)
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode
+        # None == "default" (append neither sandbox flag); normalize up front so the
+        # value stored on the instance and validated below is always one of SANDBOX_MODES.
+        sandbox_mode: SandboxMode = sandbox or "default"
         # Resolve resume_mode early so we can apply the per-mode policy checks below
         # before spending side-effect budget (trust writes, log file creation, etc.).
         # For a resume the prior instance is the SPECIFIC one being revived
@@ -760,7 +846,13 @@ class SessionRunner:
         effective_resume_mode: ResumeMode = (
             "pty" if self._is_pty_mode(prior_for_mode, requested=resume_mode) else "standard"
         )
-        self._validate_spawn_options(proj, spawn_mode, permission_mode, resume_mode)
+        self._validate_spawn_options(proj, spawn_mode, permission_mode, resume_mode, sandbox_mode)
+        # Validate before any spawn side effect (fail closed), same as spawn/permission
+        # mode above. Blank/None falls back to the project name (today's behavior); a
+        # non-blank value is only actually passed as --name for a *standard* bridge (see
+        # spawn_detailed docstring) — resolved_name still gets computed uniformly here so
+        # a bad value 422s regardless of which mode ends up launching.
+        resolved_name = _normalize_custom_name(custom_name, fallback=name)
 
         # Non-blocking advisories collected along the way, surfaced on the outcome so
         # the API can show them to the operator (#778).
@@ -901,9 +993,20 @@ class SessionRunner:
         # chmod). O_EXCL also refuses a pre-planted symlink at this per-spawn-unique path;
         # the bridge's --debug-file open then appends to this existing 0600 inode.
         os.close(os.open(raw_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        # label always reflects what the bridge process is ACTUALLY given as its display
+        # name: resolved_name is only ever passed as --name for the standard subcommand
+        # form (below); the pty flag form always uses the project name (#780 disposition
+        # — no equivalent flag), so label must match that or it'd lie about a running
+        # pty session's name.
+        label = resolved_name if effective_resume_mode == "standard" else name
+        # Sandbox is a standard-only flag (#780); a pty bridge records "default" so its
+        # persisted/displayed state never implies a toggle that was never applied.
+        effective_sandbox: SandboxMode = (
+            sandbox_mode if effective_resume_mode == "standard" else "default"
+        )
         instance = RemoteControlInstance(
             project=name,
-            label=name,
+            label=label,
             status=InstanceStatus.STARTING,
             bridge_debug_log_path=log_path,
             bridge_raw_log_path=raw_path,
@@ -915,6 +1018,7 @@ class SessionRunner:
             # resume_mode was resolved above (effective_resume_mode) so the per-mode
             # policy checks could run before any side effects. Assign it now.
             resume_mode=effective_resume_mode,
+            sandbox_mode=effective_sandbox,
         )
         if resume and resume_target is not None:
             # A resume REVIVES the same logical session: keep its instance_id so the
@@ -941,8 +1045,18 @@ class SessionRunner:
             )
 
         try:
+            # resolved_name (not the bare project name) becomes --name here (#780) —
+            # the standard subcommand form is the only one with an equivalent flag.
+            # effective_sandbox is standard-only too (see above).
             proc = await asyncio.to_thread(
-                self._popen, proj.path, log_path, name, spawn_mode, permission_mode, raw_path
+                self._popen,
+                proj.path,
+                log_path,
+                resolved_name,
+                spawn_mode,
+                permission_mode,
+                raw_path,
+                effective_sandbox,
             )
         except (OSError, ClaudeNotFound) as exc:
             # Binary unresolvable / not executable: fail the instance cleanly
@@ -979,10 +1093,24 @@ class SessionRunner:
         the same permission mode (a *fresh* bare start would drop back to the
         default 'ask'). The session id, which a reconnecting bridge does NOT
         re-log, is recovered from the pointer by :meth:`spawn`'s enrich step.
+
+        Also reuses the stopped instance's ``label`` as the custom-name input
+        (#780) when — and only when — it differs from the project name: a standard
+        bridge's ``label`` is whatever was resolved as its ``--name`` at first launch
+        (a real custom name, or the project name as fallback). Threading a *real*
+        custom name back through keeps it across a resume; a bare project-name label
+        is passed as ``None`` so resume takes the same trusted fast-path as first
+        spawn (``_normalize_custom_name(None, …)``) instead of re-running the project
+        name through the validator — which would raise on a name a first spawn
+        accepted, an asymmetry (Greptile #811).
         """
         existing = self._instances.get(instance_id)
         if existing is None:
             raise UnknownProject(f"no managed instance to resume: {instance_id!r}")
+        # Only forward a label that is a genuine custom name; a bare project-name label
+        # → None so the fallback path (not the validator) runs on resume, exactly as it
+        # did on first spawn where custom_name was None.
+        carried_name = existing.label if existing.label != existing.project else None
         return await self.spawn(
             existing.project,
             spawn_mode=existing.spawn_mode,
@@ -998,6 +1126,11 @@ class SessionRunner:
             # resume of a stopped pty session isn't misresolved against a concurrently
             # live standard bridge in the same project (#777).
             resume_target=existing,
+            custom_name=carried_name,
+            # Keep the sandbox choice across a resume, parity with custom_name (#780):
+            # the instance records the resolved tri-state, so a resumed bridge re-passes
+            # the same --sandbox/--no-sandbox (or neither) instead of reverting to default.
+            sandbox=existing.sandbox_mode,
         )
 
     def _validate_spawn_options(
@@ -1006,6 +1139,7 @@ class SessionRunner:
         spawn_mode: str,
         permission_mode: str,
         resume_mode: str | None = None,
+        sandbox: str | None = None,
     ) -> None:
         if spawn_mode not in SPAWN_MODES:
             raise InvalidSpawnOption(
@@ -1018,6 +1152,10 @@ class SessionRunner:
         if resume_mode is not None and resume_mode not in RESUME_MODES:
             raise InvalidSpawnOption(
                 f"invalid resume_mode {resume_mode!r}; expected one of {RESUME_MODES}"
+            )
+        if sandbox is not None and sandbox not in SANDBOX_MODES:
+            raise InvalidSpawnOption(
+                f"invalid sandbox {sandbox!r}; expected one of {SANDBOX_MODES}"
             )
         if spawn_mode == "worktree" and not proj.is_git_repo:
             raise InvalidSpawnOption(
@@ -1205,9 +1343,25 @@ class SessionRunner:
             _log.warning("could not write redacted bridge log for %s: %s", instance.project, exc)
 
     def _build_cmd(
-        self, log_path: Path, name: str, spawn_mode: SpawnMode, permission_mode: PermissionMode
+        self,
+        log_path: Path,
+        name: str,
+        spawn_mode: SpawnMode,
+        permission_mode: PermissionMode,
+        sandbox: SandboxMode = "default",
     ) -> list[str]:
-        """Build the `claude remote-control` argv. Pure (no side effects) so it's unit-testable."""
+        """Build the `claude remote-control` argv. Pure (no side effects) so it's unit-testable.
+
+        ``name`` becomes ``--name`` verbatim — the caller (:meth:`_spawn_locked`) has
+        already resolved it to either the operator's custom bridge name or the
+        project name (#780, via :func:`_normalize_custom_name`).
+
+        ``sandbox`` (#780) adds the OS-level filesystem/network isolation flag:
+        ``"on"`` → ``--sandbox``, ``"off"`` → ``--no-sandbox``, ``"default"`` → neither
+        (claude's own off-by-default / ``sandbox.*`` settings apply — zero change).
+        These are real, documented flags on ``claude remote-control`` (verified on
+        claude 2.1.198; see the docs at code.claude.com/docs/en/remote-control).
+        """
         defaults = self._config.instance_defaults
         cmd = [
             self._binary,
@@ -1221,6 +1375,13 @@ class SessionRunner:
             "--permission-mode",
             permission_mode,
         ]
+        # Sandbox toggle (#780) — append only for an explicit on/off; "default" leaves it
+        # to claude's own setting. Placed before the config-driven flags below, order is
+        # immaterial to claude's parser.
+        if sandbox == "on":
+            cmd += ["--sandbox"]
+        elif sandbox == "off":
+            cmd += ["--no-sandbox"]
         # Brand auto-generated session names when configured. Multi-session modes only
         # (same-dir/worktree) — `session` is single-session, so the prefix is out of scope.
         if defaults.session_name_prefix and spawn_mode in ("same-dir", "worktree"):
@@ -1293,11 +1454,12 @@ class SessionRunner:
         spawn_mode: SpawnMode,
         permission_mode: PermissionMode,
         debug_path: Path | None = None,
+        sandbox: SandboxMode = "default",
     ) -> subprocess.Popen:
         # The bridge writes its --debug-file to `debug_path` (the private raw parse-
         # source when on-disk redaction is on); the captured-stderr sibling stays keyed
         # off the public `log_path`. They coincide when redaction is off.
-        cmd = self._build_cmd(debug_path or log_path, name, spawn_mode, permission_mode)
+        cmd = self._build_cmd(debug_path or log_path, name, spawn_mode, permission_mode, sandbox)
         # Exec the RESOLVED absolute path, not the bare configured name: Windows
         # CreateProcess only auto-appends .exe (never the .cmd/.ps1 shim npm installs
         # for `claude`), so a bare name that the version probe resolves via
@@ -2042,6 +2204,18 @@ class SessionRunner:
             rm if rm in RESUME_MODES else self._config.claude.launch_mode,
         )
 
+    @staticmethod
+    def _saved_sandbox(saved: dict) -> SandboxMode:
+        """Coerce a persisted ``sandbox_mode`` against the allowed set (#780).
+
+        Absent (pre-#780 state.json) or corrupt values fall back to ``"default"`` —
+        the safe no-flag behavior — so a rebuilt STOPPED card offers the same sandbox
+        choice on resume that the original launch used, without failing the model on a
+        hand-edited value.
+        """
+        sb = saved.get("sandbox_mode")
+        return cast(SandboxMode, sb) if sb in SANDBOX_MODES else "default"
+
     def _stopped_from_persisted(self, name: str) -> RemoteControlInstance | None:
         """Rebuild a STOPPED, resumable instance from a gone bridge's persisted record.
 
@@ -2068,6 +2242,10 @@ class SessionRunner:
             spawn_mode=spawn_mode,
             permission_mode=permission_mode,
             resume_mode=resume_mode,
+            # Carry the persisted sandbox choice (#780) so a resume of this STOPPED card
+            # re-applies the same --sandbox/--no-sandbox (or neither). pty is out of
+            # scope, so a pty record coerces to "default" harmlessly.
+            sandbox_mode=self._saved_sandbox(saved),
             # The process is gone: no pid/keeper/env to recover. intentional_stop is
             # carried through (a host-down bridge has it False — "interrupted" — vs a
             # deliberate Stop's True); both render as a resumable STOPPED card.

@@ -163,6 +163,39 @@
                             </select>
                           </div>
                           {% endif %}
+                          {# Custom bridge/session display name (#780) — Server Mode (standard)
+                             only: it becomes `claude remote-control --name`. The Interactive
+                             Session (pty) flag form has no equivalent flag, so this is hidden
+                             there rather than silently ignored (avoids a name typed here from
+                             looking like it applies when Mode is flipped to pty). Blank keeps
+                             today's default (the project name); the server validates length +
+                             control characters before any spawn side effect. #}
+                          <div class="col-12"
+                               {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'standard'"{% endif %} x-cloak>
+                            <label class="form-label small mb-1" for="name-{{ p.name }}">Session name <span class="text-secondary">(optional)</span></label>
+                            <input id="name-{{ p.name }}" class="form-control form-control-sm" x-model="customName['{{ p.name }}']"
+                                   maxlength="128" placeholder="{{ p.name }}" aria-describedby="name-hint-{{ p.name }}"
+                                   title="Custom display name for this bridge, shown in claude.ai/code in place of the project name. Leave blank to use the project name.">
+                            <p id="name-hint-{{ p.name }}" class="form-hint text-secondary small mt-1 mb-0">Leave blank to use the project name (<code>{{ p.name }}</code>).</p>
+                          </div>
+                          {# Sandbox toggle (#780) — Server Mode (standard) only, SAME
+                             `=== 'standard'` x-show gate as the Session-name field above so the
+                             two stay in lockstep. Maps to `claude remote-control --sandbox` /
+                             `--no-sandbox`; "Default" sends neither (claude's own off-by-default /
+                             sandbox.* settings apply). Not offered for the pty flag form (#780
+                             is server-mode; pty sandbox is a possible follow-up). #}
+                          <div class="col-12"
+                               {% if pty_supported %}x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'standard'"{% endif %} x-cloak>
+                            <label class="form-label small mb-1" for="sandbox-{{ p.name }}">Sandbox</label>
+                            <select id="sandbox-{{ p.name }}" class="form-select form-select-sm" x-model="sandboxMode['{{ p.name }}']"
+                                    aria-describedby="sandbox-hint-{{ p.name }}"
+                                    title="OS-level filesystem + network isolation for this session's Bash commands (off by default). Default = use claude's own setting; Enabled = --sandbox; Disabled = --no-sandbox.">
+                              <option value="default">Default (claude's setting)</option>
+                              <option value="on">Enabled</option>
+                              <option value="off">Disabled</option>
+                            </select>
+                            <p id="sandbox-hint-{{ p.name }}" class="form-hint text-secondary small mt-1 mb-0">OS-level filesystem + network isolation for this session's shell commands. Off by default.</p>
+                          </div>
                           {# Spawn applies to BOTH modes (#779): standard maps to
                              `claude remote-control --spawn`; an Interactive Session honors
                              same-dir/worktree (worktree = `claude --worktree`, its own isolated

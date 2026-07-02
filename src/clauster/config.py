@@ -52,6 +52,15 @@ SessionChannel = Literal["remote-control", "hosted"]
 # Never rename the wire tokens above — only the display names are user-facing.
 SPAWN_MODES: tuple[str, ...] = ("same-dir", "worktree", "session")
 RESUME_MODES: tuple[str, ...] = ("standard", "pty")
+# Per-launch sandbox toggle for the STANDARD (server-mode) bridge (#780). Tri-state:
+# "default" appends NEITHER flag (claude's own setting wins — zero behavior change),
+# "on" appends `--sandbox`, "off" appends `--no-sandbox`. These are undocumented/hidden
+# flags on `claude remote-control` (absent from --help) but empirically accepted on
+# claude 2.1.198 — a genuinely-unknown flag errors "Unknown argument", whereas
+# `--sandbox`/`--no-sandbox` parse and connect. Version-coupled: revisit if a future
+# claude removes them.
+SandboxMode = Literal["default", "on", "off"]
+SANDBOX_MODES: tuple[str, ...] = ("default", "on", "off")
 PERMISSION_MODES: tuple[str, ...] = (
     "default",
     "plan",

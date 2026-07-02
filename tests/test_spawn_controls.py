@@ -8,6 +8,7 @@ validation before any process is spawned — so they never invoke a real binary.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from clauster.runner import (
     InvalidSpawnOption,
     PermissionModeNotAllowed,
     SessionRunner,
+    _normalize_custom_name,
 )
 
 
@@ -93,6 +95,38 @@ def test_build_cmd_appends_verbose_when_configured(runner_config):
         assert "--verbose" in cmd
 
 
+# ----- _build_cmd sandbox toggle (#780) --------------------------------
+
+
+def test_build_cmd_no_sandbox_flag_by_default(runner_config):
+    # Tri-state "default" (the _build_cmd param default) appends NEITHER flag.
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default")
+    assert "--sandbox" not in cmd
+    assert "--no-sandbox" not in cmd
+
+
+def test_build_cmd_appends_sandbox_when_on(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default", "on")
+    assert "--sandbox" in cmd
+    assert "--no-sandbox" not in cmd
+
+
+def test_build_cmd_appends_no_sandbox_when_off(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default", "off")
+    assert "--no-sandbox" in cmd
+    assert "--sandbox" not in cmd
+
+
+def test_build_cmd_explicit_default_appends_neither(runner_config):
+    runner = _runner(runner_config)
+    cmd = runner._build_cmd(Path("/tmp/x.log"), "alpha", "same-dir", "default", "default")
+    assert "--sandbox" not in cmd
+    assert "--no-sandbox" not in cmd
+
+
 # ----- validation -------------------------------------------------------
 
 
@@ -163,6 +197,318 @@ async def test_spawn_uses_config_defaults(runner_config, monkeypatch):
     assert inst.permission_mode == "plan"
     assert inst.spawn_mode == "same-dir"
     await runner.stop(inst.instance_id)
+
+
+# ----- custom bridge name (#780) -----------------------------------------
+#
+# --name is user-customizable for a *standard* (server-mode) bridge only: the
+# pty (Interactive Session) flag form has no equivalent flag (verified: `claude
+# remote-control --help` documents --name, `claude --help`'s --remote-control
+# entry does not), so a custom name is a no-op there (see test_runner_pty.py's
+# test_spawn_pty_ignores_custom_name).
+
+
+def test_normalize_custom_name_none_falls_back_to_project_name():
+    assert _normalize_custom_name(None, fallback="alpha") == "alpha"
+
+
+def test_normalize_custom_name_blank_after_strip_falls_back():
+    assert _normalize_custom_name("   ", fallback="alpha") == "alpha"
+
+
+def test_normalize_custom_name_empty_string_falls_back():
+    assert _normalize_custom_name("", fallback="alpha") == "alpha"
+
+
+def test_normalize_custom_name_strips_surrounding_whitespace():
+    assert _normalize_custom_name("  my session  ", fallback="alpha") == "my session"
+
+
+def test_normalize_custom_name_passes_through_valid_value():
+    assert _normalize_custom_name("my session", fallback="alpha") == "my session"
+
+
+def test_normalize_custom_name_accepts_exactly_the_length_cap():
+    assert _normalize_custom_name("x" * 128, fallback="alpha") == "x" * 128
+
+
+def test_normalize_custom_name_rejects_too_long():
+    with pytest.raises(InvalidSpawnOption):
+        _normalize_custom_name("x" * 129, fallback="alpha")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "bad\nname",  # newline (Cc)
+        "bad\rname",  # carriage return (Cc)
+        "bad\tname",  # tab (Cc)
+        "bad\x00name",  # NUL (Cc)
+        "bad\x1fname",  # C0 control (Cc)
+        "bad\x7fname",  # DEL (Cc)
+        "bad\x9bname",  # C1 control (Cc)
+        "bad​name",  # zero-width space (Cf — a format char)
+        "bad‮name",  # right-to-left override — bidi spoof (Cf)
+        "bad⁦name",  # left-to-right isolate — bidi spoof (Cf)
+        "bad\u2028name",  # line separator (Zl, not category C)
+        "bad\u2029name",  # paragraph separator (Zp, not category C)
+    ],
+)
+def test_normalize_custom_name_rejects_display_unsafe_characters(bad):
+    with pytest.raises(InvalidSpawnOption):
+        _normalize_custom_name(bad, fallback="alpha")
+
+
+@pytest.mark.parametrize("good", ["Café-Bridge", "Über Session", "橋 bridge", "Bridge 🚀"])
+def test_normalize_custom_name_accepts_ordinary_unicode(good):
+    # Legitimate non-ASCII (accents, CJK, emoji) is category L/N/S — never over-rejected.
+    assert _normalize_custom_name(good, fallback="alpha") == good
+
+
+async def test_spawn_custom_name_reaches_argv_and_label(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", custom_name="My Custom Bridge")
+    try:
+        assert inst.label == "My Custom Bridge"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--name") + 1] == "My Custom Bridge"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_blank_custom_name_falls_back_to_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", custom_name="   ")
+    try:
+        assert inst.label == "alpha"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--name") + 1] == "alpha"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_omitted_custom_name_keeps_default_behavior(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha")
+    try:
+        assert inst.label == "alpha"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_invalid_custom_name_rejected_before_any_spawn(runner_config):
+    runner = _runner(runner_config)
+    with pytest.raises(InvalidSpawnOption):
+        await runner.spawn("alpha", custom_name="bad\nname")
+    assert runner.running_count() == 0  # rejected before _popen ever ran
+
+
+async def test_resume_preserves_custom_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", custom_name="My Custom Bridge")
+    await runner.stop(inst.instance_id)
+    resumed = await runner.resume(inst.instance_id)
+    try:
+        assert resumed.label == "My Custom Bridge"
+        argv = json.loads(Path(str(resumed.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--name") + 1] == "My Custom Bridge"
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+def _runner_client(runner_config) -> TestClient:
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    return TestClient(create_app(config, runner=runner))
+
+
+def test_api_spawn_custom_name_reaches_label_and_argv(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _runner_client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "name": "My Custom Bridge"})
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["label"] == "My Custom Bridge"
+        argv = json.loads(Path(str(body["bridge_debug_log_path"]) + ".argv.json").read_text())
+        assert argv[argv.index("--name") + 1] == "My Custom Bridge"
+
+
+def test_api_spawn_blank_custom_name_falls_back(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _runner_client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "name": "   "})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["label"] == "alpha"
+
+
+def test_api_spawn_custom_name_too_long_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "name": "x" * 129})
+    assert resp.status_code == 422
+
+
+def test_api_spawn_custom_name_control_char_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "name": "bad\nname"})
+    assert resp.status_code == 422
+
+
+def test_api_spawn_non_string_custom_name_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "name": 5})
+    assert resp.status_code == 422
+
+
+# ----- resume default-name round-trip (Greptile #811) -------------------
+#
+# A default-name standard bridge has label == the raw project name. resume() must
+# pass custom_name=None for that case (the trusted fast-path), NOT feed the project
+# name back through the validator — otherwise a project name containing a char the
+# validator now rejects would make resume raise even though the first launch
+# succeeded. Project names are constrained by PROJECT_NAME_RE so this is near-
+# unreachable in practice, but the round-trip must stay symmetric.
+
+
+async def test_resume_default_name_bridge_passes_none_not_project_name(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha")  # no custom name -> label == "alpha"
+    await runner.stop(inst.instance_id)
+
+    seen: dict = {}
+    real_spawn = runner.spawn
+
+    async def _spy(name, **kwargs):
+        seen.update(kwargs)
+        return await real_spawn(name, **kwargs)
+
+    monkeypatch.setattr(runner, "spawn", _spy)
+    resumed = await runner.resume(inst.instance_id)
+    try:
+        # The bare project-name label is forwarded as None (fallback path), not "alpha".
+        assert seen["custom_name"] is None
+        assert resumed.label == "alpha"
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+# ----- sandbox toggle (#780) -------------------------------------------
+
+
+async def test_spawn_sandbox_on_reaches_argv_and_instance(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="on")
+    try:
+        assert inst.sandbox_mode == "on"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" in argv
+        assert "--no-sandbox" not in argv
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_sandbox_off_reaches_argv(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="off")
+    try:
+        assert inst.sandbox_mode == "off"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--no-sandbox" in argv
+        assert "--sandbox" not in argv
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_sandbox_default_appends_neither(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha")  # sandbox omitted -> "default"
+    try:
+        assert inst.sandbox_mode == "default"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" not in argv
+        assert "--no-sandbox" not in argv
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_invalid_sandbox_rejected_before_any_spawn(runner_config):
+    runner = _runner(runner_config)
+    with pytest.raises(InvalidSpawnOption):
+        await runner.spawn("alpha", sandbox="bogus")
+    assert runner.running_count() == 0  # rejected before _popen ever ran
+
+
+async def test_resume_preserves_sandbox_choice(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="on")
+    await runner.stop(inst.instance_id)
+    resumed = await runner.resume(inst.instance_id)
+    try:
+        assert resumed.sandbox_mode == "on"
+        argv = json.loads(Path(str(resumed.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" in argv
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+def test_sandbox_persisted_in_subset(runner_config):
+    runner = _runner(runner_config)
+    fake = RemoteControlInstance(project="alpha", label="alpha", sandbox_mode="off")
+    runner._instances[fake.instance_id] = fake
+    subset = runner._persist_subset()
+    record = next(v for v in subset.values() if v.get("project_name") == "alpha")
+    assert record["sandbox_mode"] == "off"
+
+
+def test_stopped_from_persisted_restores_sandbox(runner_config):
+    # A gone standard bridge rebuilt from state.json keeps its sandbox choice so a
+    # resume re-applies it. Coerces an absent/bad value to "default".
+    runner = _runner(runner_config)
+    runner._persisted = {
+        "iid-1": {"project_name": "alpha", "label": "alpha", "sandbox_mode": "off"},
+    }
+    inst = runner._stopped_from_persisted("alpha")
+    assert inst is not None
+    assert inst.sandbox_mode == "off"
+
+
+def test_stopped_from_persisted_defaults_sandbox_when_absent(runner_config):
+    runner = _runner(runner_config)
+    runner._persisted = {"iid-1": {"project_name": "alpha", "label": "alpha"}}  # pre-#780
+    inst = runner._stopped_from_persisted("alpha")
+    assert inst is not None
+    assert inst.sandbox_mode == "default"
+
+
+def test_api_spawn_sandbox_on_reaches_argv(runner_config, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _runner_client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "sandbox": "on"})
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["sandbox_mode"] == "on"
+        argv = json.loads(Path(str(body["bridge_debug_log_path"]) + ".argv.json").read_text())
+        assert "--sandbox" in argv
+
+
+def test_api_spawn_invalid_sandbox_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "sandbox": "bogus"})
+    assert resp.status_code == 422
+
+
+def test_api_spawn_non_string_sandbox_is_422(write_config):
+    client = _client(write_config)
+    resp = client.post("/api/instances", json={"project": "alpha", "sandbox": 5})
+    assert resp.status_code == 422
 
 
 # ----- max_bridges (clauster-enforced concurrent-bridge cap) -----------
@@ -439,6 +785,25 @@ def test_dashboard_renders_pickers(write_config):
     # a Jinja-rendered perm option (value-stable; the label is plain-language copy)
     assert '<option value="default">Ask each time (default)</option>' in html
     assert '<option value="worktree">worktree</option>' in html  # alpha is a git repo
+
+
+def test_dashboard_renders_name_and_sandbox_controls(write_config, monkeypatch):
+    # #780 launch popover controls (standard-only): the Session name input and the
+    # Sandbox select, both gated on the SAME `=== 'standard'` x-show predicate as each
+    # other. Assert on the binding markup (the contract), not the copy.
+    #
+    # The `=== 'standard'` x-show gate is emitted only inside `{% if pty_supported %}`
+    # (there's nothing to hide when there's no pty mode), and pty_supported is
+    # `sys.platform != "win32"` — so force a non-win32 platform to make the predicate
+    # render (and the count assertion hold) on EVERY OS, not just POSIX CI.
+    monkeypatch.setattr(sys, "platform", "linux")
+    html = _client(write_config).get("/").text
+    assert "x-model=\"customName['alpha']\"" in html  # Session name input
+    assert "x-model=\"sandboxMode['alpha']\"" in html  # Sandbox select
+    assert '<option value="on">Enabled</option>' in html
+    assert '<option value="off">Disabled</option>' in html
+    # Both #780 controls share the standard-only gate (never shown in pty mode).
+    assert html.count("(resumeMode['alpha'] || defaultResumeMode) === 'standard'") >= 2
 
 
 # The picker <option> gained a `:disabled` binding restricting bypass to the Desktop

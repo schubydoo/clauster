@@ -209,6 +209,45 @@ async def test_spawn_explicit_pty_overrides_standard_config(runner_config) -> No
 
 
 @_POSIX_ONLY
+async def test_spawn_pty_ignores_custom_name(runner_config) -> None:
+    """#780 disposition: pty (the flag form) has no --name equivalent.
+
+    ``label`` (and the positional name actually passed to ``--remote-control``)
+    stay the project name, unlike a standard bridge where the same
+    ``custom_name`` becomes ``--name`` (see
+    test_spawn_controls.test_spawn_custom_name_reaches_argv_and_label).
+    """
+    runner = SessionRunner(runner_config[0], claude_json=runner_config[1])  # config=standard
+    inst = await runner.spawn("alpha", resume_mode="pty", custom_name="My Custom Bridge")
+    try:
+        assert inst.resume_mode == "pty"
+        assert inst.label == "alpha"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--remote-control") + 1] == "alpha"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_ignores_sandbox(runner_config) -> None:
+    """#780 is server-mode: a pty bridge records "default" and gets no sandbox flag.
+
+    Mirrors :func:`test_spawn_pty_ignores_custom_name` — the sandbox toggle is only
+    wired into the standard subcommand argv, never the flag-form pty bridge.
+    """
+    runner = SessionRunner(runner_config[0], claude_json=runner_config[1])  # config=standard
+    inst = await runner.spawn("alpha", resume_mode="pty", sandbox="on")
+    try:
+        assert inst.resume_mode == "pty"
+        assert inst.sandbox_mode == "default"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" not in argv
+        assert "--no-sandbox" not in argv
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+@_POSIX_ONLY
 async def test_spawn_pty_launch_failure_sets_error(runner_config, tmp_path, monkeypatch) -> None:
     """A keeper that fails to launch (OSError) marks the instance ERROR and persists it."""
     from clauster.models import Project, RemoteControlInstance
