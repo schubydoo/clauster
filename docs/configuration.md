@@ -169,9 +169,21 @@ export PATH="$_bindir:$PATH"
 exec "$_bindir/npx" "$@"
 ```
 
-Restart the service (or start a fresh bridge) for the shim to take effect, then
-re-check `claude mcp list` inside a bridge. Interactive-launch deployments inherit
-`node` from your shell and never hit this. A first-class opt-in knob is tracked in
+Save it as `~/.local/bin/npx` and **make it executable** —
+`chmod +x ~/.local/bin/npx`. Without the executable bit the spawn fails with
+`Permission denied`, the same silent symptom this is meant to fix. Then restart
+the service (or start a fresh bridge) for it to take effect and re-check
+`claude mcp list` inside a bridge.
+
+The shim intercepts `command: "npx"` servers — the common case for published
+servers. A server configured with `command: "node"` directly (e.g.
+`node /path/to/server.js`) is spawned the same way and also finds no `node` on
+the bridge `PATH`; cover it with a parallel `~/.local/bin/node` shim built on the
+same pattern (resolve nvm's `default`, prepend its bin dir, then
+`exec "$_bindir/node" "$@"`).
+
+Interactive-launch deployments inherit `node` from your shell and never hit this.
+A first-class opt-in knob is tracked in
 [issue #792](https://github.com/schubydoo/clauster/issues/792).
 
 ## `instance_defaults` — new-bridge defaults (`InstanceDefaults`)
