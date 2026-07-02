@@ -1938,3 +1938,58 @@ async def test_poll_forever_propagates_cancel_from_poll(runner_config, monkeypat
     monkeypatch.setattr(runner, "poll_once", _cancel)
     with pytest.raises(asyncio.CancelledError):
         await runner._poll_forever()
+
+
+# ----- get_instance_for_project determinism with N instances per project (#778) -----
+
+
+def _seed(runner, project, *, mode, status):
+    inst = RemoteControlInstance(project=project, label=project, resume_mode=mode, status=status)
+    runner._instances[inst.instance_id] = inst
+    return inst
+
+
+def test_get_instance_for_project_prefers_live_standard(runner_config):
+    """The live standard bridge wins even when registered after stopped/live pty rows.
+
+    Pre-#778 the first registry match won, so a stopped pty session registered first
+    hid a RUNNING standard bridge from ``_bridge_running`` (and the name-compat
+    ``resolve_bridge_id`` fallback picked an arbitrary session).
+    """
+    runner = _make_runner(runner_config)
+    _seed(runner, "alpha", mode="pty", status=InstanceStatus.STOPPED)
+    live_pty = _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)
+    _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)  # a younger live session
+    standard = _seed(runner, "alpha", mode="standard", status=InstanceStatus.RUNNING)
+    assert runner.get_instance_for_project("alpha") is standard
+    # Without a live standard, the OLDEST live pty session wins — over the stopped
+    # row registered before it and over the younger live session after it.
+    standard.status = InstanceStatus.STOPPED
+    assert runner.get_instance_for_project("alpha") is live_pty
+
+
+def test_get_instance_for_project_falls_back_to_first_when_none_live(runner_config):
+    """With nothing live, the first (oldest-registered) instance is returned.
+
+    The name-compat fallback must still reach a STOPPED instance — Forget/Resume by
+    project name target exactly those.
+    """
+    runner = _make_runner(runner_config)
+    oldest = _seed(runner, "alpha", mode="pty", status=InstanceStatus.STOPPED)
+    _seed(runner, "alpha", mode="standard", status=InstanceStatus.STOPPED)
+    assert runner.get_instance_for_project("alpha") is oldest
+    assert runner.get_instance_for_project("ghost") is None
+
+
+def test_has_running_instance_sees_running_pty_behind_starting_standard(runner_config):
+    """The liveness flag must not miss a RUNNING pty while a standard bridge STARTS (#778).
+
+    ``get_instance_for_project``'s canonical pick prefers the live standard bridge —
+    transiently STARTING — so ``_bridge_running`` routes through this any-RUNNING scan.
+    """
+    runner = _make_runner(runner_config)
+    _seed(runner, "alpha", mode="standard", status=InstanceStatus.STARTING)
+    assert runner.has_running_instance("alpha") is False  # nothing RUNNING yet
+    _seed(runner, "alpha", mode="pty", status=InstanceStatus.RUNNING)
+    assert runner.has_running_instance("alpha") is True
+    assert runner.has_running_instance("beta") is False

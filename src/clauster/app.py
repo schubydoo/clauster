@@ -13,6 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TypeVar
 
 import segno
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -95,6 +96,10 @@ logger = logging.getLogger(__name__)
 _SESSION_COOKIE = "clauster_session"
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
+
+# Result type for _spawn_or_http: the create route awaits a SpawnOutcome, the
+# resume route a bare RemoteControlInstance (#778) — same exception mapping.
+_SpawnT = TypeVar("_SpawnT")
 
 # Content-Security-Policy for every response (defence-in-depth; #428). The CSRF
 # Origin gate already blocks cross-origin state changes, so this is a fallback
@@ -1757,6 +1762,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     @app.get("/api/instances")
     async def api_instances() -> list[RemoteControlInstance]:
+        """Every managed bridge, one row per instance (registration order).
+
+        A project may contribute several rows (#778): at most one standard
+        (server-mode) bridge plus any number of interactive (pty) sessions.
+        Group client-side by ``project`` and key rows by ``instance_id`` —
+        ``project`` is not unique.
+        """
         return runner.list_instances()
 
     @app.get("/api/hosted")
@@ -2125,10 +2137,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 ),
             )
 
-    async def _spawn_or_http(coro: Awaitable[RemoteControlInstance]) -> RemoteControlInstance:
+    async def _spawn_or_http(coro: Awaitable[_SpawnT]) -> _SpawnT:
         """Await a spawn/resume coroutine, mapping its exceptions to HTTP codes.
 
         Shared by the create and resume routes so the mapping lives in one place.
+        Generic over the coroutine's result: the create route awaits a
+        :class:`~clauster.runner.SpawnOutcome`, resume a bare instance (#778).
         """
         try:
             return await coro
@@ -2141,8 +2155,36 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except SpawnError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    def _spawn_body(
+        instance: RemoteControlInstance,
+        *,
+        created: bool,
+        reason: str | None = None,
+        warnings: list[str] | None = None,
+    ) -> dict:
+        """Serialize a spawn response: the instance plus additive outcome keys (#778).
+
+        The instance's own fields stay at the top level (existing clients read
+        ``status``/``session_url`` etc. straight off the body); ``created`` /
+        ``reason`` / ``warnings`` are additive so pre-#778 clients ignore them.
+        """
+        return {
+            **instance.model_dump(mode="json"),
+            "created": created,
+            "reason": reason,
+            "warnings": warnings or [],
+        }
+
     @app.post("/api/instances", status_code=201)
-    async def api_spawn(body: dict) -> RemoteControlInstance:
+    async def api_spawn(body: dict, response: Response) -> dict:
+        """Start a bridge/session; 201 when launched, 200 when an existing one was reused.
+
+        The body is the instance plus outcome keys (#778): ``created`` is False —
+        with ``reason`` — when the standard-singleton cap returned the already-live
+        standard bridge instead of launching a second one; ``warnings`` carries
+        non-blocking advisories (an interactive pty session launched without a
+        worktree risks conflicting concurrent edits).
+        """
         project = body.get("project")
         if not isinstance(project, str) or not project:
             raise HTTPException(status_code=422, detail="body must include a 'project' string")
@@ -2159,16 +2201,26 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             if value is not None and not isinstance(value, str):
                 raise HTTPException(status_code=422, detail=f"{field} must be a string")
         if channel == "hosted":
-            return await _spawn_hosted(project, permission_mode)
+            return _spawn_body(await _spawn_hosted(project, permission_mode), created=True)
         if channel != "remote-control":
             raise HTTPException(status_code=422, detail=f"unknown channel: {channel!r}")
-        return await _spawn_or_http(
-            runner.spawn(
+        outcome = await _spawn_or_http(
+            runner.spawn_detailed(
                 project,
                 spawn_mode=spawn_mode,
                 permission_mode=permission_mode,
                 resume_mode=resume_mode,
             )
+        )
+        if not outcome.created:
+            # Nothing was launched — the existing live instance came back. 200, not
+            # 201: no resource was created, and `reason` says why.
+            response.status_code = 200
+        return _spawn_body(
+            outcome.instance,
+            created=outcome.created,
+            reason=outcome.reason,
+            warnings=outcome.warnings,
         )
 
     async def _hosted_prereqs(project: str) -> tuple[object, Path, str]:
@@ -2420,8 +2472,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         raise HTTPException(status_code=404, detail=f"project {name!r} not found")
 
     def _bridge_running(name: str) -> bool:
-        inst = runner.get_instance_for_project(name)
-        if inst is not None and inst.status is InstanceStatus.RUNNING:
+        # Any-RUNNING scan, not the canonical-instance resolver: with N instances per
+        # project (#778) the canonical pick can transiently be a STARTING standard
+        # bridge while a pty session is already RUNNING — this flag must not miss it.
+        if runner.has_running_instance(name):
             return True
         return name in runner.external_sessions_by_project()
 

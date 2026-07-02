@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -122,6 +123,24 @@ class AdoptionUnavailable(RuntimeError):
     """
 
 
+@dataclass(slots=True)
+class SpawnOutcome:
+    """What a spawn call actually did, for API callers that must surface it (#778).
+
+    ``created`` is False when the call returned an already-live instance instead of
+    launching a new one — the standard-singleton cap (a live standard bridge exists
+    for the project) or an idempotent resume of an already-live pty session —
+    with ``reason`` saying which. ``warnings`` carries non-blocking advisories the
+    caller should show the operator (today: launching an interactive pty session
+    without a worktree risks conflicting concurrent edits).
+    """
+
+    instance: RemoteControlInstance
+    created: bool
+    reason: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+
 # How long to wait for a freshly-spawned bridge to reach its poll loop.
 _READY_TIMEOUT = 15.0
 _READY_POLL_INTERVAL = 0.25
@@ -171,9 +190,11 @@ class SessionRunner:
         self._procs: dict[str, subprocess.Popen] = {}
         self._sessions: list[WorkingSession] = []
         self._poll_task: asyncio.Task | None = None
-        # Server-side per-project metrics snapshot (#354): the metrics task refreshes it
-        # off the request path so /api/projects/{name}/metrics + the batch read + the
-        # /metrics scrape all serve from the last sample at O(1), no per-request thread.
+        # Server-side metrics snapshot (#354): the metrics task refreshes it off the
+        # request path so /api/projects/{name}/metrics + the batch read + the /metrics
+        # scrape all serve from the last sample at O(1), no per-request thread. Keyed
+        # by instance_id (#778 — a project may run several bridges, so a project key
+        # would clobber); the public readers aggregate per project.
         self._metrics_cache: dict[str, dict] = {}
         self._metrics_task: asyncio.Task | None = None
         # Per-spawn background tasks that watch a STARTING bridge until it either
@@ -262,13 +283,40 @@ class SessionRunner:
         return dict(self._crash_counts)
 
     def metrics_snapshot(self, name: str) -> dict | None:
-        """Return a copy of the last cached resource sample for ``name``, or None (#354)."""
-        sample = self._metrics_cache.get(name)
-        return dict(sample) if sample is not None else None
+        """Return the aggregated cached resource sample for project ``name``, or None (#354).
+
+        With several bridges live for one project (#777), the per-instance samples are
+        folded into one per-project figure (see :meth:`metrics_snapshots`).
+        """
+        return self.metrics_snapshots().get(name)
 
     def metrics_snapshots(self) -> dict[str, dict]:
-        """Return a copy of the per-project cached resource samples (#354 batch read)."""
-        return dict(self._metrics_cache)
+        """Return per-project aggregated resource samples (#354 batch read).
+
+        The cache holds one sample per *instance* (#778); this folds them into one
+        dict per project — ``procs``/``cpu_percent``/``rss_bytes`` summed, the
+        ``disk_*`` rates summed when any bridge reports them (``None`` when none do),
+        plus ``bridges``: how many live bridges the figure covers. A cache entry whose
+        instance vanished from the registry between refreshes is dropped, never
+        misattributed.
+        """
+        out: dict[str, dict] = {}
+        for iid, sample in self._metrics_cache.items():
+            inst = self._instances.get(iid)
+            if inst is None:  # forgotten since the last refresh
+                continue
+            agg = out.get(inst.project)
+            if agg is None:
+                out[inst.project] = {**sample, "bridges": 1}
+                continue
+            agg["bridges"] += 1
+            agg["procs"] += sample["procs"]
+            agg["cpu_percent"] = round(agg["cpu_percent"] + sample["cpu_percent"], 1)
+            agg["rss_bytes"] += sample["rss_bytes"]
+            for k in ("disk_read_bps", "disk_write_bps"):
+                if sample[k] is not None:
+                    agg[k] = (agg[k] or 0) + sample[k]
+        return out
 
     async def _sample_one_bridge(self, inst: RemoteControlInstance) -> dict | None:
         """Sample a single running bridge's resource tree, or None to skip it (#407).
@@ -329,7 +377,9 @@ class SessionRunner:
                 _log.debug("metrics sample failed for %s: %s", inst.project, sample)
                 continue
             if sample:
-                fresh[inst.project] = sample
+                # Keyed by instance_id (#778): several bridges may share one project,
+                # and a project key would keep only whichever sampled last.
+                fresh[inst.instance_id] = sample
         self._metrics_cache = fresh
 
     def _warn_if_refresh_slow(self, elapsed: float) -> None:
@@ -365,17 +415,44 @@ class SessionRunner:
         return self._instances.get(instance_id)
 
     def get_instance_for_project(self, project_name: str) -> RemoteControlInstance | None:
-        """Return the first live instance for a project, or None.
+        """Return the most relevant instance for a project, or None.
 
-        For standard bridges this is always the unique instance. For pty sessions
-        it returns the first (oldest) live one. Used by callers that only need to
-        know *whether* a managed bridge exists for a project (e.g. ``_bridge_running``
-        in app.py). Does not raise; returns ``None`` when no instance matches.
+        A project may hold one standard bridge plus N interactive (pty) sessions
+        (#777), so "the project's instance" is resolved deterministically (#778):
+        the live standard bridge first, then the first (oldest-registered) live pty
+        session, then the first instance in any status — so a caller checking
+        liveness (``_bridge_running`` in app.py) never misses a running bridge
+        behind a stopped one, while name-compat callers (``resolve_bridge_id``) can
+        still reach a stopped instance. Does not raise; ``None`` when no instance
+        matches.
         """
+        live = (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+        first: RemoteControlInstance | None = None
+        first_live: RemoteControlInstance | None = None
         for inst in self._instances.values():
-            if inst.project == project_name:
-                return inst
-        return None
+            if inst.project != project_name:
+                continue
+            if first is None:
+                first = inst
+            if inst.status in live:
+                if inst.resume_mode == "standard":
+                    return inst  # the singleton standard bridge wins outright
+                if first_live is None:
+                    first_live = inst
+        return first_live or first
+
+    def has_running_instance(self, project_name: str) -> bool:
+        """Report whether ANY managed instance for the project is RUNNING (#778).
+
+        Liveness-exact, unlike :meth:`get_instance_for_project`, whose canonical
+        pick can transiently be a STARTING standard bridge while a pty session for
+        the same project is already RUNNING — a caller that only wants "is
+        something running here?" (``_bridge_running`` in app.py) must not miss it.
+        """
+        return any(
+            inst.project == project_name and inst.status is InstanceStatus.RUNNING
+            for inst in self._instances.values()
+        )
 
     def resolve_bridge_id(self, identity: str) -> str | None:
         """Resolve a bridge identity (instance_id OR project name) to an instance_id.
@@ -388,8 +465,10 @@ class SessionRunner:
 
         Returns ``None`` when the identity matches neither a known instance_id nor a
         managed project — the caller raises the same 404 it would have raised before.
-        A project maps unambiguously today (one standard bridge per project); if that
-        ever loosens for pty, this returns the first live instance for the project.
+        With N instances per project the name fallback resolves deterministically
+        via :meth:`get_instance_for_project` (#778): the live standard bridge first,
+        then the oldest live pty session, then the first instance in any status.
+        Per-session operations on a multi-session project must send the instance_id.
         """
         if identity in self._instances:
             return identity
@@ -577,6 +656,32 @@ class SessionRunner:
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
     ) -> RemoteControlInstance:
+        """Spawn a bridge for ``name`` and return the instance (see :meth:`spawn_detailed`).
+
+        Thin wrapper for callers that only need the instance; :meth:`spawn_detailed`
+        additionally reports whether anything was actually launched and any
+        non-blocking spawn warnings (#778).
+        """
+        outcome = await self.spawn_detailed(
+            name,
+            spawn_mode=spawn_mode,
+            permission_mode=permission_mode,
+            resume_mode=resume_mode,
+            resume=resume,
+            resume_target=resume_target,
+        )
+        return outcome.instance
+
+    async def spawn_detailed(
+        self,
+        name: str,
+        *,
+        spawn_mode: SpawnMode | None = None,
+        permission_mode: PermissionMode | None = None,
+        resume_mode: ResumeMode | None = None,
+        resume: bool = False,
+        resume_target: RemoteControlInstance | None = None,
+    ) -> SpawnOutcome:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
 
         Validates spawn/permission modes, ensures remote control + the recap hook are
@@ -602,6 +707,11 @@ class SessionRunner:
         of a mode-agnostic project scan — otherwise a resume of a stopped pty session
         while a standard bridge is concurrently live (both allowed per project since
         #777) would resolve against the standard bridge and hand it back instead.
+
+        Returns a :class:`SpawnOutcome`: ``created`` is False when an already-live
+        instance was returned instead of launching (with ``reason``), and
+        ``warnings`` carries non-blocking advisories (the pty no-worktree collision
+        warning) so the API can surface them (#778).
         """
         async with self._spawn_lock_for(name):
             return await self._spawn_locked(
@@ -632,8 +742,8 @@ class SessionRunner:
         resume_mode: ResumeMode | None = None,
         resume: bool = False,
         resume_target: RemoteControlInstance | None = None,
-    ) -> RemoteControlInstance:
-        # Body of spawn(), always run under the per-project lock (see spawn()).
+    ) -> SpawnOutcome:
+        # Body of spawn_detailed(), always run under the per-project lock (see spawn()).
         proj = self._resolve_project(name)
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
@@ -649,6 +759,10 @@ class SessionRunner:
         )
         self._validate_spawn_options(proj, spawn_mode, permission_mode, resume_mode)
 
+        # Non-blocking advisories collected along the way, surfaced on the outcome so
+        # the API can show them to the operator (#778).
+        spawn_warnings: list[str] = []
+
         # --- per-mode spawn policy (#777) -----------------------------------
         if effective_resume_mode == "standard":
             # Standard bridges: cap at one per project.
@@ -660,7 +774,15 @@ class SessionRunner:
             # second Start is a no-op the caller already sees as "still running".
             live_standard = self._live_standard_for_project(name)
             if live_standard is not None:
-                return live_standard
+                return SpawnOutcome(
+                    instance=live_standard,
+                    created=False,
+                    reason=(
+                        f"a standard bridge for {name!r} is already "
+                        f"{live_standard.status.value} — standard bridges are capped at "
+                        "one per project, so the existing bridge was returned"
+                    ),
+                )
         else:
             # PTY sessions: N per project allowed; idempotent ONLY for the specific
             # instance being resumed (resume_target), never a coincidentally-live
@@ -671,10 +793,23 @@ class SessionRunner:
                 and resume_target is not None
                 and resume_target.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
             ):
-                return resume_target
+                return SpawnOutcome(
+                    instance=resume_target,
+                    created=False,
+                    reason=(
+                        f"interactive session {resume_target.instance_id} is already "
+                        f"{resume_target.status.value} — returned it instead of resuming"
+                    ),
+                )
             # Warn (don't block) when spawning a pty session without a worktree:
             # two pty sessions sharing the same cwd risk conflicting file edits.
             if spawn_mode != "worktree":
+                spawn_warnings.append(
+                    f"interactive session for {name!r} launched without a worktree — "
+                    "concurrent interactive sessions sharing the same working directory "
+                    "may cause conflicting file edits. Use the worktree spawn mode to "
+                    "isolate each session."
+                )
                 _log.warning(
                     "pty session for %r launched without a worktree — concurrent interactive "
                     "sessions sharing the same working directory may cause conflicting file "
@@ -786,7 +921,13 @@ class SessionRunner:
         # and its resume_mode is now resolved. A "ready" follows iff it reaches RUNNING.
         self._emit_lifecycle("spawn", instance)
         if instance.resume_mode == "pty":
-            return await self._spawn_pty(instance, proj, name, log_path, permission_mode, resume)
+            return SpawnOutcome(
+                instance=await self._spawn_pty(
+                    instance, proj, name, log_path, permission_mode, resume
+                ),
+                created=True,
+                warnings=spawn_warnings,
+            )
 
         try:
             proc = await asyncio.to_thread(
@@ -798,7 +939,8 @@ class SessionRunner:
             _log.warning("spawn of %s failed to launch: %s", name, exc)
             instance.status = InstanceStatus.ERROR
             await self._persist()
-            return instance
+            # created=True: a new registry row exists (in ERROR), not a reused one.
+            return SpawnOutcome(instance=instance, created=True, warnings=spawn_warnings)
         self._procs[instance.instance_id] = proc
         instance.bridge_pid = proc.pid
         instance.bridge_proc_start = await asyncio.to_thread(procutil.proc_create_time, proc.pid)
@@ -814,7 +956,7 @@ class SessionRunner:
         # only ever promoted to RUNNING once it actually registers an environment.
         if instance.status is InstanceStatus.STARTING:
             self._start_startup_watch(instance.instance_id)
-        return instance
+        return SpawnOutcome(instance=instance, created=True, warnings=spawn_warnings)
 
     async def resume(self, instance_id: str) -> RemoteControlInstance:
         """Re-spawn a stopped/crashed bridge, reconnecting to its prior session.

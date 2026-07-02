@@ -1646,27 +1646,41 @@ def test_metrics_no_running_bridge_returns_false(write_config, tmp_path):
     assert r.json() == {"running": False}
 
 
+def _cache_sample(client, project: str, sample: dict) -> None:
+    """Register an instance for ``project`` and cache ``sample`` under its id (#778).
+
+    The cache is keyed by instance_id and the public readers fold per project, so a
+    seeded sample must belong to a registered instance to be visible.
+    """
+    from clauster.models import RemoteControlInstance
+
+    inst = RemoteControlInstance(project=project, label=project)
+    runner = client.app.state.runner
+    runner._instances[inst.instance_id] = inst
+    runner._metrics_cache[inst.instance_id] = sample
+
+
 def test_metrics_running_bridge_returns_sample(write_config, tmp_path):
     # The endpoint now serves the runner's cached snapshot (#354) — O(1), no sampling.
     client = _client(write_config, tmp_path)
-    client.app.state.runner._metrics_cache["alpha"] = {
+    _cache_sample(client, "alpha", {"cpu_percent": 3.0, "rss_bytes": 4096, "procs": 2})
+    body = client.get("/api/projects/alpha/metrics").json()
+    assert body == {
+        "running": True,
         "cpu_percent": 3.0,
         "rss_bytes": 4096,
         "procs": 2,
+        "bridges": 1,
     }
-    body = client.get("/api/projects/alpha/metrics").json()
-    assert body == {"running": True, "cpu_percent": 3.0, "rss_bytes": 4096, "procs": 2}
 
 
 def test_metrics_batch_returns_all_cached(write_config, tmp_path):
     # The batch endpoint (#354) returns every cached bridge in one O(1) read.
     client = _client(write_config, tmp_path)
-    client.app.state.runner._metrics_cache = {
-        "alpha": {"cpu_percent": 1.0, "rss_bytes": 10},
-        "beta": {"cpu_percent": 2.0, "rss_bytes": 20},
-    }
+    _cache_sample(client, "alpha", {"cpu_percent": 1.0, "rss_bytes": 10})
+    _cache_sample(client, "beta", {"cpu_percent": 2.0, "rss_bytes": 20})
     body = client.get("/api/metrics").json()
-    assert body["alpha"] == {"running": True, "cpu_percent": 1.0, "rss_bytes": 10}
+    assert body["alpha"] == {"running": True, "cpu_percent": 1.0, "rss_bytes": 10, "bridges": 1}
     assert body["beta"]["cpu_percent"] == 2.0
 
 
@@ -1756,7 +1770,7 @@ def test_prometheus_exposes_crash_counter(write_config, tmp_path):
 def test_prometheus_exposes_per_bridge_cpu_rss(write_config, tmp_path):
     # /metrics reads the runner's metrics cache (#354) — no per-scrape sampling.
     client = _client_with(write_config, tmp_path, "observability:\n  prometheus_enabled: true\n")
-    client.app.state.runner._metrics_cache["alpha"] = {"cpu_percent": 7.5, "rss_bytes": 2048}
+    _cache_sample(client, "alpha", {"cpu_percent": 7.5, "rss_bytes": 2048})
     body = client.get("/metrics").text
     assert 'clauster_bridge_cpu_percent{project="alpha"} 7.5' in body
     assert 'clauster_bridge_rss_bytes{project="alpha"} 2048' in body
