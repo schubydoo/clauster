@@ -1433,4 +1433,19 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
     raw = _apply_env_overrides(raw)
     config = ClausterConfig.model_validate(raw)
     config._source_path = found
+    if "database_url" in raw:
+        # database_url was removed in 0.13 (#796): clauster is SQLite-only. The key is
+        # dropped as an unknown field so an old config still LOADS (additive-only), but do
+        # NOT drop it silently — an operator who set a Postgres DSN would otherwise believe
+        # their data lives there while every write goes to local SQLite. "Fail closed, never
+        # silently": surface the ignored setting + the real data location.
+        from .db.engine import resolve_url  # local import: avoid a config->db import cycle
+
+        _log.warning(
+            "`database_url` in %s is no longer supported and was IGNORED — clauster is "
+            "SQLite-only since 0.13 (#796). Data is stored at %s. Remove `database_url` "
+            "from the config to silence this warning.",
+            found,
+            resolve_url(config.state_dir),
+        )
     return config

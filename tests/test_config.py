@@ -25,14 +25,20 @@ def test_instance_defaults_verbose_round_trips(write_config):
     assert config.instance_defaults.verbose is True
 
 
-def test_legacy_database_url_key_still_loads(write_config):
+def test_legacy_database_url_key_still_loads_with_warning(write_config, caplog):
     # #796: clauster is SQLite-only now — the `database_url` field was removed from
-    # ClausterConfig. Schema is additive-only (old configs must always validate
-    # against newer versions), so a leftover `database_url` key from a pre-#796
-    # config must be silently ignored, not rejected, on load.
+    # ClausterConfig. Schema is additive-only (old configs must always validate against
+    # newer versions), so a leftover `database_url` key from a pre-#796 config must LOAD,
+    # not be rejected. But it must NOT be dropped silently ("fail closed, never silently"):
+    # an operator who set a Postgres DSN would otherwise think their data lives there while
+    # writes go to local SQLite — so load emits a WARNING naming the real data location.
     cfg_path = write_config("database_url: postgresql+psycopg://x/y\n")
-    config = load_config(cfg_path)
+    with caplog.at_level("WARNING", logger="clauster.config"):
+        config = load_config(cfg_path)
     assert not hasattr(config, "database_url")
+    msgs = [r.message for r in caplog.records]
+    assert any("database_url" in m and "no longer supported" in m for m in msgs)
+    assert any("clauster.db" in m for m in msgs)  # points at the real SQLite location
 
 
 def test_missing_projects_root_rejected(tmp_path):
