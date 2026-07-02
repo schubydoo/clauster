@@ -562,7 +562,10 @@
             <div class="list-group-item sess-row" :class="bridgeRailClass(i.rk)" x-show="activeFilter === 'all' || activeFilter === 'desktop'">
               <div class="d-flex align-items-center flex-wrap gap-1">
                 {{ desktop_row_head("Running") }}
-                <span class="text-secondary small ms-1" x-show="metricsLabel(i.project)" x-cloak
+                {# Project-keyed metrics on the STANDARD row only (#779): a pty row would
+                   otherwise wear the co-located standard bridge's CPU/MEM figures. #}
+                <span class="text-secondary small ms-1" x-cloak
+                      x-show="i.resume_mode !== 'pty' && metricsLabel(i.project)"
                       :title="metricsTitle(i.project)" x-text="metricsLabel(i.project)"></span>
                 <span class="ms-auto d-flex gap-1">
                   <a class="btn btn-sm btn-primary" target="_blank" rel="noopener"

@@ -518,7 +518,7 @@
       presentFilters() {
         const f = ["all"];
         if (this.liveHosted().length) f.push("browser");
-        if (this.activeBridges().length) f.push("desktop");
+        if (this.activeBridges().length + this.ptyPendingNames().length) f.push("desktop");
         if (this.liveAgents().length) f.push("detached");
         if (this.externalSessionsFlat().length) f.push("external");
         return f;
@@ -534,10 +534,13 @@
       // #357: live sessions matching the active filter; 0 drives the "no matches" line
       // (e.g. the selected type empties out while still active).
       activeFilterCount() {
+        // The pending pty stub is a visible desktop-bucket row (#779): count it, or a
+        // lone pending launch shows "No sessions match this filter." over its own stub.
+        const pending = this.ptyPendingNames().length;
         const counts = {
-          all: this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length,
+          all: this.liveHosted().length + this.activeBridges().length + this.liveAgents().length + this.externalSessionsFlat().length + pending,
           browser: this.liveHosted().length,
-          desktop: this.activeBridges().length,
+          desktop: this.activeBridges().length + pending,
           detached: this.liveAgents().length,
           external: this.externalSessionsFlat().length,
         };
@@ -3078,7 +3081,7 @@
       // valid spawn mode. (Was a two-statement inline handler with an if.)
       toggleLaunchPop(isGitRepo) {
         this.lopen = !this.lopen;
-        if (this.lopen) this.coerceSpawnMode(name, isGitRepo);
+        if (this.lopen) { this.coerceSpawnMode(name, isGitRepo); this.coercePtySpawn(name); }
       },
       // Dismiss the popover (outside-click / Escape) AND clear any pending trust/bypass
       // gate (#686) so a hidden gate never lingers; mopen resets so More options
