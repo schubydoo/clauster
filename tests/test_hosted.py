@@ -1242,6 +1242,112 @@ async def test_manager_synced_tolerates_missing_session(fake_claustrum):
         assert mgr.get_instance(pid) is not None
 
 
+# -- #834: lifecycle ops resolve the row's instance_id, not just the registry key --
+# Hosted rows are keyed internally by ``claustrum_process_id`` but also expose an
+# ``instance_id`` (dashed UUID) — the field API clients naturally reach for. Every
+# lookup must resolve either id to the same session; an unknown id still misses.
+
+
+async def test_manager_lookup_by_instance_id(fake_claustrum):
+    async with _manager(fake_claustrum) as (_fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        assert inst.instance_id != inst.claustrum_process_id  # two distinct id fields
+        # get_instance + session both resolve via the instance_id, not just the key.
+        got = mgr.get_instance(inst.instance_id)
+        assert got is not None and got.claustrum_process_id == inst.claustrum_process_id
+        assert mgr.session(inst.instance_id) is mgr.session(inst.claustrum_process_id)
+        assert mgr.get_instance("no-such-id") is None  # an unknown id still misses
+
+
+async def test_manager_send_by_instance_id(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        await mgr.send(inst.instance_id, "hello")  # routed by the dashed UUID
+        await wait_until(lambda: _stdin_frames(fake, inst.claustrum_process_id))
+        frames = _stdin_frames(fake, inst.claustrum_process_id)
+        assert frames == [{"type": "user", "message": {"role": "user", "content": "hello"}}]
+
+
+async def test_manager_stop_by_instance_id_locks_on_canonical_key(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit_exit(pid, 0)  # exit first so stop() doesn't wait out the grace
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
+        result = await mgr.stop(inst.instance_id)  # stop by the dashed UUID
+        assert result.status is InstanceStatus.STOPPED
+        # The per-id lifecycle lock is keyed by the canonical process_id regardless of
+        # which id the caller passed — so a mixed-id concurrent pair serializes on one
+        # lock rather than each minting its own and both entering the critical section.
+        assert pid in mgr._id_locks
+        assert inst.instance_id not in mgr._id_locks
+
+
+async def test_manager_forget_by_instance_id(fake_claustrum):
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        await fake.emit_exit(pid, 0)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
+        await mgr.stop(pid)
+        await mgr.forget(inst.instance_id)  # forget by the dashed UUID
+        assert mgr.get_instance(pid) is None
+        assert mgr.list_instances() == []
+
+
+async def test_manager_resume_by_instance_id(fake_claustrum):
+    uuid = "11111111-2222-4333-8444-555555555555"
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        old_id = await _crash_with_uuid(fake, mgr, client, uuid)
+        old_instance_id = mgr.get_instance(old_id).instance_id
+        # Resume addressed by the pre-resume instance_id, not the process_id.
+        resumed = await mgr.resume(client, old_instance_id, cwd="/tmp/proj", claude_binary=_BIN)
+        assert resumed.status is InstanceStatus.RUNNING
+        assert resumed.claustrum_process_id != old_id  # fresh daemon process
+        assert resumed.claude_session_uuid == uuid
+        assert mgr.get_instance(old_id) is None  # dead row retired
+        await mgr.aclose()
+
+
+async def test_manager_kill_orphan_by_instance_id(monkeypatch):
+    killed: list[tuple] = []
+    monkeypatch.setattr(
+        "clauster.procutil.kill_if_match", lambda pid, ps: killed.append((pid, ps))
+    )
+    mgr = HostedManager()
+    inst = _orphan_instance()
+    mgr._instances[inst.claustrum_process_id] = inst
+    result = await mgr.kill_orphan(inst.instance_id)  # kill by the dashed UUID
+    assert killed == [(4242, 1000.0)]  # match-gated kill still issued for the survivor
+    assert result.status is InstanceStatus.STOPPED
+
+
+async def test_manager_stop_unknown_raises(fake_claustrum):
+    # An unknown id fails the _key_for resolve → 404 before any lock is taken.
+    async with _manager(fake_claustrum) as (_fake, _client, mgr):
+        with pytest.raises(HostedSessionError):
+            await mgr.stop("no-such-id")
+
+
+async def test_manager_kill_orphan_row_evicted_after_resolve_raises(monkeypatch):
+    # A concurrent forget/resume can pop the row between _key_for() and lock
+    # acquisition; kill_orphan must re-check under the lock and raise (caller maps
+    # 404), never AttributeError on a None row.
+    mgr = HostedManager()
+    inst = _orphan_instance()
+    mgr._instances[inst.claustrum_process_id] = inst
+    real_key_for = mgr._key_for
+
+    def _resolve_then_evict(hid):
+        key = real_key_for(hid)
+        mgr._instances.pop(inst.claustrum_process_id, None)  # a concurrent op wins the row
+        return key
+
+    monkeypatch.setattr(mgr, "_key_for", _resolve_then_evict)
+    with pytest.raises(HostedSessionError):
+        await mgr.kill_orphan(inst.claustrum_process_id)
+
+
 # -- reattach + persistence (CL-6) -----------------------------------------
 
 
