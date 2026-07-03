@@ -1590,17 +1590,25 @@
       async _loadMcpApprovals(myGen) {
         const c = this.configMgmt, ap = c.mcp.approvals;
         ap.confirm = ""; ap.resetConfirm = "";
+        // Baseline to an empty, NON-dirty state up front (before the fetch) so EVERY
+        // failure path — a non-ok response, an auth redirect, a fetch reject, or a
+        // non-JSON body that throws in .json() — leaves `orig` matching the sig rather
+        // than at its "" init. A stale "" would read as false-dirty ('[]|[]' !== '')
+        // and let a Save PUT an empty enabled/disabled that clobbers real stored
+        // choices to unset — a silent data-loss the "fail closed" rule forbids. On
+        // success both are overwritten below.
+        ap.enabled = []; ap.disabled = []; ap.orig = this._mcpApprovalsSig([], []);
         try {
           const res = await fetch(ROOT + "/api/config-write/mcp/approvals?project=" + encodeURIComponent(c.project));
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { ap.enabled = []; ap.disabled = []; ap.orig = this._mcpApprovalsSig([], []); return; }
+          if (!res.ok) return;  // baseline above already left an empty, non-dirty panel
           const d = await res.json();
           if (c.gen !== myGen) return;
           ap.enabled = Array.isArray(d.enabled) ? d.enabled.slice() : [];
           ap.disabled = Array.isArray(d.disabled) ? d.disabled.slice() : [];
           ap.orig = this._mcpApprovalsSig(ap.enabled, ap.disabled);
-        } catch (e) { /* approvals are secondary — leave the server list usable on failure */ }
+        } catch (e) { /* approvals are secondary — the baseline above keeps the panel non-dirty */ }
       },
       configMgmtMcpApprovalState(name) {
         const ap = this.configMgmt.mcp.approvals;
