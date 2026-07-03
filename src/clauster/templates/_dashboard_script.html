@@ -1518,14 +1518,14 @@
         m.entryText = JSON.stringify(row.entry, null, 2); m.orig = m.entryText; m.confirm = "";
       },
       configMgmtCancelMcp() {
-        const m = this.configMgmt.mcp;
-        m.editing = false; m.confirm = ""; this.configMgmt.error = "";
-        // Re-fetch: a New/edit bumped gen and may have orphaned the approvals
-        // sub-fetch (its gen-guarded finally then skips), so the panel could hold a
-        // stale/baseline-empty approvals state. Reloading guarantees the list +
-        // approvals reflect real stored choices before the panel is interactive
-        // again — otherwise a Save could silently clobber real approvals to empty.
-        this.configMgmtReload();
+        const c = this.configMgmt, m = c.mcp;
+        m.editing = false; m.confirm = ""; c.error = "";
+        // Reload ONLY if a New/edit orphaned an in-flight approvals sub-fetch
+        // (loading still true) — then the panel holds a baseline/stale state that a
+        // Save could silently clobber, so a fresh fetch is required. When approvals
+        // are already loaded (loading false), preserve them — reloading here would
+        // silently discard any unsaved toggle choices made before opening the editor.
+        if (m.approvals.loading) this.configMgmtReload();
       },
       configMgmtMcpDirty() {
         const m = this.configMgmt.mcp;
@@ -1567,10 +1567,11 @@
         c.error = ""; c.saved = false; m.deletingName = name; m.confirm = "";
       },
       configMgmtCancelDeleteMcp() {
-        this.configMgmt.mcp.deletingName = ""; this.configMgmt.mcp.confirm = "";
-        // Reload for the same reason as configMgmtCancelMcp — a stale approvals panel
-        // must not be left interactive after the gen bump orphaned its sub-fetch.
-        this.configMgmtReload();
+        const m = this.configMgmt.mcp;
+        m.deletingName = ""; m.confirm = "";
+        // Same rule as configMgmtCancelMcp: only reload to recover an orphaned
+        // approvals load; otherwise preserve loaded (and any unsaved) choices.
+        if (m.approvals.loading) this.configMgmtReload();
       },
       configMgmtCanDeleteMcp() {
         const m = this.configMgmt.mcp;
