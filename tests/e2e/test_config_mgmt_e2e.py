@@ -1,11 +1,11 @@
-"""Browser E2E for the config-management modal (#773, slices A + B).
+"""Browser E2E for the config-management modal (#773, slices A + B + C).
 
 Drives the real save path: open the modal from the header, edit a project-scope
 surface, type the scope name to confirm, save, and assert the file landed on disk.
-Covers the CLAUDE.md round trip, the type-the-name gate, the settings tab, and the
-slice-B permissions round trip + hooks tab (both JSON surfaces sharing the generic
-loader/saver). The gate + markup are unit-tested; this proves the wired Alpine flow
-round-trips to a real running server.
+Covers the CLAUDE.md round trip, the type-the-name gate, the settings tab, the
+slice-B permissions round trip + hooks tab, and the slice-C subagents list surface
+(read-only built-ins + a new-agent round trip to disk). The gate + markup are
+unit-tested; this proves the wired Alpine flow round-trips to a real running server.
 """
 
 from __future__ import annotations
@@ -113,3 +113,45 @@ def test_config_mgmt_hooks_tab_loads(browser: AgentBrowser, config_mgmt_server: 
     browser.click('[data-test="cm-surface-hooks"]')
     browser.expect_visible('[data-test="cm-view-hooks"]')
     browser.expect_value('[data-test="cm-hooks-text"]', "{}")
+
+
+def test_config_mgmt_subagents_list_shows_readonly_builtins(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The subagents list renders Claude Code's built-ins as read-only entries."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-view-subagents"]')
+    browser.expect_visible('[data-test="cm-agents-table"]')
+    # Built-ins are always present and never editable.
+    browser.expect_text('[data-test="cm-agents-table"]', "general-purpose")
+    browser.expect_text('[data-test="cm-agents-table"]', "read-only")
+
+
+def test_config_mgmt_new_subagent_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Creating a subagent through the editor writes its .md into the project."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')  # wait for the list to finish loading
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')
+
+    browser.fill('[data-test="cm-agent-name"]', "my-agent")
+    browser.fill(
+        '[data-test="cm-agent-content"]',
+        "---\nname: my-agent\ndescription: an e2e agent\n---\nDo the thing.\n",
+    )
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    browser.click('[data-test="cm-agent-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+
+    saved = projects_root / "alpha" / ".claude" / "agents" / "my-agent.md"
+    assert saved.exists(), "expected alpha/.claude/agents/my-agent.md to be written"
+    assert "an e2e agent" in saved.read_text(encoding="utf-8")
