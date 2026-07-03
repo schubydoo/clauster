@@ -1147,6 +1147,7 @@
             c.error = this._configMgmtLoadErr(res); return;
           }
           const d = await res.json();
+          if (c.gen !== myGen) return;  // re-check across the json() await before writing state
           const text = JSON.stringify(d[surface] || {}, null, 2);
           st.text = text; st.orig = text; st.hash = d.hash || null;
         } catch (e) { if (c.gen === myGen) c.error = "Failed to load " + surface + "."; }
@@ -1164,6 +1165,7 @@
             c.error = this._configMgmtLoadErr(res); return;
           }
           const d = await res.json();
+          if (c.gen !== myGen) return;  // re-check across the json() await before writing state
           c.claudeMd.content = d.content || "";
           c.claudeMd.orig = c.claudeMd.content;
           c.claudeMd.hash = d.hash || null;
@@ -1185,7 +1187,7 @@
         c.settings.showEffective = !c.settings.showEffective;
         if (c.settings.showEffective && !c.settings.effective) {
           // Pass the CURRENT gen — do NOT bump. The effective panel is a secondary
-          // load; bumping here would void an in-flight _saveSettings that shares this
+          // load; bumping here would void an in-flight _saveJsonSurface that shares this
           // gen (saving keeps the settings view + this toggle visible, unlike loading),
           // dropping its success branch so the next save 409s on a stale hash. A later
           // primary reload bumps gen and cancels this via _loadEffective's own guard.
@@ -1204,6 +1206,7 @@
           if (this._authExpired(res)) return;
           if (!res.ok) { c.settings.effectiveError = "Could not load merged view (" + res.status + ")."; return; }
           const d = await res.json();
+          if (c.gen !== myGen) return;  // re-check across the json() await before writing state
           c.settings.effective = d.effective || {};
         } catch (e) { if (c.gen === myGen) c.settings.effectiveError = "Could not load merged view."; }
       },
