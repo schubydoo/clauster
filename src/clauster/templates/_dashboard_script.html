@@ -3593,7 +3593,7 @@
         finally { this.loaded = true; this.loading = false; }
       },
       async _reap(action, confirm) {
-        this.ops += 1; s.busy = true; this.error = null; this.result = null;
+        this.busy = true; this.error = null; this.result = null;
         try {
           const res = await fetch(ROOT + "/api/environments/reap", {
             method: "POST", headers: JSON_HEADERS,
@@ -3609,7 +3609,7 @@
           await this.load();
           this.result = msg;
         } catch (e) { this.error = String(e); }
-        finally { this.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+        finally { this.busy = false; }
       },
       archive() { this._reap("archive", "archive"); },
       del() { if (this.deleteTyped === "DELETE") this._reap("delete", "DELETE"); },
