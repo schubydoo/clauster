@@ -1346,6 +1346,30 @@
                 </div>
               </div>
             </div>
+
+            <!-- Permissions surface (#773 slice B) -->
+            <div data-test="cm-view-permissions"
+                 x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'permissions'" x-cloak>
+              <label class="form-label small" for="cm-permissions">permissions — allow / deny / ask</label>
+              <textarea id="cm-permissions" class="form-control form-control-sm font-monospace" rows="12"
+                        data-test="cm-permissions-text" spellcheck="false"
+                        x-model="configMgmt.permissions.text"></textarea>
+              <div class="form-hint small mt-1">
+                The tool-permission rules Claude Code enforces (<code>allow</code> / <code>deny</code> / <code>ask</code>). Edited as JSON.
+              </div>
+            </div>
+
+            <!-- Hooks surface (#773 slice B) -->
+            <div data-test="cm-view-hooks"
+                 x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'hooks'" x-cloak>
+              <label class="form-label small" for="cm-hooks">hooks</label>
+              <textarea id="cm-hooks" class="form-control form-control-sm font-monospace" rows="12"
+                        data-test="cm-hooks-text" spellcheck="false"
+                        x-model="configMgmt.hooks.text"></textarea>
+              <div class="form-hint small mt-1">
+                Shell commands Claude Code runs on lifecycle events — review carefully before saving. Edited as JSON.
+              </div>
+            </div>
           </div>
           <div class="modal-footer justify-content-between align-items-end flex-wrap gap-2">
             <div class="flex-grow-1" x-show="!configMgmtNeedsProject()" x-cloak>
