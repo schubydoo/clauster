@@ -1507,10 +1507,6 @@
         c.error = ""; c.saved = false; m.deletingName = "";
         m.editing = true; m.isNew = true;
         m.name = ""; m.entryText = ""; m.orig = ""; m.confirm = "";
-        // Bumping gen orphans any in-flight _loadMcpApprovals (its gen-guarded finally
-        // will now skip), so release its loading flag here or a later return-to-list
-        // (Cancel doesn't reload) would show a permanent "Loading…".
-        m.approvals.loading = false;
       },
       // Editing reuses the already-loaded (masked) list entry — no fetch, so no race.
       configMgmtOpenMcp(name) {
@@ -1524,6 +1520,12 @@
       configMgmtCancelMcp() {
         const m = this.configMgmt.mcp;
         m.editing = false; m.confirm = ""; this.configMgmt.error = "";
+        // Re-fetch: a New/edit bumped gen and may have orphaned the approvals
+        // sub-fetch (its gen-guarded finally then skips), so the panel could hold a
+        // stale/baseline-empty approvals state. Reloading guarantees the list +
+        // approvals reflect real stored choices before the panel is interactive
+        // again — otherwise a Save could silently clobber real approvals to empty.
+        this.configMgmtReload();
       },
       configMgmtMcpDirty() {
         const m = this.configMgmt.mcp;
@@ -1563,10 +1565,12 @@
         const c = this.configMgmt, m = c.mcp;
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight load
         c.error = ""; c.saved = false; m.deletingName = name; m.confirm = "";
-        m.approvals.loading = false;  // release an orphaned approvals load (see configMgmtNewMcp)
       },
       configMgmtCancelDeleteMcp() {
         this.configMgmt.mcp.deletingName = ""; this.configMgmt.mcp.confirm = "";
+        // Reload for the same reason as configMgmtCancelMcp — a stale approvals panel
+        // must not be left interactive after the gen bump orphaned its sub-fetch.
+        this.configMgmtReload();
       },
       configMgmtCanDeleteMcp() {
         const m = this.configMgmt.mcp;
