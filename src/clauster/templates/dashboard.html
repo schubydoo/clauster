@@ -1252,13 +1252,16 @@
                 {% if config_write_allow_user_scope %}
                 <button type="button" class="btn" data-test="cm-scope-user"
                         :class="configMgmt.scope === 'user' ? 'btn-primary' : 'btn-outline-primary'"
+                        :aria-pressed="configMgmt.scope === 'user'"
                         @click="configMgmtSetScope('user')">User</button>
                 {% endif %}
                 <button type="button" class="btn" data-test="cm-scope-project"
                         :class="configMgmt.scope === 'project' ? 'btn-primary' : 'btn-outline-primary'"
+                        :aria-pressed="configMgmt.scope === 'project'"
                         @click="configMgmtSetScope('project')">Project</button>
                 <button type="button" class="btn" data-test="cm-scope-local"
                         :class="configMgmt.scope === 'local' ? 'btn-primary' : 'btn-outline-primary'"
+                        :aria-pressed="configMgmt.scope === 'local'"
                         @click="configMgmtSetScope('local')">Local</button>
               </div>
               <div class="form-hint small mt-1" x-text="configMgmtScopeHint()"></div>
@@ -1284,6 +1287,7 @@
                 <button type="button" class="btn btn-sm"
                         :class="configMgmt.surface === s.key ? 'btn-primary' : 'btn-ghost-secondary'"
                         :data-test="'cm-surface-' + s.key"
+                        :aria-pressed="configMgmt.surface === s.key"
                         @click="configMgmtSetSurface(s.key)" x-text="s.label"></button>
               </template>
             </div>
@@ -1330,7 +1334,8 @@
                       <template x-for="row in configMgmtEffectiveRows()" :key="row.key">
                         <tr>
                           <td class="font-monospace" x-text="row.key"></td>
-                          <td class="font-monospace text-truncate" style="max-width: 12rem" x-text="row.value"></td>
+                          <td class="font-monospace text-truncate" style="max-width: 12rem"
+                              :title="row.value" x-text="row.value"></td>
                           <td><span class="badge bg-secondary-lt text-capitalize" x-text="row.source"></span></td>
                         </tr>
                       </template>

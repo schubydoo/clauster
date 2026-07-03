@@ -1048,6 +1048,11 @@
       closeConfigMgmt() {
         const c = this.configMgmt;
         c.open = false;
+        // Reset the in-flight flags: closing mid-load/save bumps gen on the next open,
+        // so the orphaned op's gen-gated finally would never clear them — a stranded
+        // `loading` blocks reopen (openConfigMgmt bails on `c.loading`) and a stranded
+        // `saving` keeps Save disabled. The gen bump already voids the stale response.
+        c.loading = false; c.saving = false;
         document.body.style.overflow = "";  // release the scroll lock
         if (c.trigger && c.trigger.focus) c.trigger.focus();
       },
@@ -1116,7 +1121,12 @@
           const res = await fetch(ROOT + "/api/config-write/claude-md?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;  // superseded by a newer load
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.error = this._configMgmtLoadErr(res); return; }
+          if (!res.ok) {
+            // Clear so a failed switch never leaves the PREVIOUS target's content
+            // visible under the error banner (the surface view stays shown on error).
+            c.claudeMd.content = ""; c.claudeMd.orig = ""; c.claudeMd.hash = null; c.claudeMd.exists = false;
+            c.error = this._configMgmtLoadErr(res); return;
+          }
           const d = await res.json();
           c.claudeMd.content = d.content || "";
           c.claudeMd.orig = c.claudeMd.content;
@@ -1131,7 +1141,10 @@
           const res = await fetch(ROOT + "/api/config-write/settings?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
-          if (!res.ok) { c.error = this._configMgmtLoadErr(res); return; }
+          if (!res.ok) {
+            c.settings.text = ""; c.settings.orig = ""; c.settings.hash = null;
+            c.error = this._configMgmtLoadErr(res); return;
+          }
           const d = await res.json();
           // Pretty-print the redacted misc view; the operator edits it as JSON.
           const text = JSON.stringify(d.settings || {}, null, 2);

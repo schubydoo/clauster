@@ -68,3 +68,16 @@ def test_user_scope_button_absent_without_allow_user_scope(write_config):
 
 def test_user_scope_button_present_with_allow_user_scope(write_config):
     assert 'data-test="cm-scope-user"' in _html(write_config, _ON_USER)
+
+
+# ---- a11y: active scope/surface state is programmatic, not color-only ---------
+
+
+def test_scope_and_surface_toggles_expose_aria_pressed(write_config):
+    # The active selection must be conveyed with :aria-pressed, not just the
+    # btn-primary fill — mirroring the filter chips + sort toggle convention so a
+    # screen reader announces which scope/surface is current.
+    html = _html(write_config, _ON_USER)
+    assert html.count(":aria-pressed") >= 5  # 3 scope buttons + >=2 surface tabs
+    assert "aria-pressed=\"configMgmt.scope === 'project'\"" in html
+    assert 'aria-pressed="configMgmt.surface === s.key"' in html
