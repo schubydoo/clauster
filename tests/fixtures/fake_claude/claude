@@ -212,6 +212,46 @@ def run_mcp(args):
     return int(os.environ.get("FAKE_CLAUDE_MCP_EXIT_CODE", "0"))
 
 
+def run_plugin(args):
+    """Fake `claude plugin <verb> ...` for #771 route-level tests (never the real CLI).
+
+    Scripted entirely via env vars so a route test can drive success/not-found
+    without ever touching a real `claude`/account/marketplace:
+      FAKE_CLAUDE_PLUGIN_EXIT_CODE      = default exit code to return (default "0")
+      FAKE_CLAUDE_PLUGIN_EXIT_CODE_<KEY> = per-verb override, KEY is the verb
+                                  upper-cased (ENABLE/DISABLE/INSTALL/UNINSTALL/
+                                  UPDATE/LIST/DETAILS), or for a `marketplace`
+                                  subcommand `MARKETPLACE_<SUBVERB>` (e.g.
+                                  MARKETPLACE_ADD, MARKETPLACE_REMOVE).
+      FAKE_CLAUDE_PLUGIN_STDOUT   = stdout text to emit (default "")
+      FAKE_CLAUDE_PLUGIN_STDERR   = stderr text to emit (default "")
+      FAKE_CLAUDE_PLUGIN_ARGV_FILE = path to record {"argv", "cwd"} as JSON, so a
+                                  test can assert exactly what clauster invoked
+                                  (including the spawn cwd, which several #771
+                                  routes resolve deliberately per scope).
+    """
+    verb = args[0] if args else ""
+    key = verb.upper().replace("-", "_")
+    if verb == "marketplace" and len(args) > 1:
+        key = f"MARKETPLACE_{args[1].upper().replace('-', '_')}"
+    if os.environ.get("FAKE_CLAUDE_PLUGIN_ARGV_FILE"):
+        import json
+
+        record = {"argv": args, "cwd": os.getcwd()}
+        with open(os.environ["FAKE_CLAUDE_PLUGIN_ARGV_FILE"], "w") as fh:
+            json.dump(record, fh)
+    stdout = os.environ.get("FAKE_CLAUDE_PLUGIN_STDOUT", "")
+    stderr = os.environ.get("FAKE_CLAUDE_PLUGIN_STDERR", "")
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+    per_verb = os.environ.get(f"FAKE_CLAUDE_PLUGIN_EXIT_CODE_{key}")
+    if per_verb is not None:
+        return int(per_verb)
+    return int(os.environ.get("FAKE_CLAUDE_PLUGIN_EXIT_CODE", "0"))
+
+
 def main():
     args = sys.argv[1:]
     if args and args[0] == "--version":
@@ -226,6 +266,8 @@ def main():
         return run_flag_bridge(args)
     if args and args[0] == "mcp":
         return run_mcp(args[1:])
+    if args and args[0] == "plugin":
+        return run_plugin(args[1:])
     sys.stderr.write(f"fake-claude: unknown args {args}\n")
     return 2
 

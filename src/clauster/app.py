@@ -37,6 +37,7 @@ from . import (
     config_write_mcp,
     config_write_mcp_cli,
     config_write_permissions,
+    config_write_plugins,
     config_write_settings,
     config_write_skills,
     config_write_subagents,
@@ -1652,6 +1653,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # script-body confirm token — a distinct 400 gate on top of the ordinary
             # type-the-name confirm (see config_write_skills' module docstring).
             return HTTPException(status_code=400, detail=str(exc))
+        if isinstance(exc, config_write_plugins.PluginNotFoundError):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, config_write_plugins.MarketplaceNotFoundError):
+            return HTTPException(status_code=404, detail=str(exc))
         return HTTPException(status_code=400, detail=str(exc))  # pragma: no cover - defensive
 
     @app.get("/api/config-write/mcp")
@@ -2776,6 +2781,329 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             user_misc=user_misc, project_misc=project_misc, local_misc=local_misc
         )
         return {"project": project, "effective": effective}
+
+    def _plugin_cli_cwd(scope: str, project: str) -> Path:
+        # Resolve the directory `claude plugin ...` should be spawned from for a
+        # given scope. User scope has no project — an arbitrary safe directory the
+        # CLI ignores (same choice config_write_mcp_cli makes for MCP user-scope
+        # calls). Project/local scope MUST exist on disk (require_exists=True):
+        # several verbs' output genuinely depends on this cwd (plugin `list`'s
+        # per-entry `enabled` field, marketplace declarations visible from it) --
+        # see config_write_plugins' module docstring's live-verified findings.
+        if scope == "user":
+            active_runner = app.state.runner
+            if active_runner is None:
+                raise HTTPException(
+                    status_code=404, detail="config-write user scope is unavailable"
+                )
+            return active_runner.claude_json.parent
+        return _resolve_cw_project(project, require_exists=True)
+
+    @app.get("/api/config-write/plugins")
+    async def api_config_write_plugins_list(scope: str = "project", project: str = "") -> dict:
+        # Installed plugins (#771) -- CLI-only (`claude plugin list --json`): cache
+        # path / install timestamp / cwd-dependent `enabled` state have no
+        # settings.json equivalent to read directly. Capability gate FIRST (#819).
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        cwd = _plugin_cli_cwd(scope, project)
+        try:
+            plugins = await asyncio.to_thread(
+                config_write_plugins.cli_list_plugins, config.claude.binary, cwd
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        # Omit `project` for user scope (where it is a meaningless "") to match the
+        # sibling routes (/plugins/enabled, /marketplaces/declared, the action POSTs).
+        result: dict[str, Any] = {"scope": scope, "plugins": plugins}
+        if scope != "user":
+            result["project"] = project
+        return result
+
+    @app.get("/api/config-write/plugins/enabled")
+    async def api_config_write_plugins_enabled(scope: str = "project", project: str = "") -> dict:
+        # Direct (non-spawning) read of the enable/disable map -- mirrors the MCP
+        # surface's "file read for display" doctrine; no secret ever lives here.
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        if scope == "user":
+            enabled = await asyncio.to_thread(
+                config_write_plugins.read_user_enabled_plugins, _user_settings_json()
+            )
+            return {"scope": "user", "enabled": enabled}
+        project_dir = _resolve_cw_project(project)
+        read_fn = (
+            config_write_plugins.read_project_local_enabled_plugins
+            if scope == "local"
+            else config_write_plugins.read_project_enabled_plugins
+        )
+        enabled = await asyncio.to_thread(read_fn, project_dir)
+        return {"scope": scope, "project": project, "enabled": enabled}
+
+    @app.get("/api/config-write/plugins/{plugin_id}")
+    async def api_config_write_plugin_details(
+        plugin_id: str, scope: str = "project", project: str = ""
+    ) -> dict:
+        # `claude plugin details <id>` -- CLI-only (component inventory + token
+        # cost projection, not stored in settings.json). Capability gate FIRST.
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        try:
+            config_write.validate_candidate(plugin_id, config_write_plugins.validate_plugin_id)
+        except config_write.InvalidCandidateError as exc:
+            raise _map_config_write_error(exc) from exc
+        cwd = _plugin_cli_cwd(scope, project)
+        try:
+            details = await asyncio.to_thread(
+                config_write_plugins.cli_plugin_details, config.claude.binary, cwd, plugin_id
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": scope, "project": project, "plugin": plugin_id, "details": details}
+
+    @app.post("/api/config-write/plugins/action")
+    async def api_config_write_plugins_action(body: dict) -> dict:
+        # Plugin enable/disable/install/uninstall/update (#771), the highest
+        # blast-radius config-write child: `install` pulls new executable code
+        # onto the host, so it carries a SECOND, stronger confirm on top of the
+        # ordinary scope confirm -- see config_write_plugins.require_install_confirm.
+        # Gate order (the #819/#768 fix, extended with the install-specific
+        # confirm): capability -> scope-enum 422 -> base scope confirm 400 ->
+        # op/plugin-id shape 422 -> [install only] plugin-id confirm 400 ->
+        # path resolve/contain (400/404) -> the CLI dispatch itself (404
+        # not-found, or 400 for any other CLI failure).
+        scope = body.get("scope", "project")
+        config_write.require_capability(config, scope)
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        project = body.get("project") if scope != "user" else None
+        config_write.require_confirm(scope, project, body.get("confirm"))  # type: ignore[arg-type]
+
+        op = body.get("op")
+        if op not in ("enable", "disable", "install", "uninstall", "update"):
+            raise HTTPException(
+                status_code=422,
+                detail="op must be 'enable', 'disable', 'install', 'uninstall', or 'update'",
+            )
+        plugin_id = body.get("plugin")
+        if not isinstance(plugin_id, str) or not plugin_id:
+            raise HTTPException(
+                status_code=422, detail="body must include a non-empty 'plugin' string"
+            )
+        try:
+            config_write.validate_candidate(plugin_id, config_write_plugins.validate_plugin_id)
+        except config_write.InvalidCandidateError as exc:
+            raise _map_config_write_error(exc) from exc
+
+        if op == "install":
+            # The STRONG per-install confirm: the operator retypes the exact
+            # plugin id being introduced, not just the project/scope name.
+            config_write_plugins.require_install_confirm(plugin_id, body.get("confirm_plugin"))
+
+        keep_data = body.get("keep_data", False)
+        if not isinstance(keep_data, bool):
+            raise HTTPException(status_code=422, detail="'keep_data' must be a boolean")
+        prune = body.get("prune", False)
+        if not isinstance(prune, bool):
+            raise HTTPException(status_code=422, detail="'prune' must be a boolean")
+
+        cwd = _plugin_cli_cwd(scope, project or "")
+        binary = config.claude.binary
+
+        def _work() -> None:
+            if op == "enable":
+                config_write_plugins.cli_enable_plugin(binary, cwd, plugin_id, scope)  # type: ignore[arg-type]
+            elif op == "disable":
+                config_write_plugins.cli_disable_plugin(binary, cwd, plugin_id, scope)  # type: ignore[arg-type]
+            elif op == "install":
+                config_write_plugins.cli_install_plugin(binary, cwd, plugin_id, scope)  # type: ignore[arg-type]
+            elif op == "uninstall":
+                config_write_plugins.cli_uninstall_plugin(
+                    binary,
+                    cwd,
+                    plugin_id,
+                    scope,  # type: ignore[arg-type]
+                    keep_data=keep_data,
+                    prune=prune,
+                )
+            else:
+                config_write_plugins.cli_update_plugin(binary, cwd, plugin_id, scope)  # type: ignore[arg-type]
+
+        try:
+            await asyncio.to_thread(_work)
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        if scope == "local":
+            # The CLI writes settings.local.json directly (never through clauster's
+            # own writer), so clauster must gitignore it itself here -- the
+            # gitignore-on-create hard requirement (#766) still applies even when
+            # the file is CLI-written rather than clauster-written.
+            await asyncio.to_thread(
+                config_write.ensure_gitignored, cwd, ".claude/settings.local.json"
+            )
+
+        result = {"scope": scope, "plugin": plugin_id, "op": op, "ok": True}
+        if scope != "user":
+            result["project"] = project
+        return result
+
+    @app.get("/api/config-write/marketplaces")
+    async def api_config_write_marketplaces_list(
+        scope: str = "project", project: str = ""
+    ) -> dict:
+        # `claude plugin marketplace list --json` (#771) -- a single merged pool,
+        # confirmed cwd-independent live, but still gated/routed through the
+        # ordinary scope plumbing like every other route here.
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        cwd = _plugin_cli_cwd(scope, project)
+        try:
+            marketplaces = await asyncio.to_thread(
+                config_write_plugins.cli_list_marketplaces, config.claude.binary, cwd
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        # Omit `project` for user scope (a meaningless "") to match the sibling routes.
+        result: dict[str, Any] = {"scope": scope, "marketplaces": marketplaces}
+        if scope != "user":
+            result["project"] = project
+        return result
+
+    @app.get("/api/config-write/marketplaces/declared")
+    async def api_config_write_marketplaces_declared(
+        scope: str = "project", project: str = ""
+    ) -> dict:
+        # Direct (non-spawning) read of the PER-SCOPE `extraKnownMarketplaces`
+        # declaration -- the one thing the CLI's merged list view cannot tell you
+        # (which scope declared a given marketplace), needed to know where a
+        # remove/add would land.
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        if scope == "user":
+            declared = await asyncio.to_thread(
+                config_write_plugins.read_user_marketplaces, _user_settings_json()
+            )
+            return {"scope": "user", "marketplaces": declared}
+        project_dir = _resolve_cw_project(project)
+        read_fn = (
+            config_write_plugins.read_project_local_marketplaces
+            if scope == "local"
+            else config_write_plugins.read_project_marketplaces
+        )
+        declared = await asyncio.to_thread(read_fn, project_dir)
+        return {"scope": scope, "project": project, "marketplaces": declared}
+
+    @app.post("/api/config-write/marketplaces/action")
+    async def api_config_write_marketplaces_action(body: dict) -> dict:
+        # Marketplace add/remove/update (#771). `add`/`remove` are scoped
+        # (--scope always explicit, never omitted -- omitting it on `remove`
+        # would let the CLI reach into every scope, see config_write_plugins'
+        # module docstring); `update` takes no --scope but is still routed
+        # through the same scope/project/confirm plumbing for a stable cwd.
+        scope = body.get("scope", "project")
+        config_write.require_capability(config, scope)
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        project = body.get("project") if scope != "user" else None
+        config_write.require_confirm(scope, project, body.get("confirm"))  # type: ignore[arg-type]
+
+        op = body.get("op")
+        if op not in ("add", "remove", "update"):
+            raise HTTPException(status_code=422, detail="op must be 'add', 'remove', or 'update'")
+
+        name_raw = body.get("name")
+        source_raw = body.get("source")
+        name: str | None = None
+        source: str | None = None
+        if op == "add":
+            if not isinstance(source_raw, str) or not source_raw:
+                raise HTTPException(
+                    status_code=422, detail="body must include a non-empty 'source' string"
+                )
+            source = source_raw
+            try:
+                config_write.validate_candidate(
+                    source, config_write_plugins.validate_marketplace_source
+                )
+            except config_write.InvalidCandidateError as exc:
+                raise _map_config_write_error(exc) from exc
+        elif op == "remove":
+            if not isinstance(name_raw, str) or not name_raw:
+                raise HTTPException(
+                    status_code=422, detail="body must include a non-empty 'name' string"
+                )
+            name = name_raw
+            try:
+                config_write.validate_candidate(
+                    name, config_write_plugins.validate_marketplace_name
+                )
+            except config_write.InvalidCandidateError as exc:
+                raise _map_config_write_error(exc) from exc
+        elif name_raw is not None:
+            if not isinstance(name_raw, str) or not name_raw:
+                raise HTTPException(
+                    status_code=422, detail="'name' must be a non-empty string when present"
+                )
+            name = name_raw
+            try:
+                config_write.validate_candidate(
+                    name, config_write_plugins.validate_marketplace_name
+                )
+            except config_write.InvalidCandidateError as exc:
+                raise _map_config_write_error(exc) from exc
+
+        cwd = _plugin_cli_cwd(scope, project or "")
+        binary = config.claude.binary
+
+        def _work() -> None:
+            if op == "add":
+                config_write_plugins.cli_marketplace_add(binary, cwd, source, scope)  # type: ignore[arg-type]
+            elif op == "remove":
+                config_write_plugins.cli_marketplace_remove(binary, cwd, name, scope)  # type: ignore[arg-type]
+            else:
+                config_write_plugins.cli_marketplace_update(binary, cwd, name)
+
+        try:
+            await asyncio.to_thread(_work)
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        if scope == "local" and op in ("add", "remove"):
+            # Only add/remove actually touch the scope's settings file (`update`
+            # merely refreshes a git checkout, writing no settings key) -- see the
+            # plugins/action route's identical comment for why this is needed at
+            # all: the CLI writes settings.local.json directly, bypassing
+            # clauster's own gitignore-on-create writer path.
+            await asyncio.to_thread(
+                config_write.ensure_gitignored, cwd, ".claude/settings.local.json"
+            )
+
+        result: dict[str, Any] = {"scope": scope, "op": op, "ok": True}
+        if name is not None:
+            result["name"] = name
+        if source is not None:
+            result["source"] = source
+        if scope != "user":
+            result["project"] = project
+        return result
 
     async def _project_by_name(name: str) -> Project:
         for proj in await list_projects():
