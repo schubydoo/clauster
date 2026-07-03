@@ -279,7 +279,10 @@ def test_resolve_rewraps_escaping_symlink(tmp_path: Path) -> None:
     # resolve_contained_path's symlink-following containment check catches that, and
     # `_resolve` rewraps its PathEscapeError as `cw.PathEscapeError`.
     outside = tmp_path.parent / "outside.md"
-    outside.write_text("elsewhere", encoding="utf-8")
+    # write_bytes (not text-mode write_text) keeps fixtures byte-exact: Path.write_text
+    # translates \n -> \r\n on Windows, which would mutate content the byte-exact reader
+    # (config_file_writer.read_file) then faithfully returns, breaking round-trip asserts.
+    outside.write_bytes(b"elsewhere")
     root = tmp_path / "agents"
     root.mkdir()
     try:
@@ -295,7 +298,7 @@ def test_resolve_rewraps_escaping_symlink(tmp_path: Path) -> None:
 
 def test_is_read_only_file_detects_symlink(tmp_path: Path) -> None:
     real = tmp_path / "elsewhere.md"
-    real.write_text(_MINIMAL, encoding="utf-8")
+    real.write_bytes(_MINIMAL.encode("utf-8"))
     link = tmp_path / "linked.md"
     try:
         link.symlink_to(real)
@@ -312,7 +315,7 @@ def test_is_read_only_file_detects_plugin_marker() -> None:
 
 def test_is_read_only_file_plain_content_is_editable(tmp_path: Path) -> None:
     plain = tmp_path / "plain.md"
-    plain.write_text(_MINIMAL, encoding="utf-8")
+    plain.write_bytes(_MINIMAL.encode("utf-8"))
     assert not sub._is_read_only_file(plain, plain.read_bytes())
 
 
@@ -338,7 +341,7 @@ def test_list_project_agents_empty_dir_shows_only_builtins(tmp_path: Path) -> No
 def test_list_project_agents_includes_real_files(tmp_path: Path) -> None:
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
-    (agents_dir / "my-agent.md").write_text(_content("my-agent"), encoding="utf-8")
+    (agents_dir / "my-agent.md").write_bytes(_content("my-agent").encode("utf-8"))
     agents = sub.list_project_agents(tmp_path)
     real = [a for a in agents if a["name"] == "my-agent"]
     assert len(real) == 1
@@ -350,8 +353,8 @@ def test_list_project_agents_includes_real_files(tmp_path: Path) -> None:
 def test_list_skips_invalid_filenames(tmp_path: Path) -> None:
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
-    (agents_dir / "Bad Name.md").write_text(_MINIMAL, encoding="utf-8")
-    (agents_dir / "not-markdown.txt").write_text("hi", encoding="utf-8")
+    (agents_dir / "Bad Name.md").write_bytes(_MINIMAL.encode("utf-8"))
+    (agents_dir / "not-markdown.txt").write_bytes(b"hi")
     agents = sub.list_project_agents(tmp_path)
     names = {a["name"] for a in agents}
     assert "Bad Name" not in names
@@ -372,7 +375,7 @@ def test_list_flags_plugin_marker_file_read_only(tmp_path: Path) -> None:
 
 def test_list_flags_symlink_file_read_only(tmp_path: Path) -> None:
     real = tmp_path / "elsewhere.md"
-    real.write_text(_content("linked"), encoding="utf-8")
+    real.write_bytes(_content("linked").encode("utf-8"))
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
     try:
@@ -388,7 +391,7 @@ def test_list_flags_symlink_file_read_only(tmp_path: Path) -> None:
 def test_list_tolerates_unparsable_frontmatter(tmp_path: Path) -> None:
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
-    (agents_dir / "broken.md").write_text("not frontmatter at all\n", encoding="utf-8")
+    (agents_dir / "broken.md").write_bytes(b"not frontmatter at all\n")
     agents = sub.list_project_agents(tmp_path)
     entry = next(a for a in agents if a["name"] == "broken")
     assert entry["description"] is None
@@ -409,7 +412,7 @@ def test_list_skips_unreadable_file(tmp_path: Path) -> None:
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
     unreadable = agents_dir / "unreadable.md"
-    unreadable.write_text(_MINIMAL, encoding="utf-8")
+    unreadable.write_bytes(_MINIMAL.encode("utf-8"))
     unreadable.chmod(0o000)
     try:
         agents = sub.list_project_agents(tmp_path)
@@ -424,7 +427,7 @@ def test_list_description_missing_from_frontmatter_is_none(tmp_path: Path) -> No
     # non-string/absent `description` value just yields `description: None`.
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
-    (agents_dir / "no-desc.md").write_text("---\nname: no-desc\n---\nbody\n", encoding="utf-8")
+    (agents_dir / "no-desc.md").write_bytes(b"---\nname: no-desc\n---\nbody\n")
     agents = sub.list_project_agents(tmp_path)
     entry = next(a for a in agents if a["name"] == "no-desc")
     assert entry["description"] is None
@@ -434,7 +437,7 @@ def test_list_user_agents_uses_claude_json_parent(tmp_path: Path) -> None:
     claude_json = tmp_path / ".claude.json"
     agents_dir = sub.user_agents_dir(claude_json)
     agents_dir.mkdir(parents=True)
-    (agents_dir / "u.md").write_text(_content("u"), encoding="utf-8")
+    (agents_dir / "u.md").write_bytes(_content("u").encode("utf-8"))
     agents = sub.list_user_agents(claude_json)
     entry = next(a for a in agents if a["name"] == "u")
     assert entry["source"] == "user"
@@ -495,7 +498,10 @@ def test_read_non_utf8_file_raises_invalid_candidate(tmp_path: Path) -> None:
 def test_read_degrades_gracefully_on_unparsable_frontmatter(tmp_path: Path) -> None:
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
-    (agents_dir / "broken.md").write_text("no frontmatter here\n", encoding="utf-8")
+    # write_bytes keeps the fixture byte-exact: text-mode write_text would translate
+    # \n -> \r\n on Windows, and the byte-exact reader would then return "...\r\n",
+    # breaking the round-trip assert below (the product read path is already byte-exact).
+    (agents_dir / "broken.md").write_bytes(b"no frontmatter here\n")
     doc = sub.read_project_agent(tmp_path, "broken")
     assert doc["exists"] is True
     assert doc["frontmatter"] == {}
@@ -528,7 +534,10 @@ def test_read_user_agent_targets_claude_agents_dir(tmp_path: Path) -> None:
 def test_write_creates_new_file(tmp_path: Path) -> None:
     sub.write_project_agent(tmp_path, "my-agent", _content("my-agent"), None)
     target = tmp_path / ".claude" / "agents" / "my-agent.md"
-    assert target.read_text(encoding="utf-8") == _content("my-agent")
+    # read_bytes().decode (not read_text) so the assert is byte-exact: read_text does
+    # universal-newline translation, which would diverge from the verbatim bytes the
+    # product write path (config_file_writer.write_file) stored.
+    assert target.read_bytes().decode("utf-8") == _content("my-agent")
 
 
 def test_write_no_hash_on_existing_file_is_stale(tmp_path: Path) -> None:
@@ -632,6 +641,87 @@ def test_delete_user_agent(tmp_path: Path) -> None:
     sub.write_user_agent(claude_json, "u", _content("u"), None)
     assert sub.delete_user_agent(claude_json, "u") is True
     assert not (tmp_path / ".claude" / "agents" / "u.md").exists()
+
+
+# --- plugin SYMLINK read-only (containment-ordering fix) ----------------------------
+# A .claude/agents/<name>.md that is a SYMLINK to a plugin file OUTSIDE the agents dir
+# must be classified read-only (symlink signal) BEFORE the containment resolve would
+# follow + reject it as a path-escape. GET → content-less read-only doc (target never
+# read); write/delete → ReadOnlyAgentError. A genuinely escaping NON-symlink still
+# fails closed via _resolve.
+
+
+def _symlinked_agent(project_dir: Path, name: str, *, target_body: bytes) -> Path:
+    """Create a plugin-style symlink at <project>/.claude/agents/<name>.md.
+
+    The target lives OUTSIDE the agents dir and carries sentinel content, so a test
+    can prove the read path never follows it. Skips if symlinks are unavailable.
+    """
+    outside = project_dir / "plugin-source.md"
+    outside.write_bytes(target_body)
+    agents_dir = sub.project_agents_dir(project_dir)
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    link = agents_dir / f"{name}.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform/host")
+    return link
+
+
+def test_unresolved_target_rejects_invalid_name(tmp_path: Path) -> None:
+    # The un-resolved helper still fails closed on a bad name (the same PathEscapeError
+    # `_resolve` raises), so read/write/delete reject a malformed name before any I/O.
+    with pytest.raises(cw.PathEscapeError):
+        sub._unresolved_target(tmp_path, "Bad-Name")
+
+
+def test_read_symlink_agent_is_read_only_and_never_reads_target(tmp_path: Path) -> None:
+    _symlinked_agent(tmp_path, "shadow", target_body=b"SECRET plugin content\n")
+    doc = sub.read_project_agent(tmp_path, "shadow")
+    assert doc["exists"] is True
+    assert doc["editable"] is False
+    assert doc["source"] == "plugin"
+    # The out-of-tree target is NEVER followed/read — no arbitrary-file read.
+    assert doc["content"] == ""
+    assert "SECRET" not in doc["content"]
+
+
+def test_write_symlink_agent_refused_403_target_untouched(tmp_path: Path) -> None:
+    link = _symlinked_agent(tmp_path, "shadow", target_body=b"original\n")
+    target = tmp_path / "plugin-source.md"
+    with pytest.raises(sub.ReadOnlyAgentError):
+        sub.write_project_agent(tmp_path, "shadow", _content("shadow"), None)
+    assert link.is_symlink()  # still a symlink, not clobbered into a real file
+    assert target.read_bytes() == b"original\n"  # target content untouched
+
+
+def test_delete_symlink_agent_refused_403(tmp_path: Path) -> None:
+    link = _symlinked_agent(tmp_path, "shadow", target_body=b"original\n")
+    target = tmp_path / "plugin-source.md"
+    with pytest.raises(sub.ReadOnlyAgentError):
+        sub.delete_project_agent(tmp_path, "shadow")
+    assert link.is_symlink()  # symlink not removed
+    assert target.exists()  # target not removed
+
+
+def test_user_scope_symlink_agent_refused(tmp_path: Path) -> None:
+    # The user-scope writers/deleters route through the same _write_agent/_delete_agent,
+    # so the symlink guard applies there too.
+    claude_json = tmp_path / ".claude.json"
+    outside = tmp_path / "plugin-source.md"
+    outside.write_bytes(b"original\n")
+    agents_dir = sub.user_agents_dir(claude_json)
+    agents_dir.mkdir(parents=True)
+    try:
+        (agents_dir / "shadow.md").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform/host")
+    assert sub.read_user_agent(claude_json, "shadow")["editable"] is False
+    with pytest.raises(sub.ReadOnlyAgentError):
+        sub.write_user_agent(claude_json, "shadow", _content("shadow"), None)
+    with pytest.raises(sub.ReadOnlyAgentError):
+        sub.delete_user_agent(claude_json, "shadow")
 
 
 # =====================================================================================
@@ -1054,6 +1144,63 @@ def test_route_plugin_owned_file_write_is_403(write_config, tmp_path, projects_r
         del_resp = c.delete(f"{_agent_url('shadowed')}?project=alpha&scope=project&confirm=alpha")
         assert del_resp.status_code == 403
     assert target.read_bytes() == original
+
+
+def test_route_plugin_symlink_get_readonly_200_put_delete_403(
+    write_config, tmp_path, projects_root
+) -> None:
+    # Greptile P1: a plugin SYMLINK agent must be a read-only 200 on GET (target
+    # never read) and a 403 on PUT/DELETE — NOT a 400 path-escape from the
+    # containment resolve following the symlink.
+    agents_dir = projects_root / "alpha" / ".claude" / "agents"
+    agents_dir.mkdir(parents=True)
+    outside = projects_root / "alpha" / "plugin-source.md"
+    outside.write_bytes(b"SECRET plugin content\n")
+    link = agents_dir / "shadowed.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform/host")
+    with _client(write_config, tmp_path, _ON) as c:
+        get_resp = c.get(f"{_agent_url('shadowed')}?project=alpha")
+        assert get_resp.status_code == 200  # read-only 200, NOT a 400 path-escape
+        assert get_resp.json()["editable"] is False
+        assert get_resp.json()["source"] == "plugin"
+        assert get_resp.json()["content"] == ""  # target never followed/read
+        assert "SECRET" not in get_resp.json()["content"]
+
+        put_resp = c.put(
+            _agent_url("shadowed"),
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "content": _content("shadowed"),
+            },
+        )
+        assert put_resp.status_code == 403  # NOT 400
+
+        del_resp = c.delete(f"{_agent_url('shadowed')}?project=alpha&scope=project&confirm=alpha")
+        assert del_resp.status_code == 403  # NOT 400
+    assert link.is_symlink()  # untouched
+    assert outside.read_bytes() == b"SECRET plugin content\n"
+
+
+def test_route_nonsymlink_escape_still_400(write_config, tmp_path) -> None:
+    # The ordering fix must NOT loosen containment for a genuinely-escaping
+    # NON-symlink input: a `../escape` project still fails closed as a 400.
+    with _client(write_config, tmp_path, _ON) as c:
+        assert c.get(f"{_LIST_URL}?project=../escape").status_code == 400
+        resp = c.put(
+            _agent_url("my-agent"),
+            json={
+                "scope": "project",
+                "project": "../escape",
+                "confirm": "../escape",
+                "content": _content("my-agent"),
+            },
+        )
+        assert resp.status_code == 400
 
 
 def test_route_get_missing_agent_is_404(write_config, tmp_path, projects_root) -> None:
