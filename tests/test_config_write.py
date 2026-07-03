@@ -537,3 +537,28 @@ def test_status_route_user_scope_flag_independent(write_config, tmp_path) -> Non
         resp = c.get("/api/config-write/status")
         assert resp.status_code == 200
         assert resp.json() == {"enabled": True, "allow_user_scope": False}
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "body"),
+    [
+        ("GET", "/api/config-write/mcp?scope=bogus", None),
+        ("POST", "/api/config-write/mcp/server", {"scope": "bogus"}),
+        ("GET", "/api/config-write/permissions?scope=bogus", None),
+        ("GET", "/api/config-write/hooks?scope=bogus", None),
+        ("PUT", "/api/config-write/mcp", {"scope": "bogus"}),
+        ("PUT", "/api/config-write/permissions", {"scope": "bogus"}),
+        ("PUT", "/api/config-write/hooks", {"scope": "bogus"}),
+    ],
+)
+def test_disabled_surface_404s_even_for_bogus_scope(write_config, tmp_path, method, url, body):
+    # #819/#768 invisible-surface invariant: the capability gate runs BEFORE the scope-enum
+    # check on every config-write handler, so a disabled surface 404s for ANY request (a
+    # bogus scope included) instead of leaking that the endpoint exists via a differing 422.
+    # (Regression: mcp/permissions/hooks + mcp/server + the shared PUT helper were scope-first.)
+    with _client(write_config, tmp_path, "") as c:
+        assert c.request(method, url, json=body).status_code == 404
+    # When ENABLED the surface is reachable, so the same bogus scope is safely a 422.
+    enabled = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
+    with _client(write_config, tmp_path, enabled) as c:
+        assert c.request(method, url, json=body).status_code == 422
