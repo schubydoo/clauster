@@ -81,6 +81,22 @@ def test_subagents_surface_present_when_enabled(write_config):
     assert "configMgmtSurfaceHasLocal()" in html
 
 
+def test_mcp_surface_present_when_enabled(write_config):
+    # Slice D adds the MCP list surface (servers CRUD + project approvals panel).
+    html = _html(write_config, _ON)
+    # The tab is data-driven (Alpine-bound data-test), so assert the surface is
+    # registered in the JS surfaces array rather than a literal tab hook.
+    assert 'key: "mcp"' in html
+    assert 'data-test="cm-view-mcp"' in html
+    assert 'data-test="cm-mcp-new"' in html
+    assert 'data-test="cm-mcp-editor"' in html
+    assert 'data-test="cm-mcp-entry"' in html
+    # The project-scope approvals sub-panel + its reset control.
+    assert 'data-test="cm-mcp-approvals"' in html
+    assert 'data-test="cm-mcp-approvals-save"' in html
+    assert 'data-test="cm-mcp-reset-go"' in html
+
+
 # ---- User scope option is gated on allow_user_scope -------------------------
 
 

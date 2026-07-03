@@ -1371,6 +1371,153 @@
               </div>
             </div>
 
+            <!-- MCP servers surface (#773 slice D) — list + per-server JSON editor -->
+            <div data-test="cm-view-mcp"
+                 x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'mcp'" x-cloak>
+              <!-- LIST mode -->
+              <div x-show="!configMgmt.mcp.editing" x-cloak>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="form-label small mb-0">MCP servers</div>
+                  <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-mcp-new"
+                          @click="configMgmtNewMcp()">New server</button>
+                </div>
+                <div class="text-secondary small" x-show="configMgmt.mcp.list.length === 0" x-cloak>
+                  No MCP servers at this scope.
+                </div>
+                <table class="table table-sm mb-0" data-test="cm-mcp-table"
+                       x-show="configMgmt.mcp.list.length" x-cloak>
+                  <caption class="visually-hidden">MCP servers: name, definition, and actions</caption>
+                  <tbody>
+                    <template x-for="srv in configMgmt.mcp.list" :key="srv.name">
+                      <tr>
+                        <td>
+                          <span class="fw-medium" x-text="srv.name"></span>
+                          <div class="text-secondary small font-monospace text-truncate" style="max-width: 20rem"
+                               :title="configMgmtMcpEntrySummary(srv.entry)"
+                               x-text="configMgmtMcpEntrySummary(srv.entry)"></div>
+                        </td>
+                        <td class="text-end">
+                          <span class="d-inline-flex gap-1">
+                            <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                    @click="configMgmtOpenMcp(srv.name)">Edit</button>
+                            <button type="button" class="btn btn-sm btn-ghost-danger"
+                                    @click="configMgmtAskDeleteMcp(srv.name)">Delete</button>
+                          </span>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <!-- delete confirm -->
+                <div class="mt-2 p-2 border rounded" data-test="cm-mcp-delete-confirm"
+                     x-show="configMgmt.mcp.deletingName" x-cloak>
+                  <div class="small mb-1">Delete <code x-text="configMgmt.mcp.deletingName"></code>? Type
+                    <code x-text="configMgmtConfirmToken()"></code> to confirm.</div>
+                  <div class="d-flex gap-2 align-items-center">
+                    <input type="text" class="form-control form-control-sm" data-test="cm-mcp-delete-input"
+                           aria-label="Type the confirmation token to delete this MCP server"
+                           autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.confirm"
+                           :placeholder="configMgmtConfirmToken()">
+                    <button type="button" class="btn btn-sm btn-danger" data-test="cm-mcp-delete-go"
+                            :disabled="!configMgmtCanDeleteMcp()" @click="configMgmtDeleteMcp()">Delete</button>
+                    <button type="button" class="btn btn-sm" @click="configMgmtCancelDeleteMcp()">Cancel</button>
+                  </div>
+                </div>
+
+                <!-- Project approvals: which committed .mcp.json servers Claude may use -->
+                <div class="mt-3" data-test="cm-mcp-approvals"
+                     x-show="configMgmt.scope === 'project' && configMgmt.mcp.list.length" x-cloak>
+                  <div class="form-label small mb-1">Server approvals</div>
+                  <div class="form-hint small mb-2">
+                    Whether Claude Code may use each committed <code>.mcp.json</code> server in this project.
+                  </div>
+                  <div class="text-secondary small" x-show="configMgmt.mcp.approvals.loading" x-cloak>Loading…</div>
+                  <div x-show="!configMgmt.mcp.approvals.loading" x-cloak>
+                  <table class="table table-sm mb-2">
+                    <caption class="visually-hidden">Per-server approval state</caption>
+                    <tbody>
+                      <template x-for="srv in configMgmt.mcp.list" :key="'ap-' + srv.name">
+                        <tr>
+                          <td class="font-monospace" x-text="srv.name"></td>
+                          <td class="text-end">
+                            <div class="btn-group btn-group-sm" role="group" :aria-label="'Approval for ' + srv.name">
+                              <button type="button" class="btn" :data-test="'cm-mcp-approve-' + srv.name"
+                                      :class="configMgmtMcpApprovalState(srv.name) === 'enabled' ? 'btn-success' : 'btn-ghost-secondary'"
+                                      :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'enabled'"
+                                      @click="configMgmtMcpSetApproval(srv.name, 'enabled')">Approve</button>
+                              <button type="button" class="btn" :data-test="'cm-mcp-reject-' + srv.name"
+                                      :class="configMgmtMcpApprovalState(srv.name) === 'disabled' ? 'btn-danger' : 'btn-ghost-secondary'"
+                                      :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'disabled'"
+                                      @click="configMgmtMcpSetApproval(srv.name, 'disabled')">Reject</button>
+                              <button type="button" class="btn" :data-test="'cm-mcp-unset-' + srv.name"
+                                      :class="configMgmtMcpApprovalState(srv.name) === 'unset' ? 'btn-secondary' : 'btn-ghost-secondary'"
+                                      :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'unset'"
+                                      @click="configMgmtMcpSetApproval(srv.name, 'unset')">Unset</button>
+                            </div>
+                          </td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                  <div class="d-flex gap-2 align-items-center flex-wrap mb-2"
+                       x-show="configMgmtMcpApprovalsDirty()" x-cloak>
+                    <input type="text" class="form-control form-control-sm" data-test="cm-mcp-approvals-confirm"
+                           aria-label="Type the confirmation token to save approval choices"
+                           autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.approvals.confirm"
+                           :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                    <button type="button" class="btn btn-sm btn-primary" data-test="cm-mcp-approvals-save"
+                            :disabled="!configMgmtCanSaveMcpApprovals()" @click="configMgmtSaveMcpApprovals()">
+                      <span x-text="configMgmt.mcp.approvals.busy ? 'Saving…' : 'Save approvals'">Save approvals</span>
+                    </button>
+                  </div>
+                  <details>
+                    <summary class="small text-secondary">Reset all approval choices</summary>
+                    <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
+                      <input type="text" class="form-control form-control-sm" data-test="cm-mcp-reset-confirm"
+                             aria-label="Type the confirmation token to reset approval choices"
+                             autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.approvals.resetConfirm"
+                             :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                      <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-mcp-reset-go"
+                              :disabled="!configMgmtCanResetMcp()" @click="configMgmtResetMcpChoices()">Reset choices</button>
+                    </div>
+                  </details>
+                  </div><!-- /approvals !loading wrapper -->
+                </div>
+              </div>
+              <!-- EDITOR mode -->
+              <div x-show="configMgmt.mcp.editing" x-cloak data-test="cm-mcp-editor">
+                <label class="form-label small" for="cm-mcp-name">Name</label>
+                <input type="text" class="form-control form-control-sm mb-2" id="cm-mcp-name" data-test="cm-mcp-name"
+                       autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.name"
+                       :readonly="!configMgmt.mcp.isNew" placeholder="my-server">
+                <label class="form-label small" for="cm-mcp-entry">Definition (JSON)</label>
+                <textarea id="cm-mcp-entry" class="form-control form-control-sm font-monospace" rows="10"
+                          data-test="cm-mcp-entry" spellcheck="false"
+                          x-model="configMgmt.mcp.entryText"></textarea>
+                <div class="form-hint small mt-1">
+                  e.g. <code>{"command": "npx", "args": ["-y", "a-server"]}</code> or
+                  <code>{"type": "http", "url": "https://…"}</code>. Secret-shaped values are
+                  masked as <code>********</code> — leave the mask to keep the stored value.
+                </div>
+                <div class="mt-2">
+                  <label class="form-label small mb-1" for="cm-mcp-confirm">
+                    Type <code x-text="configMgmtConfirmToken()"></code> to confirm
+                  </label>
+                  <div class="d-flex gap-2 align-items-center flex-wrap">
+                    <input type="text" class="form-control form-control-sm" id="cm-mcp-confirm" data-test="cm-mcp-confirm"
+                           autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.confirm"
+                           :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                    <button type="button" class="btn btn-sm btn-primary" data-test="cm-mcp-save"
+                            :disabled="!configMgmtCanSaveMcp()" @click="configMgmtSaveMcp()">
+                      <span x-text="configMgmt.mcp.busy ? 'Saving…' : 'Save'">Save</span>
+                    </button>
+                    <button type="button" class="btn btn-sm" data-test="cm-mcp-cancel"
+                            @click="configMgmtCancelMcp()">Back to list</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- Subagents surface (#773 slice C) — list + per-agent Markdown editor -->
             <div data-test="cm-view-subagents"
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'subagents'" x-cloak>
