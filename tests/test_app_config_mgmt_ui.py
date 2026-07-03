@@ -68,6 +68,19 @@ def test_permissions_and_hooks_surfaces_present_when_enabled(write_config):
     assert 'data-test="cm-hooks-text"' in html
 
 
+def test_subagents_surface_present_when_enabled(write_config):
+    # Slice C adds the subagents list surface (list + per-agent editor + delete).
+    html = _html(write_config, _ON)
+    # The tab itself is data-driven (its data-test is Alpine-bound), so assert the
+    # surface is registered in the JS surfaces array rather than a literal tab hook.
+    assert 'key: "subagents"' in html
+    assert 'data-test="cm-view-subagents"' in html
+    assert 'data-test="cm-agent-new"' in html
+    assert 'data-test="cm-agent-editor"' in html
+    # The Local scope tab is conditionally hidden for user/project-only surfaces.
+    assert "configMgmtSurfaceHasLocal()" in html
+
+
 # ---- User scope option is gated on allow_user_scope -------------------------
 
 

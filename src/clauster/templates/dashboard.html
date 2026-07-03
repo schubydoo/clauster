@@ -1261,7 +1261,7 @@
                         :class="configMgmt.scope === 'project' ? 'btn-primary' : 'btn-outline-primary'"
                         :aria-pressed="configMgmt.scope === 'project'"
                         @click="configMgmtSetScope('project')">Project</button>
-                <button type="button" class="btn" data-test="cm-scope-local"
+                <button type="button" class="btn" data-test="cm-scope-local" x-show="configMgmtSurfaceHasLocal()"
                         :class="configMgmt.scope === 'local' ? 'btn-primary' : 'btn-outline-primary'"
                         :aria-pressed="configMgmt.scope === 'local'"
                         @click="configMgmtSetScope('local')">Local</button>
@@ -1370,9 +1370,98 @@
                 Shell commands Claude Code runs on lifecycle events — review carefully before saving. Edited as JSON.
               </div>
             </div>
+
+            <!-- Subagents surface (#773 slice C) — list + per-agent Markdown editor -->
+            <div data-test="cm-view-subagents"
+                 x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'subagents'" x-cloak>
+              <!-- LIST mode -->
+              <div x-show="!configMgmt.subagents.editing" x-cloak>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="form-label small mb-0">Subagents</div>
+                  <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-agent-new"
+                          @click="configMgmtNewAgent()">New subagent</button>
+                </div>
+                <div class="text-secondary small" x-show="configMgmt.subagents.list.length === 0" x-cloak>
+                  No subagents at this scope.
+                </div>
+                <table class="table table-sm mb-0" data-test="cm-agents-table"
+                       x-show="configMgmt.subagents.list.length" x-cloak>
+                  <caption class="visually-hidden">Subagents: name, source, and actions</caption>
+                  <tbody>
+                    <template x-for="a in configMgmt.subagents.list" :key="a.source + ':' + a.name">
+                      <tr>
+                        <td>
+                          <span class="fw-medium" x-text="a.name"></span>
+                          <div class="text-secondary small" x-show="a.description" x-cloak x-text="a.description"></div>
+                        </td>
+                        <td><span class="badge bg-secondary-lt text-capitalize" x-text="a.source"></span></td>
+                        <td class="text-end">
+                          <template x-if="a.editable">
+                            <span class="d-inline-flex gap-1">
+                              <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                      @click="configMgmtOpenAgent(a.name)">Edit</button>
+                              <button type="button" class="btn btn-sm btn-ghost-danger"
+                                      @click="configMgmtAskDeleteAgent(a.name)">Delete</button>
+                            </span>
+                          </template>
+                          <template x-if="!a.editable">
+                            <span class="badge bg-secondary-lt">read-only</span>
+                          </template>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <!-- delete confirm -->
+                <div class="mt-2 p-2 border rounded" data-test="cm-agent-delete-confirm"
+                     x-show="configMgmt.subagents.deletingName" x-cloak>
+                  <div class="small mb-1">Delete <code x-text="configMgmt.subagents.deletingName"></code>? Type
+                    <code x-text="configMgmtConfirmToken()"></code> to confirm.</div>
+                  <div class="d-flex gap-2 align-items-center">
+                    <input type="text" class="form-control form-control-sm" data-test="cm-agent-delete-input"
+                           aria-label="Type the confirmation token to delete this subagent"
+                           autocomplete="off" spellcheck="false" x-model="configMgmt.subagents.confirm"
+                           :placeholder="configMgmtConfirmToken()">
+                    <button type="button" class="btn btn-sm btn-danger" data-test="cm-agent-delete-go"
+                            :disabled="!configMgmtCanDeleteAgent()" @click="configMgmtDeleteAgent()">Delete</button>
+                    <button type="button" class="btn btn-sm" @click="configMgmtCancelDeleteAgent()">Cancel</button>
+                  </div>
+                </div>
+              </div>
+              <!-- EDITOR mode -->
+              <div x-show="configMgmt.subagents.editing" x-cloak data-test="cm-agent-editor">
+                <label class="form-label small" for="cm-agent-name">Name</label>
+                <input type="text" class="form-control form-control-sm mb-2" id="cm-agent-name" data-test="cm-agent-name"
+                       autocomplete="off" spellcheck="false" x-model="configMgmt.subagents.name"
+                       :readonly="!configMgmt.subagents.isNew" placeholder="my-agent">
+                <label class="form-label small" for="cm-agent-content">Definition (Markdown + frontmatter)</label>
+                <textarea id="cm-agent-content" class="form-control form-control-sm font-monospace" rows="11"
+                          data-test="cm-agent-content" spellcheck="false"
+                          x-model="configMgmt.subagents.content"></textarea>
+                <div class="mt-2">
+                  <label class="form-label small mb-1" for="cm-agent-confirm">
+                    Type <code x-text="configMgmtConfirmToken()"></code> to confirm
+                  </label>
+                  <div class="d-flex gap-2 align-items-center flex-wrap">
+                    <input type="text" class="form-control form-control-sm" id="cm-agent-confirm" data-test="cm-agent-confirm"
+                           autocomplete="off" spellcheck="false" x-model="configMgmt.subagents.confirm"
+                           :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                    <button type="button" class="btn btn-sm btn-primary" data-test="cm-agent-save"
+                            :disabled="!configMgmtCanSaveAgent()" @click="configMgmtSaveAgent()">
+                      <span x-text="configMgmt.subagents.busy ? 'Saving…' : 'Save'">Save</span>
+                    </button>
+                    <button type="button" class="btn btn-sm" data-test="cm-agent-cancel"
+                            @click="configMgmtCancelAgent()">Back to list</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="modal-footer justify-content-between align-items-end flex-wrap gap-2">
-            <div class="flex-grow-1" x-show="!configMgmtNeedsProject()" x-cloak>
+            {# Document surfaces (CLAUDE.md/settings/permissions/hooks) confirm + save
+               here; list surfaces (subagents, later MCP/skills/plugins) drive their own
+               inline controls, so this footer confirm+Save hides for them. #}
+            <div class="flex-grow-1" x-show="!configMgmtNeedsProject() && configMgmtIsDocSurface()" x-cloak>
               <label class="form-label small mb-1" for="cm-confirm">
                 Type <code x-text="configMgmtConfirmToken()"></code> to confirm
               </label>
@@ -1380,9 +1469,9 @@
                      autocomplete="off" spellcheck="false" x-model="configMgmt.confirm"
                      :placeholder="configMgmtConfirmToken()">
             </div>
-            <span class="d-flex gap-2">
+            <span class="d-flex gap-2 ms-auto">
               <button type="button" class="btn" @click="closeConfigMgmt()">Close</button>
-              <button type="button" class="btn btn-primary" data-test="cm-save"
+              <button type="button" class="btn btn-primary" data-test="cm-save" x-show="configMgmtIsDocSurface()"
                       :disabled="!configMgmtCanSave()" @click="configMgmtSave()">
                 <span x-text="configMgmt.saving ? 'Saving…' : 'Save'">Save</span>
               </button>
