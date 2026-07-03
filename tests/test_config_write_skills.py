@@ -341,14 +341,63 @@ def test_write_skill_rejects_absolute_member_path(tmp_path: Path) -> None:
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
 def test_read_skill_file_rejects_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path / "outside_secret.txt"
-    outside.write_text("top secret\n")
+    outside.write_bytes(b"top secret\n")
     skills_root = tmp_path / "skills"
     skill_dir = skills_root / "my-skill"
     skill_dir.mkdir(parents=True)
-    (skill_dir / sk.SKILL_FILENAME).write_text(_VALID_MD)
+    (skill_dir / sk.SKILL_FILENAME).write_bytes(_VALID_MD.encode("utf-8"))
     (skill_dir / "escape.txt").symlink_to(outside)
     with pytest.raises(cw.PathEscapeError):
         sk.read_skill_file(tmp_path, "my-skill", "escape.txt")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
+def test_list_skills_does_not_read_symlinked_skill_md(tmp_path: Path) -> None:
+    # A symlinked SKILL.md pointing at an outside secret must NOT be followed: the
+    # skill lists as has_skill_md=False and the target content never surfaces
+    # (no description, no frontmatter_error quoting it).
+    outside = tmp_path / "outside_secret_skill.md"
+    outside.write_bytes(b"---\ndescription: TOPSECRET_LEAKED_VALUE\n---\nbody\n")
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "my-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / sk.SKILL_FILENAME).symlink_to(outside)
+    listing = sk.list_skills(tmp_path)
+    assert listing == [{"name": "my-skill", "has_skill_md": False, "files": []}]
+    # Belt-and-suspenders: the secret never appears anywhere in the serialized listing.
+    assert "TOPSECRET_LEAKED_VALUE" not in repr(listing)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
+def test_list_skills_does_not_enumerate_symlinked_member(tmp_path: Path) -> None:
+    # A member symlink targeting an outside file must NOT be enumerated in `files`
+    # (so it can never be offered up for a later read that would leak the target).
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_bytes(b"top secret\n")
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "my-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / sk.SKILL_FILENAME).write_bytes(_VALID_MD.encode("utf-8"))
+    (skill_dir / "real.sh").write_bytes(b"echo hi\n")
+    (skill_dir / "escape.txt").symlink_to(outside)
+    listing = sk.list_skills(tmp_path)
+    assert listing[0]["files"] == ["real.sh"]  # symlinked member skipped
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
+def test_list_skills_skips_member_under_symlinked_subdir(tmp_path: Path) -> None:
+    # A regular file is not itself a symlink, but if it lives under a symlinked
+    # subdir that escapes the skill dir, its resolved path escapes and it is skipped.
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "leak.txt").write_bytes(b"secret\n")
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "my-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / sk.SKILL_FILENAME).write_bytes(_VALID_MD.encode("utf-8"))
+    (skill_dir / "sub").symlink_to(outside_dir, target_is_directory=True)
+    listing = sk.list_skills(tmp_path)
+    assert listing[0]["files"] == []  # nothing under the escaping symlinked subdir
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
@@ -448,8 +497,8 @@ def test_list_skills_redacts_secret_in_frontmatter_error(tmp_path: Path) -> None
     bad = skills_root / "broken"
     bad.mkdir(parents=True)
     # Malformed YAML (unbalanced bracket) whose error message quotes the secret line.
-    (bad / sk.SKILL_FILENAME).write_text(
-        "---\ndescription: [unclosed ${SUPER_SECRET_VALUE}\n---\nbody"
+    (bad / sk.SKILL_FILENAME).write_bytes(
+        b"---\ndescription: [unclosed ${SUPER_SECRET_VALUE}\n---\nbody"
     )
     listing = sk.list_skills(tmp_path)
     err = listing[0]["frontmatter_error"]
@@ -461,7 +510,7 @@ def test_list_skills_reports_frontmatter_error_without_raising(tmp_path: Path) -
     skills_root = tmp_path / "skills"
     bad = skills_root / "broken"
     bad.mkdir(parents=True)
-    (bad / sk.SKILL_FILENAME).write_text("no frontmatter here")
+    (bad / sk.SKILL_FILENAME).write_bytes(b"no frontmatter here")
     listing = sk.list_skills(tmp_path)
     assert len(listing) == 1
     assert "frontmatter_error" in listing[0]
@@ -477,6 +526,21 @@ def test_list_skills_includes_supporting_files(tmp_path: Path) -> None:
     )
     listing = sk.list_skills(tmp_path)
     assert listing[0]["files"] == ["scripts/x.sh"]
+
+
+def test_list_skills_files_use_posix_separators(tmp_path: Path) -> None:
+    # A nested member key is always forward-slash, on every OS (logical member keys,
+    # not host filesystem paths — no backslash even on Windows).
+    sk.write_skill(
+        tmp_path,
+        "my-skill",
+        {sk.SKILL_FILENAME: _VALID_MD, "scripts/deep/run.sh": "echo hi"},
+        expected_hash=None,
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    files = sk.list_skills(tmp_path)[0]["files"]
+    assert files == ["scripts/deep/run.sh"]
+    assert all("\\" not in f for f in files)
 
 
 def test_list_skills_skips_invalid_names(tmp_path: Path) -> None:
@@ -529,6 +593,21 @@ def test_read_skill_file_redacts_secret_shaped_lines(tmp_path: Path) -> None:
     read_back, _h, _exists = sk.read_skill_file(tmp_path, "my-skill")
     assert "sk-super-secret-value" not in read_back
     assert cw.REDACTION_SENTINEL in read_back
+
+
+def test_read_skill_file_hash_matches_returned_content_bytes(tmp_path: Path) -> None:
+    # Single-read invariant (TOCTOU fix): for a non-secret file the returned content
+    # is byte-identical to what the returned hash describes -- both derive from the
+    # SAME read_bytes, so hash == sha256(returned content bytes).
+    body = "---\ndescription: plain non-secret skill\n---\njust instructions\n"
+    sk.write_skill(tmp_path, "my-skill", {sk.SKILL_FILENAME: body}, expected_hash=None)
+    content, file_hash, exists = sk.read_skill_file(tmp_path, "my-skill")
+    assert exists is True
+    assert content == body  # no redaction happened (nothing secret-shaped)
+    assert file_hash == cw.hash_bytes(content.encode("utf-8"))
+    # And the hash the reader returns is exactly the one a follow-up write must echo.
+    updated = "---\ndescription: plain non-secret skill v2\n---\nmore\n"
+    sk.write_skill(tmp_path, "my-skill", {sk.SKILL_FILENAME: updated}, expected_hash=file_hash)
 
 
 def test_read_skill_file_rejects_invalid_name(tmp_path: Path) -> None:

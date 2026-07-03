@@ -65,11 +65,12 @@ operator-authored ``SKILL.md`` or, especially, a script — is far more likely t
 an inline credential than ``CLAUDE.md`` prose (the surface :mod:`clauster.claude_md`
 deliberately does NOT redact, since it is pure memory/prose never containing
 executable material). Skills are executable-adjacent and often copy-pasted from
-elsewhere, so this surface's read path (:func:`read_skill_file`) runs every file
-through :func:`~clauster.config_file_writer.read_file`'s built-in
+elsewhere, so every read path here runs its content through
 :func:`~clauster.config_write.redact_secret_lines` — the line-oriented redaction the
-#766 primitive shipped for exactly this case. This is a deliberate, DIFFERENT choice
-than CLAUDE.md's, not an oversight.
+#766 primitive shipped for exactly this case — before returning it:
+:func:`read_skill_file` for a file body, and :func:`list_skills` for the surfaced
+``description`` / ``frontmatter_error`` metadata. This is a deliberate, DIFFERENT
+choice than CLAUDE.md's, not an oversight.
 
 **Stale-hash guard scope (a documented simplification).** The guard compares against
 the hash of ``SKILL.md`` content only, not a whole-tree hash — mirroring
@@ -272,6 +273,26 @@ def _skills_root(base: Path) -> Path:
     return base / SKILLS_DIRNAME
 
 
+def _is_contained_regular_file(path: Path, root_resolved: Path) -> bool:
+    """Whether ``path`` is a regular file that really lives inside ``root_resolved``.
+
+    Symlink-safe member gate for :func:`list_skills`' file enumeration: rejects a
+    symlink outright (a symlink-to-file passes ``is_file()`` but must never be listed —
+    it could point at, and later leak, an outside file) AND rejects any path whose
+    resolved real location escapes ``root_resolved`` (catching a regular file sitting
+    under a symlinked intermediate directory). ``root_resolved`` is the *already
+    resolved* skill directory, so the containment check is a pure parent comparison.
+    A vanished/broken entry (``OSError`` from ``resolve``) fails closed as not-listable.
+    """
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        real = path.resolve()
+    except OSError:  # pragma: no cover - broken/racing symlink; fail closed
+        return False
+    return real == root_resolved or root_resolved in real.parents
+
+
 def _skill_md_hash(skills_root: Path, name: str) -> str:
     """Return the hash of the current on-disk ``SKILL.md`` bytes (empty digest if absent)."""
     try:
@@ -310,8 +331,14 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
         if not entry.is_dir() or entry.is_symlink() or not is_valid_skill_name(entry.name):
             continue
         skill_md = entry / SKILL_FILENAME
-        item: dict[str, Any] = {"name": entry.name, "has_skill_md": skill_md.is_file()}
-        if item["has_skill_md"]:
+        # A *symlinked* SKILL.md is refused, never followed — consistent with skipping
+        # symlinked skill DIRS above. ``is_file()`` follows symlinks (True for a
+        # symlink-to-file), so a symlinked SKILL.md pointing out of the tree would
+        # otherwise have its target content read; requiring a non-symlink regular file
+        # closes that. A symlinked entrypoint reads as "no SKILL.md" (nothing surfaced).
+        has_skill_md = skill_md.is_file() and not skill_md.is_symlink()
+        item: dict[str, Any] = {"name": entry.name, "has_skill_md": has_skill_md}
+        if has_skill_md:
             try:
                 text = skill_md.read_bytes().decode("utf-8")
                 frontmatter, _body = parse_frontmatter(text)
@@ -334,8 +361,17 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
                 item["disable_model_invocation"] = bool(
                     frontmatter.get("disable-model-invocation", False)
                 )
+        # Member enumeration is symlink-SAFE: a symlinked member (or one under a
+        # symlinked subdir) is skipped, so a symlink pointing at an outside file is
+        # never listed — and therefore never offered up for a later read that would leak
+        # its target's content. Keys are normalized to forward slashes (``as_posix``) so
+        # the API returns ``scripts/x.sh`` on every OS — these are logical member keys,
+        # not host filesystem paths.
+        entry_resolved = entry.resolve()
         item["files"] = sorted(
-            str(p.relative_to(entry)) for p in entry.rglob("*") if p.is_file() and p != skill_md
+            p.relative_to(entry).as_posix()
+            for p in entry.rglob("*")
+            if p != skill_md and _is_contained_regular_file(p, entry_resolved)
         )
         out.append(item)
     return out
@@ -347,12 +383,18 @@ def read_skill_file(
     """Return ``(redacted_content, hash, exists)`` for one file inside a skill directory.
 
     Path-contained twice over: the skill ``name`` and the ``relative`` member path
-    both go through :func:`~clauster.config_file_writer.resolve_contained_path`
-    (the latter via :func:`~clauster.config_file_writer.read_file`), so neither a
-    crafted name nor a crafted member path (``../secrets``) can escape the skills
-    root. Content is redacted (see the module docstring's read-redaction decision).
-    The hash is over the RAW (unredacted) bytes, matching what a subsequent write's
-    stale-hash guard compares against.
+    both go through :func:`~clauster.config_file_writer.resolve_contained_path`, so
+    neither a crafted name nor a crafted member path (``../secrets``) can escape the
+    skills root.
+
+    The file is read **exactly once** — the returned (redacted) content and the hash
+    are both derived from that single ``read_bytes`` (the hash over the RAW,
+    unredacted bytes; the content through
+    :func:`~clauster.config_write.redact_secret_lines`). Reading twice — once for the
+    hash, once via ``read_file`` for the content — would open a TOCTOU window where the
+    bytes the hash describes and the bytes returned could differ; this closes it. The
+    hash matching the raw bytes is exactly what a subsequent write's stale-hash guard
+    compares against. See the module docstring for the read-redaction decision.
     """
     if not is_valid_skill_name(name):
         raise cw.PathEscapeError(f"invalid skill name: {name!r}")
@@ -368,10 +410,11 @@ def read_skill_file(
         raw = b""
         exists = False
     try:
-        raw.decode("utf-8")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise cw.InvalidCandidateError(f"{relative} is not valid UTF-8") from exc
-    content = fw.read_file(skills_root, f"{name}/{relative}") if exists else ""
+    # Redact and hash from the SAME bytes (single read) — no second read to drift from.
+    content = cw.redact_secret_lines(text)
     return content, cw.hash_bytes(raw), exists
 
 
@@ -450,7 +493,12 @@ def write_skill(
         for relative, content in files.items():
             target = fw.resolve_contained_path(staging, relative)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            # write_BYTES, not write_text: text mode would translate "\n" to the
+            # platform newline (CRLF on Windows), but the read path (read_skill_file /
+            # list_skills) is byte-exact, so a text-mode write would break the
+            # round-trip off-POSIX. Members are stored verbatim, mirroring the #766
+            # primitive's own "wb" write.
+            target.write_bytes(content.encode("utf-8"))
 
     try:
         fw.replace_tree(skills_root, name, _build)
