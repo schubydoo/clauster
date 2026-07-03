@@ -1386,6 +1386,7 @@
                 </div>
                 <table class="table table-sm mb-0" data-test="cm-agents-table"
                        x-show="configMgmt.subagents.list.length" x-cloak>
+                  <caption class="visually-hidden">Subagents: name, source, and actions</caption>
                   <tbody>
                     <template x-for="a in configMgmt.subagents.list" :key="a.source + ':' + a.name">
                       <tr>
@@ -1418,6 +1419,7 @@
                     <code x-text="configMgmtConfirmToken()"></code> to confirm.</div>
                   <div class="d-flex gap-2 align-items-center">
                     <input type="text" class="form-control form-control-sm" data-test="cm-agent-delete-input"
+                           aria-label="Type the confirmation token to delete this subagent"
                            autocomplete="off" spellcheck="false" x-model="configMgmt.subagents.confirm"
                            :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-danger" data-test="cm-agent-delete-go"

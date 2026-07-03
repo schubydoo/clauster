@@ -1350,6 +1350,7 @@
       },
       configMgmtNewAgent() {
         const c = this.configMgmt, s = c.subagents;
+        c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenAgent fetch
         c.error = ""; c.saved = false; s.deletingName = "";
         s.editing = true; s.isNew = true;
         s.name = ""; s.content = ""; s.orig = ""; s.hash = null; s.confirm = "";
@@ -1375,7 +1376,7 @@
       },
       configMgmtCancelAgent() {
         const c = this.configMgmt;
-        c.subagents.editing = false; c.error = "";
+        c.subagents.editing = false; c.subagents.confirm = ""; c.error = "";
       },
       configMgmtAgentDirty() {
         const s = this.configMgmt.subagents;
@@ -1407,6 +1408,7 @@
       },
       configMgmtAskDeleteAgent(name) {
         const c = this.configMgmt, s = c.subagents;
+        c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenAgent fetch
         c.error = ""; c.saved = false; s.deletingName = name; s.confirm = "";
       },
       configMgmtCancelDeleteAgent() {
