@@ -327,6 +327,31 @@ def config_mgmt_server(
 
 
 @pytest.fixture
+def config_mgmt_plugins_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A config-management server whose fake ``claude plugin`` seeds a plugin + a marketplace.
+
+    Plugins/marketplaces are wholly CLI-driven, so the fake ``claude`` must emit the
+    two distinct list shapes (`plugin list --json` and `plugin marketplace list
+    --json`) for the surface to render rows. Action verbs (enable/disable/...) return
+    exit 0 by default, so a round-trip through the wired POST → reload succeeds.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-configmgmt-plugins")
+    yield from _start_server(
+        tmp,
+        mutable_projects_tree,
+        extra="config_write:\n  enabled: true\n  allow_user_scope: true\n",
+        extra_env={
+            "FAKE_CLAUDE_PLUGIN_LIST_STDOUT": '[{"id": "hello@market", "enabled": true}]',
+            "FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT": (
+                '[{"name": "market", "source": "owner/repo"}]'
+            ),
+        },
+    )
+
+
+@pytest.fixture
 def trust_fail_bridge_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:

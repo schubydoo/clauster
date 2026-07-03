@@ -290,6 +290,30 @@ def test_config_mgmt_skill_edit_and_delete_round_trip(
     assert not skill_md.parent.exists(), "expected the deleted skill directory to be gone"
 
 
+def test_config_mgmt_plugins_tab_lists_and_acts(
+    browser: AgentBrowser, config_mgmt_plugins_server: Server
+) -> None:
+    """The plugins surface lists the seeded plugin + marketplace and an action posts.
+
+    The plugin/marketplace lists come from the fake ``claude plugin`` (seeded by the
+    fixture). Typing the scope confirm arms the action buttons; clicking Disable
+    round-trips through the wired POST → reload and surfaces the saved banner.
+    """
+    _open_modal(browser, config_mgmt_plugins_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-plugins"]')
+    browser.expect_visible('[data-test="cm-view-plugins"]')
+    # Both CLI-driven lists rendered.
+    browser.expect_text('[data-test="cm-plugins-table"]', "hello@market")
+    browser.expect_text('[data-test="cm-marketplaces-table"]', "market")
+
+    # Actions are disabled until the scope token is typed, then a Disable posts.
+    browser.expect_visible('[data-test="cm-plugin-confirm"]')
+    browser.fill('[data-test="cm-plugin-confirm"]', "alpha")
+    browser.click('[data-test="cm-plugin-disable-hello@market"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+
+
 def test_config_mgmt_mcp_approvals_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

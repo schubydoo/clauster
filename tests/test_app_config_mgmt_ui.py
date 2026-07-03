@@ -115,6 +115,27 @@ def test_skills_surface_present_when_enabled(write_config):
     assert no_local and '"skills"' in no_local.group(1)
 
 
+def test_plugins_surface_present_when_enabled(write_config):
+    # Slice F adds the plugins + marketplaces surface (two CLI-driven action panels).
+    html = _html(write_config, _ON)
+    assert 'key: "plugins"' in html
+    assert 'data-test="cm-view-plugins"' in html
+    # Shared scope-token confirm arming the actions.
+    assert 'data-test="cm-plugin-confirm"' in html
+    # Plugins panel: table + install form (with the strong retype-id confirm).
+    assert 'data-test="cm-plugins-table"' in html
+    assert 'data-test="cm-plugin-install-id"' in html
+    assert 'data-test="cm-plugin-install-confirm"' in html
+    assert 'data-test="cm-plugin-install-go"' in html
+    # Marketplaces panel: table + add form.
+    assert 'data-test="cm-marketplaces-table"' in html
+    assert 'data-test="cm-marketplace-add-source"' in html
+    assert 'data-test="cm-marketplace-add-go"' in html
+    # Plugins support all three scopes — NOT in the no-local list.
+    no_local = re.search(r"configMgmtNoLocalSurfaces:\s*\[([^\]]*)\]", html)
+    assert no_local and '"plugins"' not in no_local.group(1)
+
+
 # ---- User scope option is gated on allow_user_scope -------------------------
 
 

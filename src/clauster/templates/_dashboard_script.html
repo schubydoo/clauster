@@ -210,9 +210,22 @@
           name: "", content: "", orig: "", hash: null,
           confirm: "", busy: false, ops: 0, deletingName: "",
         },
+        // Plugins + marketplaces (#773 slice F): a CLI-driven list surface, all three
+        // scopes. Two panels — installed plugins (enable/disable/update/uninstall +
+        // install) and marketplaces (add/remove/update). Every action is a single POST
+        // gated on the shared scope-token `confirm`; install carries an EXTRA strong
+        // confirm (retype the exact plugin id). Actions are stateless (no dirty-toggle
+        // state to clobber); `busy` covers each action THROUGH its post-action reload.
+        plugins: {
+          list: [], marketplaces: [],
+          confirm: "",                       // scope-token confirm, shared by all actions
+          installId: "", installConfirm: "", // install form: plugin id + strong retype-id
+          addSource: "",                     // marketplace add: source (url / owner/repo / path)
+          busy: false, ops: 0,
+        },
       },
-      // Surface tabs — extended by later #773 slices (skills, plugins still to come).
-      // Data-driven so the nav + views stay in sync.
+      // Surface tabs — all eight #773 slices (claude-md, settings, permissions, hooks,
+      // mcp, subagents, skills, plugins) are present. Data-driven so nav + views stay in sync.
       configMgmtSurfaces: [
         { key: "claude-md", label: "CLAUDE.md" },
         { key: "settings", label: "Settings" },
@@ -221,6 +234,7 @@
         { key: "mcp", label: "MCP" },
         { key: "subagents", label: "Subagents" },
         { key: "skills", label: "Skills" },
+        { key: "plugins", label: "Plugins" },
       ],
       // Surfaces that edit ONE document via the shared footer confirm+Save. List
       // surfaces (subagents, later MCP/skills/plugins) drive their own inline controls.
@@ -1191,6 +1205,7 @@
         if (surface === "subagents") return this._loadSubagents(myGen);
         if (surface === "mcp") return this._loadMcp(myGen);
         if (surface === "skills") return this._loadSkills(myGen);
+        if (surface === "plugins") return this._loadPlugins(myGen);
         return this._loadJsonSurface(surface, myGen);  // permissions | hooks
       },
       // Shared JSON-surface loader: GET /api/config-write/<surface> and pretty-print
@@ -1796,6 +1811,113 @@
           if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSkills(gen); }
           else await this._configMgmtWriteErr(res);
         } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+      },
+      // --- plugins + marketplaces (#773 slice F): CLI-driven, all 3 scopes ---------
+      // Two panels sharing one scope-token `confirm`. Every action is a single POST
+      // then a reload; `busy` stays true THROUGH the reload so no button can be
+      // clicked against stale rows. Actions are stateless (no dirty state to clobber),
+      // so there is no approvals-style baseline race here. Install needs an EXTRA
+      // strong confirm: the operator retypes the exact plugin id being introduced.
+      async _loadPlugins(myGen) {
+        const c = this.configMgmt, pl = c.plugins;
+        // Clear the action inputs on every (re)load — matches the doc surfaces'
+        // "clear confirm after a write" rule and forces a fresh confirm per action.
+        pl.confirm = ""; pl.installId = ""; pl.installConfirm = ""; pl.addSource = "";
+        try {
+          const res = await fetch(ROOT + "/api/config-write/plugins?" + this._configMgmtQuery());
+          if (c.gen !== myGen) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) { pl.list = []; pl.marketplaces = []; c.error = this._configMgmtLoadErr(res); return; }
+          const d = await res.json();
+          if (c.gen !== myGen) return;
+          pl.list = d.plugins || [];
+          const mres = await fetch(ROOT + "/api/config-write/marketplaces?" + this._configMgmtQuery());
+          if (c.gen !== myGen) return;
+          if (this._authExpired(mres)) return;
+          if (mres.ok) {
+            const md = await mres.json();
+            if (c.gen !== myGen) return;
+            pl.marketplaces = md.marketplaces || [];
+          } else {
+            // Surface the failure rather than showing a misleading empty "No
+            // marketplaces" — the plugins list may have loaded fine while this
+            // second fetch failed (fail closed, never silently).
+            pl.marketplaces = []; c.error = this._configMgmtLoadErr(mres);
+          }
+        } catch (e) { if (c.gen === myGen) c.error = "Failed to load plugins."; }
+      },
+      // True when the shared scope-token confirm matches — gates every non-install action.
+      configMgmtCanPluginAct() {
+        const c = this.configMgmt, pl = c.plugins;
+        if (pl.busy || this.configMgmtNeedsProject()) return false;
+        return pl.confirm === this.configMgmtConfirmToken();
+      },
+      async _pluginActionPost(url, body) {
+        // Shared POST+reload for every plugin/marketplace action. Caller has already
+        // gated on the confirm; `busy` (set here) covers the reload so no second
+        // action can fire against stale rows.
+        const c = this.configMgmt, pl = c.plugins;
+        const gen = c.gen; pl.ops += 1; pl.busy = true; c.error = ""; c.saved = false;
+        try {
+          const res = await fetch(ROOT + url, {
+            method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
+          });
+          if (c.gen !== gen) return;
+          if (this._authExpired(res)) return;
+          if (res.ok) { c.saved = true; await this._loadPlugins(gen); }
+          else await this._configMgmtWriteErr(res);
+        } finally { pl.ops = Math.max(0, pl.ops - 1); pl.busy = pl.ops > 0; }
+      },
+      configMgmtPluginAction(id, op) {
+        const pl = this.configMgmt.plugins;
+        if (!this.configMgmtCanPluginAct()) return;
+        return this._pluginActionPost(
+          "/api/config-write/plugins/action",
+          Object.assign(this._configMgmtTarget(), { op: op, plugin: id, confirm: pl.confirm }),
+        );
+      },
+      // Install: needs the scope token AND a retype of the exact plugin id.
+      configMgmtCanInstallPlugin() {
+        const c = this.configMgmt, pl = c.plugins;
+        if (pl.busy || this.configMgmtNeedsProject()) return false;
+        if (!pl.installId.trim()) return false;
+        if (pl.confirm !== this.configMgmtConfirmToken()) return false;
+        return pl.installConfirm === pl.installId.trim();
+      },
+      configMgmtInstallPlugin() {
+        const c = this.configMgmt, pl = c.plugins;
+        if (!this.configMgmtCanInstallPlugin()) return;
+        const id = pl.installId.trim();
+        return this._pluginActionPost(
+          "/api/config-write/plugins/action",
+          Object.assign(this._configMgmtTarget(), {
+            op: "install", plugin: id, confirm: pl.confirm, confirm_plugin: pl.installConfirm,
+          }),
+        );
+      },
+      configMgmtMarketAction(name, op) {
+        const pl = this.configMgmt.plugins;
+        if (!this.configMgmtCanPluginAct()) return;
+        return this._pluginActionPost(
+          "/api/config-write/marketplaces/action",
+          Object.assign(this._configMgmtTarget(), { op: op, name: name, confirm: pl.confirm }),
+        );
+      },
+      configMgmtCanAddMarket() {
+        const c = this.configMgmt, pl = c.plugins;
+        if (pl.busy || this.configMgmtNeedsProject()) return false;
+        if (!pl.addSource.trim()) return false;
+        return pl.confirm === this.configMgmtConfirmToken();
+      },
+      configMgmtAddMarketplace() {
+        const c = this.configMgmt, pl = c.plugins;
+        if (!this.configMgmtCanAddMarket()) return;
+        return this._pluginActionPost(
+          "/api/config-write/marketplaces/action",
+          Object.assign(this._configMgmtTarget(), {
+            op: "add", source: pl.addSource.trim(), confirm: pl.confirm,
+          }),
+        );
       },
       // --- read-only transcript viewer (#431) ---
       // Coarse relative timestamp from an mtime (epoch SECONDS, as the API returns
