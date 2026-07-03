@@ -1663,12 +1663,15 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_config_write_mcp_read(scope: str = "project", project: str = "") -> dict:
         # Read the (structurally redacted) MCP server map for a surface. Gated exactly
         # like the status route: 404 when config-write is off, and 404 for user scope
-        # when allow_user_scope is off — the surface is invisible, never 403.
+        # when allow_user_scope is off — the surface is invisible, never 403. Capability
+        # gate FIRST, before the scope-enum check, so a disabled surface 404s for ANY
+        # request (a bogus scope included) instead of leaking existence via a differing
+        # 422 — the #819/#768 invisible-surface invariant.
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user", "local"):
             raise HTTPException(
                 status_code=422, detail="scope must be 'project', 'user', or 'local'"
             )
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope == "user":
             try:
                 servers = await asyncio.to_thread(
@@ -1716,7 +1719,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     ) -> dict:
         """Shared Foundation pipeline for the three PUT /api/config-write/* routes.
 
-        Order: capability/scope 404 gate → confirm (400, FIRST semantic gate) →
+        Order: capability (404, FIRST — invisible-surface #819/#768) → scope-enum (422)
+        → confirm (400, FIRST semantic gate) →
         payload shape check (422) → path resolve/contain → stale-hash guard (409) →
         atomic write. Any step aborts before the write.
 
@@ -1732,11 +1736,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         forwarded when the relevant flag is ``False``.
         """
         scope = body.get("scope", "project")
+        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
+        # for ANY request (a bogus scope included), never a differing 422 (#819/#768).
+        config_write.require_capability(config, scope)
         if scope not in ("project", "user", "local"):
             raise HTTPException(
                 status_code=422, detail="scope must be 'project', 'user', or 'local'"
             )
-        config_write.require_capability(config, scope)
         if scope == "user":
             config_write.require_confirm("user", None, body.get("confirm"))
             payload = body.get(payload_key)
@@ -1828,16 +1834,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_config_write_mcp_server(body: dict) -> dict:
         # CLI-driven add/remove/edit (#769) over the same Foundation gate the PUT
         # (whole-map) route uses. Order mirrors the Foundation docstring exactly:
-        # scope shape (422) -> capability (404) -> confirm (400, FIRST semantic gate,
-        # so it fires even against a garbled op/name/entry) -> op/name/entry shape
-        # (422) -> path resolve (400/404) -> the CLI/direct-write dispatch itself
-        # (409 already-exists, 404 not-found, or 400 for any other CLI failure).
+        # capability (404, FIRST — a disabled surface 404s for ANY request, a bogus
+        # scope included, so it never leaks existence via a differing 422; #819/#768)
+        # -> scope shape (422) -> confirm (400, FIRST semantic gate, so it fires even
+        # against a garbled op/name/entry) -> op/name/entry shape (422) -> path resolve
+        # (400/404) -> the CLI/direct-write dispatch itself (409 already-exists, 404
+        # not-found, or 400 for any other CLI failure).
         scope = body.get("scope", "project")
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user", "local"):
             raise HTTPException(
                 status_code=422, detail="scope must be 'project', 'user', or 'local'"
             )
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
 
         project = body.get("project")
         config_write.require_confirm(
@@ -2040,11 +2048,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # is off — the surface is invisible, never 403. A corrupt/non-object on-disk
         # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
         # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
+        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
+        # for ANY request (a bogus scope included), never a differing 422 (#819/#768).
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user", "local"):
             raise HTTPException(
                 status_code=422, detail="scope must be 'project', 'user', or 'local'"
             )
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope == "user":
             try:
                 permissions, file_hash = await asyncio.to_thread(
@@ -2102,11 +2112,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # settings.json raises InvalidCandidateError from _load_json_obj; map it through the
         # same helper as the PUT route so a hand-edited file is a clean 422, never a 500.
         # READ never runs a command — it only reflects the stored (inert) hook structure.
+        # Capability gate FIRST, before the scope-enum check, so a disabled surface 404s
+        # for ANY request (a bogus scope included), never a differing 422 (#819/#768).
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope not in ("project", "user", "local"):
             raise HTTPException(
                 status_code=422, detail="scope must be 'project', 'user', or 'local'"
             )
-        config_write.require_capability(config, scope)  # type: ignore[arg-type]
         if scope == "user":
             try:
                 hooks, file_hash = await asyncio.to_thread(

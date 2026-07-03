@@ -1538,7 +1538,7 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
 
         _log.warning(
             "`database_url` (config key or CLAUSTER_DATABASE_URL env) is no longer supported "
-            "and was IGNORED — clauster is SQLite-only since 0.13 (#796). Data is stored at "
+            "and was IGNORED — clauster is SQLite-only (#796). Data is stored at "
             "%s. Remove it to silence this warning.",
             resolve_url(config.state_dir),
         )
