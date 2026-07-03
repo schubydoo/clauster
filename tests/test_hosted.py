@@ -111,6 +111,23 @@ def test_build_hosted_argv_with_resume():
     assert argv[argv.index("--resume") + 1] == "abc-123"
 
 
+def test_build_hosted_argv_with_session_id():
+    # #836: a fresh spawn pins a session id so it's resumable before the first turn.
+    argv = build_hosted_argv(_BIN, permission_mode="acceptEdits", session_id="sid-123")
+    assert argv[argv.index("--session-id") + 1] == "sid-123"
+    assert "--resume" not in argv
+
+
+def test_build_hosted_argv_resume_takes_precedence_over_session_id():
+    # On resume, --resume reloads the existing session, so --session-id is omitted
+    # (pinning a fresh id would fork a new conversation).
+    argv = build_hosted_argv(
+        _BIN, permission_mode="acceptEdits", resume_uuid="r-1", session_id="s-1"
+    )
+    assert argv[argv.index("--resume") + 1] == "r-1"
+    assert "--session-id" not in argv
+
+
 # -- spawn -----------------------------------------------------------------
 
 
@@ -124,6 +141,26 @@ async def test_start_spawns_stream_json_contract(fake_claustrum):
         assert spawned["command"] == _BIN
         assert "--output-format" in spawned["args"]
         assert spawned["args"][spawned["args"].index("--permission-mode") + 1] == "plan"
+
+
+async def test_start_pins_session_id_for_fresh_spawn(fake_claustrum):
+    # #836: a fresh session pins its session id up front (resumable before any turn) in
+    # spawn_session_id, leaving claude_session_uuid for the frame-captured value.
+    async with _session(fake_claustrum) as (fake, session):
+        sid = session.spawn_session_id
+        assert sid  # pinned at start, before any stream frame arrives
+        assert session.claude_session_uuid is None  # frame-captured id stays unset
+        args = fake.spawned[0]["args"]
+        assert args[args.index("--session-id") + 1] == sid  # forced onto the spawn argv
+
+
+async def test_start_with_resume_does_not_pin_new_session_id(fake_claustrum):
+    # On resume, --resume drives the reload; start() must NOT also pin a fresh
+    # --session-id (that would fork a new conversation off the resumed one).
+    async with _session(fake_claustrum, resume_uuid="r-9") as (fake, session):
+        args = fake.spawned[0]["args"]
+        assert args[args.index("--resume") + 1] == "r-9"
+        assert "--session-id" not in args
 
 
 async def test_start_twice_is_rejected(fake_claustrum):
@@ -1132,6 +1169,27 @@ async def test_manager_stop_returns_synced_instance(fake_claustrum):
         assert result.status is InstanceStatus.STOPPED
 
 
+async def test_manager_idle_session_is_resumable(fake_claustrum):
+    # #836: a fresh hosted session pins its session id at spawn, so stopping it before
+    # any turn (no init frame, no message) still leaves it resumable — previously the
+    # uuid stayed null → resume raised "no captured session uuid" (the 409).
+    async with _manager(fake_claustrum) as (fake, client, mgr):
+        inst = await _spawn(mgr, client)
+        pid = inst.claustrum_process_id
+        sid = mgr.get_instance(pid).claude_session_uuid
+        assert sid  # known at spawn, before any turn
+        args = fake.spawned[-1]["args"]
+        assert args[args.index("--session-id") + 1] == sid
+        await fake.emit_exit(pid, 0)
+        await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.STOPPED)
+        await mgr.stop(pid)
+        # Resumable with no turn ever taken: resume finds the pinned uuid and respawns.
+        resumed = await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
+        assert resumed.status is InstanceStatus.RUNNING
+        assert resumed.claude_session_uuid == sid  # same conversation
+        await mgr.aclose()
+
+
 async def test_manager_stop_row_popped_mid_grace_raises_not_keyerror(fake_claustrum):
     # A concurrent forget()/resume() can pop the registry row during stop()'s grace
     # window; stop() must surface that as HostedSessionError (caller maps 404), never
@@ -1685,8 +1743,13 @@ async def test_manager_resume_without_uuid_raises(fake_claustrum):
     async with _manager(fake_claustrum) as (fake, client, mgr):
         inst = await _spawn(mgr, client)
         pid = inst.claustrum_process_id
-        await fake.emit_exit(pid, 1)  # crashed, but no session_id was ever seen
+        await fake.emit_exit(pid, 1)  # crashed, but no session_id was ever captured
         await wait_until(lambda: mgr.get_instance(pid).status is InstanceStatus.CRASHED)
+        # Clear both the captured and the pinned id to model a row with no resume target
+        # (e.g. a pre-#836 reattached record): resume must then refuse. #836 otherwise
+        # pins spawn_session_id so a fresh session is always resumable.
+        mgr._instances[pid].claude_session_uuid = None
+        mgr._sessions[pid].spawn_session_id = None
         with pytest.raises(HostedSessionError):
             await mgr.resume(client, pid, cwd="/tmp/proj", claude_binary=_BIN)
 

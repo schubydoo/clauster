@@ -89,16 +89,22 @@ def build_hosted_argv(
     *,
     permission_mode: PermissionMode,
     resume_uuid: str | None = None,
+    session_id: str | None = None,
 ) -> list[str]:
     """Build the headless stream-json spawn argv for a hosted session.
 
     ``claude_binary`` must already be an absolute, resolved path (validate-before-
     spawn is the caller's job). ``resume_uuid`` adds ``--resume <uuid>`` for
     deterministic conversation resume (CL-7); omit it for a fresh session.
+    ``session_id`` adds ``--session-id <uuid>`` on a *fresh* spawn so the session id
+    is known before the first turn (#836) — mutually exclusive with ``resume_uuid``,
+    which reloads an existing session and takes precedence.
     """
     argv = [claude_binary, *_STREAM_JSON_ARGS, "--permission-mode", permission_mode]
     if resume_uuid is not None:
         argv += ["--resume", resume_uuid]
+    elif session_id is not None:
+        argv += ["--session-id", session_id]
     return argv
 
 
@@ -166,6 +172,10 @@ class HostedSession:
         self.status: InstanceStatus = InstanceStatus.STARTING
         self.exit_code: int | None = None
         self.claude_session_uuid: str | None = None
+        # A fresh spawn pins a --session-id up front; kept separate from the frame-
+        # captured claude_session_uuid so claude's reported id still wins once it
+        # arrives, and this is the fallback only for an idle, pre-first-frame session (#836).
+        self.spawn_session_id: str | None = None
         self.agent_pid: int | None = None
         self.agent_proc_start: float | None = None
         # Highest *daemon* frame seq drained — the reattach replay cursor across
@@ -214,8 +224,20 @@ class HostedSession:
         """
         if self._pump_task is not None:
             raise HostedSessionError("hosted session already started")
+        session_id: str | None = None
+        if resume_uuid is None:
+            # Pin a session id up front so the conversation is resumable before its first
+            # turn — an idle session that never emits an init frame otherwise has no resume
+            # target, so resume 409s and stop reads as crashed (#836). Held in
+            # spawn_session_id (not claude_session_uuid) so the frame-captured id still wins
+            # once it arrives; claude echoes --session-id, so the two agree in practice.
+            session_id = str(uuid.uuid4())
+            self.spawn_session_id = session_id
         argv = build_hosted_argv(
-            self._claude_binary, permission_mode=permission_mode, resume_uuid=resume_uuid
+            self._claude_binary,
+            permission_mode=permission_mode,
+            resume_uuid=resume_uuid,
+            session_id=session_id,
         )
         self._stream = self._client.stream(self._process_id)
         self._source = self._stream.subscribe()
@@ -1069,8 +1091,11 @@ class HostedManager:
         session = self._sessions.get(instance.claustrum_process_id or "")
         if session is not None:
             instance.status = session.status
-            if session.claude_session_uuid:
-                instance.claude_session_uuid = session.claude_session_uuid
+            # Prefer the frame-captured id; fall back to the pinned spawn id so an idle
+            # session (no init frame yet) is still resumable (#836).
+            effective_uuid = session.claude_session_uuid or session.spawn_session_id
+            if effective_uuid:
+                instance.claude_session_uuid = effective_uuid
             # The reattach cursor is the *daemon* seq, not the clauster ring seq.
             instance.daemon_last_seq = max(instance.daemon_last_seq, session.daemon_last_seq)
         return instance
