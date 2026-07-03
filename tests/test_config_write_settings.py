@@ -316,7 +316,7 @@ def test_local_write_stale_hash_raises(tmp_path: Path) -> None:
 
 
 def test_effective_local_overrides_project_overrides_user() -> None:
-    effective = cws.compute_effective_settings(
+    effective = cws._compute_effective_settings(
         user_misc={"model": "haiku", "cleanupPeriodDays": 10},
         project_misc={"model": "opus"},
         local_misc={"model": "sonnet"},
@@ -327,7 +327,7 @@ def test_effective_local_overrides_project_overrides_user() -> None:
 
 
 def test_effective_project_overrides_user_when_local_silent_on_key() -> None:
-    effective = cws.compute_effective_settings(
+    effective = cws._compute_effective_settings(
         user_misc={"model": "haiku"},
         project_misc={"model": "opus"},
         local_misc={},
@@ -336,14 +336,14 @@ def test_effective_project_overrides_user_when_local_silent_on_key() -> None:
 
 
 def test_effective_falls_through_to_user_when_others_absent() -> None:
-    effective = cws.compute_effective_settings(
+    effective = cws._compute_effective_settings(
         user_misc={"model": "haiku"}, project_misc={}, local_misc={}
     )
     assert effective["model"] == {"value": "haiku", "source": "user"}
 
 
 def test_effective_omits_key_absent_everywhere() -> None:
-    effective = cws.compute_effective_settings(user_misc={}, project_misc={}, local_misc={})
+    effective = cws._compute_effective_settings(user_misc={}, project_misc={}, local_misc={})
     assert effective == {}
 
 
@@ -351,7 +351,7 @@ def test_effective_none_scope_never_participates() -> None:
     # user_misc=None (allow_user_scope off) must never be treated as an
     # authoritative empty layer — a key only user defines simply never surfaces,
     # rather than falling through to "nothing" and hiding the real gap.
-    effective = cws.compute_effective_settings(
+    effective = cws._compute_effective_settings(
         user_misc=None, project_misc={"model": "opus"}, local_misc={}
     )
     assert effective == {"model": {"value": "opus", "source": "project"}}
@@ -360,7 +360,7 @@ def test_effective_none_scope_never_participates() -> None:
 def test_effective_whole_value_wins_no_deep_merge_inside_env() -> None:
     # A project-scope `env` is not key-by-key merged with a user-scope `env` —
     # the highest-precedence scope that defines `env` at all supplies it whole.
-    effective = cws.compute_effective_settings(
+    effective = cws._compute_effective_settings(
         user_misc={"env": {"A": "1", "B": "2"}},
         project_misc={},
         local_misc={"env": {"A": "9"}},

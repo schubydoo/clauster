@@ -322,7 +322,7 @@ def write_project_local_settings(
     cw.ensure_gitignored(project_dir, ".claude/settings.local.json")
 
 
-def compute_effective_settings(
+def _compute_effective_settings(
     *,
     user_misc: dict[str, Any] | None,
     project_misc: dict[str, Any] | None,
@@ -330,16 +330,26 @@ def compute_effective_settings(
 ) -> dict[str, dict[str, Any]]:
     """Return, per top-level key, the effective value and which scope supplied it.
 
-    Each of ``user_misc``/``project_misc``/``local_misc`` is the
-    **already-redacted** misc view for that scope (i.e. the output of
-    :func:`read_user_settings`/:func:`read_project_settings`/
-    :func:`read_project_local_settings` -- never raw disk content), so this
-    function never sees or handles an unmasked secret; it is a pure
-    dict-merge. ``None`` means that scope was not read at all (e.g. the caller
-    omitted the user layer because ``allow_user_scope`` is off) -- distinct
-    from an empty dict (the scope *was* read and genuinely defines nothing),
-    so an unread scope never silently participates in the merge as if it were
-    authoritatively empty.
+    **Module-private on purpose (contract-safety, Greptile #823 P2).** This
+    function is a pure dict-merge that copies its inputs' values verbatim into
+    the returned ``{"value": ..., "source": ...}`` dicts -- it does **no
+    redaction of its own**. Every caller MUST pass the **already-redacted** misc
+    view for each scope, i.e. the output of :func:`read_user_settings` /
+    :func:`read_project_settings` / :func:`read_project_local_settings`, and
+    **never raw ``settings.json`` disk content**: a caller that skipped the read
+    layer and handed in raw data would silently surface live ``env`` secrets in
+    the effective view (env-masking lives in the read functions, not here). The
+    leading underscore keeps this function reachable only from
+    :mod:`clauster.app`'s route handler (the one correct call site) so a future
+    caller can't wire it to raw data by importing a public symbol.
+
+    Each of ``user_misc``/``project_misc``/``local_misc`` is that already-redacted
+    misc view, so this function never sees or handles an unmasked secret.
+    ``None`` means that scope was not read at all (e.g. the caller omitted the
+    user layer because ``allow_user_scope`` is off) -- distinct from an empty
+    dict (the scope *was* read and genuinely defines nothing), so an unread
+    scope never silently participates in the merge as if it were authoritatively
+    empty.
 
     Precedence follows Claude Code's own scope order among the three scopes
     clauster manages -- **local > project > user** (see module docstring for

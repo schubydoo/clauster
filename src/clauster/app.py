@@ -2367,7 +2367,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-        effective = config_write_settings.compute_effective_settings(
+        effective = config_write_settings._compute_effective_settings(
             user_misc=user_misc, project_misc=project_misc, local_misc=local_misc
         )
         return {"project": project, "effective": effective}
