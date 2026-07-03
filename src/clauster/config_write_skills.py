@@ -293,6 +293,14 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
     validation is still listed (so a hand-edited/corrupt skill is visible, not hidden)
     with ``frontmatter_error`` set instead of raising — a single bad skill must never
     break the whole listing.
+
+    **Redaction (consistency with the file-body read view).** Both the surfaced
+    ``description`` and any ``frontmatter_error`` fragment run through
+    :func:`~clauster.config_write.redact_secret_lines` before entering the listing —
+    a secret pasted into a ``description:`` line, or echoed back inside a YAML
+    parse-error message, is masked exactly as it would be on the
+    :func:`read_skill_file` body view, so this surface's redaction invariant holds on
+    every read path, not just the file-body one.
     """
     skills_root = _skills_root(base)
     if not skills_root.is_dir():
@@ -309,11 +317,20 @@ def list_skills(base: Path) -> list[dict[str, Any]]:
                 frontmatter, _body = parse_frontmatter(text)
                 validate_frontmatter(frontmatter)
             except cw.InvalidCandidateError as exc:
-                item["frontmatter_error"] = str(exc)
+                # The error string can quote a fragment of the offending frontmatter
+                # (a bad YAML line), so redact it the same way the body view is.
+                item["frontmatter_error"] = cw.redact_secret_lines(str(exc))
             except UnicodeDecodeError:
                 item["frontmatter_error"] = f"{SKILL_FILENAME} is not valid UTF-8"
             else:
-                item["description"] = frontmatter.get("description")
+                description = frontmatter.get("description")
+                # description is a validated non-empty str here, but guard anyway so a
+                # future validator change can't feed a non-str into redact_secret_lines.
+                item["description"] = (
+                    cw.redact_secret_lines(description)
+                    if isinstance(description, str)
+                    else description
+                )
                 item["disable_model_invocation"] = bool(
                     frontmatter.get("disable-model-invocation", False)
                 )
@@ -374,10 +391,13 @@ def write_skill(
     otherwise, before any I/O) — see the module docstring. Every file is validated
     for shape only and NEVER executed: :func:`validate_skill_md_content` for
     ``SKILL.md``, :func:`validate_script_body` for everything else. Member paths are
-    containment-checked one by one inside the atomic build (each goes through
-    :func:`~clauster.config_file_writer.write_file`, which calls
-    :func:`~clauster.config_file_writer.resolve_contained_path`) — a ``../`` member
-    path aborts the whole write before any promote.
+    containment-checked one by one inside the atomic build (each is resolved through
+    :func:`~clauster.config_file_writer.resolve_contained_path` against the staging
+    dir before it is written) — a ``../`` or absolute member path aborts the whole
+    write before any promote. The build writes members directly rather than via
+    :func:`~clauster.config_file_writer.write_file` so no per-file ``.lock`` sidecar
+    lands inside (and is then promoted as part of) the skill tree — see the inline
+    comment in ``_build``.
     """
     if not is_valid_skill_name(name):
         raise cw.PathEscapeError(f"invalid skill name: {name!r}")

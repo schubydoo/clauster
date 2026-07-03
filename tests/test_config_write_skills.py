@@ -428,6 +428,35 @@ def test_list_skills_reports_valid_skill(tmp_path: Path) -> None:
     assert item["files"] == []
 
 
+def test_list_skills_redacts_secret_in_description(tmp_path: Path) -> None:
+    # A secret pasted into a description: line must be masked in the LIST metadata,
+    # exactly as it is on the file-body read view -- the redaction invariant holds
+    # on every read path, not just read_skill_file.
+    secretish = "connects to slack://XOXB-super-secret-token@hooks"
+    sk.write_skill(
+        tmp_path, "my-skill", {sk.SKILL_FILENAME: _md(description=secretish)}, expected_hash=None
+    )
+    listing = sk.list_skills(tmp_path)
+    assert "XOXB-super-secret-token" not in listing[0]["description"]
+    assert cw.REDACTION_SENTINEL in listing[0]["description"]
+
+
+def test_list_skills_redacts_secret_in_frontmatter_error(tmp_path: Path) -> None:
+    # A YAML parse error can echo a fragment of the offending line back; a secret
+    # interpolation in that fragment must be masked in the error string too.
+    skills_root = tmp_path / "skills"
+    bad = skills_root / "broken"
+    bad.mkdir(parents=True)
+    # Malformed YAML (unbalanced bracket) whose error message quotes the secret line.
+    (bad / sk.SKILL_FILENAME).write_text(
+        "---\ndescription: [unclosed ${SUPER_SECRET_VALUE}\n---\nbody"
+    )
+    listing = sk.list_skills(tmp_path)
+    err = listing[0]["frontmatter_error"]
+    assert "SUPER_SECRET_VALUE" not in err
+    assert cw.REDACTION_SENTINEL in err
+
+
 def test_list_skills_reports_frontmatter_error_without_raising(tmp_path: Path) -> None:
     skills_root = tmp_path / "skills"
     bad = skills_root / "broken"
