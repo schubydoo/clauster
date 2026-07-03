@@ -197,12 +197,12 @@
           name: "", entryText: "", orig: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
           approvals: {
-            enabled: [], disabled: [], orig: "",
+            enabled: [], disabled: [], orig: "", loading: false,
             confirm: "", busy: false, ops: 0, resetConfirm: "", resetBusy: false,
           },
         },
       },
-      // Surface tabs — extended by later slices (#773 D adds skills, plugins).
+      // Surface tabs — extended by later #773 slices (skills, plugins still to come).
       // Data-driven so the nav + views stay in sync.
       configMgmtSurfaces: [
         { key: "claude-md", label: "CLAUDE.md" },
@@ -1598,6 +1598,13 @@
         // choices to unset — a silent data-loss the "fail closed" rule forbids. On
         // success both are overwritten below.
         ap.enabled = []; ap.disabled = []; ap.orig = this._mcpApprovalsSig([], []);
+        // `loading` hides the toggles until the real state lands. A post-action reload
+        // (save/delete/approvals-save/reset) calls _loadMcp directly WITHOUT c.loading,
+        // so the surface stays visible; without this flag the panel would show the
+        // baseline "all unset" and a click in the sub-fetch window would be silently
+        // overwritten when the response arrives. The initial load is already gated by
+        // c.loading. Cleared gen-guarded so a superseding load keeps ownership.
+        ap.loading = true;
         try {
           const res = await fetch(ROOT + "/api/config-write/mcp/approvals?project=" + encodeURIComponent(c.project));
           if (c.gen !== myGen) return;
@@ -1609,6 +1616,7 @@
           ap.disabled = Array.isArray(d.disabled) ? d.disabled.slice() : [];
           ap.orig = this._mcpApprovalsSig(ap.enabled, ap.disabled);
         } catch (e) { /* approvals are secondary — the baseline above keeps the panel non-dirty */ }
+        finally { if (c.gen === myGen) ap.loading = false; }
       },
       configMgmtMcpApprovalState(name) {
         const ap = this.configMgmt.mcp.approvals;

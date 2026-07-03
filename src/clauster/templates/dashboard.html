@@ -1431,6 +1431,8 @@
                   <div class="form-hint small mb-2">
                     Whether Claude Code may use each committed <code>.mcp.json</code> server in this project.
                   </div>
+                  <div class="text-secondary small" x-show="configMgmt.mcp.approvals.loading" x-cloak>Loading…</div>
+                  <div x-show="!configMgmt.mcp.approvals.loading" x-cloak>
                   <table class="table table-sm mb-2">
                     <caption class="visually-hidden">Per-server approval state</caption>
                     <tbody>
@@ -1479,6 +1481,7 @@
                               :disabled="!configMgmtCanResetMcp()" @click="configMgmtResetMcpChoices()">Reset choices</button>
                     </div>
                   </details>
+                  </div><!-- /approvals !loading wrapper -->
                 </div>
               </div>
               <!-- EDITOR mode -->
