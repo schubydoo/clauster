@@ -1176,6 +1176,7 @@
         const c = this.configMgmt;
         c.settings.effective = null; c.settings.effectiveError = "";
         await this._loadJsonSurface("settings", myGen);
+        if (c.gen !== myGen) return;  // superseded — skip the secondary effective fetch
         // Only fetch the merged view when the settings load itself succeeded — no point
         // compounding a network error — and the panel is open on a scoped (non-user) read.
         if (!c.error && c.settings.showEffective && c.scope !== "user") {
