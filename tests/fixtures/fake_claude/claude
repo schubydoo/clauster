@@ -241,6 +241,17 @@ def run_plugin(args):
         with open(os.environ["FAKE_CLAUDE_PLUGIN_ARGV_FILE"], "w") as fh:
             json.dump(record, fh)
     stdout = os.environ.get("FAKE_CLAUDE_PLUGIN_STDOUT", "")
+    # The plugins UI reads two distinct list shapes in one surface load (`plugin list
+    # --json` -> [{id,enabled}] and `plugin marketplace list --json` -> [{name,source}]),
+    # so a single STDOUT can't serve both. These per-verb overrides let an E2E seed each
+    # list independently; both fall back to FAKE_CLAUDE_PLUGIN_STDOUT when unset, so the
+    # existing route tests are unaffected.
+    list_out = os.environ.get("FAKE_CLAUDE_PLUGIN_LIST_STDOUT")
+    mkt_out = os.environ.get("FAKE_CLAUDE_PLUGIN_MARKETPLACE_LIST_STDOUT")
+    if verb == "list" and list_out is not None:
+        stdout = list_out
+    elif verb == "marketplace" and len(args) > 1 and args[1] == "list" and mkt_out is not None:
+        stdout = mkt_out
     stderr = os.environ.get("FAKE_CLAUDE_PLUGIN_STDERR", "")
     if stdout:
         sys.stdout.write(stdout)
