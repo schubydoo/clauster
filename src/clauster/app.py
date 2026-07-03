@@ -38,6 +38,7 @@ from . import (
     config_write_mcp_cli,
     config_write_permissions,
     config_write_settings,
+    config_write_skills,
     config_write_subagents,
     config_writer,
     environments,
@@ -1646,6 +1647,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return HTTPException(status_code=404, detail=str(exc))
         if isinstance(exc, config_write_subagents.ReadOnlyAgentError):
             return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, config_write_skills.ScriptConfirmRequiredError):
+            # A skill upload included non-SKILL.md files without echoing the extra
+            # script-body confirm token — a distinct 400 gate on top of the ordinary
+            # type-the-name confirm (see config_write_skills' module docstring).
+            return HTTPException(status_code=400, detail=str(exc))
         return HTTPException(status_code=400, detail=str(exc))  # pragma: no cover - defensive
 
     @app.get("/api/config-write/mcp")
@@ -2365,6 +2371,277 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
         return {"scope": "project", "project": proj, "name": name, "deleted": existed}
+
+    def _user_claude_json_guarded() -> Path:
+        # Same fail-closed guard as _user_settings_json(): the user-scope skills
+        # directory (~/.claude/skills/) needs a runner to resolve ~/.claude.json;
+        # without one, fail closed with the 404-invisible shape rather than let a
+        # None runner raise an unhandled 500.
+        active_runner = app.state.runner
+        if active_runner is None:
+            raise HTTPException(status_code=404, detail="config-write user scope is unavailable")
+        return active_runner.claude_json
+
+    @app.get("/api/config-write/skills")
+    async def api_config_write_skills_list(scope: str = "project", project: str = "") -> dict:
+        # Skill DIRECTORY ops are User/Project scope ONLY -- Claude Code has no
+        # "local" skills directory (config_write_skills' module docstring). Capability
+        # gate FIRST, before the scope-enum check (#819 ordering fix): a disabled
+        # surface must 404 for ANY request, a bogus scope included.
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project' or 'user' for skills"
+            )
+        # NOTE: config_write_skills.list_{user,project}_skills() never raises
+        # ConfigWriteError -- a skill whose SKILL.md fails structural validation is
+        # still listed with a "frontmatter_error" field (see its docstring), so
+        # there is no error-mapping try/except needed here (unlike the file-read
+        # and write routes below, which DO propagate typed failures).
+        if scope == "user":
+            skills = await asyncio.to_thread(
+                config_write_skills.list_user_skills, _user_claude_json_guarded()
+            )
+            return {"scope": "user", "skills": skills}
+        project_dir = _resolve_cw_project(project)
+        skills = await asyncio.to_thread(config_write_skills.list_project_skills, project_dir)
+        return {"scope": "project", "project": project, "skills": skills}
+
+    @app.get("/api/config-write/skills/file")
+    async def api_config_write_skills_file_read(
+        scope: str = "project",
+        project: str = "",
+        name: str = "",
+        relative: str = config_write_skills.SKILL_FILENAME,
+    ) -> dict:
+        # View a single file inside a skill directory (SKILL.md by default). Content
+        # is REDACTED (config_write_skills' module docstring -- the #813 INFO-1 gap
+        # this surface deliberately closes, unlike the CLAUDE.md content-tier route).
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project' or 'user' for skills"
+            )
+        if not name:
+            raise HTTPException(status_code=422, detail="'name' is required")
+        if scope == "user":
+            try:
+                content, file_hash, exists = await asyncio.to_thread(
+                    config_write_skills.read_user_skill_file,
+                    _user_claude_json_guarded(),
+                    name,
+                    relative,
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {
+                "scope": "user",
+                "name": name,
+                "relative": relative,
+                "content": content,
+                "hash": file_hash,
+                "exists": exists,
+            }
+        project_dir = _resolve_cw_project(project)
+        try:
+            content, file_hash, exists = await asyncio.to_thread(
+                config_write_skills.read_project_skill_file, project_dir, name, relative
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {
+            "scope": "project",
+            "project": project,
+            "name": name,
+            "relative": relative,
+            "content": content,
+            "hash": file_hash,
+            "exists": exists,
+        }
+
+    @app.put("/api/config-write/skills")
+    async def api_config_write_skills_write(body: dict) -> dict:
+        # SECURITY: a skill's supporting files (scripts/*) are uploaded, OPAQUE
+        # content -- never parsed/resolved/executed here, only shape-checked
+        # (config_write_skills.validate_script_body). Any file besides SKILL.md
+        # requires the caller to echo config_write_skills.SCRIPT_CONFIRM_TOKEN back
+        # in "confirm_scripts" -- a SECOND, distinct confirm on top of the ordinary
+        # type-the-name gate, required only when script bodies are actually present.
+        #
+        # Capability gate FIRST, before the scope-enum check (#819 ordering fix).
+        scope = body.get("scope", "project")
+        config_write.require_capability(config, scope)
+        if scope not in ("project", "user"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project' or 'user' for skills"
+            )
+        name = body.get("name")
+        if not isinstance(name, str) or not name:
+            raise HTTPException(status_code=422, detail="body must include a 'name' string")
+        project = body.get("project") if scope != "user" else None
+        config_write.require_confirm(scope, project, body.get("confirm"))  # type: ignore[arg-type]
+        files = body.get("files")
+        if not isinstance(files, dict):
+            raise HTTPException(status_code=422, detail="body must include a 'files' object")
+        expected: str | None = body.get("hash")
+        if expected is not None and not isinstance(expected, str):
+            raise HTTPException(status_code=422, detail="'hash' must be a string when present")
+        confirm_scripts = body.get("confirm_scripts")
+        if scope == "user":
+            try:
+                await asyncio.to_thread(
+                    config_write_skills.write_user_skill,
+                    _user_claude_json_guarded(),
+                    name,
+                    files,
+                    expected_hash=expected,
+                    confirm_scripts=confirm_scripts,
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "name": name, "ok": True}
+        project_dir = _resolve_cw_project(project, require_exists=True)
+        try:
+            await asyncio.to_thread(
+                config_write_skills.write_project_skill,
+                project_dir,
+                name,
+                files,
+                expected_hash=expected,
+                confirm_scripts=confirm_scripts,
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": "project", "project": project, "name": name, "ok": True}
+
+    @app.post("/api/config-write/skills/delete")
+    async def api_config_write_skills_delete(body: dict) -> dict:
+        # Deletion needs the same type-the-name confirm as a write: irreversible, no
+        # undo store. Capability gate FIRST, before the scope-enum check.
+        scope = body.get("scope", "project")
+        config_write.require_capability(config, scope)
+        if scope not in ("project", "user"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project' or 'user' for skills"
+            )
+        name = body.get("name")
+        if not isinstance(name, str) or not name:
+            raise HTTPException(status_code=422, detail="body must include a 'name' string")
+        project = body.get("project") if scope != "user" else None
+        config_write.require_confirm(scope, project, body.get("confirm"))  # type: ignore[arg-type]
+        if scope == "user":
+            try:
+                existed = await asyncio.to_thread(
+                    config_write_skills.delete_user_skill, _user_claude_json_guarded(), name
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "name": name, "existed": existed}
+        project_dir = _resolve_cw_project(project, require_exists=True)
+        try:
+            existed = await asyncio.to_thread(
+                config_write_skills.delete_project_skill, project_dir, name
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": "project", "project": project, "name": name, "existed": existed}
+
+    @app.get("/api/config-write/skills/overrides")
+    async def api_config_write_skills_overrides_read(
+        scope: str = "project", project: str = ""
+    ) -> dict:
+        # skillOverrides is an ordinary settings.json key, so -- unlike the directory
+        # ops above -- it gets all three scopes (user/project/local), exactly like
+        # config_write_hooks' `hooks` key. Capability gate FIRST (#819 ordering fix).
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        if scope == "user":
+            try:
+                overrides, file_hash = await asyncio.to_thread(
+                    config_write_skills.read_user_skill_overrides, _user_settings_json()
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "overrides": overrides, "hash": file_hash}
+        if scope == "local":
+            project_dir = _resolve_cw_project(project)
+            try:
+                overrides, file_hash = await asyncio.to_thread(
+                    config_write_skills.read_project_local_skill_overrides, project_dir
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {
+                "scope": "local",
+                "project": project,
+                "overrides": overrides,
+                "hash": file_hash,
+            }
+        project_dir = _resolve_cw_project(project)
+        try:
+            overrides, file_hash = await asyncio.to_thread(
+                config_write_skills.read_project_skill_overrides, project_dir
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": "project", "project": project, "overrides": overrides, "hash": file_hash}
+
+    @app.put("/api/config-write/skills/overrides")
+    async def api_config_write_skills_overrides_write(body: dict) -> dict:
+        # skillOverrides is inert visibility state (on/name-only/user-invocable-only/
+        # off) -- never executed, unlike the skill directory writer above. Gate order
+        # mirrors the CLAUDE.md/settings routes (capability -> scope-enum 422 ->
+        # confirm 400 -> payload shape 422 -> path resolve/contain -> stale-hash guard
+        # (inside the writer) -> atomic write) -- the #819 fix, not the older
+        # _put_config_write helper's order (scope-enum before capability).
+        scope = body.get("scope", "project")
+        config_write.require_capability(config, scope)
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        project = body.get("project") if scope != "user" else None
+        config_write.require_confirm(scope, project, body.get("confirm"))  # type: ignore[arg-type]
+        payload = body.get("overrides")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="body must include an 'overrides' object")
+        expected: str | None = body.get("hash")
+        if expected is not None and not isinstance(expected, str):
+            raise HTTPException(status_code=422, detail="'hash' must be a string when present")
+        if scope == "user":
+            try:
+                await asyncio.to_thread(
+                    config_write_skills.write_user_skill_overrides,
+                    _user_settings_json(),
+                    payload,
+                    expected,
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "ok": True}
+        if scope == "local":
+            project_dir = _resolve_cw_project(project, require_exists=True)
+            try:
+                await asyncio.to_thread(
+                    config_write_skills.write_project_local_skill_overrides,
+                    project_dir,
+                    payload,
+                    expected,
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "local", "project": project, "ok": True}
+        project_dir = _resolve_cw_project(project, require_exists=True)
+        try:
+            await asyncio.to_thread(
+                config_write_skills.write_project_skill_overrides, project_dir, payload, expected
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": "project", "project": project, "ok": True}
 
     @app.get("/api/config-write/settings")
     async def api_config_write_settings_read(scope: str = "project", project: str = "") -> dict:
