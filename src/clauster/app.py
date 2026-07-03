@@ -14,7 +14,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import segno
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -37,6 +37,7 @@ from . import (
     config_write_mcp,
     config_write_mcp_cli,
     config_write_permissions,
+    config_write_settings,
     config_writer,
     environments,
     logstream,
@@ -2236,6 +2237,140 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
         return {"scope": scope, "project": project, "ok": True}
+
+    @app.get("/api/config-write/settings")
+    async def api_config_write_settings_read(scope: str = "project", project: str = "") -> dict:
+        # Generic settings.json editor (#772): env/model/misc keys not owned by a
+        # dedicated surface (permissions/hooks/plugin+MCP-enable stay on their own
+        # routes). Gated exactly like the other config-write reads: 404 when
+        # config-write is off, 404 for user scope when allow_user_scope is off.
+        #
+        # Capability gate FIRST, before the scope-enum check (the #819/#768
+        # ordering fix): a disabled surface must 404 for ANY request, a bogus
+        # scope included, rather than leak existence via a differing 422.
+        config_write.require_capability(config, scope)  # type: ignore[arg-type]
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        if scope == "user":
+            try:
+                settings_view, file_hash = await asyncio.to_thread(
+                    config_write_settings.read_user_settings, _user_settings_json()
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "settings": settings_view, "hash": file_hash}
+        if scope == "local":
+            project_dir = _resolve_cw_project(project)
+            try:
+                settings_view, file_hash = await asyncio.to_thread(
+                    config_write_settings.read_project_local_settings, project_dir
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {
+                "scope": "local",
+                "project": project,
+                "settings": settings_view,
+                "hash": file_hash,
+            }
+        project_dir = _resolve_cw_project(project)
+        try:
+            settings_view, file_hash = await asyncio.to_thread(
+                config_write_settings.read_project_settings, project_dir
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {
+            "scope": "project",
+            "project": project,
+            "settings": settings_view,
+            "hash": file_hash,
+        }
+
+    @app.put("/api/config-write/settings")
+    async def api_config_write_settings_write(body: dict) -> dict:
+        # SECURITY: `env` is where operators keep secrets (#822 lesson) -- the
+        # read path masks every env value unconditionally; a write that resends
+        # the mask sentinel keeps the stored value (config_write.merge_redacted),
+        # so this route never assembles a live secret from a client echo. See
+        # config_write_settings' module docstring for the full redaction decision.
+        #
+        # Gate order mirrors the CLAUDE.md route (capability -> scope-enum 422 ->
+        # confirm 400 -> payload shape 422 -> path resolve/contain -> stale-hash
+        # guard (inside the writer) -> atomic write) -- the #819/#768 fix, not the
+        # older `_put_config_write` helper's order (scope-enum before capability).
+        scope = body.get("scope", "project")
+        config_write.require_capability(config, scope)
+        if scope not in ("project", "user", "local"):
+            raise HTTPException(
+                status_code=422, detail="scope must be 'project', 'user', or 'local'"
+            )
+        project = body.get("project") if scope != "user" else None
+        config_write.require_confirm(scope, project, body.get("confirm"))  # type: ignore[arg-type]
+        payload = body.get("settings")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="body must include a 'settings' object")
+        expected: str | None = body.get("hash")
+        if expected is not None and not isinstance(expected, str):
+            raise HTTPException(status_code=422, detail="'hash' must be a string when present")
+        if scope == "user":
+            try:
+                await asyncio.to_thread(
+                    config_write_settings.write_user_settings,
+                    _user_settings_json(),
+                    payload,
+                    expected,
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+            return {"scope": "user", "ok": True}
+        project_dir = _resolve_cw_project(project, require_exists=True)
+        write_fn = (
+            config_write_settings.write_project_local_settings
+            if scope == "local"
+            else config_write_settings.write_project_settings
+        )
+        try:
+            await asyncio.to_thread(write_fn, project_dir, payload, expected)
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        return {"scope": scope, "project": project, "ok": True}
+
+    @app.get("/api/config-write/settings/effective")
+    async def api_config_write_settings_effective(project: str = "") -> dict:
+        # Scope-merge provenance (#772, the novel part): per-key effective value
+        # + which scope layer supplied it, across every scope clauster manages.
+        # Gated on "project" scope -- project/local are inherently per-project,
+        # so a project is always required for this view. The user layer is
+        # folded into the merge only when allow_user_scope is ALSO on; when it's
+        # off, ~/.claude/settings.json is never read for this route either --
+        # the user-scope surface stays invisible for every read, this one
+        # included, not just the dedicated GET/PUT above.
+        config_write.require_capability(config, "project")
+        project_dir = _resolve_cw_project(project)
+        try:
+            project_misc, _p_hash = await asyncio.to_thread(
+                config_write_settings.read_project_settings, project_dir
+            )
+            local_misc, _l_hash = await asyncio.to_thread(
+                config_write_settings.read_project_local_settings, project_dir
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
+        user_misc: dict[str, Any] | None = None
+        if config.config_write.allow_user_scope:
+            try:
+                user_misc, _u_hash = await asyncio.to_thread(
+                    config_write_settings.read_user_settings, _user_settings_json()
+                )
+            except config_write.ConfigWriteError as exc:
+                raise _map_config_write_error(exc) from exc
+        effective = config_write_settings._compute_effective_settings(
+            user_misc=user_misc, project_misc=project_misc, local_misc=local_misc
+        )
+        return {"project": project, "effective": effective}
 
     async def _project_by_name(name: str) -> Project:
         for proj in await list_projects():
