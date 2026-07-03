@@ -1603,6 +1603,93 @@
                 </div>
               </div>
             </div>
+
+            <!-- Skills surface (#773 slice E) — list + per-skill SKILL.md editor -->
+            <div data-test="cm-view-skills"
+                 x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'skills'" x-cloak>
+              <!-- LIST mode -->
+              <div x-show="!configMgmt.skills.editing" x-cloak>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <div class="form-label small mb-0">Skills</div>
+                  <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-skill-new"
+                          @click="configMgmtNewSkill()">New skill</button>
+                </div>
+                <div class="text-secondary small" x-show="configMgmt.skills.list.length === 0" x-cloak>
+                  No skills at this scope.
+                </div>
+                <table class="table table-sm mb-0" data-test="cm-skills-table"
+                       x-show="configMgmt.skills.list.length" x-cloak>
+                  <caption class="visually-hidden">Skills: name, description, and actions</caption>
+                  <tbody>
+                    <template x-for="sk in configMgmt.skills.list" :key="sk.name">
+                      <tr>
+                        <td>
+                          <span class="fw-medium" x-text="sk.name"></span>
+                          <div class="text-secondary small" x-show="sk.description" x-cloak x-text="sk.description"></div>
+                          <div class="text-danger small" x-show="sk.frontmatter_error" x-cloak
+                               x-text="sk.frontmatter_error"></div>
+                        </td>
+                        <td class="text-end">
+                          <span class="d-inline-flex gap-1">
+                            <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                    :data-test="'cm-skill-edit-' + sk.name"
+                                    @click="configMgmtOpenSkill(sk.name)">Edit</button>
+                            <button type="button" class="btn btn-sm btn-ghost-danger"
+                                    :data-test="'cm-skill-del-' + sk.name"
+                                    @click="configMgmtAskDeleteSkill(sk.name)">Delete</button>
+                          </span>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <!-- delete confirm -->
+                <div class="mt-2 p-2 border rounded" data-test="cm-skill-delete-confirm"
+                     x-show="configMgmt.skills.deletingName" x-cloak>
+                  <div class="small mb-1">Delete <code x-text="configMgmt.skills.deletingName"></code>? Type
+                    <code x-text="configMgmtConfirmToken()"></code> to confirm.</div>
+                  <div class="d-flex gap-2 align-items-center">
+                    <input type="text" class="form-control form-control-sm" data-test="cm-skill-delete-input"
+                           aria-label="Type the confirmation token to delete this skill"
+                           autocomplete="off" spellcheck="false" x-model="configMgmt.skills.confirm"
+                           :placeholder="configMgmtConfirmToken()">
+                    <button type="button" class="btn btn-sm btn-danger" data-test="cm-skill-delete-go"
+                            :disabled="!configMgmtCanDeleteSkill()" @click="configMgmtDeleteSkill()">Delete</button>
+                    <button type="button" class="btn btn-sm" @click="configMgmtCancelDeleteSkill()">Cancel</button>
+                  </div>
+                </div>
+              </div>
+              <!-- EDITOR mode -->
+              <div x-show="configMgmt.skills.editing" x-cloak data-test="cm-skill-editor">
+                <label class="form-label small" for="cm-skill-name">Name</label>
+                <input type="text" class="form-control form-control-sm mb-2" id="cm-skill-name" data-test="cm-skill-name"
+                       autocomplete="off" spellcheck="false" x-model="configMgmt.skills.name"
+                       :readonly="!configMgmt.skills.isNew" placeholder="my-skill">
+                <label class="form-label small" for="cm-skill-content">SKILL.md (Markdown + frontmatter)</label>
+                <textarea id="cm-skill-content" class="form-control form-control-sm font-monospace" rows="11"
+                          data-test="cm-skill-content" spellcheck="false"
+                          x-model="configMgmt.skills.content"></textarea>
+                <div class="form-hint small mt-1">
+                  Edits the skill's <code>SKILL.md</code>. Supporting scripts aren't managed here.
+                </div>
+                <div class="mt-2">
+                  <label class="form-label small mb-1" for="cm-skill-confirm">
+                    Type <code x-text="configMgmtConfirmToken()"></code> to confirm
+                  </label>
+                  <div class="d-flex gap-2 align-items-center flex-wrap">
+                    <input type="text" class="form-control form-control-sm" id="cm-skill-confirm" data-test="cm-skill-confirm"
+                           autocomplete="off" spellcheck="false" x-model="configMgmt.skills.confirm"
+                           :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                    <button type="button" class="btn btn-sm btn-primary" data-test="cm-skill-save"
+                            :disabled="!configMgmtCanSaveSkill()" @click="configMgmtSaveSkill()">
+                      <span x-text="configMgmt.skills.busy ? 'Saving…' : 'Save'">Save</span>
+                    </button>
+                    <button type="button" class="btn btn-sm" data-test="cm-skill-cancel"
+                            @click="configMgmtCancelSkill()">Back to list</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="modal-footer justify-content-between align-items-end flex-wrap gap-2">
             {# Document surfaces (CLAUDE.md/settings/permissions/hooks) confirm + save

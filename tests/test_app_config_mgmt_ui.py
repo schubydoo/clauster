@@ -13,6 +13,8 @@ These are server-render contract tests: the modal lives inside an Alpine
 
 from __future__ import annotations
 
+import re
+
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
@@ -95,6 +97,22 @@ def test_mcp_surface_present_when_enabled(write_config):
     assert 'data-test="cm-mcp-approvals"' in html
     assert 'data-test="cm-mcp-approvals-save"' in html
     assert 'data-test="cm-mcp-reset-go"' in html
+
+
+def test_skills_surface_present_when_enabled(write_config):
+    # Slice E adds the skills list surface (list + per-skill SKILL.md editor + delete).
+    html = _html(write_config, _ON)
+    # The tab is data-driven (Alpine-bound data-test), so assert the surface is
+    # registered in the JS surfaces array rather than a literal tab hook.
+    assert 'key: "skills"' in html
+    assert 'data-test="cm-view-skills"' in html
+    assert 'data-test="cm-skill-new"' in html
+    assert 'data-test="cm-skill-editor"' in html
+    assert 'data-test="cm-skill-content"' in html
+    # Skills are user/project only — registered in the no-local list. Match the array
+    # membership rather than exact spacing/ordering so a reformat can't break this.
+    no_local = re.search(r"configMgmtNoLocalSurfaces:\s*\[([^\]]*)\]", html)
+    assert no_local and '"skills"' in no_local.group(1)
 
 
 # ---- User scope option is gated on allow_user_scope -------------------------
