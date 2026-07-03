@@ -4250,6 +4250,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "browser_notify_on_crash": config.notifications.notify_on_crash,
             "browser_notify_on_ready": config.notifications.notify_on_ready,
             "browser_notify_on_stop": config.notifications.notify_on_stop,
+            # Config-management surface (#773): the navbar trigger + its modal render
+            # only when config-write is enabled — the same invisible-surface invariant
+            # the /api/config-write/* routes enforce (404 when off). allow_user_scope
+            # gates whether the User scope option is offered at all.
+            "config_write_enabled": config.config_write.enabled,
+            "config_write_allow_user_scope": config.config_write.allow_user_scope,
         }
 
     @app.get("/", response_class=HTMLResponse)

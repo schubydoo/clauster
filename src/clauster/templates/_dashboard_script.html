@@ -160,6 +160,28 @@
         error: "", saved: false, trigger: null, gen: 0,
       },
       configQuery: "",
+      // --- Claude Code config management (#773) — the first UI over the gated ---
+      // --- /api/config-write/* surfaces. Distinct from configEditor above, which ---
+      // --- edits clauster.yml; this manages the host's Claude Code config. ---
+      // Every write is type-the-name confirmed (configMgmtConfirmToken) and secrets
+      // are server-masked. `gen` drops a stale in-flight load/save when the scope,
+      // project, or surface changes under it (the configEditor single-flight idiom).
+      configMgmt: {
+        open: false, loading: false, saving: false, error: "", saved: false,
+        scope: "project", project: "", surface: "claude-md",
+        confirm: "", trigger: null, gen: 0,
+        claudeMd: { content: "", orig: "", hash: null, exists: false },
+        settings: {
+          text: "", orig: "", hash: null,
+          showEffective: false, effective: null, effectiveError: "",
+        },
+      },
+      // Surface tabs — extended by later slices (#773 B/C/D add permissions, hooks,
+      // MCP, subagents, skills, plugins). Data-driven so the nav + views stay in sync.
+      configMgmtSurfaces: [
+        { key: "claude-md", label: "CLAUDE.md" },
+        { key: "settings", label: "Settings" },
+      ],
       // --- read-only transcript viewer (#431) ---
       // order: "desc" (newest-first, default) | "asc" (oldest-first) — sort toggle (#612).
       // q: in-message substring filter; queryTooShort drives the "keep typing" state (#612).
@@ -1007,6 +1029,224 @@
             "doesn't reconnect.",
           "warning",
         );
+      },
+      // --- Claude Code config management (#773) ------------------------------
+      // Open/close mirror the configEditor modal: remember the opener for focus
+      // restore, lock background scroll, bump `gen` so a stale save is dropped.
+      openConfigMgmt() {
+        const c = this.configMgmt;
+        if (c.open || c.loading) return;  // single-flight: ignore re-entry
+        c.gen = (c.gen || 0) + 1;
+        c.trigger = document.activeElement;
+        c.open = true; c.error = ""; c.saved = false; c.confirm = "";
+        // Seed a project so project/local scope is usable immediately; user scope
+        // ignores it. An empty list leaves it "" and the pick-a-project note shows.
+        if (!c.project && this.projectNames.length) c.project = this.projectNames[0];
+        document.body.style.overflow = "hidden";
+        this.configMgmtReload();
+      },
+      closeConfigMgmt() {
+        const c = this.configMgmt;
+        c.open = false;
+        document.body.style.overflow = "";  // release the scroll lock
+        if (c.trigger && c.trigger.focus) c.trigger.focus();
+      },
+      // The scope name the operator must retype to confirm a write, derived exactly
+      // as the server's expected_confirm_token: user -> "USER SCOPE", local ->
+      // "<project> (local)", project -> "<project>".
+      configMgmtConfirmToken() {
+        const c = this.configMgmt;
+        if (c.scope === "user") return "USER SCOPE";
+        if (c.scope === "local") return c.project + " (local)";
+        return c.project;
+      },
+      configMgmtScopeHint() {
+        const s = this.configMgmt.scope;
+        if (s === "user") return "~/.claude — applies to you across every project.";
+        if (s === "local") return ".claude/settings.local.json etc. — this project, you only (gitignored on create).";
+        return ".claude — committed with the project, shared with the team.";
+      },
+      // Project/local scope is meaningless without a selected project — the surface
+      // views + confirm hide and Save disables until one is chosen.
+      configMgmtNeedsProject() {
+        const c = this.configMgmt;
+        return c.scope !== "user" && !c.project;
+      },
+      configMgmtSetScope(scope) {
+        const c = this.configMgmt;
+        if (c.scope === scope) return;
+        c.scope = scope; c.confirm = ""; c.error = ""; c.saved = false;
+        this.configMgmtReload();
+      },
+      configMgmtSetSurface(key) {
+        const c = this.configMgmt;
+        if (c.surface === key) return;  // clicking the active tab must not wipe edits
+        c.surface = key; c.error = ""; c.saved = false;
+        this.configMgmtReload();
+      },
+      _configMgmtQuery() {
+        const c = this.configMgmt;
+        const p = new URLSearchParams({ scope: c.scope });
+        if (c.scope !== "user") p.set("project", c.project);
+        return p.toString();
+      },
+      _configMgmtLoadErr(res) {
+        if (res.status === 404) return "This config surface is unavailable.";
+        return "Failed to load (" + res.status + ").";
+      },
+      // Reload the active surface for the current scope/project. Bumps `gen` so a
+      // slower earlier fetch can't clobber this one; each surface loader re-checks it.
+      async configMgmtReload() {
+        const c = this.configMgmt;
+        c.saved = false; c.error = "";
+        if (this.configMgmtNeedsProject()) { c.loading = false; return; }
+        c.gen = (c.gen || 0) + 1;
+        const myGen = c.gen;
+        c.loading = true;
+        try {
+          if (c.surface === "claude-md") await this._loadClaudeMd(myGen);
+          else if (c.surface === "settings") await this._loadSettings(myGen);
+        } finally {
+          if (c.gen === myGen) c.loading = false;
+        }
+      },
+      async _loadClaudeMd(myGen) {
+        const c = this.configMgmt;
+        try {
+          const res = await fetch(ROOT + "/api/config-write/claude-md?" + this._configMgmtQuery());
+          if (c.gen !== myGen) return;  // superseded by a newer load
+          if (this._authExpired(res)) return;
+          if (!res.ok) { c.error = this._configMgmtLoadErr(res); return; }
+          const d = await res.json();
+          c.claudeMd.content = d.content || "";
+          c.claudeMd.orig = c.claudeMd.content;
+          c.claudeMd.hash = d.hash || null;
+          c.claudeMd.exists = !!d.exists;
+        } catch (e) { if (c.gen === myGen) c.error = "Failed to load CLAUDE.md."; }
+      },
+      async _loadSettings(myGen) {
+        const c = this.configMgmt;
+        c.settings.effective = null; c.settings.effectiveError = "";
+        try {
+          const res = await fetch(ROOT + "/api/config-write/settings?" + this._configMgmtQuery());
+          if (c.gen !== myGen) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) { c.error = this._configMgmtLoadErr(res); return; }
+          const d = await res.json();
+          // Pretty-print the redacted misc view; the operator edits it as JSON.
+          const text = JSON.stringify(d.settings || {}, null, 2);
+          c.settings.text = text; c.settings.orig = text; c.settings.hash = d.hash || null;
+        } catch (e) { if (c.gen === myGen) c.error = "Failed to load settings."; }
+        if (c.settings.showEffective && c.scope !== "user") await this._loadEffective(myGen);
+      },
+      configMgmtToggleEffective() {
+        const c = this.configMgmt;
+        c.settings.showEffective = !c.settings.showEffective;
+        if (c.settings.showEffective && !c.settings.effective) {
+          c.gen = (c.gen || 0) + 1;
+          this._loadEffective(c.gen);
+        }
+      },
+      // Scope-merge provenance (project scope): per-key value + which scope won.
+      async _loadEffective(myGen) {
+        const c = this.configMgmt;
+        c.settings.effectiveError = "";
+        try {
+          const res = await fetch(
+            ROOT + "/api/config-write/settings/effective?project=" + encodeURIComponent(c.project),
+          );
+          if (c.gen !== myGen) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) { c.settings.effectiveError = "Could not load merged view (" + res.status + ")."; return; }
+          const d = await res.json();
+          c.settings.effective = d.effective || {};
+        } catch (e) { if (c.gen === myGen) c.settings.effectiveError = "Could not load merged view."; }
+      },
+      configMgmtEffectiveRows() {
+        const eff = this.configMgmt.settings.effective || {};
+        const rows = [];
+        for (const k of Object.keys(eff).sort()) {
+          const cell = eff[k] || {};
+          let vs;
+          try { vs = typeof cell.value === "string" ? cell.value : JSON.stringify(cell.value); }
+          catch (e) { vs = String(cell.value); }
+          rows.push({ key: k, value: vs, source: cell.source || "" });
+        }
+        return rows;
+      },
+      configMgmtDirty() {
+        const c = this.configMgmt;
+        if (c.surface === "claude-md") return c.claudeMd.content !== c.claudeMd.orig;
+        if (c.surface === "settings") return c.settings.text !== c.settings.orig;
+        return false;
+      },
+      configMgmtCanSave() {
+        const c = this.configMgmt;
+        if (c.loading || c.saving) return false;
+        if (this.configMgmtNeedsProject()) return false;
+        if (c.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
+        return this.configMgmtDirty();
+      },
+      _configMgmtTarget() {
+        const c = this.configMgmt;
+        return c.scope === "user" ? { scope: "user" } : { scope: c.scope, project: c.project };
+      },
+      async configMgmtSave() {
+        const c = this.configMgmt;
+        if (!this.configMgmtCanSave()) return;
+        const myGen = c.gen;  // a scope/surface switch bumps gen and voids this save
+        c.saving = true; c.error = ""; c.saved = false;
+        try {
+          if (c.surface === "claude-md") await this._saveClaudeMd(myGen);
+          else if (c.surface === "settings") await this._saveSettings(myGen);
+        } finally {
+          // Always clear — never gate on gen. A scope/surface/project switch mid-save
+          // bumps gen (its buttons aren't disabled while saving); the stale response is
+          // dropped by the inner `c.gen !== myGen` guards, but the button must still
+          // return from "Saving…" rather than stick forever.
+          c.saving = false;
+        }
+      },
+      async _saveClaudeMd(myGen) {
+        const c = this.configMgmt;
+        const body = Object.assign(this._configMgmtTarget(), {
+          content: c.claudeMd.content, confirm: c.confirm, hash: c.claudeMd.hash,
+        });
+        const res = await fetch(ROOT + "/api/config-write/claude-md", {
+          method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
+        });
+        if (c.gen !== myGen) return;
+        if (this._authExpired(res)) return;
+        if (res.ok) { c.saved = true; c.confirm = ""; await this._loadClaudeMd(myGen); }
+        else await this._configMgmtWriteErr(res);
+      },
+      async _saveSettings(myGen) {
+        const c = this.configMgmt;
+        let payload;
+        try { payload = JSON.parse(c.settings.text); }
+        catch (e) { c.error = "Settings must be valid JSON."; return; }
+        if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+          c.error = "Settings must be a JSON object."; return;
+        }
+        const body = Object.assign(this._configMgmtTarget(), {
+          settings: payload, confirm: c.confirm, hash: c.settings.hash,
+        });
+        const res = await fetch(ROOT + "/api/config-write/settings", {
+          method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
+        });
+        if (c.gen !== myGen) return;
+        if (this._authExpired(res)) return;
+        if (res.ok) { c.saved = true; c.confirm = ""; await this._loadSettings(myGen); }
+        else await this._configMgmtWriteErr(res);
+      },
+      async _configMgmtWriteErr(res) {
+        const c = this.configMgmt;
+        if (res.status === 409) {
+          c.error = "Changed on disk since you loaded it — close and reopen to reload.";
+          return;
+        }
+        const d = await res.json().catch(() => ({}));
+        c.error = (d && d.detail) || ("Save failed (" + res.status + ").");
       },
       // --- read-only transcript viewer (#431) ---
       // Coarse relative timestamp from an mtime (epoch SECONDS, as the API returns

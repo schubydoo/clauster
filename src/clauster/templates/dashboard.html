@@ -479,6 +479,18 @@
                 title="Edit configuration" :disabled="configEditor.loading" @click="openConfig()">
           <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-edit"/></svg>
         </button>
+        {# Config-management surface (#773): a distinct trigger from the config editor
+           above (that one edits clauster.yml; this one manages the host's Claude Code
+           config — CLAUDE.md, settings, permissions, hooks, MCP, subagents, skills,
+           plugins). Rendered ONLY when config-write is enabled, mirroring the
+           invisible-surface invariant of its /api/config-write/* routes. #}
+        {% if config_write_enabled %}
+        <button type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Manage Claude Code config"
+                data-test="configmgmt-trigger"
+                title="Manage Claude Code config" :disabled="configMgmt.loading" @click="openConfigMgmt()">
+          <svg class="icon" width="20" height="20" aria-hidden="true"><use href="#ic-tool"/></svg>
+        </button>
+        {% endif %}
         <button id="theme-toggle" type="button" class="btn btn-icon btn-ghost-secondary" aria-label="Toggle theme" title="Toggle dark / light theme">
           <svg class="icon icon-sun" width="20" height="20" aria-hidden="true"><use href="#ic-sun"/></svg>
           <svg class="icon icon-moon" width="20" height="20" aria-hidden="true"><use href="#ic-moon"/></svg>
@@ -1216,6 +1228,140 @@
       </div>
     </div>
   </template>
+
+  {# Config-management modal (#773) — the first UI over the gated /api/config-write/*
+     surfaces. Rendered only when config-write is enabled (invisible-surface invariant),
+     so a disabled deployment ships no dead modal. Slice A wires CLAUDE.md + settings;
+     later slices append surface tabs + views. Scope toggle, project picker, and a
+     shared type-the-name confirm gate every write; secrets are server-masked. #}
+  {% if config_write_enabled %}
+  <template x-if="configMgmt.open">
+    {{ modal_shell("configmgmt-modal", "configmgmt-title", "closeConfigMgmt", "trapConfigTab", "Manage Claude Code config") }}
+          <div class="modal-body">
+            <p class="text-secondary small mb-2">
+              Manage this host's Claude Code configuration. Every write asks you to type
+              the scope name to confirm, and secret-shaped values are masked.
+            </p>
+            <div class="alert alert-danger py-2" data-test="cm-error" x-show="configMgmt.error" x-cloak x-text="configMgmt.error"></div>
+            <div class="alert alert-success py-2" data-test="cm-saved" x-show="configMgmt.saved" x-cloak>Saved.</div>
+
+            <!-- Scope toggle: User (gated on allow_user_scope) / Project / Local -->
+            <div class="mb-2">
+              <div class="form-label small mb-1">Scope</div>
+              <div class="btn-group btn-group-sm" role="group" aria-label="Config scope">
+                {% if config_write_allow_user_scope %}
+                <button type="button" class="btn" data-test="cm-scope-user"
+                        :class="configMgmt.scope === 'user' ? 'btn-primary' : 'btn-outline-primary'"
+                        @click="configMgmtSetScope('user')">User</button>
+                {% endif %}
+                <button type="button" class="btn" data-test="cm-scope-project"
+                        :class="configMgmt.scope === 'project' ? 'btn-primary' : 'btn-outline-primary'"
+                        @click="configMgmtSetScope('project')">Project</button>
+                <button type="button" class="btn" data-test="cm-scope-local"
+                        :class="configMgmt.scope === 'local' ? 'btn-primary' : 'btn-outline-primary'"
+                        @click="configMgmtSetScope('local')">Local</button>
+              </div>
+              <div class="form-hint small mt-1" x-text="configMgmtScopeHint()"></div>
+            </div>
+
+            <!-- Project selector (project/local scope) -->
+            <div class="mb-2" x-show="configMgmt.scope !== 'user'" x-cloak>
+              <label class="form-label small mb-1" for="cm-project">Project</label>
+              <select class="form-select form-select-sm" id="cm-project" data-test="cm-project"
+                      x-model="configMgmt.project" @change="configMgmtReload()">
+                <template x-for="p in projectNames" :key="p">
+                  <option :value="p" :selected="p === configMgmt.project" x-text="p"></option>
+                </template>
+              </select>
+              <div class="text-secondary small mt-1" x-show="projectNames.length === 0" x-cloak>
+                No projects yet — create one first.
+              </div>
+            </div>
+
+            <!-- Surface tabs -->
+            <div class="cfg-jump mb-2" role="group" aria-label="Config surface">
+              <template x-for="s in configMgmtSurfaces" :key="s.key">
+                <button type="button" class="btn btn-sm"
+                        :class="configMgmt.surface === s.key ? 'btn-primary' : 'btn-ghost-secondary'"
+                        :data-test="'cm-surface-' + s.key"
+                        @click="configMgmtSetSurface(s.key)" x-text="s.label"></button>
+              </template>
+            </div>
+
+            <div class="text-secondary" x-show="configMgmt.loading" x-cloak>Loading…</div>
+            <div class="text-secondary small" data-test="cm-need-project"
+                 x-show="!configMgmt.loading && configMgmtNeedsProject()" x-cloak>
+              Select a project to manage its <span x-text="configMgmt.scope"></span> config.
+            </div>
+
+            <!-- CLAUDE.md surface -->
+            <div data-test="cm-view-claude-md"
+                 x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'claude-md'" x-cloak>
+              <label class="form-label small" for="cm-claudemd">CLAUDE.md</label>
+              <textarea id="cm-claudemd" class="form-control form-control-sm font-monospace" rows="12"
+                        data-test="cm-claudemd-text" spellcheck="false"
+                        x-model="configMgmt.claudeMd.content"></textarea>
+              <div class="form-hint small mt-1">Free-form guidance. Blank clears it — there is no delete.</div>
+            </div>
+
+            <!-- Settings (env / model / misc) surface -->
+            <div data-test="cm-view-settings"
+                 x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'settings'" x-cloak>
+              <label class="form-label small" for="cm-settings">settings.json — env / model / misc</label>
+              <textarea id="cm-settings" class="form-control form-control-sm font-monospace" rows="12"
+                        data-test="cm-settings-text" spellcheck="false"
+                        x-model="configMgmt.settings.text"></textarea>
+              <div class="form-hint small mt-1">
+                Permissions, hooks, plugins, and MCP-enable have their own tabs and are not shown here.
+                Secret-shaped values are masked as <code>********</code> — leave the mask to keep the stored value.
+              </div>
+              <!-- Effective (scope-merge provenance), project/local scope only -->
+              <div class="mt-2" x-show="configMgmt.scope !== 'user'" x-cloak>
+                <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="cm-effective-toggle"
+                        @click="configMgmtToggleEffective()"
+                        x-text="configMgmt.settings.showEffective ? 'Hide merged view' : 'Show merged (effective) view'"></button>
+                <div class="mt-2" x-show="configMgmt.settings.showEffective" x-cloak>
+                  <div class="alert alert-danger py-1 small" x-show="configMgmt.settings.effectiveError" x-cloak
+                       x-text="configMgmt.settings.effectiveError"></div>
+                  <table class="table table-sm mb-0" data-test="cm-effective-table"
+                         x-show="configMgmt.settings.effective" x-cloak>
+                    <thead><tr><th>Key</th><th>Value</th><th>From</th></tr></thead>
+                    <tbody>
+                      <template x-for="row in configMgmtEffectiveRows()" :key="row.key">
+                        <tr>
+                          <td class="font-monospace" x-text="row.key"></td>
+                          <td class="font-monospace text-truncate" style="max-width: 12rem" x-text="row.value"></td>
+                          <td><span class="badge bg-secondary-lt text-capitalize" x-text="row.source"></span></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer justify-content-between align-items-end flex-wrap gap-2">
+            <div class="flex-grow-1" x-show="!configMgmtNeedsProject()" x-cloak>
+              <label class="form-label small mb-1" for="cm-confirm">
+                Type <code x-text="configMgmtConfirmToken()"></code> to confirm
+              </label>
+              <input type="text" class="form-control form-control-sm" id="cm-confirm" data-test="cm-confirm"
+                     autocomplete="off" spellcheck="false" x-model="configMgmt.confirm"
+                     :placeholder="configMgmtConfirmToken()">
+            </div>
+            <span class="d-flex gap-2">
+              <button type="button" class="btn" @click="closeConfigMgmt()">Close</button>
+              <button type="button" class="btn btn-primary" data-test="cm-save"
+                      :disabled="!configMgmtCanSave()" @click="configMgmtSave()">
+                <span x-text="configMgmt.saving ? 'Saving…' : 'Save'">Save</span>
+              </button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+  {% endif %}
 
   <!-- Read-only transcript viewer modal (#431) — lists a project's sessions, then
        paginates one session's turns. All turn content is rendered via x-text (the

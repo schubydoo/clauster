@@ -310,6 +310,23 @@ def enum_config_server(
 
 
 @pytest.fixture
+def config_mgmt_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A loopback clauster with config-write enabled for the config-management E2E (#773).
+
+    Function-scoped so a saved CLAUDE.md / settings write from one test never leaks
+    into the next. ``allow_user_scope`` is on so the User scope option renders too.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-configmgmt")
+    yield from _start_server(
+        tmp,
+        mutable_projects_tree,
+        extra="config_write:\n  enabled: true\n  allow_user_scope: true\n",
+    )
+
+
+@pytest.fixture
 def trust_fail_bridge_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:
