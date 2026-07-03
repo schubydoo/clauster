@@ -1236,6 +1236,8 @@
      shared type-the-name confirm gate every write; secrets are server-masked. #}
   {% if config_write_enabled %}
   <template x-if="configMgmt.open">
+    {# trapConfigTab is generic (scopes the focus trap via e.currentTarget), so it is
+       shared with the config-editor modal — not editor-specific despite the name. #}
     {{ modal_shell("configmgmt-modal", "configmgmt-title", "closeConfigMgmt", "trapConfigTab", "Manage Claude Code config") }}
           <div class="modal-body">
             <p class="text-secondary small mb-2">

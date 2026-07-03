@@ -73,4 +73,9 @@ def test_config_mgmt_settings_tab_loads(browser: AgentBrowser, config_mgmt_serve
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-settings"]')
     browser.expect_visible('[data-test="cm-view-settings"]')
-    browser.expect_visible('[data-test="cm-settings-text"]')
+    # Close the render<->backend loop: alpha has no settings.json, so the redacted
+    # misc view is {} — proving the fetch returned and Alpine bound it into the editor.
+    browser.expect_value('[data-test="cm-settings-text"]', "{}")
+    # The merged (effective) provenance view fetches + renders on demand.
+    browser.click('[data-test="cm-effective-toggle"]')
+    browser.expect_visible('[data-test="cm-effective-table"]')

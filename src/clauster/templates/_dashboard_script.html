@@ -1081,6 +1081,10 @@
         const c = this.configMgmt;
         if (c.scope === scope) return;
         c.scope = scope; c.confirm = ""; c.error = ""; c.saved = false;
+        // Collapse the merged view: it hides under x-show on user scope, so a
+        // lingering `true` would auto-expand (and re-fetch) on the next switch back
+        // to project/local without the operator clicking the toggle again.
+        c.settings.showEffective = false;
         this.configMgmtReload();
       },
       configMgmtSetSurface(key) {
@@ -1156,7 +1160,11 @@
         const c = this.configMgmt;
         c.settings.showEffective = !c.settings.showEffective;
         if (c.settings.showEffective && !c.settings.effective) {
-          c.gen = (c.gen || 0) + 1;
+          // Pass the CURRENT gen — do NOT bump. The effective panel is a secondary
+          // load; bumping here would void an in-flight _saveSettings that shares this
+          // gen (saving keeps the settings view + this toggle visible, unlike loading),
+          // dropping its success branch so the next save 409s on a stale hash. A later
+          // primary reload bumps gen and cancels this via _loadEffective's own guard.
           this._loadEffective(c.gen);
         }
       },
