@@ -97,6 +97,20 @@ def test_mcp_surface_present_when_enabled(write_config):
     assert 'data-test="cm-mcp-reset-go"' in html
 
 
+def test_skills_surface_present_when_enabled(write_config):
+    # Slice E adds the skills list surface (list + per-skill SKILL.md editor + delete).
+    html = _html(write_config, _ON)
+    # The tab is data-driven (Alpine-bound data-test), so assert the surface is
+    # registered in the JS surfaces array rather than a literal tab hook.
+    assert 'key: "skills"' in html
+    assert 'data-test="cm-view-skills"' in html
+    assert 'data-test="cm-skill-new"' in html
+    assert 'data-test="cm-skill-editor"' in html
+    assert 'data-test="cm-skill-content"' in html
+    # Skills are user/project only — registered in the no-local list alongside subagents.
+    assert '"subagents", "skills"' in html
+
+
 # ---- User scope option is gated on allow_user_scope -------------------------
 
 

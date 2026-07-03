@@ -201,6 +201,15 @@
             confirm: "", busy: false, ops: 0, resetConfirm: "", resetBusy: false,
           },
         },
+        // Skills (#773 slice E): a list surface — user/project skill directories,
+        // list/view/add/edit/delete. v1 edits SKILL.md only (no supporting scripts),
+        // so the extra script-confirm token is never needed. Same ops-counter idiom
+        // as subagents. Plugin/built-in skills are not in this list (not editable).
+        skills: {
+          list: [], editing: false, isNew: false,
+          name: "", content: "", orig: "", hash: null,
+          confirm: "", busy: false, ops: 0, deletingName: "",
+        },
       },
       // Surface tabs — extended by later #773 slices (skills, plugins still to come).
       // Data-driven so the nav + views stay in sync.
@@ -211,12 +220,13 @@
         { key: "hooks", label: "Hooks" },
         { key: "mcp", label: "MCP" },
         { key: "subagents", label: "Subagents" },
+        { key: "skills", label: "Skills" },
       ],
       // Surfaces that edit ONE document via the shared footer confirm+Save. List
       // surfaces (subagents, later MCP/skills/plugins) drive their own inline controls.
       configMgmtDocSurfaces: ["claude-md", "settings", "permissions", "hooks"],
       // Surfaces WITHOUT a project-local scope (Claude Code has no local dir for them).
-      configMgmtNoLocalSurfaces: ["subagents"],
+      configMgmtNoLocalSurfaces: ["subagents", "skills"],
       // --- read-only transcript viewer (#431) ---
       // order: "desc" (newest-first, default) | "asc" (oldest-first) — sort toggle (#612).
       // q: in-message substring filter; queryTooShort drives the "keep typing" state (#612).
@@ -1128,6 +1138,7 @@
         c.surface = key; c.error = ""; c.saved = false;
         c.subagents.editing = false; c.subagents.deletingName = "";  // leave any list-editor
         c.mcp.editing = false; c.mcp.deletingName = "";
+        c.skills.editing = false; c.skills.deletingName = "";
         // Some surfaces have no local scope; drop out of local before loading one.
         if (c.scope === "local" && this.configMgmtNoLocalSurfaces.includes(key)) {
           c.scope = "project"; c.confirm = "";
@@ -1176,6 +1187,7 @@
         if (surface === "settings") return this._loadSettings(myGen);
         if (surface === "subagents") return this._loadSubagents(myGen);
         if (surface === "mcp") return this._loadMcp(myGen);
+        if (surface === "skills") return this._loadSkills(myGen);
         return this._loadJsonSurface(surface, myGen);  // permissions | hooks
       },
       // Shared JSON-surface loader: GET /api/config-write/<surface> and pretty-print
@@ -1690,6 +1702,115 @@
           if (res.ok) { c.saved = true; ap.resetConfirm = ""; await this._loadMcp(gen); }
           else await this._configMgmtWriteErr(res);
         } finally { ap.resetBusy = false; }
+      },
+      // --- skills (#773 slice E): a list surface — list + per-skill SKILL.md editor -
+      // Directory ops are user/project scope only (no Claude Code local skills dir).
+      // v1 writes SKILL.md alone (files = {"SKILL.md": content}); the backend's extra
+      // script-confirm token is only required when other files are present, so it is
+      // never sent here. Same ops-counter concurrency idiom as subagents.
+      _skillsQuery(extra) {
+        const c = this.configMgmt;
+        const p = new URLSearchParams(Object.assign({ scope: c.scope }, extra || {}));
+        if (c.scope !== "user") p.set("project", c.project);
+        return p.toString();
+      },
+      async _loadSkills(myGen) {
+        const c = this.configMgmt;
+        c.skills.editing = false; c.skills.deletingName = "";
+        try {
+          const res = await fetch(ROOT + "/api/config-write/skills?" + this._skillsQuery());
+          if (c.gen !== myGen) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) { c.skills.list = []; c.error = this._configMgmtLoadErr(res); return; }
+          const d = await res.json();
+          if (c.gen !== myGen) return;
+          c.skills.list = d.skills || [];
+        } catch (e) { if (c.gen === myGen) c.error = "Failed to load skills."; }
+      },
+      configMgmtNewSkill() {
+        const c = this.configMgmt, s = c.skills;
+        c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenSkill fetch
+        c.error = ""; c.saved = false; s.deletingName = "";
+        s.editing = true; s.isNew = true;
+        s.name = ""; s.content = ""; s.orig = ""; s.hash = null; s.confirm = "";
+      },
+      async configMgmtOpenSkill(name) {
+        const c = this.configMgmt, s = c.skills;
+        c.error = ""; c.saved = false; s.deletingName = "";
+        const gen = (c.gen = (c.gen || 0) + 1);  // primary navigation — supersede a stale list load
+        s.ops += 1; s.busy = true;
+        try {
+          const res = await fetch(ROOT + "/api/config-write/skills/file?" + this._skillsQuery({ name: name }));
+          if (c.gen !== gen) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) { c.error = this._configMgmtLoadErr(res); return; }
+          const d = await res.json();
+          if (c.gen !== gen) return;
+          s.editing = true; s.isNew = false; s.name = d.name || name;
+          s.content = d.content || ""; s.orig = s.content; s.hash = d.hash || null; s.confirm = "";
+        } catch (e) { if (c.gen === gen) c.error = "Failed to load skill."; }
+        finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+      },
+      configMgmtCancelSkill() {
+        const s = this.configMgmt.skills;
+        s.editing = false; s.confirm = ""; this.configMgmt.error = "";
+      },
+      configMgmtSkillDirty() {
+        const s = this.configMgmt.skills;
+        return s.isNew ? (s.name.trim() !== "" || s.content !== "") : (s.content !== s.orig);
+      },
+      configMgmtCanSaveSkill() {
+        const c = this.configMgmt, s = c.skills;
+        if (s.busy || this.configMgmtNeedsProject()) return false;
+        if (s.isNew && !s.name.trim()) return false;
+        if (s.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
+        return this.configMgmtSkillDirty();
+      },
+      async configMgmtSaveSkill() {
+        const c = this.configMgmt, s = c.skills;
+        if (!this.configMgmtCanSaveSkill()) return;
+        const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
+        try {
+          const body = Object.assign(this._configMgmtTarget(), {
+            name: s.name.trim(), files: { "SKILL.md": s.content }, confirm: s.confirm, hash: s.hash,
+          });
+          const res = await fetch(ROOT + "/api/config-write/skills", {
+            method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
+          });
+          if (c.gen !== gen) return;
+          if (this._authExpired(res)) return;
+          if (res.ok) { c.saved = true; s.editing = false; s.confirm = ""; await this._loadSkills(gen); }
+          else await this._configMgmtWriteErr(res);
+        } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+      },
+      configMgmtAskDeleteSkill(name) {
+        const c = this.configMgmt, s = c.skills;
+        c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenSkill fetch
+        c.error = ""; c.saved = false; s.deletingName = name; s.confirm = "";
+      },
+      configMgmtCancelDeleteSkill() {
+        this.configMgmt.skills.deletingName = ""; this.configMgmt.skills.confirm = "";
+      },
+      configMgmtCanDeleteSkill() {
+        const c = this.configMgmt, s = c.skills;
+        if (s.busy || !s.deletingName) return false;
+        return s.confirm === this.configMgmtConfirmToken();
+      },
+      async configMgmtDeleteSkill() {
+        const c = this.configMgmt, s = c.skills;
+        if (!this.configMgmtCanDeleteSkill()) return;
+        const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
+        const name = s.deletingName;
+        try {
+          const body = Object.assign(this._configMgmtTarget(), { name: name, confirm: s.confirm });
+          const res = await fetch(ROOT + "/api/config-write/skills/delete", {
+            method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
+          });
+          if (c.gen !== gen) return;
+          if (this._authExpired(res)) return;
+          if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSkills(gen); }
+          else await this._configMgmtWriteErr(res);
+        } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
       // --- read-only transcript viewer (#431) ---
       // Coarse relative timestamp from an mtime (epoch SECONDS, as the API returns
