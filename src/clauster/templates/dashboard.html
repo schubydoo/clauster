@@ -1632,8 +1632,10 @@
                         <td class="text-end">
                           <span class="d-inline-flex gap-1">
                             <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                    :data-test="'cm-skill-edit-' + sk.name"
                                     @click="configMgmtOpenSkill(sk.name)">Edit</button>
                             <button type="button" class="btn btn-sm btn-ghost-danger"
+                                    :data-test="'cm-skill-del-' + sk.name"
                                     @click="configMgmtAskDeleteSkill(sk.name)">Delete</button>
                           </span>
                         </td>

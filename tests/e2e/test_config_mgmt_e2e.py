@@ -241,6 +241,55 @@ def test_config_mgmt_new_skill_round_trip(
     assert "an e2e skill" in saved.read_text(encoding="utf-8")
 
 
+def test_config_mgmt_skill_edit_and_delete_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Editing then deleting a skill through the UI round-trips to disk."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    skill_md = projects_root / "alpha" / ".claude" / "skills" / "editme" / "SKILL.md"
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-skills"]')
+    browser.expect_visible('[data-test="cm-skill-new"]')
+
+    # Create a skill to act on.
+    browser.click('[data-test="cm-skill-new"]')
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    browser.fill('[data-test="cm-skill-name"]', "editme")
+    browser.fill(
+        '[data-test="cm-skill-content"]',
+        "---\nname: editme\ndescription: first\n---\nOne.\n",
+    )
+    browser.fill('[data-test="cm-skill-confirm"]', "alpha")
+    browser.click('[data-test="cm-skill-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+    assert "description: first" in skill_md.read_text(encoding="utf-8")
+
+    # Edit it from the list: open, change the body, save.
+    browser.expect_visible('[data-test="cm-skill-edit-editme"]')
+    browser.click('[data-test="cm-skill-edit-editme"]')
+    browser.expect_visible('[data-test="cm-skill-editor"]')
+    browser.fill(
+        '[data-test="cm-skill-content"]',
+        "---\nname: editme\ndescription: second\n---\nTwo.\n",
+    )
+    browser.fill('[data-test="cm-skill-confirm"]', "alpha")
+    browser.click('[data-test="cm-skill-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+    assert "description: second" in skill_md.read_text(encoding="utf-8")
+
+    # Delete it: inline confirm, then verify the directory is gone.
+    browser.expect_visible('[data-test="cm-skill-del-editme"]')
+    browser.click('[data-test="cm-skill-del-editme"]')
+    browser.expect_visible('[data-test="cm-skill-delete-confirm"]')
+    browser.fill('[data-test="cm-skill-delete-input"]', "alpha")
+    browser.click('[data-test="cm-skill-delete-go"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+    assert not skill_md.parent.exists(), "expected the deleted skill directory to be gone"
+
+
 def test_config_mgmt_mcp_approvals_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

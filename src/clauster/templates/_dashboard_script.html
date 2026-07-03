@@ -1154,9 +1154,12 @@
       configMgmtSurfaceHasLocal() {
         return !this.configMgmtNoLocalSurfaces.includes(this.configMgmt.surface);
       },
-      _configMgmtQuery() {
+      // Build the scope[+project] query string shared by every config-write GET/
+      // DELETE. `extra` merges in per-call params (e.g. { name } / { confirm }); the
+      // list surfaces (subagents/mcp/skills) all use this one helper.
+      _configMgmtQuery(extra) {
         const c = this.configMgmt;
-        const p = new URLSearchParams({ scope: c.scope });
+        const p = new URLSearchParams(Object.assign({ scope: c.scope }, extra || {}));
         if (c.scope !== "user") p.set("project", c.project);
         return p.toString();
       },
@@ -1360,17 +1363,11 @@
         c.error = (d && d.detail) || ("Save failed (" + res.status + ").");
       },
       // --- subagents (#773 slice C): a list surface — list + per-agent editor ------
-      _subagentQuery(extra) {
-        const c = this.configMgmt;
-        const p = new URLSearchParams(Object.assign({ scope: c.scope }, extra || {}));
-        if (c.scope !== "user") p.set("project", c.project);
-        return p.toString();
-      },
       async _loadSubagents(myGen) {
         const c = this.configMgmt;
         c.subagents.editing = false; c.subagents.deletingName = "";
         try {
-          const res = await fetch(ROOT + "/api/config-write/subagents?" + this._subagentQuery());
+          const res = await fetch(ROOT + "/api/config-write/subagents?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
           if (!res.ok) { c.subagents.list = []; c.error = this._configMgmtLoadErr(res); return; }
@@ -1393,7 +1390,7 @@
         s.ops += 1; s.busy = true;
         try {
           const res = await fetch(
-            ROOT + "/api/config-write/subagents/" + encodeURIComponent(name) + "?" + this._subagentQuery(),
+            ROOT + "/api/config-write/subagents/" + encodeURIComponent(name) + "?" + this._configMgmtQuery(),
           );
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
@@ -1457,7 +1454,7 @@
         const name = s.deletingName;
         try {
           const res = await fetch(
-            ROOT + "/api/config-write/subagents/" + encodeURIComponent(name) + "?" + this._subagentQuery({ confirm: s.confirm }),
+            ROOT + "/api/config-write/subagents/" + encodeURIComponent(name) + "?" + this._configMgmtQuery({ confirm: s.confirm }),
             { method: "DELETE" },
           );
           if (c.gen !== gen) return;
@@ -1471,12 +1468,6 @@
       // mask left in place round-trips to the stored secret. CRUD goes through the
       // per-server POST /mcp/server (op add|edit|remove) — the CLI-hybrid backend
       // routes any entry with an env/headers/secret to its secret-safe direct writer.
-      _mcpQuery(extra) {
-        const c = this.configMgmt;
-        const p = new URLSearchParams(Object.assign({ scope: c.scope }, extra || {}));
-        if (c.scope !== "user") p.set("project", c.project);
-        return p.toString();
-      },
       _mcpServerRows(servers) {
         const rows = [];
         for (const name of Object.keys(servers).sort()) rows.push({ name: name, entry: servers[name] });
@@ -1495,7 +1486,7 @@
         const c = this.configMgmt, m = c.mcp;
         m.editing = false; m.deletingName = "";
         try {
-          const res = await fetch(ROOT + "/api/config-write/mcp?" + this._mcpQuery());
+          const res = await fetch(ROOT + "/api/config-write/mcp?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
           if (!res.ok) { m.list = []; m.hash = null; c.error = this._configMgmtLoadErr(res); return; }
@@ -1708,17 +1699,11 @@
       // v1 writes SKILL.md alone (files = {"SKILL.md": content}); the backend's extra
       // script-confirm token is only required when other files are present, so it is
       // never sent here. Same ops-counter concurrency idiom as subagents.
-      _skillsQuery(extra) {
-        const c = this.configMgmt;
-        const p = new URLSearchParams(Object.assign({ scope: c.scope }, extra || {}));
-        if (c.scope !== "user") p.set("project", c.project);
-        return p.toString();
-      },
       async _loadSkills(myGen) {
         const c = this.configMgmt;
         c.skills.editing = false; c.skills.deletingName = "";
         try {
-          const res = await fetch(ROOT + "/api/config-write/skills?" + this._skillsQuery());
+          const res = await fetch(ROOT + "/api/config-write/skills?" + this._configMgmtQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
           if (!res.ok) { c.skills.list = []; c.error = this._configMgmtLoadErr(res); return; }
@@ -1740,7 +1725,7 @@
         const gen = (c.gen = (c.gen || 0) + 1);  // primary navigation — supersede a stale list load
         s.ops += 1; s.busy = true;
         try {
-          const res = await fetch(ROOT + "/api/config-write/skills/file?" + this._skillsQuery({ name: name }));
+          const res = await fetch(ROOT + "/api/config-write/skills/file?" + this._configMgmtQuery({ name: name }));
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
           if (!res.ok) { c.error = this._configMgmtLoadErr(res); return; }
