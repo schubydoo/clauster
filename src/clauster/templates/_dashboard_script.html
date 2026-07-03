@@ -175,12 +175,17 @@
           text: "", orig: "", hash: null,
           showEffective: false, effective: null, effectiveError: "",
         },
+        // JSON surfaces sharing _loadJsonSurface/_saveJsonSurface (#773 slice B).
+        permissions: { text: "", orig: "", hash: null },
+        hooks: { text: "", orig: "", hash: null },
       },
-      // Surface tabs — extended by later slices (#773 B/C/D add permissions, hooks,
-      // MCP, subagents, skills, plugins). Data-driven so the nav + views stay in sync.
+      // Surface tabs — extended by later slices (#773 C/D add MCP, subagents, skills,
+      // plugins). Data-driven so the nav + views stay in sync.
       configMgmtSurfaces: [
         { key: "claude-md", label: "CLAUDE.md" },
         { key: "settings", label: "Settings" },
+        { key: "permissions", label: "Permissions" },
+        { key: "hooks", label: "Hooks" },
       ],
       // --- read-only transcript viewer (#431) ---
       // order: "desc" (newest-first, default) | "asc" (oldest-first) — sort toggle (#612).
@@ -1113,11 +1118,39 @@
         const myGen = c.gen;
         c.loading = true;
         try {
-          if (c.surface === "claude-md") await this._loadClaudeMd(myGen);
-          else if (c.surface === "settings") await this._loadSettings(myGen);
+          await this._reloadSurface(c.surface, myGen);
         } finally {
           if (c.gen === myGen) c.loading = false;
         }
+      },
+      // Dispatch a surface reload for the current scope/project (used by the primary
+      // reload and by every save's post-write refresh). claude-md is content;
+      // settings/permissions/hooks are JSON objects sharing one loader.
+      _reloadSurface(surface, myGen) {
+        if (surface === "claude-md") return this._loadClaudeMd(myGen);
+        if (surface === "settings") return this._loadSettings(myGen);
+        return this._loadJsonSurface(surface, myGen);  // permissions | hooks
+      },
+      // Shared JSON-surface loader: GET /api/config-write/<surface> and pretty-print
+      // the (server-redacted) object into that surface's editor. settings/permissions/
+      // hooks share this shape — only the route path + response key (== surface) differ.
+      async _loadJsonSurface(surface, myGen) {
+        const c = this.configMgmt;
+        const st = c[surface];
+        try {
+          const res = await fetch(ROOT + "/api/config-write/" + surface + "?" + this._configMgmtQuery());
+          if (c.gen !== myGen) return;  // superseded by a newer load
+          if (this._authExpired(res)) return;
+          if (!res.ok) {
+            // Clear so a failed switch never leaves the previous target's JSON visible.
+            st.text = ""; st.orig = ""; st.hash = null;
+            c.error = this._configMgmtLoadErr(res); return;
+          }
+          const d = await res.json();
+          if (c.gen !== myGen) return;  // re-check across the json() await before writing state
+          const text = JSON.stringify(d[surface] || {}, null, 2);
+          st.text = text; st.orig = text; st.hash = d.hash || null;
+        } catch (e) { if (c.gen === myGen) c.error = "Failed to load " + surface + "."; }
       },
       async _loadClaudeMd(myGen) {
         const c = this.configMgmt;
@@ -1132,6 +1165,7 @@
             c.error = this._configMgmtLoadErr(res); return;
           }
           const d = await res.json();
+          if (c.gen !== myGen) return;  // re-check across the json() await before writing state
           c.claudeMd.content = d.content || "";
           c.claudeMd.orig = c.claudeMd.content;
           c.claudeMd.hash = d.hash || null;
@@ -1141,27 +1175,20 @@
       async _loadSettings(myGen) {
         const c = this.configMgmt;
         c.settings.effective = null; c.settings.effectiveError = "";
-        try {
-          const res = await fetch(ROOT + "/api/config-write/settings?" + this._configMgmtQuery());
-          if (c.gen !== myGen) return;
-          if (this._authExpired(res)) return;
-          if (!res.ok) {
-            c.settings.text = ""; c.settings.orig = ""; c.settings.hash = null;
-            c.error = this._configMgmtLoadErr(res); return;
-          }
-          const d = await res.json();
-          // Pretty-print the redacted misc view; the operator edits it as JSON.
-          const text = JSON.stringify(d.settings || {}, null, 2);
-          c.settings.text = text; c.settings.orig = text; c.settings.hash = d.hash || null;
-        } catch (e) { if (c.gen === myGen) c.error = "Failed to load settings."; }
-        if (c.settings.showEffective && c.scope !== "user") await this._loadEffective(myGen);
+        await this._loadJsonSurface("settings", myGen);
+        if (c.gen !== myGen) return;  // superseded — skip the secondary effective fetch
+        // Only fetch the merged view when the settings load itself succeeded — no point
+        // compounding a network error — and the panel is open on a scoped (non-user) read.
+        if (!c.error && c.settings.showEffective && c.scope !== "user") {
+          await this._loadEffective(myGen);
+        }
       },
       configMgmtToggleEffective() {
         const c = this.configMgmt;
         c.settings.showEffective = !c.settings.showEffective;
         if (c.settings.showEffective && !c.settings.effective) {
           // Pass the CURRENT gen — do NOT bump. The effective panel is a secondary
-          // load; bumping here would void an in-flight _saveSettings that shares this
+          // load; bumping here would void an in-flight _saveJsonSurface that shares this
           // gen (saving keeps the settings view + this toggle visible, unlike loading),
           // dropping its success branch so the next save 409s on a stale hash. A later
           // primary reload bumps gen and cancels this via _loadEffective's own guard.
@@ -1180,6 +1207,7 @@
           if (this._authExpired(res)) return;
           if (!res.ok) { c.settings.effectiveError = "Could not load merged view (" + res.status + ")."; return; }
           const d = await res.json();
+          if (c.gen !== myGen) return;  // re-check across the json() await before writing state
           c.settings.effective = d.effective || {};
         } catch (e) { if (c.gen === myGen) c.settings.effectiveError = "Could not load merged view."; }
       },
@@ -1198,8 +1226,8 @@
       configMgmtDirty() {
         const c = this.configMgmt;
         if (c.surface === "claude-md") return c.claudeMd.content !== c.claudeMd.orig;
-        if (c.surface === "settings") return c.settings.text !== c.settings.orig;
-        return false;
+        const st = c[c.surface];  // settings | permissions | hooks — JSON surfaces
+        return st ? st.text !== st.orig : false;
       },
       configMgmtCanSave() {
         const c = this.configMgmt;
@@ -1219,7 +1247,7 @@
         c.saving = true; c.error = ""; c.saved = false;
         try {
           if (c.surface === "claude-md") await this._saveClaudeMd(myGen);
-          else if (c.surface === "settings") await this._saveSettings(myGen);
+          else await this._saveJsonSurface(c.surface, myGen);  // settings/permissions/hooks
         } finally {
           // Always clear — never gate on gen. A scope/surface/project switch mid-save
           // bumps gen (its buttons aren't disabled while saving); the stale response is
@@ -1241,23 +1269,26 @@
         if (res.ok) { c.saved = true; c.confirm = ""; await this._loadClaudeMd(myGen); }
         else await this._configMgmtWriteErr(res);
       },
-      async _saveSettings(myGen) {
+      // Shared JSON-surface saver: parse + validate the editor as a JSON object, PUT it
+      // to /api/config-write/<surface> with the confirm token + stale-hash guard, then
+      // reload. Used by settings/permissions/hooks (the backend validates structure).
+      async _saveJsonSurface(surface, myGen) {
         const c = this.configMgmt;
+        const st = c[surface];
         let payload;
-        try { payload = JSON.parse(c.settings.text); }
-        catch (e) { c.error = "Settings must be valid JSON."; return; }
+        try { payload = JSON.parse(st.text); }
+        catch (e) { c.error = surface + " must be valid JSON."; return; }
         if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-          c.error = "Settings must be a JSON object."; return;
+          c.error = surface + " must be a JSON object."; return;
         }
-        const body = Object.assign(this._configMgmtTarget(), {
-          settings: payload, confirm: c.confirm, hash: c.settings.hash,
-        });
-        const res = await fetch(ROOT + "/api/config-write/settings", {
+        const body = Object.assign(this._configMgmtTarget(), { confirm: c.confirm, hash: st.hash });
+        body[surface] = payload;
+        const res = await fetch(ROOT + "/api/config-write/" + surface, {
           method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
         });
         if (c.gen !== myGen) return;
         if (this._authExpired(res)) return;
-        if (res.ok) { c.saved = true; c.confirm = ""; await this._loadSettings(myGen); }
+        if (res.ok) { c.saved = true; c.confirm = ""; await this._reloadSurface(surface, myGen); }
         else await this._configMgmtWriteErr(res);
       },
       async _configMgmtWriteErr(res) {

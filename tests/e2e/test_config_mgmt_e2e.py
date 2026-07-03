@@ -1,10 +1,11 @@
-"""Browser E2E for the config-management modal (#773, slice A).
+"""Browser E2E for the config-management modal (#773, slices A + B).
 
 Drives the real save path: open the modal from the header, edit a project-scope
-CLAUDE.md, type the scope name to confirm, save, and assert the file landed on
-disk. Also checks the type-the-name gate (Save stays disabled until the confirm
-text matches) and that the settings tab loads. The gate + markup are unit-tested;
-this proves the wired Alpine flow round-trips to a real running server.
+surface, type the scope name to confirm, save, and assert the file landed on disk.
+Covers the CLAUDE.md round trip, the type-the-name gate, the settings tab, and the
+slice-B permissions round trip + hooks tab (both JSON surfaces sharing the generic
+loader/saver). The gate + markup are unit-tested; this proves the wired Alpine flow
+round-trips to a real running server.
 """
 
 from __future__ import annotations
@@ -79,3 +80,36 @@ def test_config_mgmt_settings_tab_loads(browser: AgentBrowser, config_mgmt_serve
     # The merged (effective) provenance view fetches + renders on demand.
     browser.click('[data-test="cm-effective-toggle"]')
     browser.expect_visible('[data-test="cm-effective-table"]')
+
+
+def test_config_mgmt_permissions_project_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Saving project permissions writes the rules into the project's settings.json."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    # alpha has no settings.json yet -> the permissions view is {} (fetch bound).
+    browser.expect_value('[data-test="cm-permissions-text"]', "{}")
+
+    browser.fill('[data-test="cm-permissions-text"]', '{"allow": ["Bash(ls:*)"]}')
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    assert settings.exists(), "expected alpha/.claude/settings.json to be written"
+    assert "Bash(ls:*)" in settings.read_text(encoding="utf-8")
+
+
+def test_config_mgmt_hooks_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
+    """Switching to the Hooks tab loads its JSON editor for the scope."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_value('[data-test="cm-hooks-text"]', "{}")

@@ -59,6 +59,15 @@ def test_modal_and_slice_a_surfaces_present_when_enabled(write_config):
     assert 'data-test="cm-save"' in html
 
 
+def test_permissions_and_hooks_surfaces_present_when_enabled(write_config):
+    # Slice B adds the permissions + hooks surface tabs and their JSON editors.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-view-permissions"' in html
+    assert 'data-test="cm-permissions-text"' in html
+    assert 'data-test="cm-view-hooks"' in html
+    assert 'data-test="cm-hooks-text"' in html
+
+
 # ---- User scope option is gated on allow_user_scope -------------------------
 
 
