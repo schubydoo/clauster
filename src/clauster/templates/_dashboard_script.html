@@ -183,7 +183,9 @@
         subagents: {
           list: [], editing: false, isNew: false,
           name: "", content: "", orig: "", hash: null,
-          confirm: "", busy: false, deletingName: "",
+          // `busy` is derived from `ops` (a concurrent-op counter) so an early op's
+          // finally can't clear it while another subagent request is still in flight.
+          confirm: "", busy: false, ops: 0, deletingName: "",
         },
       },
       // Surface tabs — extended by later slices (#773 D adds skills, plugins).
@@ -1339,7 +1341,7 @@
         const c = this.configMgmt;
         c.subagents.editing = false; c.subagents.deletingName = "";
         try {
-          const res = await fetch(ROOT + "/api/config-write/subagents?" + this._configMgmtQuery());
+          const res = await fetch(ROOT + "/api/config-write/subagents?" + this._subagentQuery());
           if (c.gen !== myGen) return;
           if (this._authExpired(res)) return;
           if (!res.ok) { c.subagents.list = []; c.error = this._configMgmtLoadErr(res); return; }
@@ -1359,7 +1361,7 @@
         const c = this.configMgmt, s = c.subagents;
         c.error = ""; c.saved = false; s.deletingName = "";
         const gen = (c.gen = (c.gen || 0) + 1);  // primary navigation — supersede a stale list load
-        s.busy = true;
+        s.ops += 1; s.busy = true;
         try {
           const res = await fetch(
             ROOT + "/api/config-write/subagents/" + encodeURIComponent(name) + "?" + this._subagentQuery(),
@@ -1372,7 +1374,7 @@
           s.editing = true; s.isNew = false; s.name = d.name || name;
           s.content = d.content || ""; s.orig = s.content; s.hash = d.hash || null; s.confirm = "";
         } catch (e) { if (c.gen === gen) c.error = "Failed to load subagent."; }
-        finally { s.busy = false; }
+        finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
       configMgmtCancelAgent() {
         const c = this.configMgmt;
@@ -1392,7 +1394,7 @@
       async configMgmtSaveAgent() {
         const c = this.configMgmt, s = c.subagents;
         if (!this.configMgmtCanSaveAgent()) return;
-        const gen = c.gen; s.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
             content: s.content, confirm: s.confirm, hash: s.hash,
@@ -1404,7 +1406,7 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; s.editing = false; s.confirm = ""; await this._loadSubagents(gen); }
           else await this._configMgmtWriteErr(res);
-        } finally { s.busy = false; }
+        } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
       configMgmtAskDeleteAgent(name) {
         const c = this.configMgmt, s = c.subagents;
@@ -1422,7 +1424,7 @@
       async configMgmtDeleteAgent() {
         const c = this.configMgmt, s = c.subagents;
         if (!this.configMgmtCanDeleteAgent()) return;
-        const gen = c.gen; s.busy = true; c.error = ""; c.saved = false;
+        const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         const name = s.deletingName;
         try {
           const res = await fetch(
@@ -1433,7 +1435,7 @@
           if (this._authExpired(res)) return;
           if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSubagents(gen); }
           else await this._configMgmtWriteErr(res);
-        } finally { s.busy = false; }
+        } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
       // --- read-only transcript viewer (#431) ---
       // Coarse relative timestamp from an mtime (epoch SECONDS, as the API returns
@@ -3591,7 +3593,7 @@
         finally { this.loaded = true; this.loading = false; }
       },
       async _reap(action, confirm) {
-        this.busy = true; this.error = null; this.result = null;
+        this.ops += 1; s.busy = true; this.error = null; this.result = null;
         try {
           const res = await fetch(ROOT + "/api/environments/reap", {
             method: "POST", headers: JSON_HEADERS,
@@ -3607,7 +3609,7 @@
           await this.load();
           this.result = msg;
         } catch (e) { this.error = String(e); }
-        finally { this.busy = false; }
+        finally { this.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
       },
       archive() { this._reap("archive", "archive"); },
       del() { if (this.deleteTyped === "DELETE") this._reap("delete", "DELETE"); },
