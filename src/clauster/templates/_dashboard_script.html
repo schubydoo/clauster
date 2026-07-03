@@ -224,8 +224,8 @@
           busy: false, ops: 0,
         },
       },
-      // Surface tabs — extended by later #773 slices (skills, plugins still to come).
-      // Data-driven so the nav + views stay in sync.
+      // Surface tabs — all eight #773 slices (claude-md, settings, permissions, hooks,
+      // mcp, subagents, skills, plugins) are present. Data-driven so nav + views stay in sync.
       configMgmtSurfaces: [
         { key: "claude-md", label: "CLAUDE.md" },
         { key: "settings", label: "Settings" },
@@ -1838,7 +1838,12 @@
             const md = await mres.json();
             if (c.gen !== myGen) return;
             pl.marketplaces = md.marketplaces || [];
-          } else { pl.marketplaces = []; }
+          } else {
+            // Surface the failure rather than showing a misleading empty "No
+            // marketplaces" — the plugins list may have loaded fine while this
+            // second fetch failed (fail closed, never silently).
+            pl.marketplaces = []; c.error = this._configMgmtLoadErr(mres);
+          }
         } catch (e) { if (c.gen === myGen) c.error = "Failed to load plugins."; }
       },
       // True when the shared scope-token confirm matches — gates every non-install action.
