@@ -1,10 +1,11 @@
-"""Browser E2E for the config-management modal (#773, slices A + B + C).
+"""Browser E2E for the config-management modal (#773, slices A + B + C + D).
 
 Drives the real save path: open the modal from the header, edit a project-scope
 surface, type the scope name to confirm, save, and assert the file landed on disk.
 Covers the CLAUDE.md round trip, the type-the-name gate, the settings tab, the
-slice-B permissions round trip + hooks tab, and the slice-C subagents list surface
-(read-only built-ins + a new-agent round trip to disk). The gate + markup are
+slice-B permissions round trip + hooks tab, the slice-C subagents list surface
+(read-only built-ins + a new-agent round trip to disk), and the slice-D MCP list
+surface (tab load + a new-server round trip to .mcp.json). The gate + markup are
 unit-tested; this proves the wired Alpine flow round-trips to a real running server.
 """
 
@@ -155,3 +156,93 @@ def test_config_mgmt_new_subagent_round_trip(
     saved = projects_root / "alpha" / ".claude" / "agents" / "my-agent.md"
     assert saved.exists(), "expected alpha/.claude/agents/my-agent.md to be written"
     assert "an e2e agent" in saved.read_text(encoding="utf-8")
+
+
+def test_config_mgmt_mcp_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
+    """The MCP surface renders its list controls once the servers load."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-view-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+
+
+def test_config_mgmt_new_mcp_server_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Adding an MCP server through the editor writes it into the project .mcp.json.
+
+    The entry carries an ``env`` value, so the backend routes it to the secret-safe
+    direct writer (never the CLI) — proving the wired flow round-trips to disk
+    without depending on the fake ``claude`` implementing ``mcp add-json``.
+    """
+    import json
+
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')  # wait for the list to finish loading
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')
+
+    browser.fill('[data-test="cm-mcp-name"]', "my-server")
+    browser.fill(
+        '[data-test="cm-mcp-entry"]',
+        '{"command": "echo", "args": ["hi"], "env": {"FOO": "bar"}}',
+    )
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+
+    saved = projects_root / "alpha" / ".mcp.json"
+    assert saved.exists(), "expected alpha/.mcp.json to be written"
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["my-server"]["command"] == "echo"
+    assert data["mcpServers"]["my-server"]["env"]["FOO"] == "bar"
+
+
+def test_config_mgmt_mcp_approvals_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Approving a committed server through the panel writes enabledMcpjsonServers.
+
+    Adds a server to .mcp.json, then approves it in the per-server approvals panel
+    and saves — the choice must land in ``~/.claude.json`` under the project's
+    ``enabledMcpjsonServers`` list.
+    """
+    import json
+
+    state_dir = Path(config_mgmt_server.state_dir)
+    cfg_path = state_dir.parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    claude_json = state_dir.parent / "home" / ".claude.json"
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')
+    browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+
+    # The approvals panel now lists the committed server — approve it and save.
+    browser.expect_visible('[data-test="cm-mcp-approvals"]')
+    browser.expect_visible('[data-test="cm-mcp-approve-gizmo"]')
+    browser.click('[data-test="cm-mcp-approve-gizmo"]')
+    # The confirm input + Save appear only once the toggle makes the panel dirty.
+    browser.expect_visible('[data-test="cm-mcp-approvals-confirm"]')
+    browser.fill('[data-test="cm-mcp-approvals-confirm"]', "alpha")
+    browser.expect_visible('[data-test="cm-mcp-approvals-save"]:not([disabled])')
+    browser.click('[data-test="cm-mcp-approvals-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+
+    alpha_key = str(projects_root / "alpha")
+    stored = json.loads(claude_json.read_text(encoding="utf-8"))
+    assert "gizmo" in stored["projects"][alpha_key]["enabledMcpjsonServers"]

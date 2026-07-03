@@ -187,6 +187,20 @@
           // finally can't clear it while another subagent request is still in flight.
           confirm: "", busy: false, ops: 0, deletingName: "",
         },
+        // MCP servers (#773 slice D): a list surface — the {name: entry} map edited
+        // per-entry as JSON, add/edit/delete across all three scopes via the
+        // secret-safe per-server POST. Project `.mcp.json` servers also carry
+        // approval state (which committed servers Claude may use), managed inline.
+        mcp: {
+          list: [], hash: null,
+          editing: false, isNew: false,
+          name: "", entryText: "", orig: "",
+          confirm: "", busy: false, ops: 0, deletingName: "",
+          approvals: {
+            enabled: [], disabled: [], orig: "",
+            confirm: "", busy: false, ops: 0, resetConfirm: "", resetBusy: false,
+          },
+        },
       },
       // Surface tabs — extended by later slices (#773 D adds skills, plugins).
       // Data-driven so the nav + views stay in sync.
@@ -195,6 +209,7 @@
         { key: "settings", label: "Settings" },
         { key: "permissions", label: "Permissions" },
         { key: "hooks", label: "Hooks" },
+        { key: "mcp", label: "MCP" },
         { key: "subagents", label: "Subagents" },
       ],
       // Surfaces that edit ONE document via the shared footer confirm+Save. List
@@ -1112,6 +1127,7 @@
         if (c.surface === key) return;  // clicking the active tab must not wipe edits
         c.surface = key; c.error = ""; c.saved = false;
         c.subagents.editing = false; c.subagents.deletingName = "";  // leave any list-editor
+        c.mcp.editing = false; c.mcp.deletingName = "";
         // Some surfaces have no local scope; drop out of local before loading one.
         if (c.scope === "local" && this.configMgmtNoLocalSurfaces.includes(key)) {
           c.scope = "project"; c.confirm = "";
@@ -1159,6 +1175,7 @@
         if (surface === "claude-md") return this._loadClaudeMd(myGen);
         if (surface === "settings") return this._loadSettings(myGen);
         if (surface === "subagents") return this._loadSubagents(myGen);
+        if (surface === "mcp") return this._loadMcp(myGen);
         return this._loadJsonSurface(surface, myGen);  // permissions | hooks
       },
       // Shared JSON-surface loader: GET /api/config-write/<surface> and pretty-print
@@ -1436,6 +1453,216 @@
           if (res.ok) { c.saved = true; s.deletingName = ""; s.confirm = ""; await this._loadSubagents(gen); }
           else await this._configMgmtWriteErr(res);
         } finally { s.ops = Math.max(0, s.ops - 1); s.busy = s.ops > 0; }
+      },
+      // --- MCP servers (#773 slice D): a list surface — per-entry JSON editor ------
+      // The {name: entry} map is server-masked (secret-shaped values -> ********); a
+      // mask left in place round-trips to the stored secret. CRUD goes through the
+      // per-server POST /mcp/server (op add|edit|remove) — the CLI-hybrid backend
+      // routes any entry with an env/headers/secret to its secret-safe direct writer.
+      _mcpQuery(extra) {
+        const c = this.configMgmt;
+        const p = new URLSearchParams(Object.assign({ scope: c.scope }, extra || {}));
+        if (c.scope !== "user") p.set("project", c.project);
+        return p.toString();
+      },
+      _mcpServerRows(servers) {
+        const rows = [];
+        for (const name of Object.keys(servers).sort()) rows.push({ name: name, entry: servers[name] });
+        return rows;
+      },
+      // A one-line glance at an entry for the list — command/args (stdio) or url (remote).
+      configMgmtMcpEntrySummary(entry) {
+        if (!entry || typeof entry !== "object") return "";
+        if (entry.type === "http" || entry.type === "sse" || entry.url) {
+          return (entry.type || "remote") + ": " + (entry.url || "");
+        }
+        const args = Array.isArray(entry.args) ? entry.args.join(" ") : "";
+        return ("stdio: " + (entry.command || "") + " " + args).trim();
+      },
+      async _loadMcp(myGen) {
+        const c = this.configMgmt, m = c.mcp;
+        m.editing = false; m.deletingName = "";
+        try {
+          const res = await fetch(ROOT + "/api/config-write/mcp?" + this._mcpQuery());
+          if (c.gen !== myGen) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) { m.list = []; m.hash = null; c.error = this._configMgmtLoadErr(res); return; }
+          const d = await res.json();
+          if (c.gen !== myGen) return;
+          m.list = this._mcpServerRows(d.servers || {});
+          m.hash = d.hash || null;
+          // Approvals are a project-only concept (committed .mcp.json servers); other
+          // scopes have none. Load them under the same gen so a switch drops both.
+          if (c.scope === "project") await this._loadMcpApprovals(myGen);
+          else {
+            m.approvals.enabled = []; m.approvals.disabled = [];
+            m.approvals.orig = this._mcpApprovalsSig([], []);
+          }
+        } catch (e) { if (c.gen === myGen) c.error = "Failed to load MCP servers."; }
+      },
+      configMgmtNewMcp() {
+        const c = this.configMgmt, m = c.mcp;
+        c.gen = (c.gen || 0) + 1;  // supersede any in-flight load
+        c.error = ""; c.saved = false; m.deletingName = "";
+        m.editing = true; m.isNew = true;
+        m.name = ""; m.entryText = ""; m.orig = ""; m.confirm = "";
+      },
+      // Editing reuses the already-loaded (masked) list entry — no fetch, so no race.
+      configMgmtOpenMcp(name) {
+        const c = this.configMgmt, m = c.mcp;
+        c.error = ""; c.saved = false; m.deletingName = "";
+        const row = m.list.find(r => r.name === name);
+        if (!row) return;
+        m.editing = true; m.isNew = false; m.name = name;
+        m.entryText = JSON.stringify(row.entry, null, 2); m.orig = m.entryText; m.confirm = "";
+      },
+      configMgmtCancelMcp() {
+        const m = this.configMgmt.mcp;
+        m.editing = false; m.confirm = ""; this.configMgmt.error = "";
+      },
+      configMgmtMcpDirty() {
+        const m = this.configMgmt.mcp;
+        return m.isNew ? (m.name.trim() !== "" || m.entryText.trim() !== "") : (m.entryText !== m.orig);
+      },
+      configMgmtCanSaveMcp() {
+        const c = this.configMgmt, m = c.mcp;
+        if (m.busy || this.configMgmtNeedsProject()) return false;
+        if (m.isNew && !m.name.trim()) return false;
+        if (m.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
+        return this.configMgmtMcpDirty();
+      },
+      async configMgmtSaveMcp() {
+        const c = this.configMgmt, m = c.mcp;
+        if (!this.configMgmtCanSaveMcp()) return;
+        let entry;
+        try { entry = JSON.parse(m.entryText); }
+        catch (e) { c.error = "Server entry must be valid JSON."; return; }
+        if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+          c.error = "Server entry must be a JSON object."; return;
+        }
+        const gen = c.gen; m.ops += 1; m.busy = true; c.error = ""; c.saved = false;
+        try {
+          const body = Object.assign(this._configMgmtTarget(), {
+            op: m.isNew ? "add" : "edit", name: m.name.trim(), entry: entry, confirm: m.confirm,
+          });
+          const res = await fetch(ROOT + "/api/config-write/mcp/server", {
+            method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
+          });
+          if (c.gen !== gen) return;
+          if (this._authExpired(res)) return;
+          if (res.ok) { c.saved = true; m.editing = false; m.confirm = ""; await this._loadMcp(gen); }
+          else await this._configMgmtWriteErr(res);
+        } finally { m.ops = Math.max(0, m.ops - 1); m.busy = m.ops > 0; }
+      },
+      configMgmtAskDeleteMcp(name) {
+        const c = this.configMgmt, m = c.mcp;
+        c.gen = (c.gen || 0) + 1;  // supersede any in-flight load
+        c.error = ""; c.saved = false; m.deletingName = name; m.confirm = "";
+      },
+      configMgmtCancelDeleteMcp() {
+        this.configMgmt.mcp.deletingName = ""; this.configMgmt.mcp.confirm = "";
+      },
+      configMgmtCanDeleteMcp() {
+        const m = this.configMgmt.mcp;
+        if (m.busy || !m.deletingName) return false;
+        return m.confirm === this.configMgmtConfirmToken();
+      },
+      async configMgmtDeleteMcp() {
+        const c = this.configMgmt, m = c.mcp;
+        if (!this.configMgmtCanDeleteMcp()) return;
+        const gen = c.gen; m.ops += 1; m.busy = true; c.error = ""; c.saved = false;
+        const name = m.deletingName;
+        try {
+          const body = Object.assign(this._configMgmtTarget(), { op: "remove", name: name, confirm: m.confirm });
+          const res = await fetch(ROOT + "/api/config-write/mcp/server", {
+            method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
+          });
+          if (c.gen !== gen) return;
+          if (this._authExpired(res)) return;
+          if (res.ok) { c.saved = true; m.deletingName = ""; m.confirm = ""; await this._loadMcp(gen); }
+          else await this._configMgmtWriteErr(res);
+        } finally { m.ops = Math.max(0, m.ops - 1); m.busy = m.ops > 0; }
+      },
+      // --- MCP project approvals: which committed .mcp.json servers Claude may use --
+      _mcpApprovalsSig(enabled, disabled) {
+        return JSON.stringify(enabled.slice().sort()) + "|" + JSON.stringify(disabled.slice().sort());
+      },
+      async _loadMcpApprovals(myGen) {
+        const c = this.configMgmt, ap = c.mcp.approvals;
+        ap.confirm = ""; ap.resetConfirm = "";
+        try {
+          const res = await fetch(ROOT + "/api/config-write/mcp/approvals?project=" + encodeURIComponent(c.project));
+          if (c.gen !== myGen) return;
+          if (this._authExpired(res)) return;
+          if (!res.ok) { ap.enabled = []; ap.disabled = []; ap.orig = this._mcpApprovalsSig([], []); return; }
+          const d = await res.json();
+          if (c.gen !== myGen) return;
+          ap.enabled = Array.isArray(d.enabled) ? d.enabled.slice() : [];
+          ap.disabled = Array.isArray(d.disabled) ? d.disabled.slice() : [];
+          ap.orig = this._mcpApprovalsSig(ap.enabled, ap.disabled);
+        } catch (e) { /* approvals are secondary — leave the server list usable on failure */ }
+      },
+      configMgmtMcpApprovalState(name) {
+        const ap = this.configMgmt.mcp.approvals;
+        if (ap.enabled.indexOf(name) !== -1) return "enabled";
+        if (ap.disabled.indexOf(name) !== -1) return "disabled";
+        return "unset";
+      },
+      configMgmtMcpSetApproval(name, state) {
+        const ap = this.configMgmt.mcp.approvals;
+        ap.enabled = ap.enabled.filter(n => n !== name);
+        ap.disabled = ap.disabled.filter(n => n !== name);
+        if (state === "enabled") ap.enabled.push(name);
+        else if (state === "disabled") ap.disabled.push(name);
+        this.configMgmt.saved = false;
+      },
+      configMgmtMcpApprovalsDirty() {
+        const ap = this.configMgmt.mcp.approvals;
+        return this._mcpApprovalsSig(ap.enabled, ap.disabled) !== ap.orig;
+      },
+      configMgmtCanSaveMcpApprovals() {
+        const c = this.configMgmt, ap = c.mcp.approvals;
+        if (ap.busy || this.configMgmtNeedsProject()) return false;
+        if (ap.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
+        return this.configMgmtMcpApprovalsDirty();
+      },
+      async configMgmtSaveMcpApprovals() {
+        const c = this.configMgmt, ap = c.mcp.approvals;
+        if (!this.configMgmtCanSaveMcpApprovals()) return;
+        const gen = c.gen; ap.ops += 1; ap.busy = true; c.error = ""; c.saved = false;
+        try {
+          const body = {
+            scope: "project", project: c.project, confirm: ap.confirm,
+            enabled: ap.enabled, disabled: ap.disabled,
+          };
+          const res = await fetch(ROOT + "/api/config-write/mcp/approvals", {
+            method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
+          });
+          if (c.gen !== gen) return;
+          if (this._authExpired(res)) return;
+          if (res.ok) { c.saved = true; ap.confirm = ""; await this._loadMcp(gen); }
+          else await this._configMgmtWriteErr(res);
+        } finally { ap.ops = Math.max(0, ap.ops - 1); ap.busy = ap.ops > 0; }
+      },
+      configMgmtCanResetMcp() {
+        const c = this.configMgmt, ap = c.mcp.approvals;
+        if (ap.resetBusy || this.configMgmtNeedsProject()) return false;
+        return ap.resetConfirm === this.configMgmtConfirmToken();  // type-the-name gate
+      },
+      async configMgmtResetMcpChoices() {
+        const c = this.configMgmt, ap = c.mcp.approvals;
+        if (!this.configMgmtCanResetMcp()) return;
+        const gen = c.gen; ap.resetBusy = true; c.error = ""; c.saved = false;
+        try {
+          const body = { project: c.project, confirm: ap.resetConfirm };
+          const res = await fetch(ROOT + "/api/config-write/mcp/reset-project-choices", {
+            method: "POST", headers: JSON_HEADERS, body: JSON.stringify(body),
+          });
+          if (c.gen !== gen) return;
+          if (this._authExpired(res)) return;
+          if (res.ok) { c.saved = true; ap.resetConfirm = ""; await this._loadMcp(gen); }
+          else await this._configMgmtWriteErr(res);
+        } finally { ap.resetBusy = false; }
       },
       // --- read-only transcript viewer (#431) ---
       // Coarse relative timestamp from an mtime (epoch SECONDS, as the API returns
