@@ -648,13 +648,22 @@ class HostedManager:
         return [self._synced(inst) for inst in self._instances.values()]
 
     def get_instance(self, hosted_id: str) -> RemoteControlInstance | None:
-        """Return the hosted instance for ``hosted_id`` (status-synced), or None."""
-        inst = self._instances.get(hosted_id)
+        """Return the hosted instance for ``hosted_id`` (status-synced), or None.
+
+        ``hosted_id`` may be the registry key (``claustrum_process_id``) or the row's
+        ``instance_id`` — resolved via :meth:`_key_for` (#834).
+        """
+        key = self._key_for(hosted_id)
+        inst = self._instances.get(key) if key is not None else None
         return self._synced(inst) if inst is not None else None
 
     def session(self, hosted_id: str) -> HostedSession | None:
-        """Return the live :class:`HostedSession` for ``hosted_id``, or None."""
-        return self._sessions.get(hosted_id)
+        """Return the live :class:`HostedSession` for ``hosted_id``, or None.
+
+        Accepts the registry key or the row's ``instance_id`` (see :meth:`_key_for`, #834).
+        """
+        key = self._key_for(hosted_id)
+        return self._sessions.get(key) if key is not None else None
 
     async def spawn(
         self,
@@ -747,12 +756,15 @@ class HostedManager:
         Serialized per id (see :meth:`_lock_for`): a concurrent forget/resume on the
         same id waits rather than racing the stop's grace-window awaits.
         """
-        async with self._lock_for(hosted_id):
-            await self._require(hosted_id).stop()
+        key = self._key_for(hosted_id)
+        if key is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        async with self._lock_for(key):
+            await self._require(key).stop()
             # The per-id lock now bars a concurrent forget()/resume() from popping the
             # row mid-grace; the re-fetch + absent→404 mapping stays as defense-in-depth
             # (and still covers the no-session-but-row corner) rather than a 500.
-            instance = self._instances.get(hosted_id)
+            instance = self._instances.get(key)
             if instance is None:
                 raise HostedSessionError(f"no such hosted session: {hosted_id}")
             # Mark the intent so a restart shows it as stopped, not "lost"/crashed.
@@ -781,10 +793,11 @@ class HostedManager:
         both pass the running-check and both spawn — the second blocks at the lock,
         then sees the row already retired and 404s, so exactly one process results.
         """
-        async with self._lock_for(hosted_id):
-            return await self._resume_locked(
-                client, hosted_id, cwd=cwd, claude_binary=claude_binary
-            )
+        key = self._key_for(hosted_id)
+        if key is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        async with self._lock_for(key):
+            return await self._resume_locked(client, key, cwd=cwd, claude_binary=claude_binary)
 
     async def _resume_locked(
         self,
@@ -794,7 +807,11 @@ class HostedManager:
         cwd: str,
         claude_binary: str,
     ) -> RemoteControlInstance:
-        """Body of :meth:`resume`, always run under the per-id lifecycle lock."""
+        """Body of :meth:`resume`, always run under the per-id lifecycle lock.
+
+        ``hosted_id`` is the resolved registry key (``claustrum_process_id``) — the
+        caller applies :meth:`_key_for` before taking the lock (#834).
+        """
         old = self._instances.get(hosted_id)
         if old is None:
             raise HostedSessionError(f"no such hosted session: {hosted_id}")
@@ -850,8 +867,11 @@ class HostedManager:
         Serialized per id (see :meth:`_lock_for`) so a concurrent resume can't spawn
         a fresh agent off this row while we're hard-killing the survivor.
         """
-        async with self._lock_for(hosted_id):
-            inst = self._instances.get(hosted_id)
+        key = self._key_for(hosted_id)
+        if key is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        async with self._lock_for(key):
+            inst = self._instances.get(key)
             if inst is None:
                 raise HostedSessionError(f"no such hosted session: {hosted_id}")
             if inst.agent_pid is not None:
@@ -885,12 +905,15 @@ class HostedManager:
         registry-pop are held together, so a concurrent stop→running-transition or a
         resume can't slip between the check and the drop.
         """
-        async with self._lock_for(hosted_id):
-            inst = self._instances.get(hosted_id)
+        key = self._key_for(hosted_id)
+        if key is None:
+            raise HostedSessionError(f"no such hosted session: {hosted_id}")
+        async with self._lock_for(key):
+            inst = self._instances.get(key)
             if inst is None:
                 raise HostedSessionError(f"no such hosted session: {hosted_id}")
             inst = self._synced(inst)
-            session = self._sessions.get(hosted_id)
+            session = self._sessions.get(key)
             if (
                 session is not None and session.status in ("running", "starting")
             ) or inst.status in (
@@ -908,14 +931,14 @@ class HostedManager:
             # client-side ProcessStream subscriber deterministically instead of leaking it.
             if session is not None:
                 await session.detach()
-            self._sessions.pop(hosted_id, None)
-            self._instances.pop(hosted_id, None)
+            self._sessions.pop(key, None)
+            self._instances.pop(key, None)
             # Prune the per-id lock so _id_locks doesn't grow unbounded — it's keyed by
             # the fresh per-session UUID, not by a finite stable set like the runner's
             # spawn locks. Safe under the held lock: a coroutine already waiting on this
             # lock object still acquires it, finds no instance, and raises; a later
             # arrival mints a fresh lock and hits the same not-found result.
-            self._id_locks.pop(hosted_id, None)
+            self._id_locks.pop(key, None)
             await self._persist()
 
     @staticmethod
@@ -999,9 +1022,32 @@ class HostedManager:
         """Public debounced persist — the dashboard poll calls this to refresh cursors."""
         await self._persist()
 
+    def _key_for(self, hosted_id: str) -> str | None:
+        """Resolve a caller-supplied id to the registry key, or None if unknown (#834).
+
+        The hosted registry keys ``_instances``/``_sessions`` by ``claustrum_process_id``
+        (client-chosen at spawn), but API clients naturally reach for the row's
+        ``instance_id`` (a dashed UUID) — the field the dashboard and standard bridges
+        expose. Accept either: a direct key hit wins (the common path), otherwise scan
+        for the row whose ``instance_id`` matches. The two id formats never collide
+        (32-hex vs. dashed UUID), and the registry is small (a handful of sessions), so
+        the linear fallback is cheap. Returns the ``claustrum_process_id`` to key by.
+        """
+        if hosted_id in self._instances:
+            return hosted_id
+        for pid, inst in self._instances.items():
+            if inst.instance_id == hosted_id:
+                return pid
+        return None
+
     def _require(self, hosted_id: str) -> HostedSession:
-        """Return the live session for ``hosted_id`` or raise ``HostedSessionError``."""
-        session = self._sessions.get(hosted_id)
+        """Return the live session for ``hosted_id`` or raise ``HostedSessionError``.
+
+        Resolves ``hosted_id`` (registry key or the row's ``instance_id``) via
+        :meth:`_key_for` (#834).
+        """
+        key = self._key_for(hosted_id)
+        session = self._sessions.get(key) if key is not None else None
         if session is None:
             raise HostedSessionError(f"no such hosted session: {hosted_id}")
         return session
