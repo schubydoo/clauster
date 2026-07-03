@@ -370,14 +370,14 @@ def _compute_effective_settings(
         if misc is not None:
             layers.append((scope, misc))
 
-    keys: set[str] = set()
-    for _scope, misc in layers:
-        keys.update(misc)
-
+    # ``layers`` is in precedence order (local, project, user). Walk it
+    # reversed so the highest-precedence scope is applied *last* and wins on
+    # a shared key -- a plain last-write-wins merge, with no inner loop that
+    # would need a break (and no "loop exhausts without finding the key"
+    # branch for codecov to flag: every scope's own keys are always found in
+    # that scope's own dict).
     effective: dict[str, dict[str, Any]] = {}
-    for key in sorted(keys):
-        for scope, misc in layers:
-            if key in misc:
-                effective[key] = {"value": misc[key], "source": scope}
-                break
-    return effective
+    for scope, misc in reversed(layers):
+        for key, value in misc.items():
+            effective[key] = {"value": value, "source": scope}
+    return {key: effective[key] for key in sorted(effective)}
