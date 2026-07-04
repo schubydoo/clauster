@@ -1209,6 +1209,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # <option> text and the bypass hint render identically here.
                 "permission_labels": PERMISSION_LABELS,
                 "bypass_desktop_hint": BYPASS_DESKTOP_HINT,
+                # Gate the #837 "Resolve in Server approvals" link on config-write being
+                # enabled (its target panel + /api/config-write/* routes 404 when off).
+                # The full-page render passes this via _dashboard_context(); the fragment
+                # route must pass it too, else an undefined Jinja var reads falsy and the
+                # link would WRONGLY vanish on dynamically-inserted rows when it IS on.
+                "config_write_enabled": config.config_write.enabled,
             },
         )
 
