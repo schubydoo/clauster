@@ -186,6 +186,11 @@ def run_login_shepherd(mode, args):
         - url_then_exit:    prints a VALID authorize URL, then exits 0 immediately
                              (never blocks on stdin) — the "URL found but process
                              already dead" case; start() must fail closed.
+        - url_then_delayed_exit: prints a VALID authorize URL, stays alive
+                             FAKE_CLAUDE_LOGIN_DELAYED_EXIT_SECONDS (default 0.3), THEN
+                             exits 0 — the DETERMINISTIC form of the "URL seen while the
+                             process still looked alive, then it died" race; start()'s
+                             liveness settle must catch the exit and fail closed.
         - slow_url:         sleeps FAKE_CLAUDE_LOGIN_SLOW_SECONDS (default 0.3)
                              before printing the URL (exercise the bounded wait).
         - reject_code:      prints the URL, reads the pasted code, then prints a
@@ -231,6 +236,16 @@ def run_login_shepherd(mode, args):
         # stdin — the "URL found but subprocess already dead" case. start() must fail
         # closed here, never hand the operator a URL for a process with no live stdin.
         emit(f"Open this URL to authorize: {url}")
+        return 0
+
+    if mode_sel == "url_then_delayed_exit":
+        # Prints a VALID authorize URL, stays alive briefly so start()'s wait observes the
+        # URL WHILE the process still looks alive (exited=False), THEN exits — the
+        # deterministic form of the "URL seen, then the process died" race. start()'s
+        # liveness settle must catch this exit and fail closed, never hand back a URL for a
+        # subprocess with no live stdin.
+        emit(f"Open this URL to authorize: {url}")
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_LOGIN_DELAYED_EXIT_SECONDS", "0.3")))
         return 0
 
     if mode_sel == "decoy_url":

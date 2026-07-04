@@ -109,6 +109,24 @@ def test_start_url_then_immediate_exit_fails_closed(shepherd, monkeypatch) -> No
     assert not shepherd.is_active()
 
 
+def test_start_url_found_then_process_dies_fails_closed(shepherd, monkeypatch) -> None:
+    # The DETERMINISTIC counterpart to the immediate-exit test above. There, the process
+    # dies so fast that `start()`'s wait usually already sees the exit. Here the process
+    # prints a valid URL and stays alive briefly, so the wait latches the URL while the
+    # process still LOOKS alive (exited=False) — then it dies. This is the exact race the
+    # flaky immediate-exit variant only hit by chance under load: without the liveness
+    # settle, `start()` would hand back a URL for a subprocess with no live stdin. A
+    # generous grace + a short child delay make the exit land INSIDE the settle window
+    # every time (no scheduling dependence), so `start()` must fail closed deterministically.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "url_then_delayed_exit")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_DELAYED_EXIT_SECONDS", "0.3")
+    monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(ls, "_URL_LIVENESS_GRACE_SECONDS", 5.0)
+    with pytest.raises(ls.LoginShepherdError, match="exited before the login could proceed"):
+        shepherd.start("login")
+    assert not shepherd.is_active()  # dead process reaped — no leaked subprocess or URL
+
+
 def test_start_bounded_wait_survives_a_slow_url(shepherd, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "slow_url")
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_SLOW_SECONDS", "0.2")

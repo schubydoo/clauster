@@ -80,6 +80,16 @@ SUBMIT_TIMEOUT_SECONDS = 45.0
 #: Poll cadence for the bounded waits below.
 _POLL_INTERVAL_SECONDS = 0.1
 
+#: After `start()` sees an authorize URL while the process still *looks* alive, how long
+#: to wait to confirm it stays alive (a genuine login BLOCKS on stdin here) before trusting
+#: the URL. `poll()` can lag a just-returned `exit()` by a scheduling tick, so a process
+#: that prints a URL and immediately dies can momentarily read as still-running; this brief
+#: settle lets that exit surface so `start()` fails closed deterministically instead of
+#: racily handing back a URL for a subprocess with no live stdin. An already-dead process is
+#: reaped within the first wait tick (so the pathological case pays ~0ms); only the genuine
+#: blocked-on-stdin login rides out the full grace once — invisible against a human login.
+_URL_LIVENESS_GRACE_SECONDS = 0.25
+
 # `setup-token`'s printed long-lived credential (per the spike: `CLAUDE_CODE_OAUTH_TOKEN=...`).
 # Matched permissively (any non-whitespace value) since the exact real-binary format is
 # unverified — this is defensive, not assumed exact. Kept local (not shared with
@@ -350,13 +360,26 @@ class LoginShepherd:
             else _extract_authorize_url
         )
         url, output, exited = _wait_for(flow, condition, timeout=START_TIMEOUT_SECONDS)
-        # Fail closed whenever the process has EXITED during the start wait — even if a
-        # URL was found. `_wait_for` breaks on a URL match OR process exit, so a process
-        # that printed a URL and then died lands here with url set AND exited=True; handing
-        # that URL back would strand the operator (they'd authorize, then `submit_code`
-        # would find no live stdin). Only a URL found while the process is STILL RUNNING
-        # (blocked on stdin, exited=False) is a usable login. This makes returning a URL
-        # for a dead subprocess structurally impossible.
+        if url is not None and not exited:
+            # A URL appeared while the process still looked alive — but `_wait_for` breaks
+            # the instant a URL matches, and `poll()` can lag a just-returned `exit()` by a
+            # scheduling tick, so a process that printed a URL then immediately died can read
+            # as still-running for that one iteration. Confirm liveness with a short bounded
+            # wait before trusting the URL: a genuine login BLOCKS on stdin and rides out the
+            # grace (still running → usable), while a mid-exit process is reaped within it →
+            # exited=True → fail closed. Makes the "URL then died" case deterministic, not racy.
+            try:
+                flow.proc.wait(timeout=_URL_LIVENESS_GRACE_SECONDS)
+                exited = True
+            except subprocess.TimeoutExpired:
+                pass
+        # Fail closed whenever the process has EXITED during the start wait — even if a URL
+        # was found. A process that printed a URL and then died lands here with url set AND
+        # exited=True (the liveness settle above guarantees that exit is observed); handing
+        # that URL back would strand the operator (they'd authorize, then `submit_code` would
+        # find no live stdin). Only a URL found while the process is STILL RUNNING (blocked on
+        # stdin, exited=False) is a usable login — returning a URL for a dead subprocess is
+        # structurally impossible.
         if url is None or exited:
             self._teardown(flow)
             if exited:
