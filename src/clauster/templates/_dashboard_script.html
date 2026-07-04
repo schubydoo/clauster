@@ -328,6 +328,11 @@
       // up front instead of failing silently when you click Start. loaded stays false
       // until /api/doctor answers, so the panel never flashes empty.
       readiness: { loaded: false, ok: true, checks: [], showAll: false, showPanel: false },
+      // #838: runtime claude account login state, refreshed alongside refresh() from
+      // /healthz. `known` stays false until an authenticated /healthz response has
+      // included the field (an unauthenticated trimmed body omits it) — the header
+      // pill only renders once known, so it never flashes a false "not logged in".
+      claudeLogin: { known: false, ok: true, expiresAt: null },
       activeFilter: "all",   // Zone 2 unified-list filter: all | browser | desktop | detached
       projectFilter: "",     // Zone 1 search box
       showAllProjects: false, // Zone 1: reveal projects beyond the cap
@@ -487,6 +492,15 @@
       readinessBlockers() { return this.readiness.checks.filter((c) => c.status !== "ok" && c.status !== "warn"); },
       readinessWarnings() { return this.readiness.checks.filter((c) => c.status === "warn"); },
       checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
+      // #838: title text for the claude-login header pill — distinguishes an expired
+      // token (a specific, recoverable cause) from an absent/otherwise-invalid one.
+      claudeLoginTitle() {
+        if (this.claudeLogin.ok) return "Signed in to claude — bridges inherit this login";
+        const expired = this.claudeLogin.expiresAt !== null && this.claudeLogin.expiresAt <= Date.now();
+        return (expired
+          ? "claude login has expired"
+          : "claude is not logged in") + " — bridges will start but fail to authenticate; run `claude` to sign in";
+      },
       // --- launch popover + unified active list ---
       // Outcome-language launch choices — jargon (hosted/bridge/background) mapped to
       // the plain result the user gets. The "cloud" checkbox folds into Background.
@@ -2241,15 +2255,26 @@
         this._refreshing = true;
         let ok = true;
         try {
-          const [iRes, sRes, aRes, dRes, tRes] = await Promise.all([
+          const [iRes, sRes, aRes, dRes, tRes, hzRes] = await Promise.all([
             fetch(ROOT + "/api/instances"),
             fetch(ROOT + "/api/sessions"),
             fetch(ROOT + "/api/agents"),
             fetch(ROOT + "/api/sessions/adoptable"),
             fetch(ROOT + "/api/sessions/tracked"),
+            fetch(ROOT + "/healthz"),
           ]);
           // Session expired mid-use -> bounce to login instead of silently showing stale data.
           if (this._authExpired(iRes) || this._authExpired(sRes) || this._authExpired(aRes) || this._authExpired(dRes) || this._authExpired(tRes)) return;
+          // #838: claude account login state, riding the existing 4s poll. Advisory only —
+          // a failed/unauthenticated /healthz (trimmed body has no claude_login_ok key)
+          // just leaves the indicator hidden rather than affecting connLost.
+          if (hzRes.ok) {
+            const hz = await hzRes.json().catch(() => ({}));
+            this.claudeLogin.known = Object.hasOwn(hz, "claude_login_ok");
+            this.claudeLogin.ok = !!hz.claude_login_ok;
+            this.claudeLogin.expiresAt = typeof hz.claude_login_expires_at === "number"
+              ? hz.claude_login_expires_at : null;
+          }
           if (iRes.ok) {
             const list = await iRes.json();
             // Split the flat instance list (#779): the project-keyed map holds each

@@ -22,6 +22,19 @@ def test_healthz(write_config):
     body = resp.json()
     assert body["status"] == "ok"
     assert "instances_running" in body
+    # #838: auth is off in this fixture, so the authenticated branch (and its
+    # login-status fields) is exercised here rather than the trimmed unauth body.
+    assert "claude_login_ok" in body
+    assert "claude_login_expires_at" in body
+
+
+def test_dashboard_ships_claude_login_indicator(write_config):
+    # #838: the header pill markup + its poll wiring ship, gated on an authenticated
+    # /healthz response ("known") and only shown while logged out/expired.
+    page = _client(write_config).get("/").text
+    assert 'x-show="claudeLogin.known && !claudeLogin.ok"' in page
+    assert "claude not logged in" in page
+    assert 'fetch(ROOT + "/healthz")' in page
 
 
 def test_api_projects(write_config):

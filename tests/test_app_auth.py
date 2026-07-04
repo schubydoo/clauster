@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -82,7 +83,11 @@ def test_public_paths_reachable_unauthenticated(runner_config):
     assert client.get("/static/favicon.svg").status_code == 200  # static mount is public
     health = client.get("/healthz")
     assert health.status_code == 200
-    assert health.json() == {"status": "ok"}  # trimmed when unauthenticated
+    body = health.json()
+    assert body == {"status": "ok"}  # trimmed when unauthenticated
+    # #838: the login-status fields must NEVER leak to an unauthenticated caller.
+    assert "claude_login_ok" not in body
+    assert "claude_login_expires_at" not in body
 
 
 # ----- login / logout ------------------------------------------------------
@@ -94,7 +99,12 @@ def test_login_correct_then_authed(runner_config):
     assert client.cookies.get("clauster_session")
     assert client.get("/api/instances").status_code == 200
     # healthz now returns full detail to the authed session
-    assert "claude_version" in client.get("/healthz").json()
+    body = client.get("/healthz").json()
+    assert "claude_version" in body
+    # #838: login-status fields are present (though absent creds -> logged out) once authed.
+    assert "claude_login_ok" in body
+    assert "claude_login_expires_at" in body
+    assert body["claude_login_ok"] is False  # runner_config's claude_json has no .credentials.json
 
 
 def test_login_wrong_password_rejected(runner_config):
@@ -722,6 +732,39 @@ def test_healthz_claude_probe_failure(runner_config):
     client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
     body = client.get("/healthz").json()
     assert body["claude_ok"] is False and body["claude_version"] is None
+
+
+def test_healthz_reports_valid_login(runner_config):
+    # #838: a present, unexpired .credentials.json -> claude_login_ok True with the
+    # exact expires_at echoed back (never the token itself).
+    config, claude_json = runner_config
+    creds = claude_json.parent / ".claude" / ".credentials.json"
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    expires_at = int(time.time() * 1000) + 3_600_000
+    creds.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "tok-secret", "expiresAt": expires_at}})
+    )
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    body = client.get("/healthz").json()
+    assert body["claude_login_ok"] is True
+    assert body["claude_login_expires_at"] == expires_at
+    assert "tok-secret" not in client.get("/healthz").text  # token never returned
+
+
+def test_healthz_reports_expired_login(runner_config):
+    # #838: an expired token -> claude_login_ok False (fail closed), expiry still surfaced
+    # so the UI can explain *why* (vs a merely-absent login).
+    config, claude_json = runner_config
+    creds = claude_json.parent / ".claude" / ".credentials.json"
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    expires_at = int(time.time() * 1000) - 1000
+    creds.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "tok-secret", "expiresAt": expires_at}})
+    )
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    body = client.get("/healthz").json()
+    assert body["claude_login_ok"] is False
+    assert body["claude_login_expires_at"] == expires_at
 
 
 # ----- audited coverage gaps (2026-07 audit) --------------------------------
