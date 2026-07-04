@@ -451,6 +451,68 @@ def test_unapproved_resolves_project_dir_for_approvals_lookup(tmp_path: Path) ->
     assert mcp.unapproved_mcp_servers(cj, unresolved) == []
 
 
+# --- #850: settings-file decisions also count as "decided" (no false warn) ----------
+
+
+def _mcp_project(tmp_path: Path, *servers: str) -> tuple[Path, Path]:
+    """Make a project with a committed .mcp.json listing `servers`; return (claude_json, dir)."""
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {s: {"command": "x"} for s in servers}}), encoding="utf-8"
+    )
+    return cj, project_dir
+
+
+def _write_settings(path: Path, **keys) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(keys), encoding="utf-8")
+
+
+def test_unapproved_settings_local_disable_counts_as_decided(tmp_path: Path) -> None:
+    # #850 repro: a server DISABLED in .claude/settings.local.json is decided as far as
+    # claude is concerned (no enable gate), so the preflight must NOT warn about it.
+    cj, project_dir = _mcp_project(tmp_path, "demo-fs", "demo-http")
+    _write_settings(
+        project_dir / ".claude" / "settings.local.json",
+        disabledMcpjsonServers=["demo-fs", "demo-http"],
+    )
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+
+
+def test_unapproved_project_settings_enable_counts_as_decided(tmp_path: Path) -> None:
+    # An ENABLE in the project-shared .claude/settings.json likewise clears the gate.
+    cj, project_dir = _mcp_project(tmp_path, "a", "b")
+    _write_settings(project_dir / ".claude" / "settings.json", enabledMcpjsonServers=["a", "b"])
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+
+
+def test_unapproved_user_settings_decision_counts_as_decided(tmp_path: Path) -> None:
+    # The user-scope ~/.claude/settings.json (beside ~/.claude.json) is honored too.
+    cj, project_dir = _mcp_project(tmp_path, "a")
+    _write_settings(cj.parent / ".claude" / "settings.json", enabledMcpjsonServers=["a"])
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+
+
+def test_unapproved_merges_every_source(tmp_path: Path) -> None:
+    # 'a' decided in ~/.claude.json, 'b' via settings.local.json, 'c' never decided
+    # anywhere -> only 'c' still needs approval.
+    cj, project_dir = _mcp_project(tmp_path, "a", "b", "c")
+    mcp.write_project_approvals(cj, project_dir.resolve(), ["a"], [])
+    _write_settings(project_dir / ".claude" / "settings.local.json", disabledMcpjsonServers=["b"])
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == ["c"]
+
+
+def test_unapproved_malformed_settings_file_is_ignored(tmp_path: Path) -> None:
+    # A corrupt settings file must not crash the preflight AND must not silently hide a
+    # genuinely-undecided server — it simply contributes no decisions.
+    cj, project_dir = _mcp_project(tmp_path, "a")
+    (project_dir / ".claude").mkdir(parents=True)
+    (project_dir / ".claude" / "settings.local.json").write_text("{not json", encoding="utf-8")
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == ["a"]
+
+
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"

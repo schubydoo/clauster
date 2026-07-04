@@ -548,6 +548,35 @@ def write_project_approvals(
 # ---------------------------------------------------------------------------
 
 
+def _settings_mcp_decisions(settings_path: Path) -> set[str]:
+    """Return the MCP server names decided (enabled OR disabled) in a settings FILE.
+
+    claude honors top-level ``enabledMcpjsonServers`` / ``disabledMcpjsonServers`` in the
+    ``.claude/settings.json`` / ``settings.local.json`` / ``~/.claude/settings.json`` files
+    (#850), in addition to the ``~/.claude.json`` ``projects[]`` lists that
+    :func:`read_project_approvals` reads. Unlike ``~/.claude.json`` these keys sit at the
+    file's TOP LEVEL, not under a per-project subtree. Fail-safe like the rest of the
+    preflight: a missing / unreadable / malformed file contributes no decisions (empty set)
+    rather than raising — a preflight read must never block or crash a launch.
+    """
+    try:
+        raw = settings_path.read_bytes()
+    except OSError:
+        return set()
+    try:
+        data = cw.load_settings_json_obj(raw)
+    except cw.ConfigWriteError:
+        # Malformed / non-object settings file — the config-write panel surfaces its own
+        # error; here we simply contribute nothing rather than fail the launch preflight.
+        return set()
+    decided: set[str] = set()
+    for key in (ENABLED_KEY, DISABLED_KEY):
+        names = data.get(key)
+        if isinstance(names, list):
+            decided.update(name for name in names if isinstance(name, str))
+    return decided
+
+
 def unapproved_mcp_servers(claude_json: Path, project_dir: Path) -> list[str]:
     """Return committed ``.mcp.json`` server names still awaiting operator approval.
 
@@ -599,4 +628,17 @@ def unapproved_mcp_servers(claude_json: Path, project_dir: Path) -> list[str]:
         )
         return []
     decided = set(approvals["enabled"]) | set(approvals["disabled"])
+    # #850: claude ALSO honors top-level enabled/disabledMcpjsonServers in the settings
+    # files, not just ~/.claude.json's projects[] lists. A server decided in ANY honored
+    # source shows no enable gate, so merge them all — otherwise the preflight FALSELY warns
+    # for a server claude treats as decided (a real false positive seen in sandbox testing:
+    # a server disabled in .claude/settings.local.json still triggered the warning). Union,
+    # not precedence-ordered: "decided anywhere" ⇒ no gate, so which source wins is moot here.
+    user_settings = claude_json.parent / ".claude" / "settings.json"
+    for settings_path in (
+        cw.project_settings_path(resolved_dir),
+        cw.project_local_settings_path(resolved_dir),
+        user_settings,
+    ):
+        decided |= _settings_mcp_decisions(settings_path)
     return [name for name in servers if name not in decided]
