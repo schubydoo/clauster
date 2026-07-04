@@ -1043,6 +1043,27 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         return result
 
+    @app.get("/api/login-status")
+    async def api_login_status() -> dict:
+        """Return the cached claude-login state for the dashboard badge (#838).
+
+        A deliberately lightweight companion to ``/healthz``: it returns ONLY the
+        three login fields, read straight from the stale-while-revalidate cache
+        (``read()`` returns immediately; the background thread does the actual
+        ``claude auth status`` probe ≤ once per TTL). Unlike ``/healthz`` it never
+        runs ``claude --version`` — so the badge's own poll can hit this every few
+        seconds across many tabs without ever spawning a subprocess on the request
+        path. ``/healthz`` keeps its login fields for external health consumers; this
+        is an additional path for the badge, not a replacement. Auth-gated by the
+        guard middleware like every other ``/api/*`` route.
+        """
+        login = app.state.login_status_cache.read()
+        return {
+            "claude_login_ok": login.logged_in,
+            "claude_login_method": login.method,
+            "claude_login_expires_at": login.expires_at_ms,
+        }
+
     def _cached_bridge_samples() -> list[tuple[str, float, int]]:
         """(project, cpu, rss) for each bridge in the server-side metrics cache (#354).
 

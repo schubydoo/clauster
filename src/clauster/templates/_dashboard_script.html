@@ -329,10 +329,11 @@
       // until /api/doctor answers, so the panel never flashes empty.
       readiness: { loaded: false, ok: true, checks: [], showAll: false, showPanel: false },
       // #838: runtime claude account login state, refreshed by loadLoginStatus() on its
-      // OWN /healthz path (decoupled from refresh() so /healthz latency never stalls the
-      // core poll). `known` stays false until an authenticated /healthz response has
-      // included the field (an unauthenticated trimmed body omits it) — the header pill
-      // only renders once known AND logged out, so it never flashes a false "not logged in".
+      // OWN path (the cache-only /api/login-status endpoint, decoupled from refresh() so
+      // neither its latency nor a subprocess ever stalls the core poll). `known` stays
+      // false until a response has included the field (an unauthenticated/failed response
+      // omits it) — the header pill only renders once known AND logged out, so it never
+      // flashes a false "not logged in".
       claudeLogin: { known: false, ok: true, expiresAt: null },
       activeFilter: "all",   // Zone 2 unified-list filter: all | browser | desktop | detached
       projectFilter: "",     // Zone 1 search box
@@ -491,17 +492,19 @@
           this.readiness.loaded = true;
         } catch (e) { /* fetch failed -> leave loaded=false so the panel stays hidden */ }
       },
-      // #838: claude account login state for the header pill. Fetched on its OWN path —
-      // deliberately NOT folded into the core refresh() Promise.all, so /healthz latency
-      // (it still runs the `claude --version` subprocess on the request path) can never
-      // delay applying the instances/sessions/agents responses that gate the primary UI.
-      // Fire-and-forget + advisory: a failed or unauthenticated /healthz (the trimmed
-      // body omits claude_login_ok) just leaves the indicator hidden — never a false
-      // "not logged in", and never touches connLost. Distinct from the #663 restart-
-      // reload /healthz poll, which is a separate one-shot loop and is left untouched.
+      // #838: claude account login state for the header pill. Fetched on its OWN path
+      // from the dedicated /api/login-status endpoint — which reads ONLY the cached
+      // login state (no `claude --version`, no full health work), so this poll never
+      // spawns a subprocess on the request path however many tabs run it. Deliberately
+      // NOT folded into the core refresh() Promise.all, so it can never delay the
+      // instances/sessions/agents responses that gate the primary UI. Fire-and-forget +
+      // advisory: a failed/unauthenticated response (the body omits claude_login_ok)
+      // just leaves the indicator hidden — never a false "not logged in", never touches
+      // connLost. Distinct from the #663 restart-reload /healthz poll (a separate
+      // one-shot loop), which is left untouched.
       async loadLoginStatus() {
         try {
-          const r = await fetch(ROOT + "/healthz");
+          const r = await fetch(ROOT + "/api/login-status");
           if (!r.ok) return;
           const hz = await r.json().catch(() => ({}));
           this.claudeLogin.known = Object.hasOwn(hz, "claude_login_ok");

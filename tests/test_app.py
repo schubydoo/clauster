@@ -37,21 +37,24 @@ def test_healthz(write_config):
 
 
 def test_dashboard_ships_claude_login_indicator(write_config):
-    # #838: the header pill markup + its poll wiring ship, gated on an authenticated
-    # /healthz response ("known") and only shown while logged out/expired.
+    # #838: the header pill markup + its poll wiring ship, gated on a response with
+    # the login field ("known") and only shown while logged out/expired.
     page = _client(write_config).get("/").text
     assert 'x-show="claudeLogin.known && !claudeLogin.ok"' in page
     assert "claude not logged in" in page
-    # The login /healthz fetch lives on its OWN path (loadLoginStatus), wired to its
-    # own interval — NOT folded into the core refresh() Promise.all, so /healthz
-    # latency can never delay the primary instances/sessions/agents poll.
+    # The badge polls the dedicated cache-only endpoint on its OWN path (loadLoginStatus)
+    # + own interval — NOT the core refresh() Promise.all, and NOT /healthz (which runs
+    # `claude --version`). So the badge poll never spawns a subprocess and never delays
+    # the primary instances/sessions/agents poll.
     assert "async loadLoginStatus()" in page
+    assert 'fetch(ROOT + "/api/login-status")' in page
     assert "setInterval(() => this.loadLoginStatus(), 4000)" in page
-    # Guard the decoupling: the core refresh() batch must not fetch /healthz. The only
-    # /healthz fetches in the script are loadLoginStatus() and the #663 restart poll
-    # (cache-busted "?_="); the bare `fetch(ROOT + "/healthz")` appears exactly once
-    # (inside loadLoginStatus), never again inside the refresh() Promise.all.
-    assert page.count('fetch(ROOT + "/healthz")') == 1
+    assert page.count('fetch(ROOT + "/api/login-status")') == 1
+    # The badge must NOT hit /healthz at all. The only /healthz fetch left in the script
+    # is the #663 restart-reload poll (cache-busted "?_="); the bare `fetch(ROOT +
+    # "/healthz")` must appear ZERO times now that the badge moved off it.
+    assert page.count('fetch(ROOT + "/healthz")') == 0
+    assert 'fetch(ROOT + "/healthz?_="' in page  # #663 restart poll untouched
 
 
 def test_api_projects(write_config):

@@ -808,6 +808,46 @@ def test_healthz_oauth_login_surfaces_expiry_but_never_token(runner_config, monk
     assert "tok-secret" not in client.get("/healthz").text
 
 
+def test_api_login_status_requires_auth(runner_config):
+    # #838: the badge's dedicated endpoint is an /api/* route, so the guard middleware
+    # gates it like every other one — unauthenticated gets 401 (never leaks login state).
+    client = _password_client(runner_config)
+    assert client.get("/api/login-status").status_code == 401
+
+
+def test_api_login_status_reads_cache_without_probing(runner_config):
+    # #838: the endpoint returns ONLY the cached login fields and must NOT run a probe
+    # (no `claude --version`, no `claude auth status`) on the request path. Inject a
+    # cache stub whose read() returns a known status and counts calls; assert the
+    # endpoint echoes exactly those three fields and only ever reads the cache.
+    from clauster import login_status
+
+    config, claude_json = runner_config
+
+    class _StubCache:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+            return login_status.LoginStatus(False, "apiKeyHelper", None, "logged out")
+
+    fake = _StubCache()
+    # auth is off in runner_config, so the endpoint is reachable without logging in.
+    app = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
+    with TestClient(app) as c:
+        c.app.state.login_status_cache = fake
+        resp = c.get("/api/login-status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "claude_login_ok": False,
+        "claude_login_method": "apiKeyHelper",
+        "claude_login_expires_at": None,
+    }
+    assert fake.reads == 1  # the endpoint read the cache exactly once, ran no probe
+
+
 # ----- audited coverage gaps (2026-07 audit) --------------------------------
 
 
