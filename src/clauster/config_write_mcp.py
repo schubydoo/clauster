@@ -64,11 +64,14 @@ secret out and a returned ``"********"`` sentinel keeps the stored value.
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from . import config_write as cw
+
+logger = logging.getLogger(__name__)
 
 #: The top-level key holding the server map in both ``.mcp.json`` and ``mcpServers``.
 MCP_SERVERS_KEY = "mcpServers"
@@ -538,3 +541,62 @@ def write_project_approvals(
         outer[key] = inner
 
     cw.update_claude_json(claude_json, _apply)
+
+
+# ---------------------------------------------------------------------------
+# #837: unapproved-server pre-flight (read-only; never mutates config)
+# ---------------------------------------------------------------------------
+
+
+def unapproved_mcp_servers(claude_json: Path, project_dir: Path) -> list[str]:
+    """Return committed ``.mcp.json`` server names still awaiting operator approval.
+
+    A name is "unapproved" when it is a key of the project's ``.mcp.json``
+    ``mcpServers`` object but appears in **neither** :data:`ENABLED_KEY` nor
+    :data:`DISABLED_KEY` for this project (see :func:`read_project_approvals`) —
+    exactly the set an interactive (pty) ``claude`` launch would block on at its
+    "N new MCP servers found — enable?" startup gate, since that prompt cannot be
+    answered through the read-only live-terminal view (#837). Reuses the existing
+    readers (:func:`read_project_servers` for the committed server names,
+    :func:`read_project_approvals` for the two approval lists) rather than
+    re-parsing either file directly, so this can never drift from what the
+    Server-approvals panel itself reads.
+
+    ``project_dir`` is resolved before the approvals lookup: the config-write
+    surface always keys ``projects[<abs-project-path>]`` by the *resolved* absolute
+    path (:func:`~clauster.config_write.resolve_project_dir`), but a discovery-scan
+    ``Project.path`` is not guaranteed resolved (e.g. a symlinked ``projects_root``)
+    — resolving here keeps this lookup aligned with where an approval actually gets
+    written, so it can never spuriously warn (or spuriously go quiet) on a path that
+    is byte-different but points at the same directory the Server-approvals panel
+    already approved.
+
+    Fail-safe by construction, never raises:
+
+    * no ``.mcp.json`` (or an empty ``mcpServers``) ⇒ ``[]`` — nothing to warn about.
+    * either file is unreadable or malformed (bad JSON, non-UTF-8, non-object) ⇒
+      logged at ``warning`` and treated as "cannot determine" ⇒ ``[]``, so a
+      preflight read failure never blocks (or crashes) a launch.
+
+    The returned order matches ``.mcp.json``'s own key order (stable, not sorted),
+    so a repeat call over an unchanged file always warns in the same order.
+    """
+    try:
+        servers, _hash = read_project_servers(project_dir)
+    except (cw.ConfigWriteError, OSError) as exc:
+        logger.warning(
+            "could not read %s for MCP-approval preflight: %s", project_dir / ".mcp.json", exc
+        )
+        return []
+    if not servers:
+        return []
+    try:
+        resolved_dir = project_dir.resolve()
+        approvals = read_project_approvals(claude_json, resolved_dir)
+    except (cw.ConfigWriteError, OSError) as exc:
+        logger.warning(
+            "could not read MCP approvals in %s for %s: %s", claude_json, project_dir, exc
+        )
+        return []
+    decided = set(approvals["enabled"]) | set(approvals["disabled"])
+    return [name for name in servers if name not in decided]

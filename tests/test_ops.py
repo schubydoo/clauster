@@ -273,8 +273,8 @@ def test_check_auth_branches(write_config, tmp_path):
 # ----- project_preflight_checks -----------------------------------------
 
 
-def _preflight(project):
-    return {c.name: c for c in project_preflight_checks(project)}
+def _preflight(project, claude_json=None):
+    return {c.name: c for c in project_preflight_checks(project, claude_json)}
 
 
 def test_project_preflight_trusted_git_all_ok():
@@ -311,6 +311,92 @@ def test_project_preflight_non_git_warns_about_worktree():
     check = _preflight(proj)["git"]
     assert check.status == WARN
     assert "worktree" in check.detail
+
+
+# ----- project_preflight_checks: #837 MCP-approval check -----------------
+
+
+def test_project_preflight_no_claude_json_arg_omits_mcp_check(tmp_path: Path):
+    # claude_json defaults to None (backward compatible with existing callers/tests
+    # that only care about trust+git) -> no mcp-approval check is even attempted.
+    from clauster.models import Project, TrustState
+
+    project_dir = tmp_path / "alpha"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text('{"mcpServers": {"a": {"command": "x"}}}')
+    proj = Project(
+        name="alpha", path=project_dir, is_git_repo=True, trust_state=TrustState.TRUSTED
+    )
+    checks = _preflight(proj)
+    assert "mcp-approval" not in checks
+
+
+def test_project_preflight_no_mcp_json_omits_mcp_check(tmp_path: Path):
+    # A project with no .mcp.json at all has nothing to warn about.
+    from clauster.models import Project, TrustState
+
+    project_dir = tmp_path / "alpha"
+    project_dir.mkdir()
+    cj = tmp_path / "claude.json"
+    proj = Project(
+        name="alpha", path=project_dir, is_git_repo=True, trust_state=TrustState.TRUSTED
+    )
+    checks = _preflight(proj, cj)
+    assert "mcp-approval" not in checks
+
+
+def test_project_preflight_all_approved_omits_mcp_check(tmp_path: Path):
+    from clauster import config_write_mcp
+    from clauster.models import Project, TrustState
+
+    project_dir = tmp_path / "alpha"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text('{"mcpServers": {"a": {"command": "x"}}}')
+    cj = tmp_path / "claude.json"
+    config_write_mcp.write_project_approvals(cj, project_dir.resolve(), ["a"], [])
+    proj = Project(
+        name="alpha", path=project_dir, is_git_repo=True, trust_state=TrustState.TRUSTED
+    )
+    checks = _preflight(proj, cj)
+    assert "mcp-approval" not in checks
+
+
+def test_project_preflight_unapproved_mcp_servers_warns(tmp_path: Path):
+    from clauster.models import Project, TrustState
+
+    project_dir = tmp_path / "alpha"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text(
+        '{"mcpServers": {"a": {"command": "x"}, "b": {"command": "y"}}}'
+    )
+    cj = tmp_path / "claude.json"  # no approvals recorded at all
+    proj = Project(
+        name="alpha", path=project_dir, is_git_repo=True, trust_state=TrustState.TRUSTED
+    )
+    checks = _preflight(proj, cj)
+    check = checks["mcp-approval"]
+    assert check.status == WARN
+    assert check.status != FAIL  # advisory only, never blocks
+    assert "2 MCP servers" in check.detail
+    assert "a" in check.detail and "b" in check.detail
+    assert "Server approvals" in check.detail
+
+
+def test_project_preflight_mcp_check_never_raises_on_malformed_mcp_json(tmp_path: Path):
+    # Malformed .mcp.json must degrade the whole preflight to trust+git only, never
+    # crash the launch-readiness path.
+    from clauster.models import Project, TrustState
+
+    project_dir = tmp_path / "alpha"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text("{not valid json")
+    cj = tmp_path / "claude.json"
+    proj = Project(
+        name="alpha", path=project_dir, is_git_repo=True, trust_state=TrustState.TRUSTED
+    )
+    checks = _preflight(proj, cj)
+    assert "mcp-approval" not in checks
+    assert "trust" in checks and "git" in checks
 
 
 # ----- _check_claude_login ----------------------------------------------

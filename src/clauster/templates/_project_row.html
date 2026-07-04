@@ -325,7 +325,16 @@
               <template x-for="c in preflightWarnings('{{ p.name }}')" :key="c.name">
                 <div class="d-flex align-items-start gap-1 py-1">
                   <svg class="ico text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>
-                  <span><span class="fw-medium text-capitalize" x-text="c.name"></span><span class="text-secondary" x-text="': ' + c.detail"></span></span>
+                  <span><span class="fw-medium text-capitalize" x-text="c.name"></span><span class="text-secondary" x-text="': ' + c.detail"></span>
+                    {# #837: an unapproved-server warning is actionable — link straight into
+                       this project's Server-approvals panel (project scope, mcp surface)
+                       rather than leaving the operator to hunt for it. WARN-only / read-only:
+                       this button only navigates, it never approves/rejects/mutates config. #}
+                    <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline"
+                            x-show="c.name === 'mcp-approval'" x-cloak
+                            data-test="mcp-approval-link"
+                            @click="openMcpApprovalsFor('{{ p.name }}')">Resolve in Server approvals</button>
+                  </span>
                 </div>
               </template>
             </div>

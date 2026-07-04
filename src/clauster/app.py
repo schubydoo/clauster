@@ -1105,10 +1105,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         the dashboard fires one request instead of N. Declared before the
         ``{name}/preflight`` route so the literal path wins the match. Read-only,
         auth-gated. The per-project route stays for the fragment-inserted-row path.
+
+        Each project's checks (including the #837 MCP-approval check, which reads
+        ``.mcp.json`` + ``~/.claude.json``) run in a worker thread — real file I/O,
+        so it must not block the event loop.
         """
         result: dict[str, dict] = {}
         for proj in await list_projects():
-            checks = ops.project_preflight_checks(proj)
+            checks = await asyncio.to_thread(
+                ops.project_preflight_checks, proj, runner.claude_json
+            )
             result[proj.name] = {
                 "ok": all(c.status != ops.FAIL for c in checks),
                 "checks": [
@@ -1158,17 +1164,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     async def api_project_preflight(name: str) -> dict:
         """Per-project spawn-readiness checks (the system-wide panel is ``/api/doctor``).
 
-        Reports the two preconditions specific to *this* project's bridge launch —
-        workspace trust and whether it's a git repo (worktree mode) — as the same
-        ``{name, status, detail}`` shape the doctor panel consumes. Derived from the
-        discovered project (so trust/git match the card); read-only and auth-gated.
+        Reports the preconditions specific to *this* project's bridge launch —
+        workspace trust, whether it's a git repo (worktree mode), and whether its
+        committed ``.mcp.json`` has servers still awaiting approval (#837) — as the
+        same ``{name, status, detail}`` shape the doctor panel consumes. Derived from
+        the discovered project (so trust/git match the card); read-only and
+        auth-gated. Runs off the event loop: the MCP-approval check does real file
+        I/O (``.mcp.json`` + ``~/.claude.json``).
         """
         if not is_valid_project_name(name):
             raise HTTPException(status_code=422, detail="invalid project name")
         proj = next((p for p in await list_projects() if p.name == name), None)
         if proj is None:
             raise HTTPException(status_code=404, detail=f"project {name!r} not found")
-        checks = ops.project_preflight_checks(proj)
+        checks = await asyncio.to_thread(ops.project_preflight_checks, proj, runner.claude_json)
         return {
             "project": name,
             "ok": all(c.status != ops.FAIL for c in checks),

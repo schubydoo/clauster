@@ -1092,17 +1092,30 @@
       // --- Claude Code config management (#773) ------------------------------
       // Open/close mirror the configEditor modal: remember the opener for focus
       // restore, lock background scroll, bump `gen` so a stale save is dropped.
-      openConfigMgmt() {
+      // `opts` (#837) lets a caller jump straight to a given project + surface —
+      // e.g. the per-project MCP-approval readiness warning links into the
+      // Server-approvals panel for THAT project instead of whatever was last open.
+      openConfigMgmt(opts) {
         const c = this.configMgmt;
         if (c.open || c.loading) return;  // single-flight: ignore re-entry
         c.gen = (c.gen || 0) + 1;
         c.trigger = document.activeElement;
         c.open = true; c.error = ""; c.saved = false; c.confirm = "";
+        const o = opts || {};
+        if (o.project) c.project = o.project;
         // Seed a project so project/local scope is usable immediately; user scope
         // ignores it. An empty list leaves it "" and the pick-a-project note shows.
         if (!c.project && this.projectNames.length) c.project = this.projectNames[0];
+        if (o.surface) c.surface = o.surface;
+        if (o.scope) c.scope = o.scope;
         document.body.style.overflow = "hidden";
         this.configMgmtReload();
+      },
+      // Jump straight to this project's Server-approvals panel (#837 readiness
+      // warning link) — project scope (approvals are project-scope only), mcp
+      // surface. Read-only navigation; never mutates config itself.
+      openMcpApprovalsFor(name) {
+        this.openConfigMgmt({ project: name, surface: "mcp", scope: "project" });
       },
       closeConfigMgmt() {
         const c = this.configMgmt;
