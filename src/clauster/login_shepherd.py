@@ -71,9 +71,12 @@ _URL_RE = re.compile(r"https://\S+")
 # Host suffixes that identify a genuine Claude/Anthropic OAuth authorize URL. Used to
 # PREFER the real authorize link when the CLI prints more than one https URL (e.g. a docs
 # link first). Suffix-matched (`endswith`) so subdomains like `console.anthropic.com`
-# count. Not a hard requirement — the real-CLI host is unverified, so a no-match falls
-# back to the LAST https URL rather than failing.
-_KNOWN_AUTH_HOST_SUFFIXES = ("claude.ai", "anthropic.com")
+# count. Not a hard requirement — a no-match falls back to the LAST https URL rather than
+# failing. `claude.com` is where real `claude auth login` prints its authorize URL
+# (live-verified against claude 2.1.200 on 2026-07-03: the URL is on `claude.com` with a
+# `platform.claude.com` redirect_uri); `claude.ai` / `anthropic.com` are kept as
+# additional/older hosts since the CLI's host is version-coupled and unpinned.
+_KNOWN_AUTH_HOST_SUFFIXES = ("claude.ai", "claude.com", "anthropic.com")
 
 # Subdomain prefixes that are documentation/marketing hosts, NOT auth endpoints — even
 # on an otherwise-known parent domain (e.g. `docs.anthropic.com` is a subdomain of
@@ -107,11 +110,12 @@ def _url_host(url: str) -> str:
 def _is_known_auth_host(host: str) -> bool:
     """Whether ``host`` is a known Claude/Anthropic *auth* host (not a docs/marketing one).
 
-    A host on a known parent domain (``claude.ai`` / ``anthropic.com``, incl. subdomains
-    like ``console.anthropic.com``) qualifies — EXCEPT documentation/marketing subdomains
-    (``docs.``/``help.``/``support.``/``www.``), which are pages an operator would land on
-    but never receive an OAuth code from. Excluding them stops a docs link printed before
-    the real authorize URL from being mistaken for the auth endpoint.
+    A host on a known parent domain (``claude.ai`` / ``claude.com`` / ``anthropic.com``,
+    incl. subdomains like ``console.anthropic.com``) qualifies — EXCEPT documentation/
+    marketing subdomains (``docs.``/``help.``/``support.``/``www.``), which are pages an
+    operator would land on but never receive an OAuth code from. Excluding them stops a docs
+    link printed before the real authorize URL from being mistaken for the auth endpoint.
+    Real ``claude auth login`` authorizes on ``claude.com`` (live-verified 2026-07-03).
     """
     if host.startswith(_NON_AUTH_HOST_PREFIXES):
         return False

@@ -194,6 +194,18 @@ def test_extract_url_docs_subdomain_is_not_an_auth_host() -> None:
     assert ls._extract_authorize_url(out) == "https://claude.ai/oauth/authorize?real=1"
 
 
+def test_extract_url_recognizes_claude_com_authorize_host() -> None:
+    # Live-verified (claude 2.1.200, 2026-07-03): real `claude auth login` prints its
+    # authorize URL on `claude.com` (redirect_uri `platform.claude.com`). A docs decoy on a
+    # known parent printed BEFORE it must not win — the real `claude.com` URL is returned.
+    real = (
+        "https://claude.com/cai/oauth/authorize?code=true&client_id=abc&"
+        "redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+    )
+    out = f"Read the guide at https://docs.anthropic.com/claude-code first.\nOpen this URL: {real}"
+    assert ls._extract_authorize_url(out) == real
+
+
 def test_extract_url_help_and_www_subdomains_excluded() -> None:
     # help./www. subdomains of a known parent are marketing/docs, not auth — excluded.
     out = (
