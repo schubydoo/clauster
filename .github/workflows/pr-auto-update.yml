@@ -80,7 +80,7 @@ jobs:
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
-            const mode = (process.env.AUTO_UPDATE || 'on').toLowerCase();
+            const mode = (process.env.AUTO_UPDATE || 'on').trim().toLowerCase();
             if (mode === 'off') { core.info('auto-update disabled via the AUTO_UPDATE repo variable'); return; }
             const EXCLUDE = new Set([
               "dependencies",
@@ -101,7 +101,7 @@ jobs:
               if (pr.draft) continue;
               if (pr.user?.type === "Bot") continue; // the release bot + Renovate
               if (pr.head?.repo?.full_name !== repoFullName) continue; // fork PR
-              if (pr.labels.some((l) => EXCLUDE.has(l.name))) {
+              if (pr.labels.some((l) => EXCLUDE.has(l.name.toLowerCase()))) {
                 core.info(`skip #${pr.number} (hold label)`);
                 continue;
               }
