@@ -8,9 +8,10 @@ file lives under tmp_path — never the real ``~/.claude``.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
-from clauster.login_status import check_login_status
+from clauster.login_status import LoginStatus, LoginStatusCache, check_login_status
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
 
@@ -200,3 +201,181 @@ def test_token_value_never_appears_in_result(tmp_path, monkeypatch):
     _set_auth(monkeypatch, stdout='{"loggedIn": true, "authMethod": "claude.ai"}')
     result = check_login_status(str(FAKE_CLAUDE), claude_json)
     assert "tok-SECRET-XYZ" not in repr(result)
+
+
+# ----- LoginStatusCache (stale-while-revalidate, non-blocking, single-flight) -----
+
+
+class _CountingProbe:
+    """A deterministic stand-in for check_login_status: counts calls, returns a
+    fixed result, and can optionally block on an event to simulate a slow/wedged
+    probe (so a test can assert read() does NOT wait on it). ``entered`` fires as
+    soon as the probe body runs, so a test can wait for the refresh to actually be
+    in flight without a fixed sleep."""
+
+    def __init__(self, result, *, block=None):
+        self.result = result
+        self.block = block  # an Event the probe waits on before returning, if set
+        self.calls = 0
+        self.entered = threading.Event()
+        self._lock = threading.Lock()
+
+    def __call__(self, binary, claude_json):
+        with self._lock:
+            self.calls += 1
+        self.entered.set()
+        if self.block is not None:
+            self.block.wait(timeout=5.0)
+        return self.result
+
+
+class _ManualClock:
+    """A monotonic clock a test advances by hand, so TTL expiry is deterministic."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+LOGGED_IN = LoginStatus(True, "claude.ai", None, "logged in")
+LOGGED_OUT = LoginStatus(False, None, None, "claude reports not logged in")
+
+
+def _cache(probe, *, clock=None, ttl_s=30.0, tmp_path=None):
+    return LoginStatusCache(
+        "claude",
+        (tmp_path / "claude.json") if tmp_path is not None else Path("/nonexistent/claude.json"),
+        ttl_s=ttl_s,
+        clock=clock or (lambda: 0.0),
+        probe=probe,
+    )
+
+
+def test_cache_cold_start_is_unknown_and_quiet():
+    # No probe has run yet -> a NEUTRAL unknown that renders quiet: logged_in True
+    # (so no logged-out pill) but known False (not a confirmed result).
+    probe = _CountingProbe(LOGGED_OUT)
+    cache = _cache(probe)
+    first = cache.read()
+    assert first.known is False
+    assert first.logged_in is True  # quiet — never cry wolf before probing
+    cache.wait_for_pending_refresh()
+    assert probe.calls == 1  # the cold read kicked exactly one refresh
+
+
+def test_cache_serves_probe_result_after_refresh():
+    probe = _CountingProbe(LOGGED_OUT)
+    cache = _cache(probe)
+    cache.read()  # cold-start unknown; kicks the probe
+    cache.wait_for_pending_refresh()
+    settled = cache.read()
+    assert settled.known is True
+    assert settled.logged_in is False  # the real (logged-out) result now served
+
+
+def test_cache_hit_within_ttl_does_not_reprobe():
+    clock = _ManualClock()
+    probe = _CountingProbe(LOGGED_IN)
+    cache = _cache(probe, clock=clock, ttl_s=30.0)
+    cache.read()
+    cache.wait_for_pending_refresh()
+    assert probe.calls == 1
+    # A read well within the TTL returns the cached value and spawns NO new probe.
+    clock.now = 29.0
+    hit = cache.read()
+    cache.wait_for_pending_refresh()
+    assert hit.logged_in is True
+    assert probe.calls == 1  # still one — served from cache, no subprocess
+
+
+def test_cache_stale_read_triggers_one_refresh():
+    clock = _ManualClock()
+    probe = _CountingProbe(LOGGED_IN)
+    cache = _cache(probe, clock=clock, ttl_s=30.0)
+    cache.read()
+    cache.wait_for_pending_refresh()
+    assert probe.calls == 1
+    clock.now = 31.0  # past the TTL -> next read is stale
+    cache.read()
+    cache.wait_for_pending_refresh()
+    assert probe.calls == 2  # exactly one additional refresh
+
+
+def test_cache_thread_spawn_failure_does_not_raise_or_wedge(monkeypatch):
+    # If Thread.start() fails (OS thread exhaustion, `can't start new thread`),
+    # read() must NOT raise (never 500 /healthz) and must NOT leave _refreshing stuck
+    # True — a later read has to be able to retry. `_refreshing`/`_thread` are set only
+    # after a successful start, so both hold.
+    probe = _CountingProbe(LOGGED_OUT)
+    cache = _cache(probe)
+
+    calls = {"n": 0}
+    real_start = threading.Thread.start
+
+    def _flaky_start(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", _flaky_start)
+
+    first = cache.read()  # spawn fails -> swallowed, stale/unknown returned
+    assert first.known is False  # still the cold-start value (no probe ran)
+    assert probe.calls == 0
+
+    # The single-flight flag was NOT wedged: a subsequent read retries and, now that
+    # start() succeeds, actually runs the probe.
+    second = cache.read()
+    cache.wait_for_pending_refresh()
+    assert probe.calls == 1
+    assert cache.read().logged_in is False  # real result served after recovery
+    assert second is not None
+
+
+def test_cache_slow_probe_does_not_block_read():
+    # A wedged probe must NOT delay read(): it returns the stale/cold value at once
+    # while the probe runs on the background thread.
+    gate = threading.Event()  # the probe blocks until we set this
+    probe = _CountingProbe(LOGGED_OUT, block=gate)
+    cache = _cache(probe)
+    # This read must return immediately even though the probe is stuck waiting.
+    value = cache.read()
+    assert value.known is False  # cold-start unknown, returned without waiting
+    assert probe.entered.wait(5.0)  # the probe was kicked (and is now blocked)
+    assert probe.calls == 1
+    gate.set()  # release the probe so the daemon thread can finish
+    cache.wait_for_pending_refresh()
+    assert cache.read().logged_in is False  # real result served once it lands
+
+
+def test_cache_single_flight_under_concurrent_reads():
+    # Many concurrent stale reads must spawn AT MOST ONE refresh thread. Hold the
+    # probe on a gate so all reader threads observe the same in-flight refresh.
+    gate = threading.Event()
+    probe = _CountingProbe(LOGGED_IN, block=gate)
+    cache = _cache(probe)
+    barrier = threading.Barrier(8)
+
+    def _hammer():
+        barrier.wait()  # release all readers at once to maximize contention
+        cache.read()
+
+    readers = [threading.Thread(target=_hammer) for _ in range(8)]
+    for t in readers:
+        t.start()
+    for t in readers:
+        t.join(5.0)
+    # All 8 reads happened while the single refresh was in flight -> only one probe.
+    assert probe.entered.wait(5.0)  # the one refresh thread has started
+    assert probe.calls == 1
+    gate.set()
+    cache.wait_for_pending_refresh()
+
+
+def test_cache_wait_for_pending_refresh_noop_when_idle():
+    # No refresh in flight (nothing ever read) -> the helper is a harmless no-op.
+    cache = _cache(_CountingProbe(LOGGED_IN))
+    cache.wait_for_pending_refresh()  # must not raise

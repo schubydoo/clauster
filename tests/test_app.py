@@ -25,11 +25,15 @@ def test_healthz(write_config):
     assert body["status"] == "ok"
     assert "instances_running" in body
     # #838: auth is off in this fixture, so the authenticated branch (and its
-    # login-status fields) is exercised here rather than the trimmed unauth body.
-    # The fake stub reports logged-in via claude.ai by default.
-    assert body["claude_login_ok"] is True
-    assert body["claude_login_method"] == "claude.ai"
-    assert "claude_login_expires_at" in body
+    # login-status fields) is exercised here. The first read is the neutral cold-start
+    # value; wait for the single background probe to land, then re-read for the real
+    # result (the fake stub reports logged-in via claude.ai by default).
+    assert body["claude_login_ok"] is True  # cold-start neutral (quiet)
+    client.app.state.login_status_cache.wait_for_pending_refresh()
+    warm = client.get("/healthz").json()
+    assert warm["claude_login_ok"] is True
+    assert warm["claude_login_method"] == "claude.ai"
+    assert "claude_login_expires_at" in warm
 
 
 def test_dashboard_ships_claude_login_indicator(write_config):

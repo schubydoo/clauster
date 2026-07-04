@@ -575,6 +575,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.state.config = config
     app.state.runner = runner
     app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
+    # #838: login-status cache. `/healthz` reads it synchronously but non-blocking —
+    # the `claude auth status` subprocess runs at most once per TTL on a background
+    # thread (never on the request path), so the dashboard's 4s poll never stalls on
+    # a slow probe and multiple tabs don't spawn overlapping subprocesses.
+    app.state.login_status_cache = login_status.LoginStatusCache(
+        config.claude.binary, runner.claude_json
+    )
     # In-app restart (#483): the entry point (``_run``) sets ``uvicorn_server`` to the
     # live server so ``POST /api/restart`` can request a graceful shutdown; left None
     # under TestClient / non-uvicorn hosts (the endpoint 503s rather than half-restart).
@@ -1013,11 +1020,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # is authenticated — an expired/absent login lets a bridge spawn and then hang
         # at "Starting" with no upfront signal. `claude auth status --json` is the
         # mechanism-agnostic signal (OAuth / apiKeyHelper / API key / env token all
-        # reflected in loggedIn). login_status fails closed (never raises) and surfaces
-        # only the non-PII loggedIn + authMethod (never email/org/subscription/token).
-        login = await asyncio.to_thread(
-            login_status.check_login_status, config.claude.binary, runner.claude_json
-        )
+        # reflected in loggedIn). Read is served from a stale-while-revalidate cache:
+        # non-blocking (the subprocess never runs on this request path) and the probe
+        # runs at most once per TTL, single-flight. A cold start returns a neutral
+        # "unknown" (claude_login_ok=True) so the UI never cries wolf before probing.
+        # Only the non-PII loggedIn + authMethod are surfaced (never email/org/token).
+        login = app.state.login_status_cache.read()
         result: dict[str, object] = {
             "status": "ok",
             "version": __version__,
