@@ -328,10 +328,11 @@
       // up front instead of failing silently when you click Start. loaded stays false
       // until /api/doctor answers, so the panel never flashes empty.
       readiness: { loaded: false, ok: true, checks: [], showAll: false, showPanel: false },
-      // #838: runtime claude account login state, refreshed alongside refresh() from
-      // /healthz. `known` stays false until an authenticated /healthz response has
-      // included the field (an unauthenticated trimmed body omits it) — the header
-      // pill only renders once known, so it never flashes a false "not logged in".
+      // #838: runtime claude account login state, refreshed by loadLoginStatus() on its
+      // OWN /healthz path (decoupled from refresh() so /healthz latency never stalls the
+      // core poll). `known` stays false until an authenticated /healthz response has
+      // included the field (an unauthenticated trimmed body omits it) — the header pill
+      // only renders once known AND logged out, so it never flashes a false "not logged in".
       claudeLogin: { known: false, ok: true, expiresAt: null },
       activeFilter: "all",   // Zone 2 unified-list filter: all | browser | desktop | detached
       projectFilter: "",     // Zone 1 search box
@@ -410,8 +411,12 @@
         this.loadAllPreflight();
         for (const n of PROJECT_NAMES) { this.loadUsage(n); }
         this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
+        this.loadLoginStatus();  // #838: login pill on its own path — never gates core refresh()
         this.reattachActiveClones();  // #659: a clone started in another tab streams here too
         setInterval(() => this.refresh(), 4000);
+        // #838: refresh the login pill on its own cadence, decoupled from refresh() so a
+        // slow /healthz can't hold up the core instances/sessions/agents poll.
+        setInterval(() => this.loadLoginStatus(), 4000);
         // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
         if (METRICS_ENABLED) { this.refreshMetrics(); setInterval(() => this.refreshMetrics(), METRICS_POLL_MS); }
         // Browser notifications (#541): request the permission grant up front when the
@@ -485,6 +490,25 @@
           this.readiness.checks = Array.isArray(d.checks) ? d.checks : [];
           this.readiness.loaded = true;
         } catch (e) { /* fetch failed -> leave loaded=false so the panel stays hidden */ }
+      },
+      // #838: claude account login state for the header pill. Fetched on its OWN path —
+      // deliberately NOT folded into the core refresh() Promise.all, so /healthz latency
+      // (it still runs the `claude --version` subprocess on the request path) can never
+      // delay applying the instances/sessions/agents responses that gate the primary UI.
+      // Fire-and-forget + advisory: a failed or unauthenticated /healthz (the trimmed
+      // body omits claude_login_ok) just leaves the indicator hidden — never a false
+      // "not logged in", and never touches connLost. Distinct from the #663 restart-
+      // reload /healthz poll, which is a separate one-shot loop and is left untouched.
+      async loadLoginStatus() {
+        try {
+          const r = await fetch(ROOT + "/healthz");
+          if (!r.ok) return;
+          const hz = await r.json().catch(() => ({}));
+          this.claudeLogin.known = Object.hasOwn(hz, "claude_login_ok");
+          this.claudeLogin.ok = !!hz.claude_login_ok;
+          this.claudeLogin.expiresAt = typeof hz.claude_login_expires_at === "number"
+            ? hz.claude_login_expires_at : null;
+        } catch (e) { /* fetch failed -> leave the pill in its prior (quiet) state */ }
       },
       readinessIssues() { return this.readiness.checks.filter((c) => c.status !== "ok"); },
       // A "warn" lets a session still start; anything else (error/fail) is a hard blocker.
@@ -2253,26 +2277,15 @@
         this._refreshing = true;
         let ok = true;
         try {
-          const [iRes, sRes, aRes, dRes, tRes, hzRes] = await Promise.all([
+          const [iRes, sRes, aRes, dRes, tRes] = await Promise.all([
             fetch(ROOT + "/api/instances"),
             fetch(ROOT + "/api/sessions"),
             fetch(ROOT + "/api/agents"),
             fetch(ROOT + "/api/sessions/adoptable"),
             fetch(ROOT + "/api/sessions/tracked"),
-            fetch(ROOT + "/healthz"),
           ]);
           // Session expired mid-use -> bounce to login instead of silently showing stale data.
           if (this._authExpired(iRes) || this._authExpired(sRes) || this._authExpired(aRes) || this._authExpired(dRes) || this._authExpired(tRes)) return;
-          // #838: claude account login state, riding the existing 4s poll. Advisory only —
-          // a failed/unauthenticated /healthz (trimmed body has no claude_login_ok key)
-          // just leaves the indicator hidden rather than affecting connLost.
-          if (hzRes.ok) {
-            const hz = await hzRes.json().catch(() => ({}));
-            this.claudeLogin.known = Object.hasOwn(hz, "claude_login_ok");
-            this.claudeLogin.ok = !!hz.claude_login_ok;
-            this.claudeLogin.expiresAt = typeof hz.claude_login_expires_at === "number"
-              ? hz.claude_login_expires_at : null;
-          }
           if (iRes.ok) {
             const list = await iRes.json();
             // Split the flat instance list (#779): the project-keyed map holds each

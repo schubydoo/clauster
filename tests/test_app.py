@@ -42,7 +42,16 @@ def test_dashboard_ships_claude_login_indicator(write_config):
     page = _client(write_config).get("/").text
     assert 'x-show="claudeLogin.known && !claudeLogin.ok"' in page
     assert "claude not logged in" in page
-    assert 'fetch(ROOT + "/healthz")' in page
+    # The login /healthz fetch lives on its OWN path (loadLoginStatus), wired to its
+    # own interval — NOT folded into the core refresh() Promise.all, so /healthz
+    # latency can never delay the primary instances/sessions/agents poll.
+    assert "async loadLoginStatus()" in page
+    assert "setInterval(() => this.loadLoginStatus(), 4000)" in page
+    # Guard the decoupling: the core refresh() batch must not fetch /healthz. The only
+    # /healthz fetches in the script are loadLoginStatus() and the #663 restart poll
+    # (cache-busted "?_="); the bare `fetch(ROOT + "/healthz")` appears exactly once
+    # (inside loadLoginStatus), never again inside the refresh() Promise.all.
+    assert page.count('fetch(ROOT + "/healthz")') == 1
 
 
 def test_api_projects(write_config):
