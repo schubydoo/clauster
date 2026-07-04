@@ -512,18 +512,23 @@ def test_setup_token_pty_write_code_after_close_is_a_noop(shepherd, monkeypatch)
     shepherd._write_code(flow, "too-late")  # noqa: SLF001 - must not raise
 
 
-def test_setup_token_pty_write_code_survives_a_broken_fd(shepherd, monkeypatch, caplog) -> None:
+def test_setup_token_pty_write_code_survives_a_broken_fd(shepherd, caplog) -> None:
     # A write to an already-closed/broken pty master must be logged, not raised, past
     # _write_code — mirrors test_submit_code_survives_a_closed_stdin for the PTY path.
-    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
-    shepherd.start("setup-token")
-    flow = shepherd._flow  # noqa: SLF001 - internals test
-    os.close(flow.master_fd)  # simulate the pty already being gone
+    # Drives a hand-built flow on a guaranteed-invalid fd (no live reader thread): a real
+    # spawn here would leave the _pump_pty reader blocked in os.read on the master, and
+    # closing that master out from under it does NOT interrupt the read on macOS/BSD (only
+    # on Linux) — the leaked reader + fd then piles up and wedges the whole xdist worker
+    # (the macOS CI hang). Exercising _write_code directly covers the same os.write path.
+    scr = ls.PtyScreen()
+
+    class _FakeProc:
+        pass
+
+    flow = ls._Flow(mode="setup-token", proc=_FakeProc(), screen=scr, master_fd=999999)  # type: ignore[arg-type]
     with caplog.at_level(logging.WARNING, logger="clauster.login_shepherd"):
-        shepherd._write_code(flow, "a-code")  # noqa: SLF001 - must not raise
+        shepherd._write_code(flow, "a-code")  # noqa: SLF001 - internals test; must not raise
     assert any("writing code" in r.getMessage() for r in caplog.records)
-    flow.stdin_closed = True  # prevent cancel() from double-closing the already-closed fd
-    shepherd.cancel()
 
 
 def test_pump_pty_survives_a_non_eio_read_error() -> None:
@@ -554,28 +559,28 @@ def test_pump_pty_treats_an_empty_read_as_eof(monkeypatch) -> None:
     assert flow.snapshot() == ""
 
 
-def test_pump_pty_survives_a_screen_feed_error() -> None:
+def test_pump_pty_survives_a_screen_feed_error(monkeypatch) -> None:
     # A pyte feed failure must not crash the reader thread — the read loop keeps
     # draining (falling back to the buffer for text) instead of dying mid-stream.
+    # Drives os.read directly rather than a real pty: closing a pty slave can discard its
+    # still-queued bytes before the master reads them on macOS/BSD, so the master's first
+    # read returns EOF and the buffer stays empty there — flaking this assertion. A
+    # scripted read (one chunk, then EOF) reproduces the feed-then-drain path everywhere.
     scr = ls.PtyScreen()
 
     def _boom(_data):
         raise RuntimeError("pyte choked")
 
     scr.feed = _boom  # type: ignore[method-assign]
-    master_fd, slave_fd = os.openpty()
-    try:
-        os.write(slave_fd, b"hello\n")
-        os.close(slave_fd)  # EOF for the master's read side after this one chunk
+    reads = [b"hello\n", b""]  # one chunk (feed() will choke on it), then clean EOF
+    monkeypatch.setattr(ls.os, "read", lambda _fd, _n: reads.pop(0))
 
-        class _FakeProc:
-            pass
+    class _FakeProc:
+        pass
 
-        flow = ls._Flow(mode="setup-token", proc=_FakeProc(), screen=scr, master_fd=master_fd)  # type: ignore[arg-type]
-        ls._pump_pty(flow)  # must not raise despite the feed() failure
-        assert "hello" in flow.snapshot()
-    finally:
-        os.close(master_fd)
+    flow = ls._Flow(mode="setup-token", proc=_FakeProc(), screen=scr, master_fd=123)  # type: ignore[arg-type]
+    ls._pump_pty(flow)  # must not raise despite the feed() failure
+    assert "hello" in flow.snapshot()
 
 
 def test_pump_pty_noop_when_unpaired() -> None:
