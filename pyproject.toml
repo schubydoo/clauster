@@ -61,6 +61,12 @@ dev = [
     "atheris>=3.0.0,<3.1.0; sys_platform == 'linux' and python_version < '3.12'",
     "pytest-cov>=5.0",
     "pytest-xdist>=3.6.1",
+    # Per-test wall-clock guard. A hung test (e.g. a blocking read/join that never
+    # returns on one platform) would otherwise freeze an xdist worker until the CI
+    # job's 15-minute cap — a slow, opaque failure. `--timeout` (below) aborts the
+    # offending test with an all-thread traceback instead, so a hang fails fast and
+    # points at itself.
+    "pytest-timeout>=2.3",
     "ruff>=0.8",
     "pyright>=1.1.390",
     "yamllint>=1.38",
@@ -145,7 +151,7 @@ asyncio_mode = "auto"
 # browser binary and would skew the coverage gate. Run it with `scripts/e2e.sh`
 # (which clears these addopts via `-o addopts=`). Keeping it out of the default run
 # leaves the required `tests` gate — and its cost — exactly as it was.
-addopts = "-n auto --cov=src/clauster --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=96 --ignore=tests/e2e"
+addopts = "-n auto --timeout=90 --cov=src/clauster --cov-branch --cov-report=term-missing:skip-covered --cov-fail-under=96 --ignore=tests/e2e"
 markers = [
     "e2e: browser end-to-end test (agent-browser + real Chromium; opt-in, see scripts/e2e.sh)",
 ]
