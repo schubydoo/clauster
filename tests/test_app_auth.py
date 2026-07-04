@@ -87,6 +87,7 @@ def test_public_paths_reachable_unauthenticated(runner_config):
     assert body == {"status": "ok"}  # trimmed when unauthenticated
     # #838: the login-status fields must NEVER leak to an unauthenticated caller.
     assert "claude_login_ok" not in body
+    assert "claude_login_method" not in body
     assert "claude_login_expires_at" not in body
 
 
@@ -101,10 +102,11 @@ def test_login_correct_then_authed(runner_config):
     # healthz now returns full detail to the authed session
     body = client.get("/healthz").json()
     assert "claude_version" in body
-    # #838: login-status fields are present (though absent creds -> logged out) once authed.
-    assert "claude_login_ok" in body
+    # #838: login-status fields present once authed. The fake `claude auth status`
+    # stub reports logged-in via claude.ai by default (mechanism-agnostic signal).
+    assert body["claude_login_ok"] is True
+    assert body["claude_login_method"] == "claude.ai"
     assert "claude_login_expires_at" in body
-    assert body["claude_login_ok"] is False  # runner_config's claude_json has no .credentials.json
 
 
 def test_login_wrong_password_rejected(runner_config):
@@ -734,9 +736,34 @@ def test_healthz_claude_probe_failure(runner_config):
     assert body["claude_ok"] is False and body["claude_version"] is None
 
 
-def test_healthz_reports_valid_login(runner_config):
-    # #838: a present, unexpired .credentials.json -> claude_login_ok True with the
-    # exact expires_at echoed back (never the token itself).
+def test_healthz_reports_logged_out(runner_config, monkeypatch):
+    # #838: `claude auth status` reports not-logged-in -> claude_login_ok False.
+    config, claude_json = runner_config
+    monkeypatch.setenv("FAKE_CLAUDE_AUTH_STDOUT", '{"loggedIn": false}')
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    body = client.get("/healthz").json()
+    assert body["claude_login_ok"] is False
+    assert body["claude_login_expires_at"] is None
+
+
+def test_healthz_logged_in_via_api_key_helper_without_creds_file(runner_config, monkeypatch):
+    # #838 regression: an apiKeyHelper/API-key deployment has NO .credentials.json yet
+    # is fully logged in. The CLI signal must report logged-in (a creds-file check
+    # would false-alarm "not logged in" here — the exact bug this approach avoids).
+    config, claude_json = runner_config
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_AUTH_STDOUT", '{"loggedIn": true, "authMethod": "apiKeyHelper"}'
+    )
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    body = client.get("/healthz").json()
+    assert body["claude_login_ok"] is True
+    assert body["claude_login_method"] == "apiKeyHelper"
+    assert body["claude_login_expires_at"] is None  # non-OAuth -> no creds file read
+
+
+def test_healthz_oauth_login_surfaces_expiry_but_never_token(runner_config, monkeypatch):
+    # #838: claude.ai OAuth + a readable .credentials.json -> proactively surface the
+    # expiry, but the token value must never appear in the response.
     config, claude_json = runner_config
     creds = claude_json.parent / ".claude" / ".credentials.json"
     creds.parent.mkdir(parents=True, exist_ok=True)
@@ -744,27 +771,13 @@ def test_healthz_reports_valid_login(runner_config):
     creds.write_text(
         json.dumps({"claudeAiOauth": {"accessToken": "tok-secret", "expiresAt": expires_at}})
     )
+    monkeypatch.setenv("FAKE_CLAUDE_AUTH_STDOUT", '{"loggedIn": true, "authMethod": "claude.ai"}')
     client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
-    body = client.get("/healthz").json()
+    resp = client.get("/healthz")
+    body = resp.json()
     assert body["claude_login_ok"] is True
     assert body["claude_login_expires_at"] == expires_at
-    assert "tok-secret" not in client.get("/healthz").text  # token never returned
-
-
-def test_healthz_reports_expired_login(runner_config):
-    # #838: an expired token -> claude_login_ok False (fail closed), expiry still surfaced
-    # so the UI can explain *why* (vs a merely-absent login).
-    config, claude_json = runner_config
-    creds = claude_json.parent / ".claude" / ".credentials.json"
-    creds.parent.mkdir(parents=True, exist_ok=True)
-    expires_at = int(time.time() * 1000) - 1000
-    creds.write_text(
-        json.dumps({"claudeAiOauth": {"accessToken": "tok-secret", "expiresAt": expires_at}})
-    )
-    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
-    body = client.get("/healthz").json()
-    assert body["claude_login_ok"] is False
-    assert body["claude_login_expires_at"] == expires_at
+    assert "tok-secret" not in resp.text  # token never returned
 
 
 # ----- audited coverage gaps (2026-07 audit) --------------------------------

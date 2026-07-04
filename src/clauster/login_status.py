@@ -1,97 +1,141 @@
 """Detect whether the runtime ``claude`` account is actually logged in (#838).
 
 ``/healthz`` already reports ``claude_ok`` — the ``claude`` binary is invokable —
-but not whether its OAuth login is still valid. An expired or absent login lets a
+but not whether the account is authenticated. An expired or absent login lets a
 bridge spawn and then hang at "Starting" with no upfront signal, because the
-subprocess itself is fine; only its credentials are stale.
+subprocess itself is fine; only its auth is stale.
 
-This mirrors :func:`clauster.ops._check_claude_login` (the ``clauster doctor``
-check) but is purpose-built for ``/healthz``: it returns a small structured
-result instead of a human-readable ``Check``, and it also surfaces expiry
-(``ops._check_claude_login`` only checks token presence).
+The authoritative, mechanism-agnostic signal is ``claude auth status --json``:
+its ``loggedIn`` reflects *whichever* auth mechanism is in effect — claude.ai
+OAuth, ``apiKeyHelper``, ``ANTHROPIC_API_KEY``, ``CLAUDE_CODE_OAUTH_TOKEN``, or a
+console/API key. Parsing ``~/.claude/.credentials.json`` directly would only
+detect the OAuth-subscription path and would false-alarm "not logged in" on a
+perfectly-authenticated API-key/helper deployment, which is worse than no signal
+— so this deliberately drives the CLI instead.
 
-The credentials file path is derived from the SAME resolved ``~/.claude.json``
-every other config-write surface already uses (``claude_json.parent / ".claude"``
-— see :mod:`clauster.claude_md`, :mod:`clauster.config_write_subagents`) rather
-than a fresh ``Path.home()`` lookup, so this stays correct under HOME isolation
-in tests and any future config-dir override.
+Fails closed: a command error, timeout, non-zero exit, or non-JSON output all
+yield ``logged_in=False`` with a ``reason`` — never raises out to the ``/healthz``
+caller. Only non-PII fields are surfaced (``loggedIn`` + ``authMethod``); the
+CLI's ``email`` / ``orgId`` / ``orgName`` / ``subscriptionType`` are PII and this
+repo is public, so they are never read, logged, or returned. The OAuth token
+value is likewise never logged or returned.
 
-Fails closed: every error path (missing file, unreadable, unparseable, no
-``accessToken``) yields ``logged_in=False`` with a ``reason`` — never raises out
-to the ``/healthz`` caller. The token value itself is never logged or returned.
+The optional ``expires_at_ms`` is a proactive extra: only when the auth method is
+claude.ai OAuth *and* ``.credentials.json`` exists is its ``expiresAt`` read (to
+warn of imminent OAuth expiry). ``loggedIn`` is always the core signal.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import claude_cli, procutil
+
 _log = logging.getLogger("clauster.login_status")
+
+#: Bound the ``claude auth status`` probe so a wedged CLI can't hang ``/healthz``.
+#: The command is local (no network round-trip) and returns in well under a second
+#: on a healthy host; 5s is generous headroom before we fail closed.
+_AUTH_STATUS_TIMEOUT_S = 5.0
+
+#: ``authMethod`` values that mean the login is a claude.ai OAuth subscription, for
+#: which ``.credentials.json`` carries an ``expiresAt`` worth surfacing. Any other
+#: method (apiKeyHelper / apiKey / console / env token) has no such file to read.
+_OAUTH_METHODS = frozenset({"claude.ai", "claudeai", "oauth"})
 
 
 @dataclass(frozen=True)
 class LoginStatus:
-    """Result of inspecting the runtime account's ``.credentials.json``.
+    """Result of probing ``claude auth status`` for the runtime account.
 
-    ``expires_at_ms`` and ``expired`` are only meaningful when the token was
-    found — ``expires_at_ms`` is ``None`` and ``expired`` is ``False`` on every
-    fail-closed path (missing/unreadable/malformed file, no ``accessToken``).
+    ``logged_in`` is the mechanism-agnostic core signal. ``method`` is the
+    non-PII ``authMethod`` string (or ``None`` when unknown / the probe failed).
+    ``expires_at_ms`` is populated only for a claude.ai OAuth login whose
+    ``.credentials.json`` was readable; it is ``None`` for every other method and
+    on every fail-closed path.
     """
 
     logged_in: bool
+    method: str | None
     expires_at_ms: int | None
-    expired: bool
     reason: str
 
 
-def credentials_path_for(claude_json: Path) -> Path:
-    """Return the ``.credentials.json`` sibling of the resolved ``claude_json``'s dir.
+def _oauth_expires_at_ms(claude_json: Path) -> int | None:
+    """Return the OAuth token's ``expiresAt`` (ms epoch) from ``.credentials.json``.
 
-    Reuses the existing ``claude_json.parent / ".claude"`` convention (the same
-    directory :mod:`clauster.claude_md` and :mod:`clauster.config_write_subagents`
-    derive their user-scope paths from) instead of a fresh ``Path.home()`` lookup.
+    Best-effort and fail-quiet: this only enriches the result with a proactive
+    expiry warning, so any problem (missing file, unreadable, malformed, missing
+    field, non-int) simply yields ``None`` rather than affecting the login verdict
+    or raising. The token value itself is never read into a returned field or log.
     """
-    return claude_json.parent / ".claude" / ".credentials.json"
-
-
-def check_login_status(claude_json: Path, *, now_ms: int) -> LoginStatus:
-    """Read ``.credentials.json`` (sibling of ``claude_json``) and report login state.
-
-    ``now_ms`` is the caller's current time in ms epoch (injected, not read from
-    the clock here, so this stays deterministically testable). Never raises: a
-    missing file, an unreadable file, unparseable JSON, or a missing
-    ``accessToken`` all fail closed to ``logged_in=False`` with a ``reason`` —
-    none of them are a token value, so nothing secret ever appears in the result
-    or in a log line.
-    """
-    creds_path = credentials_path_for(claude_json)
+    creds_path = claude_json.parent / ".claude" / ".credentials.json"
     try:
-        raw = creds_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return LoginStatus(False, None, False, f"no credentials file at {creds_path}")
-    except OSError as exc:
-        # Permission errors etc. — log the failure mode (never the path's contents)
-        # and still fail closed rather than raising out to the /healthz caller.
-        _log.warning("could not read %s: %s", creds_path, exc)
-        return LoginStatus(False, None, False, f"could not read {creds_path}: {exc}")
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return LoginStatus(False, None, False, f"{creds_path} is not valid JSON: {exc}")
-
+        data = json.loads(creds_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
     oauth = oauth if isinstance(oauth, dict) else {}
-
-    token = oauth.get("accessToken")
-    if not token:
-        return LoginStatus(False, None, False, f"no claudeAiOauth.accessToken in {creds_path}")
-
     expires_at = oauth.get("expiresAt")
-    expires_at_ms = expires_at if isinstance(expires_at, int) else None
-    expired = expires_at_ms is not None and now_ms >= expires_at_ms
-    if expired:
-        return LoginStatus(False, expires_at_ms, True, "access token has expired")
-    return LoginStatus(True, expires_at_ms, False, "logged in")
+    return expires_at if isinstance(expires_at, int) else None
+
+
+def check_login_status(binary: str, claude_json: Path) -> LoginStatus:
+    """Probe ``claude auth status --json`` and report the account's login state.
+
+    Runs the resolved ``binary`` (absolute path via the shared PATH resolver) with
+    list-argv (never ``shell=True``), the scrubbed child env, and a bounded
+    timeout. Synchronous — the caller runs it off the event loop via
+    ``asyncio.to_thread``. Never raises: a missing binary, a timeout, a non-zero
+    exit, or non-JSON output all fail closed to ``logged_in=False`` with a
+    ``reason``. Only the non-PII ``loggedIn`` / ``authMethod`` are surfaced.
+    """
+    try:
+        resolved = claude_cli.resolve_binary(binary)
+    except claude_cli.ClaudeNotFound as exc:
+        return LoginStatus(False, None, None, f"claude binary not found: {exc}")
+
+    try:
+        proc = subprocess.run(
+            [resolved, "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=_AUTH_STATUS_TIMEOUT_S,
+            env=procutil.child_env(),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        _log.warning("`claude auth status` timed out after %ss", _AUTH_STATUS_TIMEOUT_S)
+        return LoginStatus(False, None, None, "`claude auth status` timed out")
+    except OSError as exc:
+        _log.warning("`claude auth status` could not be run: %s", exc)
+        return LoginStatus(False, None, None, f"`claude auth status` could not be run: {exc}")
+
+    if proc.returncode != 0:
+        # A non-zero exit typically IS the "not logged in" signal on some CLI
+        # versions; treat it as logged-out rather than an internal error.
+        return LoginStatus(False, None, None, f"`claude auth status` exited {proc.returncode}")
+
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return LoginStatus(False, None, None, f"`claude auth status` returned non-JSON: {exc}")
+    if not isinstance(data, dict):
+        return LoginStatus(False, None, None, "`claude auth status` returned non-object JSON")
+
+    logged_in = bool(data.get("loggedIn"))
+    method_raw = data.get("authMethod")
+    method = method_raw if isinstance(method_raw, str) and method_raw else None
+
+    if not logged_in:
+        return LoginStatus(False, method, None, "claude reports not logged in")
+
+    # Optional proactive OAuth-expiry enrichment — never changes the verdict.
+    expires_at_ms = None
+    if method is not None and method.lower() in _OAUTH_METHODS:
+        expires_at_ms = _oauth_expires_at_ms(claude_json)
+    return LoginStatus(True, method, expires_at_ms, "logged in")

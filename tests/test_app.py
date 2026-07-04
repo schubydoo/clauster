@@ -16,6 +16,8 @@ def _client(write_config) -> TestClient:
 
 
 def test_healthz(write_config):
+    # write_config defaults the binary to the fake stub, so the #838 login probe
+    # never invokes the real `claude auth status` (this host may run a live account).
     client = _client(write_config)
     resp = client.get("/healthz")
     assert resp.status_code == 200
@@ -24,7 +26,9 @@ def test_healthz(write_config):
     assert "instances_running" in body
     # #838: auth is off in this fixture, so the authenticated branch (and its
     # login-status fields) is exercised here rather than the trimmed unauth body.
-    assert "claude_login_ok" in body
+    # The fake stub reports logged-in via claude.ai by default.
+    assert body["claude_login_ok"] is True
+    assert body["claude_login_method"] == "claude.ai"
     assert "claude_login_expires_at" in body
 
 

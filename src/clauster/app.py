@@ -1009,12 +1009,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except Exception:
             version = None
             claude_ok = False
-        # #838: claude_ok only confirms the binary is invokable, not that its OAuth
-        # login is still valid — an expired/absent login lets a bridge spawn and then
-        # hang at "Starting" with no upfront signal. login_status fails closed (never
-        # raises) and never returns the token itself, only presence/expiry.
+        # #838: claude_ok only confirms the binary is invokable, not that the account
+        # is authenticated — an expired/absent login lets a bridge spawn and then hang
+        # at "Starting" with no upfront signal. `claude auth status --json` is the
+        # mechanism-agnostic signal (OAuth / apiKeyHelper / API key / env token all
+        # reflected in loggedIn). login_status fails closed (never raises) and surfaces
+        # only the non-PII loggedIn + authMethod (never email/org/subscription/token).
         login = await asyncio.to_thread(
-            login_status.check_login_status, runner.claude_json, now_ms=int(time.time() * 1000)
+            login_status.check_login_status, config.claude.binary, runner.claude_json
         )
         result: dict[str, object] = {
             "status": "ok",
@@ -1022,6 +1024,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "claude_ok": claude_ok,
             "claude_version": version,
             "claude_login_ok": login.logged_in,
+            "claude_login_method": login.method,
             "claude_login_expires_at": login.expires_at_ms,
             "instances_running": runner.running_count(),
         }

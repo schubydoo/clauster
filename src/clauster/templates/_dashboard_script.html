@@ -492,14 +492,12 @@
       readinessBlockers() { return this.readiness.checks.filter((c) => c.status !== "ok" && c.status !== "warn"); },
       readinessWarnings() { return this.readiness.checks.filter((c) => c.status === "warn"); },
       checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
-      // #838: title text for the claude-login header pill — distinguishes an expired
-      // token (a specific, recoverable cause) from an absent/otherwise-invalid one.
+      // #838: title text for the claude-login header pill. The pill only shows when
+      // logged out, so this always explains the not-logged-in state; loggedIn is the
+      // authoritative signal (from `claude auth status`, mechanism-agnostic).
       claudeLoginTitle() {
-        if (this.claudeLogin.ok) return "Signed in to claude — bridges inherit this login";
-        const expired = this.claudeLogin.expiresAt !== null && this.claudeLogin.expiresAt <= Date.now();
-        return (expired
-          ? "claude login has expired"
-          : "claude is not logged in") + " — bridges will start but fail to authenticate; run `claude` to sign in";
+        return "claude is not logged in — bridges will start but fail to authenticate; "
+          + "run `claude` to sign in";
       },
       // --- launch popover + unified active list ---
       // Outcome-language launch choices — jargon (hosted/bridge/background) mapped to
