@@ -83,6 +83,7 @@ _HOSTED_FIELDS = (
     "agent_proc_start",
     "started_at",
     "intentional_stop",
+    "instance_id",
 )
 
 

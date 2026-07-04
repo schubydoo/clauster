@@ -330,6 +330,127 @@ def test_local_scope_independent_of_project_and_user_scope(tmp_path: Path) -> No
     assert mcp.read_project_local_servers(cj, project_dir) == {"l": {"command": "local"}}
 
 
+# --- #837: unapproved_mcp_servers (pre-spawn MCP-approval preflight) ---------------
+
+
+def test_unapproved_no_mcp_json_is_empty(tmp_path: Path) -> None:
+    # No .mcp.json at all -> nothing to warn about.
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+
+
+def test_unapproved_empty_servers_map_is_empty(tmp_path: Path) -> None:
+    # An .mcp.json present but with no mcpServers key/empty object -> nothing to warn.
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+
+
+def test_unapproved_all_approved_is_empty(tmp_path: Path) -> None:
+    # Every committed server is either enabled or disabled -> nothing left to warn.
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"a": {"command": "x"}, "b": {"command": "y"}}}),
+        encoding="utf-8",
+    )
+    mcp.write_project_approvals(cj, project_dir.resolve(), ["a"], ["b"])
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+
+
+def test_unapproved_some_unapproved_lists_the_set(tmp_path: Path) -> None:
+    # "a" approved, "b" rejected, "c" never decided -> only "c" is unapproved.
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "a": {"command": "x"},
+                    "b": {"command": "y"},
+                    "c": {"command": "z"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    mcp.write_project_approvals(cj, project_dir.resolve(), ["a"], ["b"])
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == ["c"]
+
+
+def test_unapproved_no_approvals_file_lists_every_server(tmp_path: Path) -> None:
+    # A committed .mcp.json with no ~/.claude.json approvals at all -> every server
+    # is unapproved (this is the exact scenario #837 hangs on: a fresh clone with a
+    # committed .mcp.json and no prior approval decision).
+    cj = tmp_path / "claude.json"  # never created
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"a": {"command": "x"}, "b": {"command": "y"}}}),
+        encoding="utf-8",
+    )
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == ["a", "b"]
+
+
+def test_unapproved_malformed_mcp_json_is_safe_empty(tmp_path: Path, caplog) -> None:
+    # Malformed .mcp.json ("cannot determine") must degrade to [] and NEVER raise —
+    # a preflight read failure must not crash (or block) the launch path.
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text("{not valid json", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+    assert any("could not read" in rec.message for rec in caplog.records)
+
+
+def test_unapproved_non_object_mcp_json_is_safe_empty(tmp_path: Path) -> None:
+    # Valid JSON but not an object (e.g. a bare list) -> also "cannot determine".
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text("[]", encoding="utf-8")
+    assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+
+
+def test_unapproved_malformed_claude_json_is_safe_empty(tmp_path: Path, caplog) -> None:
+    # .mcp.json is fine, but ~/.claude.json (the approvals store) is corrupt -> still
+    # "cannot determine", never a crash. Distinct from the .mcp.json failure above:
+    # this exercises the second try/except around the approvals read.
+    cj = tmp_path / "claude.json"
+    cj.write_text("{not valid json", encoding="utf-8")
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"a": {"command": "x"}}}), encoding="utf-8"
+    )
+    with caplog.at_level("WARNING"):
+        assert mcp.unapproved_mcp_servers(cj, project_dir) == []
+    assert any("could not read MCP approvals" in rec.message for rec in caplog.records)
+
+
+def test_unapproved_resolves_project_dir_for_approvals_lookup(tmp_path: Path) -> None:
+    # Project.path from discovery is not guaranteed resolved (e.g. a symlinked
+    # projects_root); approvals are keyed by the RESOLVED path (mirrors
+    # resolve_project_dir), so a caller passing an unresolved-but-equivalent path
+    # must still see the approval. Simulate via a "./" indirection.
+    cj = tmp_path / "claude.json"
+    real_dir = tmp_path / "proj"
+    real_dir.mkdir()
+    (real_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"a": {"command": "x"}}}), encoding="utf-8"
+    )
+    mcp.write_project_approvals(cj, real_dir.resolve(), ["a"], [])
+    unresolved = tmp_path / "." / "proj"
+    assert mcp.unapproved_mcp_servers(cj, unresolved) == []
+
+
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
