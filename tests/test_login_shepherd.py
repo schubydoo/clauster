@@ -531,6 +531,24 @@ def test_setup_token_pty_write_code_survives_a_broken_fd(shepherd, caplog) -> No
     assert any("writing code" in r.getMessage() for r in caplog.records)
 
 
+def test_teardown_pty_flow_already_stdin_closed_skips_the_close(shepherd) -> None:
+    # _teardown on a PTY flow whose master was already closed (stdin_closed=True) must SKIP
+    # re-closing it (no double-close) and still clear the flow. Built on a fake already-exited
+    # proc with no reader thread — no real master/reader — so it covers this idempotency
+    # branch without the macOS blocked-read hazard the old real-spawn form carried.
+    scr = ls.PtyScreen()
+
+    class _ExitedProc:
+        def poll(self):
+            return 0  # already exited → teardown skips terminate/wait
+
+    flow = ls._Flow(mode="setup-token", proc=_ExitedProc(), screen=scr, master_fd=999999)  # type: ignore[arg-type]
+    flow.stdin_closed = True  # master already closed → the close must be skipped, not retried
+    shepherd._flow = flow  # noqa: SLF001 - internals test
+    shepherd._teardown(flow)  # noqa: SLF001 - must not raise (never os.close(999999)) and clears
+    assert shepherd._flow is None
+
+
 def test_pump_pty_survives_a_non_eio_read_error() -> None:
     # A non-EIO OSError from os.read (e.g. EBADF from a concurrently-closed fd) must
     # still be treated as end-of-stream, not propagated past the reader thread.
