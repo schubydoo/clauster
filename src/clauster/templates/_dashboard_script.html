@@ -328,6 +328,13 @@
       // up front instead of failing silently when you click Start. loaded stays false
       // until /api/doctor answers, so the panel never flashes empty.
       readiness: { loaded: false, ok: true, checks: [], showAll: false, showPanel: false },
+      // #838: runtime claude account login state, refreshed by loadLoginStatus() on its
+      // OWN path (the cache-only /api/login-status endpoint, decoupled from refresh() so
+      // neither its latency nor a subprocess ever stalls the core poll). `known` stays
+      // false until a response has included the field (an unauthenticated/failed response
+      // omits it) — the header pill only renders once known AND logged out, so it never
+      // flashes a false "not logged in".
+      claudeLogin: { known: false, ok: true, expiresAt: null },
       activeFilter: "all",   // Zone 2 unified-list filter: all | browser | desktop | detached
       projectFilter: "",     // Zone 1 search box
       showAllProjects: false, // Zone 1: reveal projects beyond the cap
@@ -405,8 +412,12 @@
         this.loadAllPreflight();
         for (const n of PROJECT_NAMES) { this.loadUsage(n); }
         this.loadReadiness();  // fire-and-forget: doctor runs subprocess probes, don't block first paint
+        this.loadLoginStatus();  // #838: login pill on its own path — never gates core refresh()
         this.reattachActiveClones();  // #659: a clone started in another tab streams here too
         setInterval(() => this.refresh(), 4000);
+        // #838: refresh the login pill on its own cadence, decoupled from refresh() so a
+        // slow /healthz can't hold up the core instances/sessions/agents poll.
+        setInterval(() => this.loadLoginStatus(), 4000);
         // Live metrics on their own cadence (metrics.poll_seconds), if enabled.
         if (METRICS_ENABLED) { this.refreshMetrics(); setInterval(() => this.refreshMetrics(), METRICS_POLL_MS); }
         // Browser notifications (#541): request the permission grant up front when the
@@ -481,12 +492,40 @@
           this.readiness.loaded = true;
         } catch (e) { /* fetch failed -> leave loaded=false so the panel stays hidden */ }
       },
+      // #838: claude account login state for the header pill. Fetched on its OWN path
+      // from the dedicated /api/login-status endpoint — which reads ONLY the cached
+      // login state (no `claude --version`, no full health work), so this poll never
+      // spawns a subprocess on the request path however many tabs run it. Deliberately
+      // NOT folded into the core refresh() Promise.all, so it can never delay the
+      // instances/sessions/agents responses that gate the primary UI. Fire-and-forget +
+      // advisory: a failed/unauthenticated response (the body omits claude_login_ok)
+      // just leaves the indicator hidden — never a false "not logged in", never touches
+      // connLost. Distinct from the #663 restart-reload /healthz poll (a separate
+      // one-shot loop), which is left untouched.
+      async loadLoginStatus() {
+        try {
+          const r = await fetch(ROOT + "/api/login-status");
+          if (!r.ok) return;
+          const hz = await r.json().catch(() => ({}));
+          this.claudeLogin.known = Object.hasOwn(hz, "claude_login_ok");
+          this.claudeLogin.ok = !!hz.claude_login_ok;
+          this.claudeLogin.expiresAt = typeof hz.claude_login_expires_at === "number"
+            ? hz.claude_login_expires_at : null;
+        } catch (e) { /* fetch failed -> leave the pill in its prior (quiet) state */ }
+      },
       readinessIssues() { return this.readiness.checks.filter((c) => c.status !== "ok"); },
       // A "warn" lets a session still start; anything else (error/fail) is a hard blocker.
       // The pill's severity + wording follow this so it doesn't cry wolf over warnings.
       readinessBlockers() { return this.readiness.checks.filter((c) => c.status !== "ok" && c.status !== "warn"); },
       readinessWarnings() { return this.readiness.checks.filter((c) => c.status === "warn"); },
       checkClass(s) { return s === "ok" ? "text-success" : s === "warn" ? "text-warning" : "text-danger"; },
+      // #838: title text for the claude-login header pill. The pill only shows when
+      // logged out, so this always explains the not-logged-in state; loggedIn is the
+      // authoritative signal (from `claude auth status`, mechanism-agnostic).
+      claudeLoginTitle() {
+        return "claude is not logged in — bridges will start but fail to authenticate; "
+          + "run `claude` to sign in";
+      },
       // --- launch popover + unified active list ---
       // Outcome-language launch choices — jargon (hosted/bridge/background) mapped to
       // the plain result the user gets. The "cloud" checkbox folds into Background.
@@ -1092,17 +1131,30 @@
       // --- Claude Code config management (#773) ------------------------------
       // Open/close mirror the configEditor modal: remember the opener for focus
       // restore, lock background scroll, bump `gen` so a stale save is dropped.
-      openConfigMgmt() {
+      // `opts` (#837) lets a caller jump straight to a given project + surface —
+      // e.g. the per-project MCP-approval readiness warning links into the
+      // Server-approvals panel for THAT project instead of whatever was last open.
+      openConfigMgmt(opts) {
         const c = this.configMgmt;
         if (c.open || c.loading) return;  // single-flight: ignore re-entry
         c.gen = (c.gen || 0) + 1;
         c.trigger = document.activeElement;
         c.open = true; c.error = ""; c.saved = false; c.confirm = "";
+        const o = opts || {};
+        if (o.project) c.project = o.project;
         // Seed a project so project/local scope is usable immediately; user scope
         // ignores it. An empty list leaves it "" and the pick-a-project note shows.
         if (!c.project && this.projectNames.length) c.project = this.projectNames[0];
+        if (o.surface) c.surface = o.surface;
+        if (o.scope) c.scope = o.scope;
         document.body.style.overflow = "hidden";
         this.configMgmtReload();
+      },
+      // Jump straight to this project's Server-approvals panel (#837 readiness
+      // warning link) — project scope (approvals are project-scope only), mcp
+      // surface. Read-only navigation; never mutates config itself.
+      openMcpApprovalsFor(name) {
+        this.openConfigMgmt({ project: name, surface: "mcp", scope: "project" });
       },
       closeConfigMgmt() {
         const c = this.configMgmt;

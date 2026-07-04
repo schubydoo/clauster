@@ -13,10 +13,19 @@ def test_loads_minimal_config(write_config, projects_root):
     assert config.projects_root == projects_root
     assert config.host == "127.0.0.1"
     assert config.port == 7621
-    assert config.claude.binary == "claude"
     assert config.instance_defaults.capacity == 32
     assert config.instance_defaults.verbose is False  # off by default
     assert config.source_path == cfg_path
+
+
+def test_claude_binary_defaults_to_claude():
+    # The schema default is the bare name `claude` (resolved to an absolute path
+    # before spawning). Asserted against the model default directly rather than the
+    # write_config fixture, which points the binary at the fake stub for tests that
+    # exercise CLI-invoking endpoints (e.g. /healthz).
+    from clauster.config import ClausterConfig
+
+    assert ClausterConfig(projects_root=".").claude.binary == "claude"
 
 
 def test_instance_defaults_verbose_round_trips(write_config):

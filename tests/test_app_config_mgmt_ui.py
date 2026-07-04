@@ -32,6 +32,14 @@ def _html(write_config, extra: str) -> str:
     return resp.text
 
 
+def _row_html(write_config, extra: str) -> str:
+    """The per-row FRAGMENT render (GET /api/projects/{name}/row), not the full page."""
+    client = TestClient(create_app(load_config(write_config(extra))))
+    resp = client.get("/api/projects/alpha/row")
+    assert resp.status_code == 200
+    return resp.text
+
+
 # ---- gate: trigger + modal only when config-write is enabled ----------------
 
 
@@ -97,6 +105,24 @@ def test_mcp_surface_present_when_enabled(write_config):
     assert 'data-test="cm-mcp-approvals"' in html
     assert 'data-test="cm-mcp-approvals-save"' in html
     assert 'data-test="cm-mcp-reset-go"' in html
+
+
+def test_mcp_approval_link_gated_on_config_write_on_both_render_paths(write_config):
+    # #837: the "Resolve in Server approvals" link inside the per-project readiness
+    # detail jumps into the Server-approvals panel — which 404s when config-write is
+    # OFF. So the actionable link must render ONLY when config-write is enabled, on
+    # BOTH the full-page dashboard render AND the api_project_row fragment (the two
+    # paths that emit _project_row.html). The <template x-for> row markup is emitted
+    # inert by Jinja regardless of runtime state, so a plain data-test presence check
+    # is exact here — the ONLY gate on the button is {% if config_write_enabled %}.
+    link = 'data-test="mcp-approval-link"'
+    # Full-page render.
+    assert link not in _html(write_config, _OFF)
+    assert link in _html(write_config, _ON)
+    # Fragment render (must be threaded the same flag, else it reads undefined→falsy
+    # and the link would WRONGLY vanish on dynamically-inserted rows when it IS on).
+    assert link not in _row_html(write_config, _OFF)
+    assert link in _row_html(write_config, _ON)
 
 
 def test_skills_surface_present_when_enabled(write_config):

@@ -504,6 +504,15 @@
       <span class="text-secondary fs-5 fw-normal">v{{ version }}</span>
       <span class="text-secondary small d-none d-lg-inline ms-2 text-truncate">{{ projects_root }}</span>
       <div class="navbar-nav flex-row ms-auto align-items-center navbar-tools">
+        <!-- #838: claude account login state. Quiet by construction: renders NOTHING
+             until an authenticated /healthz response is known, and even then only
+             appears (a neutral badge, not a button) when logged out/expired — a
+             healthy login stays invisible so the header isn't cluttered by default. -->
+        <span class="badge bg-yellow-lt" x-cloak
+              x-show="claudeLogin.known && !claudeLogin.ok"
+              role="status"
+              :title="claudeLoginTitle()">
+          <svg class="ico me-1" aria-hidden="true"><use href="#ic-alert"/></svg>claude not logged in</span>
         <!-- Readiness promoted to a header pill: it gates whether anything will start,
              so it surfaces at header level (click to expand the checks). -->
         <!-- Severity-aware: solid red + "blocking" only when a check actually blocks a

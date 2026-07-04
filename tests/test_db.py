@@ -165,6 +165,27 @@ def test_hosted_save_prunes_absent_keys(persistence):
     assert store.load() == {"pid-2": {"project": "b2"}}
 
 
+def test_hosted_instance_id_round_trips(persistence):
+    # Regression guard for #841: the DB-backed hosted store must round-trip
+    # instance_id exactly like the JSON store, so a restart can restore the
+    # per-runtime id a client may have cached.
+    store = persistence.hosted_state_store()
+    iid = "33333333-3333-4333-8333-333333333333"
+    store.save({"pid-1": {"project": "alpha", "instance_id": iid}})
+    assert store.load() == {"pid-1": {"project": "alpha", "instance_id": iid}}
+
+
+def test_hosted_instance_id_absent_stays_absent(persistence):
+    # A record saved without instance_id (older client, or a pre-migration row)
+    # loads with the column NULL -> omitted, same "absent stays absent" contract
+    # as every other nullable hosted field. The caller's `.get("instance_id")`
+    # then falls through to the model's default_factory, minting a fresh id.
+    store = persistence.hosted_state_store()
+    store.save({"pid-1": {"project": "alpha"}})
+    loaded = store.load()["pid-1"]
+    assert "instance_id" not in loaded
+
+
 # ----- fail-closed read + raising save -----------------------------------
 
 
@@ -650,6 +671,35 @@ def test_instance_id_migration_rekeys_existing_row_with_deterministic_uuid(tmp_p
                 text("SELECT instance_id, project_name, label, resume_mode FROM instances")
             ).all()
         assert rows == [(expected_iid, "alpha", "Alpha", "pty")]
+    finally:
+        engine.dispose()
+
+
+def test_hosted_instance_id_migration_adds_and_drops_nullable_column(tmp_path):
+    # 0005 adds a nullable instance_id column to hosted_sessions (#841); upgrading
+    # to head must expose it, and downgrading one step must cleanly remove it
+    # again without disturbing the rest of the table (SQLite has no native ALTER,
+    # so this also covers the batch_alter_table add/drop path on this backend).
+    from alembic import command
+
+    engine = create_db_engine(tmp_path)
+    try:
+        with engine.connect() as conn:
+            cfg = Config(str(bootstrap._ALEMBIC_INI))
+            cfg.set_main_option("script_location", str(bootstrap._MIGRATIONS_DIR))
+            cfg.attributes["connection"] = conn
+            command.upgrade(cfg, "head")
+            columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(hosted_sessions)")).all()
+            }
+            assert "instance_id" in columns
+
+            command.downgrade(cfg, "c28a9ef64664")  # one step back, pre-0005
+            columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(hosted_sessions)")).all()
+            }
+            assert "instance_id" not in columns
+            assert "claustrum_process_id" in columns  # the rest of the table survives
     finally:
         engine.dispose()
 

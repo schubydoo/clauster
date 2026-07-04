@@ -365,6 +365,32 @@ def run_plugin(args):
     return int(os.environ.get("FAKE_CLAUDE_PLUGIN_EXIT_CODE", "0"))
 
 
+def run_auth(args):
+    """Fake `claude auth status --json` for #838 login-detection tests.
+
+    Scripted entirely via env vars so a test can drive each branch without ever
+    touching a real `claude`/account:
+      FAKE_CLAUDE_AUTH_STDOUT    = stdout text to emit (default '{"loggedIn": true,
+                                   "authMethod": "claude.ai", "apiProvider":
+                                   "firstParty"}')
+      FAKE_CLAUDE_AUTH_EXIT_CODE = exit code to return (default "0")
+      FAKE_CLAUDE_AUTH_HANG      = if set, sleep long enough to trip the caller's
+                                   subprocess timeout (exercises the timeout path)
+
+    Only handles the `status` verb; any other auth subcommand is unknown (exit 2),
+    matching the stub's strict "never guess" posture.
+    """
+    if args[:1] != ["status"]:
+        sys.stderr.write(f"fake-claude: unknown auth args {args}\n")
+        return 2
+    if os.environ.get("FAKE_CLAUDE_AUTH_HANG"):
+        time.sleep(30)  # far beyond the caller's ~5s bound -> TimeoutExpired
+        return 0
+    default = '{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty"}'
+    sys.stdout.write(os.environ.get("FAKE_CLAUDE_AUTH_STDOUT", default))
+    return int(os.environ.get("FAKE_CLAUDE_AUTH_EXIT_CODE", "0"))
+
+
 def main():
     args = sys.argv[1:]
     if args and args[0] == "--version":
@@ -373,6 +399,10 @@ def main():
     if args and args[0] == "agents" and "--json" in args:
         print(os.environ.get("FAKE_CLAUDE_AGENTS", "[]"))
         return 0
+    if args[:2] == ["auth", "login"]:
+        return run_login_shepherd("login", args[2:])
+    if args and args[0] == "auth":
+        return run_auth(args[1:])
     if args and args[0] == "remote-control":
         return run_bridge(args)
     if args and args[0] == "--remote-control":
@@ -381,8 +411,6 @@ def main():
         return run_mcp(args[1:])
     if args and args[0] == "plugin":
         return run_plugin(args[1:])
-    if args[:2] == ["auth", "login"]:
-        return run_login_shepherd("login", args[2:])
     if args and args[0] == "setup-token":
         return run_login_shepherd("setup-token", args[1:])
     sys.stderr.write(f"fake-claude: unknown args {args}\n")

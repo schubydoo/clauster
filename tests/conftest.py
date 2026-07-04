@@ -145,9 +145,20 @@ def projects_root(tmp_path: Path) -> Path:
 def write_config(tmp_path: Path, projects_root: Path):
     def _write(extra: str = "") -> Path:
         cfg = tmp_path / "clauster.yml"
+        # Default the `claude` binary to the fake stub unless the test declares its
+        # own `claude:` block. Without this, any app-level test that hits an endpoint
+        # invoking the CLI (e.g. `/healthz`, which probes `claude --version` and, per
+        # #838, `claude auth status --json`) would shell out to the REAL `claude` on
+        # the host's PATH — non-deterministic and a live account (never a real
+        # `auth status`). A test needing specific claude config still overrides it by
+        # passing its own `claude:` in `extra` (this default is then omitted so YAML
+        # never carries two `claude:` keys).
+        default_binary = "" if "claude:" in extra else f"claude:\n  binary: {FAKE_CLAUDE}\n"
         # encoding="utf-8" matches how load_config reads it (config.py); without it
         # the platform default (cp1252 on Windows) mangles non-ASCII symbols like €.
-        cfg.write_text(f"projects_root: {projects_root}\n{extra}", encoding="utf-8")
+        cfg.write_text(
+            f"projects_root: {projects_root}\n{default_binary}{extra}", encoding="utf-8"
+        )
         return cfg
 
     return _write

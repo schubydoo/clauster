@@ -157,6 +157,45 @@ def test_batch_preflight_literal_path_beats_name_route(write_config, tmp_path):
     assert isinstance(body.get("alpha"), dict)
 
 
+# ----- #837: MCP-approval preflight surfaced through both preflight routes ----
+
+
+def test_project_preflight_surfaces_unapproved_mcp_servers(write_config, tmp_path, projects_root):
+    # A committed .mcp.json with servers nobody has approved/rejected yet must show
+    # up as a WARN "mcp-approval" check on the per-project route — the read-only,
+    # pre-launch signal #837 asks for (never a FAIL; never blocks the launch).
+    (projects_root / "alpha" / ".mcp.json").write_text(
+        '{"mcpServers": {"unapproved-one": {"command": "x"}}}', encoding="utf-8"
+    )
+    r = _client(write_config, tmp_path).get("/api/projects/alpha/preflight")
+    assert r.status_code == 200
+    body = r.json()
+    checks = {c["name"]: c for c in body["checks"]}
+    assert "mcp-approval" in checks
+    assert checks["mcp-approval"]["status"] == "warn"
+    assert "unapproved-one" in checks["mcp-approval"]["detail"]
+    assert body["ok"] is True  # WARN-only: a preflight warning never flips ok False
+
+
+def test_project_preflight_no_mcp_json_omits_the_check(write_config, tmp_path, projects_root):
+    # No .mcp.json in the project at all -> no mcp-approval check appears (nothing
+    # to warn about), on both routes.
+    r = _client(write_config, tmp_path).get("/api/projects/alpha/preflight")
+    assert "mcp-approval" not in {c["name"] for c in r.json()["checks"]}
+
+
+def test_batch_preflight_surfaces_unapproved_mcp_servers(write_config, tmp_path, projects_root):
+    # Same signal on the batch (first-paint) route used by the dashboard grid.
+    (projects_root / "alpha" / ".mcp.json").write_text(
+        '{"mcpServers": {"needs-approval": {"command": "x"}}}', encoding="utf-8"
+    )
+    body = _client(write_config, tmp_path).get("/api/projects/preflight").json()
+    checks = {c["name"]: c for c in body["alpha"]["checks"]}
+    assert "mcp-approval" in checks
+    assert checks["mcp-approval"]["status"] == "warn"
+    assert "needs-approval" in checks["mcp-approval"]["detail"]
+
+
 # ----- projects sortmeta (batch sort keys for the Projects sort control, FE-2) ----
 
 
