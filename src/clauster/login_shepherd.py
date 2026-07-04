@@ -574,10 +574,36 @@ class LoginShepherd:
     def _teardown(self, flow: _Flow, *, already_cleared: bool = False) -> None:
         """Terminate + reap `flow`'s subprocess and clear it as the active flow.
 
-        For a PTY flow this also closes `flow.master_fd` (once, guarded by
-        `stdin_closed` — it doubles as "no more writes/close-owed" for both transports)
-        so the pty is never leaked across a teardown.
+        Teardown order is portability-critical for the PTY transport. The pty reader
+        thread blocks in ``os.read(master_fd)``, and closing that fd from another thread
+        does NOT interrupt an in-flight read on macOS/BSD (it does on Linux). Closing the
+        master while the reader is mid-read would therefore leak that thread — and its fd,
+        which a later ``openpty()`` can reuse, cross-wiring a subsequent flow's reader onto
+        stale bytes (the macOS CI hang: the whole xdist worker stalled on the pileup).
+        So the child is stopped FIRST: its exit closes the pty slave, and a *still-open*
+        master then reliably returns EOF/EIO on every POSIX platform, unblocking the
+        reader. Only AFTER the reader has joined is our control fd closed — the pty master,
+        or (for a plain-pipe flow, whose reader watches stdout and so was never affected)
+        the child's stdin. Closing it last means it is never pulled from under a live read.
         """
+        # Stop the child FIRST — for a PTY flow this is what unblocks the reader: closing
+        # master_fd out from under a blocked os.read does not interrupt it on macOS/BSD,
+        # but the child's exit closes the pty slave and a still-open master then returns
+        # EOF/EIO on every POSIX platform. (A plain-pipe reader watches the child's stdout,
+        # which the child's exit likewise EOFs — it was never affected.)
+        if flow.proc.poll() is None:
+            flow.proc.terminate()
+            try:
+                flow.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                flow.proc.kill()
+                flow.proc.wait(timeout=5)
+        # The reader is now unblocked by the child's EOF/EIO on the still-open fd.
+        if flow.reader_thread is not None:
+            flow.reader_thread.join(timeout=5)
+        # Close our write/control end LAST — the pty master, else the plain-pipe stdin —
+        # once the reader has joined, so it is never pulled from under an active read.
+        # `stdin_closed` guards idempotency (and doubles as "no more writes owed").
         try:
             if flow.master_fd is not None:
                 if not flow.stdin_closed:
@@ -588,15 +614,6 @@ class LoginShepherd:
                 flow.proc.stdin.close()
         except (OSError, ValueError):
             pass
-        if flow.proc.poll() is None:
-            flow.proc.terminate()
-            try:
-                flow.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                flow.proc.kill()
-                flow.proc.wait(timeout=5)
-        if flow.reader_thread is not None:
-            flow.reader_thread.join(timeout=5)
         if not already_cleared:
             with self._flow_lock:
                 if self._flow is flow:
