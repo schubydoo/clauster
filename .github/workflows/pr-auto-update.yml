@@ -16,6 +16,15 @@
 # Bot-authored PRs (the clauster-ci release App, Renovate) are skipped via the
 # `user.type === "Bot"` check; fork PRs (head in another repo) and the excluded
 # labels are skipped too.
+#
+# Two operational levers:
+#   - Per-PR hold: label a PR `no-autoupdate` to leave it BEHIND main (it stays
+#     out of the sweep until the maintainer rebases it manually).
+#   - Global kill-switch: `gh variable set AUTO_UPDATE --body off` pauses the
+#     whole sweep repo-wide (every open PR is left behind); `gh variable set
+#     AUTO_UPDATE --body on` (or `gh variable delete AUTO_UPDATE`) resumes it.
+# Either way, a held/paused PR sits BEHIND main and can't merge under the
+# strict-up-to-date ruleset until it's manually updated — that's the intent.
 name: Auto-update PRs
 
 on:
@@ -66,11 +75,16 @@ jobs:
           exit 1
       - name: Update open PRs targeting the default branch
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          AUTO_UPDATE: ${{ vars.AUTO_UPDATE }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
+            const mode = (process.env.AUTO_UPDATE || 'on').toLowerCase();
+            if (mode === 'off') { core.info('auto-update disabled via the AUTO_UPDATE repo variable'); return; }
             const EXCLUDE = new Set([
               "dependencies",
+              "no-autoupdate", // per-PR opt-out: maintainer rebases this one manually
             ]);
             const base = context.payload.repository.default_branch;
             const repoFullName = context.payload.repository.full_name;
@@ -87,7 +101,10 @@ jobs:
               if (pr.draft) continue;
               if (pr.user?.type === "Bot") continue; // the release bot + Renovate
               if (pr.head?.repo?.full_name !== repoFullName) continue; // fork PR
-              if (pr.labels.some((l) => EXCLUDE.has(l.name))) continue;
+              if (pr.labels.some((l) => EXCLUDE.has(l.name))) {
+                core.info(`skip #${pr.number} (hold label)`);
+                continue;
+              }
               try {
                 // merges API (App-enabled, unlike update-branch): merge the default
                 // branch INTO the PR's branch — same effect as "Update branch".
