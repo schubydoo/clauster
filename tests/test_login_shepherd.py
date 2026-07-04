@@ -780,6 +780,11 @@ def test_dashboard_context_reflects_flag(tmp_path: Path) -> None:
         # the /status poll endpoint (used by the interval + manual recheck).
         assert "recheck()" in resp.text
         assert "/api/login-shepherd/status" in resp.text
+        # Overlapping-poll defenses must ship too: the single-flight `rechecking` guard,
+        # and the terminal-wins guard that returns early once `finished` (so a late
+        # status/409 response can't clobber an already-captured one-time token).
+        assert "rechecking" in resp.text
+        assert "this.finished || this.rechecking" in resp.text
     with _client(tmp_path, enabled=False) as c:
         resp = c.get("/")
         assert resp.status_code == 200
