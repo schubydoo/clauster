@@ -225,7 +225,7 @@ on Clauster itself, use the dev quick-start below.
 - Scoop: run `scoop uninstall clauster`.
 - Docker: stop and remove the container with `docker rm -f clauster`, then remove
   the image with `docker rmi ghcr.io/schubydoo/clauster:latest` (substitute the
-  pinned tag you pulled, e.g. `:0.5.0`, if you used a specific release) if you no
+  pinned tag you pulled, e.g. `:X.Y.Z`, if you used a specific release) if you no
   longer need it. Docker Compose users: run `docker compose down` from the directory
   containing `compose.yaml` (add `-v` to also delete named volumes).
 - Full purge: stop Clauster first, then remove your `state_dir` if you want local
@@ -375,6 +375,8 @@ clauster run                  # start the server (default)
 clauster hash-password        # generate an argon2id hash for auth.password_hash
 clauster hash-token           # mint an API token + hash for auth.api_token_hash
 clauster hash-metrics-token   # mint a /metrics scrape token + hash for observability.metrics_token_hash
+clauster api-token issue|list|rotate|revoke   # manage named public-API bearer tokens
+clauster mcp                  # read-only MCP server over stdio (list + status)
 clauster doctor               # diagnose config / environment
 clauster backup | restore | migrate
 clauster install-service {systemd|launchd|windows}
@@ -389,9 +391,6 @@ clauster config reconcile     # remove deprecated config keys, writing their rep
 Planned work, roughly in priority order — the public-facing companion to the in-repo
 `scratch/TODO.md`.
 
-- **Public API** — promote the existing `/api/*` routes to a documented, versioned
-  OpenAPI contract so third parties can build their own dashboards (Bearer API
-  tokens, distinct from the session cookie, already ship — see `clauster hash-token`).
 - **Session naming** — predictable/branded session display names instead of the
   random adjective-noun defaults; list active/resumable sessions in the UI.
 
@@ -401,9 +400,15 @@ operator; isolate with separate instances instead). The UI is English-only and n
 localized — there is no i18n string extraction on the roadmap (re-scope only if a real
 translation contributor appears).
 
-*Shipped:* the in-repo [`docs/`](docs/index.md) pages (setup, networking, config
-reference, security model) are published as a live docs site at
-[schubydoo.github.io/clauster](https://schubydoo.github.io/clauster/).
+*Shipped:*
+
+- **Public API** — a documented, versioned [`/api/v1`](docs/public-api.md) surface with
+  named Bearer tokens (distinct from the session cookie), managed via
+  `clauster api-token issue|list|rotate|revoke`; an opt-in OpenAPI schema
+  (`api.openapi_enabled`) is available for third-party dashboards.
+- The in-repo [`docs/`](docs/index.md) pages (setup, networking, config reference,
+  security model) are published as a live docs site at
+  [schubydoo.github.io/clauster](https://schubydoo.github.io/clauster/).
 
 ## Stack
 

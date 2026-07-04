@@ -515,6 +515,9 @@ rather than silently ignored.
 
 Each bridge-event POST body is `{"event": "<name>", "project": ..., "label": ...,
 "status": ..., "resume_mode": ..., "spawn_mode": ..., "session_ref": ...}`.
+(The payload field `resume_mode` is the per-session bridge mode — `standard`/`pty`
+— distinct from the renamed `claude.launch_mode` config key above; the wire field
+keeps the older name.)
 `session_ref` is a stable, non-reversible token (16 hex chars) derived from the
 bridge's starter session id via HMAC-SHA256 keyed by the deployment's
 session-signing secret — it lets a receiver correlate the lifecycle events of one

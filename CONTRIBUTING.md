@@ -76,7 +76,8 @@ uv run clauster
 
 CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.14
 (all merge-blocking; Linux additionally enforces the 96% coverage gate), plus
-lint, security scanners, and dependency review.
+lint, security scanners, and dependency review. Internal PRs run a representative
+subset of the OS/Python legs; the full matrix runs on release and fork PRs.
 
 ## Documentation
 

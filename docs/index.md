@@ -84,12 +84,14 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 
 ## Where to next
 
+- [Quickstart](quickstart.md) — your first bridge in a few minutes.
 - [Installation](installation.md) — pip / uv, Docker / Compose, running.
 - [Configuration](configuration.md) — the complete `clauster.yml` reference.
 - [Public API](public-api.md) — the versioned `/api/v1` surface and `clauster api-token` CLI.
 - [Security](security.md) — trust model, auth, redaction.
 - [Privacy](privacy.md) — what Clauster keeps on disk, and how to purge it.
 - [Networking](networking.md) — the loopback / non-loopback auth matrix.
+- [MCP server](mcp.md) — the read-only `clauster mcp` stdio server.
 - [Architecture](architecture.md) — module map and bridge lifecycle.
 - [Operations](operations.md) — monitoring + troubleshooting runbook.
 

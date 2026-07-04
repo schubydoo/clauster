@@ -33,9 +33,10 @@ deployment it has nothing to do.)
 
 0.13 commits to SQLite as the only persistence substrate (#796) — the
 never-really-supported `database_url` config key (a Postgres DSN escape hatch)
-is gone. Config schema is additive-only, so a leftover `database_url` line in
-an older `clauster.yml` is **silently ignored on load**, not rejected — no
-action required. `clauster.db` under `state_dir` remains the only database;
+is gone. A leftover `database_url` (the YAML key **or** the
+`CLAUSTER_DATABASE_URL[_FILE]` env override) is **ignored with a logged
+warning**, not rejected — your data goes to SQLite regardless. Remove the
+key/env to silence the warning. `clauster.db` under `state_dir` remains the only database;
 nothing about the schema, migrations, or `state_dir` layout changes.
 
 ## 0.11 → 0.12: the state store moves to SQLite

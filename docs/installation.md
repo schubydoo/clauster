@@ -2,7 +2,8 @@
 
 Clauster needs the `claude` CLI on the host's `PATH` — Clauster spawns `claude`,
 it does **not** vendor it. Install Claude Code separately and make sure it is new
-enough (the default floor is `claude.min_version`, currently `2.1.145`). The
+enough (the default floor is the `claude.min_version` config default; run
+`clauster doctor` to check the installed `claude` against it). The
 `uv` / `pip` / `pipx` installs below also need **Python 3.11+**; the standalone
 binary, install script, Scoop, Homebrew, and Nix paths do not.
 
@@ -293,6 +294,8 @@ clauster run                  # start the server (default)
 clauster hash-password        # generate an argon2id hash for auth.password_hash
 clauster hash-token           # mint an API token + hash for auth.api_token_hash
 clauster hash-metrics-token   # mint a /metrics scrape token + hash for observability.metrics_token_hash
+clauster api-token issue|list|rotate|revoke   # manage named public-API bearer tokens
+clauster mcp                  # read-only MCP server over stdio (list + status)
 clauster config reconcile     # remove deprecated config keys, writing their replacements
 clauster doctor               # diagnose config / environment
 clauster backup | restore | migrate

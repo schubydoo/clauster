@@ -110,14 +110,15 @@ Origin/CSRF gate above; they are belt-and-suspenders, not the access control.
   constant) so only the inline `<script>` blocks carrying the matching
   `nonce="…"` attribute run. `'unsafe-inline'` is **dropped** from `script-src`
   entirely — that is what blocks an injected inline script that lacks the
-  nonce — while `'unsafe-eval'` is intentionally **retained** for Alpine.
-  `frame-ancestors 'none'` and `object-src 'none'` round out the clickjacking /
-  plugin surface. (If the nonce is ever absent on a degraded path the policy
-  stays *stricter*, never looser — `'unsafe-inline'` is omitted regardless.)
-  One deliberate asymmetry: `style-src` **keeps** `'unsafe-inline'` — inline
-  `<style>` blocks and `style="…"` attributes can't be nonce-gated without
-  removing them — so the style channel is intentionally looser than the
-  nonce-gated script channel.
+  nonce — and `'unsafe-eval'` is **dropped** too: Clauster ships the
+  CSP-friendly `@alpinejs/csp` build (`alpine.csp.min.js`, `'self'`-allowed), so
+  Alpine no longer needs a `new Function()` evaluator. `frame-ancestors 'none'`
+  and `object-src 'none'` round out the clickjacking / plugin surface.
+  `style-src` is **nonce-gated the same way**: its inline `<style>` blocks carry
+  the matching nonce and `'unsafe-inline'` is dropped from it too — the only
+  constraint that leaves is that Alpine `:style` bindings must use the object
+  form. (If the nonce is ever absent on a degraded path the policy stays
+  *stricter*, never looser — `'unsafe-inline'` is omitted from both regardless.)
 - **`X-Frame-Options: DENY`** — refuses framing outright (a legacy companion to
   `frame-ancestors 'none'`).
 - **`X-Content-Type-Options: nosniff`** — stops MIME-type sniffing.
@@ -275,7 +276,7 @@ whose host is — or resolves to — a loopback / link-local / private / CGNAT /
 metadata IP, using the **same** private-range classifier as the clone guard
 (it imports `provisioning._EXTRA_PRIVATE_NETS`). Default-off preserves the
 LAN-receiver use case. See
-[`webhooks`](configuration.md#webhooks--outbound-lifecycle-webhooks-webhooksconfig)
+[`webhooks`](configuration.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)
 in the configuration reference for the field.
 
 ## bypassPermissions footgun gate
