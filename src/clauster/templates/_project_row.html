@@ -284,12 +284,33 @@
                         </div>
                       </div>
 
-                      {# Primary Run action. Hidden while a trust/bypass gate is showing INSIDE the
+                      {# #851: interactive-launch MCP-approval SOFT-BLOCK. An Interactive Session
+                         with unapproved committed .mcp.json servers deterministically hangs at
+                         claude's enable prompt (the read-only terminal can't answer it), so block
+                         by default with an error-styled confirm rather than the passive WARN. Two
+                         actions: resolve (a real BUTTON, not a link — #851 feedback) or the explicit
+                         "Launch anyway" override (guards the #850 false-positive case). #}
+                      <div class="alert alert-danger mt-2 mb-0" data-test="mcp-approval-block" x-cloak
+                           x-show="confirmMcp['{{ p.name }}']" role="group" aria-labelledby="mcp-block-head-{{ p.name }}"
+                           x-effect="focusMcpBlock(confirmMcp['{{ p.name }}'], $refs)">
+                        <p id="mcp-block-head-{{ p.name }}" class="mb-2"><svg class="ico me-1 text-danger" aria-hidden="true"><use href="#ic-alert"/></svg>This <strong>Interactive Session</strong> will hang at claude's MCP approval prompt and won't connect — the read-only terminal can't answer it. Resolve the unapproved server(s) first.</p>
+                        <p class="text-secondary small mb-2" x-text="mcpApprovalMessage('{{ p.name }}')"></p>
+                        <div class="btn-list">
+                          <button type="button" class="btn btn-sm btn-primary" x-ref="mcpResolveBtn" data-test="mcp-resolve"
+                                  @click="resolveMcpApprovals('{{ p.name }}')">Resolve in Server approvals</button>
+                          <button type="button" class="btn btn-sm btn-ghost-danger" data-test="mcp-launch-anyway"
+                                  :disabled="launching['{{ p.name }}']"
+                                  @click="launchAnyway('{{ p.name }}', lmode, lperm, lcloud, lprompt)">Launch anyway</button>
+                          <button type="button" class="btn btn-sm btn-ghost-secondary" @click="cancelMcpGate('{{ p.name }}')">Cancel</button>
+                        </div>
+                      </div>
+
+                      {# Primary Run action. Hidden while a trust/bypass/MCP gate is showing INSIDE the
                          popover so the gate's own confirm button is the single next step (no competing
                          primary). On a clean launch (no gate pending) launchRun() returns true and the
                          popover closes; when it opens a gate it returns false and the popover stays. #}
-                      <button type="button" class="btn btn-primary w-100 mt-2" data-test="launch-run-go"
-                              x-show="!confirmTrust['{{ p.name }}'] && !confirmBypass['{{ p.name }}']" x-cloak
+                      <button type="button" class="btn btn-primary w-100 mt-2" data-test="launch-run-go" x-ref="launchGo"
+                              x-show="!confirmTrust['{{ p.name }}'] && !confirmBypass['{{ p.name }}'] && !confirmMcp['{{ p.name }}']" x-cloak
                               :disabled="launching['{{ p.name }}']"
                               @click="launchRunAndClose('{{ p.name }}', lmode, lperm, lcloud, lprompt)">
                         <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="permLabel(lperm)"></span>

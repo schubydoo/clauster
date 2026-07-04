@@ -304,6 +304,8 @@
       bypassTyped: {},
       confirmTrust: {},
       trustConfirmed: {},   // the "I trust…" checkbox in the trust-on-start dialog
+      confirmMcp: {},       // #851: interactive-launch MCP-approval soft-block gate (name -> shown)
+      mcpOverride: {},      // #851: name -> operator chose "Launch anyway" past the soft-block
       cmd: {},
       usage: {},
       sortMeta: {},       // project name -> {last_used: iso|null, cost_usd: float|null}; Zone 1 sort (lazy)
@@ -395,6 +397,11 @@
       //   x-effect="if (confirmBypass[name]) $nextTick(() => $refs.bypassInput && ...focus())"
       focusBypassInput(active, refs) {
         if (active) this.$nextTick(() => { if (refs.bypassInput) refs.bypassInput.focus(); });
+      },
+      // #851: move focus into the MCP-approval soft-block when it opens (WCAG 2.4.3 / 4.1.3)
+      // — the Run button hides while the gate shows, so focus would otherwise orphan on <body>.
+      focusMcpBlock(active, refs) {
+        if (active) this.$nextTick(() => { if (refs.mcpResolveBtn) refs.mcpResolveBtn.focus(); });
       },
       async init() {
         for (const n of PROJECT_NAMES) {
@@ -557,6 +564,17 @@
           // await it (start is async) so launching[name] stays set across the spawn — else
           // the finally clears the guard immediately and a desktop double-click double-spawns.
           else {
+            // #851: an INTERACTIVE (pty) launch DETERMINISTICALLY hangs at claude's "N new
+            // MCP servers found — enable?" prompt when the project has unapproved committed
+            // .mcp.json servers — the read-only live terminal can't answer it, so the bridge
+            // never connects. Soft-block: route into an error-styled confirm gate INSIDE the
+            // popover instead of launching, unless the operator picked "Launch anyway" (the
+            // escape hatch for a false-positive preflight, #850). Only pty — standard
+            // server-mode is not confirmed to hit the same gate, so it keeps the passive WARN.
+            if (this._mcpGateBlocks(name) && !this.mcpOverride[name]) {
+              this.confirmMcp[name] = true;
+              return false;  // keep the popover open; the gate renders inside it
+            }
             if (perm) this.permMode[name] = perm;
             await this.start(name);
             // start() opened a confirm gate (trust-on-start or bypass typed-confirm) → keep
@@ -1737,7 +1755,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.confirm = ""; await this._loadMcp(gen); }
+          if (res.ok) { c.saved = true; ap.confirm = ""; await this._loadMcp(gen); this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } finally { ap.ops = Math.max(0, ap.ops - 1); ap.busy = ap.ops > 0; }
       },
@@ -1757,7 +1775,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.resetConfirm = ""; await this._loadMcp(gen); }
+          if (res.ok) { c.saved = true; ap.resetConfirm = ""; await this._loadMcp(gen); this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } finally { ap.resetBusy = false; }
       },
@@ -2902,6 +2920,51 @@
       async launchRunAndClose(name, lmode, lperm, lcloud, lprompt) {
         const done = await this.launchRun(name, lmode, lperm, lcloud, lprompt);
         if (done) this._closeLaunchPop(name);
+      },
+      // #851: the unapproved-MCP-servers preflight WARN for this project (or null). The
+      // preflight readers key these checks by name; the same `mcp-approval` name the
+      // project-row detail already links "Resolve in Server approvals" from.
+      _mcpApprovalCheck(name) {
+        return this.preflightWarnings(name).find(c => c && c.name === "mcp-approval") || null;
+      },
+      // Whether a launch of THIS project should be soft-blocked. Only interactive (pty)
+      // launches hang at the MCP gate (confirmed); standard server-mode is not confirmed to
+      // block, so it is left as the passive preflight WARN, not gated here.
+      _mcpGateBlocks(name) {
+        const pty = (this.resumeMode[name] || DEFAULT_RESUME_MODE) === "pty";
+        return pty && !!this._mcpApprovalCheck(name);
+      },
+      // The check's own message (which lists the specific unapproved servers), shown inside
+      // the gate below the headline. Empty string if the check has since cleared.
+      mcpApprovalMessage(name) {
+        const c = this._mcpApprovalCheck(name);
+        return c ? c.message : "";
+      },
+      // "Launch anyway" — the operator overrides the soft-block (a false positive, #850, or
+      // they know better). Set the per-project override so the re-run skips the gate, close
+      // it, and launch. The override is cleared whenever the popover is (re)opened, so the
+      // block is always back by default on the next launch attempt.
+      async launchAnyway(name, lmode, lperm, lcloud, lprompt) {
+        this.mcpOverride[name] = true;
+        this.confirmMcp[name] = false;
+        await this.launchRunAndClose(name, lmode, lperm, lcloud, lprompt);
+      },
+      // Back out of the soft-block without launching; the override stays unset so a
+      // subsequent Run re-blocks (block-by-default). Return focus to the now-revealed Run
+      // button so it doesn't orphan on the hidden Cancel (WCAG 2.4.3, matching how the
+      // trust/bypass gates hand focus back).
+      cancelMcpGate(name) {
+        this.confirmMcp[name] = false;
+        this.$nextTick(() => { if (this.$refs.launchGo) this.$refs.launchGo.focus(); });
+      },
+      // "Resolve in Server approvals" — hand off to the config-mgmt MCP-approvals panel.
+      // Close the launch popover first so no stale gate lingers behind the modal; on a
+      // successful approval the save path refreshes this project's preflight, so reopening
+      // Run afterwards no longer blocks.
+      resolveMcpApprovals(name) {
+        this.confirmMcp[name] = false;
+        this._closeLaunchPop(name);
+        this.openMcpApprovalsFor(name);
       },
       // Stable transcript x-for key (#720). Owns the nullish fallback the template used
       // to inline with `??` — the CSP-build parser has no nullish operator, and `||`
@@ -4077,7 +4140,14 @@
       // valid spawn mode. (Was a two-statement inline handler with an if.)
       toggleLaunchPop(isGitRepo) {
         this.lopen = !this.lopen;
-        if (this.lopen) { this.coerceSpawnMode(name, isGitRepo); this.coercePtySpawn(name); }
+        if (this.lopen) {
+          this.coerceSpawnMode(name, isGitRepo);
+          this.coercePtySpawn(name);
+          // #851: every fresh open starts blocked-by-default — clear any prior gate/override
+          // so a past "Launch anyway" never silently carries into a new launch attempt.
+          this.confirmMcp[name] = false;
+          this.mcpOverride[name] = false;
+        }
       },
       // Dismiss the popover (outside-click / Escape) AND clear any pending trust/bypass
       // gate (#686) so a hidden gate never lingers; mopen resets so More options
@@ -4087,6 +4157,8 @@
         this.mopen = false;
         this.confirmTrust[name] = false;
         this.confirmBypass[name] = false;
+        this.confirmMcp[name] = false;    // #851: clear the MCP soft-block on dismiss too
+        this.mcpOverride[name] = false;
       },
       // Card-menu item: open/close the CLAUDE.md editor, then close the menu. `menu`
       // lives on the card-menu's inline x-data scope, which sits ABOVE this component
