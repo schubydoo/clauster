@@ -549,6 +549,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             yield
         finally:
             await app.state.hosted.aclose()  # detach (not stop); sessions survive the restart
+            # Login shepherd (#839): reap any in-flight `claude auth login` subprocess so an
+            # abandoned (or mid-flow-at-shutdown) login can't outlive the app. `cancel()` is a
+            # safe no-op when nothing is active; it's sync and can block on terminate/kill
+            # waits, so run it off the event loop. Always set in create_app, so no None guard.
+            await asyncio.to_thread(app.state.login_shepherd.cancel)
             daemon = getattr(app.state, "claustrum_daemon", None)
             if daemon is not None:
                 await daemon.aclose()  # drop our connection; leave the daemon running

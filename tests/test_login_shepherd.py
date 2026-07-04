@@ -104,9 +104,11 @@ def test_start_bounded_wait_survives_a_slow_url(shepherd, monkeypatch) -> None:
         shepherd.cancel()
 
 
-def test_unknown_binary_raises_before_spawning(monkeypatch) -> None:
+def test_unknown_binary_raises_login_shepherd_error(monkeypatch) -> None:
+    # An unresolvable binary must surface as a LoginShepherdError (→ 400 at the route),
+    # NOT the raw claude_cli.ClaudeNotFound that would escape the route's except and 500.
     bad = ls.LoginShepherd("definitely-not-a-real-claude-binary-xyz")
-    with pytest.raises(Exception):  # noqa: B017 - claude_cli.ClaudeNotFound, a RuntimeError
+    with pytest.raises(ls.LoginShepherdError, match="claude binary not found"):
         bad.start("login")
     assert not bad.is_active()
 
@@ -434,6 +436,42 @@ def test_start_route_start_failure_is_400(tmp_path: Path, monkeypatch) -> None:
     with _client(tmp_path, enabled=True) as c:
         resp = c.post("/api/login-shepherd/start", json={"mode": "login"})
         assert resp.status_code == 400
+
+
+def test_start_route_unresolvable_binary_is_400_not_500(tmp_path: Path) -> None:
+    # An unresolvable `claude` binary raises claude_cli.ClaudeNotFound inside start();
+    # it must be re-raised as LoginShepherdError so the route returns a clean 400, never
+    # a 500 that escapes the route's except.
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    cfg = ClausterConfig.model_validate(
+        {
+            "projects_root": str(tmp_path / "projects"),
+            "state_dir": str(tmp_path / "state"),
+            "claude": {"binary": "definitely-not-a-real-claude-binary-xyz"},
+            "login_shepherd": {"enabled": True},
+        }
+    )
+    with TestClient(create_app(cfg)) as c:
+        resp = c.post("/api/login-shepherd/start", json={"mode": "login"})
+        assert resp.status_code == 400
+
+
+def test_lifespan_shutdown_reaps_an_active_flow(tmp_path: Path, monkeypatch) -> None:
+    # FIX #839: an in-flight login subprocess (started, awaiting a pasted code) must be
+    # cancelled + reaped when the app's lifespan exits — not left running past shutdown.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    cfg = _cfg(login_shepherd_enabled=True, auth_enabled=False, tmp_path=tmp_path)
+    app = create_app(cfg)
+    with TestClient(app) as c:
+        start = c.post("/api/login-shepherd/start", json={"mode": "login"})
+        assert start.status_code == 200
+        shepherd = app.state.login_shepherd
+        assert shepherd.is_active()
+        proc = shepherd._flow.proc  # noqa: SLF001 - confirm the reap after lifespan exit
+    # The `with` block exited → FastAPI ran lifespan shutdown, which cancels the shepherd.
+    assert not shepherd.is_active()
+    assert proc.poll() is not None  # terminated + reaped, not orphaned
 
 
 def test_routes_require_auth_when_auth_enabled(tmp_path: Path) -> None:

@@ -99,6 +99,7 @@ class _Flow:
     mode: Mode
     proc: subprocess.Popen
     lock: threading.Lock = field(default_factory=threading.Lock)
+    submit_lock: threading.Lock = field(default_factory=threading.Lock)
     buffer: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
     stdin_closed: bool = False
@@ -143,7 +144,13 @@ class LoginShepherd:
         with self._flow_lock:
             if self._flow is not None:
                 raise AlreadyActiveError("a login flow is already in progress; cancel it first")
-            resolved = claude_cli.resolve_binary(self._binary)
+            try:
+                resolved = claude_cli.resolve_binary(self._binary)
+            except claude_cli.ClaudeNotFound as exc:
+                # An unresolvable binary is a login-flow failure (→ 400 at the route),
+                # not an unhandled 500. `self._flow` is still unset here — the fail path
+                # never leaves a phantom active flow behind.
+                raise LoginShepherdError(f"claude binary not found: {exc}") from exc
             argv = (
                 [resolved, "auth", "login", "--claudeai"]
                 if mode == "login"
@@ -205,35 +212,47 @@ class LoginShepherd:
         ever surfaced; the caller must copy it immediately.
 
         Never logs `code` or the extracted token. Raises `NotActiveError` if no
-        flow is in progress.
+        flow is in progress. Serialized per-flow (``flow.submit_lock``) so two
+        concurrent submits can't interleave writes to the same stdin: the second
+        blocks, then finds the flow already reaped and re-raises `NotActiveError`.
         """
         with self._flow_lock:
             flow = self._flow
         if flow is None:
             raise NotActiveError("no login flow is in progress")
 
-        try:
-            if flow.proc.stdin is not None and not flow.stdin_closed:
-                flow.proc.stdin.write(code + "\n")
-                flow.proc.stdin.flush()
-        except (OSError, ValueError) as exc:
-            # The subprocess may have already exited (closed pipe) — surface as a
-            # failure rather than raising an unhandled error to the caller.
-            _log.warning("login_shepherd: writing code to %s stdin failed: %s", flow.mode, exc)
+        with flow.submit_lock:
+            # Re-check under the per-flow lock: a concurrent submit may have already
+            # driven this flow to a terminal outcome and torn it down while we waited.
+            # Defensive concurrency guard — deterministically exercising the race that
+            # trips it isn't practical with a C-level lock, so the reject arm is
+            # pragma-excluded rather than tested with a brittle timing hack.
+            with self._flow_lock:
+                if self._flow is not flow:  # pragma: no cover - concurrent-teardown guard
+                    raise NotActiveError("no login flow is in progress")
 
-        _, output, exited = _wait_for(flow, lambda _snap: None, timeout=SUBMIT_TIMEOUT_SECONDS)
-        if exited and flow.reader_thread is not None:
-            # The reader thread's last `readline()` can still be draining the pipe in
-            # the instant `poll()` first reports exit — join briefly so the final
-            # printed line (e.g. setup-token's token) isn't missed by the snapshot below.
-            flow.reader_thread.join(timeout=2)
-            output = flow.snapshot()
-        exit_code = flow.proc.poll()
-        ok = exited and exit_code == 0
-        token_match = _TOKEN_RE.search(output)
-        token = token_match.group(1) if token_match else None
+            try:
+                if flow.proc.stdin is not None and not flow.stdin_closed:
+                    flow.proc.stdin.write(code + "\n")
+                    flow.proc.stdin.flush()
+            except (OSError, ValueError) as exc:
+                # The subprocess may have already exited (closed pipe) — surface as a
+                # failure rather than raising an unhandled error to the caller.
+                _log.warning("login_shepherd: writing code to %s stdin failed: %s", flow.mode, exc)
 
-        self._teardown(flow)
+            _, output, exited = _wait_for(flow, lambda _snap: None, timeout=SUBMIT_TIMEOUT_SECONDS)
+            if exited and flow.reader_thread is not None:
+                # The reader thread's last `readline()` can still be draining the pipe in
+                # the instant `poll()` first reports exit — join briefly so the final
+                # printed line (e.g. setup-token's token) isn't missed by the snapshot below.
+                flow.reader_thread.join(timeout=2)
+                output = flow.snapshot()
+            exit_code = flow.proc.poll()
+            ok = exited and exit_code == 0
+            token_match = _TOKEN_RE.search(output)
+            token = token_match.group(1) if token_match else None
+
+            self._teardown(flow)
 
         if ok:
             message = (
