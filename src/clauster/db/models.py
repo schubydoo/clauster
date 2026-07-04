@@ -137,6 +137,12 @@ class HostedSession(Base, TimestampMixin):
     agent_proc_start: Mapped[float | None] = mapped_column(Float, nullable=True)
     started_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     intentional_stop: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # The per-runtime RemoteControlInstance.instance_id (#834/#840), persisted so a
+    # client that cached it keeps resolving via HostedManager._key_for after a
+    # restart instead of hitting a freshly re-minted id (#841). Nullable: a
+    # pre-migration row loads with it absent and the model's default_factory mints
+    # one, same as today.
+    instance_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class SessionEvent(Base, TimestampMixin):

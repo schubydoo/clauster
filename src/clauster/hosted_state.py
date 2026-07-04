@@ -23,8 +23,11 @@ from .state import KeyedJsonStore
 CURRENT_SCHEMA = 1
 
 # The hosted-session fields a restart can't recover live. ``daemon_last_seq`` is
-# the reattach replay cursor; the rest rebuild the dashboard row. All JSON-safe
-# (the manager serializes Path/datetime before handing them here).
+# the reattach replay cursor; ``instance_id`` is the per-runtime UUID lifecycle
+# routes also accept (#834/#840) — persisting it lets a client-cached id keep
+# resolving across a restart instead of resolving to a freshly-minted one (#841).
+# The rest rebuild the dashboard row. All JSON-safe (the manager serializes
+# Path/datetime before handing them here).
 _PERSISTED_FIELDS = (
     "project",
     "label",
@@ -36,6 +39,7 @@ _PERSISTED_FIELDS = (
     "agent_proc_start",
     "started_at",
     "intentional_stop",
+    "instance_id",
 )
 
 _log = logging.getLogger("clauster.hosted_state")
