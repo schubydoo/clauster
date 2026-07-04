@@ -168,6 +168,9 @@ EXCLUDED_FIELDS: dict[str, str] = {
     # browser session could turn on its own path to rewriting the account's auth state.
     "login_shepherd.enabled": "login-shepherd: drives a live claude-account OAuth login; "
     "file/CLI-managed only, never web-editable (writes the runtime account's credentials)",
+    "login_shepherd.allow_setup_token": "login-shepherd: setup-token second opt-in; mints a "
+    "long-lived credential the operator copies out, file/CLI-managed only, never "
+    "web-editable (same rationale as login_shepherd.enabled)",
 }
 _EXCLUDED = frozenset(EXCLUDED_FIELDS)
 

@@ -94,6 +94,17 @@ def test_validate_edits_rejects_disallowed_field(write_config) -> None:
         validate_edits(raw, {"host": "0.0.0.0"})
 
 
+def test_login_shepherd_allow_setup_token_is_excluded(write_config) -> None:
+    # #846 second gate: same rationale as login_shepherd.enabled and
+    # config_write.allow_user_scope — never web-editable, so a browser session can't
+    # grant itself the higher-risk setup-token mode.
+    assert "login_shepherd.allow_setup_token" in EXCLUDED_FIELDS
+    assert "login_shepherd.allow_setup_token" not in EDITABLE_FIELDS
+    raw = _raw(write_config)
+    with pytest.raises(DisallowedFieldError):
+        validate_edits(raw, {"login_shepherd.allow_setup_token": True})
+
+
 def test_validate_edits_trips_fail_closed_validator(write_config) -> None:
     # A *value* that's individually out of range still fails re-validation, never silently.
     raw = _raw(write_config)

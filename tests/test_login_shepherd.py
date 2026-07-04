@@ -860,27 +860,54 @@ def test_pump_stdout_survives_a_read_error() -> None:
 # --- routes: config gate, auth, request validation ----------------------------------
 
 
-def _cfg(*, login_shepherd_enabled: bool, auth_enabled: bool, tmp_path: Path) -> ClausterConfig:
+def _cfg(
+    *,
+    login_shepherd_enabled: bool,
+    auth_enabled: bool,
+    tmp_path: Path,
+    allow_setup_token: bool = False,
+) -> ClausterConfig:
     return ClausterConfig.model_validate(
         {
             "projects_root": str(tmp_path / "projects"),
             "state_dir": str(tmp_path / "state"),
             "claude": {"binary": str(FAKE_CLAUDE)},
-            "login_shepherd": {"enabled": login_shepherd_enabled},
+            "login_shepherd": {
+                "enabled": login_shepherd_enabled,
+                "allow_setup_token": allow_setup_token,
+            },
             "auth": {"enabled": auth_enabled},
         }
     )
 
 
-def _client(tmp_path: Path, *, enabled: bool, auth_enabled: bool = False) -> TestClient:
+def _client(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    auth_enabled: bool = False,
+    allow_setup_token: bool = False,
+) -> TestClient:
     (tmp_path / "projects").mkdir(exist_ok=True)
-    cfg = _cfg(login_shepherd_enabled=enabled, auth_enabled=auth_enabled, tmp_path=tmp_path)
+    cfg = _cfg(
+        login_shepherd_enabled=enabled,
+        auth_enabled=auth_enabled,
+        tmp_path=tmp_path,
+        allow_setup_token=allow_setup_token,
+    )
     return TestClient(create_app(cfg))
 
 
 def test_flag_defaults_false(tmp_path: Path) -> None:
     cfg = ClausterConfig.model_validate({"projects_root": str(tmp_path)})
     assert cfg.login_shepherd.enabled is False
+
+
+def test_allow_setup_token_defaults_false(tmp_path: Path) -> None:
+    # Second gate (#846), mirroring config_write.allow_user_scope: off by default,
+    # so setup-token stays invisible even when the base surface is turned on.
+    cfg = ClausterConfig.model_validate({"projects_root": str(tmp_path)})
+    assert cfg.login_shepherd.allow_setup_token is False
 
 
 def test_routes_404_when_disabled(tmp_path: Path) -> None:
@@ -909,6 +936,44 @@ def test_code_route_missing_body_is_422(tmp_path: Path) -> None:
     with _client(tmp_path, enabled=True) as c:
         assert c.post("/api/login-shepherd/code", json={"code": ""}).status_code == 422
         assert c.post("/api/login-shepherd/code", json={}).status_code == 422
+
+
+# --- second gate (#846): setup-token requires allow_setup_token too -----------------
+
+
+def test_setup_token_404s_when_enabled_but_allow_setup_token_false(tmp_path: Path) -> None:
+    # Second gate mirrors config_write.allow_user_scope: enabled=True alone is not
+    # enough for the higher-risk mode. A distinct 403 would leak that the mode
+    # exists-but-is-disabled, so this must be the SAME 404 shape as the whole
+    # surface being off (invisible-surface invariant).
+    with _client(tmp_path, enabled=True, allow_setup_token=False) as c:
+        resp = c.post("/api/login-shepherd/start", json={"mode": "setup-token"})
+        assert resp.status_code == 404
+
+
+def test_login_mode_works_regardless_of_allow_setup_token(tmp_path: Path, monkeypatch) -> None:
+    # `login` needs only the base gate — allow_setup_token being off must not affect it.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    with _client(tmp_path, enabled=True, allow_setup_token=False) as c:
+        resp = c.post("/api/login-shepherd/start", json={"mode": "login"})
+        assert resp.status_code == 200
+        assert c.post("/api/login-shepherd/cancel").status_code == 200
+
+
+def test_setup_token_works_when_both_gates_are_on(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    with _client(tmp_path, enabled=True, allow_setup_token=True) as c:
+        resp = c.post("/api/login-shepherd/start", json={"mode": "setup-token"})
+        assert resp.status_code == 200
+        assert resp.json()["authorize_url"].startswith("https://")
+        assert c.post("/api/login-shepherd/cancel").status_code == 200
+
+
+def test_setup_token_still_404s_when_whole_surface_disabled(tmp_path: Path) -> None:
+    # allow_setup_token alone (without the base enabled flag) must not open the surface.
+    with _client(tmp_path, enabled=False, allow_setup_token=True) as c:
+        resp = c.post("/api/login-shepherd/start", json={"mode": "setup-token"})
+        assert resp.status_code == 404
 
 
 def test_full_flow_via_routes(tmp_path: Path, monkeypatch) -> None:
@@ -1075,3 +1140,39 @@ def test_dashboard_context_reflects_flag(tmp_path: Path) -> None:
         resp = c.get("/")
         assert resp.status_code == 200
         assert 'x-data="loginShepherd()"' not in resp.text
+
+
+# --- template: the setup-token mode control is gated on allow_setup_token (#846) ----
+
+
+def test_setup_token_control_absent_when_allow_setup_token_false(tmp_path: Path) -> None:
+    # enabled=True but allow_setup_token=False (the default): only the single
+    # subscription-sign-in mode renders, no two-option toggle and no way to pick
+    # or submit "setup-token" from the DOM.
+    with _client(tmp_path, enabled=True, allow_setup_token=False) as c:
+        resp = c.get("/")
+        assert resp.status_code == 200
+        html = resp.text
+        assert "Create a long-lived token" not in html
+        assert 'value="setup-token"' not in html
+        assert 'class="ls-mode-toggle' not in html
+        # The single-mode fallback description still renders (no toggle, just this).
+        assert "Opens a one-time authorize link tied to your Claude subscription." in html
+
+
+def test_setup_token_control_present_when_allow_setup_token_true(tmp_path: Path) -> None:
+    with _client(tmp_path, enabled=True, allow_setup_token=True) as c:
+        resp = c.get("/")
+        assert resp.status_code == 200
+        html = resp.text
+        assert "Create a long-lived token" in html
+        assert 'value="setup-token"' in html
+        assert 'class="ls-mode-toggle' in html
+
+
+def test_setup_token_control_absent_when_whole_surface_disabled(tmp_path: Path) -> None:
+    # allow_setup_token alone can't resurrect the panel when the base gate is off.
+    with _client(tmp_path, enabled=False, allow_setup_token=True) as c:
+        resp = c.get("/")
+        assert resp.status_code == 200
+        assert "Create a long-lived token" not in resp.text

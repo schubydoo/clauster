@@ -598,6 +598,16 @@ class LoginShepherdConfig(BaseModel):
         "the whole surface 404s when off, same invisible-surface invariant as "
         "`config_write.enabled` and the reaper UI.",
     )
+    allow_setup_token: bool = Field(
+        default=False,
+        description="A **second, independent** opt-in for the `setup-token` mode "
+        "(`claude setup-token`), which mints a long-lived `CLAUDE_CODE_OAUTH_TOKEN` the "
+        "operator copies out of the browser — a durable credential, strictly more "
+        "dangerous than the ordinary `login` mode's short-lived OAuth handshake. Requires "
+        "`login_shepherd.enabled` too; with this off, only the `login` mode is offered "
+        "(a `setup-token` request 404s, the same invisible-surface shape as the whole "
+        "disabled surface). Off by default; **not** web-editable.",
+    )
 
 
 class LogsConfig(BaseModel):

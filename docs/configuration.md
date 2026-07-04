@@ -355,6 +355,16 @@ Claude Code credentials, so — mirroring `config_write.enabled` — it defaults
 **off** and is **never** web-editable; when `enabled` is off, the entire
 `/api/login-shepherd/*` surface returns `404` and the dashboard panel doesn't render.
 
+The `setup-token` mode is gated behind a **second, independent opt-in**,
+`allow_setup_token` (#846) — mirroring `config_write.allow_user_scope` — because it
+mints a long-lived `CLAUDE_CODE_OAUTH_TOKEN` the operator copies out of the browser,
+a durable credential strictly more dangerous than the ordinary `login` mode's
+short-lived OAuth handshake. With `enabled` on but `allow_setup_token` off, only the
+`login` (subscription sign-in) mode is offered — the dashboard panel shows a single
+sign-in mode with no mode picker, and a `setup-token` start request `404`s exactly
+like the whole surface being disabled, never a distinct `403` that would reveal the
+mode exists.
+
 `claude setup-token` is a full TUI that only renders its authorize link under a
 real terminal (#846), so that mode is driven over a pty and needs the same
 optional `pyte` dependency as the live pty-screen view — `pip install
@@ -368,6 +378,7 @@ extra dependency.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch for the dashboard login-shepherd surface (`claude auth login` / `claude setup-token`, driven from the browser). Off by default; the whole surface 404s when off, same invisible-surface invariant as `config_write.enabled` and the reaper UI. |
+| `allow_setup_token` | bool | `false` | A **second, independent** opt-in for the `setup-token` mode (`claude setup-token`), which mints a long-lived `CLAUDE_CODE_OAUTH_TOKEN` the operator copies out of the browser — a durable credential, strictly more dangerous than the ordinary `login` mode's short-lived OAuth handshake. Requires `login_shepherd.enabled` too; with this off, only the `login` mode is offered (a `setup-token` request 404s, the same invisible-surface shape as the whole disabled surface). Off by default; **not** web-editable. |
 <!-- END GEN: login_shepherd -->
 
 ## `usage` — per-project cost/token badge (`UsageConfig`)

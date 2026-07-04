@@ -1613,17 +1613,32 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     # ----- login shepherd (#839): dashboard-driven `claude auth login` --------------
 
-    def _require_login_shepherd() -> None:
+    def _require_login_shepherd(mode: object = None) -> None:
         # Fail-closed invisible-surface gate, same shape as the reaper UI and
         # config-write: off by default, 404s (not 403) when disabled so a disabled
         # deployment exposes nothing about the feature's existence.
+        #
+        # `mode` is an optional second check (#846), mirroring config_write's
+        # enabled/allow_user_scope pattern: `setup-token` mints a long-lived
+        # CLAUDE_CODE_OAUTH_TOKEN the operator copies out of the browser, so it
+        # requires BOTH the base `enabled` flag AND the independent
+        # `allow_setup_token` opt-in. When `allow_setup_token` is off, a
+        # `setup-token` request 404s with the SAME detail as the base gate —
+        # invisible-surface, never a distinct 403 that would leak that the mode
+        # exists but is disabled. Runs BEFORE the caller's own body/enum
+        # validation (same ordering `config_write.require_capability` uses), so a
+        # disabled mode 404s even alongside a malformed request. `login` and the
+        # `code`/`status`/`cancel` routes (which call this with no `mode`) need
+        # only the base gate.
         if not config.login_shepherd.enabled:
+            raise HTTPException(status_code=404, detail="login shepherd is disabled")
+        if mode == "setup-token" and not config.login_shepherd.allow_setup_token:
             raise HTTPException(status_code=404, detail="login shepherd is disabled")
 
     @app.post("/api/login-shepherd/start")
     async def api_login_shepherd_start(body: dict) -> dict:
-        _require_login_shepherd()
         mode = body.get("mode")
+        _require_login_shepherd(mode)
         if mode not in ("login", "setup-token"):
             raise HTTPException(status_code=422, detail="mode must be 'login' or 'setup-token'")
         try:
@@ -4332,7 +4347,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # Login shepherd (#839): the maintenance-zone panel only renders when
             # explicitly enabled — same invisible-surface invariant as the reaper UI
             # and config-write (the /api/login-shepherd/* routes 404 when off too).
+            # allow_setup_token (#846) is the second, independent opt-in that gates
+            # whether the higher-risk "Create a long-lived token" mode is offered at
+            # all — when off, only the `login` (subscription sign-in) mode renders.
             "login_shepherd_enabled": config.login_shepherd.enabled,
+            "login_shepherd_allow_setup_token": config.login_shepherd.allow_setup_token,
         }
 
     @app.get("/", response_class=HTMLResponse)

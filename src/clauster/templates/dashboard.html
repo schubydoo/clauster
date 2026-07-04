@@ -1120,9 +1120,13 @@
 
             <template x-if="!started">
               <div>
+                {% if login_shepherd_allow_setup_token %}
                 <!-- Segmented mode toggle (#846): a two-option, mutually-exclusive
                      picker with an obvious selected/unselected contrast — restyled
-                     via .ls-mode-toggle (below) so it never reads as a text input. -->
+                     via .ls-mode-toggle (below) so it never reads as a text input.
+                     Only rendered when allow_setup_token (#846 second gate) is on —
+                     otherwise the setup-token radio never exists in the DOM, so the
+                     picker collapses to the single sign-in mode below. -->
                 <div class="ls-mode-toggle mb-2" role="group" aria-label="Sign-in mode">
                   <label class="ls-mode-opt" :class="{ 'ls-mode-opt-sel': mode === 'login' }">
                     <input type="radio" class="ls-mode-input" name="login-shepherd-mode"
@@ -1147,6 +1151,15 @@
                     environment yourself — requires a Claude subscription.
                   </span>
                 </p>
+                {% else %}
+                <!-- allow_setup_token is off (#846 second gate): only the `login` mode
+                     is offered — no toggle, just its description. `mode` already
+                     defaults to "login" in loginShepherd() and start() re-asserts it,
+                     so setup-token can never be selected or submitted from here. -->
+                <p class="ls-mode-desc text-secondary small mb-2">
+                  Opens a one-time authorize link tied to your Claude subscription.
+                </p>
+                {% endif %}
                 <button class="btn btn-primary" @click="start()" :disabled="busy"
                         x-text="busy ? 'Starting…' : 'Start'">Start</button>
               </div>
