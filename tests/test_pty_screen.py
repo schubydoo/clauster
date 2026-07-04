@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,45 @@ def test_find_authorize_url_is_incremental_across_feeds():
     assert scr.find_authorize_url() is None
     scr.feed(b"https://claude.com/cai/oauth/authorize?code=2")
     assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=2"
+
+
+def test_concurrent_feed_and_scan_does_not_corrupt_the_screen():
+    # login_shepherd's setup-token flow feeds this screen from its reader thread while the
+    # request thread concurrently scans it with find_authorize_url (#846). pyte is not
+    # reentrant, so without PtyScreen's internal lock a scan can catch feed() mid-mutation
+    # and raise "dictionary changed size during iteration" (or read a torn row). Feeding
+    # in tiny chunks while a reader hammers find_authorize_url maximizes that overlap; with
+    # the lock every scan sees a whole, self-consistent screen: no reader ever raises, and
+    # once the full URL has been fed the scan returns it intact.
+    # (A scan that lands BETWEEN two feeds can still see a legitimately partial URL — that
+    # is a separate consumer-side stability concern, tracked as a follow-up, not a screen
+    # corruption, so it is not asserted here.)
+    scr = None
+    url = "https://claude.com/cai/oauth/authorize?code=" + ("a" * 400)
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def _scan() -> None:
+        try:
+            while not stop.is_set():
+                scr.find_authorize_url()
+        except BaseException as exc:  # noqa: BLE001 — record any reader-thread crash
+            errors.append(exc)
+
+    for _ in range(40):
+        scr = PtyScreen(cols=600, rows=4)
+        reader = threading.Thread(target=_scan)
+        reader.start()
+        try:
+            for chunk in (url[i : i + 3].encode() for i in range(0, len(url), 3)):
+                scr.feed(chunk)
+        finally:
+            stop.set()
+            reader.join(timeout=5)
+        stop.clear()
+
+    assert not errors, f"reader thread crashed: {errors[0]!r}"
+    assert scr.find_authorize_url() == url
 
 
 def test_find_authorize_url_prefers_authorize_path_over_same_host_decoy_after_it():

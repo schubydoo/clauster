@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -363,6 +364,18 @@ class PtyScreen:
     Pure (no I/O): :meth:`feed` consumes raw byte chunks and :meth:`frame` returns the
     current screen as a redacted, cells-only snapshot. Lazily imports ``pyte`` so the
     module is importable without the optional ``pty`` extra.
+
+    **Thread-safe.** ``pyte`` is pure-Python and NOT reentrant, and this object is shared
+    across threads: `login_shepherd`'s ``setup-token`` flow feeds from its reader thread
+    (:func:`login_shepherd._pump_pty`) while the request thread concurrently scans it via
+    :meth:`find_authorize_url` (and the #534 keeper likewise feeds while the WebSocket
+    thread reads :meth:`frame`). A single lock serializes every mutate (:meth:`feed`)
+    against every read so a scan can never observe a half-applied ``feed`` (an unlocked
+    read racing pyte's buffer mutation can raise ``dictionary changed size during
+    iteration`` or return a torn row). NB: the lock does not make a scan wait for the
+    stream to be *complete* — a read that lands between two feeds still sees a legitimately
+    partial screen; guarding against trusting a not-yet-finished authorize URL is the
+    caller's job.
     """
 
     def __init__(self, cols: int = SCREEN_COLS, rows: int = SCREEN_ROWS) -> None:
@@ -372,10 +385,15 @@ class PtyScreen:
         self.rows = rows
         self._screen = pyte.Screen(cols, rows)
         self._stream = pyte.ByteStream(self._screen)
+        # Serializes feed (mutate) against every reader below — pyte is not reentrant and
+        # this screen is fed and scanned from different threads. No reader calls feed or
+        # another reader, so a plain (non-reentrant) Lock cannot self-deadlock.
+        self._lock = threading.Lock()
 
     def feed(self, data: bytes) -> None:
         """Feed a chunk of raw pty bytes into the emulator (escape sequences consumed here)."""
-        self._stream.feed(data)
+        with self._lock:
+            self._stream.feed(data)
 
     def find_session_id(self) -> str | None:
         """Scan the reassembled screen for the bridge's ``session_<id>``, or None.
@@ -390,7 +408,8 @@ class PtyScreen:
         copy) is what makes the match possible — a redacted frame's mask token carries no
         ``session_`` prefix, so it could never yield the real id anyway.
         """
-        match = _RE_CONNECT_URL.search("\n".join(self._screen.display))
+        with self._lock:
+            match = _RE_CONNECT_URL.search("\n".join(self._screen.display))
         return match.group(1) if match else None
 
     def find_authorize_url(self) -> str | None:
@@ -411,7 +430,9 @@ class PtyScreen:
         `login_shepherd._LOGIN_PTY_COLS`), but `_unwrap_display` makes the scan correct at
         any width.
         """
-        return extract_authorize_url(_unwrap_display(self._screen.display))
+        with self._lock:
+            display = list(self._screen.display)
+        return extract_authorize_url(_unwrap_display(display))
 
     def find_oauth_token(self) -> str | None:
         """Scan the reassembled screen for ``setup-token``'s printed OAuth token, or None.
@@ -421,7 +442,9 @@ class PtyScreen:
         pyte-rendered (and unwrapped) screen, not necessarily the raw byte stream or a
         naive newline-joined display.
         """
-        return extract_oauth_token(_unwrap_display(self._screen.display))
+        with self._lock:
+            display = list(self._screen.display)
+        return extract_oauth_token(_unwrap_display(display))
 
     def frame(self) -> dict[str, Any]:
         """Return the current screen as a redacted, cells-only frame.
@@ -436,12 +459,14 @@ class PtyScreen:
         geometry (a too-long row wraps). Truncation only trims the right edge, so it can
         never expose a redacted span.
         """
-        cursor = self._screen.cursor
-        redacted = redact_screen_text(list(self._screen.display))
+        with self._lock:
+            cursor_x, cursor_y = self._screen.cursor.x, self._screen.cursor.y
+            display = list(self._screen.display)
+        redacted = redact_screen_text(display)
         rows = [row[: self.cols].ljust(self.cols) for row in redacted]
         return {
             "rows": rows,
-            "cursor": {"x": cursor.x, "y": cursor.y},
+            "cursor": {"x": cursor_x, "y": cursor_y},
             "cols": self.cols,
             "rows_count": self.rows,
         }
