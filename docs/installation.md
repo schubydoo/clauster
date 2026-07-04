@@ -363,18 +363,13 @@ script (uv tool / pip / pipx) is invoked directly, as shown above. Only a bare d
 interpreter falls back to the `python -m clauster run …` form.
 
 !!! note "`KillMode=process` keeps bridges alive across a restart"
-    Clauster's spawned bridges run inside the service's cgroup, so systemd's
-    default `KillMode=control-group` would reap every running bridge — including
-    `pty` true-resume sessions — on a `systemctl restart` / `stop`. The generated
-    unit sets **`KillMode=process`** so systemd signals only the Clauster process;
-    the detached bridges keep running and Clauster reattaches them on startup. A
-    deliberate `stop` therefore leaves bridges running (orphaned until the next
-    start re-adopts them) — that's intentional, so an upgrade restart doesn't drop
-    live coding sessions. Already running an **older unit** without it? Regenerate
-    (`clauster install-service systemd …`), reinstall, and `sudo systemctl
-    daemon-reload`; `clauster doctor` warns when the loaded `clauster.service`
-    still uses a reaping `KillMode`. (A bridge truly lost to a crash or reboot is
-    still recoverable with `claude --continue`.)
+    The generated unit sets **`KillMode=process`** (not systemd's default
+    `KillMode=control-group`), so a `systemctl restart` / `stop` signals only the
+    Clauster process — detached bridges, including `pty` true-resume sessions, keep
+    running and Clauster reattaches them on startup. `clauster doctor` warns if an
+    older loaded unit still uses a reaping `KillMode`. See
+    [Operations → the `KillMode` / `systemctl restart` caveat](operations.md#restart)
+    for the full rationale and recovery steps.
 
 !!! note "Bridges inherit the unit's `PATH`"
     Under systemd a service gets a minimal default `PATH`, and Clauster propagates
