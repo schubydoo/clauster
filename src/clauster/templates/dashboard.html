@@ -1114,12 +1114,12 @@
       <!-- ===== Login shepherd (#839): dashboard-driven `claude` account login ===== -->
       <div class="mt-4" x-data="loginShepherd()">
         <button class="btn btn-sm btn-ghost-secondary" @click="toggle()">
-          <span x-show="open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Close claude login</span><span x-show="!open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-trust"/></svg>Sign in the claude account</span>
+          <span x-show="open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Close claude login</span><span x-show="!open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-trust"/></svg>Sign in to the claude account</span>
         </button>
         <div class="card mt-2" x-show="open" x-cloak>
           <div class="card-body">
             <h3 class="card-title">
-              <svg class="ico me-1" aria-hidden="true"><use href="#ic-trust"/></svg>Sign in the runtime <code>claude</code> account
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-trust"/></svg>Sign in to the runtime <code>claude</code> account
             </h3>
             <p class="text-secondary small">
               Fixes a logged-out or expired <code>claude</code> account without SSH. Pick a mode,
@@ -1187,6 +1187,7 @@
                 <p class="mb-1">2. Paste the code it gives you back here:</p>
                 <div class="input-group input-group-narrow mb-2">
                   <input type="text" class="form-control" x-model="code" placeholder="Paste code"
+                         aria-label="Authorization code"
                          autocomplete="off" spellcheck="false" @keydown.enter="submitCode()">
                   <button class="btn btn-primary" @click="submitCode()" :disabled="busy || !code"
                           x-text="busy ? 'Submitting…' : 'Submit'">Submit</button>
@@ -1206,9 +1207,9 @@
                      x-text="result && result.message"></div>
                 <template x-if="result && result.token">
                   <div class="mb-2">
-                    <label class="form-label">Long-lived token (shown once — copy it now)</label>
+                    <label class="form-label" for="ls-token">Long-lived token (shown once — copy it now)</label>
                     <div class="input-group input-group-narrow">
-                      <input type="text" class="form-control" readonly :value="result.token" @focus="$el.select()">
+                      <input type="text" id="ls-token" class="form-control" readonly :value="result.token" @focus="$el.select()">
                       <button class="btn" @click="copyToken()" x-text="copied ? 'Copied' : 'Copy'">Copy</button>
                     </div>
                     <p class="text-secondary small mt-1">
