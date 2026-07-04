@@ -187,6 +187,16 @@ def run_login_shepherd(mode, args):
                              before printing the URL (exercise the bounded wait).
         - reject_code:      prints the URL, reads the pasted code, then prints a
                              failure line and exits 1 (bad-code path).
+        - decoy_url:        prints a NON-Claude https URL (a docs link) BEFORE the
+                             real authorize URL — the extractor must prefer the
+                             known-host one, not the first match.
+        - punct_url:        prints the authorize URL with trailing punctuation
+                             ("...authorize?fake=1)." ) — the extractor must trim it.
+        - ansi_url:         prints the authorize URL wrapped in ANSI color+reset
+                             escapes — the extractor must strip the escapes.
+        - hang_after_code:  prints the URL, reads the pasted code, then idles WITHOUT
+                             exiting (mimics a slow provider verification) — exercises
+                             submit_code's "still verifying, don't kill" path.
       FAKE_CLAUDE_LOGIN_URL   = the authorize URL to print (default a fixed fake URL)
       FAKE_CLAUDE_LOGIN_TOKEN = the CLAUDE_CODE_OAUTH_TOKEN value for setup-token
                                 success (default "fake-oauth-token-canned")
@@ -209,7 +219,18 @@ def run_login_shepherd(mode, args):
     if mode_sel == "slow_url":
         time.sleep(float(os.environ.get("FAKE_CLAUDE_LOGIN_SLOW_SECONDS", "0.3")))
 
-    emit(f"Open this URL to authorize: {url}")
+    if mode_sel == "decoy_url":
+        # A non-Claude docs link printed FIRST; the real authorize URL second.
+        emit("See the docs at https://docs.example.com/help for more.")
+        emit(f"Open this URL to authorize: {url}")
+    elif mode_sel == "punct_url":
+        # Authorize URL with trailing sentence punctuation the extractor must trim.
+        emit(f"Open this URL to authorize: ({url}).")
+    elif mode_sel == "ansi_url":
+        # Authorize URL wrapped in an ANSI color code + reset the extractor must strip.
+        emit(f"Open this URL to authorize: \x1b[36m{url}\x1b[0m")
+    else:
+        emit(f"Open this URL to authorize: {url}")
     emit("Paste the code you received:")
     try:
         pasted = sys.stdin.readline()
@@ -218,6 +239,10 @@ def run_login_shepherd(mode, args):
     if not pasted:
         # stdin closed without a code (e.g. cancel()) — exit quietly.
         return 1
+    if mode_sel == "hang_after_code":
+        # Read the code but never finish verifying: idle until signalled. Exercises the
+        # submit-timeout "still verifying" path (the flow must be left active, not killed).
+        return _idle_until_signal()
     if mode_sel == "reject_code":
         emit("Error: invalid code")
         return 1

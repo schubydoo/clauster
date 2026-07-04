@@ -37,10 +37,14 @@ import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Literal, TypeVar
+from urllib.parse import urlsplit
 
-from . import claude_cli, procutil
+from . import claude_cli, procutil, redact
+
+_T = TypeVar("_T")
 
 _log = logging.getLogger("clauster.login_shepherd")
 
@@ -60,12 +64,72 @@ SUBMIT_TIMEOUT_SECONDS = 45.0
 _POLL_INTERVAL_SECONDS = 0.1
 
 # The authorize URL `claude auth login`/`setup-token` prints for the operator to open.
+# Deliberately greedy-then-trimmed: grab the whole https run, then `_clean_url` strips
+# trailing punctuation/quotes the CLI may print around it (see `_extract_authorize_url`).
 _URL_RE = re.compile(r"https://\S+")
+
+# Host suffixes that identify a genuine Claude/Anthropic OAuth authorize URL. Used to
+# PREFER the real authorize link when the CLI prints more than one https URL (e.g. a docs
+# link first). Suffix-matched (`endswith`) so subdomains like `console.anthropic.com`
+# count. Not a hard requirement — the real-CLI host is unverified, so a no-match falls
+# back to the LAST https URL rather than failing.
+_KNOWN_AUTH_HOST_SUFFIXES = ("claude.ai", "anthropic.com")
+
+# Trailing characters the CLI may print immediately after a URL (sentence punctuation,
+# closing brackets/quotes) that are not part of the URL itself.
+_URL_TRAILING = ".,;:!?)]}>\"'"
 
 # `setup-token`'s printed long-lived credential (per the spike: `CLAUDE_CODE_OAUTH_TOKEN=...`).
 # Matched permissively (any non-whitespace value) since the exact real-binary format is
 # unverified — this is defensive, not assumed exact.
 _TOKEN_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)")
+
+
+def _clean_url(url: str) -> str:
+    """Trim trailing sentence punctuation / closing quotes off a matched URL token."""
+    return url.rstrip(_URL_TRAILING)
+
+
+def _url_host(url: str) -> str:
+    """Return the lowercased host of ``url`` (empty string if unparseable)."""
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:  # pragma: no cover - urlsplit is very lenient; defensive only
+        return ""
+
+
+def _is_known_auth_host(host: str) -> bool:
+    """Whether ``host`` is (a subdomain of) a known Claude/Anthropic auth host."""
+    return any(
+        host == suffix or host.endswith("." + suffix) for suffix in _KNOWN_AUTH_HOST_SUFFIXES
+    )
+
+
+def _extract_authorize_url(output: str) -> str | None:
+    """Return the best authorize URL in ``output``, or None if none is present.
+
+    Robust against the ways a real CLI's terminal output can mangle a URL:
+
+    * ANSI/terminal escape sequences are stripped first (via :func:`redact.strip_ansi`)
+      so a colored/reset-wrapped URL isn't polluted with escape bytes.
+    * Each matched ``https://…`` token is trimmed of trailing punctuation/quotes.
+    * When several https URLs are present, one whose host ends in a known Claude/Anthropic
+      auth host wins over an arbitrary first match (a decoy docs link printed first can't
+      hijack the operator); with no known-host match it falls back to the *last* https URL
+      (the CLI prints the actionable link last far more often than first).
+
+    Deliberately defensive, not host-locked: the real-CLI format is unverified, so a URL
+    on an unknown host is still returned rather than rejected.
+    """
+    cleaned_output = redact.strip_ansi(output)
+    candidates = [_clean_url(m.group(0)) for m in _URL_RE.finditer(cleaned_output)]
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        return None
+    for url in candidates:
+        if _is_known_auth_host(_url_host(url)):
+            return url
+    return candidates[-1]
 
 
 class LoginShepherdError(RuntimeError):
@@ -179,18 +243,20 @@ class LoginShepherd:
             reader.start()
             self._flow = flow
 
-        match, output, exited = _wait_for(
-            flow, lambda snap: _URL_RE.search(snap), timeout=START_TIMEOUT_SECONDS
+        url, output, exited = _wait_for(
+            flow, _extract_authorize_url, timeout=START_TIMEOUT_SECONDS
         )
-        url = cast("re.Match[str] | None", match)
         if url is None:
             # Fail closed: no authorize URL ever appeared. Reap the subprocess and
             # surface the raw captured output so the operator can see *why* — but
             # never hang the request indefinitely.
             self._teardown(flow)
             if exited:
-                # `_teardown` joined the reader thread, so a final in-flight line
-                # (unlikely for a no-URL crash, but possible) is now captured.
+                # `_teardown` joined the reader thread, so a final in-flight line is now
+                # captured — refresh the snapshot so the error message shows the real
+                # last output. We do NOT try to salvage a URL here: the process has
+                # EXITED, so there'd be no live subprocess to receive the pasted code —
+                # returning a URL would strand the operator. Fail closed instead.
                 output = flow.snapshot()
             reason = (
                 "the process exited before printing an authorize URL"
@@ -201,20 +267,28 @@ class LoginShepherd:
                 f"claude {mode} did not produce a login URL: {reason}. "
                 f"Captured output:\n{_redact(output)}"
             )
-        return {"authorize_url": url.group(0), "output": _redact(output)}
+        return {"authorize_url": url, "output": _redact(output)}
 
     def submit_code(self, code: str) -> dict:
         """Write the operator-pasted `code` to the active subprocess's stdin.
 
-        Reads the remaining output (bounded by `SUBMIT_TIMEOUT_SECONDS`), then
-        classifies success by exit code. For `setup-token`, extracts the printed
-        `CLAUDE_CODE_OAUTH_TOKEN=...` value and returns it — the ONE time it is
-        ever surfaced; the caller must copy it immediately.
+        Waits (bounded by `SUBMIT_TIMEOUT_SECONDS`) for the login to react, then keys
+        the outcome off a FRESH `poll()`, never a stale wait flag:
 
-        Never logs `code` or the extracted token. Raises `NotActiveError` if no
-        flow is in progress. Serialized per-flow (``flow.submit_lock``) so two
-        concurrent submits can't interleave writes to the same stdin: the second
-        blocks, then finds the flow already reaped and re-raises `NotActiveError`.
+        * **Exited** (`poll()` is not None): classify success by the exit code, extract
+          `setup-token`'s printed `CLAUDE_CODE_OAUTH_TOKEN=...` (the ONE time it is
+          surfaced), tear the flow down, and return the result. A process that exited
+          right at the wait boundary is thus correctly seen as done, not failed.
+        * **Still running** (`poll()` is None after the timeout): the login is genuinely
+          in-flight (a slow provider verification can exceed the wait). Do NOT tear it
+          down / kill it — leave the flow active and return a "still verifying" result so
+          the operator can wait and re-check, or `cancel()` explicitly. Single-flight
+          still blocks a new `start()` while it runs.
+
+        Never logs `code` or the extracted token. Raises `NotActiveError` if no flow is
+        in progress. Serialized per-flow (``flow.submit_lock``) so two concurrent submits
+        can't interleave writes to the same stdin: the second blocks, then finds the flow
+        already reaped and re-raises `NotActiveError`.
         """
         with self._flow_lock:
             flow = self._flow
@@ -240,15 +314,30 @@ class LoginShepherd:
                 # failure rather than raising an unhandled error to the caller.
                 _log.warning("login_shepherd: writing code to %s stdin failed: %s", flow.mode, exc)
 
-            _, output, exited = _wait_for(flow, lambda _snap: None, timeout=SUBMIT_TIMEOUT_SECONDS)
-            if exited and flow.reader_thread is not None:
-                # The reader thread's last `readline()` can still be draining the pipe in
-                # the instant `poll()` first reports exit — join briefly so the final
-                # printed line (e.g. setup-token's token) isn't missed by the snapshot below.
-                flow.reader_thread.join(timeout=2)
-                output = flow.snapshot()
+            # Wait until the process exits, then read a FRESH poll() — never trust the
+            # wait's own `exited` flag, which can lag a poll() that already reports the
+            # exit code (the timeout-boundary race).
+            _wait_for(flow, lambda _snap: None, timeout=SUBMIT_TIMEOUT_SECONDS)
             exit_code = flow.proc.poll()
-            ok = exited and exit_code == 0
+
+            if exit_code is None:
+                # Still running after the timeout: a slow-but-valid verification. Leave the
+                # flow ACTIVE (don't kill it) so a genuine login isn't aborted; the operator
+                # can wait + re-check or cancel. Return without tearing down.
+                message = (
+                    f"claude {flow.mode} is still verifying — the login is still running "
+                    f"(no result within {SUBMIT_TIMEOUT_SECONDS:.0f}s). Wait and re-check "
+                    "`claude auth status --json`, or cancel."
+                )
+                return {"ok": False, "message": message}
+
+            # Exited: drain the reader (its last `readline()` may still be in flight in the
+            # instant poll() first reported exit) so a final line — e.g. setup-token's token
+            # — isn't missed, then classify off the real exit code.
+            if flow.reader_thread is not None:
+                flow.reader_thread.join(timeout=2)
+            output = flow.snapshot()
+            ok = exit_code == 0
             token_match = _TOKEN_RE.search(output)
             token = token_match.group(1) if token_match else None
 
@@ -266,12 +355,10 @@ class LoginShepherd:
                 )
             )
         else:
-            code_desc = (
-                "still running (timed out waiting for it to react)"
-                if not exited
-                else (f"exited with code {exit_code}")
+            message = (
+                f"claude {flow.mode} exited with code {exit_code}. "
+                f"Captured output:\n{_redact(output)}"
             )
-            message = f"claude {flow.mode} {code_desc}. Captured output:\n{_redact(output)}"
         result: dict = {"ok": ok, "message": message}
         if token:
             result["token"] = token
@@ -321,7 +408,9 @@ def _pump_stdout(flow: _Flow) -> None:
         pass
 
 
-def _wait_for(flow: _Flow, condition, *, timeout: float) -> tuple[object, str, bool]:
+def _wait_for(
+    flow: _Flow, condition: Callable[[str], _T | None], *, timeout: float
+) -> tuple[_T | None, str, bool]:
     """Poll `flow`'s captured output against `condition(snapshot)` until match/exit/timeout.
 
     `condition` receives the buffer captured so far and returns a truthy match (or
@@ -331,7 +420,7 @@ def _wait_for(flow: _Flow, condition, *, timeout: float) -> tuple[object, str, b
     final snapshot regardless of which condition fired.
     """
     deadline = time.monotonic() + timeout
-    match = None
+    match: _T | None = None
     exited = False
     snapshot = ""
     while time.monotonic() < deadline:

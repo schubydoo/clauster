@@ -104,6 +104,60 @@ def test_start_bounded_wait_survives_a_slow_url(shepherd, monkeypatch) -> None:
         shepherd.cancel()
 
 
+def test_start_prefers_the_known_host_url_over_a_decoy(shepherd, monkeypatch) -> None:
+    # A non-Claude https link printed FIRST must not hijack the operator — the extractor
+    # prefers the known-host authorize URL over an arbitrary first match.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "decoy_url")
+    try:
+        result = shepherd.start("login")
+        assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
+    finally:
+        shepherd.cancel()
+
+
+def test_start_trims_trailing_punctuation_off_the_url(shepherd, monkeypatch) -> None:
+    # The CLI printed "(<url>)." — the returned href must not carry the trailing `).`.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "punct_url")
+    try:
+        result = shepherd.start("login")
+        assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
+    finally:
+        shepherd.cancel()
+
+
+def test_start_strips_ansi_escapes_around_the_url(shepherd, monkeypatch) -> None:
+    # An ANSI color/reset-wrapped URL must come back clean (no escape bytes in the href).
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ansi_url")
+    try:
+        result = shepherd.start("login")
+        assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
+        assert "\x1b" not in result["authorize_url"]
+    finally:
+        shepherd.cancel()
+
+
+# --- _extract_authorize_url() pure-unit coverage ------------------------------------
+
+
+def test_extract_url_none_when_absent() -> None:
+    assert ls._extract_authorize_url("just some text, no link here") is None
+
+
+def test_extract_url_prefers_known_host() -> None:
+    out = "first https://evil.example.com/x then https://console.anthropic.com/authorize?z"
+    assert ls._extract_authorize_url(out) == "https://console.anthropic.com/authorize?z"
+
+
+def test_extract_url_falls_back_to_last_when_no_known_host() -> None:
+    out = "https://a.example.com/1 and https://b.example.com/2"
+    assert ls._extract_authorize_url(out) == "https://b.example.com/2"
+
+
+def test_extract_url_trims_and_strips_ansi() -> None:
+    out = "go to \x1b[36mhttps://claude.ai/authorize?fake=1\x1b[0m."
+    assert ls._extract_authorize_url(out) == "https://claude.ai/authorize?fake=1"
+
+
 def test_unknown_binary_raises_login_shepherd_error(monkeypatch) -> None:
     # An unresolvable binary must surface as a LoginShepherdError (→ 400 at the route),
     # NOT the raw claude_cli.ClaudeNotFound that would escape the route's except and 500.
@@ -199,6 +253,46 @@ def test_submit_code_survives_a_closed_stdin(shepherd, monkeypatch, caplog) -> N
         result = shepherd.submit_code("a-code")
     assert result["ok"] is False
     assert any("writing code" in r.getMessage() for r in caplog.records)
+
+
+def test_submit_code_keys_off_fresh_poll_not_stale_wait_flag(shepherd, monkeypatch) -> None:
+    # Finding 2 (timeout-boundary race): a completed OAuth (exit 0) that `_wait_for` failed
+    # to observe as `exited` must STILL be reported as success + drain the token, because
+    # submit_code keys off a fresh `flow.proc.poll()`, not `_wait_for`'s stale flag. Force
+    # `_wait_for` to always claim NOT-exited to prove the fresh poll() is what decides.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_TOKEN", "boundary-token")
+    shepherd.start("setup-token")
+
+    # Patch _wait_for only for the submit call (start() already ran with the real one).
+    def _wait_reports_not_exited(flow, condition, *, timeout):
+        # Let the real process actually finish (it exits 0 after reading the code), but
+        # report exited=False — the boundary race the old code trusted and got wrong.
+        flow.proc.wait(timeout=5)
+        return None, flow.snapshot(), False
+
+    monkeypatch.setattr(ls, "_wait_for", _wait_reports_not_exited)
+    result = shepherd.submit_code("the-code")
+    assert result["ok"] is True  # fresh poll() saw exit 0, not the stale exited=False
+    assert result["token"] == "boundary-token"
+    assert not shepherd.is_active()
+
+
+def test_submit_code_slow_verification_is_not_killed(shepherd, monkeypatch) -> None:
+    # Finding 3 (slow-verification-kill): if the login is still running after the submit
+    # timeout (a slow provider), submit_code must NOT tear it down / kill it — it returns a
+    # "still verifying" result and leaves the flow ACTIVE so the operator can wait or cancel.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "hang_after_code")
+    monkeypatch.setattr(ls, "SUBMIT_TIMEOUT_SECONDS", 0.5)
+    shepherd.start("login")
+    proc = shepherd._flow.proc  # noqa: SLF001 - confirm it's left alive
+    result = shepherd.submit_code("the-code")
+    assert result["ok"] is False
+    assert "still verifying" in result["message"]
+    assert "token" not in result
+    assert shepherd.is_active()  # flow left active, not reaped
+    assert proc.poll() is None  # the still-valid login was NOT killed
+    shepherd.cancel()  # explicit cleanup, as the operator would
 
 
 # --- cancel(): reaps cleanly, always safe -------------------------------------------
@@ -436,6 +530,24 @@ def test_start_route_start_failure_is_400(tmp_path: Path, monkeypatch) -> None:
     with _client(tmp_path, enabled=True) as c:
         resp = c.post("/api/login-shepherd/start", json={"mode": "login"})
         assert resp.status_code == 400
+
+
+def test_code_route_still_verifying_is_200_ok_false(tmp_path: Path, monkeypatch) -> None:
+    # A slow-but-valid login (still running past the submit timeout) returns a normal 200
+    # with ok=false + a "still verifying" message — NOT an error, and the flow stays active
+    # (the lifespan shutdown reaps it when the client context exits).
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "hang_after_code")
+    monkeypatch.setattr(ls, "SUBMIT_TIMEOUT_SECONDS", 0.5)
+    with _client(tmp_path, enabled=True) as c:
+        start = c.post("/api/login-shepherd/start", json={"mode": "login"})
+        assert start.status_code == 200
+        code = c.post("/api/login-shepherd/code", json={"code": "the-code"})
+        assert code.status_code == 200
+        body = code.json()
+        assert body["ok"] is False
+        assert "still verifying" in body["message"]
+        # Flow is intentionally left active; explicitly cancel so shutdown is clean-fast.
+        assert c.post("/api/login-shepherd/cancel").status_code == 200
 
 
 def test_start_route_unresolvable_binary_is_400_not_500(tmp_path: Path) -> None:
