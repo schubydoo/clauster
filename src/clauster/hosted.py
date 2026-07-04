@@ -1110,6 +1110,7 @@ class HostedManager:
             "agent_proc_start": instance.agent_proc_start,
             "started_at": instance.started_at.isoformat() if instance.started_at else None,
             "intentional_stop": instance.intentional_stop,
+            "instance_id": instance.instance_id,
         }
 
     @staticmethod
@@ -1123,7 +1124,7 @@ class HostedManager:
             except ValueError:
                 parsed_start = None
         log_path = fields.get("hosted_log_path")
-        return RemoteControlInstance(
+        instance = RemoteControlInstance(
             project=fields.get("project", ""),
             label=fields.get("label", f"hosted:{process_id[:8]}"),
             channel="hosted",
@@ -1138,6 +1139,14 @@ class HostedManager:
             intentional_stop=bool(fields.get("intentional_stop", False)),
             status=InstanceStatus.STARTING,
         )
+        # Restore the per-runtime instance_id (#834/#840) so a client that cached
+        # it before the restart still resolves via HostedManager._key_for instead
+        # of hitting the freshly-minted default_factory id (#841). Constructed
+        # then set rather than passed to the constructor — a bare **fields unpack
+        # would let heterogeneous/unknown persisted keys reach the model directly.
+        if fields.get("instance_id"):
+            instance.instance_id = fields["instance_id"]
+        return instance
 
 
 def _redact_obj(obj: Any) -> Any:

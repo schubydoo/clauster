@@ -22,6 +22,7 @@ _REC = {
     "agent_proc_start": 1717000000.0,
     "started_at": "2026-06-12T00:00:00+00:00",
     "intentional_stop": False,
+    "instance_id": "22222222-2222-4222-8222-222222222222",
 }
 
 

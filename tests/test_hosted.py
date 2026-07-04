@@ -1408,6 +1408,65 @@ async def test_manager_reattach_restores_running_session(fake_claustrum, tmp_pat
         await mgr.aclose()
 
 
+def test_record_projects_instance_id():
+    """``_record`` includes ``instance_id`` so a save doesn't drop it (#841)."""
+    inst = RemoteControlInstance(
+        project="proj", label="hosted:proj", channel="hosted", claustrum_process_id=_PID
+    )
+    record = HostedManager._record(inst)
+    assert record["instance_id"] == inst.instance_id
+
+
+def test_instance_from_record_restores_persisted_instance_id():
+    """A persisted ``instance_id`` is restored onto the rebuilt row (#841).
+
+    Guards the exact regression: pre-#841, ``_instance_from_record`` never set
+    ``instance_id``, so the model's ``default_factory`` minted a fresh one on every
+    restart and a client's cached id 404'd.
+    """
+    persisted_iid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    inst = HostedManager._instance_from_record(
+        _PID, {"project": "proj", "label": "hosted:proj", "instance_id": persisted_iid}
+    )
+    assert inst.instance_id == persisted_iid
+
+
+def test_instance_from_record_without_instance_id_mints_a_fresh_one():
+    """Backward compat: a record with no ``instance_id`` (older save, or a
+    pre-migration DB row) still loads — the model's ``default_factory`` mints a
+    fresh id exactly as it did before #841, never a crash or a blank id.
+    """
+    inst = HostedManager._instance_from_record(_PID, {"project": "proj", "label": "hosted:proj"})
+    assert inst.instance_id  # minted, non-empty
+    assert inst.instance_id != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+async def test_manager_reattach_restores_persisted_instance_id(fake_claustrum, tmp_path):
+    """A hosted session's ``instance_id`` survives a persist → reattach cycle.
+
+    Regression guard for #841: pre-fix, ``reattach_all`` re-minted a fresh
+    ``instance_id`` on every restart even though the JSON store round-tripped it,
+    because ``_instance_from_record`` silently dropped the field. A client that
+    resolved the row via its (now stale) cached instance_id would 404 after a
+    restart despite the underlying session having reattached successfully.
+    """
+    fake = await fake_claustrum()
+    store = HostedStateStore(tmp_path)
+    pid = await _spawn_gen1(fake, store)
+    persisted_iid = store.load()[pid]["instance_id"]
+    assert persisted_iid  # the JSON store round-tripped it (generation 1 already closed)
+
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        mgr = HostedManager(store)
+        await mgr.reattach_all(client)
+        inst = mgr.get_instance(pid)
+        assert inst.instance_id == persisted_iid
+        # The lifecycle lookup by instance_id (#834/#840) still resolves post-restart.
+        assert mgr.get_instance(persisted_iid) is not None
+        assert mgr.get_instance(persisted_iid).claustrum_process_id == pid
+        await mgr.aclose()
+
+
 async def test_manager_reattach_intentional_stop_not_reattached(fake_claustrum, tmp_path):
     fake = await fake_claustrum()
     store = HostedStateStore(tmp_path)
