@@ -4105,6 +4105,7 @@
     return {
       open: false, mode: "login", started: false, finished: false, busy: false,
       authorizeUrl: null, output: "", code: "", error: null, result: null, copied: false,
+      pending: false, pendingMessage: "",
       toggle() { this.open = !this.open; },
       async start() {
         this.busy = true; this.error = null;
@@ -4131,7 +4132,15 @@
           const body = await res.json();
           this.code = "";  // never keep the pasted code in the DOM/state longer than needed
           if (!res.ok) { this.error = body.detail || "failed to submit code"; return; }
-          this.result = body; this.finished = true;
+          // `pending: true` = the login is still verifying server-side (a slow provider):
+          // NOT finished. Keep the flow active (Cancel stays visible, the operator can
+          // re-submit once the code is issued or wait), and show the verifying message.
+          // Only a terminal outcome (ok, or ok:false with no pending) finishes the flow.
+          if (body.pending) {
+            this.pending = true; this.pendingMessage = body.message || "Still verifying…";
+          } else {
+            this.result = body; this.finished = true; this.pending = false;
+          }
         } catch (e) { this.error = String(e); }
         finally { this.busy = false; }
       },
@@ -4142,10 +4151,13 @@
         } catch (e) { this.error = String(e); }
         finally { this.busy = false; this.reset(); }
       },
+      // "Start another" must cancel any still-active server-side flow before resetting
+      // local state, so a pending (or already-finished) flow is never orphaned.
+      async startAnother() { await this.cancel(); },
       reset() {
         this.started = false; this.finished = false; this.authorizeUrl = null;
         this.output = ""; this.code = ""; this.result = null; this.error = null;
-        this.copied = false;
+        this.copied = false; this.pending = false; this.pendingMessage = "";
       },
       async copyToken() {
         const text = this.result && this.result.token;

@@ -193,6 +193,10 @@ def run_login_shepherd(mode, args):
         - decoy_url:        prints a NON-Claude https URL (a docs link) BEFORE the
                              real authorize URL — the extractor must prefer the
                              known-host one, not the first match.
+        - docs_decoy_url:   prints a docs subdomain of a KNOWN parent
+                             (docs.anthropic.com) BEFORE the real authorize URL —
+                             the extractor must NOT treat the docs host as an auth
+                             host, and return the real claude.ai URL.
         - punct_url:        prints the authorize URL with trailing punctuation
                              ("...authorize?fake=1)." ) — the extractor must trim it.
         - ansi_url:         prints the authorize URL wrapped in ANSI color+reset
@@ -232,6 +236,11 @@ def run_login_shepherd(mode, args):
     if mode_sel == "decoy_url":
         # A non-Claude docs link printed FIRST; the real authorize URL second.
         emit("See the docs at https://docs.example.com/help for more.")
+        emit(f"Open this URL to authorize: {url}")
+    elif mode_sel == "docs_decoy_url":
+        # A docs subdomain of a KNOWN parent (docs.anthropic.com) printed FIRST — must NOT
+        # be mistaken for the auth host; the real authorize URL (claude.ai) is second.
+        emit("Read the guide at https://docs.anthropic.com/claude-code first.")
         emit(f"Open this URL to authorize: {url}")
     elif mode_sel == "punct_url":
         # Authorize URL with trailing sentence punctuation the extractor must trim.

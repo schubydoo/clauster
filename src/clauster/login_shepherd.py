@@ -75,6 +75,12 @@ _URL_RE = re.compile(r"https://\S+")
 # back to the LAST https URL rather than failing.
 _KNOWN_AUTH_HOST_SUFFIXES = ("claude.ai", "anthropic.com")
 
+# Subdomain prefixes that are documentation/marketing hosts, NOT auth endpoints — even
+# on an otherwise-known parent domain (e.g. `docs.anthropic.com` is a subdomain of
+# `anthropic.com` but is a docs page, not an authorize URL). Excluded so a help/docs link
+# printed before the real authorize URL can't be mistaken for the auth host.
+_NON_AUTH_HOST_PREFIXES = ("docs.", "help.", "support.", "www.")
+
 # Trailing characters the CLI may print immediately after a URL (sentence punctuation,
 # closing brackets/quotes) that are not part of the URL itself.
 _URL_TRAILING = ".,;:!?)]}>\"'"
@@ -99,7 +105,16 @@ def _url_host(url: str) -> str:
 
 
 def _is_known_auth_host(host: str) -> bool:
-    """Whether ``host`` is (a subdomain of) a known Claude/Anthropic auth host."""
+    """Whether ``host`` is a known Claude/Anthropic *auth* host (not a docs/marketing one).
+
+    A host on a known parent domain (``claude.ai`` / ``anthropic.com``, incl. subdomains
+    like ``console.anthropic.com``) qualifies — EXCEPT documentation/marketing subdomains
+    (``docs.``/``help.``/``support.``/``www.``), which are pages an operator would land on
+    but never receive an OAuth code from. Excluding them stops a docs link printed before
+    the real authorize URL from being mistaken for the auth endpoint.
+    """
+    if host.startswith(_NON_AUTH_HOST_PREFIXES):
+        return False
     return any(
         host == suffix or host.endswith("." + suffix) for suffix in _KNOWN_AUTH_HOST_SUFFIXES
     )
@@ -113,10 +128,12 @@ def _extract_authorize_url(output: str) -> str | None:
     * ANSI/terminal escape sequences are stripped first (via :func:`redact.strip_ansi`)
       so a colored/reset-wrapped URL isn't polluted with escape bytes.
     * Each matched ``https://…`` token is trimmed of trailing punctuation/quotes.
-    * When several https URLs are present, one whose host ends in a known Claude/Anthropic
-      auth host wins over an arbitrary first match (a decoy docs link printed first can't
-      hijack the operator); with no known-host match it falls back to the *last* https URL
-      (the CLI prints the actionable link last far more often than first).
+    * When several https URLs are present, the LAST one whose host is a known Claude/
+      Anthropic auth host (docs/marketing subdomains excluded — see
+      :func:`_is_known_auth_host`) wins: a decoy docs/help link printed *before* the real
+      authorize URL can't hijack the operator, and — since the CLI prints the actionable
+      link after any preamble — the last known-host match is the authorize link. With no
+      known-auth-host match it falls back to the *last* https URL overall.
 
     Deliberately defensive, not host-locked: the real-CLI format is unverified, so a URL
     on an unknown host is still returned rather than rejected.
@@ -126,9 +143,9 @@ def _extract_authorize_url(output: str) -> str | None:
     candidates = [c for c in candidates if c]
     if not candidates:
         return None
-    for url in candidates:
-        if _is_known_auth_host(_url_host(url)):
-            return url
+    known = [url for url in candidates if _is_known_auth_host(_url_host(url))]
+    if known:
+        return known[-1]
     return candidates[-1]
 
 
@@ -326,13 +343,16 @@ class LoginShepherd:
             if exit_code is None:
                 # Still running after the timeout: a slow-but-valid verification. Leave the
                 # flow ACTIVE (don't kill it) so a genuine login isn't aborted; the operator
-                # can wait + re-check or cancel. Return without tearing down.
+                # can wait + re-check or cancel. Return without tearing down. `pending: true`
+                # distinguishes this IN-PROGRESS state from a terminal failure so the UI keeps
+                # the Cancel control and doesn't treat it as "finished" (which would orphan the
+                # still-running server-side flow).
                 message = (
                     f"claude {flow.mode} is still verifying — the login is still running "
                     f"(no result within {SUBMIT_TIMEOUT_SECONDS:.0f}s). Wait and re-check "
                     "`claude auth status --json`, or cancel."
                 )
-                return {"ok": False, "message": message}
+                return {"ok": False, "pending": True, "message": message}
 
             # Exited: drain the reader (its last `readline()` may still be in flight in the
             # instant poll() first reported exit) so a final line — e.g. setup-token's token

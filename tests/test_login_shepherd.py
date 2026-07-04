@@ -129,6 +129,17 @@ def test_start_prefers_the_known_host_url_over_a_decoy(shepherd, monkeypatch) ->
         shepherd.cancel()
 
 
+def test_start_ignores_a_docs_subdomain_of_a_known_parent(shepherd, monkeypatch) -> None:
+    # `docs.anthropic.com` (a docs subdomain of the known parent anthropic.com) printed
+    # first must NOT be selected — the real claude.ai authorize URL is returned instead.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "docs_decoy_url")
+    try:
+        result = shepherd.start("login")
+        assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
+    finally:
+        shepherd.cancel()
+
+
 def test_start_trims_trailing_punctuation_off_the_url(shepherd, monkeypatch) -> None:
     # The CLI printed "(<url>)." — the returned href must not carry the trailing `).`.
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "punct_url")
@@ -170,6 +181,43 @@ def test_extract_url_falls_back_to_last_when_no_known_host() -> None:
 def test_extract_url_trims_and_strips_ansi() -> None:
     out = "go to \x1b[36mhttps://claude.ai/authorize?fake=1\x1b[0m."
     assert ls._extract_authorize_url(out) == "https://claude.ai/authorize?fake=1"
+
+
+def test_extract_url_docs_subdomain_is_not_an_auth_host() -> None:
+    # `docs.anthropic.com` is a subdomain of a known parent (anthropic.com) but is a docs
+    # page, NOT an auth endpoint — a docs link printed BEFORE the real authorize URL must
+    # not be selected (this is the "known host decoy" the docs-subdomain exclusion closes).
+    out = (
+        "Read the docs at https://docs.anthropic.com/claude-code\n"
+        "Then authorize at https://claude.ai/oauth/authorize?real=1"
+    )
+    assert ls._extract_authorize_url(out) == "https://claude.ai/oauth/authorize?real=1"
+
+
+def test_extract_url_help_and_www_subdomains_excluded() -> None:
+    # help./www. subdomains of a known parent are marketing/docs, not auth — excluded.
+    out = (
+        "https://www.anthropic.com/pricing and https://help.claude.ai/faq\n"
+        "https://console.anthropic.com/auth?code=1"
+    )
+    assert ls._extract_authorize_url(out) == "https://console.anthropic.com/auth?code=1"
+
+
+def test_extract_url_prefers_the_last_known_auth_host() -> None:
+    # Two genuine auth-host URLs → the LAST one wins (the actionable link is printed after
+    # any preamble), not the first.
+    out = (
+        "https://claude.ai/oauth/authorize?first=1\n"
+        "Actually, use https://claude.ai/oauth/authorize?second=2"
+    )
+    assert ls._extract_authorize_url(out) == "https://claude.ai/oauth/authorize?second=2"
+
+
+def test_extract_url_only_docs_hosts_falls_back_to_last_https() -> None:
+    # When every known-parent host is a docs/marketing subdomain (none is a real auth host),
+    # fall back to the LAST https URL overall rather than picking a docs page as "known".
+    out = "https://docs.anthropic.com/a and https://help.claude.ai/b"
+    assert ls._extract_authorize_url(out) == "https://help.claude.ai/b"
 
 
 def test_unknown_binary_raises_login_shepherd_error(monkeypatch) -> None:
@@ -248,6 +296,8 @@ def test_submit_code_rejected_by_cli(shepherd, monkeypatch) -> None:
     result = shepherd.submit_code("a-bad-code")
     assert result["ok"] is False
     assert "invalid code" in result["message"]
+    # A genuine terminal failure is NOT pending — the flow is done and torn down.
+    assert result.get("pending") is not True
     assert not shepherd.is_active()
 
 
@@ -302,6 +352,7 @@ def test_submit_code_slow_verification_is_not_killed(shepherd, monkeypatch) -> N
     proc = shepherd._flow.proc  # noqa: SLF001 - confirm it's left alive
     result = shepherd.submit_code("the-code")
     assert result["ok"] is False
+    assert result["pending"] is True  # distinguishes IN-PROGRESS from a terminal failure
     assert "still verifying" in result["message"]
     assert "token" not in result
     assert shepherd.is_active()  # flow left active, not reaped
@@ -559,6 +610,7 @@ def test_code_route_still_verifying_is_200_ok_false(tmp_path: Path, monkeypatch)
         assert code.status_code == 200
         body = code.json()
         assert body["ok"] is False
+        assert body["pending"] is True  # the UI keys off this to stay IN-PROGRESS, not finished
         assert "still verifying" in body["message"]
         # Flow is intentionally left active; explicitly cancel so shutdown is clean-fast.
         assert c.post("/api/login-shepherd/cancel").status_code == 200
