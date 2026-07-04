@@ -97,6 +97,94 @@ def test_find_authorize_url_is_incremental_across_feeds():
     assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=2"
 
 
+# --- find_authorize_url() at a NARROW width: hard-wrap reassembly (live-smoke regression) --
+#
+# Live-smoke-tested against real claude 2.1.201 (#846 follow-up): the setup-token PTY was
+# opened via a bare `os.openpty()`, which defaults to 80 columns. Real `claude setup-token`
+# wraps its ~450-char authorize URL at the terminal width, and the old
+# `"\n".join(screen.display)` join left the wrapped URL split across rows — truncating it
+# at the first row boundary (e.g. cut mid `client_id=...`). The fix widens the PTY itself
+# (`login_shepherd._LOGIN_PTY_COLS`) AND makes `find_authorize_url`/`find_oauth_token`
+# reassemble hard-wrapped rows before scanning, so the scan is correct at ANY width. These
+# tests pin that reassembly directly at a narrow (80-col) width, independent of the caller's
+# chosen PTY size.
+
+_REALISTIC_AUTHORIZE_URL = (
+    "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88e4"
+    "-1234567890ab&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3A"
+    "model_registry&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2F"
+    "callback&state=" + ("a" * 120) + "&code_challenge=" + ("b" * 80) + "&code_challenge_method"
+    "=S256&final=true"
+)
+
+
+def test_find_authorize_url_reassembles_a_hard_wrapped_url_at_narrow_width():
+    # ~450+ chars: WOULD wrap repeatedly at 80 columns (the pre-fix default winsize).
+    assert len(_REALISTIC_AUTHORIZE_URL) > 450
+    scr = PtyScreen(cols=80, rows=20)
+    scr.feed(f"Open this URL to authorize: {_REALISTIC_AUTHORIZE_URL}\r\n".encode())
+    found = scr.find_authorize_url()
+    # Complete and untruncated: every query param survives, including the very last one.
+    assert found == _REALISTIC_AUTHORIZE_URL
+    assert found is not None and found.endswith("&final=true")
+    assert "client_id=9d1c250a-e61b-44d9-88e4-1234567890ab" in found
+
+
+def test_find_authorize_url_reassembles_url_fed_as_pre_wrapped_bytes():
+    # Feed the URL pre-split into 80-byte chunks with NO separator between them — standing
+    # in for a raw pty stream that already wrapped the line before this emulator ever sees
+    # it (rather than relying on pyte's own autowrap to reproduce the split). Proves the
+    # reassembly is robust to hard-wrapped input arriving in arbitrary chunk boundaries, not
+    # just to pyte wrapping it itself in one feed() call.
+    text = f"Open this URL to authorize: {_REALISTIC_AUTHORIZE_URL}"
+    scr = PtyScreen(cols=80, rows=20)
+    for i in range(0, len(text), 80):
+        scr.feed(text[i : i + 80].encode())
+    found = scr.find_authorize_url()
+    assert found == _REALISTIC_AUTHORIZE_URL
+
+
+def test_find_authorize_url_at_wide_width_never_wraps_in_the_first_place():
+    # The primary fix: at the WIDE pty width login_shepherd now uses, the URL fits on one
+    # rendered row and never wraps at all — the unwrap reassembly is defense in depth, not
+    # what makes this case work.
+    scr = PtyScreen(cols=1024, rows=10)
+    scr.feed(f"Open this URL to authorize: {_REALISTIC_AUTHORIZE_URL}\r\n".encode())
+    assert scr.find_authorize_url() == _REALISTIC_AUTHORIZE_URL
+
+
+def test_find_oauth_token_reassembles_a_hard_wrapped_token_at_narrow_width():
+    # The token line can also wrap at a narrow width; find_oauth_token must recover it whole.
+    token = "tok-" + ("x" * 200)
+    scr = PtyScreen(cols=80, rows=10)
+    scr.feed(f"Login successful.\r\nCLAUDE_CODE_OAUTH_TOKEN={token}".encode())
+    assert scr.find_oauth_token() == token
+
+
+# --- _unwrap_display() pure-unit coverage --------------------------------------------
+
+
+def test_unwrap_display_joins_a_full_width_row_with_no_separator():
+    # A row that fills every column (last char non-space) was hard-wrapped -> no \n.
+    # The trailing (last) row's own wrapped-ness only matters for what follows it, which
+    # here is nothing, so no trailing newline is appended.
+    assert pty_screen._unwrap_display(["abcde", "fghij"]) == "abcdefghij"
+
+
+def test_unwrap_display_inserts_newline_after_a_short_row():
+    # A row that does NOT reach the last column (trailing space) ends a logical line.
+    assert pty_screen._unwrap_display(["ab   ", "cd   "]) == "ab   \ncd   \n"
+
+
+def test_unwrap_display_handles_an_empty_row():
+    assert pty_screen._unwrap_display(["", "next "]) == "\nnext \n"
+
+
+def test_unwrap_display_mixed_wrapped_and_unwrapped_rows():
+    # First row wrapped into the second (no separator); second row ends the line (newline).
+    assert pty_screen._unwrap_display(["hello", "world ", "tail"]) == "helloworld \ntail"
+
+
 def test_find_oauth_token_scrapes_the_rendered_screen():
     scr = PtyScreen(cols=80, rows=3)
     scr.feed(b"Login successful.\r\nCLAUDE_CODE_OAUTH_TOKEN=canned-token-value-xyz")

@@ -49,13 +49,23 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeVar
 
 from . import claude_cli, procutil
-from .pty_screen import PtyScreen, PyteUnavailableError, extract_authorize_url
+from .pty_screen import SCREEN_ROWS, PtyScreen, PyteUnavailableError, extract_authorize_url
 
 _T = TypeVar("_T")
 
 _log = logging.getLogger("clauster.login_shepherd")
 
 Mode = Literal["login", "setup-token"]
+
+#: PTY width (columns) for the `setup-token` transport (#846 follow-up). Real
+#: `claude setup-token` wraps its printed `https://claude.com/cai/oauth/authorize?...`
+#: URL at the terminal's column width — a plain `os.openpty()` defaults to 80 cols, which
+#: is narrower than the ~450-char authorize URL and truncates it mid-query-string once
+#: `PtyScreen.find_authorize_url()` joins the (now multi-line) rendered screen. Sizing the
+#: pty (and the shepherd's own `PtyScreen`, see `_spawn_pty`) to a wide column count keeps
+#: the whole URL on one rendered line so it never wraps in the first place. Rows reuse
+#: `SCREEN_ROWS` (the pty-screen module's fixed geometry) — only the width matters here.
+_LOGIN_PTY_COLS = 1024
 
 #: How long `start()` waits for an authorize URL (or process exit) before giving
 #: up and failing closed. The real flow should print the URL almost immediately;
@@ -190,7 +200,7 @@ class LoginShepherd:
         return flow
 
     def _spawn_pty(self, mode: Mode, resolved_binary: str) -> _Flow:
-        """Spawn `claude setup-token` under a PTY, reusing `pty_screen.PtyScreen` (#846).
+        r"""Spawn `claude setup-token` under a PTY, reusing `pty_screen.PtyScreen` (#846).
 
         `claude setup-token` is a full TUI: it prints essentially nothing on a plain pipe
         and only renders its authorize URL under a real terminal, so it needs a real PTY
@@ -216,15 +226,29 @@ class LoginShepherd:
         anywhere that response is logged upstream). Disabling `ECHO` closes it at the
         source — this fails closed too: a `termios` failure aborts the spawn rather
         than risk running with echo silently left on.
+
+        **The pty is sized WIDE (`_LOGIN_PTY_COLS`), not left at the `os.openpty()`
+        default of 80x24 (live-smoke-test regression, #846 follow-up).** Real `claude
+        setup-token` wraps its authorize URL at the terminal's column width; at the
+        default 80 cols a ~450-char URL wraps across multiple screen rows, and
+        `PtyScreen.find_authorize_url()` (over `"\\n".join(display)`) then truncates it
+        at the first wrap point. Sizing the slave's winsize wide keeps the URL on one
+        rendered row, and `screen` is built at the SAME width (`PtyScreen(cols=...)`) so
+        pyte doesn't re-wrap/re-truncate it down to its own default geometry. Best-effort
+        like `pty_keeper`'s existing winsize ioctl (a failure here only risks the
+        rare-but-now-defended-against wrap case, never a crash) — the ECHO-disable above
+        stays fail-closed since it is security-critical, not cosmetic.
         """
         try:
-            screen = PtyScreen()
+            screen = PtyScreen(cols=_LOGIN_PTY_COLS, rows=SCREEN_ROWS)
         except PyteUnavailableError as exc:
             raise LoginShepherdError(
                 "the long-lived-token mode needs the `pty` extra (pyte) — use "
                 f"subscription sign-in instead, or install it: {exc}"
             ) from exc
 
+        import fcntl
+        import struct
         import termios
 
         argv = [resolved_binary, "setup-token"]
@@ -232,6 +256,19 @@ class LoginShepherd:
             master_fd, slave_fd = os.openpty()
         except OSError as exc:
             raise LoginShepherdError(f"failed to open a pty for claude {mode}: {exc}") from exc
+        try:
+            fcntl.ioctl(
+                slave_fd,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", SCREEN_ROWS, _LOGIN_PTY_COLS, 0, 0),
+            )
+        except OSError as exc:
+            # Best-effort, like pty_keeper's winsize ioctl: a failure here means the
+            # slave stays at whatever default winsize the pty was opened with, so a very
+            # long authorize URL *could* still wrap and get truncated — but it is never
+            # fatal to the login flow, so log at debug and keep going rather than abort
+            # the spawn (unlike the ECHO disable below, which IS security-critical).
+            _log.debug("login_shepherd: failed to widen pty winsize for %s: %s", mode, exc)
         try:
             attrs = termios.tcgetattr(slave_fd)
             attrs[3] &= ~termios.ECHO  # lflags &= ~ECHO

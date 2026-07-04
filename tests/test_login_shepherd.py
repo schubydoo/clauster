@@ -306,6 +306,59 @@ def test_setup_token_popen_failure_closes_both_fds(shepherd, monkeypatch) -> Non
     assert len(closed) == 2  # master + slave, both reclaimed
 
 
+def test_setup_token_pty_is_sized_wide_not_the_80_col_default(shepherd, monkeypatch) -> None:
+    # Live-smoke-test regression (#846 follow-up): a bare os.openpty() defaults to 80
+    # columns, which wraps (and thus truncates) claude setup-token's ~450-char authorize
+    # URL. The slave's real winsize (TIOCGWINSZ) must reflect the widened _LOGIN_PTY_COLS,
+    # not the pty default — and the shepherd's PtyScreen must be built at the SAME width,
+    # or pyte would just re-wrap the already-wide line down to its own default geometry.
+    import fcntl
+    import struct
+    import termios
+
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("setup-token")
+        flow = shepherd._flow  # noqa: SLF001 - internals test
+        assert flow.screen is not None
+        assert flow.screen.cols == ls._LOGIN_PTY_COLS
+        assert flow.screen.rows == ls.SCREEN_ROWS
+
+        # Read back the slave's winsize via its master (TIOCGWINSZ mirrors TIOCSWINSZ).
+        packed = fcntl.ioctl(flow.master_fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+        rows, cols, _, _ = struct.unpack("HHHH", packed)
+        assert cols == ls._LOGIN_PTY_COLS
+        assert rows == ls.SCREEN_ROWS
+        assert cols != 80  # the os.openpty() default this regression guards against
+    finally:
+        shepherd.cancel()
+
+
+def test_setup_token_pty_winsize_ioctl_failure_is_best_effort(shepherd, monkeypatch) -> None:
+    # A TIOCSWINSZ failure must NOT abort the spawn (unlike the ECHO-disable failure below,
+    # which is security-critical and fails closed) — it only risks the rare wrap/truncation
+    # case that find_authorize_url's hard-wrap reassembly additionally defends against.
+    import fcntl as real_fcntl
+    import termios
+
+    real_ioctl = real_fcntl.ioctl
+
+    def _selective_boom(fd, request, *args, **kwargs):
+        if request == termios.TIOCSWINSZ:
+            raise OSError("simulated TIOCSWINSZ failure")
+        return real_ioctl(fd, request, *args, **kwargs)
+
+    monkeypatch.setattr(real_fcntl, "ioctl", _selective_boom)
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        result = shepherd.start("setup-token")
+        # The flow still starts and finds the (narrow-rendered, but present) authorize URL —
+        # a winsize failure degrades gracefully rather than crashing the spawn.
+        assert result["authorize_url"].startswith("https://")
+    finally:
+        shepherd.cancel()
+
+
 def test_setup_token_pty_full_flow_start_submit_token(shepherd, monkeypatch) -> None:
     # End-to-end PTY happy path: start() scrapes the authorize URL from the rendered
     # screen, submit_code() writes to the pty master (not a stdin pipe), and the

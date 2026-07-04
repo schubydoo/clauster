@@ -93,6 +93,36 @@ _URL_TRAILING = ".,;:!?)]}>\"'"
 _TOKEN_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)")
 
 
+def _unwrap_display(display: list[str]) -> str:
+    r"""Reassemble ``display`` rows into text, joining hard-wrapped continuation lines.
+
+    Defense in depth for `find_authorize_url`/`find_oauth_token` (#846 follow-up): the
+    `setup-token` PTY is now sized wide enough (see `login_shepherd._LOGIN_PTY_COLS`) that
+    its ~450-char authorize URL should never wrap in practice, but this makes the scan
+    correct at ANY pty width, in case a URL ever exceeds it.
+
+    Each pyte `display` row is padded to exactly ``cols`` characters (trailing spaces).
+    When a terminal autowraps a long logical line, the wrapped row is filled edge-to-edge
+    with real content — its LAST column is a non-space character — and the continuation
+    resumes at the start of the next row with no separator of its own. A row that did NOT
+    fill the width (its last character is a space, i.e. the terminal stopped short of the
+    edge) ends a logical line, so a newline belongs there. This lets a caller join rows
+    without a separator exactly where pyte's autowrap split them, and with ``\n`` everywhere
+    else — recovering the original logical line before scanning it for a URL/token.
+
+    Not perfect (a logical line that happens to end exactly at the last column with real
+    content is indistinguishable from a wrap), but strictly better than always joining with
+    ``\n``, which is what silently truncated the authorize URL in the first place.
+    """
+    pieces: list[str] = []
+    for row in display:
+        pieces.append(row)
+        wrapped = bool(row) and not row[-1].isspace()
+        if not wrapped:
+            pieces.append("\n")
+    return "".join(pieces)
+
+
 def _clean_url(url: str) -> str:
     """Trim trailing sentence punctuation / closing quotes off a matched URL token."""
     return url.rstrip(_URL_TRAILING)
@@ -323,18 +353,25 @@ class PtyScreen:
         pty-bridge connect URL, so the same reassembled-then-selected approach applies here —
         :func:`extract_authorize_url` (the shared claude.com/known-host preference,
         docs-decoy exclusion, last-match selection also used by `login_shepherd`'s plain-pipe
-        `login` reader) runs over ``"\\n".join(self._screen.display)`` rather than the raw,
-        redraw-fragmented byte stream.
+        `login` reader) runs over :func:`_unwrap_display` rather than a naive
+        ``"\\n".join(display)`` — the authorize URL is ~450 chars, long enough to hard-wrap
+        across several rows at a narrower pty width, and a plain newline join would leave it
+        split (and thus truncated at the first row boundary) instead of reassembled whole.
+        The pty is sized wide enough that this should rarely matter in practice (see
+        `login_shepherd._LOGIN_PTY_COLS`), but `_unwrap_display` makes the scan correct at
+        any width.
         """
-        return extract_authorize_url("\n".join(self._screen.display))
+        return extract_authorize_url(_unwrap_display(self._screen.display))
 
     def find_oauth_token(self) -> str | None:
         """Scan the reassembled screen for ``setup-token``'s printed OAuth token, or None.
 
-        Same reassembly rationale as :meth:`find_authorize_url`: the token line is only
-        whole in the pyte-rendered screen, not necessarily the raw byte stream.
+        Same reassembly rationale as :meth:`find_authorize_url`, including the
+        :func:`_unwrap_display` hard-wrap reassembly: the token line is only whole in the
+        pyte-rendered (and unwrapped) screen, not necessarily the raw byte stream or a
+        naive newline-joined display.
         """
-        return extract_oauth_token("\n".join(self._screen.display))
+        return extract_oauth_token(_unwrap_display(self._screen.display))
 
     def frame(self) -> dict[str, Any]:
         """Return the current screen as a redacted, cells-only frame.
