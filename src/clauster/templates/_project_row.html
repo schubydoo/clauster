@@ -301,7 +301,7 @@
                           <button type="button" class="btn btn-sm btn-ghost-danger" data-test="mcp-launch-anyway"
                                   :disabled="launching['{{ p.name }}']"
                                   @click="launchAnyway('{{ p.name }}', lmode, lperm, lcloud, lprompt)">Launch anyway</button>
-                          <button type="button" class="btn btn-sm btn-ghost-secondary" @click="cancelMcpGate('{{ p.name }}')">Cancel</button>
+                          <button type="button" class="btn btn-sm btn-ghost-secondary" @click="cancelMcpGate('{{ p.name }}', $refs)">Cancel</button>
                         </div>
                       </div>
 

@@ -1755,7 +1755,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.confirm = ""; await this._loadMcp(gen); this.loadPreflight(c.project); }
+          if (res.ok) { c.saved = true; ap.confirm = ""; await this._loadMcp(gen); await this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } finally { ap.ops = Math.max(0, ap.ops - 1); ap.busy = ap.ops > 0; }
       },
@@ -1775,7 +1775,7 @@
           });
           if (c.gen !== gen) return;
           if (this._authExpired(res)) return;
-          if (res.ok) { c.saved = true; ap.resetConfirm = ""; await this._loadMcp(gen); this.loadPreflight(c.project); }
+          if (res.ok) { c.saved = true; ap.resetConfirm = ""; await this._loadMcp(gen); await this.loadPreflight(c.project); }
           else await this._configMgmtWriteErr(res);
         } finally { ap.resetBusy = false; }
       },
@@ -2953,9 +2953,12 @@
       // subsequent Run re-blocks (block-by-default). Return focus to the now-revealed Run
       // button so it doesn't orphan on the hidden Cancel (WCAG 2.4.3, matching how the
       // trust/bypass gates hand focus back).
-      cancelMcpGate(name) {
+      cancelMcpGate(name, refs) {
         this.confirmMcp[name] = false;
-        this.$nextTick(() => { if (this.$refs.launchGo) this.$refs.launchGo.focus(); });
+        // `launchGo` is an x-ref inside the project ROW; pass the directive's own `$refs`
+        // (row-scoped) rather than reading `this.$refs` (which resolves on the dashboard
+        // component and would miss it) — mirrors how `focusMcpBlock` receives `$refs`.
+        this.$nextTick(() => { if (refs && refs.launchGo) refs.launchGo.focus(); });
       },
       // "Resolve in Server approvals" — hand off to the config-mgmt MCP-approvals panel.
       // Close the launch popover first so no stale gate lingers behind the modal; on a
