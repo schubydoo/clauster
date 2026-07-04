@@ -196,6 +196,50 @@
     .empty-state-light { display: flex; flex-wrap: wrap; align-items: center;
       gap: .5rem 1rem; padding: .75rem 0; }
     .empty-state-light-actions { display: flex; gap: .5rem; margin-left: auto; }
+
+    /* #846: login-shepherd mode picker — a segmented toggle, not Tabler's default
+       .form-selectgroup. That component's unselected .form-selectgroup-label shares
+       the same background/border/shadow as a plain .form-control, so an unselected
+       option reads as an empty text input rather than "the other choice" (live-UI
+       finding). This is a purpose-built two-option group: unselected is a flat,
+       low-contrast segment; selected gets a solid primary fill + white text — a
+       binary state that can't be mistaken for an editable field. */
+    .ls-mode-toggle { display: flex; border: 1px solid var(--tblr-border-color);
+      border-radius: var(--tblr-border-radius); overflow: hidden; width: max-content;
+      max-width: 100%; }
+    /* WCAG AA (#846): text color is --tblr-body-color, not --tblr-secondary — the
+       latter only clears ~3:1 against the dark-theme surface (secondary is tuned for
+       large/muted text, not a 14px interactive label), while body-color holds
+       comfortably above 4.5:1 in both themes. The unselected/selected distinction
+       comes from the BACKGROUND fill instead (surface vs. solid primary), so
+       readability is never traded for the toggle's visual states. */
+    .ls-mode-opt { position: relative; margin: 0; padding: .5rem .9rem; font-size: .875rem;
+      line-height: 1.25rem; text-align: center; cursor: pointer; user-select: none;
+      color: var(--tblr-body-color); background: var(--tblr-bg-surface);
+      transition: background .15s; }
+    .ls-mode-opt + .ls-mode-opt { border-left: 1px solid var(--tblr-border-color); }
+    .ls-mode-opt:hover { background: var(--tblr-bg-surface-secondary); }
+    /* Selected = solid primary fill (never the ~4%-tint Tabler uses for its own
+       selectgroup) so the two states are unmistakable at a glance, not just a subtle
+       border-color change. */
+    .ls-mode-opt-sel, .ls-mode-opt-sel:hover { color: #fff; background: var(--tblr-primary); }
+    /* The native radio stays for keyboard/AT semantics (name-grouped, checked state,
+       label association) but is visually replaced by the segment's own fill — same
+       "hide the control, style the label" pattern as .form-selectgroup-input, just
+       with a visible focus ring on the LABEL (below) instead of relying on the
+       invisible input's default outline, which a zero-size/opacity input would clip. */
+    .ls-mode-input { position: absolute; opacity: 0; width: 1px; height: 1px;
+      margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+    .ls-mode-input:focus-visible + span { outline: 2px solid var(--tblr-primary);
+      outline-offset: 2px; border-radius: 2px; }
+    /* Fixed-height slot (#846): reserves room for the taller of the two mode
+       descriptions so switching modes toggles TEXT, not the slot's height — the
+       Start button below it never jumps rows. Sized for two lines at this
+       font-size/line-height (the longest description wraps to 2 lines around the
+       card's typical width); a wider viewport that fits both on one line still just
+       has extra breathing room, never a shift. (Bottom margin comes from the
+       template's own `.mb-2` utility class, not repeated here.) */
+    .ls-mode-desc { min-height: 2.5rem; }
   </style>
 </head>
 <body>
@@ -1059,6 +1103,122 @@
                 </div>
                 <div class="alert alert-info mt-2" x-show="result" x-cloak x-text="result"></div>
                 <button class="btn btn-sm mt-2" @click="load()" :disabled="busy">Refresh</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if login_shepherd_enabled %}
+      <!-- ===== Login shepherd (#839): dashboard-driven `claude` account login ===== -->
+      <div class="mt-4" x-data="loginShepherd()">
+        <button class="btn btn-sm btn-ghost-secondary" @click="toggle()">
+          <span x-show="open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Close claude login</span><span x-show="!open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-trust"/></svg>Sign in to the claude account</span>
+        </button>
+        <div class="card mt-2" x-show="open" x-cloak>
+          <div class="card-body">
+            <h3 class="card-title">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-trust"/></svg>Sign in to the runtime <code>claude</code> account
+            </h3>
+            <p class="text-secondary small">
+              Fixes a logged-out or expired <code>claude</code> account without SSH. Pick a mode,
+              open the authorize link in a new tab, approve it, then paste the code it gives you
+              back here.
+            </p>
+
+            <template x-if="!started">
+              <div>
+                {% if login_shepherd_allow_setup_token %}
+                <!-- Segmented mode toggle (#846): a two-option, mutually-exclusive
+                     picker with an obvious selected/unselected contrast — restyled
+                     via .ls-mode-toggle (below) so it never reads as a text input.
+                     Only rendered when allow_setup_token (#846 second gate) is on —
+                     otherwise the setup-token radio never exists in the DOM, so the
+                     picker collapses to the single sign-in mode below. -->
+                <div class="ls-mode-toggle mb-2" role="group" aria-label="Sign-in mode">
+                  <label class="ls-mode-opt" :class="{ 'ls-mode-opt-sel': mode === 'login' }">
+                    <input type="radio" class="ls-mode-input" name="login-shepherd-mode"
+                           value="login" x-model="mode">
+                    <span>Sign in with your Claude subscription</span>
+                  </label>
+                  <label class="ls-mode-opt" :class="{ 'ls-mode-opt-sel': mode === 'setup-token' }">
+                    <input type="radio" class="ls-mode-input" name="login-shepherd-mode"
+                           value="setup-token" x-model="mode">
+                    <span>Create a long-lived token</span>
+                  </label>
+                </div>
+                <!-- Fixed-height slot (#846): both modes render a description here so
+                     picking either mode shows/hides text WITHOUT changing the slot's
+                     height, keeping Start at a constant position below it. -->
+                <p class="ls-mode-desc text-secondary small mb-2">
+                  <span x-show="mode === 'login'" x-cloak>
+                    Opens a one-time authorize link tied to your Claude subscription.
+                  </span>
+                  <span x-show="mode === 'setup-token'" x-cloak>
+                    Mints a <code>CLAUDE_CODE_OAUTH_TOKEN</code> you copy into the runtime
+                    environment yourself — requires a Claude subscription.
+                  </span>
+                </p>
+                {% else %}
+                <!-- allow_setup_token is off (#846 second gate): only the `login` mode
+                     is offered — no toggle, just its description. `mode` already
+                     defaults to "login" in loginShepherd() and start() re-asserts it,
+                     so setup-token can never be selected or submitted from here. -->
+                <p class="ls-mode-desc text-secondary small mb-2">
+                  Opens a one-time authorize link tied to your Claude subscription.
+                </p>
+                {% endif %}
+                <button class="btn btn-primary" @click="start()" :disabled="busy"
+                        x-text="busy ? 'Starting…' : 'Start'">Start</button>
+              </div>
+            </template>
+
+            <div class="alert alert-danger mt-2" x-show="error" x-cloak x-text="error"></div>
+
+            <template x-if="started && authorizeUrl && !finished">
+              <div>
+                <p class="mb-1">
+                  1. Open the authorize link, sign in, and approve access:
+                </p>
+                <p>
+                  <a :href="authorizeUrl" target="_blank" rel="noopener noreferrer" x-text="authorizeUrl"></a>
+                </p>
+                <p class="mb-1">2. Paste the code it gives you back here:</p>
+                <div class="input-group input-group-narrow mb-2">
+                  <input type="text" class="form-control" x-model="code" placeholder="Paste code"
+                         aria-label="Authorization code"
+                         autocomplete="off" spellcheck="false" @keydown.enter="submitCode()">
+                  <button class="btn btn-primary" @click="submitCode()" :disabled="busy || !code"
+                          x-text="busy ? 'Submitting…' : 'Submit'">Submit</button>
+                </div>
+                <!-- Still-verifying (pending) state: the login is running server-side and
+                     hasn't resolved yet. The UI polls /status every ~3s; the message shows,
+                     "Recheck now" forces an immediate poll, and Cancel stays available. -->
+                <div class="alert alert-info" role="status" x-show="pending" x-cloak x-text="pendingMessage"></div>
+                <button class="btn btn-sm me-1" x-show="pending" x-cloak @click="recheck()">Recheck now</button>
+                <button class="btn btn-sm btn-ghost-secondary" @click="cancel()" :disabled="busy">Cancel</button>
+              </div>
+            </template>
+
+            <template x-if="finished">
+              <div>
+                <div class="alert mt-2" :class="result && result.ok ? 'alert-success' : 'alert-danger'"
+                     x-text="result && result.message"></div>
+                <template x-if="result && result.token">
+                  <div class="mb-2">
+                    <label class="form-label" for="ls-token">Long-lived token (shown once — copy it now)</label>
+                    <div class="input-group input-group-narrow">
+                      <input type="text" id="ls-token" class="form-control" readonly :value="result.token" @focus="$el.select()">
+                      <button class="btn" @click="copyToken()" x-text="copied ? 'Copied' : 'Copy'">Copy</button>
+                    </div>
+                    <p class="text-secondary small mt-1">
+                      Set this as <code>CLAUDE_CODE_OAUTH_TOKEN</code> in the runtime account's
+                      environment, then restart the bridge.
+                    </p>
+                  </div>
+                </template>
+                <button class="btn btn-sm mt-1" @click="startAnother()" :disabled="busy">Start another</button>
               </div>
             </template>
           </div>

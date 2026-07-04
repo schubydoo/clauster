@@ -43,6 +43,7 @@ from . import (
     config_write_subagents,
     config_writer,
     environments,
+    login_shepherd,
     login_status,
     logstream,
     ops,
@@ -549,6 +550,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             yield
         finally:
             await app.state.hosted.aclose()  # detach (not stop); sessions survive the restart
+            # Login shepherd (#839): reap any in-flight `claude auth login` subprocess so an
+            # abandoned (or mid-flow-at-shutdown) login can't outlive the app. `cancel()` is a
+            # safe no-op when nothing is active; it's sync and can block on terminate/kill
+            # waits, so run it off the event loop. Always set in create_app, so no None guard.
+            await asyncio.to_thread(app.state.login_shepherd.cancel)
             daemon = getattr(app.state, "claustrum_daemon", None)
             if daemon is not None:
                 await daemon.aclose()  # drop our connection; leave the daemon running
@@ -634,6 +640,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     runner.set_hosted_provider(app.state.hosted.list_instances)
     clone_jobs = CloneJobManager()
     app.state.clone_jobs = clone_jobs
+    # Login shepherd (#839): single-flight manager for a dashboard-driven `claude
+    # auth login` / `claude setup-token`. Constructed unconditionally (cheap, no
+    # subprocess yet) — the config gate gets enforced per-request by the routes.
+    app.state.login_shepherd = login_shepherd.LoginShepherd(config.claude.binary)
     # Drop a finished clone job after this grace so a client that disconnected
     # mid-clone can reconnect and still read the terminal frame.
     _CLONE_JOB_TTL = 60.0
@@ -1657,6 +1667,72 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             }
 
         return await asyncio.to_thread(_work)
+
+    # ----- login shepherd (#839): dashboard-driven `claude auth login` --------------
+
+    def _require_login_shepherd(mode: object = None) -> None:
+        # Fail-closed invisible-surface gate, same shape as the reaper UI and
+        # config-write: off by default, 404s (not 403) when disabled so a disabled
+        # deployment exposes nothing about the feature's existence.
+        #
+        # `mode` is an optional second check (#846), mirroring config_write's
+        # enabled/allow_user_scope pattern: `setup-token` mints a long-lived
+        # CLAUDE_CODE_OAUTH_TOKEN the operator copies out of the browser, so it
+        # requires BOTH the base `enabled` flag AND the independent
+        # `allow_setup_token` opt-in. When `allow_setup_token` is off, a
+        # `setup-token` request 404s with the SAME detail as the base gate —
+        # invisible-surface, never a distinct 403 that would leak that the mode
+        # exists but is disabled. Runs BEFORE the caller's own body/enum
+        # validation (same ordering `config_write.require_capability` uses), so a
+        # disabled mode 404s even alongside a malformed request. `login` and the
+        # `code`/`status`/`cancel` routes (which call this with no `mode`) need
+        # only the base gate.
+        if not config.login_shepherd.enabled:
+            raise HTTPException(status_code=404, detail="login shepherd is disabled")
+        if mode == "setup-token" and not config.login_shepherd.allow_setup_token:
+            raise HTTPException(status_code=404, detail="login shepherd is disabled")
+
+    @app.post("/api/login-shepherd/start")
+    async def api_login_shepherd_start(body: dict) -> dict:
+        mode = body.get("mode")
+        _require_login_shepherd(mode)
+        if mode not in ("login", "setup-token"):
+            raise HTTPException(status_code=422, detail="mode must be 'login' or 'setup-token'")
+        try:
+            return await asyncio.to_thread(app.state.login_shepherd.start, mode)
+        except login_shepherd.AlreadyActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except login_shepherd.LoginShepherdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/login-shepherd/code")
+    async def api_login_shepherd_code(body: dict) -> dict:
+        _require_login_shepherd()
+        code = body.get("code")
+        if not isinstance(code, str) or not code.strip():
+            raise HTTPException(status_code=422, detail="code must be a non-empty string")
+        try:
+            return await asyncio.to_thread(app.state.login_shepherd.submit_code, code.strip())
+        except login_shepherd.NotActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/login-shepherd/status")
+    async def api_login_shepherd_status() -> dict:
+        # Poll the eventual outcome after a `pending: true` submit (a slow verification).
+        # Returns the same shape: `pending: true` while still running, or the terminal
+        # result (which also reaps the completed flow). 409 once the flow is gone —
+        # the client's cue to stop polling.
+        _require_login_shepherd()
+        try:
+            return await asyncio.to_thread(app.state.login_shepherd.poll)
+        except login_shepherd.NotActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/login-shepherd/cancel")
+    async def api_login_shepherd_cancel() -> dict:
+        _require_login_shepherd()
+        await asyncio.to_thread(app.state.login_shepherd.cancel)
+        return {"ok": True}
 
     @app.get("/api/config-write/status")
     async def api_config_write_status() -> dict:
@@ -4325,6 +4401,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # gates whether the User scope option is offered at all.
             "config_write_enabled": config.config_write.enabled,
             "config_write_allow_user_scope": config.config_write.allow_user_scope,
+            # Login shepherd (#839): the maintenance-zone panel only renders when
+            # explicitly enabled — same invisible-surface invariant as the reaper UI
+            # and config-write (the /api/login-shepherd/* routes 404 when off too).
+            # allow_setup_token (#846) is the second, independent opt-in that gates
+            # whether the higher-risk "Create a long-lived token" mode is offered at
+            # all — when off, only the `login` (subscription sign-in) mode renders.
+            "login_shepherd_enabled": config.login_shepherd.enabled,
+            "login_shepherd_allow_setup_token": config.login_shepherd.allow_setup_token,
         }
 
     @app.get("/", response_class=HTMLResponse)

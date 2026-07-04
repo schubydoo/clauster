@@ -4150,6 +4150,132 @@
     };
   }
 
+  // Login shepherd (#839): dashboard-driven `claude auth login` / `claude setup-token`,
+  // gated by login_shepherd.enabled (server-injected). A single-flight flow — the server
+  // rejects a second /start while one is active (409), surfaced here as a plain error.
+  function loginShepherd() {
+    return {
+      open: false, mode: "login", started: false, finished: false, busy: false,
+      authorizeUrl: null, output: "", code: "", error: null, result: null, copied: false,
+      pending: false, pendingMessage: "", pollTimer: null, rechecking: false,
+      toggle() { this.open = !this.open; },
+      async start() {
+        this.busy = true; this.error = null;
+        try {
+          const res = await fetch(ROOT + "/api/login-shepherd/start", {
+            method: "POST", headers: JSON_HEADERS,
+            body: JSON.stringify({ mode: this.mode }),
+          });
+          const body = await res.json();
+          if (!res.ok) { this.error = body.detail || "failed to start"; return; }
+          this.authorizeUrl = body.authorize_url; this.output = body.output || "";
+          this.started = true;
+        } catch (e) { this.error = String(e); }
+        finally { this.busy = false; }
+      },
+      // Apply a /code or /status response: terminal (ok, or ok:false without pending) →
+      // finish + stop polling; pending → stay IN-PROGRESS and keep polling.
+      _applyResult(body) {
+        if (body.pending) {
+          this.pending = true; this.pendingMessage = body.message || "Still verifying…";
+          this.startPolling();
+        } else {
+          this.result = body; this.finished = true; this.pending = false;
+          this.stopPolling();
+        }
+      },
+      async submitCode() {
+        if (!this.code) return;
+        this.busy = true; this.error = null;
+        try {
+          const res = await fetch(ROOT + "/api/login-shepherd/code", {
+            method: "POST", headers: JSON_HEADERS,
+            body: JSON.stringify({ code: this.code }),
+          });
+          const body = await res.json();
+          this.code = "";  // never keep the pasted code in the DOM/state longer than needed
+          if (!res.ok) { this.error = body.detail || "failed to submit code"; return; }
+          this._applyResult(body);
+        } catch (e) { this.error = String(e); }
+        finally { this.busy = false; }
+      },
+      // Poll the eventual outcome after a `pending` submit. 409 = the flow is gone
+      // (completed-and-reaped elsewhere, or cancelled) → stop polling and reset to idle.
+      //
+      // Two defenses against an overlapping status request clobbering an already-captured
+      // terminal result (the one-time setup-token) — the "overlapping poll resets result"
+      // race where a slow request lands AFTER another request already finished the flow
+      // and reaped it server-side, so this one gets a late 409:
+      //   1. Single-flight: `rechecking` skips a call while one is already in flight, so an
+      //      interval tick and a manual "Recheck now" can't both hit /status at once.
+      //   2. Terminal-wins: if the flow is already `finished`, return early — a late
+      //      response (409 or otherwise) must never reset() or drop `result`/the token.
+      async recheck() {
+        if (this.finished || this.rechecking) return;
+        this.rechecking = true;
+        this.error = null;
+        try {
+          const res = await fetch(ROOT + "/api/login-shepherd/status", {
+            method: "POST", headers: JSON_HEADERS,
+          });
+          if (this.finished) return;  // a concurrent path finished the flow while we waited
+          if (res.status === 409) {
+            if (this.finished) return;  // belt-and-suspenders: never clobber a terminal result
+            this.stopPolling(); this.reset(); return;
+          }
+          const body = await res.json();
+          if (this.finished) return;  // re-check after the await — never clobber a terminal result
+          if (!res.ok) { this.error = body.detail || "failed to check status"; return; }
+          this._applyResult(body);
+        } catch (e) { this.error = String(e); }
+        finally { this.rechecking = false; }
+      },
+      startPolling() {
+        if (this.pollTimer) return;  // already polling — never stack intervals
+        this.pollTimer = setInterval(() => { this.recheck(); }, 3000);
+      },
+      stopPolling() {
+        if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+      },
+      async cancel() {
+        this.busy = true; this.error = null;
+        this.stopPolling();
+        try {
+          await fetch(ROOT + "/api/login-shepherd/cancel", { method: "POST", headers: JSON_HEADERS });
+        } catch (e) { this.error = String(e); }
+        finally { this.busy = false; this.reset(); }
+      },
+      // "Start another" must cancel any still-active server-side flow before resetting
+      // local state, so a pending (or already-finished) flow is never orphaned.
+      async startAnother() { await this.cancel(); },
+      reset() {
+        this.stopPolling();
+        this.started = false; this.finished = false; this.authorizeUrl = null;
+        this.output = ""; this.code = ""; this.result = null; this.error = null;
+        this.copied = false; this.pending = false; this.pendingMessage = "";
+        this.rechecking = false;
+      },
+      async copyToken() {
+        const text = this.result && this.result.token;
+        if (!text) return;
+        try {
+          if (window.isSecureContext && navigator.clipboard) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            const ta = document.createElement("textarea");
+            ta.value = text; ta.setAttribute("readonly", "");
+            ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+            document.body.appendChild(ta); ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+          }
+          this.copied = true;
+          setTimeout(() => { this.copied = false; }, 2000);
+        } catch (e) { /* clipboard denied — the value is still selectable/readable inline */ }
+      },
+    };
+  }
+
   // CSP build (#533): x-data expressions resolve component factories ONLY through the
   // Alpine.data() registry — a bare script-global function is "Undefined variable" to the
   // CSP evaluator and the page would render nothing. This inline script runs before the
@@ -4158,5 +4284,6 @@
     Alpine.data("dashboard", dashboard);
     Alpine.data("projectRow", projectRow);
     Alpine.data("reaper", reaper);
+    Alpine.data("loginShepherd", loginShepherd);
   });
 </script>

@@ -169,6 +169,123 @@ def run_bridge(args):
     return 0
 
 
+def run_login_shepherd(mode, args):
+    """Fake `claude auth login --claudeai` / `claude setup-token` for #839 tests.
+
+    Scripted entirely via env vars so a test can drive each branch without ever
+    touching the real CLI/account:
+      FAKE_CLAUDE_LOGIN_MODE = ready | no_url | crash_before_url | slow_url
+                                | reject_code                        (default ready)
+        - ready:            prints an authorize URL, waits for one line of stdin
+                             (the pasted code), then prints a success line (+ a
+                             canned CLAUDE_CODE_OAUTH_TOKEN= line for setup-token)
+                             and exits 0.
+        - no_url:           prints ordinary chatter but never an authorize URL,
+                             then idles (exercises the fail-closed no-URL path).
+        - crash_before_url: exits 1 immediately, no URL ever printed.
+        - url_then_exit:    prints a VALID authorize URL, then exits 0 immediately
+                             (never blocks on stdin) — the "URL found but process
+                             already dead" case; start() must fail closed.
+        - url_then_delayed_exit: prints a VALID authorize URL, stays alive
+                             FAKE_CLAUDE_LOGIN_DELAYED_EXIT_SECONDS (default 0.3), THEN
+                             exits 0 — the DETERMINISTIC form of the "URL seen while the
+                             process still looked alive, then it died" race; start()'s
+                             liveness settle must catch the exit and fail closed.
+        - slow_url:         sleeps FAKE_CLAUDE_LOGIN_SLOW_SECONDS (default 0.3)
+                             before printing the URL (exercise the bounded wait).
+        - reject_code:      prints the URL, reads the pasted code, then prints a
+                             failure line and exits 1 (bad-code path).
+        - decoy_url:        prints a NON-Claude https URL (a docs link) BEFORE the
+                             real authorize URL — the extractor must prefer the
+                             known-host one, not the first match.
+        - docs_decoy_url:   prints a docs subdomain of a KNOWN parent
+                             (docs.anthropic.com) BEFORE the real authorize URL —
+                             the extractor must NOT treat the docs host as an auth
+                             host, and return the real claude.ai URL.
+        - punct_url:        prints the authorize URL with trailing punctuation
+                             ("...authorize?fake=1)." ) — the extractor must trim it.
+        - ansi_url:         prints the authorize URL wrapped in ANSI color+reset
+                             escapes — the extractor must strip the escapes.
+        - hang_after_code:  prints the URL, reads the pasted code, then idles WITHOUT
+                             exiting (mimics a slow provider verification) — exercises
+                             submit_code's "still verifying, don't kill" path.
+      FAKE_CLAUDE_LOGIN_URL   = the authorize URL to print (default a fixed fake URL)
+      FAKE_CLAUDE_LOGIN_TOKEN = the CLAUDE_CODE_OAUTH_TOKEN value for setup-token
+                                success (default "fake-oauth-token-canned")
+    Never echoes the pasted code back to stdout (the real CLI wouldn't either) —
+    a test asserting the code never appears in captured output relies on this.
+    """
+    mode_sel = os.environ.get("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    url = os.environ.get("FAKE_CLAUDE_LOGIN_URL", "https://claude.ai/oauth/authorize?fake=1")
+    token = os.environ.get("FAKE_CLAUDE_LOGIN_TOKEN", "fake-oauth-token-canned")
+
+    def emit(line):
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+    if mode_sel == "crash_before_url":
+        return 1
+    if mode_sel == "no_url":
+        emit("Checking credentials...")
+        return _idle_until_signal()
+    if mode_sel == "slow_url":
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_LOGIN_SLOW_SECONDS", "0.3")))
+
+    if mode_sel == "url_then_exit":
+        # Prints a VALID authorize URL, then exits immediately (0) WITHOUT blocking on
+        # stdin — the "URL found but subprocess already dead" case. start() must fail
+        # closed here, never hand the operator a URL for a process with no live stdin.
+        emit(f"Open this URL to authorize: {url}")
+        return 0
+
+    if mode_sel == "url_then_delayed_exit":
+        # Prints a VALID authorize URL, stays alive briefly so start()'s wait observes the
+        # URL WHILE the process still looks alive (exited=False), THEN exits — the
+        # deterministic form of the "URL seen, then the process died" race. start()'s
+        # liveness settle must catch this exit and fail closed, never hand back a URL for a
+        # subprocess with no live stdin.
+        emit(f"Open this URL to authorize: {url}")
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_LOGIN_DELAYED_EXIT_SECONDS", "0.3")))
+        return 0
+
+    if mode_sel == "decoy_url":
+        # A non-Claude docs link printed FIRST; the real authorize URL second.
+        emit("See the docs at https://docs.example.com/help for more.")
+        emit(f"Open this URL to authorize: {url}")
+    elif mode_sel == "docs_decoy_url":
+        # A docs subdomain of a KNOWN parent (docs.anthropic.com) printed FIRST — must NOT
+        # be mistaken for the auth host; the real authorize URL (claude.ai) is second.
+        emit("Read the guide at https://docs.anthropic.com/claude-code first.")
+        emit(f"Open this URL to authorize: {url}")
+    elif mode_sel == "punct_url":
+        # Authorize URL with trailing sentence punctuation the extractor must trim.
+        emit(f"Open this URL to authorize: ({url}).")
+    elif mode_sel == "ansi_url":
+        # Authorize URL wrapped in an ANSI color code + reset the extractor must strip.
+        emit(f"Open this URL to authorize: \x1b[36m{url}\x1b[0m")
+    else:
+        emit(f"Open this URL to authorize: {url}")
+    emit("Paste the code you received:")
+    try:
+        pasted = sys.stdin.readline()
+    except (OSError, ValueError):
+        pasted = ""
+    if not pasted:
+        # stdin closed without a code (e.g. cancel()) — exit quietly.
+        return 1
+    if mode_sel == "hang_after_code":
+        # Read the code but never finish verifying: idle until signalled. Exercises the
+        # submit-timeout "still verifying" path (the flow must be left active, not killed).
+        return _idle_until_signal()
+    if mode_sel == "reject_code":
+        emit("Error: invalid code")
+        return 1
+    emit("Login successful.")
+    if mode == "setup-token":
+        emit(f"CLAUDE_CODE_OAUTH_TOKEN={token}")
+    return 0
+
+
 def run_mcp(args):
     """Fake `claude mcp <verb> ...` for #769 route-level tests (never the real CLI).
 
@@ -297,6 +414,8 @@ def main():
     if args and args[0] == "agents" and "--json" in args:
         print(os.environ.get("FAKE_CLAUDE_AGENTS", "[]"))
         return 0
+    if args[:2] == ["auth", "login"]:
+        return run_login_shepherd("login", args[2:])
     if args and args[0] == "auth":
         return run_auth(args[1:])
     if args and args[0] == "remote-control":
@@ -307,6 +426,8 @@ def main():
         return run_mcp(args[1:])
     if args and args[0] == "plugin":
         return run_plugin(args[1:])
+    if args and args[0] == "setup-token":
+        return run_login_shepherd("setup-token", args[1:])
     sys.stderr.write(f"fake-claude: unknown args {args}\n")
     return 2
 

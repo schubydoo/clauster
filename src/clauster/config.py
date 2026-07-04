@@ -580,6 +580,36 @@ class ConfigWriteConfig(BaseModel):
     )
 
 
+class LoginShepherdConfig(BaseModel):
+    """Dashboard-driven `claude` account login (#839) — a fail-closed gate.
+
+    Gates the browser surface that drives a **live OAuth login** for the runtime
+    `claude` account (`claude auth login` / `claude setup-token`) so an operator
+    whose runtime account has logged out (or whose token expired) doesn't need SSH
+    to fix it. This is security-sensitive: the flow writes the runtime user's own
+    Claude Code credentials, so — mirroring `config_write.enabled` — it defaults
+    **off** and is not offered anywhere unless explicitly turned on.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Master switch for the dashboard login-shepherd surface (`claude "
+        "auth login` / `claude setup-token`, driven from the browser). Off by default; "
+        "the whole surface 404s when off, same invisible-surface invariant as "
+        "`config_write.enabled` and the reaper UI.",
+    )
+    allow_setup_token: bool = Field(
+        default=False,
+        description="A **second, independent** opt-in for the `setup-token` mode "
+        "(`claude setup-token`), which mints a long-lived `CLAUDE_CODE_OAUTH_TOKEN` the "
+        "operator copies out of the browser — a durable credential, strictly more "
+        "dangerous than the ordinary `login` mode's short-lived OAuth handshake. Requires "
+        "`login_shepherd.enabled` too; with this off, only the `login` mode is offered "
+        "(a `setup-token` request 404s, the same invisible-surface shape as the whole "
+        "disabled surface). Off by default; **not** web-editable.",
+    )
+
+
 class LogsConfig(BaseModel):
     """Bridge-log rotation sizing and WebSocket redaction/ANSI-stripping toggles."""
 
@@ -1267,6 +1297,7 @@ class ClausterConfig(BaseModel):
     clone: CloneConfig = Field(default_factory=CloneConfig)
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
     config_write: ConfigWriteConfig = Field(default_factory=ConfigWriteConfig)
+    login_shepherd: LoginShepherdConfig = Field(default_factory=LoginShepherdConfig)
     usage: UsageConfig = Field(default_factory=UsageConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)

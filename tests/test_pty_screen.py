@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,193 @@ def test_find_session_id_none_when_absent():
     scr = PtyScreen(cols=40, rows=2)
     scr.feed(b"just some terminal output, no connect url here")
     assert scr.find_session_id() is None
+
+
+# --- find_authorize_url() / find_oauth_token() (#846: setup-token PTY reader) --------
+
+
+def test_find_authorize_url_scrapes_the_rendered_screen():
+    # `claude setup-token` is a full TUI (#846): the reassembled screen (not necessarily
+    # the raw byte stream) is what carries the whole URL line.
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(b"Open this URL to authorize: https://claude.com/cai/oauth/authorize?code=1")
+    assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=1"
+
+
+def test_find_authorize_url_none_when_absent():
+    scr = PtyScreen(cols=60, rows=2)
+    scr.feed(b"Checking credentials...")
+    assert scr.find_authorize_url() is None
+
+
+def test_find_authorize_url_prefers_known_host_over_a_decoy():
+    # Shares the exact selection rule login_shepherd's plain-pipe reader uses (last
+    # known-auth-host match wins over an earlier docs/decoy link).
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(
+        b"See the docs at https://docs.example.com/help\r\n"
+        b"Open this URL to authorize: https://claude.ai/oauth/authorize?fake=1"
+    )
+    assert scr.find_authorize_url() == "https://claude.ai/oauth/authorize?fake=1"
+
+
+def test_find_authorize_url_is_incremental_across_feeds():
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(b"Open this URL to authorize: ")
+    assert scr.find_authorize_url() is None
+    scr.feed(b"https://claude.com/cai/oauth/authorize?code=2")
+    assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=2"
+
+
+def test_concurrent_feed_and_scan_does_not_corrupt_the_screen():
+    # login_shepherd's setup-token flow feeds this screen from its reader thread while the
+    # request thread concurrently scans it with find_authorize_url (#846). pyte is not
+    # reentrant, so without PtyScreen's internal lock a scan can catch feed() mid-mutation
+    # and raise "dictionary changed size during iteration" (or read a torn row). Feeding
+    # in tiny chunks while a reader hammers find_authorize_url maximizes that overlap; with
+    # the lock every scan sees a whole, self-consistent screen: no reader ever raises, and
+    # once the full URL has been fed the scan returns it intact.
+    # (A scan that lands BETWEEN two feeds can still see a legitimately partial URL — that
+    # is a separate consumer-side stability concern, tracked as a follow-up, not a screen
+    # corruption, so it is not asserted here.)
+    scr = None
+    url = "https://claude.com/cai/oauth/authorize?code=" + ("a" * 400)
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def _scan() -> None:
+        try:
+            while not stop.is_set():
+                scr.find_authorize_url()
+        except BaseException as exc:  # noqa: BLE001 — record any reader-thread crash
+            errors.append(exc)
+
+    for _ in range(40):
+        scr = PtyScreen(cols=600, rows=4)
+        reader = threading.Thread(target=_scan)
+        reader.start()
+        try:
+            for chunk in (url[i : i + 3].encode() for i in range(0, len(url), 3)):
+                scr.feed(chunk)
+        finally:
+            stop.set()
+            reader.join(timeout=5)
+        stop.clear()
+
+    assert not errors, f"reader thread crashed: {errors[0]!r}"
+    assert scr.find_authorize_url() == url
+
+
+def test_find_authorize_url_prefers_authorize_path_over_same_host_decoy_after_it():
+    # Greptile P1 "same-host decoy wins": the real authorize URL prints FIRST, then the CLI
+    # later renders a same-host non-authorize page (e.g. a settings/account screen) — the
+    # authorize-path match must still win over the later same-host URL.
+    scr = PtyScreen(cols=120, rows=6)
+    scr.feed(
+        b"Open this URL to authorize: https://claude.com/cai/oauth/authorize?code=1\r\n"
+        b"Manage your account at https://claude.com/account"
+    )
+    assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=1"
+
+
+# --- find_authorize_url() at a NARROW width: hard-wrap reassembly (live-smoke regression) --
+#
+# Live-smoke-tested against real claude 2.1.201 (#846 follow-up): the setup-token PTY was
+# opened via a bare `os.openpty()`, which defaults to 80 columns. Real `claude setup-token`
+# wraps its ~450-char authorize URL at the terminal width, and the old
+# `"\n".join(screen.display)` join left the wrapped URL split across rows — truncating it
+# at the first row boundary (e.g. cut mid `client_id=...`). The fix widens the PTY itself
+# (`login_shepherd._LOGIN_PTY_COLS`) AND makes `find_authorize_url`/`find_oauth_token`
+# reassemble hard-wrapped rows before scanning, so the scan is correct at ANY width. These
+# tests pin that reassembly directly at a narrow (80-col) width, independent of the caller's
+# chosen PTY size.
+
+_REALISTIC_AUTHORIZE_URL = (
+    "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88e4"
+    "-1234567890ab&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3A"
+    "model_registry&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2F"
+    "callback&state=" + ("a" * 120) + "&code_challenge=" + ("b" * 80) + "&code_challenge_method"
+    "=S256&final=true"
+)
+
+
+def test_find_authorize_url_reassembles_a_hard_wrapped_url_at_narrow_width():
+    # ~450+ chars: WOULD wrap repeatedly at 80 columns (the pre-fix default winsize).
+    assert len(_REALISTIC_AUTHORIZE_URL) > 450
+    scr = PtyScreen(cols=80, rows=20)
+    scr.feed(f"Open this URL to authorize: {_REALISTIC_AUTHORIZE_URL}\r\n".encode())
+    found = scr.find_authorize_url()
+    # Complete and untruncated: every query param survives, including the very last one.
+    assert found == _REALISTIC_AUTHORIZE_URL
+    assert found is not None and found.endswith("&final=true")
+    assert "client_id=9d1c250a-e61b-44d9-88e4-1234567890ab" in found
+
+
+def test_find_authorize_url_reassembles_url_fed_as_pre_wrapped_bytes():
+    # Feed the URL pre-split into 80-byte chunks with NO separator between them — standing
+    # in for a raw pty stream that already wrapped the line before this emulator ever sees
+    # it (rather than relying on pyte's own autowrap to reproduce the split). Proves the
+    # reassembly is robust to hard-wrapped input arriving in arbitrary chunk boundaries, not
+    # just to pyte wrapping it itself in one feed() call.
+    text = f"Open this URL to authorize: {_REALISTIC_AUTHORIZE_URL}"
+    scr = PtyScreen(cols=80, rows=20)
+    for i in range(0, len(text), 80):
+        scr.feed(text[i : i + 80].encode())
+    found = scr.find_authorize_url()
+    assert found == _REALISTIC_AUTHORIZE_URL
+
+
+def test_find_authorize_url_at_wide_width_never_wraps_in_the_first_place():
+    # The primary fix: at the WIDE pty width login_shepherd now uses, the URL fits on one
+    # rendered row and never wraps at all — the unwrap reassembly is defense in depth, not
+    # what makes this case work.
+    scr = PtyScreen(cols=1024, rows=10)
+    scr.feed(f"Open this URL to authorize: {_REALISTIC_AUTHORIZE_URL}\r\n".encode())
+    assert scr.find_authorize_url() == _REALISTIC_AUTHORIZE_URL
+
+
+def test_find_oauth_token_reassembles_a_hard_wrapped_token_at_narrow_width():
+    # The token line can also wrap at a narrow width; find_oauth_token must recover it whole.
+    token = "tok-" + ("x" * 200)
+    scr = PtyScreen(cols=80, rows=10)
+    scr.feed(f"Login successful.\r\nCLAUDE_CODE_OAUTH_TOKEN={token}".encode())
+    assert scr.find_oauth_token() == token
+
+
+# --- _unwrap_display() pure-unit coverage --------------------------------------------
+
+
+def test_unwrap_display_joins_a_full_width_row_with_no_separator():
+    # A row that fills every column (last char non-space) was hard-wrapped -> no \n.
+    # The trailing (last) row's own wrapped-ness only matters for what follows it, which
+    # here is nothing, so no trailing newline is appended.
+    assert pty_screen._unwrap_display(["abcde", "fghij"]) == "abcdefghij"
+
+
+def test_unwrap_display_inserts_newline_after_a_short_row():
+    # A row that does NOT reach the last column (trailing space) ends a logical line.
+    assert pty_screen._unwrap_display(["ab   ", "cd   "]) == "ab   \ncd   \n"
+
+
+def test_unwrap_display_handles_an_empty_row():
+    assert pty_screen._unwrap_display(["", "next "]) == "\nnext \n"
+
+
+def test_unwrap_display_mixed_wrapped_and_unwrapped_rows():
+    # First row wrapped into the second (no separator); second row ends the line (newline).
+    assert pty_screen._unwrap_display(["hello", "world ", "tail"]) == "helloworld \ntail"
+
+
+def test_find_oauth_token_scrapes_the_rendered_screen():
+    scr = PtyScreen(cols=80, rows=3)
+    scr.feed(b"Login successful.\r\nCLAUDE_CODE_OAUTH_TOKEN=canned-token-value-xyz")
+    assert scr.find_oauth_token() == "canned-token-value-xyz"
+
+
+def test_find_oauth_token_none_when_absent():
+    scr = PtyScreen(cols=60, rows=2)
+    scr.feed(b"Login successful.")
+    assert scr.find_oauth_token() is None
 
 
 def test_title_is_never_serialized():
