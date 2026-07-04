@@ -207,12 +207,18 @@
     .ls-mode-toggle { display: flex; border: 1px solid var(--tblr-border-color);
       border-radius: var(--tblr-border-radius); overflow: hidden; width: max-content;
       max-width: 100%; }
+    /* WCAG AA (#846): text color is --tblr-body-color, not --tblr-secondary — the
+       latter only clears ~3:1 against the dark-theme surface (secondary is tuned for
+       large/muted text, not a 14px interactive label), while body-color holds
+       comfortably above 4.5:1 in both themes. The unselected/selected distinction
+       comes from the BACKGROUND fill instead (surface vs. solid primary), so
+       readability is never traded for the toggle's visual states. */
     .ls-mode-opt { position: relative; margin: 0; padding: .5rem .9rem; font-size: .875rem;
       line-height: 1.25rem; text-align: center; cursor: pointer; user-select: none;
-      color: var(--tblr-secondary); background: var(--tblr-bg-surface);
-      transition: background .15s, color .15s; }
+      color: var(--tblr-body-color); background: var(--tblr-bg-surface);
+      transition: background .15s; }
     .ls-mode-opt + .ls-mode-opt { border-left: 1px solid var(--tblr-border-color); }
-    .ls-mode-opt:hover { color: var(--tblr-body-color); }
+    .ls-mode-opt:hover { background: var(--tblr-bg-surface-secondary); }
     /* Selected = solid primary fill (never the ~4%-tint Tabler uses for its own
        selectgroup) so the two states are unmistakable at a glance, not just a subtle
        border-color change. */

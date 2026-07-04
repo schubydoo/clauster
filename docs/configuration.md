@@ -355,6 +355,15 @@ Claude Code credentials, so — mirroring `config_write.enabled` — it defaults
 **off** and is **never** web-editable; when `enabled` is off, the entire
 `/api/login-shepherd/*` surface returns `404` and the dashboard panel doesn't render.
 
+`claude setup-token` is a full TUI that only renders its authorize link under a
+real terminal (#846), so that mode is driven over a pty and needs the same
+optional `pyte` dependency as the live pty-screen view — `pip install
+'clauster[pty]'` (or `CLAUSTER_PYTE_PATH` on the standalone binary; see
+`pty_screen_enabled` above). Without it, picking "Create a long-lived token"
+fails closed with a message pointing at subscription sign-in (`claude auth
+login`) instead, which stays on its original plain-pipe transport and needs no
+extra dependency.
+
 <!-- BEGIN GEN: login_shepherd -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |

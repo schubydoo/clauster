@@ -332,6 +332,47 @@ def test_setup_token_pty_reject_code_fails_without_token(shepherd, monkeypatch) 
     assert not shepherd.is_active()
 
 
+def test_setup_token_pty_never_echoes_the_pasted_code_back(shepherd, monkeypatch) -> None:
+    # Security regression guard: a pty's line discipline echoes back whatever is
+    # written to it by DEFAULT (unlike `login`'s plain subprocess.PIPE, where a stdin
+    # write is never mirrored into stdout) — `_spawn_pty` must disable that echo so
+    # the operator-pasted code never round-trips through the master into
+    # `flow.buffer`, and from there into a redacted-output failure message returned
+    # over the API. Assert the secret is nowhere in the failure result — not just
+    # that `_redact()` would mask a TOKEN= line, which this codepath never emits.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "reject_code")
+    shepherd.start("setup-token")
+    secret_code = "SUPER-SECRET-PASTED-CODE-MUST-NOT-ECHO"
+    outcome = shepherd.submit_code(secret_code)
+    assert outcome["ok"] is False
+    assert secret_code not in outcome["message"]
+    assert not shepherd.is_active()
+
+
+def test_setup_token_pty_echo_disable_failure_is_wrapped(shepherd, monkeypatch) -> None:
+    # A termios.tcsetattr failure while disabling local echo must fail closed (never
+    # silently spawn with echo left on, which would risk leaking the pasted code) and
+    # must reclaim both fds rather than leak them.
+    closed: list[int] = []
+    real_close = ls.os.close
+
+    def _tracking_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    import termios
+
+    def _boom(*_args, **_kwargs):
+        raise termios.error("simulated tcsetattr failure")
+
+    monkeypatch.setattr(ls.os, "close", _tracking_close)
+    monkeypatch.setattr(termios, "tcsetattr", _boom)
+    with pytest.raises(ls.LoginShepherdError, match="failed to disable pty echo"):
+        shepherd.start("setup-token")
+    assert not shepherd.is_active()
+    assert len(closed) == 2  # master + slave, both reclaimed
+
+
 def test_setup_token_pty_cancel_closes_master_fd(shepherd, monkeypatch) -> None:
     # cancel() must close the pty master (not leak it) and reap the subprocess even
     # though this transport has no proc.stdin pipe to close.

@@ -202,6 +202,20 @@ class LoginShepherd:
         the child from inheriting unrelated open fds. The slave fd is closed in the
         parent right after spawn — the child holds its own dup via stdin/stdout/stderr,
         so the parent only needs the master to read/write the session.
+
+        **Local echo is disabled on the slave BEFORE spawn (security-critical, not
+        cosmetic).** A pty's line discipline echoes back whatever is written to it by
+        default — unlike the `login` mode's plain `subprocess.PIPE`, where a write to
+        `stdin` is never mirrored into `stdout`. Since `submit_code()` writes the
+        operator-pasted code to this same fd (`os.write`, standing in for a human's
+        keystrokes), an un-tweaked pty would echo that code straight back through the
+        master into `flow.buffer` — and from there into the redacted-output failure
+        message `_finalize_exited`/`start()` return to the caller. `_TOKEN_RE`-based
+        redaction only masks a `CLAUDE_CODE_OAUTH_TOKEN=...` line, not an arbitrary
+        pasted code, so that would be a real secret leak into the API response (and
+        anywhere that response is logged upstream). Disabling `ECHO` closes it at the
+        source — this fails closed too: a `termios` failure aborts the spawn rather
+        than risk running with echo silently left on.
         """
         try:
             screen = PtyScreen()
@@ -211,11 +225,23 @@ class LoginShepherd:
                 f"subscription sign-in instead, or install it: {exc}"
             ) from exc
 
+        import termios
+
         argv = [resolved_binary, "setup-token"]
         try:
             master_fd, slave_fd = os.openpty()
         except OSError as exc:
             raise LoginShepherdError(f"failed to open a pty for claude {mode}: {exc}") from exc
+        try:
+            attrs = termios.tcgetattr(slave_fd)
+            attrs[3] &= ~termios.ECHO  # lflags &= ~ECHO
+            termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+        except termios.error as exc:
+            os.close(master_fd)
+            os.close(slave_fd)
+            raise LoginShepherdError(
+                f"failed to disable pty echo for claude {mode}: {exc}"
+            ) from exc
         try:
             proc = subprocess.Popen(  # noqa: S603 — list-argv, absolute binary, no shell
                 argv,
