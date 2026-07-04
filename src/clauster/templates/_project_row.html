@@ -325,7 +325,25 @@
               <template x-for="c in preflightWarnings('{{ p.name }}')" :key="c.name">
                 <div class="d-flex align-items-start gap-1 py-1">
                   <svg class="ico text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>
-                  <span><span class="fw-medium text-capitalize" x-text="c.name"></span><span class="text-secondary" x-text="': ' + c.detail"></span></span>
+                  <span><span class="fw-medium text-capitalize" x-text="c.name"></span><span class="text-secondary" x-text="': ' + c.detail"></span>
+                    {# #837: an unapproved-server warning is actionable — link straight into
+                       this project's Server-approvals panel (project scope, mcp surface)
+                       rather than leaving the operator to hunt for it. WARN-only / read-only:
+                       this button only navigates, it never approves/rejects/mutates config.
+                       Gated on config-write being enabled (same invariant as the navbar
+                       trigger in dashboard.html): when config-write is OFF the
+                       Server-approvals panel + its /api/config-write/* routes 404, so the
+                       link would lead to a dead panel — the WARNING still shows (it's
+                       informative), only the dead action is suppressed. config_write_enabled
+                       is threaded into BOTH render paths (full page + the api_project_row
+                       fragment) so a dynamically-inserted row never wrongly loses the link. #}
+                    {% if config_write_enabled %}
+                    <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline"
+                            x-show="c.name === 'mcp-approval'" x-cloak
+                            data-test="mcp-approval-link"
+                            @click="openMcpApprovalsFor('{{ p.name }}')">Resolve in Server approvals</button>
+                    {% endif %}
+                  </span>
                 </div>
               </template>
             </div>

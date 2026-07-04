@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 from xml.sax.saxutils import escape as _xml_escape
 
-from . import claude_cli, environments, procutil
+from . import claude_cli, config_write_mcp, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import Project, _load_trusted_paths, trust_state_for
 from .state import CURRENT_SCHEMA, StateStore
@@ -157,19 +157,25 @@ def run_doctor(
     return checks, all(c.status != FAIL for c in checks)
 
 
-def project_preflight_checks(project: Project) -> list[Check]:
-    """Per-project spawn-readiness checks (trust + git), mirroring the doctor shape.
+def project_preflight_checks(project: Project, claude_json: Path | None = None) -> list[Check]:
+    """Per-project spawn-readiness checks (trust + git + MCP approvals), doctor-shaped.
 
-    Complements the system-wide ``run_doctor`` panel with the two preconditions that
-    are specific to *one* project's bridge launch: workspace **trust** (a standard
-    spawn raises ``NotTrusted`` without it) and whether the directory is a **git
-    repo** (required for the ``worktree`` spawn mode). Both are advisory (``WARN``,
-    never ``FAIL``) — each is recoverable from the UI (trust-on-start; pick a
-    non-worktree mode) — so the panel informs without blocking. Pure/read-only:
-    derives from the already-discovered ``Project`` (no extra subprocess or fs scan).
+    Complements the system-wide ``run_doctor`` panel with preconditions specific to
+    *one* project's bridge launch: workspace **trust** (a standard spawn raises
+    ``NotTrusted`` without it), whether the directory is a **git repo** (required
+    for the ``worktree`` spawn mode), and — when ``claude_json`` is given — whether
+    the project's committed ``.mcp.json`` has servers still awaiting **approval**
+    (#837: an interactive/pty launch blocks invisibly at ``claude``'s "N new MCP
+    servers found — enable?" startup gate, which the read-only live-terminal view
+    cannot answer). All three are advisory (``WARN``, never ``FAIL``) — each is
+    resolvable from the UI (trust-on-start; pick a non-worktree mode; the
+    Server-approvals panel) — so the panel informs without blocking. Pure/read-only:
+    derives from the already-discovered ``Project`` plus one MCP-approval lookup (no
+    extra subprocess); ``claude_json`` is optional so existing callers/tests that
+    only care about trust+git keep working unchanged.
     """
     trusted = project.trust_state.value == "trusted"
-    return [
+    checks = [
         Check(
             "trust",
             OK if trusted else WARN,
@@ -186,6 +192,21 @@ def project_preflight_checks(project: Project) -> list[Check]:
             else "not a git repository — the worktree spawn mode is unavailable",
         ),
     ]
+    if claude_json is not None:
+        unapproved = config_write_mcp.unapproved_mcp_servers(claude_json, project.path)
+        if unapproved:
+            plural = "s" if len(unapproved) != 1 else ""
+            checks.append(
+                Check(
+                    "mcp-approval",
+                    WARN,
+                    f"{len(unapproved)} MCP server{plural} need approval "
+                    f"({', '.join(sorted(unapproved))}) — resolve in Server approvals "
+                    "before launching an interactive session, or it will hang at "
+                    "claude's approval prompt",
+                )
+            )
+    return checks
 
 
 def _check_repo_freshness(repo: Path | None = None) -> Check | None:
