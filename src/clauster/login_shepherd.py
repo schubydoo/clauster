@@ -354,11 +354,15 @@ class LoginShepherd:
             flow = self._spawn(mode, resolved)
             self._flow = flow
 
-        condition = (
-            (lambda _snap: flow.screen.find_authorize_url())  # type: ignore[union-attr]
-            if flow.screen is not None
-            else _extract_authorize_url
-        )
+        condition: Callable[[str], str | None]
+        if flow.screen is not None:
+            # setup-token PTY path: require the authorize URL to be STABLE across two polls,
+            # so a URL caught mid-render (split across the reader's `feed()` chunks) is never
+            # trusted as final (#852). The plain-pipe `login` reader is line-buffered — a URL
+            # line only appears in the buffer once whole — so it needs no such guard.
+            condition = _stable_match_finder(flow.screen.find_authorize_url)
+        else:
+            condition = _extract_authorize_url
         url, output, exited = _wait_for(flow, condition, timeout=START_TIMEOUT_SECONDS)
         if url is not None and not exited:
             # A URL appeared while the process still looked alive — but `_wait_for` breaks
@@ -677,6 +681,30 @@ def _pump_pty(flow: _Flow) -> None:
         flow.append(chunk.decode("utf-8", errors="replace"))
 
 
+def _stable_match_finder(find: Callable[[], _T | None]) -> Callable[[str], _T | None]:
+    """Adapt a zero-arg finder into a `_wait_for` condition that fires only on a STABLE match.
+
+    A match is reported only once the finder returns the same value on two consecutive polls.
+    The setup-token PTY reader feeds the pty in `os.read` chunks, so a poll can land between
+    two `feed()`s and see a syntactically-complete-but-TRUNCATED authorize URL mid-render;
+    `_wait_for` would latch that first match and hand back a broken URL (#852). Requiring the
+    same value on two consecutive polls rejects a still-growing partial (its length keeps
+    changing) and trusts only the settled line — the reader stops feeding once `claude
+    setup-token` has drawn the URL and blocked on stdin, so the final URL repeats and is
+    accepted one poll (~`_POLL_INTERVAL_SECONDS`) later. The `_snapshot` arg is ignored:
+    unlike the plain-pipe reader (which scans the captured buffer), this finder reads the
+    pyte-rendered screen directly.
+    """
+    prev: list[_T | None] = [None]
+
+    def _condition(_snapshot: str) -> _T | None:
+        current = find()
+        was, prev[0] = prev[0], current
+        return current if current is not None and current == was else None
+
+    return _condition
+
+
 def _wait_for(
     flow: _Flow, condition: Callable[[str], _T | None], *, timeout: float
 ) -> tuple[_T | None, str, bool]:
@@ -699,4 +727,14 @@ def _wait_for(
         if match or exited:
             break
         time.sleep(_POLL_INTERVAL_SECONDS)
+    else:
+        # The deadline elapsed with no match/exit. Give the condition ONE final look so a
+        # value first observed on the last in-window poll is not lost to the deadline: a
+        # stability-gated condition (the setup-token URL finder, #852) needs a second
+        # observation to confirm, and without this the confirming poll would fall just past
+        # the deadline and an already-visible URL would be discarded as "never appeared"
+        # (#856). Cheap and idempotent for the stateless plain-pipe condition.
+        snapshot = flow.snapshot()
+        match = condition(snapshot)
+        exited = flow.proc.poll() is not None
     return match, snapshot, exited
