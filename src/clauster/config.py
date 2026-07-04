@@ -580,6 +580,26 @@ class ConfigWriteConfig(BaseModel):
     )
 
 
+class LoginShepherdConfig(BaseModel):
+    """Dashboard-driven `claude` account login (#839) — a fail-closed gate.
+
+    Gates the browser surface that drives a **live OAuth login** for the runtime
+    `claude` account (`claude auth login` / `claude setup-token`) so an operator
+    whose runtime account has logged out (or whose token expired) doesn't need SSH
+    to fix it. This is security-sensitive: the flow writes the runtime user's own
+    Claude Code credentials, so — mirroring `config_write.enabled` — it defaults
+    **off** and is not offered anywhere unless explicitly turned on.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Master switch for the dashboard login-shepherd surface (`claude "
+        "auth login` / `claude setup-token`, driven from the browser). Off by default; "
+        "the whole surface 404s when off, same invisible-surface invariant as "
+        "`config_write.enabled` and the reaper UI.",
+    )
+
+
 class LogsConfig(BaseModel):
     """Bridge-log rotation sizing and WebSocket redaction/ANSI-stripping toggles."""
 
@@ -1267,6 +1287,7 @@ class ClausterConfig(BaseModel):
     clone: CloneConfig = Field(default_factory=CloneConfig)
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
     config_write: ConfigWriteConfig = Field(default_factory=ConfigWriteConfig)
+    login_shepherd: LoginShepherdConfig = Field(default_factory=LoginShepherdConfig)
     usage: UsageConfig = Field(default_factory=UsageConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)

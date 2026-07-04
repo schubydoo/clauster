@@ -43,6 +43,7 @@ from . import (
     config_write_subagents,
     config_writer,
     environments,
+    login_shepherd,
     logstream,
     ops,
     prometheus,
@@ -626,6 +627,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     runner.set_hosted_provider(app.state.hosted.list_instances)
     clone_jobs = CloneJobManager()
     app.state.clone_jobs = clone_jobs
+    # Login shepherd (#839): single-flight manager for a dashboard-driven `claude
+    # auth login` / `claude setup-token`. Constructed unconditionally (cheap, no
+    # subprocess yet) — the config gate gets enforced per-request by the routes.
+    app.state.login_shepherd = login_shepherd.LoginShepherd(config.claude.binary)
     # Drop a finished clone job after this grace so a client that disconnected
     # mid-clone can reconnect and still read the terminal frame.
     _CLONE_JOB_TTL = 60.0
@@ -1600,6 +1605,45 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             }
 
         return await asyncio.to_thread(_work)
+
+    # ----- login shepherd (#839): dashboard-driven `claude auth login` --------------
+
+    def _require_login_shepherd() -> None:
+        # Fail-closed invisible-surface gate, same shape as the reaper UI and
+        # config-write: off by default, 404s (not 403) when disabled so a disabled
+        # deployment exposes nothing about the feature's existence.
+        if not config.login_shepherd.enabled:
+            raise HTTPException(status_code=404, detail="login shepherd is disabled")
+
+    @app.post("/api/login-shepherd/start")
+    async def api_login_shepherd_start(body: dict) -> dict:
+        _require_login_shepherd()
+        mode = body.get("mode")
+        if mode not in ("login", "setup-token"):
+            raise HTTPException(status_code=422, detail="mode must be 'login' or 'setup-token'")
+        try:
+            return await asyncio.to_thread(app.state.login_shepherd.start, mode)
+        except login_shepherd.AlreadyActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except login_shepherd.LoginShepherdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/login-shepherd/code")
+    async def api_login_shepherd_code(body: dict) -> dict:
+        _require_login_shepherd()
+        code = body.get("code")
+        if not isinstance(code, str) or not code.strip():
+            raise HTTPException(status_code=422, detail="code must be a non-empty string")
+        try:
+            return await asyncio.to_thread(app.state.login_shepherd.submit_code, code.strip())
+        except login_shepherd.NotActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/login-shepherd/cancel")
+    async def api_login_shepherd_cancel() -> dict:
+        _require_login_shepherd()
+        await asyncio.to_thread(app.state.login_shepherd.cancel)
+        return {"ok": True}
 
     @app.get("/api/config-write/status")
     async def api_config_write_status() -> dict:
@@ -4268,6 +4312,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # gates whether the User scope option is offered at all.
             "config_write_enabled": config.config_write.enabled,
             "config_write_allow_user_scope": config.config_write.allow_user_scope,
+            # Login shepherd (#839): the maintenance-zone panel only renders when
+            # explicitly enabled — same invisible-surface invariant as the reaper UI
+            # and config-write (the /api/login-shepherd/* routes 404 when off too).
+            "login_shepherd_enabled": config.login_shepherd.enabled,
         }
 
     @app.get("/", response_class=HTMLResponse)

@@ -169,6 +169,64 @@ def run_bridge(args):
     return 0
 
 
+def run_login_shepherd(mode, args):
+    """Fake `claude auth login --claudeai` / `claude setup-token` for #839 tests.
+
+    Scripted entirely via env vars so a test can drive each branch without ever
+    touching the real CLI/account:
+      FAKE_CLAUDE_LOGIN_MODE = ready | no_url | crash_before_url | slow_url
+                                | reject_code                        (default ready)
+        - ready:            prints an authorize URL, waits for one line of stdin
+                             (the pasted code), then prints a success line (+ a
+                             canned CLAUDE_CODE_OAUTH_TOKEN= line for setup-token)
+                             and exits 0.
+        - no_url:           prints ordinary chatter but never an authorize URL,
+                             then idles (exercises the fail-closed no-URL path).
+        - crash_before_url: exits 1 immediately, no URL ever printed.
+        - slow_url:         sleeps FAKE_CLAUDE_LOGIN_SLOW_SECONDS (default 0.3)
+                             before printing the URL (exercise the bounded wait).
+        - reject_code:      prints the URL, reads the pasted code, then prints a
+                             failure line and exits 1 (bad-code path).
+      FAKE_CLAUDE_LOGIN_URL   = the authorize URL to print (default a fixed fake URL)
+      FAKE_CLAUDE_LOGIN_TOKEN = the CLAUDE_CODE_OAUTH_TOKEN value for setup-token
+                                success (default "fake-oauth-token-canned")
+    Never echoes the pasted code back to stdout (the real CLI wouldn't either) —
+    a test asserting the code never appears in captured output relies on this.
+    """
+    mode_sel = os.environ.get("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    url = os.environ.get("FAKE_CLAUDE_LOGIN_URL", "https://claude.ai/oauth/authorize?fake=1")
+    token = os.environ.get("FAKE_CLAUDE_LOGIN_TOKEN", "fake-oauth-token-canned")
+
+    def emit(line):
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+    if mode_sel == "crash_before_url":
+        return 1
+    if mode_sel == "no_url":
+        emit("Checking credentials...")
+        return _idle_until_signal()
+    if mode_sel == "slow_url":
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_LOGIN_SLOW_SECONDS", "0.3")))
+
+    emit(f"Open this URL to authorize: {url}")
+    emit("Paste the code you received:")
+    try:
+        pasted = sys.stdin.readline()
+    except (OSError, ValueError):
+        pasted = ""
+    if not pasted:
+        # stdin closed without a code (e.g. cancel()) — exit quietly.
+        return 1
+    if mode_sel == "reject_code":
+        emit("Error: invalid code")
+        return 1
+    emit("Login successful.")
+    if mode == "setup-token":
+        emit(f"CLAUDE_CODE_OAUTH_TOKEN={token}")
+    return 0
+
+
 def run_mcp(args):
     """Fake `claude mcp <verb> ...` for #769 route-level tests (never the real CLI).
 
@@ -279,6 +337,10 @@ def main():
         return run_mcp(args[1:])
     if args and args[0] == "plugin":
         return run_plugin(args[1:])
+    if args[:2] == ["auth", "login"]:
+        return run_login_shepherd("login", args[2:])
+    if args and args[0] == "setup-token":
+        return run_login_shepherd("setup-token", args[1:])
     sys.stderr.write(f"fake-claude: unknown args {args}\n")
     return 2
 

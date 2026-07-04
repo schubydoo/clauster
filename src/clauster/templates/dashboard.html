@@ -1057,6 +1057,92 @@
       </div>
       {% endif %}
 
+      {% if login_shepherd_enabled %}
+      <!-- ===== Login shepherd (#839): dashboard-driven `claude` account login ===== -->
+      <div class="mt-4" x-data="loginShepherd()">
+        <button class="btn btn-sm btn-ghost-secondary" @click="toggle()">
+          <span x-show="open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Close claude login</span><span x-show="!open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-trust"/></svg>Sign in the claude account</span>
+        </button>
+        <div class="card mt-2" x-show="open" x-cloak>
+          <div class="card-body">
+            <h3 class="card-title">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-trust"/></svg>Sign in the runtime <code>claude</code> account
+            </h3>
+            <p class="text-secondary small">
+              Fixes a logged-out or expired <code>claude</code> account without SSH. Pick a mode,
+              open the authorize link in a new tab, approve it, then paste the code it gives you
+              back here.
+            </p>
+
+            <template x-if="!started">
+              <div>
+                <div class="form-selectgroup mb-2">
+                  <label class="form-selectgroup-item">
+                    <input type="radio" class="form-selectgroup-input" name="login-shepherd-mode"
+                           value="login" x-model="mode">
+                    <span class="form-selectgroup-label">Sign in with your Claude subscription</span>
+                  </label>
+                  <label class="form-selectgroup-item">
+                    <input type="radio" class="form-selectgroup-input" name="login-shepherd-mode"
+                           value="setup-token" x-model="mode">
+                    <span class="form-selectgroup-label">Create a long-lived token</span>
+                  </label>
+                </div>
+                <p class="text-secondary small" x-show="mode === 'setup-token'" x-cloak>
+                  Mints a <code>CLAUDE_CODE_OAUTH_TOKEN</code> you copy into the runtime
+                  environment yourself — requires a Claude subscription.
+                </p>
+                <button class="btn btn-primary" @click="start()" :disabled="busy"
+                        x-text="busy ? 'Starting…' : 'Start'">Start</button>
+              </div>
+            </template>
+
+            <div class="alert alert-danger mt-2" x-show="error" x-cloak x-text="error"></div>
+
+            <template x-if="started && authorizeUrl && !finished">
+              <div>
+                <p class="mb-1">
+                  1. Open the authorize link, sign in, and approve access:
+                </p>
+                <p>
+                  <a :href="authorizeUrl" target="_blank" rel="noopener noreferrer" x-text="authorizeUrl"></a>
+                </p>
+                <p class="mb-1">2. Paste the code it gives you back here:</p>
+                <div class="input-group input-group-narrow mb-2">
+                  <input type="text" class="form-control" x-model="code" placeholder="Paste code"
+                         autocomplete="off" spellcheck="false" @keydown.enter="submitCode()">
+                  <button class="btn btn-primary" @click="submitCode()" :disabled="busy || !code"
+                          x-text="busy ? 'Submitting…' : 'Submit'">Submit</button>
+                </div>
+                <button class="btn btn-sm btn-ghost-secondary" @click="cancel()" :disabled="busy">Cancel</button>
+              </div>
+            </template>
+
+            <template x-if="finished">
+              <div>
+                <div class="alert mt-2" :class="result && result.ok ? 'alert-success' : 'alert-danger'"
+                     x-text="result && result.message"></div>
+                <template x-if="result && result.token">
+                  <div class="mb-2">
+                    <label class="form-label">Long-lived token (shown once — copy it now)</label>
+                    <div class="input-group input-group-narrow">
+                      <input type="text" class="form-control" readonly :value="result.token" @focus="$el.select()">
+                      <button class="btn" @click="copyToken()" x-text="copied ? 'Copied' : 'Copy'">Copy</button>
+                    </div>
+                    <p class="text-secondary small mt-1">
+                      Set this as <code>CLAUDE_CODE_OAUTH_TOKEN</code> in the runtime account's
+                      environment, then restart the bridge.
+                    </p>
+                  </div>
+                </template>
+                <button class="btn btn-sm mt-1" @click="reset()">Start another</button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
       <!-- ===== Toasts ===== -->
       <div class="toast-stack" role="log" aria-live="polite" aria-label="Notifications">
         <template x-for="t in toasts" :key="t.id">

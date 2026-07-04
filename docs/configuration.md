@@ -345,6 +345,22 @@ top of `enabled`.
 | `allow_user_scope` | bool | `false` | A **second, independent** opt-in for user-scope writes (`~/.claude.json` / `~` settings), which affect every project and the live account — strictly more dangerous than a single project's `.mcp.json`. Project-scope can run with this off. Off by default; **not** web-editable. |
 <!-- END GEN: config_write -->
 
+## `login_shepherd` — dashboard-driven `claude` account login (`LoginShepherdConfig`)
+
+A fail-closed gate (#839) for a dashboard panel that drives a **live OAuth login**
+for the runtime `claude` account (`claude auth login` / `claude setup-token`),
+so an operator whose runtime account has logged out (or whose token expired) can
+fix it from the browser instead of SSHing in. This writes the runtime user's own
+Claude Code credentials, so — mirroring `config_write.enabled` — it defaults
+**off** and is **never** web-editable; when `enabled` is off, the entire
+`/api/login-shepherd/*` surface returns `404` and the dashboard panel doesn't render.
+
+<!-- BEGIN GEN: login_shepherd -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch for the dashboard login-shepherd surface (`claude auth login` / `claude setup-token`, driven from the browser). Off by default; the whole surface 404s when off, same invisible-surface invariant as `config_write.enabled` and the reaper UI. |
+<!-- END GEN: login_shepherd -->
+
 ## `usage` — per-project cost/token badge (`UsageConfig`)
 
 <!-- BEGIN GEN: usage -->

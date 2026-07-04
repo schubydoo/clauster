@@ -163,6 +163,11 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "never web-editable (RCE surface)",
     "config_write.allow_user_scope": "config-write: user-scope second opt-in; file/CLI-managed "
     "only, never web-editable (RCE surface)",
+    # login shepherd (#839) — drives a live OAuth login that writes the runtime `claude`
+    # account's own credentials. Same invariant as config_write: never web-editable, or a
+    # browser session could turn on its own path to rewriting the account's auth state.
+    "login_shepherd.enabled": "login-shepherd: drives a live claude-account OAuth login; "
+    "file/CLI-managed only, never web-editable (writes the runtime account's credentials)",
 }
 _EXCLUDED = frozenset(EXCLUDED_FIELDS)
 

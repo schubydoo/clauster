@@ -14,8 +14,8 @@
 // This script mechanically proves the templates comply:
 //   (a) no directive expression contains an unsupported construct;
 //   (b) every bare root identifier in a directive is a property of a registered
-//       component (dashboard / projectRow / reaper), an inline x-data key, an
-//       Alpine magic, or an x-for iterator variable.
+//       component (dashboard / projectRow / reaper / loginShepherd), an inline
+//       x-data key, an Alpine magic, or an x-for iterator variable.
 //
 // Run: node scripts/check_csp_expressions.mjs   (exit 1 on any violation)
 
@@ -101,7 +101,9 @@ function componentProps(fnName) {
   return props;
 }
 
-const componentPropSets = ["dashboard", "projectRow", "reaper"].map(componentProps);
+const componentPropSets = ["dashboard", "projectRow", "reaper", "loginShepherd"].map(
+  componentProps,
+);
 
 // Factories registered on the Alpine.data() registry — the ONLY names an x-data
 // expression can resolve under the CSP build.

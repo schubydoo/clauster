@@ -4098,6 +4098,76 @@
     };
   }
 
+  // Login shepherd (#839): dashboard-driven `claude auth login` / `claude setup-token`,
+  // gated by login_shepherd.enabled (server-injected). A single-flight flow — the server
+  // rejects a second /start while one is active (409), surfaced here as a plain error.
+  function loginShepherd() {
+    return {
+      open: false, mode: "login", started: false, finished: false, busy: false,
+      authorizeUrl: null, output: "", code: "", error: null, result: null, copied: false,
+      toggle() { this.open = !this.open; },
+      async start() {
+        this.busy = true; this.error = null;
+        try {
+          const res = await fetch(ROOT + "/api/login-shepherd/start", {
+            method: "POST", headers: JSON_HEADERS,
+            body: JSON.stringify({ mode: this.mode }),
+          });
+          const body = await res.json();
+          if (!res.ok) { this.error = body.detail || "failed to start"; return; }
+          this.authorizeUrl = body.authorize_url; this.output = body.output || "";
+          this.started = true;
+        } catch (e) { this.error = String(e); }
+        finally { this.busy = false; }
+      },
+      async submitCode() {
+        if (!this.code) return;
+        this.busy = true; this.error = null;
+        try {
+          const res = await fetch(ROOT + "/api/login-shepherd/code", {
+            method: "POST", headers: JSON_HEADERS,
+            body: JSON.stringify({ code: this.code }),
+          });
+          const body = await res.json();
+          this.code = "";  // never keep the pasted code in the DOM/state longer than needed
+          if (!res.ok) { this.error = body.detail || "failed to submit code"; return; }
+          this.result = body; this.finished = true;
+        } catch (e) { this.error = String(e); }
+        finally { this.busy = false; }
+      },
+      async cancel() {
+        this.busy = true; this.error = null;
+        try {
+          await fetch(ROOT + "/api/login-shepherd/cancel", { method: "POST", headers: JSON_HEADERS });
+        } catch (e) { this.error = String(e); }
+        finally { this.busy = false; this.reset(); }
+      },
+      reset() {
+        this.started = false; this.finished = false; this.authorizeUrl = null;
+        this.output = ""; this.code = ""; this.result = null; this.error = null;
+        this.copied = false;
+      },
+      async copyToken() {
+        const text = this.result && this.result.token;
+        if (!text) return;
+        try {
+          if (window.isSecureContext && navigator.clipboard) {
+            await navigator.clipboard.writeText(text);
+          } else {
+            const ta = document.createElement("textarea");
+            ta.value = text; ta.setAttribute("readonly", "");
+            ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+            document.body.appendChild(ta); ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+          }
+          this.copied = true;
+          setTimeout(() => { this.copied = false; }, 2000);
+        } catch (e) { /* clipboard denied — the value is still selectable/readable inline */ }
+      },
+    };
+  }
+
   // CSP build (#533): x-data expressions resolve component factories ONLY through the
   // Alpine.data() registry — a bare script-global function is "Undefined variable" to the
   // CSP evaluator and the page would render nothing. This inline script runs before the
@@ -4106,5 +4176,6 @@
     Alpine.data("dashboard", dashboard);
     Alpine.data("projectRow", projectRow);
     Alpine.data("reaper", reaper);
+    Alpine.data("loginShepherd", loginShepherd);
   });
 </script>
