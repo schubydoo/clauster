@@ -612,6 +612,40 @@ def test_pump_pty_noop_when_unpaired() -> None:
     assert flow.snapshot() == ""
 
 
+# --- authorize-URL stability guard (#852) -------------------------------------------
+
+
+def test_stable_match_finder_rejects_a_mid_render_partial_url() -> None:
+    # #852: the setup-token URL is fed to the pyte screen in chunks, so a poll can land
+    # mid-render and see a syntactically-valid but TRUNCATED authorize URL. The stability
+    # guard must reject a value that changed since the previous poll and only report the
+    # settled URL (seen identically on two consecutive polls) — never a truncated prefix.
+    scr = ls.PtyScreen(cols=600, rows=4)
+    condition = ls._stable_match_finder(scr.find_authorize_url)
+    url = "https://claude.com/cai/oauth/authorize?code=" + ("a" * 400)
+
+    assert condition("") is None  # nothing rendered yet
+    scr.feed(b"Open this URL: https://claude.com/cai/oauth/authorize?code=" + b"a" * 100)
+    assert condition("") is None  # first sight of a (partial) URL -> not yet stable
+    scr.feed(b"a" * 300)
+    assert condition("") is None  # URL changed since the last poll -> still rejected
+    # No more feeds: the settled URL now repeats across polls -> trusted, and it is WHOLE.
+    assert condition("") == url
+
+
+def test_stable_match_finder_requires_two_consecutive_identical_matches() -> None:
+    # A transient None (or a different value) between two identical matches must reset the
+    # stability — only a value seen twice in a row, with no gap, is trusted.
+    calls = iter([None, "u", None, "u", "u", "u"])
+    condition = ls._stable_match_finder(lambda: next(calls))
+    assert condition("") is None  # None
+    assert condition("") is None  # "u" — first sight
+    assert condition("") is None  # None — resets
+    assert condition("") is None  # "u" — first sight again
+    assert condition("") == "u"  # "u" == previous "u" -> stable
+    assert condition("") == "u"  # stays stable while unchanged
+
+
 # --- single-flight ------------------------------------------------------------------
 
 
