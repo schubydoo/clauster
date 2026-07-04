@@ -233,6 +233,50 @@ def test_extract_url_only_docs_hosts_falls_back_to_last_https() -> None:
     assert ls._extract_authorize_url(out) == "https://help.claude.ai/b"
 
 
+def test_extract_url_prefers_authorize_path_over_same_host_decoy_after_it() -> None:
+    # Greptile P1: the real authorize URL is printed FIRST, then the CLI later prints a
+    # same-host non-authorize page (settings/account) — the OLD "last known-host wins" rule
+    # picked the later, wrong URL since both share a known auth host. The authorize-path
+    # match must win regardless of print order.
+    real = "https://claude.com/cai/oauth/authorize?code=true&client_id=abc"
+    out = f"Open this URL: {real}\nLater, see your account at https://claude.com/settings"
+    assert ls._extract_authorize_url(out) == real
+
+
+def test_extract_url_prefers_authorize_path_over_platform_subdomain_decoy() -> None:
+    # Same bug, with the decoy on a different known-auth-host subdomain
+    # (platform.claude.com) rather than the bare parent host.
+    real = "https://claude.com/cai/oauth/authorize?code=true&client_id=abc"
+    out = f"{real}\nCheck https://platform.claude.com/dashboard for usage."
+    assert ls._extract_authorize_url(out) == real
+
+
+def test_extract_url_authorize_in_query_only_is_not_a_path_match() -> None:
+    # "authorize" appearing only inside a query string (e.g. a redirect_uri value) must NOT
+    # be treated as an authorize-endpoint match — only the URL's PATH counts. Proves the
+    # fix matches the path component, not the whole URL string.
+    decoy = "https://claude.com/settings?redirect_uri=https%3A%2F%2Fx.com%2Fauthorize"
+    out = f"{decoy}\nThen see https://claude.com/account"
+    # Neither candidate has an authorize PATH, so this falls back to known-auth-host
+    # selection (both are known hosts) → the LAST one, exactly the pre-existing rule.
+    assert ls._extract_authorize_url(out) == "https://claude.com/account"
+
+
+def test_extract_url_authorize_path_match_on_unknown_host_still_wins() -> None:
+    # An authorize-PATH match on an UNKNOWN host still beats a later known-host non-authorize
+    # URL: path-match is checked first regardless of host, only preferring a known host
+    # *among* the authorize-path matches (there are none here, so it falls through to the
+    # bare authorize_matches list rather than known_authorize).
+    out = (
+        "https://weird-unknown-host.example/cai/oauth/authorize?code=1\n"
+        "Later: https://claude.com/settings"
+    )
+    assert (
+        ls._extract_authorize_url(out)
+        == "https://weird-unknown-host.example/cai/oauth/authorize?code=1"
+    )
+
+
 def test_unknown_binary_raises_login_shepherd_error(monkeypatch) -> None:
     # An unresolvable binary must surface as a LoginShepherdError (→ 400 at the route),
     # NOT the raw claude_cli.ClaudeNotFound that would escape the route's except and 500.

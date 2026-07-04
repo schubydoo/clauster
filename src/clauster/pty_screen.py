@@ -87,6 +87,15 @@ _NON_AUTH_HOST_PREFIXES = ("docs.", "help.", "support.", "www.")
 # closing brackets/quotes) that are not part of the URL itself.
 _URL_TRAILING = ".,;:!?)]}>\"'"
 
+# Path segments that identify a genuine OAuth authorize *endpoint*, matched against the
+# URL's PATH only (never the full URL string — a query string can contain the substring
+# "authorize" too, e.g. inside a `redirect_uri=...%2Fauthorize` value, without the URL
+# itself being an authorize link). The real `claude auth login`/`setup-token` link is
+# `/cai/oauth/authorize` (live-verified 2026-07-03); a bare trailing `/authorize` is also
+# accepted so a future CLI path change (e.g. dropping the `/cai` prefix) doesn't silently
+# stop matching.
+_AUTHORIZE_PATH_MARKERS = ("oauth/authorize",)
+
 # `setup-token`'s printed long-lived credential (per the spike: `CLAUDE_CODE_OAUTH_TOKEN=...`).
 # Matched permissively (any non-whitespace value) since the exact real-binary format is
 # unverified — this is defensive, not assumed exact.
@@ -136,6 +145,31 @@ def _url_host(url: str) -> str:
         return ""
 
 
+def _url_path(url: str) -> str:
+    """Return the (unlowered) path of ``url`` (empty string if unparseable).
+
+    Deliberately the PATH component only, never the query string — see
+    :data:`_AUTHORIZE_PATH_MARKERS` for why a query-string match would be wrong.
+    """
+    try:
+        return urlsplit(url).path
+    except ValueError:  # pragma: no cover - urlsplit is very lenient; defensive only
+        return ""
+
+
+def _is_authorize_path(url: str) -> bool:
+    """Whether ``url``'s PATH (not its full string) identifies an OAuth authorize endpoint.
+
+    Matches the real ``/cai/oauth/authorize`` path, or any path ending in ``/authorize`` for
+    resilience to a CLI path change. Checked against :func:`_url_path` only — a query string
+    containing the word "authorize" (e.g. a ``redirect_uri`` value) must NOT count, or a
+    same-host non-authorize page whose query happens to mention "authorize" would be
+    mistaken for the real link.
+    """
+    path = _url_path(url)
+    return any(marker in path for marker in _AUTHORIZE_PATH_MARKERS) or path.endswith("/authorize")
+
+
 def _is_known_auth_host(host: str) -> bool:
     """Whether ``host`` is a known Claude/Anthropic *auth* host (not a docs/marketing one).
 
@@ -161,12 +195,24 @@ def extract_authorize_url(output: str) -> str | None:
     * ANSI/terminal escape sequences are stripped first (via :func:`redact.strip_ansi`)
       so a colored/reset-wrapped URL isn't polluted with escape bytes.
     * Each matched ``https://…`` token is trimmed of trailing punctuation/quotes.
-    * When several https URLs are present, the LAST one whose host is a known Claude/
-      Anthropic auth host (docs/marketing subdomains excluded — see
-      :func:`_is_known_auth_host`) wins: a decoy docs/help link printed *before* the
-      real authorize URL can't hijack the operator, and — since the CLI prints the actionable
-      link after any preamble — the last known-host match is the authorize link. With no
-      known-auth-host match it falls back to the *last* https URL overall.
+    * Selection among several candidate https URLs, in priority order:
+
+      1. **Authorize-endpoint match** (:func:`_is_authorize_path`, checked against the URL's
+         PATH only, never the full string): candidates whose path is the real OAuth
+         authorize endpoint (``oauth/authorize``, or any path ending in ``/authorize``).
+         This uniquely identifies the actionable link even when the CLI later prints a
+         same-host non-authorize URL (an account/settings/status page, or a
+         ``platform.claude.com`` redirect target) — a "same-host decoy" that a host-only
+         check can't distinguish from the real link. Among authorize-path matches, one on a
+         known auth host is preferred; the *last* remaining candidate wins (the CLI prints
+         the actionable link after any preamble).
+      2. **Known-auth-host fallback**: when no candidate's path matches an authorize
+         endpoint, the LAST candidate whose host is a known Claude/Anthropic auth host
+         (docs/marketing subdomains excluded — see :func:`_is_known_auth_host`) wins: a
+         decoy docs/help link printed *before* the real authorize URL can't hijack the
+         operator.
+      3. **Last candidate overall**: with no known-auth-host match either, fall back to the
+         *last* https URL overall.
 
     Deliberately defensive, not host-locked: the real-CLI format is unverified, so a URL
     on an unknown host is still returned rather than rejected.
@@ -180,6 +226,10 @@ def extract_authorize_url(output: str) -> str | None:
     candidates = [c for c in candidates if c]
     if not candidates:
         return None
+    authorize_matches = [url for url in candidates if _is_authorize_path(url)]
+    if authorize_matches:
+        known_authorize = [url for url in authorize_matches if _is_known_auth_host(_url_host(url))]
+        return (known_authorize or authorize_matches)[-1]
     known = [url for url in candidates if _is_known_auth_host(_url_host(url))]
     if known:
         return known[-1]

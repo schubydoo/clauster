@@ -97,6 +97,18 @@ def test_find_authorize_url_is_incremental_across_feeds():
     assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=2"
 
 
+def test_find_authorize_url_prefers_authorize_path_over_same_host_decoy_after_it():
+    # Greptile P1 "same-host decoy wins": the real authorize URL prints FIRST, then the CLI
+    # later renders a same-host non-authorize page (e.g. a settings/account screen) — the
+    # authorize-path match must still win over the later same-host URL.
+    scr = PtyScreen(cols=120, rows=6)
+    scr.feed(
+        b"Open this URL to authorize: https://claude.com/cai/oauth/authorize?code=1\r\n"
+        b"Manage your account at https://claude.com/account"
+    )
+    assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=1"
+
+
 # --- find_authorize_url() at a NARROW width: hard-wrap reassembly (live-smoke regression) --
 #
 # Live-smoke-tested against real claude 2.1.201 (#846 follow-up): the setup-token PTY was
