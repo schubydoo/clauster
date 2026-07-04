@@ -8,12 +8,21 @@ file lives under tmp_path — never the real ``~/.claude``.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from pathlib import Path
 
 from clauster.login_status import LoginStatus, LoginStatusCache, check_login_status
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
+# These tests spawn the fake stub as a real subprocess (check_login_status). On
+# Windows the extensionless POSIX shebang script isn't a valid Win32 executable, so
+# point at the sibling `.cmd` forwarder (which shells out to `python` and forwards
+# argv + env + exit code) — mirroring conftest's WIN_STUB_SUFFIX. Without this the
+# spawn dies with `[WinError 193] %1 is not a valid Win32 application`.
+_WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
+FAKE_CLAUDE = (
+    Path(__file__).resolve().parent / "fixtures" / "fake_claude" / f"claude{_WIN_STUB_SUFFIX}"
+)
 
 
 def _claude_json(tmp_path: Path) -> Path:
