@@ -16,12 +16,45 @@ def _client(write_config) -> TestClient:
 
 
 def test_healthz(write_config):
+    # write_config defaults the binary to the fake stub, so the #838 login probe
+    # never invokes the real `claude auth status` (this host may run a live account).
     client = _client(write_config)
     resp = client.get("/healthz")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     assert "instances_running" in body
+    # #838: auth is off in this fixture, so the authenticated branch (and its
+    # login-status fields) is exercised here. The first read is the neutral cold-start
+    # value; wait for the single background probe to land, then re-read for the real
+    # result (the fake stub reports logged-in via claude.ai by default).
+    assert body["claude_login_ok"] is True  # cold-start neutral (quiet)
+    client.app.state.login_status_cache.wait_for_pending_refresh()
+    warm = client.get("/healthz").json()
+    assert warm["claude_login_ok"] is True
+    assert warm["claude_login_method"] == "claude.ai"
+    assert "claude_login_expires_at" in warm
+
+
+def test_dashboard_ships_claude_login_indicator(write_config):
+    # #838: the header pill markup + its poll wiring ship, gated on a response with
+    # the login field ("known") and only shown while logged out/expired.
+    page = _client(write_config).get("/").text
+    assert 'x-show="claudeLogin.known && !claudeLogin.ok"' in page
+    assert "claude not logged in" in page
+    # The badge polls the dedicated cache-only endpoint on its OWN path (loadLoginStatus)
+    # + own interval — NOT the core refresh() Promise.all, and NOT /healthz (which runs
+    # `claude --version`). So the badge poll never spawns a subprocess and never delays
+    # the primary instances/sessions/agents poll.
+    assert "async loadLoginStatus()" in page
+    assert 'fetch(ROOT + "/api/login-status")' in page
+    assert "setInterval(() => this.loadLoginStatus(), 4000)" in page
+    assert page.count('fetch(ROOT + "/api/login-status")') == 1
+    # The badge must NOT hit /healthz at all. The only /healthz fetch left in the script
+    # is the #663 restart-reload poll (cache-busted "?_="); the bare `fetch(ROOT +
+    # "/healthz")` must appear ZERO times now that the badge moved off it.
+    assert page.count('fetch(ROOT + "/healthz")') == 0
+    assert 'fetch(ROOT + "/healthz?_="' in page  # #663 restart poll untouched
 
 
 def test_api_projects(write_config):

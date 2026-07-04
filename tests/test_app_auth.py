@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -34,6 +35,18 @@ def _login(client: TestClient) -> None:
         follow_redirects=False,
     )
     assert resp.status_code == 303, resp.text
+
+
+def _healthz_after_probe(client: TestClient) -> dict:
+    """Return /healthz once the #838 login-status cache has run its first probe.
+
+    /healthz is stale-while-revalidate: the first read returns the neutral cold-start
+    value and kicks a single background probe. Wait for that probe to land (no fixed
+    sleep — join the refresh thread), then re-read so the assertion sees a real result.
+    """
+    client.get("/healthz")  # kick the cold-start refresh
+    client.app.state.login_status_cache.wait_for_pending_refresh()
+    return client.get("/healthz").json()
 
 
 # ----- guard ---------------------------------------------------------------
@@ -82,7 +95,12 @@ def test_public_paths_reachable_unauthenticated(runner_config):
     assert client.get("/static/favicon.svg").status_code == 200  # static mount is public
     health = client.get("/healthz")
     assert health.status_code == 200
-    assert health.json() == {"status": "ok"}  # trimmed when unauthenticated
+    body = health.json()
+    assert body == {"status": "ok"}  # trimmed when unauthenticated
+    # #838: the login-status fields must NEVER leak to an unauthenticated caller.
+    assert "claude_login_ok" not in body
+    assert "claude_login_method" not in body
+    assert "claude_login_expires_at" not in body
 
 
 # ----- login / logout ------------------------------------------------------
@@ -94,7 +112,13 @@ def test_login_correct_then_authed(runner_config):
     assert client.cookies.get("clauster_session")
     assert client.get("/api/instances").status_code == 200
     # healthz now returns full detail to the authed session
-    assert "claude_version" in client.get("/healthz").json()
+    body = _healthz_after_probe(client)
+    assert "claude_version" in body
+    # #838: login-status fields present once authed. The fake `claude auth status`
+    # stub reports logged-in via claude.ai by default (mechanism-agnostic signal).
+    assert body["claude_login_ok"] is True
+    assert body["claude_login_method"] == "claude.ai"
+    assert "claude_login_expires_at" in body
 
 
 def test_login_wrong_password_rejected(runner_config):
@@ -722,6 +746,106 @@ def test_healthz_claude_probe_failure(runner_config):
     client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
     body = client.get("/healthz").json()
     assert body["claude_ok"] is False and body["claude_version"] is None
+
+
+def test_healthz_reports_logged_out(runner_config, monkeypatch):
+    # #838: `claude auth status` reports not-logged-in -> claude_login_ok False.
+    config, claude_json = runner_config
+    monkeypatch.setenv("FAKE_CLAUDE_AUTH_STDOUT", '{"loggedIn": false}')
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    body = _healthz_after_probe(client)
+    assert body["claude_login_ok"] is False
+    assert body["claude_login_expires_at"] is None
+
+
+def test_healthz_cold_start_is_quiet_before_probe(runner_config, monkeypatch):
+    # #838: the FIRST /healthz read (before the background probe lands) must be a
+    # neutral "unknown" — claude_login_ok True — even when the account is logged out,
+    # so the dashboard never cries wolf on a cold start. Only after the probe lands
+    # does a real loggedIn:false trip the field.
+    config, claude_json = runner_config
+    monkeypatch.setenv("FAKE_CLAUDE_AUTH_STDOUT", '{"loggedIn": false}')
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    cold = client.get("/healthz").json()  # kicks the refresh but returns immediately
+    assert cold["claude_login_ok"] is True  # quiet — not yet probed
+    assert cold["claude_login_method"] is None
+    client.app.state.login_status_cache.wait_for_pending_refresh()
+    warm = client.get("/healthz").json()
+    assert warm["claude_login_ok"] is False  # real result once the probe lands
+
+
+def test_healthz_logged_in_via_api_key_helper_without_creds_file(runner_config, monkeypatch):
+    # #838 regression: an apiKeyHelper/API-key deployment has NO .credentials.json yet
+    # is fully logged in. The CLI signal must report logged-in (a creds-file check
+    # would false-alarm "not logged in" here — the exact bug this approach avoids).
+    config, claude_json = runner_config
+    monkeypatch.setenv(
+        "FAKE_CLAUDE_AUTH_STDOUT", '{"loggedIn": true, "authMethod": "apiKeyHelper"}'
+    )
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    body = _healthz_after_probe(client)
+    assert body["claude_login_ok"] is True
+    assert body["claude_login_method"] == "apiKeyHelper"
+    assert body["claude_login_expires_at"] is None  # non-OAuth -> no creds file read
+
+
+def test_healthz_oauth_login_surfaces_expiry_but_never_token(runner_config, monkeypatch):
+    # #838: claude.ai OAuth + a readable .credentials.json -> proactively surface the
+    # expiry, but the token value must never appear in the response.
+    config, claude_json = runner_config
+    creds = claude_json.parent / ".claude" / ".credentials.json"
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    expires_at = int(time.time() * 1000) + 3_600_000
+    creds.write_text(
+        json.dumps({"claudeAiOauth": {"accessToken": "tok-secret", "expiresAt": expires_at}})
+    )
+    monkeypatch.setenv("FAKE_CLAUDE_AUTH_STDOUT", '{"loggedIn": true, "authMethod": "claude.ai"}')
+    client = TestClient(create_app(config, runner=SessionRunner(config, claude_json=claude_json)))
+    body = _healthz_after_probe(client)
+    assert body["claude_login_ok"] is True
+    assert body["claude_login_expires_at"] == expires_at
+    # Re-read to assert the token never appears in the response text either.
+    assert "tok-secret" not in client.get("/healthz").text
+
+
+def test_api_login_status_requires_auth(runner_config):
+    # #838: the badge's dedicated endpoint is an /api/* route, so the guard middleware
+    # gates it like every other one — unauthenticated gets 401 (never leaks login state).
+    client = _password_client(runner_config)
+    assert client.get("/api/login-status").status_code == 401
+
+
+def test_api_login_status_reads_cache_without_probing(runner_config):
+    # #838: the endpoint returns ONLY the cached login fields and must NOT run a probe
+    # (no `claude --version`, no `claude auth status`) on the request path. Inject a
+    # cache stub whose read() returns a known status and counts calls; assert the
+    # endpoint echoes exactly those three fields and only ever reads the cache.
+    from clauster import login_status
+
+    config, claude_json = runner_config
+
+    class _StubCache:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+            return login_status.LoginStatus(False, "apiKeyHelper", None, "logged out")
+
+    fake = _StubCache()
+    # auth is off in runner_config, so the endpoint is reachable without logging in.
+    app = create_app(config, runner=SessionRunner(config, claude_json=claude_json))
+    with TestClient(app) as c:
+        c.app.state.login_status_cache = fake
+        resp = c.get("/api/login-status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "claude_login_ok": False,
+        "claude_login_method": "apiKeyHelper",
+        "claude_login_expires_at": None,
+    }
+    assert fake.reads == 1  # the endpoint read the cache exactly once, ran no probe
 
 
 # ----- audited coverage gaps (2026-07 audit) --------------------------------

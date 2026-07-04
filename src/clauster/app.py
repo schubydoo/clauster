@@ -43,6 +43,7 @@ from . import (
     config_write_subagents,
     config_writer,
     environments,
+    login_status,
     logstream,
     ops,
     prometheus,
@@ -574,6 +575,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     app.state.config = config
     app.state.runner = runner
     app.state.claustrum_daemon = None  # set by lifespan when claustrum.enabled
+    # #838: login-status cache. `/healthz` reads it synchronously but non-blocking —
+    # the `claude auth status` subprocess runs at most once per TTL on a background
+    # thread (never on the request path), so the dashboard's 4s poll never stalls on
+    # a slow probe and multiple tabs don't spawn overlapping subprocesses.
+    app.state.login_status_cache = login_status.LoginStatusCache(
+        config.claude.binary, runner.claude_json
+    )
     # In-app restart (#483): the entry point (``_run``) sets ``uvicorn_server`` to the
     # live server so ``POST /api/restart`` can request a graceful shutdown; left None
     # under TestClient / non-uvicorn hosts (the endpoint 503s rather than half-restart).
@@ -1008,11 +1016,24 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except Exception:
             version = None
             claude_ok = False
+        # #838: claude_ok only confirms the binary is invokable, not that the account
+        # is authenticated — an expired/absent login lets a bridge spawn and then hang
+        # at "Starting" with no upfront signal. `claude auth status --json` is the
+        # mechanism-agnostic signal (OAuth / apiKeyHelper / API key / env token all
+        # reflected in loggedIn). Read is served from a stale-while-revalidate cache:
+        # non-blocking (the subprocess never runs on this request path) and the probe
+        # runs at most once per TTL, single-flight. A cold start returns a neutral
+        # "unknown" (claude_login_ok=True) so the UI never cries wolf before probing.
+        # Only the non-PII loggedIn + authMethod are surfaced (never email/org/token).
+        login = app.state.login_status_cache.read()
         result: dict[str, object] = {
             "status": "ok",
             "version": __version__,
             "claude_ok": claude_ok,
             "claude_version": version,
+            "claude_login_ok": login.logged_in,
+            "claude_login_method": login.method,
+            "claude_login_expires_at": login.expires_at_ms,
             "instances_running": runner.running_count(),
         }
         if config.claustrum.enabled:
@@ -1021,6 +1042,27 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 await daemon.probe() if daemon is not None else {"enabled": True, "running": False}
             )
         return result
+
+    @app.get("/api/login-status")
+    async def api_login_status() -> dict:
+        """Return the cached claude-login state for the dashboard badge (#838).
+
+        A deliberately lightweight companion to ``/healthz``: it returns ONLY the
+        three login fields, read straight from the stale-while-revalidate cache
+        (``read()`` returns immediately; the background thread does the actual
+        ``claude auth status`` probe ≤ once per TTL). Unlike ``/healthz`` it never
+        runs ``claude --version`` — so the badge's own poll can hit this every few
+        seconds across many tabs without ever spawning a subprocess on the request
+        path. ``/healthz`` keeps its login fields for external health consumers; this
+        is an additional path for the badge, not a replacement. Auth-gated by the
+        guard middleware like every other ``/api/*`` route.
+        """
+        login = app.state.login_status_cache.read()
+        return {
+            "claude_login_ok": login.logged_in,
+            "claude_login_method": login.method,
+            "claude_login_expires_at": login.expires_at_ms,
+        }
 
     def _cached_bridge_samples() -> list[tuple[str, float, int]]:
         """(project, cpu, rss) for each bridge in the server-side metrics cache (#354).
