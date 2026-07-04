@@ -4219,7 +4219,10 @@
             method: "POST", headers: JSON_HEADERS,
           });
           if (this.finished) return;  // a concurrent path finished the flow while we waited
-          if (res.status === 409) { this.stopPolling(); this.reset(); return; }
+          if (res.status === 409) {
+            if (this.finished) return;  // belt-and-suspenders: never clobber a terminal result
+            this.stopPolling(); this.reset(); return;
+          }
           const body = await res.json();
           if (this.finished) return;  // re-check after the await — never clobber a terminal result
           if (!res.ok) { this.error = body.detail || "failed to check status"; return; }

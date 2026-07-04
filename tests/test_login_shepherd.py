@@ -835,6 +835,83 @@ def test_teardown_does_not_clear_a_different_active_flow(shepherd, monkeypatch) 
     shepherd.cancel()
 
 
+def test_write_code_plain_pipe_skipped_when_stdin_is_none(shepherd) -> None:
+    # `_write_code`'s plain-pipe branch (`flow.master_fd is None`) guards the write on
+    # `flow.proc.stdin is not None and not flow.stdin_closed` — cover the `stdin is None`
+    # edge (e.g. a Popen spawned without capturing stdin) where the write must be
+    # skipped rather than raising an AttributeError on `None.write(...)`.
+    class _FakeProc:
+        stdin = None
+
+    flow = ls._Flow(mode="login", proc=_FakeProc())  # type: ignore[arg-type]
+    shepherd._write_code(flow, "a-code")  # noqa: SLF001 - internals test; must not raise
+    assert flow.stdin_closed is False  # untouched — the write was never attempted
+
+
+def test_write_code_plain_pipe_skipped_when_stdin_already_closed(shepherd) -> None:
+    # Same guard, other half: `stdin` is set but `stdin_closed` is already True (a prior
+    # teardown/close already ran) — the write must still be skipped, not attempted again.
+    calls: list[str] = []
+
+    class _FakeStdin:
+        def write(self, data: str) -> None:
+            calls.append(data)
+
+        def flush(self) -> None:
+            calls.append("flush")
+
+    class _FakeProc:
+        stdin = _FakeStdin()
+
+    flow = ls._Flow(mode="login", proc=_FakeProc(), stdin_closed=True)  # type: ignore[arg-type]
+    shepherd._write_code(flow, "a-code")  # noqa: SLF001 - internals test; must not raise
+    assert calls == []  # the already-closed stdin was never written to
+
+
+def test_finalize_exited_skips_join_when_no_reader_thread(shepherd) -> None:
+    # `_finalize_exited` joins `flow.reader_thread` only `if ... is not None` — cover the
+    # None edge (a flow torn down/finalized before its reader thread was ever assigned,
+    # or one whose thread already completed and was cleared) where the join is skipped.
+    class _FakeProc:
+        stdin = None
+
+        def poll(self):
+            return 0  # already exited — _finalize_exited's own _teardown() call is a no-op
+
+    flow = ls._Flow(mode="login", proc=_FakeProc(), reader_thread=None)  # type: ignore[arg-type]
+    result = shepherd._finalize_exited(flow, 0)  # noqa: SLF001 - internals test
+    assert result["ok"] is True
+
+
+def test_teardown_skips_both_stdin_branches_when_neither_transport_is_open(shepherd) -> None:
+    # `_teardown`'s stdin-close step is `if master_fd is not None: ... elif proc.stdin is
+    # not None: ...` — cover the case where NEITHER is set (already closed by an earlier
+    # teardown, or a flow whose transport was never opened): both branches must be
+    # skipped rather than raising on a None close.
+    class _FakeProc:
+        stdin = None
+
+        def poll(self):
+            return 0  # already exited — no terminate/kill/wait needed
+
+    flow = ls._Flow(mode="login", proc=_FakeProc(), master_fd=None)  # type: ignore[arg-type]
+    shepherd._teardown(flow)  # noqa: SLF001 - internals test; must not raise
+    assert flow.stdin_closed is False  # neither branch ran, so the flag was never flipped
+
+
+def test_teardown_skips_reader_join_when_no_reader_thread(shepherd) -> None:
+    # `_teardown` joins `flow.reader_thread` only `if ... is not None` — cover the None
+    # edge (mirrors `_finalize_exited`'s same guard) where the join is skipped.
+    class _FakeProc:
+        stdin = None
+
+        def poll(self):
+            return 0  # already exited
+
+    flow = ls._Flow(mode="login", proc=_FakeProc(), reader_thread=None)  # type: ignore[arg-type]
+    shepherd._teardown(flow)  # noqa: SLF001 - internals test; must not raise (no join attempted)
+
+
 def test_pump_stdout_noop_when_stdout_missing() -> None:
     class _FakeProc:
         stdout = None
