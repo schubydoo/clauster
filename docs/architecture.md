@@ -11,7 +11,7 @@ Key modules under `src/clauster/`:
 | Module | Responsibility |
 | --- | --- |
 | `app.py` | FastAPI app factory; routes, middleware, cookie/session/WS wiring. |
-| `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`, `config` (with `config reconcile`)). |
+| `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `api-token` (`issue`/`list`/`rotate`/`revoke`), `mcp`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`, `config` (with `config reconcile`)). |
 | `runner.py` | `SessionRunner` — spawn / stop / observe **standard** `claude remote-control` bridges. |
 | `pty_keeper.py` | Sidecar that owns a true-resume (**pty**) bridge's PTY. |
 | `discovery.py` | Project discovery under `projects_root`; `~/.claude.json` paths. |
@@ -24,6 +24,8 @@ Key modules under `src/clauster/`:
 | `procutil.py` | `psutil`-based process introspection: liveness with PID-reuse defense (create-time + cmdline match) and the match-gated kill behind bridge rediscovery and hosted orphan recovery. |
 | `auth.py` | Auth foundation (fail-closed; pure functions, no FastAPI import). |
 | `config.py` | Config load, env-override, and validation (`ClausterConfig`). |
+| `config_editor.py` · `config_write*.py` | Tier-A config-editor write backends — read/validate/write the runtime `claude` config surfaces (settings, permissions, hooks, MCP, plugins, skills, subagents) from the dashboard, behind the `config_write` gates. |
+| `login_shepherd.py` · `login_status.py` | Dashboard `claude` account login flow — subscription login (plain pipes) and long-lived `setup-token` (under a PTY reusing `PtyScreen`), plus the account login-status probe surfaced in `/healthz`; behind the `login_shepherd` gates. |
 | `db/` | Persistence layer: `engine.py` (resolves the SQLite `clauster.db` URL under `state_dir`), `models.py`/`stores.py` (SQLAlchemy schema + record stores), `bootstrap.py` (startup Alembic-to-head + one-time legacy-JSON import, both fail-closed), and the packaged Alembic `migrations/`; the `stores.py` layer includes an append-only `session_events` lifecycle history (`SessionHistoryStore`) that backs the Projects last-used / cost sort. |
 | `state.py` | Legacy `state.json` store — now an import source only (the live store is `clauster.db`). |
 | `models.py` | Domain models. |

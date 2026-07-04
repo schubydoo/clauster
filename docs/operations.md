@@ -32,6 +32,9 @@ body is returned:
 | `version` | Clauster's own version. |
 | `claude_ok` | Whether the `claude` binary probe (`claude --version`) succeeded. |
 | `claude_version` | The detected `claude` CLI version (`null` if the probe failed). |
+| `claude_login_ok` | Whether the `claude` account is logged in (`claude auth status`; OAuth / apiKeyHelper / API key / env token all count). `true` on a cold start before the first probe, so it never cries wolf. |
+| `claude_login_method` | How it is authenticated (`null` until probed). |
+| `claude_login_expires_at` | Login expiry as a Unix-epoch **millisecond** timestamp, or `null` if not applicable/unknown — alert as it approaches. |
 | `instances_running` | Count of bridges Clauster currently considers running. |
 | `claustrum` | Present only when the hosted channel is enabled — the daemon's health (`{enabled, running, …}`). |
 
@@ -40,8 +43,10 @@ When auth is **on** and the caller is **unauthenticated**, the body is just
 running-bridge count on a public reverse-proxy deploy.
 
 A simple container/systemd health probe only needs the `200` + `status: ok`; a
-monitoring system with credentials can additionally alert on `claude_ok: false`
-(the bridge host has lost its `claude` CLI) or watch `instances_running`.
+monitoring system with credentials can additionally alert on `claude_login_ok:
+false` (logged out / credentials expired — the classic "bridge runs but is dead"
+mode) or an approaching `claude_login_expires_at`, on `claude_ok: false` (the
+bridge host has lost its `claude` CLI), or watch `instances_running`.
 
 ### `clauster doctor` — configuration and environment diagnostics
 
@@ -109,7 +114,8 @@ runner state:
 A scraper like Prometheus can't log in through the password form. On a guarded
 deployment, set a **scrape token** so the scraper can reach `/metrics` directly.
 Mint one with `clauster hash-metrics-token` — it prints the raw token once (give
-it to the scraper) and the hash to store at rest:
+it to the scraper) and the hash to store at rest. (For the reverse-proxy-specific
+setup, see [Networking → Scraping `/metrics`](networking.md#scraping-metrics-from-behind-the-auth-gate).)
 
 ```yaml
 observability:
@@ -152,7 +158,7 @@ curl -s http://127.0.0.1:7621/metrics
 ```text
 # HELP clauster_build_info Build information for the running Clauster.
 # TYPE clauster_build_info gauge
-clauster_build_info{version="0.12.4"} 1
+clauster_build_info{version="0.12.x"} 1
 # HELP clauster_bridges Number of managed bridges by lifecycle status.
 # TYPE clauster_bridges gauge
 clauster_bridges{status="running"} 2

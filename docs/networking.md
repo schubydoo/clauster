@@ -215,7 +215,8 @@ Use header-only mode only when **all three** hold:
   covers only it); a `trusted_ips` entry that includes attacker-reachable hosts is
   a full auth bypass, not a hardening knob.
 
-`trusted_ips` is **mandatory** in this mode — clauster refuses to start without it.
+`trusted_ips` is **mandatory whenever `reverse_proxy.enabled`** (both the HMAC and
+the header-only `forward_auth` modes) — clauster refuses to start without it.
 The login rate-limiter never keys on the bare header: a forged-username flood from
 a trusted IP collapses to the shared-IP global backoff, so it can't mint a fresh
 per-user login budget.
