@@ -301,9 +301,9 @@ class LoginShepherd:
           right at the wait boundary is thus correctly seen as done, not failed.
         * **Still running** (`poll()` is None after the timeout): the login is genuinely
           in-flight (a slow provider verification can exceed the wait). Do NOT tear it
-          down / kill it — leave the flow active and return a "still verifying" result so
-          the operator can wait and re-check, or `cancel()` explicitly. Single-flight
-          still blocks a new `start()` while it runs.
+          down / kill it — leave the flow active and return a "still verifying" result
+          (`pending: true`) so the caller can poll :meth:`poll` for the eventual result,
+          or `cancel()` explicitly. Single-flight still blocks a new `start()` while it runs.
 
         Never logs `code` or the extracted token. Raises `NotActiveError` if no flow is
         in progress. Serialized per-flow (``flow.submit_lock``) so two concurrent submits
@@ -339,32 +339,72 @@ class LoginShepherd:
             # exit code (the timeout-boundary race).
             _wait_for(flow, lambda _snap: None, timeout=SUBMIT_TIMEOUT_SECONDS)
             exit_code = flow.proc.poll()
-
             if exit_code is None:
                 # Still running after the timeout: a slow-but-valid verification. Leave the
                 # flow ACTIVE (don't kill it) so a genuine login isn't aborted; the operator
-                # can wait + re-check or cancel. Return without tearing down. `pending: true`
-                # distinguishes this IN-PROGRESS state from a terminal failure so the UI keeps
-                # the Cancel control and doesn't treat it as "finished" (which would orphan the
-                # still-running server-side flow).
-                message = (
-                    f"claude {flow.mode} is still verifying — the login is still running "
-                    f"(no result within {SUBMIT_TIMEOUT_SECONDS:.0f}s). Wait and re-check "
-                    "`claude auth status --json`, or cancel."
-                )
-                return {"ok": False, "pending": True, "message": message}
+                # can wait + re-check via `poll()` or cancel. `pending: true` keeps the UI in
+                # the IN-PROGRESS state instead of "finished" (which would orphan the flow).
+                return self._pending_result(flow)
+            # Exited: build the terminal result (drains the reader, extracts the token,
+            # classifies off the real exit code) and reap the flow.
+            return self._finalize_exited(flow, exit_code)
 
-            # Exited: drain the reader (its last `readline()` may still be in flight in the
-            # instant poll() first reported exit) so a final line — e.g. setup-token's token
-            # — isn't missed, then classify off the real exit code.
-            if flow.reader_thread is not None:
-                flow.reader_thread.join(timeout=2)
-            output = flow.snapshot()
-            ok = exit_code == 0
-            token_match = _TOKEN_RE.search(output)
-            token = token_match.group(1) if token_match else None
+    def poll(self) -> dict:
+        """Re-check the active flow's outcome without submitting a code (the `pending` poll).
 
-            self._teardown(flow)
+        After :meth:`submit_code` returns ``pending: true`` (a slow verification), the caller
+        polls this to fetch the eventual result:
+
+        * **Still running** (`poll()` is None): returns the same ``pending: true`` shape.
+        * **Completed** (`poll()` is not None): builds the TERMINAL result — extracts
+          `setup-token`'s token, classifies by exit code — reaps the flow, and returns it
+          (no ``pending``). This is what both surfaces the eventual result AND reaps the
+          completed flow so it is no longer active-forever.
+
+        Raises :class:`NotActiveError` if no flow is in progress (→ 409: stop polling).
+        Serialized per-flow (``flow.submit_lock``) like :meth:`submit_code`, so a poll and a
+        concurrent submit/poll can't race on the same process; a poll that loses the race
+        finds the flow reaped and re-raises `NotActiveError`.
+        """
+        with self._flow_lock:
+            flow = self._flow
+        if flow is None:
+            raise NotActiveError("no login flow is in progress")
+
+        with flow.submit_lock:
+            with self._flow_lock:
+                if self._flow is not flow:  # pragma: no cover - concurrent-teardown guard
+                    raise NotActiveError("no login flow is in progress")
+            exit_code = flow.proc.poll()
+            if exit_code is None:
+                return self._pending_result(flow)
+            return self._finalize_exited(flow, exit_code)
+
+    def _pending_result(self, flow: _Flow) -> dict:
+        """Build the "still verifying" (in-progress) result; leaves the flow ACTIVE."""
+        message = (
+            f"claude {flow.mode} is still verifying — the login is still running "
+            f"(no result within {SUBMIT_TIMEOUT_SECONDS:.0f}s). Wait and re-check, or cancel."
+        )
+        return {"ok": False, "pending": True, "message": message}
+
+    def _finalize_exited(self, flow: _Flow, exit_code: int) -> dict:
+        """Build the TERMINAL result for an exited flow, then reap it.
+
+        Drains the reader (its last `readline()` may still be in flight in the instant
+        poll() first reported exit) so a final line — e.g. setup-token's token — isn't
+        missed, classifies off the real exit code, extracts the token, tears the flow down,
+        and returns ``{"ok": bool, "message": str, "token"?: str}`` (never ``pending``).
+        Never logs the token. Called only under ``flow.submit_lock``.
+        """
+        if flow.reader_thread is not None:
+            flow.reader_thread.join(timeout=2)
+        output = flow.snapshot()
+        ok = exit_code == 0
+        token_match = _TOKEN_RE.search(output)
+        token = token_match.group(1) if token_match else None
+
+        self._teardown(flow)
 
         if ok:
             message = (

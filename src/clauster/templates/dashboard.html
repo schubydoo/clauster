@@ -1115,9 +1115,10 @@
                           x-text="busy ? 'Submitting…' : 'Submit'">Submit</button>
                 </div>
                 <!-- Still-verifying (pending) state: the login is running server-side and
-                     hasn't resolved yet — keep the flow active, show the message, and leave
-                     Cancel available so the operator can wait, re-check, or give up. -->
+                     hasn't resolved yet. The UI polls /status every ~3s; the message shows,
+                     "Recheck now" forces an immediate poll, and Cancel stays available. -->
                 <div class="alert alert-info" role="status" x-show="pending" x-cloak x-text="pendingMessage"></div>
+                <button class="btn btn-sm me-1" x-show="pending" x-cloak @click="recheck()">Recheck now</button>
                 <button class="btn btn-sm btn-ghost-secondary" @click="cancel()" :disabled="busy">Cancel</button>
               </div>
             </template>

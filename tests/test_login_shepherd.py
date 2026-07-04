@@ -360,6 +360,78 @@ def test_submit_code_slow_verification_is_not_killed(shepherd, monkeypatch) -> N
     shepherd.cancel()  # explicit cleanup, as the operator would
 
 
+# --- poll(): fetch the eventual result after a pending submit -----------------------
+
+
+def test_poll_without_active_flow_raises(shepherd) -> None:
+    with pytest.raises(ls.NotActiveError):
+        shepherd.poll()
+
+
+def test_poll_still_running_returns_pending(shepherd, monkeypatch) -> None:
+    # A flow that's started but hasn't received/finished a code is still running → poll()
+    # returns the same pending shape and leaves the flow active.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "hang_after_code")
+    shepherd.start("login")
+    result = shepherd.poll()
+    assert result["ok"] is False
+    assert result["pending"] is True
+    assert "still verifying" in result["message"]
+    assert shepherd.is_active()  # not reaped — still verifying
+    shepherd.cancel()
+
+
+def test_poll_after_completion_returns_terminal_and_reaps(shepherd, monkeypatch) -> None:
+    # The core of the pending flow: a slow login that finishes AFTER submit_code returned
+    # pending. poll() must observe the exit, return the TERMINAL result (with token for
+    # setup-token), and REAP the flow so it is no longer active-forever.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "hang_after_code")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_TOKEN", "eventual-token")
+    monkeypatch.setattr(ls, "SUBMIT_TIMEOUT_SECONDS", 0.3)
+    shepherd.start("setup-token")
+    pending = shepherd.submit_code("the-code")
+    assert pending["pending"] is True
+    assert shepherd.is_active()
+
+    # Now let the still-running process finish (SIGTERM makes the idle stub exit), then poll.
+    shepherd._flow.proc.terminate()  # noqa: SLF001 - simulate the provider finishing verification
+    shepherd._flow.proc.wait(timeout=5)  # noqa: SLF001
+    result = shepherd.poll()
+    assert "pending" not in result  # terminal — no longer pending
+    assert not shepherd.is_active()  # reaped by poll()
+
+
+def test_poll_after_success_exit_returns_ok_and_token(shepherd, monkeypatch) -> None:
+    # A setup-token flow that exits 0 with a token line: poll() surfaces ok + the token once.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_TOKEN", "polled-token-xyz")
+    shepherd.start("setup-token")
+    # Feed the code so the stub prints success + token and exits 0, but DON'T drain it via
+    # submit_code — poll() should pick up the completed process and return the terminal result.
+    shepherd._flow.proc.stdin.write("the-code\n")  # noqa: SLF001
+    shepherd._flow.proc.stdin.flush()  # noqa: SLF001
+    shepherd._flow.proc.wait(timeout=5)  # noqa: SLF001 - let it finish
+    result = shepherd.poll()
+    assert result["ok"] is True
+    assert result["token"] == "polled-token-xyz"
+    assert "pending" not in result
+    assert not shepherd.is_active()
+
+
+def test_poll_after_failure_exit_is_terminal_and_reaps(shepherd, monkeypatch) -> None:
+    # A rejected code (exit 1): poll() after it exits returns a terminal ok:false (no pending)
+    # and reaps the flow.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "reject_code")
+    shepherd.start("login")
+    shepherd._flow.proc.stdin.write("bad-code\n")  # noqa: SLF001
+    shepherd._flow.proc.stdin.flush()  # noqa: SLF001
+    shepherd._flow.proc.wait(timeout=5)  # noqa: SLF001
+    result = shepherd.poll()
+    assert result["ok"] is False
+    assert result.get("pending") is not True
+    assert not shepherd.is_active()
+
+
 # --- cancel(): reaps cleanly, always safe -------------------------------------------
 
 
@@ -529,6 +601,7 @@ def test_routes_404_when_disabled(tmp_path: Path) -> None:
     with _client(tmp_path, enabled=False) as c:
         assert c.post("/api/login-shepherd/start", json={"mode": "login"}).status_code == 404
         assert c.post("/api/login-shepherd/code", json={"code": "x"}).status_code == 404
+        assert c.post("/api/login-shepherd/status").status_code == 404
         assert c.post("/api/login-shepherd/cancel").status_code == 404
 
 
@@ -616,6 +689,39 @@ def test_code_route_still_verifying_is_200_ok_false(tmp_path: Path, monkeypatch)
         assert c.post("/api/login-shepherd/cancel").status_code == 200
 
 
+def test_status_route_without_active_flow_is_409(tmp_path: Path) -> None:
+    with _client(tmp_path, enabled=True) as c:
+        resp = c.post("/api/login-shepherd/status")
+        assert resp.status_code == 409  # the client's cue to stop polling
+
+
+def test_status_route_still_running_then_terminal(tmp_path: Path, monkeypatch) -> None:
+    # The pending-poll flow end-to-end through the routes: submit → pending, /status →
+    # pending while running, then (after the login finishes) /status → terminal + reaped.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "hang_after_code")
+    monkeypatch.setattr(ls, "SUBMIT_TIMEOUT_SECONDS", 0.3)
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    cfg = _cfg(login_shepherd_enabled=True, auth_enabled=False, tmp_path=tmp_path)
+    app = create_app(cfg)
+    with TestClient(app) as c:
+        assert c.post("/api/login-shepherd/start", json={"mode": "login"}).status_code == 200
+        submit = c.post("/api/login-shepherd/code", json={"code": "the-code"})
+        assert submit.json()["pending"] is True
+
+        pending = c.post("/api/login-shepherd/status")
+        assert pending.status_code == 200
+        assert pending.json()["pending"] is True
+
+        # Let the still-running login finish, then /status returns the terminal result and
+        # reaps the flow — a subsequent /status is 409 (flow gone → stop polling).
+        app.state.login_shepherd._flow.proc.terminate()  # noqa: SLF001 - provider "finished"
+        app.state.login_shepherd._flow.proc.wait(timeout=5)  # noqa: SLF001
+        terminal = c.post("/api/login-shepherd/status")
+        assert terminal.status_code == 200
+        assert "pending" not in terminal.json()
+        assert c.post("/api/login-shepherd/status").status_code == 409
+
+
 def test_start_route_unresolvable_binary_is_400_not_500(tmp_path: Path) -> None:
     # An unresolvable `claude` binary raises claude_cli.ClaudeNotFound inside start();
     # it must be re-raised as LoginShepherdError so the route returns a clean 400, never
@@ -670,6 +776,10 @@ def test_dashboard_context_reflects_flag(tmp_path: Path) -> None:
         resp = c.get("/")
         assert resp.status_code == 200
         assert 'x-data="loginShepherd()"' in resp.text
+        # The pending-poll wiring must ship with the panel: the "Recheck now" control and
+        # the /status poll endpoint (used by the interval + manual recheck).
+        assert "recheck()" in resp.text
+        assert "/api/login-shepherd/status" in resp.text
     with _client(tmp_path, enabled=False) as c:
         resp = c.get("/")
         assert resp.status_code == 200

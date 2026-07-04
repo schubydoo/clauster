@@ -1644,6 +1644,18 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except login_shepherd.NotActiveError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.post("/api/login-shepherd/status")
+    async def api_login_shepherd_status() -> dict:
+        # Poll the eventual outcome after a `pending: true` submit (a slow verification).
+        # Returns the same shape: `pending: true` while still running, or the terminal
+        # result (which also reaps the completed flow). 409 once the flow is gone —
+        # the client's cue to stop polling.
+        _require_login_shepherd()
+        try:
+            return await asyncio.to_thread(app.state.login_shepherd.poll)
+        except login_shepherd.NotActiveError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/api/login-shepherd/cancel")
     async def api_login_shepherd_cancel() -> dict:
         _require_login_shepherd()
