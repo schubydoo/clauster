@@ -646,6 +646,24 @@ def test_stable_match_finder_requires_two_consecutive_identical_matches() -> Non
     assert condition("") == "u"  # stays stable while unchanged
 
 
+def test_wait_for_confirms_a_match_first_seen_on_the_final_poll() -> None:
+    # #856: a stability-gated condition needs two observations. If the value first appears on
+    # the last in-window poll, the confirming poll would fall just past the deadline — without
+    # _wait_for's final post-deadline check the already-visible URL would be lost. timeout <
+    # _POLL_INTERVAL_SECONDS forces exactly one in-loop observation, so the else-branch is what
+    # confirms the match here.
+    class _FakeProc:
+        def poll(self):
+            return None  # never exits
+
+    flow = ls._Flow(mode="setup-token", proc=_FakeProc())  # type: ignore[arg-type]
+    url = "https://claude.com/cai/oauth/authorize?code=final"
+    condition = ls._stable_match_finder(lambda: url)
+    match, _snapshot, exited = ls._wait_for(flow, condition, timeout=0.01)
+    assert match == url  # the final look confirmed the once-seen URL
+    assert exited is False
+
+
 # --- single-flight ------------------------------------------------------------------
 
 

@@ -727,4 +727,14 @@ def _wait_for(
         if match or exited:
             break
         time.sleep(_POLL_INTERVAL_SECONDS)
+    else:
+        # The deadline elapsed with no match/exit. Give the condition ONE final look so a
+        # value first observed on the last in-window poll is not lost to the deadline: a
+        # stability-gated condition (the setup-token URL finder, #852) needs a second
+        # observation to confirm, and without this the confirming poll would fall just past
+        # the deadline and an already-visible URL would be discarded as "never appeared"
+        # (#856). Cheap and idempotent for the stateless plain-pipe condition.
+        snapshot = flow.snapshot()
+        match = condition(snapshot)
+        exited = flow.proc.poll() is not None
     return match, snapshot, exited
