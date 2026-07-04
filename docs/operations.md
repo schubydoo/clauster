@@ -238,86 +238,22 @@ webhooks:
     clone-done: true
 ```
 
-### Bridge events (`spawn` / `ready` / `stop` / `crash`)
+### Events
 
-Each bridge event is a single JSON `POST` body of the shape:
+- **Bridge events** — `spawn` / `ready` / `stop` / `crash`, one JSON `POST` per
+  transition. **Default on** (an absent key stays enabled); set a key to `false` to
+  mute it.
+- **Extended events** — `bg-settled` (a `claude --bg` job settled),
+  `permission-needed` (a hosted session parked a tool-permission prompt — the
+  highest-value "come look" signal), and `clone-done` (a clone finished). **Default
+  off** — opt in per key, so a sensitive attention signal never starts egressing on
+  upgrade alone. Each carries an `event_type` discriminator and a distinct shape.
 
-```json
-{
-  "event": "ready",
-  "project": "my-project",
-  "label": "my-project",
-  "status": "running",
-  "resume_mode": "standard",
-  "spawn_mode": "same-dir",
-  "session_ref": "a1b2c3d4e5f60718"
-}
-```
-
-The `event` is one of `spawn` / `ready` / `stop` / `crash`. `status` is the
-bridge's lifecycle status at emit time. `session_ref` is a **stable,
-non-reversible correlation token** — a 16-hex-char (64-bit) HMAC-SHA256 prefix
-keyed by a per-deployment secret — so a receiver can group the
-`spawn` / `ready` / `stop` / `crash` events of one session without ever holding
-the raw session id. The raw `session_<ULID>` is deliberately **never** egressed:
-it is bearer-equivalent (anyone holding it can open a New Session composer for
-the bridge), so it is stripped from every egress surface. `session_ref` is
-`null` until a session attaches.
-
-### Extended events (`bg-settled` / `permission-needed` / `clone-done`)
-
-Beyond the four bridge events, Clauster emits three more lifecycle signals.
-**Each defaults to disabled** — set its key to `true` in `events` to turn it on.
-They do **not** reuse the bridge payload shape: each carries an `event_type`
-discriminator so a receiver can branch on the body without parsing `event`.
-
-- **`bg-settled`** — a `claude --bg` background (agent-view) job reached a
-  terminal state via the supervisor stop path.
-
-  ```json
-  {
-    "event": "bg-settled",
-    "event_type": "bg-settled",
-    "id": "a1b2c3d4",
-    "settled": true,
-    "removed": true,
-    "detail": null
-  }
-  ```
-
-  `settled` is `true` only for a confirmed cloud-deregistering stop; `removed`
-  reports whether the job row was dropped. `detail` (a human-readable note, or
-  `null`) is redacted before egress.
-
-- **`permission-needed`** — a hosted session parked a tool-permission prompt that
-  needs an explicit approve/deny. This is the highest-value **"come look"** signal,
-  which is why it defaults off (enabling it egresses an attention signal). It
-  carries only the session's process id and the request subtype — never the
-  prompt body, which can contain a tool path or argument.
-
-  ```json
-  {
-    "event": "permission-needed",
-    "event_type": "permission-needed",
-    "process_id": "0f1e2d3c4b5a6978",
-    "subtype": "can_use_tool"
-  }
-  ```
-
-- **`clone-done`** — a project clone finished.
-
-  ```json
-  {
-    "event": "clone-done",
-    "event_type": "clone-done",
-    "project": "my-project",
-    "status": "done",
-    "error": null
-  }
-  ```
-
-  `status` is `done` or `error`. The clone **URL is never sent** (it can carry
-  credentials); on a failure, `error` is the redacted failure detail.
+Every payload is redaction-safe by construction — the raw `session_<ULID>` (a
+correlatable but non-reversible `session_ref` is sent instead), clone URLs, and
+permission-prompt bodies are **never** egressed. See
+[Public API → Lifecycle webhooks](public-api.md#lifecycle-webhooks) for the exact
+payload schema of every event.
 
 Behaviour and caveats:
 

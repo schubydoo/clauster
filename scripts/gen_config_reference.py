@@ -47,6 +47,7 @@ from clauster.config import (
     UsageConfig,
     WebhooksConfig,
 )
+from clauster.config_editor import EDITABLE_FIELDS
 
 DOCS_PAGE = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
 
@@ -148,15 +149,45 @@ def render_table(model: type[BaseModel]) -> str:
     return "\n".join(rows)
 
 
+def render_editable_table() -> str:
+    """Render the Tier-A config-editor allowlist, grouped by section, from ``EDITABLE_FIELDS``.
+
+    The single source of truth is ``config_editor.EDITABLE_FIELDS`` (the same tuple the
+    ``GET /api/config`` allowlist and the coverage-guard test read); grouping by the dotted
+    path's section, in first-appearance order, keeps this table honest without a second
+    hand-maintained copy.
+    """
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for path in EDITABLE_FIELDS:
+        section, _, leaf = path.rpartition(".")
+        key = section or "(top-level)"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(leaf)
+    rows = ["| Section | Editable fields |", "| --- | --- |"]
+    for key in order:
+        fields = ", ".join(f"`{leaf}`" for leaf in groups[key])
+        rows.append(f"| `{key}` | {fields} |")
+    return "\n".join(rows)
+
+
+def _splice(text: str, key: str, content: str) -> str:
+    """Replace the body between a block's BEGIN/END GEN markers with ``content``."""
+    begin, end = f"<!-- BEGIN GEN: {key} -->", f"<!-- END GEN: {key} -->"
+    if begin not in text or end not in text:
+        raise SystemExit(f"missing markers for section {key!r} in {DOCS_PAGE}")
+    head, rest = text.split(begin, 1)
+    _, tail = rest.split(end, 1)
+    return f"{head}{begin}\n{content}\n{end}{tail}"
+
+
 def apply_blocks(text: str) -> str:
-    """Splice each model's generated table between its BEGIN/END GEN markers."""
+    """Splice every generated table (per-model, plus the editable-field allowlist)."""
     for key, model in SECTIONS:
-        begin, end = f"<!-- BEGIN GEN: {key} -->", f"<!-- END GEN: {key} -->"
-        if begin not in text or end not in text:
-            raise SystemExit(f"missing markers for section {key!r} in {DOCS_PAGE}")
-        head, rest = text.split(begin, 1)
-        _, tail = rest.split(end, 1)
-        text = f"{head}{begin}\n{render_table(model)}\n{end}{tail}"
+        text = _splice(text, key, render_table(model))
+    text = _splice(text, "editable_fields", render_editable_table())
     return text
 
 

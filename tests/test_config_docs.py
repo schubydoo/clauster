@@ -42,8 +42,10 @@ def _parse_tier_a_table() -> set[str]:
     above it, then reads ``| `section` | `k1`, `k2`, ... |`` rows into dotted paths.
     """
     text = CONFIG_DOC.read_text(encoding="utf-8")
-    # The table lives between these two headings (it sits OUTSIDE the gen-config
-    # BEGIN/END markers, so the `--check` gate above does not cover it). A missing
+    # The table lives between these two headings. It is now generated inside the
+    # `editable_fields` BEGIN/END markers (so the `--check` gate covers it too); this
+    # independent parse is a belt-and-suspenders cross-check that the RENDERED table
+    # equals `EDITABLE_FIELDS`, via a different code path than the generator. A missing
     # heading means the page was restructured — fail clearly instead of a bare
     # ValueError traceback.
     try:
@@ -80,7 +82,7 @@ def _parse_tier_a_table() -> set[str]:
 
 
 def test_tier_a_allowlist_table_matches_editable_fields():
-    """The hand-written Tier-A table equals ``EDITABLE_FIELDS`` (the gen-config gate misses it)."""
+    """The rendered Tier-A table equals ``EDITABLE_FIELDS`` (independent of the gen gate)."""
     doc_fields = _parse_tier_a_table()
     code_fields = set(EDITABLE_FIELDS)
     assert doc_fields == code_fields, (
