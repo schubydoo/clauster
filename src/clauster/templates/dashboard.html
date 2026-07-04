@@ -196,6 +196,44 @@
     .empty-state-light { display: flex; flex-wrap: wrap; align-items: center;
       gap: .5rem 1rem; padding: .75rem 0; }
     .empty-state-light-actions { display: flex; gap: .5rem; margin-left: auto; }
+
+    /* #846: login-shepherd mode picker — a segmented toggle, not Tabler's default
+       .form-selectgroup. That component's unselected .form-selectgroup-label shares
+       the same background/border/shadow as a plain .form-control, so an unselected
+       option reads as an empty text input rather than "the other choice" (live-UI
+       finding). This is a purpose-built two-option group: unselected is a flat,
+       low-contrast segment; selected gets a solid primary fill + white text — a
+       binary state that can't be mistaken for an editable field. */
+    .ls-mode-toggle { display: flex; border: 1px solid var(--tblr-border-color);
+      border-radius: var(--tblr-border-radius); overflow: hidden; width: max-content;
+      max-width: 100%; }
+    .ls-mode-opt { position: relative; margin: 0; padding: .5rem .9rem; font-size: .875rem;
+      line-height: 1.25rem; text-align: center; cursor: pointer; user-select: none;
+      color: var(--tblr-secondary); background: var(--tblr-bg-surface);
+      transition: background .15s, color .15s; }
+    .ls-mode-opt + .ls-mode-opt { border-left: 1px solid var(--tblr-border-color); }
+    .ls-mode-opt:hover { color: var(--tblr-body-color); }
+    /* Selected = solid primary fill (never the ~4%-tint Tabler uses for its own
+       selectgroup) so the two states are unmistakable at a glance, not just a subtle
+       border-color change. */
+    .ls-mode-opt-sel, .ls-mode-opt-sel:hover { color: #fff; background: var(--tblr-primary); }
+    /* The native radio stays for keyboard/AT semantics (name-grouped, checked state,
+       label association) but is visually replaced by the segment's own fill — same
+       "hide the control, style the label" pattern as .form-selectgroup-input, just
+       with a visible focus ring on the LABEL (below) instead of relying on the
+       invisible input's default outline, which a zero-size/opacity input would clip. */
+    .ls-mode-input { position: absolute; opacity: 0; width: 1px; height: 1px;
+      margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+    .ls-mode-input:focus-visible + span { outline: 2px solid var(--tblr-primary);
+      outline-offset: 2px; border-radius: 2px; }
+    /* Fixed-height slot (#846): reserves room for the taller of the two mode
+       descriptions so switching modes toggles TEXT, not the slot's height — the
+       Start button below it never jumps rows. Sized for two lines at this
+       font-size/line-height (the longest description wraps to 2 lines around the
+       card's typical width); a wider viewport that fits both on one line still just
+       has extra breathing room, never a shift. (Bottom margin comes from the
+       template's own `.mb-2` utility class, not repeated here.) */
+    .ls-mode-desc { min-height: 2.5rem; }
   </style>
 </head>
 <body>
@@ -1076,21 +1114,32 @@
 
             <template x-if="!started">
               <div>
-                <div class="form-selectgroup mb-2">
-                  <label class="form-selectgroup-item">
-                    <input type="radio" class="form-selectgroup-input" name="login-shepherd-mode"
+                <!-- Segmented mode toggle (#846): a two-option, mutually-exclusive
+                     picker with an obvious selected/unselected contrast — restyled
+                     via .ls-mode-toggle (below) so it never reads as a text input. -->
+                <div class="ls-mode-toggle mb-2" role="group" aria-label="Sign-in mode">
+                  <label class="ls-mode-opt" :class="{ 'ls-mode-opt-sel': mode === 'login' }">
+                    <input type="radio" class="ls-mode-input" name="login-shepherd-mode"
                            value="login" x-model="mode">
-                    <span class="form-selectgroup-label">Sign in with your Claude subscription</span>
+                    <span>Sign in with your Claude subscription</span>
                   </label>
-                  <label class="form-selectgroup-item">
-                    <input type="radio" class="form-selectgroup-input" name="login-shepherd-mode"
+                  <label class="ls-mode-opt" :class="{ 'ls-mode-opt-sel': mode === 'setup-token' }">
+                    <input type="radio" class="ls-mode-input" name="login-shepherd-mode"
                            value="setup-token" x-model="mode">
-                    <span class="form-selectgroup-label">Create a long-lived token</span>
+                    <span>Create a long-lived token</span>
                   </label>
                 </div>
-                <p class="text-secondary small" x-show="mode === 'setup-token'" x-cloak>
-                  Mints a <code>CLAUDE_CODE_OAUTH_TOKEN</code> you copy into the runtime
-                  environment yourself — requires a Claude subscription.
+                <!-- Fixed-height slot (#846): both modes render a description here so
+                     picking either mode shows/hides text WITHOUT changing the slot's
+                     height, keeping Start at a constant position below it. -->
+                <p class="ls-mode-desc text-secondary small mb-2">
+                  <span x-show="mode === 'login'" x-cloak>
+                    Opens a one-time authorize link tied to your Claude subscription.
+                  </span>
+                  <span x-show="mode === 'setup-token'" x-cloak>
+                    Mints a <code>CLAUDE_CODE_OAUTH_TOKEN</code> you copy into the runtime
+                    environment yourself — requires a Claude subscription.
+                  </span>
                 </p>
                 <button class="btn btn-primary" @click="start()" :disabled="busy"
                         x-text="busy ? 'Starting…' : 'Start'">Start</button>

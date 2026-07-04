@@ -18,6 +18,7 @@ land in a throwaway temp HOME, never the developer's real ``~/.claude``.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -254,6 +255,184 @@ def test_popen_failure_is_wrapped(shepherd, monkeypatch) -> None:
     assert not shepherd.is_active()
 
 
+# --- setup-token PTY transport (#846): fail-closed + spawn-failure paths -----------
+
+
+def test_setup_token_fails_closed_without_pyte(shepherd, monkeypatch) -> None:
+    # The long-lived-token mode needs the optional `pty` extra (pyte). Without it,
+    # `PtyScreen()` raises `PyteUnavailableError` — `_spawn_pty` must turn that into a
+    # clear, actionable `LoginShepherdError` BEFORE opening a pty or spawning anything,
+    # never a crash, and must leave no flow behind (`login` mode stays unaffected).
+    def _boom(*_args, **_kwargs):
+        raise ls.PyteUnavailableError("pyte is not installed; run: pip install 'clauster[pty]'")
+
+    monkeypatch.setattr(ls, "PtyScreen", _boom)
+    with pytest.raises(ls.LoginShepherdError, match="pty` extra"):
+        shepherd.start("setup-token")
+    assert not shepherd.is_active()
+
+
+def test_setup_token_openpty_failure_is_wrapped(shepherd, monkeypatch) -> None:
+    # A pty-open failure (e.g. the process fd table is exhausted) must be wrapped in
+    # LoginShepherdError, not an unhandled OSError, and leave no flow behind.
+    def _boom():
+        raise OSError("out of ptys")
+
+    monkeypatch.setattr(ls.os, "openpty", _boom)
+    with pytest.raises(ls.LoginShepherdError, match="failed to open a pty"):
+        shepherd.start("setup-token")
+    assert not shepherd.is_active()
+
+
+def test_setup_token_popen_failure_closes_both_fds(shepherd, monkeypatch) -> None:
+    # A Popen() failure on the PTY path must close BOTH the master and slave fds it
+    # already opened (never leak them) and surface as LoginShepherdError, not a bare
+    # OSError — mirrors test_popen_failure_is_wrapped for the plain-pipe transport.
+    closed: list[int] = []
+    real_close = ls.os.close
+
+    def _tracking_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("no such device")
+
+    monkeypatch.setattr(ls.os, "close", _tracking_close)
+    monkeypatch.setattr(ls.subprocess, "Popen", _boom)
+    with pytest.raises(ls.LoginShepherdError, match="failed to start claude setup-token"):
+        shepherd.start("setup-token")
+    assert not shepherd.is_active()
+    assert len(closed) == 2  # master + slave, both reclaimed
+
+
+def test_setup_token_pty_full_flow_start_submit_token(shepherd, monkeypatch) -> None:
+    # End-to-end PTY happy path: start() scrapes the authorize URL from the rendered
+    # screen, submit_code() writes to the pty master (not a stdin pipe), and the
+    # printed CLAUDE_CODE_OAUTH_TOKEN is scraped via PtyScreen.find_oauth_token().
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_TOKEN", "pty-flow-token-abc")
+    result = shepherd.start("setup-token")
+    assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    assert flow.master_fd is not None
+    assert flow.screen is not None
+    outcome = shepherd.submit_code("the-pasted-code")
+    assert outcome["ok"] is True
+    assert outcome["token"] == "pty-flow-token-abc"
+    assert not shepherd.is_active()
+
+
+def test_setup_token_pty_reject_code_fails_without_token(shepherd, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "reject_code")
+    shepherd.start("setup-token")
+    outcome = shepherd.submit_code("a-bad-code")
+    assert outcome["ok"] is False
+    assert "token" not in outcome
+    assert not shepherd.is_active()
+
+
+def test_setup_token_pty_cancel_closes_master_fd(shepherd, monkeypatch) -> None:
+    # cancel() must close the pty master (not leak it) and reap the subprocess even
+    # though this transport has no proc.stdin pipe to close.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    shepherd.start("setup-token")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    master_fd = flow.master_fd
+    assert flow.proc.stdin is None  # PTY transport never uses a stdin pipe
+    shepherd.cancel()
+    assert not shepherd.is_active()
+    with pytest.raises(OSError):
+        os.fstat(master_fd)  # the fd was closed, not leaked
+
+
+def test_setup_token_pty_write_code_after_close_is_a_noop(shepherd, monkeypatch) -> None:
+    # _write_code must not raise once the pty master has already been torn down
+    # (flow.stdin_closed guards a double-close / write-after-close).
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    shepherd.start("setup-token")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    shepherd.cancel()
+    shepherd._write_code(flow, "too-late")  # noqa: SLF001 - must not raise
+
+
+def test_setup_token_pty_write_code_survives_a_broken_fd(shepherd, monkeypatch, caplog) -> None:
+    # A write to an already-closed/broken pty master must be logged, not raised, past
+    # _write_code — mirrors test_submit_code_survives_a_closed_stdin for the PTY path.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    shepherd.start("setup-token")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    os.close(flow.master_fd)  # simulate the pty already being gone
+    with caplog.at_level(logging.WARNING, logger="clauster.login_shepherd"):
+        shepherd._write_code(flow, "a-code")  # noqa: SLF001 - must not raise
+    assert any("writing code" in r.getMessage() for r in caplog.records)
+    flow.stdin_closed = True  # prevent cancel() from double-closing the already-closed fd
+    shepherd.cancel()
+
+
+def test_pump_pty_survives_a_non_eio_read_error() -> None:
+    # A non-EIO OSError from os.read (e.g. EBADF from a concurrently-closed fd) must
+    # still be treated as end-of-stream, not propagated past the reader thread.
+    scr = ls.PtyScreen()
+
+    class _FakeProc:
+        pass
+
+    flow = ls._Flow(mode="setup-token", proc=_FakeProc(), screen=scr, master_fd=999999)  # type: ignore[arg-type]
+    ls._pump_pty(flow)  # must return cleanly (bad fd -> OSError, not EIO)
+    assert flow.snapshot() == ""
+
+
+def test_pump_pty_treats_an_empty_read_as_eof(monkeypatch) -> None:
+    # Some platforms/kernels may return b"" instead of raising EIO once the child's
+    # side of the pty is gone (a plain pipe's ordinary clean-EOF shape) — the reader
+    # must treat that the same as the EIO case: break cleanly, never spin or raise.
+    scr = ls.PtyScreen()
+
+    class _FakeProc:
+        pass
+
+    flow = ls._Flow(mode="setup-token", proc=_FakeProc(), screen=scr, master_fd=123)  # type: ignore[arg-type]
+    monkeypatch.setattr(ls.os, "read", lambda _fd, _n: b"")
+    ls._pump_pty(flow)  # must return cleanly on the very first (empty) read
+    assert flow.snapshot() == ""
+
+
+def test_pump_pty_survives_a_screen_feed_error() -> None:
+    # A pyte feed failure must not crash the reader thread — the read loop keeps
+    # draining (falling back to the buffer for text) instead of dying mid-stream.
+    scr = ls.PtyScreen()
+
+    def _boom(_data):
+        raise RuntimeError("pyte choked")
+
+    scr.feed = _boom  # type: ignore[method-assign]
+    master_fd, slave_fd = os.openpty()
+    try:
+        os.write(slave_fd, b"hello\n")
+        os.close(slave_fd)  # EOF for the master's read side after this one chunk
+
+        class _FakeProc:
+            pass
+
+        flow = ls._Flow(mode="setup-token", proc=_FakeProc(), screen=scr, master_fd=master_fd)  # type: ignore[arg-type]
+        ls._pump_pty(flow)  # must not raise despite the feed() failure
+        assert "hello" in flow.snapshot()
+    finally:
+        os.close(master_fd)
+
+
+def test_pump_pty_noop_when_unpaired() -> None:
+    # Defensive: a _Flow with only one of screen/master_fd set (shouldn't happen in
+    # practice — they're always set together) must return immediately, not crash.
+    class _FakeProc:
+        pass
+
+    flow = ls._Flow(mode="setup-token", proc=_FakeProc())  # type: ignore[arg-type]
+    ls._pump_pty(flow)  # both None -> no-op
+    assert flow.snapshot() == ""
+
+
 # --- single-flight ------------------------------------------------------------------
 
 
@@ -415,13 +594,14 @@ def test_poll_after_completion_returns_terminal_and_reaps(shepherd, monkeypatch)
 
 def test_poll_after_success_exit_returns_ok_and_token(shepherd, monkeypatch) -> None:
     # A setup-token flow that exits 0 with a token line: poll() surfaces ok + the token once.
+    # setup-token is a PTY flow (#846) — write the code to the pty master (os.write), not
+    # a proc.stdin pipe (which is None for this transport; see `_write_code`).
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_TOKEN", "polled-token-xyz")
     shepherd.start("setup-token")
     # Feed the code so the stub prints success + token and exits 0, but DON'T drain it via
     # submit_code — poll() should pick up the completed process and return the terminal result.
-    shepherd._flow.proc.stdin.write("the-code\n")  # noqa: SLF001
-    shepherd._flow.proc.stdin.flush()  # noqa: SLF001
+    os.write(shepherd._flow.master_fd, b"the-code\n")  # noqa: SLF001
     shepherd._flow.proc.wait(timeout=5)  # noqa: SLF001 - let it finish
     result = shepherd.poll()
     assert result["ok"] is True

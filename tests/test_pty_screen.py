@@ -61,6 +61,54 @@ def test_find_session_id_none_when_absent():
     assert scr.find_session_id() is None
 
 
+# --- find_authorize_url() / find_oauth_token() (#846: setup-token PTY reader) --------
+
+
+def test_find_authorize_url_scrapes_the_rendered_screen():
+    # `claude setup-token` is a full TUI (#846): the reassembled screen (not necessarily
+    # the raw byte stream) is what carries the whole URL line.
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(b"Open this URL to authorize: https://claude.com/cai/oauth/authorize?code=1")
+    assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=1"
+
+
+def test_find_authorize_url_none_when_absent():
+    scr = PtyScreen(cols=60, rows=2)
+    scr.feed(b"Checking credentials...")
+    assert scr.find_authorize_url() is None
+
+
+def test_find_authorize_url_prefers_known_host_over_a_decoy():
+    # Shares the exact selection rule login_shepherd's plain-pipe reader uses (last
+    # known-auth-host match wins over an earlier docs/decoy link).
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(
+        b"See the docs at https://docs.example.com/help\r\n"
+        b"Open this URL to authorize: https://claude.ai/oauth/authorize?fake=1"
+    )
+    assert scr.find_authorize_url() == "https://claude.ai/oauth/authorize?fake=1"
+
+
+def test_find_authorize_url_is_incremental_across_feeds():
+    scr = PtyScreen(cols=120, rows=4)
+    scr.feed(b"Open this URL to authorize: ")
+    assert scr.find_authorize_url() is None
+    scr.feed(b"https://claude.com/cai/oauth/authorize?code=2")
+    assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=2"
+
+
+def test_find_oauth_token_scrapes_the_rendered_screen():
+    scr = PtyScreen(cols=80, rows=3)
+    scr.feed(b"Login successful.\r\nCLAUDE_CODE_OAUTH_TOKEN=canned-token-value-xyz")
+    assert scr.find_oauth_token() == "canned-token-value-xyz"
+
+
+def test_find_oauth_token_none_when_absent():
+    scr = PtyScreen(cols=60, rows=2)
+    scr.feed(b"Login successful.")
+    assert scr.find_oauth_token() is None
+
+
 def test_title_is_never_serialized():
     # An OSC title sequence must not surface in any frame field — OSC 0/1/2 are a
     # data-exfiltration channel, so the title is rendered by pyte but never emitted.

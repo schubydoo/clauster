@@ -1,4 +1,4 @@
-"""Dashboard-driven `claude` account login shepherd (#839).
+"""Dashboard-driven `claude` account login shepherd (#839, #846).
 
 Today the only fix for a logged-out (or token-expired) runtime `claude` account is
 to SSH in as the runtime user and run `claude auth login` interactively. This
@@ -7,16 +7,21 @@ owning a single long-lived `claude auth login` / `claude setup-token` subprocess
 streaming its output, and forwarding the operator-pasted OAuth code back to its
 stdin — exactly what a human would type over SSH.
 
-Two modes, both interactive OAuth flows that print an authorize `https://…` URL
-and then read a pasted code back from stdin (no pty required — plain pipes work,
-per the verified spike):
+Two modes, with DIFFERENT transports (live-verified, #846):
 
-* ``login``       — ``claude auth login --claudeai`` (Claude subscription).
-* ``setup-token`` — ``claude setup-token``, which additionally prints a
-  long-lived ``CLAUDE_CODE_OAUTH_TOKEN=...`` on success. Its exact prompt/output
-  shape is NOT assumed here — the reader is generic (scan for a URL, scan for a
-  token pattern) so it degrades gracefully if the real CLI's wording differs from
-  what the spike observed.
+* ``login``       — ``claude auth login --claudeai`` (Claude subscription). A plain-pipe
+  interactive OAuth flow: it prints an authorize `https://…` URL and reads a pasted code
+  back from stdin over ordinary ``subprocess.PIPE``s — no pty required.
+* ``setup-token`` — ``claude setup-token`` is a full TUI. It prints essentially nothing on
+  a plain pipe (verified: 1 byte in 12s) and only renders its
+  ``https://claude.com/cai/oauth/authorize?...`` URL under a real terminal. So this mode is
+  spawned under a PTY (:func:`os.openpty`) and its raw bytes are fed through
+  :class:`clauster.pty_screen.PtyScreen` (reusing the pyte emulator already built for the
+  live pty-screen view, #534) — the RENDERED screen text is what gets scanned for the
+  authorize URL and the printed ``CLAUDE_CODE_OAUTH_TOKEN=...`` token, exactly like
+  :meth:`PtyScreen.find_session_id` reassembles the pty bridge's connect URL. ``pyte`` is
+  the optional ``pty`` extra, so this mode fails closed with a clear message when it is
+  absent (see :meth:`LoginShepherd._spawn_pty`) — ``login`` mode stays pyte-free.
 
 Single-flight: at most one login subprocess is ever active. Starting a new flow
 while one is already running is rejected (409) — the caller must `cancel()` first.
@@ -32,7 +37,9 @@ point of the feature).
 
 from __future__ import annotations
 
+import errno
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -40,9 +47,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, TypeVar
-from urllib.parse import urlsplit
 
-from . import claude_cli, procutil, redact
+from . import claude_cli, procutil
+from .pty_screen import PtyScreen, PyteUnavailableError, extract_authorize_url
 
 _T = TypeVar("_T")
 
@@ -63,94 +70,19 @@ SUBMIT_TIMEOUT_SECONDS = 45.0
 #: Poll cadence for the bounded waits below.
 _POLL_INTERVAL_SECONDS = 0.1
 
-# The authorize URL `claude auth login`/`setup-token` prints for the operator to open.
-# Deliberately greedy-then-trimmed: grab the whole https run, then `_clean_url` strips
-# trailing punctuation/quotes the CLI may print around it (see `_extract_authorize_url`).
-_URL_RE = re.compile(r"https://\S+")
-
-# Host suffixes that identify a genuine Claude/Anthropic OAuth authorize URL. Used to
-# PREFER the real authorize link when the CLI prints more than one https URL (e.g. a docs
-# link first). Suffix-matched (`endswith`) so subdomains like `console.anthropic.com`
-# count. Not a hard requirement — a no-match falls back to the LAST https URL rather than
-# failing. `claude.com` is where real `claude auth login` prints its authorize URL
-# (live-verified against claude 2.1.200 on 2026-07-03: the URL is on `claude.com` with a
-# `platform.claude.com` redirect_uri); `claude.ai` / `anthropic.com` are kept as
-# additional/older hosts since the CLI's host is version-coupled and unpinned.
-_KNOWN_AUTH_HOST_SUFFIXES = ("claude.ai", "claude.com", "anthropic.com")
-
-# Subdomain prefixes that are documentation/marketing hosts, NOT auth endpoints — even
-# on an otherwise-known parent domain (e.g. `docs.anthropic.com` is a subdomain of
-# `anthropic.com` but is a docs page, not an authorize URL). Excluded so a help/docs link
-# printed before the real authorize URL can't be mistaken for the auth host.
-_NON_AUTH_HOST_PREFIXES = ("docs.", "help.", "support.", "www.")
-
-# Trailing characters the CLI may print immediately after a URL (sentence punctuation,
-# closing brackets/quotes) that are not part of the URL itself.
-_URL_TRAILING = ".,;:!?)]}>\"'"
-
 # `setup-token`'s printed long-lived credential (per the spike: `CLAUDE_CODE_OAUTH_TOKEN=...`).
 # Matched permissively (any non-whitespace value) since the exact real-binary format is
-# unverified — this is defensive, not assumed exact.
+# unverified — this is defensive, not assumed exact. Kept local (not shared with
+# `pty_screen`) because it backs ONLY this module's log-redaction helper below;
+# `pty_screen.extract_oauth_token` is the shared *extraction* pattern the PTY path uses.
 _TOKEN_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)")
 
-
-def _clean_url(url: str) -> str:
-    """Trim trailing sentence punctuation / closing quotes off a matched URL token."""
-    return url.rstrip(_URL_TRAILING)
-
-
-def _url_host(url: str) -> str:
-    """Return the lowercased host of ``url`` (empty string if unparseable)."""
-    try:
-        return (urlsplit(url).hostname or "").lower()
-    except ValueError:  # pragma: no cover - urlsplit is very lenient; defensive only
-        return ""
-
-
-def _is_known_auth_host(host: str) -> bool:
-    """Whether ``host`` is a known Claude/Anthropic *auth* host (not a docs/marketing one).
-
-    A host on a known parent domain (``claude.ai`` / ``claude.com`` / ``anthropic.com``,
-    incl. subdomains like ``console.anthropic.com``) qualifies — EXCEPT documentation/
-    marketing subdomains (``docs.``/``help.``/``support.``/``www.``), which are pages an
-    operator would land on but never receive an OAuth code from. Excluding them stops a docs
-    link printed before the real authorize URL from being mistaken for the auth endpoint.
-    Real ``claude auth login`` authorizes on ``claude.com`` (live-verified 2026-07-03).
-    """
-    if host.startswith(_NON_AUTH_HOST_PREFIXES):
-        return False
-    return any(
-        host == suffix or host.endswith("." + suffix) for suffix in _KNOWN_AUTH_HOST_SUFFIXES
-    )
-
-
-def _extract_authorize_url(output: str) -> str | None:
-    """Return the best authorize URL in ``output``, or None if none is present.
-
-    Robust against the ways a real CLI's terminal output can mangle a URL:
-
-    * ANSI/terminal escape sequences are stripped first (via :func:`redact.strip_ansi`)
-      so a colored/reset-wrapped URL isn't polluted with escape bytes.
-    * Each matched ``https://…`` token is trimmed of trailing punctuation/quotes.
-    * When several https URLs are present, the LAST one whose host is a known Claude/
-      Anthropic auth host (docs/marketing subdomains excluded — see
-      :func:`_is_known_auth_host`) wins: a decoy docs/help link printed *before* the real
-      authorize URL can't hijack the operator, and — since the CLI prints the actionable
-      link after any preamble — the last known-host match is the authorize link. With no
-      known-auth-host match it falls back to the *last* https URL overall.
-
-    Deliberately defensive, not host-locked: the real-CLI format is unverified, so a URL
-    on an unknown host is still returned rather than rejected.
-    """
-    cleaned_output = redact.strip_ansi(output)
-    candidates = [_clean_url(m.group(0)) for m in _URL_RE.finditer(cleaned_output)]
-    candidates = [c for c in candidates if c]
-    if not candidates:
-        return None
-    known = [url for url in candidates if _is_known_auth_host(_url_host(url))]
-    if known:
-        return known[-1]
-    return candidates[-1]
+# The URL/token SELECTION logic (`extract_authorize_url`/`extract_oauth_token`) lives in
+# `pty_screen` (shared with `PtyScreen.find_authorize_url`/`find_oauth_token` for the
+# setup-token PTY path) — `login_shepherd` already needs `PtyScreen` for that same PTY
+# spawn, so keeping the shared helpers there avoids an import cycle. Re-exported under
+# the old private name for backward compatibility with existing callers/tests.
+_extract_authorize_url = extract_authorize_url
 
 
 class LoginShepherdError(RuntimeError):
@@ -179,7 +111,14 @@ def _redact(text: str) -> str:
 
 @dataclass
 class _Flow:
-    """State for the single active login subprocess."""
+    """State for the single active login subprocess.
+
+    ``screen``/``master_fd`` are set ONLY for a `setup-token` PTY flow (#846); both are
+    None for a plain-pipe `login` flow. Their presence is the single source of truth for
+    which transport a flow uses — every read/write/teardown site below branches on
+    ``flow.screen is not None`` rather than carrying a second is-pty flag that could drift
+    out of sync with it.
+    """
 
     mode: Mode
     proc: subprocess.Popen
@@ -188,6 +127,8 @@ class _Flow:
     buffer: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
     stdin_closed: bool = False
+    screen: PtyScreen | None = None
+    master_fd: int | None = None
 
     def snapshot(self) -> str:
         """Return everything captured from the subprocess so far."""
@@ -215,6 +156,98 @@ class LoginShepherd:
         with self._flow_lock:
             return self._flow is not None
 
+    def _spawn(self, mode: Mode, resolved_binary: str) -> _Flow:
+        """Spawn `mode`'s subprocess and return its `_Flow`. Called under `_flow_lock`.
+
+        Dispatches to the plain-pipe transport (`login`, verified) or the PTY transport
+        (`setup-token`, #846) — see the module docstring for why the two differ.
+        """
+        if mode == "login":
+            return self._spawn_pipe(mode, resolved_binary)
+        return self._spawn_pty(mode, resolved_binary)
+
+    def _spawn_pipe(self, mode: Mode, resolved_binary: str) -> _Flow:
+        """Spawn `claude auth login --claudeai` over plain pipes (the verified path)."""
+        argv = [resolved_binary, "auth", "login", "--claudeai"]
+        try:
+            proc = subprocess.Popen(  # noqa: S603 — list-argv, absolute binary, no shell
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=procutil.child_env(),
+            )
+        except OSError as exc:
+            raise LoginShepherdError(f"failed to start claude {mode}: {exc}") from exc
+        flow = _Flow(mode=mode, proc=proc)
+        reader = threading.Thread(
+            target=_pump_stdout, args=(flow,), name="login-shepherd-reader", daemon=True
+        )
+        flow.reader_thread = reader
+        reader.start()
+        return flow
+
+    def _spawn_pty(self, mode: Mode, resolved_binary: str) -> _Flow:
+        """Spawn `claude setup-token` under a PTY, reusing `pty_screen.PtyScreen` (#846).
+
+        `claude setup-token` is a full TUI: it prints essentially nothing on a plain pipe
+        and only renders its authorize URL under a real terminal, so it needs a real PTY
+        rather than the `login` mode's `subprocess.PIPE`s. Builds the `PtyScreen` emulator
+        FIRST — before opening the pty or spawning anything — so a missing `pyte` (the
+        optional `pty` extra) fails closed with a clear, actionable message and leaves no
+        subprocess and no flow behind. `start_new_session=True` gives the child its own
+        session (mirroring `pty_keeper`'s detached-bridge spawn); `close_fds=True` keeps
+        the child from inheriting unrelated open fds. The slave fd is closed in the
+        parent right after spawn — the child holds its own dup via stdin/stdout/stderr,
+        so the parent only needs the master to read/write the session.
+        """
+        try:
+            screen = PtyScreen()
+        except PyteUnavailableError as exc:
+            raise LoginShepherdError(
+                "the long-lived-token mode needs the `pty` extra (pyte) — use "
+                f"subscription sign-in instead, or install it: {exc}"
+            ) from exc
+
+        argv = [resolved_binary, "setup-token"]
+        try:
+            master_fd, slave_fd = os.openpty()
+        except OSError as exc:
+            raise LoginShepherdError(f"failed to open a pty for claude {mode}: {exc}") from exc
+        try:
+            proc = subprocess.Popen(  # noqa: S603 — list-argv, absolute binary, no shell
+                argv,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                start_new_session=True,
+                close_fds=True,
+                env=procutil.child_env(),
+            )
+        except OSError as exc:
+            # Popen never spawned (or failed after forking but before the child dup'd
+            # the slave) — both fds are still ours alone here, so both must be reclaimed
+            # on this one path. This is mutually exclusive with the success-path close
+            # below (never both), so neither fd is ever double-closed.
+            os.close(master_fd)
+            os.close(slave_fd)
+            raise LoginShepherdError(f"failed to start claude {mode}: {exc}") from exc
+        # The child dup'd the slave onto its stdio; the parent never reads/writes it
+        # directly and must close its own copy so the master sees EOF/EIO once the
+        # child's copies are the last ones open (otherwise the parent's lingering fd
+        # would keep the pty "half-open" and the read side would never signal EOF).
+        os.close(slave_fd)
+
+        flow = _Flow(mode=mode, proc=proc, screen=screen, master_fd=master_fd)
+        reader = threading.Thread(
+            target=_pump_pty, args=(flow,), name="login-shepherd-pty-reader", daemon=True
+        )
+        flow.reader_thread = reader
+        reader.start()
+        return flow
+
     def start(self, mode: Mode) -> dict:
         """Spawn `claude auth login --claudeai` or `claude setup-token`.
 
@@ -223,6 +256,14 @@ class LoginShepherd:
         `START_TIMEOUT_SECONDS` elapses. Fails closed: if no URL ever appears, the
         raw captured output is returned in the raised error's message (never
         hung-forever) and the subprocess is reaped before raising.
+
+        ``mode == "login"`` uses the verified plain-pipe transport (`_spawn_pipe`),
+        unchanged. ``mode == "setup-token"`` is a full TUI (#846) that needs a real
+        terminal to print anything, so it is spawned under a PTY (`_spawn_pty`) and its
+        output is read through a `PtyScreen` instead of a plain-pipe buffer — see the
+        module docstring. That mode fails closed with a clear message (never a crash)
+        when the optional `pyte` dependency is unavailable, BEFORE any subprocess is
+        spawned, so a `PyteUnavailableError` never leaves a phantom flow behind either.
 
         Raises `AlreadyActiveError` if a flow is already in progress.
         """
@@ -236,37 +277,16 @@ class LoginShepherd:
                 # not an unhandled 500. `self._flow` is still unset here — the fail path
                 # never leaves a phantom active flow behind.
                 raise LoginShepherdError(f"claude binary not found: {exc}") from exc
-            argv = (
-                [resolved, "auth", "login", "--claudeai"]
-                if mode == "login"
-                else [
-                    resolved,
-                    "setup-token",
-                ]
-            )
-            try:
-                proc = subprocess.Popen(  # noqa: S603 — list-argv, absolute binary, no shell
-                    argv,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    env=procutil.child_env(),
-                )
-            except OSError as exc:
-                raise LoginShepherdError(f"failed to start claude {mode}: {exc}") from exc
-            flow = _Flow(mode=mode, proc=proc)
-            reader = threading.Thread(
-                target=_pump_stdout, args=(flow,), name="login-shepherd-reader", daemon=True
-            )
-            flow.reader_thread = reader
-            reader.start()
+
+            flow = self._spawn(mode, resolved)
             self._flow = flow
 
-        url, output, exited = _wait_for(
-            flow, _extract_authorize_url, timeout=START_TIMEOUT_SECONDS
+        condition = (
+            (lambda _snap: flow.screen.find_authorize_url())  # type: ignore[union-attr]
+            if flow.screen is not None
+            else _extract_authorize_url
         )
+        url, output, exited = _wait_for(flow, condition, timeout=START_TIMEOUT_SECONDS)
         # Fail closed whenever the process has EXITED during the start wait — even if a
         # URL was found. `_wait_for` breaks on a URL match OR process exit, so a process
         # that printed a URL and then died lands here with url set AND exited=True; handing
@@ -329,14 +349,7 @@ class LoginShepherd:
                 if self._flow is not flow:  # pragma: no cover - concurrent-teardown guard
                     raise NotActiveError("no login flow is in progress")
 
-            try:
-                if flow.proc.stdin is not None and not flow.stdin_closed:
-                    flow.proc.stdin.write(code + "\n")
-                    flow.proc.stdin.flush()
-            except (OSError, ValueError) as exc:
-                # The subprocess may have already exited (closed pipe) — surface as a
-                # failure rather than raising an unhandled error to the caller.
-                _log.warning("login_shepherd: writing code to %s stdin failed: %s", flow.mode, exc)
+            self._write_code(flow, code)
 
             # Wait until the process exits, then read a FRESH poll() — never trust the
             # wait's own `exited` flag, which can lag a poll() that already reports the
@@ -384,6 +397,32 @@ class LoginShepherd:
                 return self._pending_result(flow)
             return self._finalize_exited(flow, exit_code)
 
+    def _write_code(self, flow: _Flow, code: str) -> None:
+        """Write the operator-pasted `code` to `flow`'s active subprocess.
+
+        Branches on transport: a PTY flow (`flow.master_fd` set) writes raw bytes to the
+        pty master with `os.write` (what a human's terminal keystrokes would do); a
+        plain-pipe flow writes through `proc.stdin` as before. Both sides swallow a
+        failed write (the subprocess may have already exited) and surface it as a log
+        warning rather than raising past the caller — never logs `code` itself.
+        """
+        if flow.master_fd is not None:
+            if flow.stdin_closed:
+                return
+            try:
+                os.write(flow.master_fd, (code + "\n").encode())
+            except OSError as exc:
+                _log.warning("login_shepherd: writing code to %s pty failed: %s", flow.mode, exc)
+            return
+        try:
+            if flow.proc.stdin is not None and not flow.stdin_closed:
+                flow.proc.stdin.write(code + "\n")
+                flow.proc.stdin.flush()
+        except (OSError, ValueError) as exc:
+            # The subprocess may have already exited (closed pipe) — surface as a
+            # failure rather than raising an unhandled error to the caller.
+            _log.warning("login_shepherd: writing code to %s stdin failed: %s", flow.mode, exc)
+
     def _pending_result(self, flow: _Flow) -> dict:
         """Build the "still verifying" (in-progress) result; leaves the flow ACTIVE."""
         message = (
@@ -395,18 +434,25 @@ class LoginShepherd:
     def _finalize_exited(self, flow: _Flow, exit_code: int) -> dict:
         """Build the TERMINAL result for an exited flow, then reap it.
 
-        Drains the reader (its last `readline()` may still be in flight in the instant
-        poll() first reported exit) so a final line — e.g. setup-token's token — isn't
-        missed, classifies off the real exit code, extracts the token, tears the flow down,
-        and returns ``{"ok": bool, "message": str, "token"?: str}`` (never ``pending``).
-        Never logs the token. Called only under ``flow.submit_lock``.
+        Drains the reader (its last `readline()`/pty read may still be in flight in the
+        instant poll() first reported exit) so a final line — e.g. setup-token's token —
+        isn't missed, classifies off the real exit code, extracts the token, tears the
+        flow down, and returns ``{"ok": bool, "message": str, "token"?: str}`` (never
+        ``pending``). For a PTY flow the token is scraped from the pyte-RENDERED screen
+        (`flow.screen.find_oauth_token()`), the same reassembly `find_authorize_url` uses
+        — the raw pty byte stream can fragment the token line with cursor-positioning
+        escapes exactly like it does the authorize URL, so the plain-pipe regex-over-
+        buffer approach isn't reliable there. Never logs the token. Called only under
+        ``flow.submit_lock``.
         """
         if flow.reader_thread is not None:
             flow.reader_thread.join(timeout=2)
         output = flow.snapshot()
         ok = exit_code == 0
-        token_match = _TOKEN_RE.search(output)
-        token = token_match.group(1) if token_match else None
+        token = flow.screen.find_oauth_token() if flow.screen is not None else None
+        if token is None:
+            token_match = _TOKEN_RE.search(output)
+            token = token_match.group(1) if token_match else None
 
         self._teardown(flow)
 
@@ -440,9 +486,18 @@ class LoginShepherd:
             self._teardown(flow, already_cleared=True)
 
     def _teardown(self, flow: _Flow, *, already_cleared: bool = False) -> None:
-        """Terminate + reap `flow`'s subprocess and clear it as the active flow."""
+        """Terminate + reap `flow`'s subprocess and clear it as the active flow.
+
+        For a PTY flow this also closes `flow.master_fd` (once, guarded by
+        `stdin_closed` — it doubles as "no more writes/close-owed" for both transports)
+        so the pty is never leaked across a teardown.
+        """
         try:
-            if flow.proc.stdin is not None:
+            if flow.master_fd is not None:
+                if not flow.stdin_closed:
+                    flow.stdin_closed = True
+                    os.close(flow.master_fd)
+            elif flow.proc.stdin is not None:
                 flow.stdin_closed = True
                 flow.proc.stdin.close()
         except (OSError, ValueError):
@@ -473,6 +528,50 @@ def _pump_stdout(flow: _Flow) -> None:
     except (OSError, ValueError):
         # The pipe can close out from under us during teardown — nothing more to read.
         pass
+
+
+def _pump_pty(flow: _Flow) -> None:
+    """Background-thread target: feed `flow.master_fd`'s raw bytes into its `PtyScreen`.
+
+    The `setup-token` PTY reader (#846): reads raw bytes off the pty master and
+    `screen.feed()`s them (so `find_authorize_url`/`find_oauth_token` can scan the
+    pyte-RENDERED screen), and also best-effort-decodes+appends the same bytes to
+    `flow.buffer` so `snapshot()`/`_redact()` — used for error messages and the
+    fail-closed no-URL path — keep working uniformly across both transports.
+
+    **PTY EOF/EIO edge case (POSIX, known and handled):** once the child exits and
+    closes its end, `os.read` on a pty master typically raises `OSError(EIO)` rather
+    than returning `b""` (a plain pipe's clean-EOF signal) — some platforms/kernels may
+    still return `b""` first. Both are treated as end-of-stream: an `OSError` is caught
+    and inspected (only `EIO` is expected/benign here; any other `OSError` is also
+    treated as end-of-stream rather than crashing this daemon thread, since a reader
+    thread has no one to propagate an exception to), and an empty read breaks the loop
+    the same way a plain pipe's EOF would. Either path exits the loop cleanly — never
+    raises past this thread — so a normal child exit can never look like a crash.
+    """
+    master_fd = flow.master_fd
+    screen = flow.screen
+    if master_fd is None or screen is None:  # pragma: no cover - defensive, always paired
+        return
+    while True:
+        try:
+            chunk = os.read(master_fd, 65536)
+        except OSError as exc:
+            # EIO is the expected "child exited, pty half-closed" signal on Linux; any
+            # other OSError (e.g. the fd was already closed by a concurrent teardown)
+            # is likewise treated as end-of-stream rather than propagated — a reader
+            # thread crashing has no caller to observe it, and the flow is being torn
+            # down either way.
+            if exc.errno not in (errno.EIO,):
+                _log.debug("login_shepherd: pty read ended for %s: %s", flow.mode, exc)
+            break
+        if not chunk:
+            break
+        try:
+            screen.feed(chunk)
+        except Exception as exc:  # noqa: BLE001 — a render hiccup must never kill the reader
+            _log.debug("login_shepherd: pty screen feed failed for %s: %s", flow.mode, exc)
+        flow.append(chunk.decode("utf-8", errors="replace"))
 
 
 def _wait_for(

@@ -16,6 +16,15 @@ Two constraints, locked for the v1 read-only view:
 ``pyte`` is an OPTIONAL dependency (the ``pty`` extra). It is LGPL-licensed, so it is kept
 out of the default install and the Apache-licensed standalone binary; it is imported
 lazily here so importing this module — or running the app without the extra — never fails.
+
+:mod:`login_shepherd` (#839/#846) reuses this same emulator for its ``claude setup-token``
+flow, which is a full TUI that prints nothing on a plain pipe and only renders its authorize
+URL under a real terminal — :meth:`PtyScreen.find_authorize_url` and
+:meth:`PtyScreen.find_oauth_token` scan the reassembled screen the same way
+:meth:`find_session_id` does for the pty bridge's connect URL. The shared URL/token
+SELECTION logic (:func:`extract_authorize_url`, :func:`extract_oauth_token`) lives in this
+module rather than ``login_shepherd`` so `login_shepherd` can import `PtyScreen` without an
+import cycle.
 """
 
 from __future__ import annotations
@@ -26,7 +35,9 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+from . import redact
 from .redact import redact_screen_text
 
 # Fixed v1 geometry. The keeper renders at this size and the client matches it; a
@@ -40,6 +51,120 @@ SCREEN_ROWS = 40
 # pyte-reassembled screen, where the URL is whole even when the raw stream fragments it
 # with cursor-positioning escapes at the TUI winsize (#665).
 _RE_CONNECT_URL = re.compile(r"https?://claude\.ai/code/(session_[A-Za-z0-9]+)")
+
+# ---------------------------------------------------------------------------
+# Shared authorize-URL / token selection (login_shepherd #839, #846).
+#
+# `login_shepherd`'s plain-pipe `claude auth login` path and the pty-backed
+# `claude setup-token` path (see :meth:`PtyScreen.find_authorize_url` below)
+# both need to pick the right authorize URL out of noisy CLI output, so the
+# selection logic lives HERE (not in `login_shepherd`) and `login_shepherd`
+# imports it — the reverse direction would create an import cycle, since
+# `login_shepherd` already needs `PtyScreen` for the setup-token PTY spawn.
+
+# The authorize URL `claude auth login`/`setup-token` prints for the operator to open.
+# Deliberately greedy-then-trimmed: grab the whole https run, then `_clean_url` strips
+# trailing punctuation/quotes the CLI may print around it (see `extract_authorize_url`).
+_URL_RE = re.compile(r"https://\S+")
+
+# Host suffixes that identify a genuine Claude/Anthropic OAuth authorize URL. Used to
+# PREFER the real authorize link when the CLI prints more than one https URL (e.g. a docs
+# link first). Suffix-matched (`endswith`) so subdomains like `console.anthropic.com`
+# count. Not a hard requirement — a no-match falls back to the LAST https URL rather than
+# failing. `claude.com` is where real `claude auth login` prints its authorize URL
+# (live-verified against claude 2.1.200 on 2026-07-03: the URL is on `claude.com` with a
+# `platform.claude.com` redirect_uri); `claude.ai` / `anthropic.com` are kept as
+# additional/older hosts since the CLI's host is version-coupled and unpinned.
+_KNOWN_AUTH_HOST_SUFFIXES = ("claude.ai", "claude.com", "anthropic.com")
+
+# Subdomain prefixes that are documentation/marketing hosts, NOT auth endpoints — even
+# on an otherwise-known parent domain (e.g. `docs.anthropic.com` is a subdomain of
+# `anthropic.com` but is a docs page, not an authorize URL). Excluded so a help/docs link
+# printed before the real authorize URL can't be mistaken for the auth host.
+_NON_AUTH_HOST_PREFIXES = ("docs.", "help.", "support.", "www.")
+
+# Trailing characters the CLI may print immediately after a URL (sentence punctuation,
+# closing brackets/quotes) that are not part of the URL itself.
+_URL_TRAILING = ".,;:!?)]}>\"'"
+
+# `setup-token`'s printed long-lived credential (per the spike: `CLAUDE_CODE_OAUTH_TOKEN=...`).
+# Matched permissively (any non-whitespace value) since the exact real-binary format is
+# unverified — this is defensive, not assumed exact.
+_TOKEN_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)")
+
+
+def _clean_url(url: str) -> str:
+    """Trim trailing sentence punctuation / closing quotes off a matched URL token."""
+    return url.rstrip(_URL_TRAILING)
+
+
+def _url_host(url: str) -> str:
+    """Return the lowercased host of ``url`` (empty string if unparseable)."""
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:  # pragma: no cover - urlsplit is very lenient; defensive only
+        return ""
+
+
+def _is_known_auth_host(host: str) -> bool:
+    """Whether ``host`` is a known Claude/Anthropic *auth* host (not a docs/marketing one).
+
+    A host on a known parent domain (``claude.ai`` / ``claude.com`` / ``anthropic.com``,
+    incl. subdomains like ``console.anthropic.com``) qualifies — EXCEPT documentation/
+    marketing subdomains (``docs.``/``help.``/``support.``/``www.``), which are pages an
+    operator would land on but never receive an OAuth code from. Excluding them stops a docs
+    link printed before the real authorize URL from being mistaken for the auth endpoint.
+    Real ``claude auth login`` authorizes on ``claude.com`` (live-verified 2026-07-03).
+    """
+    if host.startswith(_NON_AUTH_HOST_PREFIXES):
+        return False
+    return any(
+        host == suffix or host.endswith("." + suffix) for suffix in _KNOWN_AUTH_HOST_SUFFIXES
+    )
+
+
+def extract_authorize_url(output: str) -> str | None:
+    """Return the best authorize URL in ``output``, or None if none is present.
+
+    Robust against the ways a real CLI's terminal output can mangle a URL:
+
+    * ANSI/terminal escape sequences are stripped first (via :func:`redact.strip_ansi`)
+      so a colored/reset-wrapped URL isn't polluted with escape bytes.
+    * Each matched ``https://…`` token is trimmed of trailing punctuation/quotes.
+    * When several https URLs are present, the LAST one whose host is a known Claude/
+      Anthropic auth host (docs/marketing subdomains excluded — see
+      :func:`_is_known_auth_host`) wins: a decoy docs/help link printed *before* the
+      real authorize URL can't hijack the operator, and — since the CLI prints the actionable
+      link after any preamble — the last known-host match is the authorize link. With no
+      known-auth-host match it falls back to the *last* https URL overall.
+
+    Deliberately defensive, not host-locked: the real-CLI format is unverified, so a URL
+    on an unknown host is still returned rather than rejected.
+
+    Shared by :mod:`login_shepherd`'s plain-pipe ``login`` reader and
+    :meth:`PtyScreen.find_authorize_url` (the pty-backed ``setup-token`` reader) so the
+    two never drift onto different selection rules.
+    """
+    cleaned_output = redact.strip_ansi(output)
+    candidates = [_clean_url(m.group(0)) for m in _URL_RE.finditer(cleaned_output)]
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        return None
+    known = [url for url in candidates if _is_known_auth_host(_url_host(url))]
+    if known:
+        return known[-1]
+    return candidates[-1]
+
+
+def extract_oauth_token(output: str) -> str | None:
+    """Return ``setup-token``'s printed ``CLAUDE_CODE_OAUTH_TOKEN=...`` value, or None.
+
+    Shared by :mod:`login_shepherd` so both the plain-pipe capture and the pty-rendered
+    screen scrape the token with the exact same pattern.
+    """
+    match = _TOKEN_RE.search(output)
+    return match.group(1) if match else None
+
 
 # Opt-in escape hatch for the standalone (frozen) binary (#699). The binary deliberately
 # omits LGPL ``pyte`` and ignores system site-packages / PYTHONPATH, so a side ``pip
@@ -187,6 +312,29 @@ class PtyScreen:
         """
         match = _RE_CONNECT_URL.search("\n".join(self._screen.display))
         return match.group(1) if match else None
+
+    def find_authorize_url(self) -> str | None:
+        r"""Scan the reassembled screen for the best OAuth authorize URL, or None.
+
+        ``claude setup-token`` is a full TUI: it prints nothing over a plain pipe (verified:
+        1 byte in 12s) and only renders its ``https://claude.com/cai/oauth/authorize?...``
+        link under a real terminal (#846). Feeding its raw pty bytes through this emulator
+        reassembles the logical screen text exactly like :meth:`find_session_id` does for the
+        pty-bridge connect URL, so the same reassembled-then-selected approach applies here —
+        :func:`extract_authorize_url` (the shared claude.com/known-host preference,
+        docs-decoy exclusion, last-match selection also used by `login_shepherd`'s plain-pipe
+        `login` reader) runs over ``"\\n".join(self._screen.display)`` rather than the raw,
+        redraw-fragmented byte stream.
+        """
+        return extract_authorize_url("\n".join(self._screen.display))
+
+    def find_oauth_token(self) -> str | None:
+        """Scan the reassembled screen for ``setup-token``'s printed OAuth token, or None.
+
+        Same reassembly rationale as :meth:`find_authorize_url`: the token line is only
+        whole in the pyte-rendered screen, not necessarily the raw byte stream.
+        """
+        return extract_oauth_token("\n".join(self._screen.display))
 
     def frame(self) -> dict[str, Any]:
         """Return the current screen as a redacted, cells-only frame.
