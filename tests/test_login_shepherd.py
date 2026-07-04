@@ -81,7 +81,7 @@ def test_start_no_url_fails_closed(shepherd, monkeypatch) -> None:
     # rather than hang — and the subprocess must be reaped, not leaked.
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "no_url")
     monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 1.0)
-    with pytest.raises(ls.LoginShepherdError, match="did not produce a login URL"):
+    with pytest.raises(ls.LoginShepherdError, match="did not produce a usable login"):
         shepherd.start("login")
     assert not shepherd.is_active()  # never leaks a subprocess on the fail-closed path
 
@@ -91,6 +91,20 @@ def test_start_crash_before_url_fails_closed(shepherd, monkeypatch) -> None:
     monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 5.0)
     with pytest.raises(ls.LoginShepherdError, match="exited before printing"):
         shepherd.start("login")
+    assert not shepherd.is_active()
+
+
+def test_start_url_then_immediate_exit_fails_closed(shepherd, monkeypatch) -> None:
+    # Defense in depth: the process prints a VALID authorize URL and then exits. Even
+    # though a URL was found, start() must FAIL CLOSED — a URL for a dead subprocess would
+    # strand the operator (they'd authorize, then submit_code would find no live stdin).
+    # It must NEVER return an authorize_url in this case.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "url_then_exit")
+    monkeypatch.setattr(ls, "START_TIMEOUT_SECONDS", 5.0)
+    with pytest.raises(ls.LoginShepherdError, match="exited before the login could proceed"):
+        shepherd.start("login")
+    # The contract: start() RAISES (returns no {authorize_url: ...} dict) and reaps the
+    # dead process — so there is never a usable-looking URL for a subprocess with no stdin.
     assert not shepherd.is_active()
 
 

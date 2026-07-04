@@ -183,6 +183,9 @@ def run_login_shepherd(mode, args):
         - no_url:           prints ordinary chatter but never an authorize URL,
                              then idles (exercises the fail-closed no-URL path).
         - crash_before_url: exits 1 immediately, no URL ever printed.
+        - url_then_exit:    prints a VALID authorize URL, then exits 0 immediately
+                             (never blocks on stdin) — the "URL found but process
+                             already dead" case; start() must fail closed.
         - slow_url:         sleeps FAKE_CLAUDE_LOGIN_SLOW_SECONDS (default 0.3)
                              before printing the URL (exercise the bounded wait).
         - reject_code:      prints the URL, reads the pasted code, then prints a
@@ -218,6 +221,13 @@ def run_login_shepherd(mode, args):
         return _idle_until_signal()
     if mode_sel == "slow_url":
         time.sleep(float(os.environ.get("FAKE_CLAUDE_LOGIN_SLOW_SECONDS", "0.3")))
+
+    if mode_sel == "url_then_exit":
+        # Prints a VALID authorize URL, then exits immediately (0) WITHOUT blocking on
+        # stdin — the "URL found but subprocess already dead" case. start() must fail
+        # closed here, never hand the operator a URL for a process with no live stdin.
+        emit(f"Open this URL to authorize: {url}")
+        return 0
 
     if mode_sel == "decoy_url":
         # A non-Claude docs link printed FIRST; the real authorize URL second.

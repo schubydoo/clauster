@@ -246,25 +246,28 @@ class LoginShepherd:
         url, output, exited = _wait_for(
             flow, _extract_authorize_url, timeout=START_TIMEOUT_SECONDS
         )
-        if url is None:
-            # Fail closed: no authorize URL ever appeared. Reap the subprocess and
-            # surface the raw captured output so the operator can see *why* — but
-            # never hang the request indefinitely.
+        # Fail closed whenever the process has EXITED during the start wait — even if a
+        # URL was found. `_wait_for` breaks on a URL match OR process exit, so a process
+        # that printed a URL and then died lands here with url set AND exited=True; handing
+        # that URL back would strand the operator (they'd authorize, then `submit_code`
+        # would find no live stdin). Only a URL found while the process is STILL RUNNING
+        # (blocked on stdin, exited=False) is a usable login. This makes returning a URL
+        # for a dead subprocess structurally impossible.
+        if url is None or exited:
             self._teardown(flow)
             if exited:
                 # `_teardown` joined the reader thread, so a final in-flight line is now
                 # captured — refresh the snapshot so the error message shows the real
-                # last output. We do NOT try to salvage a URL here: the process has
-                # EXITED, so there'd be no live subprocess to receive the pasted code —
-                # returning a URL would strand the operator. Fail closed instead.
+                # last output.
                 output = flow.snapshot()
-            reason = (
-                "the process exited before printing an authorize URL"
-                if exited
-                else (f"no authorize URL appeared within {START_TIMEOUT_SECONDS:.0f}s")
-            )
+            if exited and url is not None:
+                reason = "the process exited before the login could proceed"
+            elif exited:
+                reason = "the process exited before printing an authorize URL"
+            else:
+                reason = f"no authorize URL appeared within {START_TIMEOUT_SECONDS:.0f}s"
             raise LoginShepherdError(
-                f"claude {mode} did not produce a login URL: {reason}. "
+                f"claude {mode} did not produce a usable login: {reason}. "
                 f"Captured output:\n{_redact(output)}"
             )
         return {"authorize_url": url, "output": _redact(output)}
