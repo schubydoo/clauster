@@ -220,7 +220,14 @@ def test_killmode_subprocess_error_returns_none(monkeypatch):
 
 
 def _with_nvm(monkeypatch, tmp_path, *, present=True):
-    """Point NVM_DIR at a tmp home that does/doesn't contain an nvm.sh."""
+    """Point NVM_DIR at a tmp home that does/doesn't contain an nvm.sh.
+
+    Also forces a POSIX ``sys.platform`` so the nvm branches run on a Windows runner
+    too (nvm is POSIX-only, so the real check returns early on win32) — mirroring the
+    ``sys.platform`` monkeypatch the procutil resolver tests use. The Windows-specific
+    test re-sets ``win32`` after calling this.
+    """
+    monkeypatch.setattr("clauster.ops.sys.platform", "linux")
     nvm_home = tmp_path / ".nvm"
     nvm_home.mkdir(exist_ok=True)
     if present:
