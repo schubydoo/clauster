@@ -18,6 +18,7 @@ from clauster.ops import (
     WARN,
     _check_auth,
     _check_claude_login,
+    _check_node_toolchain,
     _check_port,
     _check_repo_freshness,
     _check_state_dir_writable,
@@ -213,6 +214,66 @@ def test_killmode_subprocess_error_returns_none(monkeypatch):
 
     monkeypatch.setattr("clauster.ops.subprocess.run", boom)
     assert _check_systemd_killmode() is None
+
+
+# ----- _check_node_toolchain --------------------------------------------
+
+
+def _with_nvm(monkeypatch, tmp_path, *, present=True):
+    """Point NVM_DIR at a tmp home that does/doesn't contain an nvm.sh."""
+    nvm_home = tmp_path / ".nvm"
+    nvm_home.mkdir(exist_ok=True)
+    if present:
+        (nvm_home / "nvm.sh").write_text("# stub nvm\n")
+    monkeypatch.setenv("NVM_DIR", str(nvm_home))
+
+
+def test_node_toolchain_windows_returns_none(monkeypatch, write_config, tmp_path):
+    _with_nvm(monkeypatch, tmp_path)
+    monkeypatch.setattr("clauster.ops.sys.platform", "win32")
+    config = load_config(_cfg_file(write_config, tmp_path))
+    assert _check_node_toolchain(config) is None
+
+
+def test_node_toolchain_no_nvm_returns_none(monkeypatch, write_config, tmp_path):
+    _with_nvm(monkeypatch, tmp_path, present=False)
+    config = load_config(_cfg_file(write_config, tmp_path))
+    assert _check_node_toolchain(config) is None
+
+
+def test_node_toolchain_off_warns(monkeypatch, write_config, tmp_path):
+    _with_nvm(monkeypatch, tmp_path)
+    config = load_config(_cfg_file(write_config, tmp_path, "  node_from_nvm: false\n"))
+    c = _check_node_toolchain(config)
+    assert c is not None and c.status == WARN
+    assert "node_from_nvm: true" in c.detail and "agent-browser" in c.detail
+
+
+def test_node_toolchain_on_unresolved_warns(monkeypatch, write_config, tmp_path):
+    _with_nvm(monkeypatch, tmp_path)
+    monkeypatch.setattr("clauster.ops.procutil.resolve_nvm_default_node_bin_dir", lambda: None)
+    config = load_config(_cfg_file(write_config, tmp_path))  # default node_from_nvm=True
+    c = _check_node_toolchain(config)
+    assert c is not None and c.status == WARN
+    assert "nvm alias default" in c.detail
+
+
+def test_node_toolchain_on_resolved_ok(monkeypatch, write_config, tmp_path):
+    _with_nvm(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "clauster.ops.procutil.resolve_nvm_default_node_bin_dir", lambda: "/nvm/v24/bin"
+    )
+    config = load_config(_cfg_file(write_config, tmp_path))
+    c = _check_node_toolchain(config)
+    assert c is not None and c.status == OK and "/nvm/v24/bin" in c.detail
+
+
+def test_doctor_includes_node_toolchain_row_when_nvm_present(monkeypatch, write_config, tmp_path):
+    # node_from_nvm off + nvm present → run_doctor appends the WARN row (never FAILs).
+    _with_nvm(monkeypatch, tmp_path)
+    checks, ok = run_doctor(_cfg_file(write_config, tmp_path, "  node_from_nvm: false\n"))
+    by = {c.name: c for c in checks}
+    assert "node-toolchain" in by and by["node-toolchain"].status == WARN
 
 
 def test_doctor_state_dir_not_writable_fails(write_config, tmp_path):
