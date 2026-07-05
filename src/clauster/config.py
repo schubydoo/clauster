@@ -187,16 +187,20 @@ class ClaudeConfig(BaseModel):
         "`PATH`, never replacing it. Applies to both standard and pty bridges.",
     )
     node_from_nvm: bool = Field(
-        default=False,
+        default=True,
         description="Resolve nvm's `default` node version at each bridge spawn and append "
-        "its bin dir to the bridge subprocess `PATH` (after `path_append`). Fixes "
-        "`npx`/`node`-based MCP servers (e.g. codecov, context7) showing `✘ Failed to "
-        "connect` under a systemd deployment: Claude Code spawns MCP stdio servers by "
-        "exec'ing the configured `command` directly, not through a shell, so neither "
-        "`BASH_ENV` nor a login-shell nvm init ever reaches that spawn — only the bridge "
-        "process `PATH` does. Off by default; a no-op (never raises) when nvm, its "
+        "its bin dir to the bridge subprocess `PATH` (after `path_append`). Puts `node`/"
+        "`npx`/`npm` AND any nvm-global CLI (e.g. `agent-browser`) — all of which live in "
+        "that one bin dir — on the raw process `PATH`, so they resolve in EVERY spawn "
+        "context, not just `bash -c`: dash/`sh -c`, direct `execvp` (how Claude Code "
+        "spawns MCP stdio servers), and subagents all inherit it, unlike a `BASH_ENV` "
+        "nvm-init which only non-interactive bash sources. Fixes `npx`/`node`-based MCP "
+        "servers (e.g. codecov, context7) showing `✘ Failed to connect` under a systemd "
+        "deployment. On by default and fail-safe: a no-op (never raises) when nvm, its "
         "`default` alias, or POSIX `bash` aren't available — spawn is never blocked by "
-        "this. POSIX-only (nvm is a bash function); ignored on Windows.",
+        "this, and the resolved dir is appended last so it never shadows a `path_append` "
+        "entry. POSIX-only (nvm is a bash function); ignored on Windows. Set to `false` "
+        "to opt out (e.g. you pin node another way).",
     )
     env: dict[str, str] = Field(
         default_factory=dict,

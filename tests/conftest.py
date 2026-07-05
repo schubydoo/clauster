@@ -120,6 +120,26 @@ def _isolate_clauster_home(tmp_path_factory, monkeypatch):
     # real path even with HOME isolated. ``raising=False`` because they may be unset.
     monkeypatch.delenv("CLAUSTER_CONFIG", raising=False)
     monkeypatch.delenv("CLAUSTER_STATE_DIR", raising=False)
+    # Drop NVM_DIR too: CI runners (and many dev shells) export it pointing at a real
+    # nvm install, which would otherwise leak past the isolated HOME and make the
+    # nvm-dependent code paths (doctor's node-toolchain check, node_from_nvm) resolve
+    # off the host's real toolchain — non-deterministic. Tests that WANT nvm present set
+    # it explicitly. ``raising=False`` because it may be unset.
+    monkeypatch.delenv("NVM_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_nvm_bin_dir_cache():
+    """Clear procutil's process-wide nvm bin-dir memo before each test.
+
+    ``cached_nvm_default_node_bin_dir`` resolves once per process (so the spawn path and
+    the doctor panel share one probe); without this reset, the first test to populate it
+    would leak its (possibly monkeypatched) result into every later test.
+    """
+    from clauster import procutil
+
+    procutil._nvm_bin_dir_cache = None
+    procutil._nvm_bin_dir_resolved = False
 
 
 @pytest.fixture

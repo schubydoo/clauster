@@ -72,6 +72,12 @@ def _capture_popen_env(runner: SessionRunner, monkeypatch, tmp_path: Path) -> di
         captured["env"] = kwargs.get("env")
         return _FakeProc()
 
+    # node_from_nvm defaults on, but this helper fakes Popen globally — so the nvm
+    # resolver's own subprocess.run would recurse into the fake. Stub it: nvm
+    # resolution is orthogonal to the recap/secret-scrub env this helper captures.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.resolve_nvm_default_node_bin_dir", lambda *a, **k: None
+    )
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
     runner._popen(
         runner._config.projects_root / "alpha",

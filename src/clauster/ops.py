@@ -154,6 +154,11 @@ def run_doctor(
     if killmode is not None:
         checks.append(killmode)
 
+    # nvm toolchain reachability (only when an nvm install is present)
+    node_tc = _check_node_toolchain(config)
+    if node_tc is not None:
+        checks.append(node_tc)
+
     return checks, all(c.status != FAIL for c in checks)
 
 
@@ -378,6 +383,41 @@ def _check_auth(config: ClausterConfig) -> Check:
             return Check("auth", WARN, "bound non-loopback with auth explicitly disabled")
         return Check("auth", FAIL, f"non-loopback host {config.host} without enforced auth")
     return Check("auth", OK, "configuration consistent")
+
+
+def _check_node_toolchain(config: ClausterConfig) -> Check | None:
+    """Flag when an nvm toolchain won't reach spawned bridges.
+
+    Returns ``None`` (no panel row) when nvm isn't installed — not every deployment
+    uses it, so a non-nvm host stays quiet. When nvm *is* present: ``WARN`` if
+    ``claude.node_from_nvm`` is off, since `node`/`npx` and nvm-global CLIs (e.g.
+    ``agent-browser``) then reach only `bash -c` spawns that source ``BASH_ENV``,
+    not the dash/``execvp``/MCP/subagent spawns that bypass it; ``WARN`` if it is on
+    but nvm's ``default`` alias doesn't resolve (nothing to append onto ``PATH``);
+    else ``OK`` with the resolved bin dir. POSIX-only — nvm is a bash function.
+    """
+    if sys.platform == "win32":
+        return None
+    nvm_dir = Path(os.environ.get("NVM_DIR") or "~/.nvm").expanduser()
+    if not (nvm_dir / "nvm.sh").is_file():
+        return None
+    if not config.claude.node_from_nvm:
+        return Check(
+            "node-toolchain",
+            WARN,
+            "nvm is installed but claude.node_from_nvm is off — node/npx and nvm-global "
+            "CLIs (e.g. agent-browser) may be missing from bridge spawns that bypass "
+            "BASH_ENV; set claude.node_from_nvm: true",
+        )
+    bin_dir = procutil.cached_nvm_default_node_bin_dir()
+    if bin_dir is None:
+        return Check(
+            "node-toolchain",
+            WARN,
+            "claude.node_from_nvm is on but nvm's `default` node did not resolve — "
+            "set it with `nvm alias default <version>`",
+        )
+    return Check("node-toolchain", OK, f"nvm default node on bridge PATH ({bin_dir})")
 
 
 def _check_port(host: str, port: int) -> Check:
