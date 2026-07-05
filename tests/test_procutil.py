@@ -494,6 +494,22 @@ def test_resolve_nvm_default_node_bin_dir_none_when_resolved_path_missing(monkey
     assert procutil.resolve_nvm_default_node_bin_dir() is None
 
 
+def test_cached_nvm_default_node_bin_dir_resolves_once(monkeypatch):
+    # The spawn path AND the doctor panel share this memo, so the (bash-shelling) resolver
+    # runs at most once per process — not per spawn or per dashboard refresh.
+    calls = {"n": 0}
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return "/home/u/.nvm/versions/node/v20/bin"
+
+    monkeypatch.setattr(procutil, "resolve_nvm_default_node_bin_dir", _counting)
+    first = procutil.cached_nvm_default_node_bin_dir()
+    again = procutil.cached_nvm_default_node_bin_dir()
+    assert first == again == "/home/u/.nvm/versions/node/v20/bin"
+    assert calls["n"] == 1  # second call served from the memo, no re-probe
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="POSIX execute-bit semantics; os.access(X_OK) is ~existence on Windows (the "

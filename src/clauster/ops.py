@@ -409,7 +409,7 @@ def _check_node_toolchain(config: ClausterConfig) -> Check | None:
             "CLIs (e.g. agent-browser) may be missing from bridge spawns that bypass "
             "BASH_ENV; set claude.node_from_nvm: true",
         )
-    bin_dir = procutil.resolve_nvm_default_node_bin_dir()
+    bin_dir = procutil.cached_nvm_default_node_bin_dir()
     if bin_dir is None:
         return Check(
             "node-toolchain",

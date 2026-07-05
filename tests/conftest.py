@@ -122,6 +122,20 @@ def _isolate_clauster_home(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("CLAUSTER_STATE_DIR", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_nvm_bin_dir_cache():
+    """Clear procutil's process-wide nvm bin-dir memo before each test.
+
+    ``cached_nvm_default_node_bin_dir`` resolves once per process (so the spawn path and
+    the doctor panel share one probe); without this reset, the first test to populate it
+    would leak its (possibly monkeypatched) result into every later test.
+    """
+    from clauster import procutil
+
+    procutil._nvm_bin_dir_cache = None
+    procutil._nvm_bin_dir_resolved = False
+
+
 @pytest.fixture
 def fixtures_dir() -> Path:
     return FIXTURES

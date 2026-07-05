@@ -471,3 +471,29 @@ def resolve_nvm_default_node_bin_dir(
         )
         return None
     return os.path.dirname(node_path)
+
+
+# Process-wide memo for the nvm bin dir. Both hot paths that need it — bridge spawns
+# (``claude.node_from_nvm``) and the ``clauster doctor`` panel (re-hit on every dashboard
+# refresh / concurrent tab) — go through :func:`cached_nvm_default_node_bin_dir`, so a
+# slow/broken ``$NVM_DIR`` is probed at most once per process, not per request. Reset only
+# in tests (see conftest) to restore per-test isolation.
+_nvm_bin_dir_cache: str | None = None
+_nvm_bin_dir_resolved: bool = False
+
+
+def cached_nvm_default_node_bin_dir() -> str | None:
+    """Resolve nvm's default node bin dir once per process, then serve from the memo.
+
+    Wraps :func:`resolve_nvm_default_node_bin_dir`, which shells ``bash`` (up to its
+    timeout on a slow home mount) — so callers on hot paths (bridge spawn AND the doctor
+    panel) share ONE probe rather than each re-shelling on every request. A restart
+    re-resolves (fresh process), picking up an nvm-default change. No lock: a concurrent
+    first-call double-resolve is harmless (idempotent compute, atomic assignment) and the
+    value is written before the flag, so a racing reader that sees the flag sees the dir.
+    """
+    global _nvm_bin_dir_cache, _nvm_bin_dir_resolved
+    if not _nvm_bin_dir_resolved:
+        _nvm_bin_dir_cache = resolve_nvm_default_node_bin_dir()
+        _nvm_bin_dir_resolved = True
+    return _nvm_bin_dir_cache
