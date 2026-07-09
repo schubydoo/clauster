@@ -3171,7 +3171,12 @@ class SessionRunner:
             return
         cutoff = time.time() - _STALE_POINTER_TTL_SECONDS
         for proj in projects:
-            await asyncio.to_thread(self._prune_one_pointer, proj.path, cutoff)
+            try:
+                await asyncio.to_thread(self._prune_one_pointer, proj.path, cutoff)
+            except Exception:
+                # Best-effort hygiene: one project's failure (e.g. a resolve() symlink loop)
+                # must never abort the GC or startup — mirror the poll loop's resilience.
+                _log.exception("stale-pointer prune failed for %s; continuing", proj.path)
 
     def _prune_one_pointer(self, project_path: Path, cutoff: float) -> None:
         """Clear one project's pointer if it's non-live and its file mtime predates ``cutoff``."""

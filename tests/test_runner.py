@@ -2653,3 +2653,15 @@ async def test_prune_stale_pointers_tolerates_discover_error(runner_config, monk
 
     monkeypatch.setattr("clauster.runner.discover_projects_cached", _boom)
     await runner._prune_stale_pointers()  # logged, not raised
+
+
+async def test_prune_stale_pointers_tolerates_per_project_error(runner_config, monkeypatch):
+    # An unexpected per-project error (e.g. a resolve() symlink loop) must not abort the GC.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("symlink loop")
+
+    monkeypatch.setattr(runner, "_prune_one_pointer", _boom)
+    await runner._prune_stale_pointers()  # logged per project, never raised
