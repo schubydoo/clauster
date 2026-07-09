@@ -16,22 +16,20 @@ leaves the pointer untouched and never blocks or fails a spawn on this probe.
 from __future__ import annotations
 
 import enum
-import http.client
 import json
 import logging
-import ssl
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from .environments import (
     API_BASE,
-    BETA_HEADER,
     CLAUDE_JSON_PATH,
     CREDENTIALS_PATH,
     Credentials,
     CredentialsError,
     EnvironmentsAPIError,
     Transport,
+    _AnthropicHTTPClient,
+    https_transport,
     load_credentials,
 )
 
@@ -62,22 +60,8 @@ def code_session_id_for(starter_session_id: str) -> str:
     return "cse_" + starter_session_id.removeprefix("session_")
 
 
-def _short_timeout_transport(  # pragma: no cover - live network I/O (fake injected in tests)
-    method: str, url: str, headers: dict, body: bytes | None
-) -> tuple[int, bytes]:
-    parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.netloc:
-        raise EnvironmentsAPIError(0, f"refusing non-https URL: {url!r}")
-    conn = http.client.HTTPSConnection(
-        parts.netloc, timeout=_TIMEOUT_SECONDS, context=ssl.create_default_context()
-    )
-    try:
-        path = parts.path + (f"?{parts.query}" if parts.query else "")
-        conn.request(method, path, body=body, headers=headers)
-        resp = conn.getresponse()
-        return resp.status, resp.read()
-    finally:
-        conn.close()
+# A spawn preflight uses a short-timeout transport so a hung probe can't stall a launch.
+_CODE_TRANSPORT = https_transport(timeout=_TIMEOUT_SECONDS)
 
 
 def _is_session_not_found(raw: bytes) -> bool:
@@ -100,7 +84,7 @@ def _is_session_not_found(raw: bytes) -> bool:
     return error.get("type") == "not_found_error" and error.get("resource_type") == "session"
 
 
-class CodeSessionsClient:
+class CodeSessionsClient(_AnthropicHTTPClient):
     """Minimal read-only client for the ``/v1/code/sessions`` bridge-session namespace."""
 
     def __init__(
@@ -110,19 +94,12 @@ class CodeSessionsClient:
         transport: Transport | None = None,
         base: str = API_BASE,
     ) -> None:
-        """Bind the client to credentials, with an optional (test) transport and API base."""
-        self._cred = credentials
-        self._transport = transport or _short_timeout_transport
-        self._base = base.rstrip("/")
+        """Bind to credentials; defaults to the short-timeout preflight transport."""
+        super().__init__(credentials, transport=transport or _CODE_TRANSPORT, base=base)
 
     def _headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self._cred.access_token}",
-            "x-organization-uuid": self._cred.organization_uuid,
-            "anthropic-beta": BETA_HEADER,
-            "anthropic-version": ANTHROPIC_VERSION,
-            "content-type": "application/json",
-        }
+        # This beta namespace additionally requires an anthropic-version header.
+        return {**super()._headers(), "anthropic-version": ANTHROPIC_VERSION}
 
     def anchor_health(self, cse_id: str) -> AnchorHealth:
         """GET the anchor session and classify it (fail-safe to ``UNKNOWN``)."""

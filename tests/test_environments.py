@@ -490,7 +490,7 @@ def test_https_transport_forwards_valid_url_to_roundtrip(monkeypatch):
     # reaches the (stubbed — never real network) round-trip with its parsed parts.
     seen: dict = {}
 
-    def _fake_roundtrip(method, parts, headers, body):
+    def _fake_roundtrip(method, parts, headers, body, timeout):
         seen.update(method=method, netloc=parts.netloc, path=parts.path, query=parts.query)
         return (200, b"{}")
 
