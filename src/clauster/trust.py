@@ -74,7 +74,7 @@ def ensure_remote_control_enabled(claude_json: Path = CLAUDE_JSON) -> bool:
     writes this file too. Idempotent.
     """
 
-    def _set_flags(data: dict) -> object:
+    def _set_flags(data: dict) -> bool | None:
         if all(data.get(flag) is True for flag in _REMOTE_CONTROL_FLAGS):
             return False  # already acknowledged — signal "nothing to write"
         for flag in _REMOTE_CONTROL_FLAGS:

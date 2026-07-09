@@ -143,26 +143,30 @@ class Environment(BaseModel):
         return self.config.type == "bridge"
 
 
-def _https_transport(
-    method: str, url: str, headers: dict, body: bytes | None
-) -> tuple[int, bytes]:
-    # http.client.HTTPSConnection is HTTPS-only by construction (no file:// / other
-    # schemes possible, unlike urllib.urlopen), so a malformed base/path can't be
-    # coerced into reading a local file. The scheme guard is unit-tested; the actual
-    # network round-trip below is the live I/O boundary (exercised against the real
-    # API, not in the offline suite).
-    parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.netloc:
-        raise EnvironmentsAPIError(0, f"refusing non-https URL: {url!r}")
-    return _https_roundtrip(method, parts, headers, body)
+def https_transport(*, timeout: float = 30) -> Transport:
+    """Build a stdlib-HTTPS ``Transport`` with the given socket timeout.
+
+    The returned closure refuses non-https URLs — ``http.client.HTTPSConnection`` is
+    https-only by construction (no ``file://``/other schemes, unlike ``urllib.urlopen``),
+    so a malformed base/path can't be coerced into reading a local file; the scheme guard
+    is unit-tested. The round-trip itself is the live I/O boundary.
+    """
+
+    def _transport(method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.netloc:
+            raise EnvironmentsAPIError(0, f"refusing non-https URL: {url!r}")
+        return _https_roundtrip(method, parts, headers, body, timeout)
+
+    return _transport
 
 
-def _https_roundtrip(method, parts, headers, body):  # pragma: no cover - live network I/O
+def _https_roundtrip(method, parts, headers, body, timeout):  # pragma: no cover - live network I/O
     # Explicit verifying context checks cert chain + hostname (rule is a cross-version
     # audit nag; on py3.11+ with create_default_context() certs ARE verified) — never disable.
     # nosemgrep: python.lang.security.audit.httpsconnection-detected.httpsconnection-detected
     conn = http.client.HTTPSConnection(
-        parts.netloc, timeout=30, context=ssl.create_default_context()
+        parts.netloc, timeout=timeout, context=ssl.create_default_context()
     )
     try:
         path = parts.path + (f"?{parts.query}" if parts.query else "")
@@ -173,8 +177,12 @@ def _https_roundtrip(method, parts, headers, body):  # pragma: no cover - live n
         conn.close()
 
 
-class EnvironmentsClient:
-    """Minimal client for the Anthropic environments API (list/archive/delete)."""
+# The default 30s transport; a preflight caller (e.g. code_sessions) builds a shorter one.
+_https_transport = https_transport()
+
+
+class _AnthropicHTTPClient:
+    """Shared credential + transport binding for the stdlib Anthropic API clients."""
 
     def __init__(
         self,
@@ -183,7 +191,7 @@ class EnvironmentsClient:
         transport: Transport | None = None,
         base: str = API_BASE,
     ) -> None:
-        """Bind the client to credentials, with optional transport and API base."""
+        """Bind the client to credentials, with an optional (test) transport and API base."""
         self._cred = credentials
         self._transport = transport or _https_transport
         self._base = base.rstrip("/")
@@ -195,6 +203,10 @@ class EnvironmentsClient:
             "anthropic-beta": BETA_HEADER,
             "content-type": "application/json",
         }
+
+
+class EnvironmentsClient(_AnthropicHTTPClient):
+    """Minimal client for the Anthropic environments API (list/archive/delete)."""
 
     def _request(self, method: str, path: str) -> dict:
         status, raw = self._transport(method, self._base + path, self._headers(), None)
