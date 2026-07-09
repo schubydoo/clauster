@@ -2079,9 +2079,16 @@ class SessionRunner:
         :class:`InstanceStillLive` — it must be Stopped first; forget never kills a
         process. Raises :class:`UnknownProject` when there's no such record at all.
         """
-        # Determine project name before taking the lock (needed for per-project lock).
+        # Determine project name before taking the lock (needed for per-project lock and
+        # the pointer clear below). Fall back to the persisted record — a forgotten bridge
+        # may live only in state.json, not the in-memory registry — where the value is a
+        # serialized dict keyed by "project_name" (#777), not a RemoteControlInstance.
         instance = self._instances.get(instance_id)
-        project_name = instance.project if instance is not None else None
+        if instance is not None:
+            project_name = instance.project
+        else:
+            persisted = self._persisted.get(instance_id)
+            project_name = persisted.get("project_name") if persisted is not None else None
         # Hold the per-project spawn lock so a concurrent spawn()/resume() can't
         # repopulate _instances/_procs between the liveness check and the pop() —
         # forgetting must never remove tracking for a just-spawned live process.
@@ -2118,6 +2125,30 @@ class SessionRunner:
             # dedup baseline and _persist would skip the write (leaving the row on disk).
             self._persisted = {k: v for k, v in self._persisted.items() if k != instance_id}
             await self._persist()
+            # #867 L1: a forgotten bridge's bridge-pointer.json would otherwise be
+            # reattached on the next spawn — reviving an anchor that may have been
+            # archived/deleted out from under its env (the #671 dead-end). Clear it so the
+            # next start registers a clean session. Best-effort and never fatal to forget:
+            # a live pointer is left in place (clear_pointer guards it), and a filesystem
+            # hiccup is logged, not raised — the record is already dropped either way.
+            if project_name is not None and is_valid_project_name(project_name):
+                project_path = self._config.projects_root / project_name
+                try:
+                    await asyncio.to_thread(
+                        pointers.clear_pointer,
+                        project_path,
+                        claude_projects_dir=self._claude_projects_dir,
+                    )
+                except pointers.PointerStillLive:
+                    _log.warning(
+                        "forget(%s): bridge-pointer still live despite a stopped record; "
+                        "leaving it in place",
+                        instance_id,
+                    )
+                except OSError as exc:
+                    _log.warning(
+                        "forget(%s): could not clear bridge-pointer: %s", instance_id, exc
+                    )
 
     @staticmethod
     def _signal_stop(pid: int, *, twice: bool = False) -> None:

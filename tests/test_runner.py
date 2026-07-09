@@ -11,7 +11,7 @@ from typing import cast
 
 import pytest
 
-from clauster import bridge_log, inspector, procutil
+from clauster import bridge_log, inspector, pointers, procutil
 from clauster.db.persistence import Persistence
 from clauster.models import (
     Attribution,
@@ -182,6 +182,50 @@ async def test_forget_drops_persisted_only_record(runner_config, monkeypatch):
     runner._instances.pop(inst.instance_id)  # keep only the persisted overlay
     assert inst.instance_id in runner._persisted
 
+    await runner.forget(inst.instance_id)
+    assert inst.instance_id not in runner._persisted
+
+
+async def test_forget_without_project_name_skips_pointer_clear(runner_config):
+    # A legacy/malformed persisted record with no "project_name" is still forgettable;
+    # the pointer clear is simply skipped (no project path to resolve).
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._persisted = {"iid": {"instance_id": "iid"}}  # no project_name key
+    await runner.forget("iid")
+    assert "iid" not in runner._persisted
+
+
+async def test_forget_tolerates_live_pointer(runner_config, monkeypatch):
+    # If the pointer somehow still looks live, forget leaves it (never yanks a live anchor)
+    # but still drops the record — the clear is best-effort, not fatal.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = await runner.spawn("alpha")
+    await runner.stop(inst.instance_id)
+
+    def _raise_live(*_a, **_k):
+        raise pointers.PointerStillLive("still live")
+
+    monkeypatch.setattr("clauster.pointers.clear_pointer", _raise_live)
+    await runner.forget(inst.instance_id)
+    assert inst.instance_id not in runner._persisted
+
+
+async def test_forget_tolerates_pointer_clear_oserror(runner_config, monkeypatch):
+    # A filesystem hiccup clearing the pointer is logged, not raised — forget still drops
+    # the record (it's already been removed from state.json by this point).
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = await runner.spawn("alpha")
+    await runner.stop(inst.instance_id)
+
+    def _raise_oserror(*_a, **_k):
+        raise OSError("io error")
+
+    monkeypatch.setattr("clauster.pointers.clear_pointer", _raise_oserror)
     await runner.forget(inst.instance_id)
     assert inst.instance_id not in runner._persisted
 
