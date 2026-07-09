@@ -369,6 +369,10 @@ class _FakeProc:
         self.killed = True
         self._alive = False
 
+    def wait(self, timeout=None):
+        self._alive = False
+        return 0
+
 
 def test_apply_markers_poison_beats_running(runner_config):
     config, claude_json = runner_config

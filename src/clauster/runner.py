@@ -1976,6 +1976,9 @@ class SessionRunner:
         else:
             try:
                 proc.kill()  # never leave an idle orphan bridge behind
+                # Reap + confirm death BEFORE clearing: otherwise clear_pointer's liveness
+                # guard can still see the just-killed pid as alive and refuse (a poison loop).
+                await asyncio.to_thread(proc.wait)
             except (ProcessLookupError, OSError) as exc:
                 _log.debug("force-kill of poisoned bridge %s was a no-op: %s", proc.pid, exc)
         try:
