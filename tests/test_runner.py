@@ -11,7 +11,7 @@ from typing import cast
 
 import pytest
 
-from clauster import bridge_log, inspector, pointers, procutil
+from clauster import bridge_log, code_sessions, inspector, pointers, procutil
 from clauster.db.persistence import Persistence
 from clauster.models import (
     Attribution,
@@ -257,6 +257,98 @@ async def test_forget_tolerates_pointer_clear_oserror(runner_config, monkeypatch
     monkeypatch.setattr("clauster.pointers.clear_pointer", _raise_oserror)
     await runner.forget(inst.instance_id)
     assert inst.instance_id not in runner._persisted
+
+
+# ----- #867 L2: pre-spawn anchor health-check ---------------------------------------
+
+
+def _write_nonlive_pointer(runner: SessionRunner, project_name: str) -> Path:
+    """Write a well-formed, non-live bridge-pointer.json at the project's resolved dir."""
+    proj = (runner._config.projects_root / project_name).resolve()
+    pdir = runner._claude_projects_dir / pointers.sanitize_cwd(proj)
+    pdir.mkdir(parents=True, exist_ok=True)
+    pointer = pdir / "bridge-pointer.json"
+    pointer.write_text(
+        json.dumps(
+            {
+                "sessionId": "session_x",
+                "environmentId": "env_x",
+                "source": "standalone",
+                "pid": 81750,  # long-dead PID -> not live
+                "procStart": "2590192",
+            }
+        )
+    )
+    return pointer
+
+
+def _pin_health(monkeypatch, health, *, calls: list | None = None) -> None:
+    def _fake(*_a, **_k):
+        if calls is not None:
+            calls.append(1)
+        return health
+
+    monkeypatch.setattr("clauster.code_sessions.anchor_health_for_pointer", _fake)
+
+
+async def test_heal_clears_poisoned_pointer(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED)
+    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
+    assert not pointer.exists()  # archived/deleted anchor -> pointer cleared, cold start
+
+
+async def test_heal_keeps_healthy_pointer(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    _pin_health(monkeypatch, code_sessions.AnchorHealth.HEALTHY)
+    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
+    assert pointer.exists()  # reattach as-is
+
+
+async def test_heal_keeps_pointer_on_unknown(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    _pin_health(monkeypatch, code_sessions.AnchorHealth.UNKNOWN)
+    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
+    assert pointer.exists()  # indeterminate -> never destroy state
+
+
+async def test_heal_noop_without_pointer(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    calls: list = []
+    _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED, calls=calls)
+    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
+    assert not calls  # cold start -> never probes the API
+
+
+async def test_heal_skips_live_pointer(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    monkeypatch.setattr(pointers, "is_live", lambda ptr: True)
+    calls: list = []
+    _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED, calls=calls)
+    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")
+    assert pointer.exists() and not calls  # a running anchor is never probed or cleared
+
+
+async def test_heal_tolerates_clear_error(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    _write_nonlive_pointer(runner, "alpha")
+    _pin_health(monkeypatch, code_sessions.AnchorHealth.POISONED)
+
+    def _boom(*_a, **_k):
+        raise OSError("io error")
+
+    monkeypatch.setattr("clauster.pointers.clear_pointer", _boom)
+    await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")  # no raise
 
 
 async def test_forget_refuses_running_bridge(runner_config, monkeypatch):
@@ -1855,7 +1947,8 @@ async def test_resume_reuses_modes_and_backfills_session(runner_config, monkeypa
         environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
         session_id = "session_01RESUMEDBBBBBBBBBBB"
 
-    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: FakePtr())
+    # accept the extra claude_projects_dir arg the #867 L2 pre-spawn health-check passes
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
 
     resumed = await runner.resume(first.instance_id)
     assert resumed.status is InstanceStatus.RUNNING
@@ -1891,7 +1984,8 @@ async def test_resume_keeps_recorded_mode_when_config_flips(runner_config, monke
         environment_id = "env_01TESTENVAAAAAAAAAAAAAAAA"
         session_id = "session_01RESUMEDBBBBBBBBBBB"
 
-    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: FakePtr())
+    # accept the extra claude_projects_dir arg the #867 L2 pre-spawn health-check passes
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda *a, **k: FakePtr())
 
     resumed = await runner.resume(first.instance_id)
     # Honored the recorded mode: stayed standard, did not cross to the pty
