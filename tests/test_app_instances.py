@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 from clauster.app import create_app
 from clauster.models import InstanceStatus, RemoteControlInstance
+from clauster.pointers import sanitize_cwd
 from clauster.runner import SessionRunner
 
 
@@ -116,6 +119,38 @@ def test_forget_stopped_bridge_via_api(runner_config, monkeypatch):
         assert forget.status_code == 200, forget.text
         assert forget.json() == {"id": instance_id, "forgotten": True}
         assert client.get("/api/instances").json() == []  # gone from the list
+
+
+def test_forget_clears_bridge_pointer(runner_config, monkeypatch):
+    # #867 L1: forgetting a stopped bridge deletes its bridge-pointer.json (+ .bak) so the
+    # next spawn registers a fresh anchor instead of reattaching a possibly-poisoned one.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    with _client(runner_config) as client:
+        spawn = client.post("/api/instances", json={"project": "alpha"})
+        instance_id = spawn.json()["instance_id"]
+        client.delete(f"/api/instances/{instance_id}")  # stop -> resumable
+
+        runner = client.app.state.runner
+        proj_path = (runner._config.projects_root / "alpha").resolve()
+        pdir = runner._claude_projects_dir / sanitize_cwd(proj_path)
+        pdir.mkdir(parents=True, exist_ok=True)
+        pointer = pdir / "bridge-pointer.json"
+        pointer.write_text(
+            json.dumps(
+                {
+                    "sessionId": "session_x",
+                    "environmentId": "env_x",
+                    "source": "standalone",
+                    "pid": 81750,  # long-dead PID -> not live
+                    "procStart": "2590192",
+                }
+            )
+        )
+
+        forget = client.post(f"/api/instances/{instance_id}/forget")
+        assert forget.status_code == 200, forget.text
+        assert not pointer.exists()  # cleared
+        assert pointer.with_name(pointer.name + ".bak").exists()  # backed up first
 
 
 def test_forget_running_bridge_409(runner_config, monkeypatch):

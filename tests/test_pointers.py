@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from clauster import pointers
 
@@ -52,7 +55,6 @@ def test_load_pointer_valid_json_wrong_shape_returns_none(tmp_path: Path):
     # Parseable JSON whose shape doesn't satisfy BridgePointer (missing required
     # fields) raises a pydantic ValidationError (a ValueError) on model_validate;
     # the malformed -> None contract must still hold.
-    import json
 
     bad = tmp_path / "wrong_shape.json"
     bad.write_text(json.dumps({"sessionId": "s", "unexpected": True}))
@@ -71,3 +73,81 @@ def test_fixture_pointers_are_not_live(fixtures_dir: Path):
         ptr = pointers.load_pointer(fixtures_dir / "pointers" / f"{name}.bridge-pointer.json")
         assert ptr is not None
         assert pointers.is_live(ptr) is False
+
+
+# ----- clear_pointer (#867 L1) --------------------------------------------------
+
+
+def _write_pointer(claude_projects_dir: Path, project_path: Path, *, pid: int = 81750) -> Path:
+    """Write a well-formed, non-live bridge-pointer.json for ``project_path``."""
+    pdir = claude_projects_dir / pointers.sanitize_cwd(project_path)
+    pdir.mkdir(parents=True, exist_ok=True)
+    path = pdir / "bridge-pointer.json"
+    path.write_text(
+        json.dumps(
+            {
+                "sessionId": "session_01LG15p2JVjwBamscENjuBLi",
+                "environmentId": "env_01RHE7cHW3DawXjGRp5Ae3va",
+                "source": "standalone",
+                "pid": pid,  # long-dead PID -> not live
+                "procStart": "2590192",
+            }
+        )
+    )
+    return path
+
+
+def test_clear_pointer_absent_returns_false(tmp_path: Path):
+    assert pointers.clear_pointer(Path("/no/such/project"), claude_projects_dir=tmp_path) is False
+
+
+def test_clear_pointer_removes_nonlive_and_backs_up(tmp_path: Path):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert not path.exists()
+    assert path.with_name(path.name + ".bak").exists()
+
+
+def test_clear_pointer_no_backup_when_disabled(tmp_path: Path):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path, backup=False) is True
+    assert not path.exists()
+    assert not path.with_name(path.name + ".bak").exists()
+
+
+def test_clear_pointer_refuses_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+    monkeypatch.setattr(pointers, "is_live", lambda ptr: True)
+    with pytest.raises(pointers.PointerStillLive):
+        pointers.clear_pointer(proj, claude_projects_dir=tmp_path)
+    assert path.exists()  # a live anchor is never yanked
+
+
+def test_clear_pointer_removes_malformed(tmp_path: Path):
+    # A corrupt pointer has no derivable liveness; clear it so it can't wedge the next start.
+    proj = Path("/mnt/nas/projects/alpha")
+    pdir = tmp_path / pointers.sanitize_cwd(proj)
+    pdir.mkdir(parents=True)
+    path = pdir / "bridge-pointer.json"
+    path.write_text("{not json")
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert not path.exists()
+
+
+def test_clear_pointer_backup_failure_still_deletes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The backup is best-effort: a write failure is logged, and the delete still proceeds.
+    proj = Path("/mnt/nas/projects/alpha")
+    path = _write_pointer(tmp_path, proj)
+
+    def _boom(self: Path, data: bytes) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", _boom)
+    assert pointers.clear_pointer(proj, claude_projects_dir=tmp_path) is True
+    assert not path.exists()
+    assert not path.with_name(path.name + ".bak").exists()
