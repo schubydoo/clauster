@@ -101,51 +101,12 @@ def _read_claude_json(claude_json: Path) -> tuple[str | None, dict]:
 
 
 def _atomic_write_claude_json(claude_json: Path, raw: str | None, data: dict) -> None:
-    """Back up ``raw`` once, then atomically replace ``claude_json`` with ``data``.
+    """Atomically replace ``claude_json`` with ``data`` rendered as ``json.dumps(indent=2)``.
 
-    Must be called inside :func:`_locked`. The backup is best-effort: a failure
-    is surfaced via a warning (never a silent drop) but does not block the write.
-
-    The temp file is uniquely named (``mkstemp``), not a shared ``<file>.tmp``:
-    when :func:`_locked` degrades to a no-op (Windows / lock-open failure) two
-    writers can run concurrently, and a single fixed temp name lets them stomp
-    each other's inode — corrupting the write or failing the second ``os.replace``
-    with ``FileNotFoundError``. A per-write temp keeps each replace atomic
-    regardless of the lock. ``mkstemp`` in the target's directory keeps the
-    replace on one filesystem (so it stays atomic).
+    A thin wrapper over :func:`_atomic_write_json` that fixes the ``~/.claude.json`` render;
+    must be called inside :func:`_locked`.
     """
-    if raw is not None:
-        backup = claude_json.with_suffix(claude_json.suffix + ".bak")
-        if not backup.exists():
-            try:
-                backup.write_text(raw, encoding="utf-8")
-            except OSError as exc:
-                _log.warning("could not write %s backup: %s", backup, exc)
-
-    fd, tmp_name = tempfile.mkstemp(
-        dir=claude_json.parent, prefix=f"{claude_json.name}.", suffix=".tmp"
-    )
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, indent=2))
-            # mkstemp makes the temp 0600; mirror the existing file's permissions so
-            # the atomic replace doesn't silently re-permission ~/.claude.json. A new
-            # file keeps 0600 (it can hold tokens). POSIX-only — on Windows file
-            # permissions are ACL-based (stat reports 0o666 regardless), so POSIX mode
-            # bits are meaningless and we leave mkstemp's default as-is.
-            if _is_posix():
-                try:
-                    mode = stat.S_IMODE(claude_json.stat().st_mode)
-                except FileNotFoundError:
-                    mode = 0o600
-                os.fchmod(fh.fileno(), mode)
-        os.replace(tmp, claude_json)
-    finally:
-        # On the happy path os.replace consumed the temp; this only fires if the
-        # write/replace raised before the rename, so the temp never lingers.
-        with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()
+    _atomic_write_json(claude_json, raw, data, lambda d: json.dumps(d, indent=2))
 
 
 def update_claude_json(claude_json: Path, mutate: Callable[[dict], object]) -> bool:
@@ -202,10 +163,19 @@ def _atomic_write_json(
 ) -> None:
     """Back up ``raw`` once, then atomically replace ``path`` with ``render(data)``.
 
-    The render-agnostic core of :func:`_atomic_write_claude_json` (which keeps its own
-    fixed ``json.dumps(indent=2)`` render for behavior preservation): same one-time
-    ``.bak``, unique ``mkstemp`` temp in the target dir, existing-mode preservation on
-    POSIX, and atomic ``os.replace``. Must be called inside :func:`_locked`.
+    The render-agnostic core shared by :func:`_atomic_write_claude_json` and
+    :func:`locked_replace_json_file`. Must be called inside :func:`_locked`. The backup is
+    best-effort: a failure is surfaced via a warning (never a silent drop) but doesn't block
+    the write.
+
+    The temp file is uniquely named (``mkstemp``), not a shared ``<file>.tmp``: when
+    :func:`_locked` degrades to a no-op (Windows / lock-open failure) two writers can run
+    concurrently, and a single fixed temp name lets them stomp each other's inode —
+    corrupting the write or failing the second ``os.replace`` with ``FileNotFoundError``. A
+    per-write temp keeps each replace atomic regardless of the lock; ``mkstemp`` in the
+    target's directory keeps the replace on one filesystem. Existing file permissions are
+    mirrored on POSIX so the atomic replace can't silently re-permission a token-bearing file
+    (a new file keeps ``mkstemp``'s 0600); on Windows, POSIX mode bits are meaningless (ACLs).
     """
     if raw is not None:
         backup = path.with_suffix(path.suffix + ".bak")
