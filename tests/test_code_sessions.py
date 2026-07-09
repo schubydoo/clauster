@@ -56,8 +56,16 @@ def test_anchor_health_404_session_not_found_is_poisoned():
 
 
 def test_anchor_health_404_route_not_found_is_unknown():
-    # A route-level 404 (unrecognized body) must NOT clear a healthy pointer.
-    for body in (b"<html>404</html>", {"message": "Not Found"}, b"null"):
+    # A route-level 404 (unrecognized body) must NOT clear a healthy pointer. Both the
+    # not_found_error type AND resource_type:session are required — one alone is UNKNOWN.
+    bodies = (
+        b"<html>404</html>",
+        {"message": "Not Found"},
+        b"null",
+        {"error": {"resource_type": "session"}},  # session mentioned, wrong error type
+        {"error": {"type": "not_found_error"}},  # not_found, but not a session resource
+    )
+    for body in bodies:
         c = CodeSessionsClient(CREDS, transport=_transport(404, body))
         assert c.anchor_health("cse_x") is AnchorHealth.UNKNOWN
 

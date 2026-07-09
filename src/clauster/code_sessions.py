@@ -95,7 +95,9 @@ def _is_session_not_found(raw: bytes) -> bool:
         return False
     error = body.get("error")
     error = error if isinstance(error, dict) else body
-    return error.get("type") == "not_found_error" or error.get("resource_type") == "session"
+    # Require BOTH signals so a route-level 404 that merely mentions a session (or a
+    # generic not_found_error for a different resource) can't clear a healthy pointer.
+    return error.get("type") == "not_found_error" and error.get("resource_type") == "session"
 
 
 class CodeSessionsClient:
