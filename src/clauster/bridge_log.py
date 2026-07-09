@@ -35,8 +35,11 @@ _RE_TRUST_ERROR = re.compile(r"Workspace not trusted", re.IGNORECASE)
 # `end_session` control request whose reason is `archived`/`deleted` when the anchor is
 # gone — the #671 dead-end (the bridge then idles with no session). This is the definitive
 # poison signal (verified against a live 2.1.201 bridge log).
+# Match either key order within a single JSON object ([^{}]* can't cross an object
+# boundary), so the CLI reordering `reason`/`subtype` can't hide the poison.
 _RE_END_SESSION_GONE = re.compile(
-    r'"reason":\s*"(archived|deleted)"\s*,\s*"subtype":\s*"end_session"'
+    r'"subtype":\s*"end_session"[^{}]*"reason":\s*"(archived|deleted)"'
+    r'|"reason":\s*"(archived|deleted)"[^{}]*"subtype":\s*"end_session"'
 )
 
 
@@ -85,6 +88,6 @@ def parse_bridge_markers(text: str) -> BridgeMarkers:
     m.clean_shutdown = _RE_SHUTDOWN.search(text) is not None
     m.trust_error = _RE_TRUST_ERROR.search(text) is not None
     if (hit := _RE_END_SESSION_GONE.search(text)) is not None:
-        m.poison_reason = hit.group(1)
+        m.poison_reason = hit.group(1) or hit.group(2)
 
     return m

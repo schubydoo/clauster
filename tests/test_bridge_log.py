@@ -64,6 +64,16 @@ def test_poison_reason_deleted_detected():
     assert m.poison_reason == "deleted"
 
 
+def test_poison_reason_detected_regardless_of_key_order():
+    # The CLI reordering the JSON keys must not hide the poison.
+    assert parse_bridge_markers('{"subtype":"end_session","reason":"archived"}').poison_reason == (
+        "archived"
+    )
+    # ...but an end_session with a benign reason (different object) is not poison.
+    log = '{"subtype":"end_session","reason":"user_stop"} {"reason":"archived","foo":1}'
+    assert parse_bridge_markers(log).poison_reason is None
+
+
 def test_no_poison_in_healthy_log():
     assert parse_bridge_markers("[bridge:work] Starting poll loop env_01X\n").poison_reason is None
 
