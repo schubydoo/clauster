@@ -211,6 +211,12 @@ class SpawnOutcome:
 # How long to wait for a freshly-spawned bridge to reach its poll loop.
 _READY_TIMEOUT = 15.0
 _READY_POLL_INTERVAL = 0.25
+# #867 L3: a *reattach* can reach the poll loop and only THEN have its re-adopted session
+# torn down as archived/deleted (#671). After readiness on a reattach (no fresh "Created
+# initial session"), watch a brief grace for that poison marker before declaring RUNNING; a
+# cold start skips it. And bound how long we wait for the poisoned idle bridge to stop.
+_POISON_GRACE = 4.0
+_POISON_STOP_TIMEOUT = 5.0
 # Cadence at which the post-spawn startup-watch re-reads the bridge log to detect
 # a (late) environment registration or a stuck-but-alive bridge.
 _STARTUP_WATCH_INTERVAL = 2.0
@@ -1121,7 +1127,10 @@ class SessionRunner:
         markers = await asyncio.to_thread(self._await_ready, raw_path, proc)
         self._apply_markers(instance, markers, proc)
         await asyncio.to_thread(self._flush_redacted_mirror, instance)
-        await self._post_spawn_enrich(instance, proj.path)
+        if markers.poison_reason is not None:
+            await self._heal_poisoned_reattach(instance, proc, proj.path, markers.poison_reason)
+        else:
+            await self._post_spawn_enrich(instance, proj.path)
         await self._persist()
         # A bridge still STARTING after the synchronous readiness wait may yet
         # register (slow start) or may be alive-but-stuck (e.g. it couldn't
@@ -1868,8 +1877,24 @@ class SessionRunner:
                 markers = self._read_markers(log_path)
                 return markers
             markers = self._read_markers(log_path)
-            if markers.trust_error or markers.is_ready:
+            if markers.trust_error or markers.poison_reason is not None:
                 return markers
+            if markers.is_ready:
+                # A cold start logs its own "Created initial session" (starter_session_id);
+                # a reattach doesn't. Only a reattach can reach the poll loop and then have
+                # its re-adopted session torn down as archived/deleted (#671), so give it a
+                # bounded grace to surface that poison before we call it RUNNING.
+                if markers.starter_session_id is not None:
+                    return markers
+                grace_deadline = time.monotonic() + _POISON_GRACE
+                while time.monotonic() < grace_deadline:
+                    time.sleep(_READY_POLL_INTERVAL)
+                    if proc.poll() is not None:
+                        return self._read_markers(log_path)
+                    markers = self._read_markers(log_path)
+                    if markers.poison_reason is not None:
+                        return markers
+                return markers  # grace elapsed clean -> a healthy reattach
             time.sleep(_READY_POLL_INTERVAL)
         return markers
 
@@ -1897,7 +1922,13 @@ class SessionRunner:
         if markers.environment_id:
             instance.url = f"https://claude.ai/code?environment={markers.environment_id}"
 
-        if markers.is_ready and proc.poll() is None:
+        if markers.poison_reason is not None:
+            # #867 L3: the bridge reached the poll loop but its reattached session was torn
+            # down as archived/deleted (#671) — it would sit idle with no usable session.
+            # Surface it as ERROR (not a misleading RUNNING); the caller stops the idle
+            # bridge and clears the stale pointer so the next launch starts cold.
+            instance.status = InstanceStatus.ERROR
+        elif markers.is_ready and proc.poll() is None:
             instance.status = InstanceStatus.RUNNING
         elif markers.trust_error or proc.poll() is not None:
             # Genuine, terminal failure: the bridge rejected workspace trust, or it
@@ -1911,6 +1942,52 @@ class SessionRunner:
             instance.status = InstanceStatus.STARTING
         if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
             self._emit_lifecycle("ready", instance)  # only on the transition, not every poll
+
+    async def _heal_poisoned_reattach(
+        self,
+        instance: RemoteControlInstance,
+        proc: subprocess.Popen,
+        project_path: Path,
+        reason: str,
+    ) -> None:
+        """Stop a poisoned idle bridge and clear its stale pointer (#867 L3).
+
+        The reattached session was archived/deleted (#671), so the bridge reached its poll
+        loop but has no usable session. Record the reason (status is already ERROR), stop
+        the idle bridge, then clear ``bridge-pointer.json`` — stop-first so the bridge's own
+        shutdown can't out-race the delete — so the next launch registers a fresh session.
+        """
+        instance.error_detail = (
+            f"Could not resume the previous session — it was {reason} and can't be "
+            "reattached. Start the session again to begin a fresh one."
+        )
+        _log.warning(
+            "poisoned reattach for project %r: previous session was %s; stopping the idle "
+            "bridge and clearing its pointer for a clean restart (#671)",
+            instance.project,
+            reason,
+        )
+        self._signal_stop(proc.pid)
+        deadline = time.monotonic() + _POISON_STOP_TIMEOUT
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            await asyncio.sleep(_READY_POLL_INTERVAL)
+        else:
+            try:
+                proc.kill()  # never leave an idle orphan bridge behind
+            except (ProcessLookupError, OSError) as exc:
+                _log.debug("force-kill of poisoned bridge %s was a no-op: %s", proc.pid, exc)
+        try:
+            await asyncio.to_thread(
+                pointers.clear_pointer,
+                project_path.resolve(),
+                claude_projects_dir=self._claude_projects_dir,
+            )
+        except (pointers.PointerStillLive, OSError) as exc:
+            _log.warning(
+                "could not clear poisoned bridge-pointer for %r: %s", instance.project, exc
+            )
 
     async def _post_spawn_enrich(
         self, instance: RemoteControlInstance, project_path: Path

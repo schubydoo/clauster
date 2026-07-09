@@ -31,6 +31,13 @@ _RE_POLL_LOOP = re.compile(r"\[bridge:work\][^\n]*Starting poll loop")
 _RE_SPAWN_MODE = re.compile(r"\bspawnMode=([A-Za-z0-9-]+)")
 _RE_SHUTDOWN = re.compile(r"\[bridge:shutdown\][^\n]*(?:SIGINT|SIGTERM|shutting down)")
 _RE_TRUST_ERROR = re.compile(r"Workspace not trusted", re.IGNORECASE)
+# #867 L3: on a warm reattach the server tears the re-adopted session down with an
+# `end_session` control request whose reason is `archived`/`deleted` when the anchor is
+# gone — the #671 dead-end (the bridge then idles with no session). This is the definitive
+# poison signal (verified against a live 2.1.201 bridge log).
+_RE_END_SESSION_GONE = re.compile(
+    r'"reason":\s*"(archived|deleted)"\s*,\s*"subtype":\s*"end_session"'
+)
 
 
 @dataclass
@@ -44,6 +51,9 @@ class BridgeMarkers:
     poll_loop_started: bool = False  # the RUNNING signal
     clean_shutdown: bool = False
     trust_error: bool = False
+    # Non-None (``"archived"``/``"deleted"``) when a reattached session was torn down as
+    # gone — a poisoned reattach that would otherwise idle with no session (#671).
+    poison_reason: str | None = None
 
     @property
     def is_ready(self) -> bool:
@@ -74,5 +84,7 @@ def parse_bridge_markers(text: str) -> BridgeMarkers:
     m.poll_loop_started = _RE_POLL_LOOP.search(text) is not None
     m.clean_shutdown = _RE_SHUTDOWN.search(text) is not None
     m.trust_error = _RE_TRUST_ERROR.search(text) is not None
+    if (hit := _RE_END_SESSION_GONE.search(text)) is not None:
+        m.poison_reason = hit.group(1)
 
     return m
