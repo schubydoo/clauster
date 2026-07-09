@@ -217,6 +217,11 @@ _READY_POLL_INTERVAL = 0.25
 # cold start skips it. And bound how long we wait for the poisoned idle bridge to stop.
 _POISON_GRACE = 4.0
 _POISON_STOP_TIMEOUT = 5.0
+# #867 L4: nothing else prunes bridge-pointer.json, so a project accumulates a pointer that
+# outlives its (server-reaped) environment. At startup, clear clauster's OWN pointers that
+# are both non-live AND older than this — a live or recently-stopped-resumable session is
+# never touched (its reattach is preserved).
+_STALE_POINTER_TTL_SECONDS = 14 * 24 * 60 * 60
 # Cadence at which the post-spawn startup-watch re-reads the bridge log to detect
 # a (late) environment registration or a stuck-but-alive bridge.
 _STARTUP_WATCH_INTERVAL = 2.0
@@ -3148,9 +3153,55 @@ class SessionRunner:
 
     # ----- lifecycle ------------------------------------------------------
 
+    async def _prune_stale_pointers(self) -> None:
+        """GC clauster's own long-dead ``bridge-pointer.json`` files at startup (#867 L4).
+
+        Scoped to projects under ``projects_root`` (clauster's own data — never a pointer
+        another tool wrote), and only a pointer that is BOTH non-live AND older than
+        :data:`_STALE_POINTER_TTL_SECONDS`, so a live or recently-stopped-resumable session
+        keeps its reattach. Best-effort: a listing/stat/delete error is logged, never fatal
+        to startup. Runs AFTER :meth:`rediscover` so any live bridge is already adopted.
+        """
+        try:
+            projects = await asyncio.to_thread(
+                discover_projects_cached, self._config.projects_root, self._claude_json
+            )
+        except OSError as exc:
+            _log.warning("stale-pointer prune skipped: could not list projects: %s", exc)
+            return
+        cutoff = time.time() - _STALE_POINTER_TTL_SECONDS
+        for proj in projects:
+            await asyncio.to_thread(self._prune_one_pointer, proj.path, cutoff)
+
+    def _prune_one_pointer(self, project_path: Path, cutoff: float) -> None:
+        """Clear one project's pointer if it's non-live and its file mtime predates ``cutoff``."""
+        resolved = project_path.resolve()
+        path = pointers.pointer_path_for(resolved, self._claude_projects_dir)
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            return  # no pointer -> nothing to prune
+        except OSError as exc:
+            _log.warning("could not stat bridge-pointer for %s: %s", resolved, exc)
+            return
+        if mtime >= cutoff:
+            return  # recent enough that a resume may still want it
+        try:
+            # backup=False: a 2-week-dead pointer isn't worth a .bak that would itself linger.
+            if pointers.clear_pointer(
+                resolved, claude_projects_dir=self._claude_projects_dir, backup=False
+            ):
+                _log.info("pruned stale non-live bridge-pointer for %s", resolved)
+        except pointers.PointerStillLive:
+            pass  # became live between the stat and the clear -> leave it
+        except OSError as exc:
+            _log.warning("could not prune bridge-pointer for %s: %s", resolved, exc)
+
     async def start_poll_loop(self) -> None:
         """Rediscover already-running bridges, then start the background poll loop."""
         await self.rediscover()
+        # #867 L4: after live bridges are adopted, GC long-dead pointers (hygiene).
+        await self._prune_stale_pointers()
         self._poll_task = asyncio.create_task(self._poll_forever())
         # Server-side metrics sampler (#354): only when the feature is on. Keeps the
         # per-project / batch / scrape reads at O(1) with no per-request thread.

@@ -4,8 +4,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import cast
 
@@ -20,6 +22,7 @@ from clauster.models import (
     WorkingSession,
 )
 from clauster.runner import (
+    _STALE_POINTER_TTL_SECONDS,
     AdoptionUnavailable,
     InstanceStillLive,
     NotTrusted,
@@ -2541,3 +2544,112 @@ def test_popen_win32_detaches_with_new_process_group(runner_config, monkeypatch,
     assert captured["creationflags"] == 0x00000200
     assert captured["stdin"] is subprocess.DEVNULL
     assert captured["stderr"] is subprocess.STDOUT
+
+
+# ----- #867 L4: stale-pointer prune -----------------------------------------------
+
+
+def _age(pointer: Path, days: int) -> None:
+    old = time.time() - days * 86400
+    os.utime(pointer, (old, old))
+
+
+def _prune_cutoff() -> float:
+    return time.time() - _STALE_POINTER_TTL_SECONDS
+
+
+def test_prune_clears_aged_nonlive_pointer(runner_config):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    _age(pointer, 20)  # older than the 14-day TTL
+    runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
+    assert not pointer.exists()
+
+
+def test_prune_keeps_recent_pointer(runner_config):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")  # fresh mtime
+    runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
+    assert pointer.exists()  # a recent pointer may still back a resume
+
+
+def test_prune_keeps_live_pointer(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    _age(pointer, 20)
+    monkeypatch.setattr(pointers, "is_live", lambda ptr: True)  # a live owner
+    runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())
+    assert pointer.exists()  # never prune a live bridge's pointer
+
+
+def test_prune_noop_without_pointer(runner_config):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._prune_one_pointer(
+        config.projects_root / "alpha", _prune_cutoff()
+    )  # no pointer -> no raise
+
+
+def test_prune_tolerates_clear_oserror(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    _age(pointer, 20)
+
+    def _boom(*_a, **_k):
+        raise OSError("io error")
+
+    monkeypatch.setattr("clauster.pointers.clear_pointer", _boom)
+    runner._prune_one_pointer(
+        config.projects_root / "alpha", _prune_cutoff()
+    )  # logged, not raised
+
+
+def test_prune_tolerates_stat_oserror(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    _write_nonlive_pointer(runner, "alpha")
+    real_stat = Path.stat
+
+    def _boom(self, **kw):  # only the pointer stat errors; everything else is real
+        if self.name == "bridge-pointer.json":
+            raise OSError("stat failed")
+        return real_stat(self, **kw)
+
+    monkeypatch.setattr(Path, "stat", _boom)
+    runner._prune_one_pointer(
+        config.projects_root / "alpha", _prune_cutoff()
+    )  # logged, not raised
+
+
+def test_prune_clear_returns_false_is_noop(runner_config, monkeypatch):
+    # Race guard: the pointer vanished between the stat and the clear -> clear returns False.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    _age(pointer, 20)
+    monkeypatch.setattr("clauster.pointers.clear_pointer", lambda *a, **k: False)
+    runner._prune_one_pointer(config.projects_root / "alpha", _prune_cutoff())  # no raise, no log
+
+
+async def test_prune_stale_pointers_scans_projects(runner_config):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    _age(pointer, 30)
+    await runner._prune_stale_pointers()
+    assert not pointer.exists()  # the startup GC found + pruned it
+
+
+async def test_prune_stale_pointers_tolerates_discover_error(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+
+    def _boom(*_a, **_k):
+        raise OSError("cannot list")
+
+    monkeypatch.setattr("clauster.runner.discover_projects_cached", _boom)
+    await runner._prune_stale_pointers()  # logged, not raised
