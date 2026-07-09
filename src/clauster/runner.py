@@ -31,7 +31,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from . import auth, bridge_log, inspector, metrics, pointers, procutil, pty_screen, redact
+from . import (
+    auth,
+    bridge_log,
+    code_sessions,
+    inspector,
+    metrics,
+    pointers,
+    procutil,
+    pty_screen,
+    redact,
+)
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
     PERMISSION_MODES,
@@ -699,6 +709,46 @@ class SessionRunner:
 
     # ----- spawn ----------------------------------------------------------
 
+    async def _clear_pointer_if_anchor_poisoned(self, project_path: Path) -> None:
+        """#867 L2: pre-spawn, drop a preserved pointer whose anchor was archived/deleted.
+
+        The CLI reattaches an existing environment purely from ``bridge-pointer.json``; if
+        the anchor session behind it is gone, that reattach dead-ends into a bridge with no
+        session (#671). Probing ``/v1/code/sessions`` and dropping a poisoned pointer forces
+        a clean cold start instead. Best-effort throughout: only a non-live pointer is
+        considered, any uncertainty leaves the pointer intact, and nothing here blocks or
+        fails the spawn.
+        """
+        resolved = project_path.resolve()
+        pointer = await asyncio.to_thread(
+            pointers.pointer_for_project, resolved, self._claude_projects_dir
+        )
+        if pointer is None or not pointer.session_id:
+            return  # cold start (or pty, which writes no pointer) — nothing to reattach
+        if await asyncio.to_thread(pointers.is_live, pointer):
+            return  # a live bridge owns it; never touch a running anchor
+        credentials_path = self._claude_json.parent / ".claude" / ".credentials.json"
+        health = await asyncio.to_thread(
+            code_sessions.anchor_health_for_pointer,
+            pointer.session_id,
+            credentials_path=credentials_path,
+            claude_json_path=self._claude_json,
+        )
+        if health is not code_sessions.AnchorHealth.POISONED:
+            return  # HEALTHY -> reattach as-is; UNKNOWN -> leave it, the backstop covers it
+        _log.info(
+            "clearing bridge-pointer for %s: anchor session %s is archived/deleted; "
+            "would dead-end on reattach (#671)",
+            resolved,
+            pointer.session_id,
+        )
+        try:
+            await asyncio.to_thread(
+                pointers.clear_pointer, resolved, claude_projects_dir=self._claude_projects_dir
+            )
+        except (pointers.PointerStillLive, OSError) as exc:
+            _log.warning("could not clear poisoned bridge-pointer for %s: %s", resolved, exc)
+
     async def spawn(
         self,
         name: str,
@@ -944,6 +994,12 @@ class SessionRunner:
                     "could not install resume-recap hook in %s: %s", self._settings_json, exc
                 )
             self._recap_hook_ensured = True
+
+        # #867 L2: before launching, drop a preserved pointer whose anchor was archived or
+        # deleted — otherwise the CLI reattaches it and the bridge comes back with no
+        # session (#671). Best-effort; a no-op for a cold start, a pty spawn, or when the
+        # anchor is healthy/indeterminate.
+        await self._clear_pointer_if_anchor_poisoned(proj.path)
 
         # Enforce the optional clauster-side concurrent-bridge cap. Past the idempotency
         # early-return, this project is NOT currently live, so every live instance is a
