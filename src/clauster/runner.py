@@ -3181,6 +3181,10 @@ class SessionRunner:
     def _prune_one_pointer(self, project_path: Path, cutoff: float) -> None:
         """Clear one project's pointer if it's non-live and its file mtime predates ``cutoff``."""
         resolved = project_path.resolve()
+        # Ownership guard: a symlink under projects_root can resolve OUTSIDE it; the canonical
+        # target's pointer is not clauster's to GC, so never prune a path that escapes the root.
+        if not resolved.is_relative_to(self._config.projects_root.resolve()):
+            return
         path = pointers.pointer_path_for(resolved, self._claude_projects_dir)
         try:
             mtime = path.stat().st_mtime

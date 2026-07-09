@@ -2585,6 +2585,32 @@ def test_prune_keeps_live_pointer(runner_config, monkeypatch):
     assert pointer.exists()  # never prune a live bridge's pointer
 
 
+def test_prune_skips_project_symlinked_outside_root(runner_config, tmp_path_factory):
+    # #871 review: a symlink under projects_root that resolves OUTSIDE it must not have its
+    # (out-of-tree) pointer pruned — that pointer isn't clauster's to GC.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    outside = tmp_path_factory.mktemp("outside_proj")  # a sibling of projects_root, not under it
+    (config.projects_root / "linked").symlink_to(outside)
+    pdir = runner._claude_projects_dir / pointers.sanitize_cwd(outside.resolve())
+    pdir.mkdir(parents=True, exist_ok=True)
+    pointer = pdir / "bridge-pointer.json"
+    pointer.write_text(
+        json.dumps(
+            {
+                "sessionId": "session_x",
+                "environmentId": "env_x",
+                "source": "standalone",
+                "pid": 81750,
+                "procStart": "2590192",
+            }
+        )
+    )
+    _age(pointer, 30)
+    runner._prune_one_pointer(config.projects_root / "linked", _prune_cutoff())
+    assert pointer.exists()  # escaped projects_root -> left intact
+
+
 def test_prune_noop_without_pointer(runner_config):
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
