@@ -186,6 +186,35 @@ async def test_forget_drops_persisted_only_record(runner_config, monkeypatch):
     assert inst.instance_id not in runner._persisted
 
 
+async def test_forget_clears_pointer_with_relative_projects_root(runner_config, monkeypatch):
+    # Greptile #868 P1: with a RELATIVE projects_root, forget must resolve to the bridge's
+    # real (absolute) cwd so the pointer directory matches — otherwise the stale pointer
+    # survives and the next launch reattaches it. Fails without the .resolve() in forget().
+    config, claude_json = runner_config
+    monkeypatch.chdir(config.projects_root.parent)
+    rel_config = config.model_copy(update={"projects_root": Path(config.projects_root.name)})
+    runner = SessionRunner(rel_config, claude_json=claude_json)
+    runner._persisted = {"iid": {"instance_id": "iid", "project_name": "alpha"}}
+
+    proj_abs = (rel_config.projects_root / "alpha").resolve()
+    pdir = runner._claude_projects_dir / pointers.sanitize_cwd(proj_abs)
+    pdir.mkdir(parents=True, exist_ok=True)
+    pointer = pdir / "bridge-pointer.json"
+    pointer.write_text(
+        json.dumps(
+            {
+                "sessionId": "session_x",
+                "environmentId": "env_x",
+                "source": "standalone",
+                "pid": 81750,
+                "procStart": "2590192",
+            }
+        )
+    )
+    await runner.forget("iid")
+    assert not pointer.exists()
+
+
 async def test_forget_without_project_name_skips_pointer_clear(runner_config):
     # A legacy/malformed persisted record with no "project_name" is still forgettable;
     # the pointer clear is simply skipped (no project path to resolve).

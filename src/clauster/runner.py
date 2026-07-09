@@ -2132,7 +2132,11 @@ class SessionRunner:
             # a live pointer is left in place (clear_pointer guards it), and a filesystem
             # hiccup is logged, not raised — the record is already dropped either way.
             if project_name is not None and is_valid_project_name(project_name):
-                project_path = self._config.projects_root / project_name
+                # Resolve to the absolute path the bridge actually ran in: the CLI keys the
+                # pointer directory off the process's real (absolute) cwd, so a *relative*
+                # projects_root would otherwise sanitize to the wrong directory and silently
+                # miss the pointer (Greptile #868 P1).
+                project_path = (self._config.projects_root / project_name).resolve()
                 try:
                     await asyncio.to_thread(
                         pointers.clear_pointer,

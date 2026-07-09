@@ -131,7 +131,7 @@ def test_forget_clears_bridge_pointer(runner_config, monkeypatch):
         client.delete(f"/api/instances/{instance_id}")  # stop -> resumable
 
         runner = client.app.state.runner
-        proj_path = runner._config.projects_root / "alpha"
+        proj_path = (runner._config.projects_root / "alpha").resolve()
         pdir = runner._claude_projects_dir / sanitize_cwd(proj_path)
         pdir.mkdir(parents=True, exist_ok=True)
         pointer = pdir / "bridge-pointer.json"
