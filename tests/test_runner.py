@@ -351,6 +351,180 @@ async def test_heal_tolerates_clear_error(runner_config, monkeypatch):
     await runner._clear_pointer_if_anchor_poisoned(config.projects_root / "alpha")  # no raise
 
 
+# ----- #867 L3: poisoned-reattach detection + heal --------------------------------
+
+
+class _FakeProc:
+    """Minimal subprocess.Popen stand-in for the startup-watch tests."""
+
+    def __init__(self, *, alive: bool = True, pid: int = 999999) -> None:
+        self._alive = alive
+        self.pid = pid
+        self.killed = False
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self._alive = False
+
+    def wait(self, timeout=None):
+        self._alive = False
+        return 0
+
+
+def test_apply_markers_poison_beats_running(runner_config):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.STARTING)
+    markers = bridge_log.BridgeMarkers(
+        environment_id="env_x", poll_loop_started=True, poison_reason="archived"
+    )
+    runner._apply_markers(inst, markers, _FakeProc(alive=True))
+    assert inst.status is InstanceStatus.ERROR  # poison surfaces, not a misleading RUNNING
+
+
+async def test_heal_poisoned_reattach_stops_and_clears(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    stopped: list = []
+    monkeypatch.setattr(runner, "_signal_stop", lambda pid, **_k: stopped.append(pid))
+    proc = _FakeProc(alive=False, pid=4242)  # already exited -> no wait
+    await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "archived")
+    assert stopped == [4242]
+    assert not pointer.exists()  # stale pointer cleared for a cold restart
+    assert "archived" in (inst.error_detail or "")
+
+
+async def test_heal_force_kills_stuck_bridge(runner_config, monkeypatch):
+    monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    _write_nonlive_pointer(runner, "alpha")
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)  # SIGINT ignored
+    proc = _FakeProc(alive=True)  # never exits gracefully
+    await runner._heal_poisoned_reattach(inst, proc, config.projects_root / "alpha", "deleted")
+    assert proc.killed  # force-killed so no idle orphan is left
+
+
+def test_await_ready_returns_poison_immediately(runner_config, tmp_path):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log = tmp_path / "b.log"
+    log.write_text(
+        "[bridge:work] Starting poll loop environmentId=env_01X\n"
+        '{"reason":"archived","subtype":"end_session"}\n'
+    )
+    assert runner._await_ready(log, _FakeProc(alive=True)).poison_reason == "archived"
+
+
+def test_await_ready_cold_start_skips_grace(runner_config, tmp_path):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log = tmp_path / "b.log"
+    log.write_text(
+        "[bridge:init] Created initial session session_01X\n"
+        "[bridge:work] Starting poll loop environmentId=env_01X\n"
+    )
+    markers = runner._await_ready(log, _FakeProc(alive=True))
+    assert markers.is_ready and markers.starter_session_id == "session_01X"
+    assert markers.poison_reason is None
+
+
+def test_await_ready_healthy_reattach_after_grace(runner_config, tmp_path, monkeypatch):
+    monkeypatch.setattr("clauster.runner._POISON_GRACE", 0.1)
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log = tmp_path / "b.log"
+    # reattach: poll loop, no "Created initial session", never poisoned -> grace elapses clean
+    log.write_text("[bridge:work] Starting poll loop environmentId=env_01X\n")
+    markers = runner._await_ready(log, _FakeProc(alive=True))
+    assert markers.is_ready and markers.poison_reason is None
+
+
+def test_await_ready_catches_poison_during_grace(runner_config, tmp_path, monkeypatch):
+    # Poison that appears mid-grace (not present at readiness) is still caught.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    ready = bridge_log.BridgeMarkers(environment_id="env_x", poll_loop_started=True)
+    poisoned = bridge_log.BridgeMarkers(
+        environment_id="env_x", poll_loop_started=True, poison_reason="archived"
+    )
+    reads = iter([ready, poisoned])
+    monkeypatch.setattr(runner, "_read_markers", lambda *_a: next(reads, poisoned))
+    assert (
+        runner._await_ready(tmp_path / "b.log", _FakeProc(alive=True)).poison_reason == "archived"
+    )
+
+
+def test_await_ready_proc_exit_during_grace_returns(runner_config, tmp_path, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    log = tmp_path / "b.log"
+    log.write_text("[bridge:work] Starting poll loop environmentId=env_01X\n")  # ready reattach
+    proc = _FakeProc(alive=True)
+    n = {"c": 0}
+
+    def _poll():  # alive for the readiness + first grace check, then exits
+        n["c"] += 1
+        return None if n["c"] <= 2 else 0
+
+    monkeypatch.setattr(proc, "poll", _poll)
+    assert runner._await_ready(log, proc).is_ready
+
+
+async def test_heal_kill_error_is_swallowed(runner_config, monkeypatch):
+    monkeypatch.setattr("clauster.runner._POISON_STOP_TIMEOUT", 0.05)
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    _write_nonlive_pointer(runner, "alpha")
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)
+
+    class _KillBoom(_FakeProc):
+        def kill(self):
+            raise OSError("already gone")
+
+    await runner._heal_poisoned_reattach(
+        inst, _KillBoom(alive=True), config.projects_root / "alpha", "archived"
+    )  # a kill error is logged, not raised
+
+
+async def test_heal_clear_error_is_logged(runner_config, monkeypatch):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    inst = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.ERROR)
+    monkeypatch.setattr(runner, "_signal_stop", lambda *a, **k: None)
+
+    def _boom(*_a, **_k):
+        raise OSError("io error")
+
+    monkeypatch.setattr("clauster.pointers.clear_pointer", _boom)
+    await runner._heal_poisoned_reattach(
+        inst, _FakeProc(alive=False), config.projects_root / "alpha", "deleted"
+    )  # clear error logged, not raised
+
+
+async def test_spawn_poison_marks_error_and_clears_pointer(runner_config, monkeypatch):
+    # End-to-end: a spawn whose reattach is poisoned surfaces ERROR and clears the pointer.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    pointer = _write_nonlive_pointer(runner, "alpha")
+    poison = bridge_log.BridgeMarkers(
+        environment_id="env_x", poll_loop_started=True, poison_reason="archived"
+    )
+    monkeypatch.setattr(runner, "_await_ready", lambda *a, **k: poison)
+    inst = await runner.spawn("alpha")
+    assert inst.status is InstanceStatus.ERROR
+    assert "archived" in (inst.error_detail or "")
+    assert not pointer.exists()  # heal cleared the stale pointer for a cold restart
+
+
 async def test_forget_refuses_running_bridge(runner_config, monkeypatch):
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _make_runner(runner_config)

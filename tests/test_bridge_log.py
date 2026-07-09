@@ -48,6 +48,36 @@ def test_empty_log_is_blank():
     assert m.is_ready is False
 
 
+def test_poison_reason_archived_detected():
+    # #867 L3: the server's end_session control request marks a reattached-but-gone anchor.
+    log = (
+        "[bridge:work] Starting poll loop environmentId=env_01X\n"
+        '[bridge:ws] sessionId=[REDACTED] <<< {"request":{"reason":"archived",'
+        '"subtype":"end_session"},"type":"control_request"}\n'
+    )
+    m = parse_bridge_markers(log)
+    assert m.poison_reason == "archived"
+
+
+def test_poison_reason_deleted_detected():
+    m = parse_bridge_markers('{"reason": "deleted", "subtype": "end_session"}')
+    assert m.poison_reason == "deleted"
+
+
+def test_poison_reason_detected_regardless_of_key_order():
+    # The CLI reordering the JSON keys must not hide the poison.
+    assert parse_bridge_markers('{"subtype":"end_session","reason":"archived"}').poison_reason == (
+        "archived"
+    )
+    # ...but an end_session with a benign reason (different object) is not poison.
+    log = '{"subtype":"end_session","reason":"user_stop"} {"reason":"archived","foo":1}'
+    assert parse_bridge_markers(log).poison_reason is None
+
+
+def test_no_poison_in_healthy_log():
+    assert parse_bridge_markers("[bridge:work] Starting poll loop env_01X\n").poison_reason is None
+
+
 def test_resume_session_from_unarchive_line():
     # A --continue resume reconnects to an existing session and never logs "Created
     # initial session"; it logs the session it resumed as "[remote-bridge] Unarchive
