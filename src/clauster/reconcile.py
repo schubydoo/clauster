@@ -206,9 +206,10 @@ def apply_plan(path: str, plan: Plan) -> str:
 
     Reuses :func:`clauster.config_writer.write_edits` (backup + ruamel round-trip +
     atomic replace + post-write re-validation) so reconcile shares the one write path.
-    Imported lazily to keep this module's import graph light (``config.py`` imports the
-    transforms above at load time). Returns the new config-file hash.
+    Imported lazily to break a cycle, not just for load speed: ``config.py`` imports this
+    module's transforms at load, and ``config_writer`` imports ``config`` — hoisting this to
+    the top would close ``config → reconcile → config_writer → config``. Returns the new hash.
     """
-    from .config_writer import write_edits
+    from .config_writer import write_edits  # deferred: avoids config→reconcile→config_writer
 
     return write_edits(path, plan.edits, removals=plan.removals)

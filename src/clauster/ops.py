@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
 from . import claude_cli, config_write_mcp, environments, procutil
@@ -552,13 +552,20 @@ def _atomic_replace_state(src_state: Path, state_dir: Path) -> int:
     return count
 
 
+class RestoreResult(TypedDict):
+    """The outcome of :func:`restore_backup`: how many state files, and the config path."""
+
+    state_files: int
+    config: str | None
+
+
 def restore_backup(
     backup: Path,
     *,
     state_dir: Path,
     config_out: Path | None = None,
     force: bool = False,
-) -> dict:
+) -> RestoreResult:
     """Restore state (and optionally config) from a backup.
 
     Extraction is hardened against path traversal / absolute paths / symlink escape
@@ -577,7 +584,7 @@ def restore_backup(
     if config_out is not None and config_out.exists() and not force:
         raise FileExistsError(f"{config_out} exists; pass force=True to overwrite")
 
-    restored = {"state_files": 0, "config": None}
+    restored: RestoreResult = {"state_files": 0, "config": None}
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         _safe_extract_tar(backup, tmp)
@@ -602,7 +609,14 @@ def restore_backup(
 # ----- migrate ----------------------------------------------------------
 
 
-def migrate_state(config: ClausterConfig) -> dict:
+class MigrateResult(TypedDict):
+    """The outcome of :func:`migrate_state`: the schema written and the instance count."""
+
+    schema_version: int
+    instances: int
+
+
+def migrate_state(config: ClausterConfig) -> MigrateResult:
     """Force state.json to the current schema, then re-save canonical.
 
     ``StateStore.load`` migrates (and ``.bak``s) older schemas on read; clauster.yml

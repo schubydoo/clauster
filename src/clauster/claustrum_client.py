@@ -193,7 +193,7 @@ class ProcessStream:
         )
 
     @staticmethod
-    def _decode(data: Any) -> bytes | None:
+    def _decode(data: object) -> bytes | None:
         if not isinstance(data, str):
             return None
         try:

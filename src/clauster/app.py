@@ -1023,7 +1023,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         try:
             version = await asyncio.to_thread(claude_cli.claude_version, config.claude.binary)
             claude_ok = True
-        except Exception:
+        except Exception as exc:
+            # Stay non-throwing and fail closed (claude_ok=False surfaces in the response),
+            # but leave a diagnostic line — the one probe in this handler that was silent.
+            logger.warning("healthz claude probe failed: %s", exc)
             version = None
             claude_ok = False
         # #838: claude_ok only confirms the binary is invokable, not that the account

@@ -107,7 +107,7 @@ preserved verbatim by the locked atomic replace.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from . import config_write as cw
 from .claude_json import locked_replace_json_file
@@ -134,11 +134,9 @@ OWNED_KEYS = frozenset(
 #: the module docstring's redaction decision).
 ENV_KEY = "env"
 
-Scope = Literal["user", "project", "local"]
-
 #: Scope precedence among the three scopes clauster manages, highest first
 #: (local overrides project overrides user) -- see module docstring.
-_SCOPE_PRECEDENCE: tuple[Scope, ...] = ("local", "project", "user")
+_SCOPE_PRECEDENCE: tuple[cw.Scope, ...] = ("local", "project", "user")
 
 
 class SettingsCarveError(cw.InvalidCandidateError):
@@ -359,12 +357,12 @@ def _compute_effective_settings(
     ``env``). Returns ``{key: {"value": ..., "source": "local"|"project"|"user"}}``
     for the union of keys across every scope that was read.
     """
-    by_scope: dict[Scope, dict[str, Any] | None] = {
+    by_scope: dict[cw.Scope, dict[str, Any] | None] = {
         "local": local_misc,
         "project": project_misc,
         "user": user_misc,
     }
-    layers: list[tuple[Scope, dict[str, Any]]] = []
+    layers: list[tuple[cw.Scope, dict[str, Any]]] = []
     for scope in _SCOPE_PRECEDENCE:
         misc = by_scope[scope]
         if misc is not None:
