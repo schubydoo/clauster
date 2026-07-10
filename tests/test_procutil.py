@@ -602,3 +602,51 @@ def test_bridge_env_overlay_blank_path_append_entries_ignored():
     # nothing — no PATH key is injected (an empty append must not clobber PATH).
     overlay = procutil.bridge_env_overlay(path_append=["", ""])
     assert "PATH" not in overlay
+
+
+class _FakeChild:
+    def __init__(self, pid):
+        self.pid = pid
+
+
+def test_descendant_pids_collects_children_recursive(monkeypatch):
+    # A managed bridge's worker sessions are its process descendants (#820); the
+    # ownership set is the union of every root's recursive children.
+    trees = {10: [11, 12], 20: [21]}
+
+    class FakeProc:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def children(self, recursive=False):
+            assert recursive is True
+            return [_FakeChild(p) for p in trees.get(self._pid, [])]
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.descendant_pids([10, 20]) == {11, 12, 21}
+
+
+def test_descendant_pids_excludes_roots():
+    # Roots themselves are never in the set — a session pid is always a descendant,
+    # never the bridge pid. (Own pid has no children of interest here.)
+    assert os.getpid() not in procutil.descendant_pids([os.getpid()])
+
+
+def test_descendant_pids_empty_roots_is_empty():
+    assert procutil.descendant_pids([]) == set()
+
+
+def test_descendant_pids_fails_closed_per_root(monkeypatch):
+    # A dead/absent/inaccessible root contributes nothing (its stale pid could be
+    # reused) rather than raising — the other roots still count.
+    class FakeProc:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def children(self, recursive=False):
+            if self._pid == 99:
+                raise psutil.NoSuchProcess(self._pid)
+            return [_FakeChild(self._pid + 1)]
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.descendant_pids([99, 30]) == {31}

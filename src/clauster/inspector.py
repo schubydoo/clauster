@@ -100,6 +100,7 @@ def reconcile(
     hosted_pids: dict[int, str] | None = None,
     hosted_cwds: dict[Path, str] | None = None,
     worktree_roots: dict[Path, str] | None = None,
+    owned_pids_by_cwd: dict[Path, set[int]] | None = None,
 ) -> list[WorkingSession]:
     """Attribute each working session to a managed bridge by resolved cwd.
 
@@ -109,6 +110,23 @@ def reconcile(
     join: a `claude --bg` session sharing a managed cwd must not read as the
     bridge's session (TRACKED = false liveness) nor as an unmanaged bridge
     (EXTERNAL phantom-deletes a stopped record) — it stays UNTRACKED.
+
+    ``owned_pids_by_cwd`` maps a resolved bridge cwd → the pids that bridge owns —
+    its own live process pid(s) plus their descendants — the ownership gate for the
+    exact-cwd join (#820). (A managed session's ``agents --json`` pid is a bridge
+    child, or for an in-process flag-form pty the bridge pid itself; the runner
+    unions both.) cwd alone over-matches: an external SSH/terminal
+    ``claude`` run by hand *in a managed bridge's directory* shares that cwd and
+    would be folded into the bridge's tracked sessions, hiding its EXTERNAL status.
+    When a cwd IS in the map, a session there is TRACKED only if its pid is owned;
+    an unowned pid falls through to EXTERNAL. A cwd **absent** from the map is not
+    gated (cwd-only) — that covers a bridge with *no resolvable pid yet* (a STARTING
+    pty pre-sidecar), so its auto-created initial session still attributes (the #713
+    window). A STARTING *standard* bridge sets its pid at spawn, so it IS keyed and
+    gated — but its initial session's worker is already a live child by the time
+    ``agents --json`` reports it, so it attributes as owned. ``None`` disables the
+    gate entirely (legacy); the runner always passes the map, keyed
+    only for bridges with a resolvable pid, so production is gated where it can be.
 
     ``worktree_roots`` maps a *worktree-spawn* bridge's resolved project root →
     instance id. ``claude remote-control --spawn worktree`` runs each session in a
@@ -138,6 +156,14 @@ def reconcile(
     hosted_by_cwd = {
         p.resolve(): hid for p, hid in (hosted_cwds if hosted_cwds is not None else {}).items()
     }
+    # `is None` sentinel: None disables the ownership gate (legacy/cwd-only); a
+    # (possibly empty) dict enables it. A cwd present here is gated on pid ownership;
+    # a cwd absent falls back to cwd-only (a STARTING bridge with no known pid, #713).
+    owned_by_cwd = (
+        None
+        if owned_pids_by_cwd is None
+        else {p.resolve(): pids for p, pids in owned_pids_by_cwd.items()}
+    )
     # Match the `.claude/worktrees` subtree of each worktree-spawn root, most-specific
     # (deepest) first: a session under a nested worktree project must attribute to the
     # inner bridge, not an ancestor project that contains it.
@@ -161,9 +187,15 @@ def reconcile(
         cwd = s.cwd.resolve()
         inst_id = resolved.get(cwd)
         if inst_id is not None:
-            s.parent_instance = inst_id
-            s.attribution = Attribution.TRACKED
-            continue
+            owned_here = None if owned_by_cwd is None else owned_by_cwd.get(cwd)
+            # owned_here None -> gate off for this cwd (legacy, or STARTING bridge with
+            # no known pid): attribute on cwd alone. A (possibly empty) set -> the bridge
+            # here has a known pid, so require the session's worker to be one it owns;
+            # an unowned pid (external `claude` sharing the cwd) falls through to EXTERNAL.
+            if owned_here is None or s.pid in owned_here:
+                s.parent_instance = inst_id
+                s.attribution = Attribution.TRACKED
+                continue
         wt_id = next((iid for wt_dir, iid in worktree_dirs if cwd.is_relative_to(wt_dir)), None)
         if wt_id is not None:
             s.parent_instance = wt_id

@@ -2830,8 +2830,43 @@ class SessionRunner:
                     proj = discovered.get(inst.project)
                     if proj is not None:
                         hosted_cwds[Path(proj.path)] = hid
+        # Ownership gate for the exact-cwd join (#820): an external SSH/terminal
+        # `claude` sharing a managed bridge's cwd must stay EXTERNAL, not fold into the
+        # bridge's tracked sessions. A managed session's worker pid descends from its
+        # bridge (or pty keeper) process, so a bridge's own live pid(s) plus their
+        # descendants are the authoritative "we spawned this" set cwd containment can't
+        # give. Same live/STARTING + discovered filter as `managed`, keeping only bridges
+        # with at least one resolvable pid: a bridge with no known pid yet (STARTING pty,
+        # pre-sidecar) is left unkeyed → cwd-only, preserving the #713 startup-window
+        # attribution. Never root ownership at a dead instance's stale pid (it could be
+        # reused). Roots are UNIONED per cwd, not last-wins: a standard and a pty bridge
+        # (or N pty) can be co-located at one project root (mode-independence note above),
+        # each owning distinct worker pids — last-wins would flip the other's genuine
+        # children to EXTERNAL.
+        roots_by_cwd: dict[Path, tuple[int, ...]] = {}
+        for i in self._instances.values():
+            if i.project in discovered and (
+                i.project in live_projects or i.status is InstanceStatus.STARTING
+            ):
+                roots = tuple(p for p in (i.bridge_pid, i.keeper_pid) if p is not None)
+                if roots:
+                    cwd = Path(discovered[i.project].path)
+                    roots_by_cwd[cwd] = roots_by_cwd.get(cwd, ()) + roots
+        # The roots THEMSELVES are owned, not just their descendants: a single-session
+        # flag-form pty (`claude --remote-control`) can report its `agents --json` pid as
+        # the bridge process itself (in-process, no separate worker), and a reattached pty
+        # with a rotated/missing keeper sidecar contributes only bridge_pid. Unioning the
+        # roots makes the gate correct under both the worker-is-a-child and in-process
+        # models; it can't false-positive, as an external session's pid never equals a
+        # live managed bridge's pid. psutil walk → to_thread.
+        owned_pids_by_cwd = await asyncio.to_thread(
+            lambda: {
+                cwd: procutil.descendant_pids(roots) | set(roots)
+                for cwd, roots in roots_by_cwd.items()
+            }
+        )
         self._sessions = inspector.reconcile(
-            sessions, managed, hosted_pids, hosted_cwds, worktree_roots
+            sessions, managed, hosted_pids, hosted_cwds, worktree_roots, owned_pids_by_cwd
         )
         # Drop a non-live managed instance whose project has a live EXTERNAL session:
         # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record

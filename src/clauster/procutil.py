@@ -22,7 +22,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import psutil
 
@@ -312,6 +312,29 @@ def force_kill_tree(pid: int) -> None:
             p.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
+
+
+def descendant_pids(root_pids: Iterable[int]) -> set[int]:
+    """PIDs of all live descendants of ``root_pids`` (the ownership set, #820).
+
+    A managed ``claude remote-control`` bridge is the parent process of every
+    working session it spawns — ``agents --json`` reports each session's *worker*
+    pid, whose ancestry leads back to the bridge pid. An external SSH/terminal
+    ``claude`` sharing a bridge's cwd does **not** descend from any managed bridge,
+    so membership in this set is the authoritative "Clauster owns this session"
+    signal that cwd containment alone can't give.
+
+    Fails closed per root: a dead/absent/inaccessible root contributes nothing
+    (its stale pid could be reused) rather than raising. Roots themselves are not
+    included — a session pid is always a descendant, never the bridge pid.
+    """
+    out: set[int] = set()
+    for pid in root_pids:
+        try:
+            out.update(child.pid for child in psutil.Process(pid).children(recursive=True))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return out
 
 
 def reap_if_exited(pid: int) -> None:
