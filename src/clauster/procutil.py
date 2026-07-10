@@ -326,10 +326,12 @@ def owned_pids(root_pids: Iterable[int]) -> set[int] | None:
 
     Returns ``None`` when ownership is **indeterminate**: a root raised ``AccessDenied``
     so its child set can't be read (hardened ``/proc``, ``hidepid``, a restricted
-    container). The caller must NOT gate that cwd on this result — treating an
-    unreadable tree as "owns nothing" would flip a genuine child session to EXTERNAL.
-    A dead/absent root (``NoSuchProcess``/``ZombieProcess``) is NOT indeterminate: it
-    has no live children, so it only contributes its own (soon-irrelevant) pid.
+    container). This is distinct from an empty/known set — the caller fails CLOSED on
+    it (marks the cwd's sessions EXTERNAL) rather than falling back to the cwd-only
+    join, so an unverifiable host can't silently re-open the #820 hole (a hand-run
+    session reading as managed). A dead/absent root (``NoSuchProcess``/``ZombieProcess``)
+    is NOT indeterminate: it has no live children, so it only contributes its own
+    (soon-irrelevant) pid.
     """
     roots = tuple(root_pids)
     owned: set[int] = set(roots)  # the roots themselves are owned

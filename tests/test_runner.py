@@ -2026,11 +2026,13 @@ async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config,
             p.wait(timeout=5)
 
 
-async def test_poll_indeterminate_ownership_falls_back_to_cwd_only(runner_config, monkeypatch):
-    # #820 review (Greptile P2): on a host where the process tree can't be READ
+async def test_poll_indeterminate_ownership_fails_closed_external(runner_config, monkeypatch):
+    # #820 review (Greptile P1): on a host where the process tree can't be READ
     # (AccessDenied — hidepid/hardened /proc/restricted container), owned_pids returns
-    # None. The runner must drop that cwd from the map so reconcile stays cwd-only — a
-    # genuine bridge child must NOT flip to EXTERNAL just because its ancestry is hidden.
+    # None. That INDETERMINATE state must stay distinct from "no pid known yet" (which is
+    # cwd-only): the runner keys the cwd with an empty set so reconcile fails CLOSED —
+    # sessions there read EXTERNAL, never silently re-enabling the cwd-only join #820
+    # removed. (A pid-less STARTING pty is still cwd-only; see the STARTING test above.)
     config = runner_config[0]
     runner = _make_runner(runner_config)
     proc = subprocess.Popen(
@@ -2047,18 +2049,18 @@ async def test_poll_indeterminate_ownership_falls_back_to_cwd_only(runner_config
         )
         runner._instances[fake.instance_id] = fake
         sess = WorkingSession(
-            pid=54321,  # a child whose ancestry the walk can't read
+            pid=54321,  # ancestry the walk can't read → can't prove ownership
             cwd=config.projects_root / "alpha",
             kind="interactive",
             started_at=1,
-            local_uuid="u-child",
+            local_uuid="u-unverifiable",
         )
         monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
         monkeypatch.setattr(procutil, "owned_pids", lambda roots: None)  # AccessDenied
         await runner.poll_once()
-        tracked = runner.tracked_sessions_by_instance()
-        assert [s.local_uuid for s in tracked.get("alpha", [])] == ["u-child"]
-        assert "alpha" not in runner.external_sessions_by_project()
+        assert runner.tracked_sessions_by_instance().get("alpha", []) == []
+        ext = runner.external_sessions_by_project().get("alpha", [])
+        assert [s.local_uuid for s in ext] == ["u-unverifiable"]
     finally:
         proc.terminate()
         proc.wait(timeout=5)

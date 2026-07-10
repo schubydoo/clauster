@@ -2857,14 +2857,16 @@ class SessionRunner:
         # can report its `agents --json` pid as the bridge process itself (in-process),
         # and a reattached pty with a rotated/missing keeper contributes only bridge_pid.
         # It returns None when a root's process tree can't be READ (AccessDenied: hardened
-        # /proc, hidepid, restricted container); such a cwd is dropped from the map so
-        # reconcile leaves it cwd-only — gating on an unreadable tree would flip a genuine
-        # child session to EXTERNAL. psutil walk → to_thread.
+        # /proc, hidepid, restricted container). That is INDETERMINATE, kept distinct from
+        # "no pid known yet" (a STARTING pty pre-sidecar, absent from roots_by_cwd →
+        # cwd-only): a keyed cwd whose ownership is indeterminate maps to an empty set, so
+        # reconcile fails CLOSED — sessions there read EXTERNAL rather than silently
+        # re-enabling the cwd-only join that #820 removed (an unverifiable host must not
+        # let a hand-run session read as managed). psutil walk → to_thread.
         owned_pids_by_cwd = await asyncio.to_thread(
             lambda: {
-                cwd: owned
+                cwd: (owned if (owned := procutil.owned_pids(roots)) is not None else set())
                 for cwd, roots in roots_by_cwd.items()
-                if (owned := procutil.owned_pids(roots)) is not None
             }
         )
         self._sessions = inspector.reconcile(

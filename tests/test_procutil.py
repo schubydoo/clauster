@@ -628,8 +628,9 @@ def test_owned_pids_collects_roots_and_children_recursive(monkeypatch):
 
 
 def test_owned_pids_includes_roots():
-    # The current process is a root with no relevant children → the set is just itself.
-    assert procutil.owned_pids([os.getpid()]) == {os.getpid()}
+    # A root is always in its own owned set (can't assert equality — under xdist the
+    # test process has live children of its own).
+    assert os.getpid() in procutil.owned_pids([os.getpid()])
 
 
 def test_owned_pids_empty_roots_is_empty():
