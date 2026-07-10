@@ -314,34 +314,33 @@ def force_kill_tree(pid: int) -> None:
             pass
 
 
-def owned_pids(root_pids: Iterable[int]) -> set[int] | None:
-    """PIDs a set of managed bridge roots owns — the roots plus their descendants (#820).
+def owned_pids(root_pids: Iterable[int]) -> set[int]:
+    """PIDs a set of managed bridge roots owns — the roots plus their readable descendants.
 
     A managed ``claude remote-control`` bridge is the parent process of every working
     session it spawns — ``agents --json`` reports each session's pid as a child of the
     bridge, or (an in-process flag-form pty) the bridge pid itself. Membership in this
-    set is the authoritative "Clauster owns this session" signal that cwd containment
-    alone can't give: an external SSH/terminal ``claude`` sharing a bridge's cwd
-    descends from no managed root, so it isn't here.
+    set is the authoritative "Clauster owns this session" signal (#820) that cwd
+    containment alone can't give: an external SSH/terminal ``claude`` sharing a bridge's
+    cwd descends from no managed root, so it isn't here.
 
-    Returns ``None`` when ownership is **indeterminate**: a root raised ``AccessDenied``
-    so its child set can't be read (hardened ``/proc``, ``hidepid``, a restricted
-    container). This is distinct from an empty/known set — the caller fails CLOSED on
-    it (marks the cwd's sessions EXTERNAL) rather than falling back to the cwd-only
-    join, so an unverifiable host can't silently re-open the #820 hole (a hand-run
-    session reading as managed). A dead/absent root (``NoSuchProcess``/``ZombieProcess``)
-    is NOT indeterminate: it has no live children, so it only contributes its own
-    (soon-irrelevant) pid.
+    **Per-root, fail closed.** A root whose children can't be enumerated —
+    ``AccessDenied`` (hardened ``/proc``, ``hidepid``, a restricted container) — or that
+    is dead/absent (``NoSuchProcess``/``ZombieProcess``) contributes only its own pid,
+    never any descendants. So a bridge whose tree we can't read owns (as far as we can
+    prove) just its own process, and a child session it spawned reads EXTERNAL rather
+    than being trusted on cwd alone. Crucially this is **per root**: an unreadable root
+    never discards a *co-located* readable root's descendants — the roots for one cwd are
+    walked independently and unioned, so one bridge's inaccessibility can't flip another
+    co-located bridge's genuine children to EXTERNAL.
     """
     roots = tuple(root_pids)
     owned: set[int] = set(roots)  # the roots themselves are owned
     for pid in roots:
         try:
             owned.update(child.pid for child in psutil.Process(pid).children(recursive=True))
-        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
-        except psutil.AccessDenied:
-            return None
     return owned
 
 

@@ -653,10 +653,10 @@ def test_owned_pids_dead_root_contributes_only_itself(monkeypatch):
     assert procutil.owned_pids([99, 30]) == {99, 30, 31}
 
 
-def test_owned_pids_access_denied_is_indeterminate(monkeypatch):
+def test_owned_pids_denied_root_contributes_only_itself(monkeypatch):
     # A root whose child tree can't be READ (AccessDenied: hidepid/hardened /proc)
-    # makes ownership INDETERMINATE → None, so the caller leaves that cwd cwd-only
-    # instead of flipping a genuine child session to EXTERNAL.
+    # contributes only its own pid, never descendants — so a child session it spawned
+    # reads EXTERNAL (fail closed) rather than being trusted on cwd alone.
     class FakeProc:
         def __init__(self, pid):
             self._pid = pid
@@ -665,4 +665,21 @@ def test_owned_pids_access_denied_is_indeterminate(monkeypatch):
             raise psutil.AccessDenied(self._pid)
 
     monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
-    assert procutil.owned_pids([42]) is None
+    assert procutil.owned_pids([42]) == {42}
+
+
+def test_owned_pids_denied_root_does_not_drop_co_located_readable_root(monkeypatch):
+    # Per-root: one root's AccessDenied must NOT discard a co-located readable root's
+    # descendants. Root 10 is readable (child 11); root 20 is denied → the union keeps
+    # {10, 11, 20}, so bridge 10's genuine child stays owned even though 20 is opaque.
+    class FakeProc:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def children(self, recursive=False):
+            if self._pid == 20:
+                raise psutil.AccessDenied(self._pid)
+            return [_FakeChild(11)]
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.owned_pids([10, 20]) == {10, 11, 20}

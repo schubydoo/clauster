@@ -2852,22 +2852,19 @@ class SessionRunner:
                 if roots:
                     cwd = Path(discovered[i.project].path)
                     roots_by_cwd[cwd] = roots_by_cwd.get(cwd, ()) + roots
-        # `owned_pids` returns the roots plus their descendants — the roots themselves
-        # are owned because a single-session flag-form pty (`claude --remote-control`)
-        # can report its `agents --json` pid as the bridge process itself (in-process),
-        # and a reattached pty with a rotated/missing keeper contributes only bridge_pid.
-        # It returns None when a root's process tree can't be READ (AccessDenied: hardened
-        # /proc, hidepid, restricted container). That is INDETERMINATE, kept distinct from
-        # "no pid known yet" (a STARTING pty pre-sidecar, absent from roots_by_cwd →
-        # cwd-only): a keyed cwd whose ownership is indeterminate maps to an empty set, so
-        # reconcile fails CLOSED — sessions there read EXTERNAL rather than silently
-        # re-enabling the cwd-only join that #820 removed (an unverifiable host must not
-        # let a hand-run session read as managed). psutil walk → to_thread.
+        # `owned_pids` returns the roots plus their readable descendants — the roots
+        # themselves are owned because a single-session flag-form pty
+        # (`claude --remote-control`) can report its `agents --json` pid as the bridge
+        # process itself (in-process), and a reattached pty with a rotated/missing keeper
+        # contributes only bridge_pid. A root whose tree can't be READ (AccessDenied:
+        # hardened /proc, hidepid, restricted container) contributes only its own pid, so
+        # a keyed cwd always gates: a session that isn't provably owned reads EXTERNAL,
+        # never silently re-enabling the cwd-only join #820 removed. The gate stays on
+        # for a cwd with any known pid; only a bridge with no resolvable pid yet (STARTING
+        # pty pre-sidecar) is absent from roots_by_cwd → cwd-only (#713 window). psutil
+        # walk → to_thread.
         owned_pids_by_cwd = await asyncio.to_thread(
-            lambda: {
-                cwd: (owned if (owned := procutil.owned_pids(roots)) is not None else set())
-                for cwd, roots in roots_by_cwd.items()
-            }
+            lambda: {cwd: procutil.owned_pids(roots) for cwd, roots in roots_by_cwd.items()}
         )
         self._sessions = inspector.reconcile(
             sessions, managed, hosted_pids, hosted_cwds, worktree_roots, owned_pids_by_cwd

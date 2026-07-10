@@ -2028,11 +2028,10 @@ async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config,
 
 async def test_poll_indeterminate_ownership_fails_closed_external(runner_config, monkeypatch):
     # #820 review (Greptile P1): on a host where the process tree can't be READ
-    # (AccessDenied — hidepid/hardened /proc/restricted container), owned_pids returns
-    # None. That INDETERMINATE state must stay distinct from "no pid known yet" (which is
-    # cwd-only): the runner keys the cwd with an empty set so reconcile fails CLOSED —
-    # sessions there read EXTERNAL, never silently re-enabling the cwd-only join #820
-    # removed. (A pid-less STARTING pty is still cwd-only; see the STARTING test above.)
+    # (AccessDenied — hidepid/hardened /proc/restricted container), owned_pids contributes
+    # only the root pid, not the children. A keyed cwd still gates, so a child session the
+    # walk can't prove is owned reads EXTERNAL — fail closed, never silently re-enabling
+    # the cwd-only join #820 removed. (A pid-less STARTING pty is still cwd-only, above.)
     config = runner_config[0]
     runner = _make_runner(runner_config)
     proc = subprocess.Popen(
@@ -2049,14 +2048,15 @@ async def test_poll_indeterminate_ownership_fails_closed_external(runner_config,
         )
         runner._instances[fake.instance_id] = fake
         sess = WorkingSession(
-            pid=54321,  # ancestry the walk can't read → can't prove ownership
+            pid=54321,  # a child whose ancestry the walk can't read → unprovable
             cwd=config.projects_root / "alpha",
             kind="interactive",
             started_at=1,
             local_uuid="u-unverifiable",
         )
         monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
-        monkeypatch.setattr(procutil, "owned_pids", lambda roots: None)  # AccessDenied
+        # AccessDenied on the tree → only the root pid is owned, not the child.
+        monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
         await runner.poll_once()
         assert runner.tracked_sessions_by_instance().get("alpha", []) == []
         ext = runner.external_sessions_by_project().get("alpha", [])
