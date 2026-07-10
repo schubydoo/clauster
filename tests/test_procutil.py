@@ -609,9 +609,10 @@ class _FakeChild:
         self.pid = pid
 
 
-def test_descendant_pids_collects_children_recursive(monkeypatch):
-    # A managed bridge's worker sessions are its process descendants (#820); the
-    # ownership set is the union of every root's recursive children.
+def test_owned_pids_collects_roots_and_children_recursive(monkeypatch):
+    # The ownership set (#820) is every root PLUS the union of each root's recursive
+    # children — the roots are included so an in-process pty (session pid == bridge
+    # pid) still reads as owned.
     trees = {10: [11, 12], 20: [21]}
 
     class FakeProc:
@@ -623,22 +624,21 @@ def test_descendant_pids_collects_children_recursive(monkeypatch):
             return [_FakeChild(p) for p in trees.get(self._pid, [])]
 
     monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
-    assert procutil.descendant_pids([10, 20]) == {11, 12, 21}
+    assert procutil.owned_pids([10, 20]) == {10, 11, 12, 20, 21}
 
 
-def test_descendant_pids_excludes_roots():
-    # Roots themselves are never in the set — a session pid is always a descendant,
-    # never the bridge pid. (Own pid has no children of interest here.)
-    assert os.getpid() not in procutil.descendant_pids([os.getpid()])
+def test_owned_pids_includes_roots():
+    # The current process is a root with no relevant children → the set is just itself.
+    assert procutil.owned_pids([os.getpid()]) == {os.getpid()}
 
 
-def test_descendant_pids_empty_roots_is_empty():
-    assert procutil.descendant_pids([]) == set()
+def test_owned_pids_empty_roots_is_empty():
+    assert procutil.owned_pids([]) == set()
 
 
-def test_descendant_pids_fails_closed_per_root(monkeypatch):
-    # A dead/absent/inaccessible root contributes nothing (its stale pid could be
-    # reused) rather than raising — the other roots still count.
+def test_owned_pids_dead_root_contributes_only_itself(monkeypatch):
+    # A dead/absent root (NoSuchProcess/Zombie) is not indeterminate: it has no live
+    # children, so it only contributes its own pid — the other roots still expand.
     class FakeProc:
         def __init__(self, pid):
             self._pid = pid
@@ -649,4 +649,19 @@ def test_descendant_pids_fails_closed_per_root(monkeypatch):
             return [_FakeChild(self._pid + 1)]
 
     monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
-    assert procutil.descendant_pids([99, 30]) == {31}
+    assert procutil.owned_pids([99, 30]) == {99, 30, 31}
+
+
+def test_owned_pids_access_denied_is_indeterminate(monkeypatch):
+    # A root whose child tree can't be READ (AccessDenied: hidepid/hardened /proc)
+    # makes ownership INDETERMINATE → None, so the caller leaves that cwd cwd-only
+    # instead of flipping a genuine child session to EXTERNAL.
+    class FakeProc:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def children(self, recursive=False):
+            raise psutil.AccessDenied(self._pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.owned_pids([42]) is None

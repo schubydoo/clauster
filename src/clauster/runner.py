@@ -2852,17 +2852,19 @@ class SessionRunner:
                 if roots:
                     cwd = Path(discovered[i.project].path)
                     roots_by_cwd[cwd] = roots_by_cwd.get(cwd, ()) + roots
-        # The roots THEMSELVES are owned, not just their descendants: a single-session
-        # flag-form pty (`claude --remote-control`) can report its `agents --json` pid as
-        # the bridge process itself (in-process, no separate worker), and a reattached pty
-        # with a rotated/missing keeper sidecar contributes only bridge_pid. Unioning the
-        # roots makes the gate correct under both the worker-is-a-child and in-process
-        # models; it can't false-positive, as an external session's pid never equals a
-        # live managed bridge's pid. psutil walk → to_thread.
+        # `owned_pids` returns the roots plus their descendants — the roots themselves
+        # are owned because a single-session flag-form pty (`claude --remote-control`)
+        # can report its `agents --json` pid as the bridge process itself (in-process),
+        # and a reattached pty with a rotated/missing keeper contributes only bridge_pid.
+        # It returns None when a root's process tree can't be READ (AccessDenied: hardened
+        # /proc, hidepid, restricted container); such a cwd is dropped from the map so
+        # reconcile leaves it cwd-only — gating on an unreadable tree would flip a genuine
+        # child session to EXTERNAL. psutil walk → to_thread.
         owned_pids_by_cwd = await asyncio.to_thread(
             lambda: {
-                cwd: procutil.descendant_pids(roots) | set(roots)
+                cwd: owned
                 for cwd, roots in roots_by_cwd.items()
+                if (owned := procutil.owned_pids(roots)) is not None
             }
         )
         self._sessions = inspector.reconcile(

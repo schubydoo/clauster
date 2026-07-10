@@ -314,27 +314,33 @@ def force_kill_tree(pid: int) -> None:
             pass
 
 
-def descendant_pids(root_pids: Iterable[int]) -> set[int]:
-    """PIDs of all live descendants of ``root_pids`` (the ownership set, #820).
+def owned_pids(root_pids: Iterable[int]) -> set[int] | None:
+    """PIDs a set of managed bridge roots owns — the roots plus their descendants (#820).
 
-    A managed ``claude remote-control`` bridge is the parent process of every
-    working session it spawns — ``agents --json`` reports each session's *worker*
-    pid, whose ancestry leads back to the bridge pid. An external SSH/terminal
-    ``claude`` sharing a bridge's cwd does **not** descend from any managed bridge,
-    so membership in this set is the authoritative "Clauster owns this session"
-    signal that cwd containment alone can't give.
+    A managed ``claude remote-control`` bridge is the parent process of every working
+    session it spawns — ``agents --json`` reports each session's pid as a child of the
+    bridge, or (an in-process flag-form pty) the bridge pid itself. Membership in this
+    set is the authoritative "Clauster owns this session" signal that cwd containment
+    alone can't give: an external SSH/terminal ``claude`` sharing a bridge's cwd
+    descends from no managed root, so it isn't here.
 
-    Fails closed per root: a dead/absent/inaccessible root contributes nothing
-    (its stale pid could be reused) rather than raising. Roots themselves are not
-    included — a session pid is always a descendant, never the bridge pid.
+    Returns ``None`` when ownership is **indeterminate**: a root raised ``AccessDenied``
+    so its child set can't be read (hardened ``/proc``, ``hidepid``, a restricted
+    container). The caller must NOT gate that cwd on this result — treating an
+    unreadable tree as "owns nothing" would flip a genuine child session to EXTERNAL.
+    A dead/absent root (``NoSuchProcess``/``ZombieProcess``) is NOT indeterminate: it
+    has no live children, so it only contributes its own (soon-irrelevant) pid.
     """
-    out: set[int] = set()
-    for pid in root_pids:
+    roots = tuple(root_pids)
+    owned: set[int] = set(roots)  # the roots themselves are owned
+    for pid in roots:
         try:
-            out.update(child.pid for child in psutil.Process(pid).children(recursive=True))
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            owned.update(child.pid for child in psutil.Process(pid).children(recursive=True))
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
-    return out
+        except psutil.AccessDenied:
+            return None
+    return owned
 
 
 def reap_if_exited(pid: int) -> None:
