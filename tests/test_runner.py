@@ -1875,11 +1875,192 @@ async def test_poll_keeps_live_bridge_managed_despite_nonrunning_status(
             local_uuid="u",
         )
         monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+        # The session's worker pid descends from the (live) bridge process — the #820
+        # ownership signal. Stub the psutil walk so pid 999 reads as bridge-owned;
+        # assert the runner roots ownership at the bridge's live pid.
+        monkeypatch.setattr(
+            procutil, "owned_pids", lambda roots: {999} if proc.pid in set(roots) else set()
+        )
         await runner.poll_once()
         # Live bridge: NOT phantom-deleted.
         assert runner.get_instance_for_project("alpha") is not None
         # the session at its cwd is managed (TRACKED), so it is not surfaced as external
         assert "alpha" not in runner.external_sessions_by_project()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+async def test_poll_external_session_at_live_bridge_cwd_stays_external(runner_config, monkeypatch):
+    # #820: an external SSH/terminal `claude` the operator ran by hand IN a live
+    # bridge's project dir shares that cwd. It must stay EXTERNAL (attribution keys on
+    # process ownership, not cwd) while the bridge's genuine child at the same cwd is
+    # TRACKED — the mis-attribution that folded a hand-run session under the bridge.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "claude", "remote-control"]
+    )
+    try:
+        fake = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.RUNNING,
+            resume_mode="pty",
+            bridge_pid=proc.pid,
+            bridge_proc_start=procutil.proc_create_time(proc.pid),
+        )
+        runner._instances[fake.instance_id] = fake
+        cwd = config.projects_root / "alpha"
+        owned = WorkingSession(
+            pid=1001, cwd=cwd, kind="interactive", started_at=1, local_uuid="u-owned"
+        )
+        external = WorkingSession(
+            pid=2002, cwd=cwd, kind="interactive", started_at=2, local_uuid="u-ext"
+        )
+        monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [owned, external])
+        # The bridge owns only its real child (1001); the hand-run SSH session (2002)
+        # descends from sshd/a shell, not the bridge.
+        monkeypatch.setattr(
+            procutil, "owned_pids", lambda roots: {1001} if proc.pid in set(roots) else set()
+        )
+        await runner.poll_once()
+        tracked = runner.tracked_sessions_by_instance()
+        assert [s.local_uuid for s in tracked.get("alpha", [])] == ["u-owned"]
+        assert "alpha" in runner.external_sessions_by_project()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+async def test_poll_inprocess_pty_session_owned_via_bridge_pid(runner_config, monkeypatch):
+    # #820 review (HIGH): a single-session flag-form pty (`claude --remote-control`) can
+    # report its `agents --json` pid as the BRIDGE process itself (in-process, no child
+    # worker), and a reattached pty with a rotated/missing keeper sidecar contributes
+    # only bridge_pid (keeper_pid None). owned_pids includes the roots themselves, so
+    # such a session (pid == bridge_pid) stays TRACKED, not flipped to EXTERNAL — even
+    # though the child walk is empty.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "claude", "remote-control"]
+    )
+    try:
+        fake = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.RUNNING,
+            resume_mode="pty",
+            bridge_pid=proc.pid,
+            bridge_proc_start=procutil.proc_create_time(proc.pid),
+        )  # keeper_pid stays None (rotated/missing sidecar)
+        runner._instances[fake.instance_id] = fake
+        sess = WorkingSession(
+            pid=proc.pid,  # the session IS the bridge process (in-process pty)
+            cwd=config.projects_root / "alpha",
+            kind="interactive",
+            started_at=1,
+            local_uuid="u-inproc",
+        )
+        monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+        # In-process: the bridge has no child worker (empty child walk), so ownership
+        # comes from the root pid itself — owned_pids returns exactly the roots.
+        monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+        await runner.poll_once()
+        tracked = runner.tracked_sessions_by_instance()
+        assert [s.local_uuid for s in tracked.get("alpha", [])] == ["u-inproc"]
+        assert "alpha" not in runner.external_sessions_by_project()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config, monkeypatch):
+    # #820 review: a standard and a pty bridge (or N pty) may be co-located at one
+    # project root — each owns distinct worker pids. The per-cwd ownership set must
+    # UNION every co-located bridge's roots, or last-wins would flip one bridge's
+    # genuine children to EXTERNAL. Both children stay TRACKED; a session owned by
+    # neither is EXTERNAL.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)", "claude", "remote-control"]
+        )
+        for _ in range(2)
+    ]
+    try:
+        for mode, p in zip(("pty", "pty"), procs, strict=True):
+            inst = RemoteControlInstance(
+                project="alpha",
+                label="alpha",
+                status=InstanceStatus.RUNNING,
+                resume_mode=mode,
+                bridge_pid=p.pid,
+                bridge_proc_start=procutil.proc_create_time(p.pid),
+            )
+            runner._instances[inst.instance_id] = inst
+        cwd = config.projects_root / "alpha"
+        sessions = [
+            WorkingSession(pid=1001, cwd=cwd, kind="interactive", started_at=1, local_uuid="a"),
+            WorkingSession(pid=2002, cwd=cwd, kind="interactive", started_at=2, local_uuid="b"),
+            WorkingSession(pid=9999, cwd=cwd, kind="interactive", started_at=3, local_uuid="ext"),
+        ]
+        monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: sessions)
+        # Each bridge owns one distinct child; the runner must union both roots for the
+        # shared cwd before the walk sees them.
+        owned_of = {procs[0].pid: 1001, procs[1].pid: 2002}
+        monkeypatch.setattr(
+            procutil,
+            "owned_pids",
+            lambda roots: {owned_of[r] for r in roots if r in owned_of},
+        )
+        await runner.poll_once()
+        tracked = runner.tracked_sessions_by_instance()
+        assert sorted(s.local_uuid for s in tracked.get("alpha", [])) == ["a", "b"]
+        ext = runner.external_sessions_by_project().get("alpha", [])
+        assert [s.local_uuid for s in ext] == ["ext"]
+    finally:
+        for p in procs:
+            p.terminate()
+            p.wait(timeout=5)
+
+
+async def test_poll_indeterminate_ownership_fails_closed_external(runner_config, monkeypatch):
+    # #820 review (Greptile P1): on a host where the process tree can't be READ
+    # (AccessDenied — hidepid/hardened /proc/restricted container), owned_pids contributes
+    # only the root pid, not the children. A keyed cwd still gates, so a child session the
+    # walk can't prove is owned reads EXTERNAL — fail closed, never silently re-enabling
+    # the cwd-only join #820 removed. (A pid-less STARTING pty is still cwd-only, above.)
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "claude", "remote-control"]
+    )
+    try:
+        fake = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.RUNNING,
+            resume_mode="pty",
+            bridge_pid=proc.pid,
+            bridge_proc_start=procutil.proc_create_time(proc.pid),
+        )
+        runner._instances[fake.instance_id] = fake
+        sess = WorkingSession(
+            pid=54321,  # a child whose ancestry the walk can't read → unprovable
+            cwd=config.projects_root / "alpha",
+            kind="interactive",
+            started_at=1,
+            local_uuid="u-unverifiable",
+        )
+        monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+        # AccessDenied on the tree → only the root pid is owned, not the child.
+        monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
+        await runner.poll_once()
+        assert runner.tracked_sessions_by_instance().get("alpha", []) == []
+        ext = runner.external_sessions_by_project().get("alpha", [])
+        assert [s.local_uuid for s in ext] == ["u-unverifiable"]
     finally:
         proc.terminate()
         proc.wait(timeout=5)

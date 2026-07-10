@@ -602,3 +602,84 @@ def test_bridge_env_overlay_blank_path_append_entries_ignored():
     # nothing — no PATH key is injected (an empty append must not clobber PATH).
     overlay = procutil.bridge_env_overlay(path_append=["", ""])
     assert "PATH" not in overlay
+
+
+class _FakeChild:
+    def __init__(self, pid):
+        self.pid = pid
+
+
+def test_owned_pids_collects_roots_and_children_recursive(monkeypatch):
+    # The ownership set (#820) is every root PLUS the union of each root's recursive
+    # children — the roots are included so an in-process pty (session pid == bridge
+    # pid) still reads as owned.
+    trees = {10: [11, 12], 20: [21]}
+
+    class FakeProc:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def children(self, recursive=False):
+            assert recursive is True
+            return [_FakeChild(p) for p in trees.get(self._pid, [])]
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.owned_pids([10, 20]) == {10, 11, 12, 20, 21}
+
+
+def test_owned_pids_includes_roots():
+    # A root is always in its own owned set (can't assert equality — under xdist the
+    # test process has live children of its own).
+    assert os.getpid() in procutil.owned_pids([os.getpid()])
+
+
+def test_owned_pids_empty_roots_is_empty():
+    assert procutil.owned_pids([]) == set()
+
+
+def test_owned_pids_dead_root_contributes_only_itself(monkeypatch):
+    # A dead/absent root (NoSuchProcess/Zombie) is not indeterminate: it has no live
+    # children, so it only contributes its own pid — the other roots still expand.
+    class FakeProc:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def children(self, recursive=False):
+            if self._pid == 99:
+                raise psutil.NoSuchProcess(self._pid)
+            return [_FakeChild(self._pid + 1)]
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.owned_pids([99, 30]) == {99, 30, 31}
+
+
+def test_owned_pids_denied_root_contributes_only_itself(monkeypatch):
+    # A root whose child tree can't be READ (AccessDenied: hidepid/hardened /proc)
+    # contributes only its own pid, never descendants — so a child session it spawned
+    # reads EXTERNAL (fail closed) rather than being trusted on cwd alone.
+    class FakeProc:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def children(self, recursive=False):
+            raise psutil.AccessDenied(self._pid)
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.owned_pids([42]) == {42}
+
+
+def test_owned_pids_denied_root_does_not_drop_co_located_readable_root(monkeypatch):
+    # Per-root: one root's AccessDenied must NOT discard a co-located readable root's
+    # descendants. Root 10 is readable (child 11); root 20 is denied → the union keeps
+    # {10, 11, 20}, so bridge 10's genuine child stays owned even though 20 is opaque.
+    class FakeProc:
+        def __init__(self, pid):
+            self._pid = pid
+
+        def children(self, recursive=False):
+            if self._pid == 20:
+                raise psutil.AccessDenied(self._pid)
+            return [_FakeChild(11)]
+
+    monkeypatch.setattr(procutil.psutil, "Process", FakeProc)
+    assert procutil.owned_pids([10, 20]) == {10, 11, 20}

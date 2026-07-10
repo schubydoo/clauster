@@ -280,3 +280,74 @@ def test_reconcile_hosted_args_default_to_external(tmp_path: Path):
     sessions = inspector.parse_agents_json(json.dumps([_agent(70, "/elsewhere", "u-e")]))
     result = inspector.reconcile(sessions, {})
     assert result[0].attribution is Attribution.EXTERNAL
+
+
+def test_reconcile_external_session_at_bridge_cwd_stays_external(tmp_path: Path):
+    # #820: an external SSH/terminal `claude` run by hand IN a managed bridge's dir
+    # shares the bridge's cwd. With the ownership gate, its unowned worker pid keeps it
+    # EXTERNAL instead of being folded into the bridge's tracked sessions — even though
+    # a genuine bridge child at the same cwd (owned pid) is TRACKED.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(
+        json.dumps([_agent(100, str(proj), "u-owned"), _agent(200, str(proj), "u-ext")])
+    )
+    result = inspector.reconcile(sessions, {proj: "alpha"}, owned_pids_by_cwd={proj: {100}})
+    by_uuid = {s.local_uuid: s for s in result}
+    assert by_uuid["u-owned"].attribution is Attribution.TRACKED
+    assert by_uuid["u-owned"].parent_instance == "alpha"
+    assert by_uuid["u-ext"].attribution is Attribution.EXTERNAL
+    assert by_uuid["u-ext"].parent_instance is None
+
+
+def test_reconcile_ownership_gate_none_is_cwd_only(tmp_path: Path):
+    # owned_pids=None disables the gate (legacy/back-compat) — a session at a managed
+    # cwd is TRACKED on cwd alone, exactly as before the gate existed.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(300, str(proj), "u-x")]))
+    result = inspector.reconcile(sessions, {proj: "alpha"})  # no owned_pids_by_cwd
+    assert result[0].attribution is Attribution.TRACKED
+
+
+def test_reconcile_ownership_gate_absent_cwd_is_cwd_only(tmp_path: Path):
+    # A managed cwd ABSENT from owned_pids_by_cwd is not gated — cwd-only. This is the
+    # STARTING-bridge window (#713): the bridge's pid isn't known yet, so its
+    # auto-created initial session must still attribute rather than flicker EXTERNAL.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(350, str(proj), "u-s")]))
+    # gate enabled (non-None), but keyed for a DIFFERENT cwd → alpha is ungated.
+    result = inspector.reconcile(
+        sessions, {proj: "alpha"}, owned_pids_by_cwd={tmp_path / "other": {1}}
+    )
+    assert result[0].attribution is Attribution.TRACKED
+
+
+def test_reconcile_ownership_gate_empty_set_marks_external(tmp_path: Path):
+    # A cwd present with an EMPTY owned set (bridge pid known, but it owns none of the
+    # observed pids) actively marks a session at that cwd EXTERNAL — distinct from an
+    # absent cwd (cwd-only). Guards against collapsing "known-but-owns-nothing" into
+    # "unknown → attribute anyway."
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(400, str(proj), "u-y")]))
+    result = inspector.reconcile(sessions, {proj: "alpha"}, owned_pids_by_cwd={proj: set()})
+    assert result[0].attribution is Attribution.EXTERNAL
+
+
+def test_reconcile_worktree_join_not_gated_by_ownership(tmp_path: Path):
+    # The ownership gate is scoped to the exact-cwd join (#820's precise case: an
+    # external session at the bridge's ROOT cwd). The worktree-containment join is
+    # deliberately left ungated — a session inside `<root>/.claude/worktrees/` is in
+    # bridge-owned territory, and worktree-worker ancestry isn't observed here — so a
+    # worktree session is TRACKED even when its pid isn't in owned_pids.
+    proj = tmp_path / "alpha"
+    wt = proj / ".claude" / "worktrees" / "bridge-cse_x"
+    wt.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(json.dumps([_agent(500, str(wt), "u-wt")]))
+    result = inspector.reconcile(
+        sessions, {proj: "alpha"}, worktree_roots={proj: "alpha"}, owned_pids_by_cwd={proj: set()}
+    )
+    assert result[0].attribution is Attribution.TRACKED
+    assert result[0].parent_instance == "alpha"
