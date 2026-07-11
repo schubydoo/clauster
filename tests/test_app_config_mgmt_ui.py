@@ -78,6 +78,27 @@ def test_permissions_and_hooks_surfaces_present_when_enabled(write_config):
     assert 'data-test="cm-hooks-text"' in html
 
 
+def test_settings_env_rows_editor_present_when_enabled(write_config):
+    # #765: the settings surface gains a friendly env key/value rows editor layered
+    # over the raw-JSON escape hatch. Assert the mode toggle, the row editor, and the
+    # raw textarea (still present as the escape hatch) are all wired.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-settings-mode-rows"' in html
+    assert 'data-test="cm-settings-mode-raw"' in html
+    assert 'data-test="cm-settings-rows"' in html
+    assert 'data-test="cm-settings-env-table"' in html
+    assert 'data-test="cm-settings-env-key"' in html
+    assert 'data-test="cm-settings-env-value"' in html
+    assert 'data-test="cm-settings-env-add"' in html
+    assert 'data-test="cm-settings-env-remove"' in html
+    # The raw JSON textarea stays as the escape hatch for model / misc keys.
+    assert 'data-test="cm-settings-text"' in html
+    # The friendly editor + its projection helpers are wired in the Alpine script.
+    assert "configMgmtSettingsMode(" in html
+    assert "_settingsEnvSerialized(" in html
+    assert 'const CONFIG_MASK = "********"' in html
+
+
 def test_subagents_surface_present_when_enabled(write_config):
     # Slice C adds the subagents list surface (list + per-agent editor + delete).
     html = _html(write_config, _ON)
