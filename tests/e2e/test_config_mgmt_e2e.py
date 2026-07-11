@@ -140,6 +140,34 @@ def test_config_mgmt_settings_env_rows_round_trip(
     assert "MY_VAR" in body and "hello" in body
 
 
+def test_config_mgmt_settings_env_duplicate_key_blocks_save(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Two env rows sharing a key warn and disable Save until resolved (#765).
+
+    Guards against a silent collapse: the last row would win on serialize, dropping the
+    earlier value — so Save must stay disabled while a duplicate exists.
+    """
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-settings"]')
+    browser.expect_visible('[data-test="cm-view-settings"]')
+
+    browser.click('[data-test="cm-settings-env-add"]')
+    browser.expect_visible('[data-test="cm-settings-env-key"]')
+    browser.click('[data-test="cm-settings-env-add"]')
+    browser.expect_count('[data-test="cm-settings-env-key"]', 2)
+    # Give both rows the same key (target each row's input by table row position).
+    tbl = '[data-test="cm-settings-env-table"] tbody'
+    key_in = '[data-test="cm-settings-env-key"]'
+    browser.fill(f"{tbl} tr:nth-of-type(1) {key_in}", "DUP")
+    browser.fill(f"{tbl} tr:nth-of-type(2) {key_in}", "DUP")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+
+    browser.expect_visible('[data-test="cm-settings-env-dupe"]')
+    browser.expect_disabled('[data-test="cm-save"]')
+
+
 def test_config_mgmt_settings_empty_env_not_dirty(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

@@ -1396,8 +1396,11 @@
         const s = this.configMgmt.settings;
         if (s.mode === mode) return;
         if (mode === "raw") {
-          // Materialize the rows into the raw text so the escape hatch shows current edits.
-          s.text = this._settingsEnvSerialized(); s.mode = "raw"; s.envError = ""; return;
+          // Materialize the rows into the raw text so the escape hatch shows current
+          // edits; keep the (already-valid) text if serialize can't run (null).
+          const ser = this._settingsEnvSerialized();
+          if (ser !== null) s.text = ser;
+          s.mode = "raw"; s.envError = ""; return;
         }
         // Entering rows: rebuild from the (possibly raw-edited) text; a non-object /
         // non-string-env shape can't be shown as rows, so stay in raw with a hint.
@@ -1451,8 +1454,13 @@
       _settingsEnvSerialized() {
         const s = this.configMgmt.settings;
         let obj;
-        try { obj = JSON.parse(s.text || "{}"); } catch (e) { obj = {}; }
-        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) obj = {};
+        // Fail closed: if the base text can't be read as a JSON object we cannot safely
+        // preserve the non-env keys (model / misc), so signal "can't serialize" (null)
+        // rather than rebuilding from {} and silently dropping them. In rows mode the
+        // text was proven parseable on entry, so this is defense-in-depth for the
+        // dirty-check + save callers.
+        try { obj = JSON.parse(s.text || "{}"); } catch (e) { return null; }
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
         const env = {};
         for (const row of s.envRows) {
           const k = (row.key || "").trim();
@@ -1483,7 +1491,8 @@
         const row = this.configMgmt.settings.envRows[idx];
         if (row && row.masked && val !== CONFIG_MASK) row.masked = false;
       },
-      // Non-blocking hint when two rows share a key (the last one wins on save).
+      // Duplicate env keys would collapse to one on save (last wins), silently losing a
+      // row — so this both warns AND blocks Save (see configMgmtCanSave) until resolved.
       configMgmtEnvRowsWarning() {
         const seen = new Set(), dupes = new Set();
         for (const row of this.configMgmt.settings.envRows) {
@@ -1492,7 +1501,7 @@
           if (seen.has(k)) dupes.add(k); else seen.add(k);
         }
         if (!dupes.size) return "";
-        return "Duplicate key" + (dupes.size > 1 ? "s" : "") + " — the last row wins: " +
+        return "Duplicate key" + (dupes.size > 1 ? "s" : "") + " — rename or remove to save: " +
           [...dupes].join(", ");
       },
       configMgmtDirty() {
@@ -1502,8 +1511,11 @@
         // serialized form (not the stale-until-save text) against the loaded original.
         if (c.surface === "settings" && c.settings.mode === "rows") {
           // Compare both sides through the same normalization so an on-disk empty
-          // `env` (dropped on serialize) doesn't read as a phantom unsaved change.
-          return this._settingsEnvSerialized() !== this._settingsNormalize(c.settings.orig);
+          // `env` (dropped on serialize) doesn't read as a phantom unsaved change. A
+          // null serialization (unusable base text) can't be compared → treat as not
+          // dirty so Save stays disabled (fail closed).
+          const ser = this._settingsEnvSerialized();
+          return ser !== null && ser !== this._settingsNormalize(c.settings.orig);
         }
         const st = c[c.surface];  // settings(raw) | permissions | hooks — JSON surfaces
         return st ? st.text !== st.orig : false;
@@ -1513,6 +1525,10 @@
         if (c.loading || c.saving) return false;
         if (this.configMgmtNeedsProject()) return false;
         if (c.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
+        // Rows mode: block a save that would silently collapse duplicate env keys.
+        if (c.surface === "settings" && c.settings.mode === "rows" && this.configMgmtEnvRowsWarning()) {
+          return false;
+        }
         return this.configMgmtDirty();
       },
       _configMgmtTarget() {
@@ -1558,6 +1574,9 @@
         // materialized on a mode switch); every other JSON surface saves its textarea.
         const raw = (surface === "settings" && c.settings.mode === "rows")
           ? this._settingsEnvSerialized() : st.text;
+        // Fail closed: a null serialization means the base JSON is unusable — refuse to
+        // write rather than send a body that would drop the non-env keys.
+        if (raw === null) { c.error = "settings.json is not valid — switch to Raw JSON to fix it."; return; }
         let payload;
         try { payload = JSON.parse(raw); }
         catch (e) { c.error = surface + " must be valid JSON."; return; }
