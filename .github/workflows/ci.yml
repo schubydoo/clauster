@@ -156,13 +156,29 @@ jobs:
         env:
           PYTHON_VERSION: ${{ matrix.python }}
           RUNNER_OS: ${{ runner.os }}
+          MATRIX_OS: ${{ matrix.os }}
         run: |
+          # Time the suite and record it — the runners (esp. Windows) vary a lot, so a
+          # per-cell wall time on the run Summary + the slowest tests (`--durations`) make
+          # a REAL slowdown obvious instead of mined from job timestamps. `|| rc=$?` so the
+          # timing is still written when pytest fails (the default shell is `bash -eo pipefail`).
+          start=$(date +%s)
+          rc=0
           if [ "$RUNNER_OS" = "Linux" ]; then
-            uv run --python "$PYTHON_VERSION" pytest -q \
-              --cov-report=xml --junitxml=junit.xml -o junit_family=legacy
+            uv run --python "$PYTHON_VERSION" pytest -q --durations=15 \
+              --cov-report=xml --junitxml=junit.xml -o junit_family=legacy || rc=$?
           else
-            uv run --python "$PYTHON_VERSION" pytest -q --cov-fail-under=0
+            uv run --python "$PYTHON_VERSION" pytest -q --durations=15 --cov-fail-under=0 || rc=$?
           fi
+          dur=$(( $(date +%s) - start ))
+          {
+            echo "### ⏱ pytest timing"
+            echo ""
+            echo "| OS | Python | Wall time | Result |"
+            echo "| --- | --- | --- | --- |"
+            echo "| $MATRIX_OS | $PYTHON_VERSION | ${dur}s | $([ "$rc" -eq 0 ] && echo pass || echo FAIL) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
       # Upload coverage + test results from the single Linux 3.13 cell (the gate
       # platform — always present in both the subset and the full matrix).
       # Token-based upload (no id-token perm). Non-blocking: Codecov isn't a
