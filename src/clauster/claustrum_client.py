@@ -216,11 +216,12 @@ def _read_pipe_name(socket_path: str) -> str | None:
     claustrum's opt-in ``-listen-pipe`` transport writes the opaque pipe name to
     ``<socket-dir>/rpc.pipe`` (the pipe analogue of ``daemon.token``). A stale file left by
     a crashed daemon names a dead pipe, so a present name is NOT proof of liveness — the
-    caller must actually connect to verify (an absent/empty file yields None).
+    caller must actually connect to verify (an absent/empty file yields None). A read failure on
+    an *existing* file (permissions/I/O) propagates rather than masquerading as "no pipe".
     """
     try:
         name = _pipe_name_path(socket_path).read_text(encoding="utf-8").strip()
-    except OSError:
+    except FileNotFoundError:
         return None
     return name or None
 
@@ -261,7 +262,16 @@ async def _open_claustrum_connection(
                 f"claustrum named pipe unavailable (no rpc.pipe beside {socket_path}); "
                 "start claustrum with -listen-pipe"
             )
-        return await _open_windows_pipe_connection(name, limit=limit)
+        try:
+            return await _open_windows_pipe_connection(name, limit=limit)
+        except (AttributeError, NotImplementedError) as exc:
+            # A non-Proactor loop (e.g. under WindowsSelectorEventLoopPolicy) has no
+            # create_pipe_connection; surface it as DaemonUnreachable — the result connect()
+            # callers retry/report — rather than a bare loop/API error.
+            raise DaemonUnreachable(
+                "the running event loop has no named-pipe support; "
+                "Windows needs the default ProactorEventLoop"
+            ) from exc
     return await asyncio.open_unix_connection(socket_path, limit=limit)
 
 

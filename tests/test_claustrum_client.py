@@ -157,6 +157,39 @@ async def test_open_connection_windows_without_pipe_raises(monkeypatch, tmp_path
         await cc._open_claustrum_connection(str(tmp_path / "rpc.sock"), limit=1)
 
 
+async def test_open_connection_windows_selector_loop_raises_daemon_unreachable(
+    monkeypatch, tmp_path
+):
+    """A loop without create_pipe_connection surfaces as DaemonUnreachable, not AttributeError."""
+    from clauster import claustrum_client as cc
+
+    monkeypatch.setattr(cc.sys, "platform", "win32")
+    (tmp_path / "rpc.pipe").write_text(r"\\.\pipe\claustrum-x", encoding="utf-8")
+
+    async def no_pipe_support(*_a, **_k):  # what a non-Proactor loop does: no such method
+        raise AttributeError(
+            "'_WindowsSelectorEventLoop' object has no attribute 'create_pipe_connection'"
+        )
+
+    monkeypatch.setattr(cc, "_open_windows_pipe_connection", no_pipe_support)
+    with pytest.raises(cc.DaemonUnreachable, match="no named-pipe support"):
+        await cc._open_claustrum_connection(str(tmp_path / "rpc.sock"), limit=1)
+
+
+def test_read_pipe_name_propagates_read_error(monkeypatch, tmp_path):
+    """A read failure on an EXISTING rpc.pipe propagates — it doesn't masquerade as 'no pipe'."""
+    from clauster import claustrum_client as cc
+
+    (tmp_path / "rpc.pipe").write_text("whatever", encoding="utf-8")
+
+    def boom(*_a, **_k):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr("pathlib.Path.read_text", boom)
+    with pytest.raises(PermissionError):
+        cc._read_pipe_name(str(tmp_path / "rpc.sock"))
+
+
 async def test_read_loop_survives_oversized_frame(caplog):
     # A frame larger than _MAX_LINE_BYTES makes readline() raise ValueError (wrapping
     # asyncio's LimitOverrunError). The reader must tear down cleanly via _fail_pending —
