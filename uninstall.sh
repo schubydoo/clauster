@@ -279,6 +279,8 @@ if [ -d "$STATE_DIR" ]; then
         rm_path "$STATE_DIR" -rf
     else
         warn "Refusing to remove an unsafe state_dir path: ${STATE_DIR}"
+        warn "It may still hold session.secret / session.epoch — remove it yourself if it is clauster's."
+        CLEANUP_FAILED=1
     fi
 fi
 
@@ -291,6 +293,11 @@ fi
 echo
 if [ "$DRY_RUN" -eq 1 ]; then
     ok "Dry run complete — nothing was removed."
+elif [ "${CLEANUP_FAILED:-0}" -eq 1 ]; then
+    # Something was left behind (warned above) — never report a clean success, and exit
+    # non-zero so a caller/CI sees the partial cleanup.
+    warn "Clauster uninstall finished with errors — some files remain (see warnings above)."
+    exit 1
 else
     ok "Clauster uninstalled."
     warn "Claude Code (the 'claude' CLI) was installed separately and is left untouched."

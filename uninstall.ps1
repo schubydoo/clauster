@@ -227,7 +227,11 @@ function Uninstall-Clauster {
             Write-Info 'Removing state directory...'
             Remove-Target $stateDir -Recurse
         }
-        else { Write-Warn "Refusing to remove an unsafe state_dir path: $stateDir" }
+        else {
+            Write-Warn "Refusing to remove an unsafe state_dir path: $stateDir"
+            Write-Warn 'It may still hold session.secret / session.epoch - remove it yourself if it is clauster''s.'
+            $script:RemovalFailed = $true
+        }
     }
 
     # --- 4) Config yaml (unless kept / already moved aside) ----------------
