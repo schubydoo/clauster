@@ -85,6 +85,7 @@ component_management:
         - src/clauster/runner.py
         - src/clauster/procutil.py
         - src/clauster/pointers.py
+        - src/clauster/code_sessions.py # #867 — pre-spawn anchor-session liveness for bridge pointers
         - src/clauster/pty_keeper.py
         - src/clauster/pty_screen.py # #534 — server-side pyte screen for live pty terminal
         - src/clauster/state.py
@@ -113,6 +114,8 @@ component_management:
         - src/clauster/logging_config.py
         - src/clauster/webhooks.py
         - src/clauster/mcp_server.py # #527 — read-only clauster MCP stdio server
+        - src/clauster/login_shepherd.py # #846 — dashboard `claude` login flow
+        - src/clauster/login_status.py # #838 — `claude auth status` probe behind /healthz
     - component_id: provisioning
       name: provisioning
       paths:
@@ -156,6 +159,7 @@ component_management:
         - src/clauster/db/migrations/versions/0002_session_events.py # #363 — session lifecycle table
         - src/clauster/db/migrations/versions/0004_api_tokens.py # #302 — named public-API bearer tokens
         - src/clauster/db/migrations/versions/0003_instance_id.py # #789 — instance-identity column
+        - src/clauster/db/migrations/versions/0005_hosted_instance_id.py # hosted-session instance id
     - component_id: config_write
       name: config-write (settings.json / .mcp.json)
       # The config_write feature cluster (#687 / #690 / #732 / #738) — capability-gated
@@ -168,6 +172,10 @@ component_management:
         - src/clauster/config_write_mcp.py
         - src/clauster/config_write_permissions.py
         - src/clauster/config_write_settings.py # #772 — generic env/model/misc settings.json editor
+        - src/clauster/config_write_subagents.py # #773 — subagents (.claude/agents) surface
+        - src/clauster/config_write_skills.py # #773 — skills (.claude/skills) surface
+        - src/clauster/config_write_plugins.py # #773 — plugins + marketplaces surface
+        - src/clauster/config_write_mcp_cli.py # #773 — CLI-driven MCP approvals helper
         - src/clauster/config_file_writer.py # #766 — path-contained file/dir writer primitive
         - src/clauster/claude_json.py
     # The config_write_* family above mirrors the same pattern as the other
