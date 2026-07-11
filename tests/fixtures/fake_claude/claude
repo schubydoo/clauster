@@ -391,6 +391,11 @@ def run_auth(args):
       FAKE_CLAUDE_AUTH_EXIT_CODE = exit code to return (default "0")
       FAKE_CLAUDE_AUTH_HANG      = if set, sleep long enough to trip the caller's
                                    subprocess timeout (exercises the timeout path)
+      FAKE_CLAUDE_AUTH_HANG_SECONDS = how long to sleep when hanging (default "8",
+                                   comfortably beyond the real 5s bound). A test that
+                                   patches the bound down should shrink this too — on
+                                   Windows the .cmd wrapper's grandchild survives the
+                                   timeout-kill and holds the pipe for the WHOLE sleep.
 
     Only handles the `status` verb; any other auth subcommand is unknown (exit 2),
     matching the stub's strict "never guess" posture.
@@ -399,7 +404,7 @@ def run_auth(args):
         sys.stderr.write(f"fake-claude: unknown auth args {args}\n")
         return 2
     if os.environ.get("FAKE_CLAUDE_AUTH_HANG"):
-        time.sleep(30)  # far beyond the caller's ~5s bound -> TimeoutExpired
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_AUTH_HANG_SECONDS", "8")))  # -> TimeoutExpired
         return 0
     default = '{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty"}'
     sys.stdout.write(os.environ.get("FAKE_CLAUDE_AUTH_STDOUT", default))
