@@ -392,3 +392,49 @@ interpreter falls back to the `python -m clauster run …` form.
     `ProtectSystem=strict` (with the `state_dir` and `~/.claude` listed under
     `ReadWritePaths=`) are reasonable starting points — test a spawn after adding
     any hardening.
+
+## Uninstalling
+
+The uninstaller is the counterpart to the install script. It auto-detects how
+Clauster was installed (the standalone binary, or a `uv tool` / `pipx` / `pip` /
+`scoop` package), removes the right artifact, stops and removes a Clauster service
+unit if one was installed, and removes the state directory (`clauster.db`,
+`state.json`, `hosted_state.json`, `tls/`, `backups/`, sockets, logs) and the
+config yaml.
+
+**Linux & macOS:**
+
+```sh
+# Preview first — lists exactly what would be removed, changes nothing:
+curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/uninstall.sh | bash -s -- --dry-run
+
+# Then remove:
+curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/uninstall.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/schubydoo/clauster/main/uninstall.ps1 | iex
+# Preview first:  &([scriptblock]::Create((irm https://raw.githubusercontent.com/schubydoo/clauster/main/uninstall.ps1))) -DryRun
+```
+
+Options (same names on both, `--flag` on the shell script, `-Flag` on PowerShell):
+
+- `--dry-run` / `-DryRun` — show what would be removed without removing anything.
+- `--keep-config` / `-KeepConfig` — preserve `clauster.yml` for a future reinstall
+  (moved aside to a printed backup path).
+- `--keep-data` / `-KeepData` — preserve `clauster.db` the same way.
+- `-y` / `-Yes` — skip the confirmation prompt.
+
+The uninstaller is deliberately conservative: it never deletes a path outside the
+known Clauster locations, refuses a `state_dir` that resolves to your home directory
+or a drive root, and — if it can't identify how Clauster was installed — reports what
+it found and exits without deleting anything rather than guessing. It leaves Claude
+Code (the `claude` CLI) untouched, since that is installed separately.
+
+!!! note "systemd service needs privileges"
+    If you installed the systemd unit, removing it needs `sudo`; the script prints the
+    exact `systemctl stop/disable` + `rm` commands it runs so you can see (or run) the
+    privileged step yourself. A relocated `state_dir` or config is picked up from the
+    same `CLAUSTER_STATE_DIR` / `CLAUSTER_CONFIG` overrides the app uses.

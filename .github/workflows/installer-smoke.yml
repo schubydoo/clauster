@@ -16,6 +16,8 @@ on:
     paths:
       - install.sh
       - install.ps1
+      - uninstall.sh
+      - uninstall.ps1
       - Formula/clauster.rb
       - flake.nix
       - flake.lock
@@ -77,6 +79,63 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "clauster.exe --version exited with code $LASTEXITCODE" }
           Write-Host "version: $v"
           if ($v -notmatch '^clauster') { throw "unexpected --version output: $v" }
+
+  uninstall-sh:
+    name: uninstall.sh (${{ matrix.os }})
+    if: github.event.pull_request.draft != true # draft PRs skip; ready_for_review re-fires (#623)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # Install the real binary, then prove uninstall.sh detects it (dry run changes
+      # nothing) and removes it (a plain -y run leaves clauster off PATH). No state dir
+      # or service exists on a fresh runner, so this smokes binary detection + removal.
+      - name: install.sh then uninstall.sh
+        run: |
+          set -euo pipefail
+          bash ./install.sh
+          export PATH="$HOME/.local/bin:$PATH"
+          clauster --version | grep -q '^clauster'
+          # Dry run must detect the binary and remove nothing. Capture the output before
+          # grepping: `grep -q` closes the pipe on first match, and the script's next
+          # write would then hit EPIPE (a broken-pipe failure under pipefail).
+          dry="$(bash ./uninstall.sh --dry-run)"
+          printf '%s\n' "$dry" | grep -q 'binary:'
+          test -x "$HOME/.local/bin/clauster"
+          # Real uninstall removes the binary.
+          bash ./uninstall.sh -y
+          test ! -e "$HOME/.local/bin/clauster"
+          if command -v clauster >/dev/null 2>&1; then
+            echo "clauster still resolvable after uninstall" >&2; exit 1
+          fi
+
+  uninstall-ps1:
+    name: uninstall.ps1 (windows)
+    if: github.event.pull_request.draft != true # draft PRs skip; ready_for_review re-fires (#623)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # Verify OUTCOME (binary gone) rather than the script's exit status, mirroring the
+      # install.ps1 job — the script signals via $global:LASTEXITCODE for iex safety.
+      - name: install.ps1 then uninstall.ps1
+        shell: pwsh
+        run: |
+          ./install.ps1
+          $dest = Join-Path $env:LOCALAPPDATA 'Programs\clauster\clauster.exe'
+          if (-not (Test-Path $dest)) { throw "clauster.exe was not installed at $dest" }
+          ./uninstall.ps1 -DryRun
+          if (-not (Test-Path $dest)) { throw "dry run removed the binary" }
+          ./uninstall.ps1 -Yes
+          if (Test-Path $dest) { throw "clauster.exe still present after uninstall" }
 
   brew:
     name: Homebrew (${{ matrix.os }})
