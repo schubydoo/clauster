@@ -43,6 +43,11 @@ def _set_auth(monkeypatch, *, stdout=None, exit_code=None, hang=False):
         monkeypatch.setenv("FAKE_CLAUDE_AUTH_EXIT_CODE", str(exit_code))
     if hang:
         monkeypatch.setenv("FAKE_CLAUDE_AUTH_HANG", "1")
+        # The caller's timeout is patched to 0.3s, so the stub only needs to outlast that.
+        # Keep it short: on Windows the .cmd wrapper's grandchild survives the timeout-kill
+        # and holds the pipe for the whole sleep, so the default 8s would make this ~8s there
+        # (the 30s default made it a 30s outlier — the pytest --durations winner).
+        monkeypatch.setenv("FAKE_CLAUDE_AUTH_HANG_SECONDS", "1")
 
 
 def test_logged_in_via_claude_ai_oauth(tmp_path, monkeypatch):
