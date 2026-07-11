@@ -142,6 +142,24 @@ def _reset_nvm_bin_dir_cache():
     procutil._nvm_bin_dir_resolved = False
 
 
+@pytest.fixture(autouse=True)
+def _dispose_db_engines():
+    """Dispose any DB engine a test leaves open, after each test.
+
+    A bare ``TestClient(create_app(...))`` (no ``with``) skips the app lifespan that
+    calls ``persistence.dispose()``, so the throwaway app's SQLite connection lingers
+    until GC and warns ``ResourceWarning: unclosed database``. Closing every live engine
+    at teardown removes that noise deterministically WITHOUT suppressing the warning — a
+    genuine unclosed connection outside the engine registry would still surface. Safe:
+    the suite has no session/module-scoped app fixture whose engine this could yank out,
+    and ``dispose()`` is idempotent for an engine a ``with``-client already closed.
+    """
+    yield
+    from clauster.db.engine import dispose_live_engines
+
+    dispose_live_engines()
+
+
 @pytest.fixture
 def fixtures_dir() -> Path:
     return FIXTURES
