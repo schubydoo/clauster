@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from weakref import WeakSet
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
@@ -21,6 +22,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from ..atomicio import ensure_private_dir
 
 _log = logging.getLogger("clauster.db.engine")
+
+# Weak registry of every live engine, so a test can dispose the ones a bare
+# ``TestClient(create_app(...))`` left open (that path skips the app lifespan that
+# would otherwise call ``dispose()``, so its SQLite connections warn "unclosed
+# database" on GC). Weak refs only — this never keeps an engine alive, and prod
+# creates ~one engine and never reads it back. See ``dispose_live_engines``.
+_LIVE_ENGINES: WeakSet[Engine] = WeakSet()
 
 # The on-disk SQLite file name under ``state_dir`` when no URL is configured. Sits
 # beside ``state.json`` / ``hosted_state.json`` / ``session.secret`` in the 0700 dir.
@@ -63,7 +71,20 @@ def create_db_engine(state_dir: Path) -> Engine:
     # visible here rather than relying on the dialect's URL-shape default.
     engine = create_engine(url, future=True, connect_args={"check_same_thread": False})
     _arm_sqlite_pragmas(engine)
+    _LIVE_ENGINES.add(engine)
     return engine
+
+
+def dispose_live_engines() -> None:
+    """Dispose every still-live engine — a test-teardown helper (see :data:`_LIVE_ENGINES`).
+
+    Deterministically closes the SQLite connections that a bare
+    ``TestClient(create_app(...))`` test leaves open (it skips the app lifespan that
+    would dispose the engine). ``dispose()`` is idempotent, so this is a no-op for an
+    engine a ``with``-client already closed via lifespan shutdown.
+    """
+    for engine in list(_LIVE_ENGINES):
+        engine.dispose()
 
 
 def _arm_sqlite_pragmas(engine: Engine) -> None:
