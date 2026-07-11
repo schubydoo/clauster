@@ -238,8 +238,10 @@ async def _open_windows_pipe_connection(
     # Typed Any: create_pipe_connection lives on the win32 ProactorEventLoop, not the
     # AbstractEventLoop base, so a precise annotation would fail type-checking off-Windows.
     loop: Any = asyncio.get_running_loop()
-    reader = asyncio.StreamReader(limit=limit, loop=loop)
-    protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+    # reader/protocol bind the running loop implicitly; loop is passed only where required
+    # (create_pipe_connection and StreamWriter). Mirrors asyncio.open_unix_connection.
+    reader = asyncio.StreamReader(limit=limit)
+    protocol = asyncio.StreamReaderProtocol(reader)
     transport, _ = await loop.create_pipe_connection(lambda: protocol, name)
     writer = asyncio.StreamWriter(transport, protocol, reader, loop)
     return reader, writer
