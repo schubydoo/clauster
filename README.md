@@ -112,9 +112,9 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   key/value rows or raw JSON, plus `model` / misc keys), permissions, hooks, MCP
   servers, subagents, skills, and plugins — at user / project scope (plus **local**
   for all but subagents and skills), with secret-shaped values **masked** on the
-  surfaces that carry them (settings `env`, MCP). Lost-update-guarded, trust-gated,
-  and audit-logged. (Distinct from the **Config editor** below, which edits
-  `clauster.yml` itself.)
+  surfaces that carry them (settings `env`, MCP). Every write is lost-update-guarded
+  and trust-gated; `CLAUDE.md` writes are additionally audit-logged. (Distinct from
+  the **Config editor** below, which edits `clauster.yml` itself.)
 - **Config editor** — edit an allowlist of *operational* `clauster.yml` settings
   from the dashboard (`GET`/`PUT /api/config`). Only a Tier-A allowlist is
   exposed — auth, bind, secret, and structural fields are never editable or even
