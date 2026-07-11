@@ -218,6 +218,28 @@ def _ui_guard_matches(method: str, path: str) -> bool:
     return path.startswith("/static/") or _is_ui_only_route(method, path)
 
 
+def _app_local_path(request: Request) -> str:
+    """Return the request path with the configured ``root_path`` prefix stripped (#812).
+
+    Both the auth ``guard`` and the ``ui_guard`` classify routes by comparing against
+    app-local paths (``/login``, ``/api/…``, ``/static/…``) — the paths FastAPI's router
+    matches. ``request.url.path`` is ``scope["path"]`` verbatim: under a reverse proxy
+    that does NOT strip the mount prefix it still carries it (``/prefix/login``), which
+    would misclassify a public/gated route and, for the UI kill switch, fail **open**.
+    Stripping ``root_path`` makes classification correct regardless of whether the proxy
+    strips the prefix. The supported prefix-stripping proxy already sends no prefix in
+    the path, so the strip is a no-op there. The boundary check (exact match or a ``/``
+    after the prefix) avoids stripping a coincidental prefix (``/prefixfoo``). A
+    trailing slash on the configured ``root_path`` (``/prefix/``) is normalized off
+    first, so it can't defeat the boundary check and leave the prefix un-stripped.
+    """
+    path = request.url.path
+    root = request.scope.get("root_path", "").rstrip("/")
+    if root and (path == root or path.startswith(root + "/")):
+        return path[len(root) :] or "/"
+    return path
+
+
 def _warn_if_ui_off_locks_out_auth(config: ClausterConfig, api_token_store: ApiTokenStore) -> None:
     """Log a loud startup warning for a `ui.enabled=false` deployment nothing can reach (#806).
 
@@ -690,11 +712,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         machine-readable error, so the API contract (and its tests) stay intact.
         """
         wants_html = "text/html" in request.headers.get("accept", "")
-        # Classify against the app-local ASGI path (root_path stripped) — the same path
+        # Classify against the app-local path (root_path stripped, #812) — the same path
         # FastAPI routes on — so a prefix-mounted deployment still treats /api + /ws as
-        # machine-readable. Match the bare prefix too: exactly /api or /ws (no trailing
-        # slash) is still an API/transport path and must stay JSON, not the HTML page.
-        path = request.scope["path"]
+        # machine-readable even behind a non-prefix-stripping proxy. Match the bare prefix
+        # too: exactly /api or /ws (no trailing slash) is still an API/transport path and
+        # must stay JSON, not the HTML page.
+        path = _app_local_path(request)
         is_api = path in ("/api", "/ws") or path.startswith(("/api/", "/ws/"))
         if exc.status_code == 404 and wants_html and not is_api:
             return _render(request, "404.html", {}, status_code=404)
@@ -863,9 +886,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             and not _origin_allowed(request)
         ):
             return JSONResponse({"detail": "origin check failed"}, status_code=403)
-        if _is_public(request.url.path):
+        # Classify against the app-local path (root_path stripped) so route matching is
+        # correct even behind a non-prefix-stripping proxy (#812) — a no-op under the
+        # supported prefix-stripping proxy.
+        path = _app_local_path(request)
+        if _is_public(path):
             return await call_next(request)
-        if request.url.path in _DOCS_PATHS:
+        if path in _DOCS_PATHS:
             # OpenAPI docs (#302): disabled means the route was never registered
             # (docs_url/openapi_url=None), so let the request fall through to the
             # router's own 404 instead of the login redirect every other HTML path
@@ -879,9 +906,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         if user is None:
             # A valid scrape token grants /metrics access without a session (Prometheus
             # can't log in). Strictly additive: only /metrics, only on an exact match.
-            if request.url.path == "/metrics" and _metrics_token_ok(request):
+            if path == "/metrics" and _metrics_token_ok(request):
                 return await call_next(request)
-            if request.url.path.startswith("/api/"):
+            if path.startswith("/api/"):
                 return JSONResponse({"detail": "authentication required"}, status_code=401)
             return RedirectResponse(f"{_root}/login", status_code=303)
         return await call_next(request)
@@ -895,7 +922,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # headers land on this 404 too, same as every other response.
     @app.middleware("http")
     async def ui_guard(request: Request, call_next):
-        if not config.ui.enabled and _ui_guard_matches(request.method, request.url.path):
+        # Match on the app-local path (root_path stripped) so the kill switch can't fail
+        # OPEN behind a non-prefix-stripping proxy (#812).
+        if not config.ui.enabled and _ui_guard_matches(request.method, _app_local_path(request)):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         return await call_next(request)
 
