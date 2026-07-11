@@ -234,7 +234,9 @@ async def _open_windows_pipe_connection(
     ``open_unix_connection`` does internally, over ``ProactorEventLoop.create_pipe_connection``.
     Only reachable on win32; validated on the Windows test VM, not the POSIX CI runners.
     """
-    loop = asyncio.get_running_loop()
+    # Typed Any: create_pipe_connection lives on the win32 ProactorEventLoop, not the
+    # AbstractEventLoop base, so a precise annotation would fail type-checking off-Windows.
+    loop: Any = asyncio.get_running_loop()
     reader = asyncio.StreamReader(limit=limit, loop=loop)
     protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
     transport, _ = await loop.create_pipe_connection(lambda: protocol, name)
