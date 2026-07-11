@@ -1482,13 +1482,80 @@
             <!-- Settings (env / model / misc) surface -->
             <div data-test="cm-view-settings"
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'settings'" x-cloak>
-              <label class="form-label small" for="cm-settings">settings.json — env / model / misc</label>
-              <textarea id="cm-settings" class="form-control form-control-sm font-monospace" rows="12"
-                        data-test="cm-settings-text" spellcheck="false"
-                        x-model="configMgmt.settings.text"></textarea>
-              <div class="form-hint small mt-1">
-                Permissions, hooks, plugins, and MCP-enable have their own tabs and are not shown here.
-                Secret-shaped values are masked as <code>********</code> — leave the mask to keep the stored value.
+              <div class="d-flex justify-content-between align-items-center mb-1">
+                <label class="form-label small mb-0" for="cm-settings">settings.json — env / model / misc</label>
+                <!-- #765: friendly env rows vs the raw-JSON escape hatch -->
+                <div class="btn-group btn-group-sm" role="group" aria-label="Settings editor mode">
+                  <button type="button" class="btn" data-test="cm-settings-mode-rows"
+                          :class="configMgmt.settings.mode === 'rows' ? 'btn-primary' : 'btn-outline-primary'"
+                          :aria-pressed="configMgmt.settings.mode === 'rows'"
+                          @click="configMgmtSettingsMode('rows')">Rows</button>
+                  <button type="button" class="btn" data-test="cm-settings-mode-raw"
+                          :class="configMgmt.settings.mode === 'raw' ? 'btn-primary' : 'btn-outline-primary'"
+                          :aria-pressed="configMgmt.settings.mode === 'raw'"
+                          @click="configMgmtSettingsMode('raw')">Raw JSON</button>
+                </div>
+              </div>
+
+              <!-- Shape error shows in either mode so a rejected 'Rows' click explains itself. -->
+              <div class="alert alert-warning py-1 small" data-test="cm-settings-env-error" role="alert"
+                   x-show="configMgmt.settings.envError" x-cloak x-text="configMgmt.settings.envError"></div>
+
+              <!-- ROWS: friendly env key/value editor (#765) -->
+              <div x-show="configMgmt.settings.mode === 'rows'" data-test="cm-settings-rows" x-cloak>
+                <div class="text-secondary small mb-2" data-test="cm-settings-env-empty"
+                     x-show="!configMgmt.settings.envRows.length && !configMgmt.settings.envError" x-cloak>
+                  No <code>env</code> variables at this scope. Add one below, or switch to Raw JSON for other keys.
+                </div>
+                <table class="table table-sm mb-1" data-test="cm-settings-env-table"
+                       x-show="configMgmt.settings.envRows.length" x-cloak>
+                  <caption class="visually-hidden">Environment variables: name, value, and remove action</caption>
+                  <thead><tr><th style="width: 40%">Name</th><th>Value</th><th class="text-end">Remove</th></tr></thead>
+                  <tbody>
+                    <template x-for="(row, idx) in configMgmt.settings.envRows" :key="row.id">
+                      <tr>
+                        <td>
+                          <input type="text" class="form-control form-control-sm font-monospace"
+                                 data-test="cm-settings-env-key" autocomplete="off" spellcheck="false"
+                                 :aria-label="'Name for environment variable ' + (idx + 1)"
+                                 x-model="row.key">
+                        </td>
+                        <td>
+                          <input type="text" class="form-control form-control-sm font-monospace"
+                                 data-test="cm-settings-env-value" autocomplete="off" spellcheck="false"
+                                 :aria-label="'Value for ' + (row.key || 'environment variable')"
+                                 :title="row.masked ? 'Masked — leave as ******** to keep the stored value' : ''"
+                                 x-model="row.value" @input="configMgmtEnvRowEdited(idx, $event.target.value)">
+                        </td>
+                        <td class="text-end">
+                          <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-settings-env-remove"
+                                  :aria-label="'Remove ' + (row.key || 'environment variable')"
+                                  @click="configMgmtRemoveEnvRow(idx)">Remove</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <div class="alert alert-warning py-1 small" data-test="cm-settings-env-dupe" role="alert"
+                     x-show="configMgmtEnvRowsWarning()" x-cloak x-text="configMgmtEnvRowsWarning()"></div>
+                <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-settings-env-add"
+                        @click="configMgmtAddEnvRow()">Add variable</button>
+                <div class="form-hint small mt-2">
+                  Only <code>env</code> is shown as rows. <code>model</code> and other keys live under Raw JSON.
+                  Masked values show as <code>********</code> — leave the mask to keep the stored value.
+                </div>
+              </div>
+
+              <!-- RAW: the full settings.json escape hatch -->
+              <div x-show="configMgmt.settings.mode === 'raw'" x-cloak>
+                <label class="visually-hidden" for="cm-settings">settings.json (raw)</label>
+                <textarea id="cm-settings" class="form-control form-control-sm font-monospace" rows="12"
+                          data-test="cm-settings-text" spellcheck="false"
+                          x-model="configMgmt.settings.text"></textarea>
+                <div class="form-hint small mt-1">
+                  Permissions, hooks, plugins, and MCP-enable have their own tabs and are not shown here.
+                  Secret-shaped values are masked as <code>********</code> — leave the mask to keep the stored value.
+                </div>
               </div>
               <!-- Effective (scope-merge provenance), project/local scope only -->
               <div class="mt-2" x-show="configMgmt.scope !== 'user'" x-cloak>

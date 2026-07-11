@@ -96,6 +96,7 @@
   const METRICS_POLL_MS = {{ metrics_poll_ms | tojson }};  // metrics.poll_seconds × 1000
   const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
   const JSON_HEADERS = Object.freeze({ "Content-Type": "application/json" });
+  const CONFIG_MASK = "********";  // config-write redaction sentinel; leave in place to keep the stored value
   // Browser (Web Notifications) channel (#541): the master switch + the per-event
   // toggles the client honours on a polled bridge status transition. crash/ready/stop
   // are the transitions the client can observe from /api/instances without a server push.
@@ -174,6 +175,11 @@
         settings: {
           text: "", orig: "", hash: null,
           showEffective: false, effective: null, effectiveError: "",
+          // #765: a friendly key/value editor for the `env` map layered over the
+          // raw JSON. In rows mode `envRows` is the source of truth for `env`; the
+          // raw text stays the escape hatch for every other key. `envSeq` mints a
+          // stable per-row id so x-for keys on identity, not array index.
+          mode: "rows", envRows: [], envError: "", envSeq: 0,
         },
         // JSON surfaces sharing _loadJsonSurface/_saveJsonSurface (#773 slice B).
         permissions: { text: "", orig: "", hash: null },
@@ -1325,6 +1331,13 @@
         c.settings.effective = null; c.settings.effectiveError = "";
         await this._loadJsonSurface("settings", myGen);
         if (c.gen !== myGen) return;  // superseded — skip the secondary effective fetch
+        // Rebuild the friendly env rows from the freshly loaded JSON. If the stored
+        // shape can't be shown as str->str rows, fall back to the raw view (rather
+        // than silently dropping to an empty row set) so nothing is hidden.
+        if (!c.error) {
+          c.settings.envError = "";
+          if (!this._settingsRowsFromText()) { c.settings.mode = "raw"; c.settings.envRows = []; }
+        }
         // Only fetch the merged view when the settings load itself succeeded — no point
         // compounding a network error — and the panel is open on a scoped (non-user) read.
         if (!c.error && c.settings.showEffective && c.scope !== "user") {
@@ -1371,10 +1384,128 @@
         }
         return rows;
       },
+      // --- #765: friendly env key/value rows over settings.json -------------------
+      // In rows mode the `envRows` array is the source of truth for the `env` map;
+      // the raw JSON stays the escape hatch for every OTHER key (model / misc). The
+      // saved text is DERIVED from the rows (_settingsEnvSerialized) at dirty-check
+      // and save time rather than synced on every keystroke — x-model keeps the rows
+      // reliable, and nothing races Alpine's render scheduler. The ******** mask
+      // sentinel round-trips unchanged (a masked value left alone re-serializes to the
+      // sentinel, which the server's merge_redacted keeps as the stored secret).
+      configMgmtSettingsMode(mode) {
+        const s = this.configMgmt.settings;
+        if (s.mode === mode) return;
+        if (mode === "raw") {
+          // Materialize the rows into the raw text so the escape hatch shows current edits.
+          s.text = this._settingsEnvSerialized(); s.mode = "raw"; s.envError = ""; return;
+        }
+        // Entering rows: rebuild from the (possibly raw-edited) text; a non-object /
+        // non-string-env shape can't be shown as rows, so stay in raw with a hint.
+        if (this._settingsRowsFromText()) s.mode = "rows";
+      },
+      // Populate envRows from settings.text's `env` map. Returns false (and sets
+      // envError) when the text isn't a JSON object or `env` isn't a flat str->str
+      // map — the exact shapes the friendly rows can't represent without lying.
+      _settingsRowsFromText() {
+        const s = this.configMgmt.settings;
+        let obj;
+        try { obj = JSON.parse(s.text || "{}"); }
+        catch (e) { s.envError = "Fix the JSON in Raw view before using rows."; return false; }
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+          s.envError = "settings.json must be a JSON object to use rows."; return false;
+        }
+        const env = obj.env;
+        if (env !== undefined && (env === null || typeof env !== "object" || Array.isArray(env))) {
+          s.envError = "env must be a key/value object — edit it in Raw view."; return false;
+        }
+        const rows = [];
+        for (const k of Object.keys(env || {})) {
+          const v = env[k];
+          // A non-string value is outside this editor's str->str shape; never coerce
+          // it silently — send the operator to Raw view instead.
+          if (typeof v !== "string") {
+            s.envError = "env has a non-text value — edit it in Raw view."; return false;
+          }
+          rows.push({ id: ++s.envSeq, key: k, value: v, masked: v === CONFIG_MASK });
+        }
+        s.envRows = rows; s.envError = ""; return true;
+      },
+      // Re-serialize a settings JSON string through the SAME empty-env normalization
+      // the row editor applies on save, so a freshly loaded doc compares equal to its
+      // own rows (an on-disk `"env": {}` must not read as an unsaved change). Falls
+      // back to the input verbatim for a non-object / unparseable text.
+      _settingsNormalize(text) {
+        let obj;
+        try { obj = JSON.parse(text || "{}"); } catch (e) { return text; }
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return text;
+        if (obj.env && typeof obj.env === "object" && !Array.isArray(obj.env)
+            && Object.keys(obj.env).length === 0) {
+          delete obj.env;
+        }
+        return JSON.stringify(obj, null, 2);
+      },
+      // Serialize the current rows back over settings.text's `env`, preserving every
+      // OTHER key. Pure (no state mutation) so it's safe to call from configMgmtDirty
+      // on every render. Blank-key rows are dropped; a later duplicate key wins (a
+      // non-blocking hint is shown by configMgmtEnvRowsWarning).
+      _settingsEnvSerialized() {
+        const s = this.configMgmt.settings;
+        let obj;
+        try { obj = JSON.parse(s.text || "{}"); } catch (e) { obj = {}; }
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) obj = {};
+        const env = {};
+        for (const row of s.envRows) {
+          const k = (row.key || "").trim();
+          if (k) env[k] = row.value;
+        }
+        if (Object.keys(env).length) obj.env = env;
+        else delete obj.env;  // an emptied editor removes the key rather than writing {}
+        return JSON.stringify(obj, null, 2);
+      },
+      configMgmtAddEnvRow() {
+        const s = this.configMgmt.settings;
+        s.envRows.push({ id: ++s.envSeq, key: "", value: "", masked: false });
+        // A blank row is dropped on serialize, so it can't dirty the doc until the
+        // operator types a key. Move focus to the new name field for keyboard flow.
+        this.$nextTick(() => {
+          const inputs = document.querySelectorAll('[data-test="cm-settings-env-key"]');
+          const last = inputs[inputs.length - 1];
+          if (last && last.focus) last.focus();
+        });
+      },
+      configMgmtRemoveEnvRow(idx) {
+        this.configMgmt.settings.envRows.splice(idx, 1);
+      },
+      // A row's value diverged from the mask sentinel — it's now a real (unmasked)
+      // value the operator is setting, so drop the "masked" flag (read from the event
+      // so we never depend on x-model's commit order).
+      configMgmtEnvRowEdited(idx, val) {
+        const row = this.configMgmt.settings.envRows[idx];
+        if (row && row.masked && val !== CONFIG_MASK) row.masked = false;
+      },
+      // Non-blocking hint when two rows share a key (the last one wins on save).
+      configMgmtEnvRowsWarning() {
+        const seen = new Set(), dupes = new Set();
+        for (const row of this.configMgmt.settings.envRows) {
+          const k = (row.key || "").trim();
+          if (!k) continue;
+          if (seen.has(k)) dupes.add(k); else seen.add(k);
+        }
+        if (!dupes.size) return "";
+        return "Duplicate key" + (dupes.size > 1 ? "s" : "") + " — the last row wins: " +
+          [...dupes].join(", ");
+      },
       configMgmtDirty() {
         const c = this.configMgmt;
         if (c.surface === "claude-md") return c.claudeMd.content !== c.claudeMd.orig;
-        const st = c[c.surface];  // settings | permissions | hooks — JSON surfaces
+        // Settings in rows mode: the rows are the source of truth, so compare their
+        // serialized form (not the stale-until-save text) against the loaded original.
+        if (c.surface === "settings" && c.settings.mode === "rows") {
+          // Compare both sides through the same normalization so an on-disk empty
+          // `env` (dropped on serialize) doesn't read as a phantom unsaved change.
+          return this._settingsEnvSerialized() !== this._settingsNormalize(c.settings.orig);
+        }
+        const st = c[c.surface];  // settings(raw) | permissions | hooks — JSON surfaces
         return st ? st.text !== st.orig : false;
       },
       configMgmtCanSave() {
@@ -1423,8 +1554,12 @@
       async _saveJsonSurface(surface, myGen) {
         const c = this.configMgmt;
         const st = c[surface];
+        // Settings in rows mode saves the rows' serialized form (the raw text is only
+        // materialized on a mode switch); every other JSON surface saves its textarea.
+        const raw = (surface === "settings" && c.settings.mode === "rows")
+          ? this._settingsEnvSerialized() : st.text;
         let payload;
-        try { payload = JSON.parse(st.text); }
+        try { payload = JSON.parse(raw); }
         catch (e) { c.error = surface + " must be valid JSON."; return; }
         if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
           c.error = surface + " must be a JSON object."; return;

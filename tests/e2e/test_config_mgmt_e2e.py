@@ -107,6 +107,65 @@ def test_config_mgmt_permissions_project_round_trip(
     assert "Bash(ls:*)" in settings.read_text(encoding="utf-8")
 
 
+def test_config_mgmt_settings_env_rows_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The friendly env rows editor (#765) writes an env var into settings.json.
+
+    Drives the rows layer end to end: default to Rows mode, add a key/value row, and
+    save — proving the projection back into settings.text reaches the real save path.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-settings"]')
+    browser.expect_visible('[data-test="cm-view-settings"]')
+    # Rows is the default mode; alpha has no env yet -> the empty-state hint shows.
+    browser.expect_visible('[data-test="cm-settings-rows"]')
+    browser.expect_visible('[data-test="cm-settings-env-empty"]')
+
+    browser.click('[data-test="cm-settings-env-add"]')
+    browser.expect_visible('[data-test="cm-settings-env-key"]')  # let the x-for row hydrate
+    browser.fill('[data-test="cm-settings-env-key"]', "MY_VAR")
+    browser.fill('[data-test="cm-settings-env-value"]', "hello")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    assert settings.exists(), "expected alpha/.claude/settings.json to be written"
+    body = settings.read_text(encoding="utf-8")
+    assert "MY_VAR" in body and "hello" in body
+
+
+def test_config_mgmt_settings_empty_env_not_dirty(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """An on-disk empty ``env: {}`` must not read as an unsaved change in rows mode (#765).
+
+    Regression guard: the rows editor drops an empty ``env`` on serialize, so the dirty
+    check must normalize both sides — otherwise the surface loads pre-flagged dirty and a
+    stray save would silently strip the key.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    settings = projects_root / "alpha" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"env": {}}', encoding="utf-8")
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-settings"]')
+    browser.expect_visible('[data-test="cm-view-settings"]')
+    browser.expect_visible('[data-test="cm-settings-rows"]')
+    # Type the confirm token so ONLY the dirty check can gate Save; with no edits it
+    # must stay disabled (the empty env is not a phantom change).
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.expect_disabled('[data-test="cm-save"]')
+
+
 def test_config_mgmt_hooks_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
     """Switching to the Hooks tab loads its JSON editor for the scope."""
     _open_modal(browser, config_mgmt_server)
