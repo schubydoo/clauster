@@ -568,6 +568,29 @@ def test_cached_stamp_skips_unstattable_file(tmp_path, monkeypatch, _clean_usage
     assert usage_mod._transcript_dir_stamp(project, claude_dir) == (0, 0, -1)
 
 
+def test_stamp_keeps_max_mtime_when_later_file_is_older(tmp_path):
+    # max_mtime_ns must be the newest file's mtime even when a later-listed (sorted)
+    # transcript is older — exercises the branch where st.st_mtime_ns does NOT exceed
+    # the running max, so a stale-but-larger dir can't fake a fresh stamp.
+    import os
+
+    import clauster.usage as usage_mod
+
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    d = _project_transcript_dir(claude_dir, project)
+    # "a" sorts first and gets the NEWER mtime; "b" sorts second and is older.
+    (d / "a.jsonl").write_text("x")  # 1 byte
+    (d / "b.jsonl").write_text("yy")  # 2 bytes
+    newer_ns, older_ns = 2_000_000_000_000_000_000, 1_000_000_000_000_000_000
+    os.utime(d / "a.jsonl", ns=(newer_ns, newer_ns))
+    os.utime(d / "b.jsonl", ns=(older_ns, older_ns))
+
+    count, size, max_mtime_ns = usage_mod._transcript_dir_stamp(project, claude_dir)
+    assert count == 2 and size == 3
+    assert max_mtime_ns == newer_ns  # the older second file did not lower the max
+
+
 # ----- transcript turn reader (read-only viewer, #431) -----------------
 
 TURNS_FIXTURE = (

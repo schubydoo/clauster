@@ -216,6 +216,14 @@ def test_killmode_subprocess_error_returns_none(monkeypatch):
     assert _check_systemd_killmode() is None
 
 
+def test_doctor_includes_killmode_row_when_unit_loaded(monkeypatch, write_config, tmp_path):
+    # A loaded Clauster unit → run_doctor appends the killmode row (never FAILs).
+    _fake_systemctl(monkeypatch, stdout="LoadState=loaded\nKillMode=process\n")
+    checks, _ok = run_doctor(_cfg_file(write_config, tmp_path))
+    by = {c.name: c for c in checks}
+    assert "systemd" in by and by["systemd"].status == OK
+
+
 # ----- _check_node_toolchain --------------------------------------------
 
 
