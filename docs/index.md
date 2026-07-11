@@ -51,8 +51,12 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 ### Visibility & editing
 
 - Live bridge debug-log tail over a WebSocket — ANSI-stripped and ID-redacted.
-- In-dashboard `CLAUDE.md` editor (size-capped, lost-update-guarded,
-  trust-gated, audit-logged).
+- In-dashboard editor for a project's Claude Code config surfaces — `CLAUDE.md`,
+  `settings.json` (env as friendly key/value rows or raw JSON), permissions, hooks,
+  MCP servers, subagents, skills, and plugins — at user / project scope (plus local
+  for all but subagents and skills), with secret-shaped values masked on the surfaces
+  that carry them (settings `env`, MCP). Every write is lost-update-guarded and
+  trust-gated; `CLAUDE.md` writes are additionally audit-logged.
 - Approximate per-project cost / token badge rolled up from session transcripts.
 - Live per-bridge resource metrics (CPU / memory / disk) while a bridge runs.
 
