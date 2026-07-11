@@ -81,6 +81,82 @@ async def test_connect_unreachable_raises():
         await client.connect()
 
 
+# ----- transport selection: AF_UNIX socket vs Windows named pipe (#891) --------
+# claustrum #134 adds an opt-in Windows named-pipe transport, discovered via an
+# `rpc.pipe` file beside the socket. These exercise the client's platform branch on
+# Linux (mocked); the real `create_pipe_connection` dial is validated on the Windows VM.
+
+
+def test_read_pipe_name_reads_and_strips(tmp_path):
+    """`_read_pipe_name` returns the trimmed rpc.pipe contents beside the socket."""
+    from clauster import claustrum_client as cc
+
+    pipe = r"\\.\pipe\claustrum-deadbeef"
+    (tmp_path / "rpc.pipe").write_text(pipe + "\n", encoding="utf-8")
+    assert cc._read_pipe_name(str(tmp_path / "rpc.sock")) == pipe
+
+
+def test_read_pipe_name_absent_or_empty_is_none(tmp_path):
+    """An absent or whitespace-only rpc.pipe yields None (nothing to dial)."""
+    from clauster import claustrum_client as cc
+
+    sock = str(tmp_path / "rpc.sock")
+    assert cc._read_pipe_name(sock) is None  # absent
+    (tmp_path / "rpc.pipe").write_text("   \n", encoding="utf-8")
+    assert cc._read_pipe_name(sock) is None  # empty after strip
+
+
+async def test_open_connection_posix_dials_unix_socket(monkeypatch, tmp_path):
+    """On POSIX, `_open_claustrum_connection` dials the AF_UNIX socket."""
+    from clauster import claustrum_client as cc
+
+    monkeypatch.setattr(cc.sys, "platform", "linux")
+    seen = {}
+
+    async def fake_unix(path, *, limit):
+        seen.update(path=path, limit=limit)
+        return ("R", "W")
+
+    monkeypatch.setattr(cc.asyncio, "open_unix_connection", fake_unix)
+    sock = str(tmp_path / "rpc.sock")
+    assert await cc._open_claustrum_connection(sock, limit=123) == ("R", "W")
+    assert seen == {"path": sock, "limit": 123}
+
+
+async def test_open_connection_windows_dials_named_pipe(monkeypatch, tmp_path):
+    """On win32, it discovers the pipe via rpc.pipe and dials it — never the socket."""
+    from clauster import claustrum_client as cc
+
+    monkeypatch.setattr(cc.sys, "platform", "win32")
+    pipe = r"\\.\pipe\claustrum-abc"
+    (tmp_path / "rpc.pipe").write_text(pipe + "\n", encoding="utf-8")
+    seen = {}
+
+    async def fake_pipe(name, *, limit):
+        seen.update(name=name, limit=limit)
+        return ("PR", "PW")
+
+    async def boom_unix(*_a, **_k):
+        raise AssertionError("AF_UNIX socket dialed on Windows")
+
+    monkeypatch.setattr(cc, "_open_windows_pipe_connection", fake_pipe)
+    monkeypatch.setattr(cc.asyncio, "open_unix_connection", boom_unix)
+    assert await cc._open_claustrum_connection(str(tmp_path / "rpc.sock"), limit=99) == (
+        "PR",
+        "PW",
+    )
+    assert seen == {"name": pipe, "limit": 99}
+
+
+async def test_open_connection_windows_without_pipe_raises(monkeypatch, tmp_path):
+    """On win32 with no rpc.pipe, connecting fails closed with DaemonUnreachable."""
+    from clauster import claustrum_client as cc
+
+    monkeypatch.setattr(cc.sys, "platform", "win32")
+    with pytest.raises(cc.DaemonUnreachable, match="named pipe unavailable"):
+        await cc._open_claustrum_connection(str(tmp_path / "rpc.sock"), limit=1)
+
+
 async def test_read_loop_survives_oversized_frame(caplog):
     # A frame larger than _MAX_LINE_BYTES makes readline() raise ValueError (wrapping
     # asyncio's LimitOverrunError). The reader must tear down cleanly via _fail_pending —

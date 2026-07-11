@@ -36,7 +36,9 @@ import base64
 import binascii
 import json
 import logging
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -203,6 +205,64 @@ class ProcessStream:
             return None
 
 
+def _pipe_name_path(socket_path: str) -> Path:
+    """Return the ``rpc.pipe`` discovery-file path beside ``socket_path`` (claustrum #134)."""
+    return Path(socket_path).parent / "rpc.pipe"
+
+
+def _read_pipe_name(socket_path: str) -> str | None:
+    """Return the claustrum-chosen Windows named-pipe name from ``rpc.pipe``, or None if absent.
+
+    claustrum's opt-in ``-listen-pipe`` transport writes the opaque pipe name to
+    ``<socket-dir>/rpc.pipe`` (the pipe analogue of ``daemon.token``). A stale file left by
+    a crashed daemon names a dead pipe, so a present name is NOT proof of liveness — the
+    caller must actually connect to verify (an absent/empty file yields None).
+    """
+    try:
+        name = _pipe_name_path(socket_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return name or None
+
+
+async def _open_windows_pipe_connection(
+    name: str, *, limit: int
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:  # pragma: no cover - Windows-only runtime
+    """Open a ``(reader, writer)`` pair over a Windows named pipe.
+
+    asyncio has no high-level ``open_pipe_connection``, so this mirrors what
+    ``open_unix_connection`` does internally, over ``ProactorEventLoop.create_pipe_connection``.
+    Only reachable on win32; validated on the Windows test VM, not the POSIX CI runners.
+    """
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader(limit=limit, loop=loop)
+    protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+    transport, _ = await loop.create_pipe_connection(lambda: protocol, name)
+    writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+    return reader, writer
+
+
+async def _open_claustrum_connection(
+    socket_path: str, *, limit: int
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Dial the daemon: AF_UNIX socket on POSIX, the opt-in named pipe on Windows.
+
+    CPython's asyncio unix-socket helpers are unavailable on Windows, so there the client
+    connects via claustrum's named pipe, discovered through ``rpc.pipe`` (claustrum #134).
+    An absent ``rpc.pipe`` means the daemon was started without ``-listen-pipe`` and is
+    unreachable for this client — surfaced as :class:`DaemonUnreachable`, not a bare error.
+    """
+    if sys.platform == "win32":
+        name = _read_pipe_name(socket_path)
+        if name is None:
+            raise DaemonUnreachable(
+                f"claustrum named pipe unavailable (no rpc.pipe beside {socket_path}); "
+                "start claustrum with -listen-pipe"
+            )
+        return await _open_windows_pipe_connection(name, limit=limit)
+    return await asyncio.open_unix_connection(socket_path, limit=limit)
+
+
 class ClaustrumClient:
     """One persistent NDJSON JSON-RPC connection to a claustrum daemon.
 
@@ -244,9 +304,13 @@ class ClaustrumClient:
         await self.close()
 
     async def connect(self) -> None:
-        """Dial the daemon socket and start the background reader task."""
+        """Dial the daemon and start the background reader task.
+
+        Uses the AF_UNIX socket on POSIX and claustrum's opt-in named pipe on Windows
+        (discovered via ``rpc.pipe``); see :func:`_open_claustrum_connection`.
+        """
         try:
-            self._reader, self._writer = await asyncio.open_unix_connection(
+            self._reader, self._writer = await _open_claustrum_connection(
                 self._socket_path, limit=_MAX_LINE_BYTES
             )
         except (OSError, TimeoutError) as exc:
