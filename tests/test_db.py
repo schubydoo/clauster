@@ -19,9 +19,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from clauster.db import bootstrap
 from clauster.db.bootstrap import MigrationError, import_legacy_json, upgrade_to_head
 from clauster.db.engine import (
+    _LIVE_ENGINES,
     DB_FILENAME,
     _arm_sqlite_pragmas,
     create_db_engine,
+    dispose_engine,
+    dispose_live_engines,
     make_session_factory,
     resolve_url,
 )
@@ -71,6 +74,39 @@ def test_create_engine_creates_state_dir_0700(tmp_path):
         assert state_dir.is_dir()
     finally:
         engine.dispose()
+
+
+def test_live_registry_holds_strong_ref_until_disposed(tmp_path):
+    """The engine registry must survive GC of an unreferenced engine.
+
+    A throwaway ``SessionRunner(cfg)`` / ``Persistence`` is unreferenced the instant its
+    expression ends. A ``WeakSet`` would drop it before test teardown, letting CPython's
+    cyclic GC (3.13+) finalize its SQLite connection mid-run with an "unclosed database"
+    ResourceWarning. A strong registry pins it so ``dispose_live_engines`` can close it
+    deterministically. Guards the #887 follow-up (WeakSet → strong set).
+    """
+    import gc
+
+    engine = create_db_engine(tmp_path)
+    engine_id = id(engine)
+    assert engine in _LIVE_ENGINES
+    del engine
+    gc.collect()  # a WeakSet would have dropped it here; a strong set keeps it
+    assert any(id(e) == engine_id for e in _LIVE_ENGINES)
+    dispose_live_engines()
+    assert not _LIVE_ENGINES  # teardown disposes + clears
+
+
+def test_dispose_engine_deregisters_from_live_registry(tmp_path):
+    """A deliberate ``dispose_engine`` drops the engine from the strong registry.
+
+    Keeps the registry bounded in a long-lived process: every deliberate dispose removes
+    its own entry, so create-then-dispose cycles never accumulate.
+    """
+    engine = create_db_engine(tmp_path)
+    assert engine in _LIVE_ENGINES
+    dispose_engine(engine)
+    assert engine not in _LIVE_ENGINES
 
 
 # ----- StateStore round-trip --------------------------------------------

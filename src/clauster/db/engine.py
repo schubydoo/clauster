@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from weakref import WeakSet
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
@@ -23,12 +22,16 @@ from ..atomicio import ensure_private_dir
 
 _log = logging.getLogger("clauster.db.engine")
 
-# Weak registry of every live engine, so a test can dispose the ones a bare
-# ``TestClient(create_app(...))`` left open (that path skips the app lifespan that
-# would otherwise call ``dispose()``, so its SQLite connections warn "unclosed
-# database" on GC). Weak refs only — this never keeps an engine alive, and prod
-# creates ~one engine and never reads it back. See ``dispose_live_engines``.
-_LIVE_ENGINES: WeakSet[Engine] = WeakSet()
+# Strong registry of every live engine, so a test can dispose the ones a bare
+# ``TestClient(create_app(...))`` — or a throwaway ``SessionRunner(cfg)`` — left open
+# (those paths skip the app lifespan that would call ``dispose()``, so the SQLite
+# connections warn "unclosed database" on GC). This MUST hold strong refs, not weak:
+# a throwaway ``Persistence`` is unreferenced the instant its expression ends, so a
+# ``WeakSet`` drops it before test teardown and CPython's cyclic GC (3.13+) finalizes
+# its connection mid-run — exactly the leak this guards. ``dispose_engine`` de-registers
+# on every deliberate dispose, so prod (which builds ~one engine and disposes it on
+# shutdown) never accumulates. See ``dispose_live_engines`` (test teardown disposes + clears).
+_LIVE_ENGINES: set[Engine] = set()
 
 # The on-disk SQLite file name under ``state_dir`` when no URL is configured. Sits
 # beside ``state.json`` / ``hosted_state.json`` / ``session.secret`` in the 0700 dir.
@@ -76,15 +79,18 @@ def create_db_engine(state_dir: Path) -> Engine:
 
 
 def dispose_live_engines() -> None:
-    """Dispose every still-live engine — a test-teardown helper (see :data:`_LIVE_ENGINES`).
+    """Dispose every still-live engine, then clear the registry — a test-teardown helper.
 
     Deterministically closes the SQLite connections that a bare
-    ``TestClient(create_app(...))`` test leaves open (it skips the app lifespan that
-    would dispose the engine). ``dispose()`` is idempotent, so this is a no-op for an
-    engine a ``with``-client already closed via lifespan shutdown.
+    ``TestClient(create_app(...))`` test — or a throwaway ``SessionRunner(cfg)`` — leaves
+    open (those skip the app lifespan that would dispose the engine). ``dispose()`` is
+    idempotent, so this is a no-op for an engine a ``with``-client already closed via
+    lifespan shutdown. Clears the strong registry (:data:`_LIVE_ENGINES`) afterward so
+    engines don't accumulate across the test session. See :data:`_LIVE_ENGINES`.
     """
     for engine in list(_LIVE_ENGINES):
         engine.dispose()
+    _LIVE_ENGINES.clear()
 
 
 def _arm_sqlite_pragmas(engine: Engine) -> None:
@@ -125,5 +131,11 @@ def make_session_factory(engine: Engine) -> sessionmaker[Session]:
 
 
 def dispose_engine(engine: Engine) -> None:
-    """Close all pooled connections — call on app shutdown."""
+    """Close all pooled connections and de-register the engine — call on app shutdown.
+
+    De-registering from :data:`_LIVE_ENGINES` keeps the strong registry bounded: every
+    deliberate dispose (app shutdown, ``Persistence.dispose``) drops its own entry, so a
+    long-lived process that builds and disposes engines never accumulates them.
+    """
     engine.dispose()
+    _LIVE_ENGINES.discard(engine)
