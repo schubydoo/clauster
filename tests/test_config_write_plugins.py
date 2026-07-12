@@ -28,16 +28,15 @@ from clauster import config_write_plugins as plugins
 from clauster.app import create_app
 from clauster.config import load_config
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
-
-# The fake `claude` stub is an extensionless POSIX shebang script; on Windows it is not
-# a valid Win32 executable ([WinError 193]), so any test that actually SPAWNS it via a
-# route is POSIX-gated (same idiom as test_config_write_mcp_cli.py). The pure-unit
-# tests below inject a fake `run=` callable and never exec the stub, so they stay
-# cross-platform; only the route tests that reach the real `claude plugin` subprocess
-# are gated with @_POSIX_ONLY.
-_POSIX_ONLY = pytest.mark.skipif(
-    sys.platform == "win32", reason="fake_claude stub is a POSIX script, not a Win32 executable"
+# The fake `claude` stub is an extensionless POSIX shebang script; Windows CreateProcess
+# can't launch it directly ([WinError 193]), so on Windows the tests point at the same-named
+# `.cmd` wrapper (`_WIN_STUB_SUFFIX`), which shells it through `python` — the established
+# idiom in test_ops.py / test_provisioning.py. The route tests that spawn the real
+# `claude plugin` subprocess then run on every platform (the pure-unit tests that inject a
+# fake `run=` callable were already cross-platform).
+_WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
+FAKE_CLAUDE = (
+    Path(__file__).resolve().parent / "fixtures" / "fake_claude" / f"claude{_WIN_STUB_SUFFIX}"
 )
 
 
@@ -515,7 +514,6 @@ _PROJECT_ONLY = "config_write:\n  enabled: true\n"
 # --- GET /api/config-write/plugins (installed list, CLI) ---------------------------
 
 
-@_POSIX_ONLY
 def test_route_plugins_list_success(write_config, tmp_path, projects_root, monkeypatch) -> None:
     payload = [{"id": "hello@market", "enabled": True}]
     monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDOUT", json.dumps(payload))
@@ -527,7 +525,6 @@ def test_route_plugins_list_success(write_config, tmp_path, projects_root, monke
         assert body["project"] == "alpha"  # project scope carries the project key
 
 
-@_POSIX_ONLY
 def test_route_plugins_list_user_scope_omits_project(write_config, tmp_path, monkeypatch) -> None:
     # Greptile P2: user-scope list must OMIT `project` (a meaningless "") to match
     # the sibling routes (/plugins/enabled, action POSTs) -- not carry `"project": ""`.
@@ -612,7 +609,6 @@ def test_route_plugins_enabled_404_when_disabled(write_config, tmp_path) -> None
 # --- GET /api/config-write/plugins/{plugin_id} (details, CLI) ----------------------
 
 
-@_POSIX_ONLY
 def test_route_plugin_details_success(write_config, tmp_path, projects_root, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_PLUGIN_STDOUT", "hello 0.0.1\n  test plugin\n")
     with _client(write_config, tmp_path, _ON) as c:
@@ -627,7 +623,6 @@ def test_route_plugin_details_option_like_id_is_422(write_config, tmp_path, proj
         assert resp.status_code == 422
 
 
-@_POSIX_ONLY
 def test_route_plugin_details_not_found_is_404(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -641,7 +636,6 @@ def test_route_plugin_details_not_found_is_404(
 # --- POST /api/config-write/plugins/action ------------------------------------------
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_enable_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -672,7 +666,6 @@ def test_route_plugins_action_enable_success(
     assert record["cwd"] == str((projects_root / "alpha").resolve())
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_disable_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -690,7 +683,6 @@ def test_route_plugins_action_disable_success(
         assert resp.status_code == 200
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_install_requires_strong_confirm(
     write_config, tmp_path, projects_root
 ) -> None:
@@ -709,7 +701,6 @@ def test_route_plugins_action_install_requires_strong_confirm(
         assert resp.status_code == 400
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_install_confirm_mismatch_is_400(
     write_config, tmp_path, projects_root
 ) -> None:
@@ -728,7 +719,6 @@ def test_route_plugins_action_install_confirm_mismatch_is_400(
         assert resp.status_code == 400
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_install_success_with_matching_confirm(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -752,7 +742,6 @@ def test_route_plugins_action_install_success_with_matching_confirm(
     assert record["argv"] == ["install", "hello@market", "--scope", "project"]
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_uninstall_keep_data_and_prune(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -778,7 +767,6 @@ def test_route_plugins_action_uninstall_keep_data_and_prune(
     assert "-y" in argv
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_uninstall_not_found_is_404(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -798,7 +786,6 @@ def test_route_plugins_action_uninstall_not_found_is_404(
         assert resp.status_code == 404
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_update_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1020,7 +1007,6 @@ def test_route_plugins_action_bad_prune_type_is_422(write_config, tmp_path, proj
         assert resp.status_code == 422
 
 
-@_POSIX_ONLY
 def test_route_plugins_action_local_scope_ensures_gitignore(
     write_config, tmp_path, projects_root
 ) -> None:
@@ -1044,7 +1030,6 @@ def test_route_plugins_action_local_scope_ensures_gitignore(
 # --- GET /api/config-write/marketplaces (merged list, CLI) --------------------------
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_list_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1058,7 +1043,6 @@ def test_route_marketplaces_list_success(
         assert body["project"] == "alpha"  # project scope carries the project key
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_list_user_scope_omits_project(
     write_config, tmp_path, monkeypatch
 ) -> None:
@@ -1105,7 +1089,6 @@ def test_route_marketplaces_declared_404_when_disabled(write_config, tmp_path) -
 # --- POST /api/config-write/marketplaces/action -------------------------------------
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_add_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1145,7 +1128,6 @@ def test_route_marketplaces_action_add_rejects_leading_dash_source(
         assert resp.status_code == 422
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_add_git_not_found_is_400_not_404(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1183,7 +1165,6 @@ def test_route_marketplaces_action_add_missing_source_is_422(
         assert resp.status_code == 422
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_remove_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1223,7 +1204,6 @@ def test_route_marketplaces_action_remove_rejects_leading_dash_name(
         assert resp.status_code == 422
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_remove_not_found_is_404(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1243,7 +1223,6 @@ def test_route_marketplaces_action_remove_not_found_is_404(
         assert resp.status_code == 404
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_update_all(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1264,7 +1243,6 @@ def test_route_marketplaces_action_update_all(
     assert argv == ["marketplace", "update"]
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_update_one(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1387,7 +1365,6 @@ def test_route_marketplaces_action_missing_project_dir_is_404(
         assert resp.status_code == 404
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_local_scope_add_ensures_gitignore(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1409,7 +1386,6 @@ def test_route_marketplaces_action_local_scope_add_ensures_gitignore(
     assert ".claude/settings.local.json" in gitignore
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_local_scope_update_does_not_touch_gitignore(
     write_config, tmp_path, projects_root
 ) -> None:
@@ -1538,7 +1514,6 @@ def test_route_marketplaces_action_update_rejects_leading_dash_name(
         assert resp.status_code == 422
 
 
-@_POSIX_ONLY
 def test_route_marketplaces_action_update_user_scope_skips_project_key(
     write_config, tmp_path, monkeypatch
 ) -> None:
