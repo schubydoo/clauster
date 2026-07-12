@@ -23,7 +23,8 @@ claude:
   auto_enable_remote_control: true        # pre-ack remote control so a detached bridge skips the prompt
   resume_recap: false        # opt-in SessionStart hook: recap the prior transcript into a restarted bridge
   resume_recap_max_chars: 8000
-  launch_mode: standard      # standard (headless Server Mode) | pty (Interactive Session, true resume, POSIX).
+  launch_mode: standard      # standard (headless Server Mode) | pty (Interactive Session, true resume;
+                             # POSIX pty, or a Windows ConPTY keeper with the `pty` extra, else Server Mode).
                              # Default for NEW bridges only; the per-launch Mode picker overrides it.
   # path_append: ["~/.local/bin"]   # dirs appended to the bridge PATH (~ expanded; appended, never replacing)
   # node_from_nvm: true      # default-on (#859): append nvm `default` node's bin dir to the bridge PATH

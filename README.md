@@ -84,7 +84,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   never registers an environment is reported honestly as `Error` after a grace
   window, not a phantom `Running`.
 - **Spawn controls** — pick the spawn mode (same-dir / worktree / session),
-  permission mode, and resume mode (Server Mode / Interactive Session true-resume, POSIX) per launch;
+  permission mode, and resume mode (Server Mode / Interactive Session true-resume) per launch;
   `claude.launch_mode` is the pre-selected default. `bypassPermissions` is
   double-gated: a per-project config ceiling
   (`projects.<name>.allow_bypass_permissions`) **and** a type-the-project-name
@@ -153,8 +153,9 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   With `claude.resume_recap` enabled, Clauster installs a `SessionStart` hook in the
   runtime user's Claude settings that recaps the most recent prior transcript for
   that directory back into the new session.
-- **Native true-resume / "Interactive Session" mode (opt-in, POSIX)** — `claude.launch_mode: pty`
-  runs the `claude --remote-control` flag form under a PTY *keeper* sidecar, which
+- **Native true-resume / "Interactive Session" mode (opt-in)** — `claude.launch_mode: pty`
+  runs the `claude --remote-control` flag form under a PTY *keeper* sidecar (a POSIX pty,
+  or a Windows **ConPTY** via the `pty` extra — else `pty` falls back to Server Mode), which
   **genuinely restores prior conversation context** on Resume (`--continue`) rather
   than recapping it. The keeper outlives a Clauster restart and is stopped by signal.
   Single-session (vs. the default multi-session server). The dashboard surfaces the
@@ -368,7 +369,7 @@ validate against newer versions.
 | `auth.enabled` | `false` | master auth switch — must be on for password / proxy auth to apply |
 | `auth.password_required` | `false` | require login (`clauster hash-password` for the hash) |
 | `claude.resume_recap` | `false` | recap the prior transcript into a restarted bridge |
-| `claude.launch_mode` | `standard` | `pty` = native true-resume on Resume (POSIX); default for new bridges only — a bridge keeps the mode it launched with |
+| `claude.launch_mode` | `standard` | `pty` = native true-resume on Resume (POSIX pty, or Windows ConPTY with the `pty` extra); default for new bridges only — a bridge keeps the mode it launched with |
 | `reaper.ui_enabled` | `false` | expose the ghost-environment reaper in the dashboard |
 | `claustrum.enabled` | `false` | enable the hosted live-view channel (connect-or-spawn the `claustrum` daemon) |
 | `usage.mode` | `cost` | per-project badge contents: `cost` (≈USD + tokens) · `tokens` (count only) · `off` (hide + skip the usage fetch). `usage.show_cost: false` is a deprecated alias for `off` |
