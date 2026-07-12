@@ -333,6 +333,18 @@ class ClaustrumDaemon:
             raise DaemonSpawnError(f"claustrum binary not found: {self._cfg.binary!r}")
         return resolved
 
+    @staticmethod
+    def _unlink_token_handoff(token_file: Path | None) -> None:
+        """Best-effort remove the Windows ``-token-file`` when the spawn failed.
+
+        On a healthy start claustrum reads-then-unlinks it during startup; only a
+        failed spawn can leave the token on disk, and it must not linger there
+        (fail-closed on secrets). A no-op on POSIX, where ``token_file`` is ``None``.
+        """
+        if token_file is not None:
+            with contextlib.suppress(OSError):
+                token_file.unlink()
+
     async def _connect(self, token: str) -> ClaustrumClient:
         """Dial the socket and verify with an authed ping + version probe."""
         client = ClaustrumClient(
@@ -351,31 +363,44 @@ class ClaustrumDaemon:
         return client
 
     async def _spawn(self, token: str, deadline: float) -> None:
-        """Launch ``claustrum -serve``, feeding the token over the stdin pipe.
+        """Launch ``claustrum -serve``, handing over the auth token out-of-band.
 
-        The launcher reads the token from fd 0, re-execs a detached child
-        (reparented to ``init`` on POSIX; ``DETACHED_PROCESS`` on Windows), and
-        exits 0; the child opens the socket (plus the ``-listen-pipe`` named pipe on
-        Windows). We wait only for the launcher to exit (until ``deadline``), then
-        poll the transport separately — the daemon's own stdout/stderr go to
-        ``daemon.log`` so the detached, long-lived child never blocks on a pipe we'd drain.
+        POSIX feeds the token over the launcher's stdin (``-token-fd 0``); Windows has
+        no usable token fd for the Go daemon, so it writes the token to a short-lived
+        ``-token-file`` that claustrum reads-then-unlinks. The launcher re-execs a
+        detached child (reparented to ``init`` on POSIX; ``DETACHED_PROCESS`` on
+        Windows) and exits 0; the child opens the socket (plus the ``-listen-pipe``
+        named pipe on Windows). We wait only for the launcher to exit (until
+        ``deadline``), then poll the transport separately — the daemon's own
+        stdout/stderr go to ``daemon.log`` so the detached, long-lived child never
+        blocks on a pipe we'd drain.
         """
         binary = self._resolve_binary()
         # -keep-children (CL-8): a daemon restart/upgrade then leaves hosted child
         # sessions running for Clauster to reattach/recover. POSIX-only — the daemon
         # ignores it with a warning on Windows.
-        argv = [binary, "-serve", "-socket", str(self._socket), "-token-fd", "0"]
+        argv = [binary, "-serve", "-socket", str(self._socket)]
         if self._cfg.keep_children:
             argv.append("-keep-children")
-        # The Windows client dials a named pipe, not the AF_UNIX socket, so the daemon
-        # must also open a pipe listener and advertise it via rpc.pipe (#893/#894).
-        # claustrum self-daemonizes with DETACHED_PROCESS in its own re-exec, so the
-        # short-lived launcher Clauster spawns only forwards the token on stdin and
-        # exits 0 — no creationflags are needed here.
+        # claustrum self-daemonizes (reparented to init on POSIX, DETACHED_PROCESS on
+        # Windows) in its own re-exec, so the short-lived launcher Clauster spawns only
+        # hands over the token and exits 0 — no creationflags are needed here.
         spawn_kwargs: dict[str, Any] = {}
+        token_file: Path | None = None
         if sys.platform == "win32":
+            # The Windows client dials a named pipe, not the AF_UNIX socket, so the
+            # daemon must also open a pipe listener and advertise it via rpc.pipe (#894).
             argv.append("-listen-pipe")
+            # A numeric fd is not a usable token handle for the Go daemon on Windows
+            # (fd 0 → "read token-fd: The handle is invalid."), so hand the token over a
+            # short-lived file that claustrum reads-then-unlinks (-token-file) rather
+            # than -token-fd 0 over stdin. The file is written under the spawn guard
+            # below so a write failure is cleaned up + fail-closed, never left on disk.
+            token_file = self._socket.parent / f"token-handoff.{secrets.token_hex(8)}.tmp"
+            argv += ["-token-file", str(token_file)]
         else:
+            # POSIX: feed the token over the launcher's stdin (fd 0) — nothing on disk.
+            argv += ["-token-fd", "0"]
             # POSIX-only detach into a new session (setsid); omitted entirely on Windows
             # so no POSIX-only kwarg reaches the Windows subprocess layer at all.
             spawn_kwargs["start_new_session"] = True
@@ -388,43 +413,56 @@ class ClaustrumDaemon:
         # Append-mode log: the detached daemon keeps writing here after we return.
         log_file = open(self._log_path, "ab")  # noqa: SIM115 - handed to the child; closed below
         try:
+            # Windows: write the token handoff here, inside the guard, so a write failure
+            # (bad dir / perms / disk full) is cleaned up + surfaced, not leaked on disk.
+            if token_file is not None:
+                token_file.write_text(token, encoding="utf-8")
             proc = await asyncio.create_subprocess_exec(
                 *argv,
-                stdin=asyncio.subprocess.PIPE,
+                # POSIX feeds the token over stdin; Windows uses -token-file, so its
+                # launcher needs no stdin pipe.
+                stdin=asyncio.subprocess.DEVNULL if token_file else asyncio.subprocess.PIPE,
                 stdout=log_file,
                 stderr=log_file,
                 env=env,
                 **spawn_kwargs,
             )
-        except OSError as exc:  # pragma: no cover - exec failure after which() resolved
+        except OSError as exc:
             log_file.close()
+            self._unlink_token_handoff(token_file)
             self._error = f"could not launch claustrum: {exc}"
             raise DaemonSpawnError(self._error) from exc
 
-        stdin = proc.stdin
-        if stdin is None:  # pragma: no cover - stdin=PIPE always yields a writer
-            log_file.close()
-            raise DaemonSpawnError("claustrum launcher exposes no stdin pipe")
-        try:
-            stdin.write(token.encode("utf-8") + b"\n")
-            await stdin.drain()
-            stdin.close()
-        except (OSError, ConnectionError):  # pragma: no cover - racy; backstopped by returncode
-            # The launcher may have already read its token and closed fd 0; any
-            # real failure surfaces via the returncode / poll below.
-            logger.debug("claustrum: writing token to launcher stdin failed (already closed?)")
+        if token_file is None:  # POSIX: hand the token to the launcher over its stdin pipe.
+            stdin = proc.stdin
+            if stdin is None:  # pragma: no cover - stdin=PIPE always yields a writer
+                log_file.close()
+                raise DaemonSpawnError("claustrum launcher exposes no stdin pipe")
+            try:
+                stdin.write(token.encode("utf-8") + b"\n")
+                await stdin.drain()
+                stdin.close()
+            except (
+                OSError,
+                ConnectionError,
+            ):  # pragma: no cover - racy; backstopped by returncode
+                # The launcher may have already read its token and closed fd 0; any
+                # real failure surfaces via the returncode / poll below.
+                logger.debug("claustrum: writing token to launcher stdin failed (already closed?)")
 
         remaining = max(0.0, deadline - asyncio.get_running_loop().time())
         try:
             returncode = await asyncio.wait_for(proc.wait(), timeout=remaining)
         except TimeoutError as exc:
             proc.kill()
+            self._unlink_token_handoff(token_file)
             self._error = "claustrum -serve did not detach within the spawn timeout"
             raise DaemonSpawnError(self._error) from exc
         finally:
             log_file.close()
 
         if returncode != 0:
+            self._unlink_token_handoff(token_file)
             self._error = f"claustrum -serve exited {returncode}; see {self._log_path}"
             raise DaemonSpawnError(self._error)
 

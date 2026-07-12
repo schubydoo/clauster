@@ -27,11 +27,21 @@ from clauster.claustrum_client import AuthRejected, DaemonUnreachable
 from clauster.claustrum_daemon import ClaustrumDaemon, DaemonSpawnError
 from clauster.config import ClausterConfig
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="claustrum daemon is POSIX-only (AF_UNIX + setsid)"
+# The daemon lifecycle runs on Windows too: the fake binary detaches (DETACHED_PROCESS
+# instead of fork) and serves a named pipe there, advertised via rpc.pipe. Only the
+# POSIX file-mode assertions below stay Unix-only — Windows has no 0o600/0o700 bits.
+_POSIX_MODE_BITS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX file-mode bits (0o600/0o700) are not enforced on Windows",
 )
 
-FAKE_BIN = Path(__file__).resolve().parent / "fixtures" / "fake_claustrum_bin.py"
+# On Windows CreateProcess/shutil.which can't run the extensionless .py directly, so
+# the daemon binary points at the same-named .cmd wrapper (mirrors fake_claude).
+FAKE_BIN = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / ("fake_claustrum_bin.cmd" if sys.platform == "win32" else "fake_claustrum_bin.py")
+)
 
 
 @pytest.fixture
@@ -82,7 +92,9 @@ async def make_daemon(tmp_path: Path) -> AsyncIterator[Callable[..., ClaustrumDa
                     continue
                 try:
                     os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError:
+                except (ProcessLookupError, OSError):
+                    # POSIX raises ProcessLookupError for a dead PID; Windows os.kill
+                    # (TerminateProcess) raises OSError when the process is already gone.
                     pass
             shutil.rmtree(root, ignore_errors=True)
 
@@ -114,6 +126,7 @@ async def test_ensure_is_idempotent(make_daemon):
     assert first is second
 
 
+@_POSIX_MODE_BITS
 async def test_token_and_dir_permissions(make_daemon):
     """The state dir is 0700 and the token file is 0600."""
     daemon = make_daemon()
@@ -220,6 +233,7 @@ async def test_empty_token_file_is_regenerated(make_daemon, monkeypatch):
     assert len((daemon.socket_path.parent / "token").read_text(encoding="utf-8")) == 64
 
 
+@_POSIX_MODE_BITS
 def test_read_or_create_token_creates_with_o_excl(make_daemon):
     """Item-4 (#408): absent token → a fresh 64-char hex created at 0600."""
     daemon = make_daemon()
@@ -285,6 +299,7 @@ def test_read_or_create_token_waits_out_midwrite_winner_never_clobbers(make_daem
     assert daemon._token_path.read_text(encoding="utf-8") == winner
 
 
+@_POSIX_MODE_BITS
 def test_read_or_create_token_replaces_truly_abandoned_blank(make_daemon, monkeypatch):
     """A file that stays blank for the whole wait is abandoned → atomically replaced."""
     # Shrink the wait so the test doesn't sleep ~1s.
@@ -422,6 +437,9 @@ async def test_spawn_appends_listen_pipe_on_win32(make_daemon, monkeypatch):
     assert "-listen-pipe" in argv  # the Windows client dials a pipe, not AF_UNIX
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="asserts the POSIX _spawn branch, which Windows never takes"
+)
 async def test_spawn_omits_listen_pipe_on_posix(make_daemon, monkeypatch):
     # POSIX byte-identity guard: the AF_UNIX path must never grow -listen-pipe.
     argv = await _capture_spawn_argv(make_daemon, monkeypatch)
@@ -436,10 +454,84 @@ async def test_spawn_no_new_session_on_win32(make_daemon, monkeypatch):
     assert "start_new_session" not in kwargs
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="asserts the POSIX _spawn branch, which Windows never takes"
+)
 async def test_spawn_uses_start_new_session_on_posix(make_daemon, monkeypatch):
     # POSIX regression guard: the launcher detaches into its own session.
     kwargs = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]
     assert kwargs["start_new_session"] is True
+
+
+async def test_spawn_uses_token_file_not_fd_on_win32(make_daemon, monkeypatch):
+    # fd 0 is not a usable token handle for the Go daemon on Windows, so the token is
+    # handed over via a read-then-unlinked -token-file, never -token-fd.
+    _simulate_win32(monkeypatch)
+    argv = await _capture_spawn_argv(make_daemon, monkeypatch)
+    assert "-token-file" in argv
+    assert "-token-fd" not in argv
+
+
+async def test_spawn_win32_launcher_gets_no_stdin_pipe(make_daemon, monkeypatch):
+    # With -token-file the launcher needs no stdin pipe, so it is spawned with DEVNULL.
+    _simulate_win32(monkeypatch)
+    kwargs = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]
+    assert kwargs["stdin"] == asyncio.subprocess.DEVNULL
+
+
+async def test_spawn_win32_token_file_write_failure_fails_closed(make_daemon, monkeypatch):
+    # A failure writing the Windows token handoff must fail closed (DaemonSpawnError) and
+    # leave no token fragment on disk — it must not escape as a raw OSError.
+    _simulate_win32(monkeypatch)
+    daemon = make_daemon()
+
+    real_write = Path.write_text
+
+    def _boom(self, *args, **kwargs):
+        if self.name.startswith("token-handoff."):
+            raise OSError("disk full")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+
+    with pytest.raises(DaemonSpawnError):
+        await daemon.ensure()
+    assert not list(daemon.socket_path.parent.glob("token-handoff.*.tmp"))
+
+
+async def test_spawn_win32_success_skips_stdin_write(make_daemon, monkeypatch):
+    # On win32 the token went via -token-file (stdin=DEVNULL), so a successful spawn must
+    # skip the POSIX stdin block entirely — touching proc.stdin (None) would AttributeError.
+    _simulate_win32(monkeypatch)
+
+    class _FakeProc:
+        stdin = None  # DEVNULL yields no writer; the win32 path must never touch it
+
+        async def wait(self):
+            return 0
+
+        def kill(self):  # pragma: no cover - not reached on the success path
+            pass
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    # Returns cleanly (launcher "exited" 0) without dereferencing proc.stdin.
+    await daemon._spawn("t" * 64, asyncio.get_running_loop().time() + 5.0)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="asserts the POSIX _spawn branch, which Windows never takes"
+)
+async def test_spawn_uses_token_fd_over_stdin_on_posix(make_daemon, monkeypatch):
+    # POSIX regression guard: the token goes over stdin (-token-fd 0), nothing on disk.
+    call = await _capture_spawn_call(make_daemon, monkeypatch)
+    assert "-token-fd" in call["argv"]
+    assert "-token-file" not in call["argv"]
+    assert call["kwargs"]["stdin"] == asyncio.subprocess.PIPE
 
 
 # -- env-sentinel scrub (claustrum daemonize collision) --------------------

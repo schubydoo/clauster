@@ -224,7 +224,11 @@ async def fake_claustrum() -> AsyncIterator[Callable[..., Awaitable]]:
     sock_dir = Path(tempfile.mkdtemp(prefix="fclaustrum-"))
 
     async def _make(*, token: str = "tok", **kwargs) -> FakeClaustrum:
-        sock = str(sock_dir / f"d{len(started)}.sock")
+        # One subdir per fake so each gets its own `rpc.pipe` (the Windows pipe-name
+        # advertisement lives beside the socket path); harmless on POSIX.
+        sub = sock_dir / f"d{len(started)}"
+        sub.mkdir(exist_ok=True)
+        sock = str(sub / "d.sock")
         fake = FakeClaustrum(sock, token, **kwargs)
         await fake.start()
         started.append(fake)
