@@ -140,6 +140,18 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      # Concurrency cap as a simple boolean toggle via the CI_CAP_PARALLEL repo
+      # variable: set it to `false` to LIFT the cap (256 = GitHub's matrix-job
+      # ceiling, i.e. effectively uncapped on the 12-cell grid); anything else —
+      # `true`, unset, or garbage — keeps the safe default cap of 4 so a clauster
+      # run doesn't monopolise the account-wide runner pool. `4`/`256` are UNQUOTED
+      # numeric literals, so the expression evaluates to a NUMBER (max-parallel
+      # rejects a string — a quoted value is what broke the first attempt); the
+      # variable is only ever string-COMPARED (case-insensitive), never parsed as a
+      # number, so no value can error or break matrix expansion. The 4-cell subset
+      # PRs are unaffected by a cap of 4 — only the full grid (push:main / nightly)
+      # is throttled.
+      max-parallel: ${{ vars.CI_CAP_PARALLEL != 'false' && 4 || 256 }}
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -168,7 +180,12 @@ jobs:
             uv run --python "$PYTHON_VERSION" pytest -q --durations=15 \
               --cov-report=xml --junitxml=junit.xml -o junit_family=legacy || rc=$?
           else
-            uv run --python "$PYTHON_VERSION" pytest -q --durations=15 --cov-fail-under=0 || rc=$?
+            # macOS/Windows: keep the fail-under gate off (no single OS reaches
+            # 96% on its own), but DO emit coverage.xml so each OS's coverage can
+            # be uploaded under its own Codecov flag — per-OS visibility on the
+            # platform branches Linux can't exercise.
+            uv run --python "$PYTHON_VERSION" pytest -q --durations=15 --cov-fail-under=0 \
+              --cov-report=xml || rc=$?
           fi
           dur=$(( $(date +%s) - start ))
           {
@@ -179,8 +196,11 @@ jobs:
             echo "| $MATRIX_OS | $PYTHON_VERSION | ${dur}s | $([ "$rc" -eq 0 ] && echo pass || echo FAIL) |"
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
-      # Upload coverage + test results from the single Linux 3.13 cell (the gate
-      # platform — always present in both the subset and the full matrix).
+      # Upload coverage from EVERY cell, tagged with its OS as a Codecov flag
+      # (Linux/macOS/Windows), so coverage is broken out per platform — the axis
+      # where clauster actually varies (74 sys.platform branches; zero version
+      # branches). The internal-PR subset spans all three OSes, so every code PR
+      # uploads all three flags on the current commit and no carryforward is needed.
       # Token-based upload (no id-token perm). Non-blocking: Codecov isn't a
       # required check and upload flakiness must never fail CI. `!cancelled()` so
       # a FAILED pytest still uploads (pytest writes the reports before the gate),
@@ -189,12 +209,16 @@ jobs:
       # status/comment is pure noise) — filtered on the PR author; the login is empty
       # on push, so main-branch uploads are unaffected.
       - name: Upload coverage to Codecov
-        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
+        if: ${{ !cancelled() && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
+          flags: ${{ runner.os }}
           fail_ci_if_error: false
+      # Test results only need a single upload — keep it on the Linux 3.13 gate
+      # cell (always present in both the subset and the full matrix; only that
+      # branch writes junit.xml).
       - name: Upload test results to Codecov
         if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
