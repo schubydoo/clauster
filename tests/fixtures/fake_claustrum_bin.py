@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Spawnable fake claustrum daemon for connect-or-spawn tests (CL-2).
 
-Mimics the parts of ``claustrum -serve -socket <path> -token-fd <fd>`` that
-:mod:`clauster.claustrum_daemon` depends on: it reads the auth token from the
-given fd, self-daemonizes, and then serves a minimal auth-gated NDJSON JSON-RPC
-subset (``server.ping`` / ``server.version`` / ``server.shutdown``).
+Mimics the parts of ``claustrum -serve -socket <path>`` that
+:mod:`clauster.claustrum_daemon` depends on: it reads the auth token (from
+``-token-fd`` on POSIX, or the read-then-unlinked ``-token-file`` on Windows),
+self-daemonizes, and then serves a minimal auth-gated NDJSON JSON-RPC subset
+(``server.ping`` / ``server.version`` / ``server.shutdown``).
 
 * **POSIX** — ``fork`` + ``setsid``; the launcher process exits 0 once the real
   daemon is reparented to ``init`` and serves the ``AF_UNIX`` socket.
@@ -199,8 +200,13 @@ def main() -> None:
         _windows_child_main(socket_path, version)
         return
 
-    token_fd = int(_arg_value("-token-fd") or "0")
-    token = _read_token(token_fd)
+    token_file = _arg_value("-token-file")
+    if token_file is not None:
+        # Windows handoff: read-then-unlink, mirroring the real claustrum daemon.
+        token = Path(token_file).read_text(encoding="utf-8").rstrip("\r\n")
+        Path(token_file).unlink(missing_ok=True)
+    else:
+        token = _read_token(int(_arg_value("-token-fd") or "0"))
 
     fail = os.environ.get("FAKE_CLAUSTRUM_EXIT")
     if fail is not None:

@@ -463,6 +463,77 @@ async def test_spawn_uses_start_new_session_on_posix(make_daemon, monkeypatch):
     assert kwargs["start_new_session"] is True
 
 
+async def test_spawn_uses_token_file_not_fd_on_win32(make_daemon, monkeypatch):
+    # fd 0 is not a usable token handle for the Go daemon on Windows, so the token is
+    # handed over via a read-then-unlinked -token-file, never -token-fd.
+    _simulate_win32(monkeypatch)
+    argv = await _capture_spawn_argv(make_daemon, monkeypatch)
+    assert "-token-file" in argv
+    assert "-token-fd" not in argv
+
+
+async def test_spawn_win32_launcher_gets_no_stdin_pipe(make_daemon, monkeypatch):
+    # With -token-file the launcher needs no stdin pipe, so it is spawned with DEVNULL.
+    _simulate_win32(monkeypatch)
+    kwargs = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]
+    assert kwargs["stdin"] == asyncio.subprocess.DEVNULL
+
+
+async def test_spawn_win32_token_file_write_failure_fails_closed(make_daemon, monkeypatch):
+    # A failure writing the Windows token handoff must fail closed (DaemonSpawnError) and
+    # leave no token fragment on disk — it must not escape as a raw OSError.
+    _simulate_win32(monkeypatch)
+    daemon = make_daemon()
+
+    real_write = Path.write_text
+
+    def _boom(self, *args, **kwargs):
+        if self.name.startswith("token-handoff."):
+            raise OSError("disk full")
+        return real_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _boom)
+
+    with pytest.raises(DaemonSpawnError):
+        await daemon.ensure()
+    assert not list(daemon.socket_path.parent.glob("token-handoff.*.tmp"))
+
+
+async def test_spawn_win32_success_skips_stdin_write(make_daemon, monkeypatch):
+    # On win32 the token went via -token-file (stdin=DEVNULL), so a successful spawn must
+    # skip the POSIX stdin block entirely — touching proc.stdin (None) would AttributeError.
+    _simulate_win32(monkeypatch)
+
+    class _FakeProc:
+        stdin = None  # DEVNULL yields no writer; the win32 path must never touch it
+
+        async def wait(self):
+            return 0
+
+        def kill(self):  # pragma: no cover - not reached on the success path
+            pass
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    # Returns cleanly (launcher "exited" 0) without dereferencing proc.stdin.
+    await daemon._spawn("t" * 64, asyncio.get_running_loop().time() + 5.0)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="asserts the POSIX _spawn branch, which Windows never takes"
+)
+async def test_spawn_uses_token_fd_over_stdin_on_posix(make_daemon, monkeypatch):
+    # POSIX regression guard: the token goes over stdin (-token-fd 0), nothing on disk.
+    call = await _capture_spawn_call(make_daemon, monkeypatch)
+    assert "-token-fd" in call["argv"]
+    assert "-token-file" not in call["argv"]
+    assert call["kwargs"]["stdin"] == asyncio.subprocess.PIPE
+
+
 # -- env-sentinel scrub (claustrum daemonize collision) --------------------
 
 
