@@ -194,7 +194,10 @@ async def test_binary_not_found(make_daemon):
 async def test_spawn_then_never_listens_times_out(make_daemon, monkeypatch):
     """A daemon that detaches but never binds the socket → DaemonUnreachable."""
     monkeypatch.setenv("FAKE_CLAUSTRUM_NO_LISTEN", "1")
-    daemon = make_daemon(spawn_timeout_seconds=0.5)
+    # Windows process spawn (the fake's .cmd → python → detached-child Popen) can take ~1s
+    # under CI load; 0.5s is plenty on POSIX. Too tight a budget makes the launcher's detach
+    # itself time out ("did not detach") instead of the intended never-accepted poll timeout.
+    daemon = make_daemon(spawn_timeout_seconds=3.0 if sys.platform == "win32" else 0.5)
 
     with pytest.raises(DaemonUnreachable):
         await daemon.ensure()
