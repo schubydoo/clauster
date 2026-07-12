@@ -4,11 +4,12 @@
 # on the Linux cell). The `project` status mirrors that floor and stays
 # `informational: true` (it nudges, never blocks — pyproject is the source of
 # truth). The `patch` status is the one thing Codecov adds that pytest cannot —
-# per-PR-diff coverage at 80% with `informational: false`: a visible pass/fail
-# traffic light (green >= 80%, red X below) that nudges, never blocks (not a
-# required check). Coverage uploads from ONE
-# Linux 3.13 cell (see ci.yml), so flags / carryforward / report-merging aren't
-# needed.
+# per-PR-diff coverage at 95% with `informational: false`: a visible pass/fail
+# traffic light (green >= 95%, red X below) that nudges, never blocks (not a
+# required check). Coverage is uploaded from every matrix cell tagged with its OS
+# as a flag (Linux/macOS/Windows) for per-platform visibility; the internal-PR
+# subset spans all three OSes, so every code PR lands all three flags fresh and
+# carryforward is deliberately OFF (see the `flags` block below).
 #
 # Validate before deploying changes:
 #   curl -X POST --data-binary @codecov.yml https://api.codecov.io/validate
@@ -21,9 +22,15 @@ codecov:
   # `require_ci_to_pass: true`, which we never set, so listing it would be a no-op.
   require_ci_to_pass: false
   notify:
-    # A single upload cell (ubuntu+3.13 in ci.yml) sends exactly one report. Make
-    # the assumption explicit so a future second uploader is forced to revisit it.
-    after_n_builds: 1
+    # after_n_builds counts UPLOADS (not distinct flags): every code run uploads
+    # one coverage report per cell — the internal-PR subset emits 4 (one per cell,
+    # spanning all three OSes); the full grid emits 12. Wait for a few before
+    # notifying so the comment isn't posted off a single fast cell; later uploads
+    # (incl. the full grid's extra cells) update it in place (behavior: default).
+    # Kept at 3 — at or below the subset's guaranteed 4 uploads, so the
+    # notification ALWAYS fires (a value above the actual upload count would mean
+    # the comment never posts).
+    after_n_builds: 3
     wait_for_ci: false # default is true — must be explicit to show coverage immediately
 
 coverage:
@@ -65,10 +72,24 @@ coverage:
 github_checks:
   annotations: false
 
+# Per-OS coverage flags (uploaded from ci.yml, one per cell, tagged by
+# `runner.os`). Declared explicitly to pin carryforward OFF: the internal-PR
+# subset already spans all three OSes, so every code PR uploads all three flags on
+# the current commit and nothing needs carrying forward from a prior commit (which
+# would risk surfacing a stale per-OS number). Flag names MUST match the uploaded
+# `runner.os` values exactly (Linux / macOS / Windows). No per-flag `statuses` —
+# flags add VISIBILITY only, like components; they create no extra per-OS PR check.
+flags:
+  Linux:
+    carryforward: false
+  macOS:
+    carryforward: false
+  Windows:
+    carryforward: false
+
 comment:
-  # No flags are uploaded (single cell), so drop the empty "flags" panel and show
-  # the per-component breakdown instead.
-  layout: "condensed_header, diff, components, files"
+  # Flags (per-OS) + components (per-area) both broken out in the PR comment.
+  layout: "condensed_header, diff, flags, components, files"
   behavior: default # update the existing comment in place
   require_changes: true # only comment when coverage actually moves
   hide_project_coverage: false
