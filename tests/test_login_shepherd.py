@@ -17,6 +17,7 @@ land in a throwaway temp HOME, never the developer's real ``~/.claude``.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import sys
@@ -559,6 +560,26 @@ def test_pump_pty_survives_a_non_eio_read_error() -> None:
 
     flow = ls._Flow(mode="setup-token", proc=_FakeProc(), screen=scr, master_fd=999999)  # type: ignore[arg-type]
     ls._pump_pty(flow)  # must return cleanly (bad fd -> OSError, not EIO)
+    assert flow.snapshot() == ""
+
+
+def test_pump_pty_treats_eio_as_clean_eof(monkeypatch) -> None:
+    # On Linux a child exit makes os.read raise OSError(EIO); on macOS/BSD the pty
+    # often returns b"" instead (see the empty-read test below), so the EIO branch is
+    # only ever driven on the Linux cell. Patch os.read to raise EIO explicitly so the
+    # "expected end-of-stream, not logged" branch runs deterministically on every OS.
+    scr = ls.PtyScreen()
+
+    class _FakeProc:
+        pass
+
+    flow = ls._Flow(mode="setup-token", proc=_FakeProc(), screen=scr, master_fd=123)  # type: ignore[arg-type]
+
+    def _raise_eio(_fd, _n):
+        raise OSError(errno.EIO, "input/output error")
+
+    monkeypatch.setattr(ls.os, "read", _raise_eio)
+    ls._pump_pty(flow)  # EIO → treated as clean EOF; must return without raising
     assert flow.snapshot() == ""
 
 

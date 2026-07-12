@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import itertools
 import os
+from collections import namedtuple
 
 import psutil
 
@@ -34,6 +36,29 @@ def test_sample_tree_disk_unavailable_yields_none(monkeypatch):
     assert s is not None
     assert s["disk_read_bps"] is None
     assert s["disk_write_bps"] is None
+
+
+def test_sample_tree_disk_available_computes_positive_rates(monkeypatch):
+    # Force the io_counters-SUPPORTED branch on EVERY OS. macOS's psutil has no
+    # io_counters, so reading io.read_bytes/write_bytes and computing the disk-rate
+    # delta only ever run on the Linux/Windows cells — the macOS coverage flag shows
+    # them uncovered. Returning monotonically growing byte counters makes the second
+    # snapshot show a positive delta, exercising the supported path deterministically
+    # regardless of host platform (mirrors the disk-unavailable test above).
+    pio = namedtuple("pio", ["read_bytes", "write_bytes"])
+    counter = itertools.count(1_000_000, 1_000_000)
+
+    def growing(self):
+        n = next(counter)
+        return pio(read_bytes=n, write_bytes=n)
+
+    monkeypatch.setattr(psutil.Process, "io_counters", growing, raising=False)
+    s = metrics.sample_tree(os.getpid(), interval=0.02)
+    assert s is not None
+    assert isinstance(s["disk_read_bps"], int)
+    assert s["disk_read_bps"] > 0
+    assert isinstance(s["disk_write_bps"], int)
+    assert s["disk_write_bps"] > 0
 
 
 def test_sample_tree_survives_vanishing_procs(monkeypatch):
