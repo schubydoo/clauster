@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from clauster import pty_screen
-from clauster.pty_screen import PtyScreen, PyteUnavailableError
+from clauster.pty_screen import PtyScreen, PyteUnavailableError, extract_osc8_hyperlinks
 
 
 def test_renders_plaintext_cells_and_cursor():
@@ -147,6 +147,119 @@ def test_find_authorize_url_prefers_authorize_path_over_same_host_decoy_after_it
         b"Manage your account at https://claude.com/account"
     )
     assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=1"
+
+
+# --- OSC 8 hyperlink authorize-URL recovery (#905: setup-token under a Windows ConPTY) ------
+#
+# Under a ConPTY, `claude setup-token` emits its authorize URL as an OSC 8 hyperlink whose
+# target lives ONLY in the escape; pyte (0.8.2) drops it, so a display scan returns None.
+# find_authorize_url falls back to the URI captured from the raw byte stream.
+
+_OSC8_AUTH = "https://claude.com/cai/oauth/authorize?code=abc123&state=xyz"
+
+
+def _osc8(uri: str, label: str = "link", *, bel: bool = False, params: str = "") -> bytes:
+    """Build an OSC 8 hyperlink (open + labelled text + close), ST- or BEL-terminated."""
+    term = b"\x07" if bel else b"\x1b\\"
+    return (
+        b"\x1b]8;"
+        + params.encode()
+        + b";"
+        + uri.encode()
+        + term
+        + label.encode()
+        + b"\x1b]8;;"
+        + term
+    )
+
+
+def test_extract_osc8_hyperlinks_captures_open_and_skips_close():
+    # The open sequence carries the URI; the close sequence (empty URI) is skipped.
+    assert extract_osc8_hyperlinks(_osc8(_OSC8_AUTH)) == [_OSC8_AUTH]
+
+
+def test_extract_osc8_hyperlinks_bel_terminator_and_params():
+    # BEL (\x07) is a valid terminator, and non-empty params (id=…) precede the URI.
+    assert extract_osc8_hyperlinks(_osc8(_OSC8_AUTH, bel=True, params="id=1")) == [_OSC8_AUTH]
+
+
+def test_extract_osc8_hyperlinks_none_when_no_hyperlink():
+    assert extract_osc8_hyperlinks(b"just some \x1b[31mcolored\x1b[0m output, no hyperlink") == []
+
+
+def test_find_authorize_url_recovers_conpty_osc8_hyperlink():
+    # The URL is ONLY inside the hyperlink escape — the visible display shows just "Open link".
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(_osc8(_OSC8_AUTH, label="Open link"))
+    assert _OSC8_AUTH not in "\n".join(scr._screen.display)  # pyte really did drop the URI
+    assert scr.find_authorize_url() == _OSC8_AUTH
+
+
+def test_osc8_capture_is_off_by_default_for_the_keeper_screen():
+    # The long-lived keeper screen (default capture_osc8=False) never reads find_authorize_url,
+    # so it must NOT accumulate hyperlinks (would be an unbounded leak — reviewer finding #1).
+    scr = PtyScreen(cols=100, rows=6)  # default: no capture
+    scr.feed(_osc8(_OSC8_AUTH, label="Open link"))
+    assert scr._osc8_urls == []
+    assert scr.find_authorize_url() is None
+
+
+def test_find_authorize_url_osc8_split_across_feeds():
+    # A hyperlink cut mid-URI across two feed() chunks still matches via the carry buffer.
+    seq = _osc8(_OSC8_AUTH)
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(seq[: len(seq) // 2])
+    assert scr.find_authorize_url() is None
+    scr.feed(seq[len(seq) // 2 :])
+    assert scr.find_authorize_url() == _OSC8_AUTH
+
+
+def test_find_authorize_url_prefers_display_text_over_osc8():
+    # When a plain-text authorize URL is on the rendered display, it wins over an OSC 8
+    # decoy (display-first); the OSC 8 fallback only fires when the display scan is empty.
+    scr = PtyScreen(cols=120, rows=6, capture_osc8=True)
+    scr.feed(_osc8("https://docs.claude.com/help", label="docs"))
+    scr.feed(b"Open this URL to authorize: https://claude.com/cai/oauth/authorize?code=disp")
+    assert scr.find_authorize_url() == "https://claude.com/cai/oauth/authorize?code=disp"
+
+
+def test_find_authorize_url_osc8_fallback_reuses_selection_rule():
+    # Two OSC 8 links, a docs decoy before the real authorize link — the shared selection
+    # rule (authorize-path preference) picks the real one, not merely the last hyperlink.
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(_osc8("https://docs.claude.com/help", label="docs"))
+    scr.feed(_osc8(_OSC8_AUTH, label="authorize"))
+    assert scr.find_authorize_url() == _OSC8_AUTH
+
+
+def test_find_authorize_url_osc8_ignores_non_https_scheme():
+    # Parity with the text path's https-only _URL_RE: a stray non-https TUI hyperlink
+    # (file://, vscode://) must never surface as an authorize URL (reviewer finding #2).
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(_osc8("vscode://open?file=/etc/passwd", label="open"))
+    scr.feed(_osc8("file:///home/user/token.txt", label="file"))
+    assert scr._osc8_urls == []
+    assert scr.find_authorize_url() is None
+
+
+def test_osc8_urls_are_fifo_capped():
+    # Accumulator is bounded (reviewer finding #1): more than _OSC8_MAX_URLS distinct links
+    # evict the oldest, yet the most recent authorize URL still wins (selection is last-wins).
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    for i in range(pty_screen._OSC8_MAX_URLS + 25):
+        scr.feed(_osc8(f"https://example.com/link/{i}", label=f"l{i}"))
+    scr.feed(_osc8(_OSC8_AUTH, label="authorize"))
+    assert len(scr._osc8_urls) <= pty_screen._OSC8_MAX_URLS
+    assert scr.find_authorize_url() == _OSC8_AUTH
+
+
+def test_osc8_carry_stays_bounded_under_an_unterminated_flood():
+    # A ConPTY output flood with an unterminated escape must not grow the carry without
+    # bound (memory safety) — it is capped at _OSC8_MAX_CARRY.
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(b"\x1b" + b"0011Ignore" * 20000)
+    assert len(scr._osc8_carry) <= pty_screen._OSC8_MAX_CARRY
+    assert scr.find_authorize_url() is None
 
 
 # --- find_authorize_url() at a NARROW width: hard-wrap reassembly (live-smoke regression) --

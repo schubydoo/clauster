@@ -250,7 +250,7 @@ class LoginShepherd:
         stays fail-closed since it is security-critical, not cosmetic.
         """
         try:
-            screen = PtyScreen(cols=_LOGIN_PTY_COLS, rows=SCREEN_ROWS)
+            screen = PtyScreen(cols=_LOGIN_PTY_COLS, rows=SCREEN_ROWS, capture_osc8=True)
         except PyteUnavailableError as exc:
             raise LoginShepherdError(
                 "the long-lived-token mode needs the `pty` extra (pyte) — use "

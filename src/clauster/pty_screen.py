@@ -34,6 +34,7 @@ import os
 import re
 import sys
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -101,6 +102,26 @@ _AUTHORIZE_PATH_MARKERS = ("oauth/authorize",)
 # Matched permissively (any non-whitespace value) since the exact real-binary format is
 # unverified — this is defensive, not assumed exact.
 _TOKEN_RE = re.compile(r"CLAUDE_CODE_OAUTH_TOKEN=(\S+)")
+
+# OSC 8 hyperlink: ``ESC ] 8 ; <params> ; <URI> (ST | BEL)``. Under a Windows ConPTY,
+# ``claude setup-token`` emits its authorize URL as an OSC 8 hyperlink whose URI lives ONLY
+# inside the escape — pyte (0.8.2, empirically verified) drops it entirely, rendering just
+# the visible link label, so a display scan returns None. We capture the URI straight from
+# the raw byte stream instead. ``<params>`` (e.g. ``id=foo``) is ``:``-separated and carries
+# no ``;``, so ``[^;]*`` is a safe match for it; the URI capture stops at the ST (``ESC \``)
+# or BEL terminator. The closing sequence ``ESC ] 8 ; ; ST`` carries an empty URI (skipped).
+_OSC8_RE = re.compile(rb"\x1b\]8;[^;]*;([^\x1b\x07]*)(?:\x1b\\|\x07)")
+
+# Bound on the raw-byte tail carried between :meth:`PtyScreen.feed` calls so a hyperlink
+# split across a chunk boundary still matches — comfortably larger than the ~450-char
+# authorize URL plus escape overhead, and a hard cap against an unterminated escape (e.g.
+# the ConPTY output flood) growing the carry without bound.
+_OSC8_MAX_CARRY = 4096
+
+# Cap on retained OSC 8 URIs. Selection is "last wins", so a small tail suffices; the cap
+# bounds memory on the login screen and is belt-and-suspenders for the keeper (which does
+# not capture at all — see ``PtyScreen(capture_osc8=…)``).
+_OSC8_MAX_URLS = 64
 
 
 def _unwrap_display(display: list[str]) -> str:
@@ -223,18 +244,41 @@ def extract_authorize_url(output: str) -> str | None:
     two never drift onto different selection rules.
     """
     cleaned_output = redact.strip_ansi(output)
-    candidates = [_clean_url(m.group(0)) for m in _URL_RE.finditer(cleaned_output)]
-    candidates = [c for c in candidates if c]
-    if not candidates:
+    return _select_authorize_url(m.group(0) for m in _URL_RE.finditer(cleaned_output))
+
+
+def _select_authorize_url(candidates: Iterable[str]) -> str | None:
+    """Pick the best authorize URL from already-extracted candidate URLs, or None.
+
+    The shared selection rule behind BOTH :func:`extract_authorize_url` (the text scan over
+    a plain-pipe / rendered-display blob) and :meth:`PtyScreen.find_authorize_url`'s OSC 8
+    hyperlink fallback, so the two can never drift onto different rules. Each candidate is
+    trimmed of trailing punctuation/quotes; then, in priority order: (1) an authorize-endpoint
+    path match (:func:`_is_authorize_path`), preferring a known auth host, last one wins;
+    (2) the last known-auth-host candidate; (3) the last candidate overall.
+    """
+    cleaned = [c for c in (_clean_url(c) for c in candidates) if c]
+    if not cleaned:
         return None
-    authorize_matches = [url for url in candidates if _is_authorize_path(url)]
+    authorize_matches = [url for url in cleaned if _is_authorize_path(url)]
     if authorize_matches:
         known_authorize = [url for url in authorize_matches if _is_known_auth_host(_url_host(url))]
         return (known_authorize or authorize_matches)[-1]
-    known = [url for url in candidates if _is_known_auth_host(_url_host(url))]
+    known = [url for url in cleaned if _is_known_auth_host(_url_host(url))]
     if known:
         return known[-1]
-    return candidates[-1]
+    return cleaned[-1]
+
+
+def extract_osc8_hyperlinks(data: bytes) -> list[str]:
+    """Return the URIs of every complete OSC 8 hyperlink *open*-sequence in ``data``.
+
+    The closing sequence (``ESC ] 8 ; ; ST``) carries an empty URI and is skipped. OSC 8
+    URIs are ASCII per spec; a stray non-ASCII byte is replaced rather than raising. Used to
+    recover ``claude setup-token``'s authorize URL under a ConPTY, where it is emitted as a
+    hyperlink whose target pyte does not render (see :data:`_OSC8_RE`).
+    """
+    return [uri.decode("ascii", "replace") for m in _OSC8_RE.finditer(data) if (uri := m.group(1))]
 
 
 def extract_oauth_token(output: str) -> str | None:
@@ -378,8 +422,16 @@ class PtyScreen:
     caller's job.
     """
 
-    def __init__(self, cols: int = SCREEN_COLS, rows: int = SCREEN_ROWS) -> None:
-        """Build the emulator at a fixed ``cols`` x ``rows`` geometry (raises if no pyte)."""
+    def __init__(
+        self, cols: int = SCREEN_COLS, rows: int = SCREEN_ROWS, *, capture_osc8: bool = False
+    ) -> None:
+        """Build the emulator at a fixed ``cols`` x ``rows`` geometry (raises if no pyte).
+
+        ``capture_osc8`` opts into OSC 8 hyperlink authorize-URL capture (#905), needed ONLY
+        by `login_shepherd`'s short-lived ``setup-token`` screen. The long-lived #534 keeper
+        screen leaves it off (default): it never reads :meth:`find_authorize_url`, so capturing
+        would be dead weight that also accumulates every TUI hyperlink for the bridge lifetime.
+        """
         pyte = _import_pyte()
         self.cols = cols
         self.rows = rows
@@ -389,11 +441,42 @@ class PtyScreen:
         # this screen is fed and scanned from different threads. No reader calls feed or
         # another reader, so a plain (non-reentrant) Lock cannot self-deadlock.
         self._lock = threading.Lock()
+        # OSC 8 hyperlink capture (ConPTY authorize-URL recovery — see :data:`_OSC8_RE`).
+        # pyte drops the hyperlink target, so we scan the raw byte stream in :meth:`feed`.
+        # ``_osc8_carry`` holds a bounded tail so a hyperlink split across a chunk boundary
+        # still matches; ``_osc8_urls`` retains the last :data:`_OSC8_MAX_URLS` deduped URIs.
+        self._capture_osc8 = capture_osc8
+        self._osc8_carry = b""
+        self._osc8_urls: list[str] = []
+        self._osc8_seen: set[str] = set()
 
     def feed(self, data: bytes) -> None:
         """Feed a chunk of raw pty bytes into the emulator (escape sequences consumed here)."""
         with self._lock:
             self._stream.feed(data)
+            if self._capture_osc8:
+                self._scan_osc8(data)
+
+    def _scan_osc8(self, data: bytes) -> None:
+        """Record OSC 8 hyperlink URIs from ``data`` (caller holds ``self._lock``).
+
+        Scans ``carry + data`` so a hyperlink split across two :meth:`feed` chunks still
+        matches, then carries the tail from its last ``ESC`` (where an unterminated escape
+        would begin), capped at :data:`_OSC8_MAX_CARRY`. ``_osc8_seen`` dedups so no URI is
+        double-counted even if a completed sequence's trailing bytes are re-carried, and
+        ``_osc8_urls`` is FIFO-evicted at :data:`_OSC8_MAX_URLS`. Only ``https://`` URIs are
+        retained — parity with the text path's ``https``-only :data:`_URL_RE`, and it keeps a
+        stray TUI hyperlink (``file://``, ``vscode://``) from ever surfacing as an authorize URL.
+        """
+        buf = self._osc8_carry + data
+        for url in extract_osc8_hyperlinks(buf):
+            if url.startswith("https://") and url not in self._osc8_seen:
+                self._osc8_seen.add(url)
+                self._osc8_urls.append(url)
+                if len(self._osc8_urls) > _OSC8_MAX_URLS:
+                    self._osc8_seen.discard(self._osc8_urls.pop(0))
+        esc = buf.rfind(b"\x1b")
+        self._osc8_carry = buf[esc:][-_OSC8_MAX_CARRY:] if esc != -1 else b""
 
     def find_session_id(self) -> str | None:
         """Scan the reassembled screen for the bridge's ``session_<id>``, or None.
@@ -429,10 +512,23 @@ class PtyScreen:
         The pty is sized wide enough that this should rarely matter in practice (see
         `login_shepherd._LOGIN_PTY_COLS`), but `_unwrap_display` makes the scan correct at
         any width.
+
+        Windows ConPTY fallback (#905): `claude setup-token` emits the authorize URL as an
+        OSC 8 hyperlink whose target pyte drops from the rendered display, so the display
+        scan returns None there. When it does, fall back to the URI captured from the raw
+        byte stream (:meth:`_scan_osc8`), run through the SAME :func:`_select_authorize_url`
+        rule so the two paths can never disagree.
         """
         with self._lock:
             display = list(self._screen.display)
-        return extract_authorize_url(_unwrap_display(display))
+            osc8_urls = list(self._osc8_urls)
+        url = extract_authorize_url(_unwrap_display(display))
+        if url is not None:
+            return url
+        # ConPTY renders the authorize URL as an OSC 8 hyperlink whose target pyte drops from
+        # the display (#905); fall back to the URI captured from the raw OSC 8 sequences,
+        # run through the SAME selection rule as the text scan.
+        return _select_authorize_url(osc8_urls)
 
     def find_oauth_token(self) -> str | None:
         """Scan the reassembled screen for ``setup-token``'s printed OAuth token, or None.
