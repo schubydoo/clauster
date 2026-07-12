@@ -31,16 +31,15 @@ from clauster import config_write_mcp_cli as mcp_cli
 from clauster.app import create_app
 from clauster.config import load_config
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
-
-# The fake `claude` stub is an extensionless POSIX shebang script; on Windows it is not a
-# valid Win32 executable ([WinError 193]), so any test that actually SPAWNS it via a route
-# is POSIX-gated (same idiom as tests/test_app_hosted.py's _POSIX_ONLY). The pure-unit
-# tests below inject a fake `run=` callable and never exec the stub, so they stay
-# cross-platform; only the route tests that reach the real `claude mcp` subprocess are
-# gated with @_POSIX_ONLY.
-_POSIX_ONLY = pytest.mark.skipif(
-    sys.platform == "win32", reason="fake_claude stub is a POSIX script, not a Win32 executable"
+# The fake `claude` stub is an extensionless POSIX shebang script; Windows CreateProcess
+# can't launch it directly ([WinError 193]), so on Windows the tests point at the same-named
+# `.cmd` wrapper (`_WIN_STUB_SUFFIX`), which shells it through `python` — the established
+# idiom in test_ops.py / test_provisioning.py. The route tests that spawn the real
+# `claude mcp` subprocess then run on every platform (the pure-unit tests that inject a fake
+# `run=` callable were already cross-platform).
+_WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
+FAKE_CLAUDE = (
+    Path(__file__).resolve().parent / "fixtures" / "fake_claude" / f"claude{_WIN_STUB_SUFFIX}"
 )
 
 
@@ -679,7 +678,6 @@ _ON = "config_write:\n  enabled: true\n  allow_user_scope: true\n"
 _PROJECT_ONLY = "config_write:\n  enabled: true\n"
 
 
-@_POSIX_ONLY
 def test_route_server_add_project_scope_via_cli(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -711,7 +709,6 @@ def test_route_server_add_project_scope_via_cli(
     assert record["has_client_secret_env"] is False
 
 
-@_POSIX_ONLY
 def test_route_server_add_conflict_is_409(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -732,7 +729,6 @@ def test_route_server_add_conflict_is_409(
         assert resp.status_code == 409
 
 
-@_POSIX_ONLY
 def test_route_server_remove_not_found_is_404(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -776,7 +772,6 @@ def test_route_server_add_with_secret_bypasses_cli(
     assert on_disk["mcpServers"]["srv"]["env"]["API_TOKEN"] == "sk-live-real"
 
 
-@_POSIX_ONLY
 def test_route_server_edit_project_scope_reaches_cli_add(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -803,7 +798,6 @@ def test_route_server_edit_project_scope_reaches_cli_add(
     assert record["argv"][1] == "srv"
 
 
-@_POSIX_ONLY
 def test_route_server_remote_client_secret_via_env(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -829,7 +823,6 @@ def test_route_server_remote_client_secret_via_env(
     assert record["has_client_secret_env"] is True
 
 
-@_POSIX_ONLY
 def test_route_server_remove_success(write_config, tmp_path, projects_root, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_MCP_STDOUT", "Removed MCP server srv from project config")
     with _client(write_config, tmp_path, _ON) as c:
@@ -983,7 +976,6 @@ def test_route_server_option_like_name_is_422(write_config, tmp_path, projects_r
         assert resp.status_code == 422
 
 
-@_POSIX_ONLY
 def test_route_server_edit_readd_failure_restores_and_500s(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1017,7 +1009,6 @@ def test_route_server_edit_readd_failure_restores_and_500s(
     assert on_disk["mcpServers"]["srv"] == {"command": "OLD", "env": {"API_TOKEN": "sk-prior"}}
 
 
-@_POSIX_ONLY
 def test_route_server_edit_readd_failure_no_prior_still_400s(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1196,7 +1187,6 @@ def test_route_server_missing_project_dir_is_404(write_config, tmp_path, project
         assert resp.status_code == 404
 
 
-@_POSIX_ONLY
 def test_route_server_user_scope_add_via_cli(write_config, tmp_path, monkeypatch) -> None:
     argv_file = tmp_path / "argv.json"
     monkeypatch.setenv("FAKE_CLAUDE_MCP_ARGV_FILE", str(argv_file))
@@ -1282,7 +1272,6 @@ def test_route_approvals_read_missing_project_is_422(
 # --- reset-project-choices route ----------------------------------------------------
 
 
-@_POSIX_ONLY
 def test_route_reset_project_choices_success(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
@@ -1320,7 +1309,6 @@ def test_route_reset_project_choices_confirm_mismatch_is_400(
         assert resp.status_code == 400
 
 
-@_POSIX_ONLY
 def test_route_reset_project_choices_cli_failure_is_400(
     write_config, tmp_path, projects_root, monkeypatch
 ) -> None:
