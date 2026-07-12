@@ -140,15 +140,18 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      # Cap how many matrix cells run at once so a clauster run (full grid = 12
-      # cells) doesn't monopolise the account-wide concurrent-runner pool while
-      # other repos queue. Controlled by the CI_MAX_PARALLEL repo variable so the
-      # cap is tunable — or liftable — WITHOUT a code change: 4 = default cap; set
-      # it to 12 (or higher) to effectively remove the cap, since the full grid is
-      # 12 cells. The `|| '4'` fallback keeps CI safe if the variable is ever unset
-      # or deleted. The internal-PR subset is only 4 cells, so a cap of 4 leaves PR
-      # latency untouched and throttles only the full grid on push:main / nightly.
-      max-parallel: ${{ vars.CI_MAX_PARALLEL || '4' }}
+      # Concurrency cap as a simple boolean toggle via the CI_CAP_PARALLEL repo
+      # variable: set it to `false` to LIFT the cap (256 = GitHub's matrix-job
+      # ceiling, i.e. effectively uncapped on the 12-cell grid); anything else —
+      # `true`, unset, or garbage — keeps the safe default cap of 4 so a clauster
+      # run doesn't monopolise the account-wide runner pool. `4`/`256` are UNQUOTED
+      # numeric literals, so the expression evaluates to a NUMBER (max-parallel
+      # rejects a string — a quoted value is what broke the first attempt); the
+      # variable is only ever string-COMPARED (case-insensitive), never parsed as a
+      # number, so no value can error or break matrix expansion. The 4-cell subset
+      # PRs are unaffected by a cap of 4 — only the full grid (push:main / nightly)
+      # is throttled.
+      max-parallel: ${{ vars.CI_CAP_PARALLEL != 'false' && 4 || 256 }}
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

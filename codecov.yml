@@ -22,15 +22,14 @@ codecov:
   # `require_ci_to_pass: true`, which we never set, so listing it would be a no-op.
   require_ci_to_pass: false
   notify:
-    # after_n_builds counts UPLOADS (not distinct flags): every code run uploads
-    # one coverage report per cell — the internal-PR subset emits 4 (one per cell,
-    # spanning all three OSes); the full grid emits 12. Wait for a few before
-    # notifying so the comment isn't posted off a single fast cell; later uploads
-    # (incl. the full grid's extra cells) update it in place (behavior: default).
-    # Kept at 3 — at or below the subset's guaranteed 4 uploads, so the
-    # notification ALWAYS fires (a value above the actual upload count would mean
-    # the comment never posts).
-    after_n_builds: 3
+    # Notify after the first upload and let later per-OS uploads update the comment
+    # in place (behavior: default). Deliberately 1, NOT the upload count: a higher
+    # threshold can starve — if a fast re-push cancels slower cells (the upload step
+    # skips cancelled jobs), fewer reports land and a threshold-gated comment would
+    # never post even though the completed cells produced coverage. 1 always fires;
+    # the first report is ~the passing Linux number and ticks up as macOS/Windows
+    # arrive, so an early single-OS comment is never a false alarm.
+    after_n_builds: 1
     wait_for_ci: false # default is true — must be explicit to show coverage immediately
 
 coverage:
