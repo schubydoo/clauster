@@ -174,7 +174,11 @@ sustained over a scrape interval.
 The per-project live resource metrics (CPU / memory / disk shown on a running
 bridge's card) are a separate, dashboard-only fetch
 (`/api/projects/{name}/metrics`); they are not part of the Prometheus exposition
-and are governed by the `metrics` config block, not `observability`.
+and are governed by the `metrics` config block, not `observability`. **Disk I/O is
+unavailable on macOS** — `psutil` has no per-process `io_counters` there, so the API
+returns `null` for `disk_read_bps` / `disk_write_bps` and the card leaves those fields
+blank on macOS (CPU and memory still show). See the platform-support matrix in
+`architecture.md` for the full per-OS list.
 
 ## Crash alerts
 

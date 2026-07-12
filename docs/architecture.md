@@ -114,8 +114,10 @@ The default (Server Mode). `runner.py`'s `SessionRunner` spawns the headless
 
 ### Interactive Session (`claude --remote-control` under a keeper)
 
-Opt-in via `claude.launch_mode: pty`, POSIX only (falls back to Server Mode on
-Windows). `pty_keeper.py` runs the `claude --remote-control` **flag form** under
+Opt-in via `claude.launch_mode: pty`. On POSIX it runs under a real pty; on Windows
+under a ConPTY keeper (pywinpty, the `pty` extra), falling back to Server Mode when
+that extra is absent — see [Platform support](#platform-support). `pty_keeper.py` runs
+the `claude --remote-control` **flag form** under
 a PTY keeper sidecar:
 
 - **Single-session.**
@@ -174,6 +176,39 @@ resume always honour the recorded mode.
     the current JSON schema (the database schema is migrated automatically at
     startup, above); `clauster backup`/`restore` tar the `state_dir`
     (`clauster.db` included) + config.
+
+## Platform support
+
+Clauster runs on Linux, macOS, and Windows. A handful of runtime capabilities
+are POSIX-specific or otherwise platform-bound; the table below is the single
+source of truth for "what works where". When one of these rows changes, update
+it **here** rather than restating the gap in another doc — the scattered notes
+elsewhere point back to this matrix.
+
+Legend: ✓ works · ✗ not available (honest platform gap) · 🟡 in progress
+
+| Capability | Linux | macOS | Windows | Notes |
+| --- | :---: | :---: | :---: | --- |
+| Standard (Server Mode) bridge | ✓ | ✓ | ✓ | Windows spawns the bridge with `CREATE_NEW_PROCESS_GROUP` and stops it via `CTRL_BREAK_EVENT`; POSIX uses `start_new_session` + `SIGINT`. |
+| Interactive Session (PTY) bridge | ✓ | ✓ | ✓ † | POSIX uses `pty.openpty` + `termios`; Windows drives a **ConPTY** keeper via **pywinpty** ([#903](https://github.com/schubydoo/clauster/pull/903)). † Needs the `pty` extra (`pip install 'clauster[pty]'`) — without it `launch_mode: pty` falls back to Server Mode. |
+| Hosted channel (claustrum) | ✓ | ✓ | ✓ | Windows dials claustrum's named pipe (discovered via `rpc.pipe`) rather than the `AF_UNIX` socket, and clauster spawns the daemon with `-listen-pipe` + a `-token-file` handoff (a numeric token fd isn't usable there). Round-trip validated ([#902](https://github.com/schubydoo/clauster/pull/902)). |
+| Dashboard `claude` login | ✓ | ✓ | 🟡 | Subscription sign-in (`claude auth login`, plain pipes) works everywhere; the long-lived `setup-token` flow runs under a POSIX PTY, so on Windows it awaits a ConPTY port ([#905](https://github.com/schubydoo/clauster/issues/905)). |
+| Config-write CLI (`claude mcp` / `claude plugin`) | ✓ | ✓ | ✓ | Routes exercised on the Windows CI cells + VM. |
+| Per-bridge CPU % / RSS memory | ✓ | ✓ | ✓ | `psutil.cpu_times` / `memory_info` on every platform. |
+| Per-bridge disk I/O rate | ✓ | ✗ | ✓ | `psutil` has no per-process `io_counters` on macOS, so a bridge card's `disk_read_bps` / `disk_write_bps` fields are blank there. |
+| Advisory file locking (config writes) | ✓ | ✓ | 🟡 lock-free | `fcntl.flock` is POSIX-only; on Windows the writers rely on atomic `os.replace` (no torn files), but concurrent read-modify-write updates can still lose the earlier writer's changes. |
+| Owner-only file modes (`0o600` / `0o700`) | ✓ | ✓ | ✗ | Windows has no POSIX mode bits (the `chmod` is a no-op); ACL hardening is not implemented. |
+| Directory `fsync` (crash durability) | ✓ | ✓ | ✗ | A directory handle can't be `fsync`ed on Windows. |
+| Service-unit install (`install-service`) | ✓ | ✓ | ✓ † | Renders a systemd unit on Linux, a launchd plist on macOS (`launchd` kind), and an nssm install script on Windows (`windows` kind) — `ops.render_service_unit`. † Windows requires `nssm` installed + on `PATH` before running the generated script. |
+
+The remaining gaps above are honest platform differences, not defects — they're why
+the Windows per-OS coverage flag sits a little below 100% (the POSIX-only branches it
+can't run), while the union across all three platforms is 100%. Only the Linux CI cell
+enforces the coverage gate (`--cov-fail-under=96`); the per-OS flags add visibility, not
+a gate. The **ConPTY keeper and the live pty-screen view both need
+the `pty` extra** (`pip install 'clauster[pty]'`, pulling pywinpty on Windows and pyte
+everywhere); it is intentionally not bundled in the standalone binary — see the module
+notes and [#904](https://github.com/schubydoo/clauster/issues/904).
 
 ## Conventions
 
