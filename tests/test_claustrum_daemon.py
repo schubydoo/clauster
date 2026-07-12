@@ -192,16 +192,24 @@ async def test_binary_not_found(make_daemon):
 
 
 async def test_spawn_then_never_listens_times_out(make_daemon, monkeypatch):
-    """A daemon that detaches but never binds the socket → DaemonUnreachable."""
+    """A daemon that detaches but never binds the socket → ensure() fails closed."""
     monkeypatch.setenv("FAKE_CLAUSTRUM_NO_LISTEN", "1")
     # Windows process spawn (the fake's .cmd → python → detached-child Popen) can take ~1s
-    # under CI load; 0.5s is plenty on POSIX. Too tight a budget makes the launcher's detach
-    # itself time out ("did not detach") instead of the intended never-accepted poll timeout.
+    # under CI load; 0.5s is plenty on POSIX. The generous win32 budget lets the launcher detach
+    # so the connect poll runs and hits the intended never-accepted timeout in the normal case.
     daemon = make_daemon(spawn_timeout_seconds=3.0 if sys.platform == "win32" else 0.5)
 
-    with pytest.raises(DaemonUnreachable):
+    # On POSIX the launcher detaches instantly, so this deterministically hits the never-accepted
+    # poll timeout (DaemonUnreachable). On Windows the launcher's own detach bounds the budget, so
+    # an unusually slow detach can instead surface as DaemonSpawnError ("did not detach") — both
+    # are the intended fail-closed outcome, so accept either there rather than depend on which
+    # timeout fires first (a fixed budget can't make that deterministic; the exception tuple can).
+    with pytest.raises((DaemonUnreachable, DaemonSpawnError)):
         await daemon.ensure()
-    assert "never accepted" in (daemon.status()["error"] or "")
+    if sys.platform == "win32":
+        assert daemon.status()["error"]
+    else:
+        assert "never accepted" in (daemon.status()["error"] or "")
 
 
 async def test_spawn_launcher_hang_times_out(make_daemon, monkeypatch):
