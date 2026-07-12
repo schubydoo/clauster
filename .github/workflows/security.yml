@@ -124,12 +124,13 @@ jobs:
 
   trivy-image:
     name: trivy image scan
-    # Building the image just to scan it costs ~75s — the long pole of this
-    # workflow. Skip it on PRs (where it's report-only anyway); run on the main
-    # push + the weekly cron, which still catch image CVEs and a broken Dockerfile
-    # before any tagged release. The `security required checks passed` aggregator
-    # treats a skipped job as passing (same as the PR-only dependency-review on
-    # push), so the required check stays green on PRs.
+    # Building the image just to scan it is the long pole of this workflow (a few
+    # minutes — it builds no-cache; see the build step). Skip it on PRs (where it's
+    # report-only anyway); run on the main push + the weekly cron, which still catch
+    # image CVEs and a broken Dockerfile before any tagged release. The `security
+    # required checks passed` aggregator treats a skipped job as passing (same as
+    # the PR-only dependency-review on push), so the required check stays green on
+    # PRs.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -143,7 +144,11 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       # Build the amd64 image once and load it locally for the scan (no push).
-      # The gha cache keeps cold builds cheap.
+      # NO build cache: the runtime `apt-get upgrade` layer is keyed on the FROM
+      # digest, so a cached build serves stale OS packages and Trivy then flags CVEs
+      # already fixed in what we ship — release.yml/nightly.yml build fresh, so the
+      # scan must too (esp. when a Debian fix lands before upstream republishes the
+      # base, leaving no digest bump to bust the cache — the libcurl deb13u4 case).
       - name: Build image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -151,8 +156,7 @@ jobs:
           load: true
           tags: clauster:scan
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: true
       - name: Trivy image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
