@@ -372,8 +372,13 @@ class ClaustrumDaemon:
         # claustrum self-daemonizes with DETACHED_PROCESS in its own re-exec, so the
         # short-lived launcher Clauster spawns only forwards the token on stdin and
         # exits 0 — no creationflags are needed here.
+        spawn_kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
             argv.append("-listen-pipe")
+        else:
+            # POSIX-only detach into a new session (setsid); omitted entirely on Windows
+            # so no POSIX-only kwarg reaches the Windows subprocess layer at all.
+            spawn_kwargs["start_new_session"] = True
         # Defensive: scrub claustrum's daemonize sentinel from the child env (see
         # _DAEMON_SENTINEL_ENV) so an ambient CLAUDE_SSH_DAEMON_CHILD can't make the
         # launcher mistake itself for its own re-exec'd child and skip the token read.
@@ -389,9 +394,7 @@ class ClaustrumDaemon:
                 stdout=log_file,
                 stderr=log_file,
                 env=env,
-                # New-session detach on POSIX; False (the default no-op) on Windows,
-                # where claustrum self-daemonizes via DETACHED_PROCESS in its re-exec.
-                start_new_session=sys.platform != "win32",
+                **spawn_kwargs,
             )
         except OSError as exc:  # pragma: no cover - exec failure after which() resolved
             log_file.close()

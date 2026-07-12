@@ -429,11 +429,11 @@ async def test_spawn_omits_listen_pipe_on_posix(make_daemon, monkeypatch):
 
 
 async def test_spawn_no_new_session_on_win32(make_daemon, monkeypatch):
-    # start_new_session is a POSIX-only detach; on Windows it's False (CPython ignores
-    # it) — claustrum self-daemonizes via DETACHED_PROCESS in its own re-exec.
+    # start_new_session is a POSIX-only detach; omitted entirely on Windows (claustrum
+    # self-daemonizes via DETACHED_PROCESS), so no POSIX-only kwarg reaches the spawn.
     _simulate_win32(monkeypatch)
     kwargs = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]
-    assert kwargs["start_new_session"] is False
+    assert "start_new_session" not in kwargs
 
 
 async def test_spawn_uses_start_new_session_on_posix(make_daemon, monkeypatch):
