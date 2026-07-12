@@ -398,6 +398,50 @@ async def test_spawn_omits_keep_children_when_disabled(make_daemon, monkeypatch)
     assert "-keep-children" not in argv
 
 
+# -- Windows -listen-pipe + spawn flags (#894) -----------------------------
+# Patching `sys.platform` mutates the shared singleton, so the pre-spawn `_connect`
+# also takes the client's win32 pipe branch → no `rpc.pipe` in the tmp state dir →
+# DaemonUnreachable → falls through to `_spawn`, where the stub captures the call.
+
+
+def _simulate_win32(monkeypatch) -> None:
+    """Force the win32 spawn branch on a POSIX host.
+
+    Also passes `shutil.which` through: under simulated win32 it applies PATHEXT/.exe
+    resolution and can't find the extensionless fake binary (a test-only artifact — a
+    real Windows deploy resolves `claustrum.exe`), which would fail _resolve_binary
+    before the argv is built.
+    """
+    monkeypatch.setattr("clauster.claustrum_daemon.sys.platform", "win32")
+    monkeypatch.setattr("clauster.claustrum_daemon.shutil.which", lambda name: name)
+
+
+async def test_spawn_appends_listen_pipe_on_win32(make_daemon, monkeypatch):
+    _simulate_win32(monkeypatch)
+    argv = await _capture_spawn_argv(make_daemon, monkeypatch)
+    assert "-listen-pipe" in argv  # the Windows client dials a pipe, not AF_UNIX
+
+
+async def test_spawn_omits_listen_pipe_on_posix(make_daemon, monkeypatch):
+    # POSIX byte-identity guard: the AF_UNIX path must never grow -listen-pipe.
+    argv = await _capture_spawn_argv(make_daemon, monkeypatch)
+    assert "-listen-pipe" not in argv
+
+
+async def test_spawn_no_new_session_on_win32(make_daemon, monkeypatch):
+    # start_new_session is a POSIX-only detach; on Windows it's False (CPython ignores
+    # it) — claustrum self-daemonizes via DETACHED_PROCESS in its own re-exec.
+    _simulate_win32(monkeypatch)
+    kwargs = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]
+    assert kwargs["start_new_session"] is False
+
+
+async def test_spawn_uses_start_new_session_on_posix(make_daemon, monkeypatch):
+    # POSIX regression guard: the launcher detaches into its own session.
+    kwargs = (await _capture_spawn_call(make_daemon, monkeypatch))["kwargs"]
+    assert kwargs["start_new_session"] is True
+
+
 # -- env-sentinel scrub (claustrum daemonize collision) --------------------
 
 

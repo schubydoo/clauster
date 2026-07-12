@@ -11,10 +11,11 @@ The handshake is **connect-or-spawn**, in that order:
 * If a daemon is already listening (e.g. it outlived a Clauster restart — it
   self-daemonizes with ``setsid``), Clauster simply reconnects with the token it
   persisted on disk. Nothing is spawned.
-* Otherwise Clauster spawns ``claustrum -serve -socket <sock> -token-fd 0``,
-  hands the token over the child's stdin pipe (never argv/env/logs), waits for
-  the launcher to detach (it exits 0 once the real daemon is reparented to
-  ``init``), then polls the socket until the first authed ping succeeds.
+* Otherwise Clauster spawns ``claustrum -serve -socket <sock> -token-fd 0``
+  (plus ``-listen-pipe`` on Windows), hands the token over the child's stdin pipe
+  (never argv/env/logs), waits for the launcher to detach (it exits 0 once the real
+  daemon is detached — reparented to ``init`` on POSIX, ``DETACHED_PROCESS`` on
+  Windows), then polls the transport until the first authed ping succeeds.
 
 Fail-closed: a daemon that cannot be reached or rejects the token leaves
 :meth:`ClaustrumDaemon.status` carrying the error and never raises into the app
@@ -22,7 +23,10 @@ lifespan — bridges are unaffected and (future) hosted spawns are refused. The
 daemon is intentionally **left running** on :meth:`ClaustrumDaemon.aclose`, the
 same way Clauster leaves bridges running across its own restarts.
 
-POSIX-only: claustrum speaks ``AF_UNIX`` and self-daemonizes via ``setsid``.
+Cross-platform: claustrum speaks ``AF_UNIX`` on POSIX and a named pipe on Windows
+(the client discovers it via ``rpc.pipe``, #893); the Windows spawn adds
+``-listen-pipe``. It self-daemonizes on both — ``setsid`` on POSIX,
+``DETACHED_PROCESS`` on Windows — so Clauster only waits for the launcher to exit.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ import os
 import secrets
 import shutil
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -349,10 +354,11 @@ class ClaustrumDaemon:
         """Launch ``claustrum -serve``, feeding the token over the stdin pipe.
 
         The launcher reads the token from fd 0, re-execs a detached child
-        (reparented to ``init``), and exits 0; the child opens the socket. We
-        wait only for the launcher to exit (until ``deadline``), then poll the
-        socket separately — the daemon's own stdout/stderr go to ``daemon.log``
-        so the detached, long-lived child never blocks on a pipe we'd drain.
+        (reparented to ``init`` on POSIX; ``DETACHED_PROCESS`` on Windows), and
+        exits 0; the child opens the socket (plus the ``-listen-pipe`` named pipe on
+        Windows). We wait only for the launcher to exit (until ``deadline``), then
+        poll the transport separately — the daemon's own stdout/stderr go to
+        ``daemon.log`` so the detached, long-lived child never blocks on a pipe we'd drain.
         """
         binary = self._resolve_binary()
         # -keep-children (CL-8): a daemon restart/upgrade then leaves hosted child
@@ -361,6 +367,13 @@ class ClaustrumDaemon:
         argv = [binary, "-serve", "-socket", str(self._socket), "-token-fd", "0"]
         if self._cfg.keep_children:
             argv.append("-keep-children")
+        # The Windows client dials a named pipe, not the AF_UNIX socket, so the daemon
+        # must also open a pipe listener and advertise it via rpc.pipe (#893/#894).
+        # claustrum self-daemonizes with DETACHED_PROCESS in its own re-exec, so the
+        # short-lived launcher Clauster spawns only forwards the token on stdin and
+        # exits 0 — no creationflags are needed here.
+        if sys.platform == "win32":
+            argv.append("-listen-pipe")
         # Defensive: scrub claustrum's daemonize sentinel from the child env (see
         # _DAEMON_SENTINEL_ENV) so an ambient CLAUDE_SSH_DAEMON_CHILD can't make the
         # launcher mistake itself for its own re-exec'd child and skip the token read.
@@ -375,8 +388,10 @@ class ClaustrumDaemon:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=log_file,
                 stderr=log_file,
-                start_new_session=True,
                 env=env,
+                # New-session detach on POSIX; False (the default no-op) on Windows,
+                # where claustrum self-daemonizes via DETACHED_PROCESS in its re-exec.
+                start_new_session=sys.platform != "win32",
             )
         except OSError as exc:  # pragma: no cover - exec failure after which() resolved
             log_file.close()
