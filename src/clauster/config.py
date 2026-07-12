@@ -163,7 +163,8 @@ class ClaudeConfig(BaseModel):
     launch_mode: ResumeMode = Field(
         default="standard",
         description="Launch mode for **new** bridges. `pty` = native true-resume under a "
-        "PTY keeper (POSIX only; falls back to standard on Windows). A bridge keeps the "
+        "PTY keeper (a POSIX pty, or a ConPTY keeper on Windows with the `pty` extra "
+        "installed; falls back to standard when that extra is absent). A bridge keeps the "
         "mode it launched with — editing this never re-modes a running or stopped bridge. "
         "(Renamed from `resume_mode`, still accepted as a deprecated alias.)",
     )
