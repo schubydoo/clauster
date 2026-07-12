@@ -29,6 +29,7 @@ only; Windows has no ``pty`` and keeps the subcommand / recap path.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import procutil
 
@@ -173,6 +175,217 @@ def _proc_start(pid: int) -> float | None:
         return None
 
 
+class _KeeperDrain:
+    """Shared drain/publish logic for both keeper backends (POSIX pty + Windows ConPTY).
+
+    Each backend owns only its transport I/O and liveness check; it feeds drained bytes
+    here, which runs the single copy of the pyte-screen feed, connect-URL scrape, and
+    sidecar / live-screen-frame publishing. ``base`` is mutated in place and shared with
+    the caller's sidecar dict.
+    """
+
+    def __init__(
+        self,
+        base: dict[str, object],
+        sidecar: Path,
+        screen: PtyScreen | None,
+        screen_sidecar: Path | None,
+    ) -> None:
+        """Wire the drain to its sidecar and (optional) live-screen tap."""
+        self._base = base
+        self._sidecar = sidecar
+        self._screen = screen
+        self._tap: _ScreenTap | None = (
+            _ScreenTap(screen, screen_sidecar)
+            if screen is not None and screen_sidecar is not None
+            else None
+        )
+        self._seq = 0
+        self._dirty = False
+        self._last_write = 0.0
+        self._buf = bytearray()
+        self._url_found = False
+        self._deadline = time.monotonic() + _URL_TIMEOUT
+
+    def feed(self, chunk: bytes) -> None:
+        """Feed one drained chunk into the pyte screen + the connect-URL scrape."""
+        if self._screen is not None:
+            try:
+                self._screen.feed(chunk)
+                self._dirty = True
+            except Exception as exc:  # noqa: BLE001 — best-effort, never kill the bridge
+                # A feed failure disables both screen consumers for the rest of the session:
+                # the live view (if any) reports a terminal `error`, and URL extraction falls
+                # back to the raw-bytes regex below. The bridge is unaffected.
+                if self._tap is not None:  # pragma: no cover - tap is set with screen
+                    self._seq += 1
+                    _write_screen_status(
+                        self._tap.sidecar, self._seq, "error", f"screen feed: {exc}"
+                    )
+                    self._tap = None
+                self._screen = None
+        if not self._url_found:
+            self._buf.extend(chunk)
+            session_id = _scan_connect_url(self._buf, self._screen)
+            if session_id is not None:
+                self._base.update(
+                    connect_url=f"https://claude.ai/code/{session_id}",
+                    session_id=session_id,
+                    state="ready",
+                )
+                _write_sidecar(self._sidecar, self._base)
+                self._url_found = True
+                self._buf = bytearray()  # keep draining, stop accumulating
+
+    def tick(self) -> None:
+        """Between reads: throttle the live-screen frame and handle the URL timeout."""
+        if self._tap is not None and self._dirty:
+            now = time.monotonic()
+            if now - self._last_write >= _SCREEN_FLUSH_INTERVAL:
+                self._seq = _write_screen_frame(
+                    self._tap.sidecar, self._tap.screen, self._seq, "live"
+                )
+                self._dirty = False
+                self._last_write = now
+        if not self._url_found and time.monotonic() > self._deadline:
+            # The connect URL never appeared; stop accumulating and promote a still-alive
+            # bridge to "ready" (the URL is a deep-link nicety, not a liveness signal — a
+            # `--continue` resume or a newer claude build may never re-print it).
+            self._url_found = True
+            self._buf = bytearray()
+            if self._base.get("state") == "starting":  # pragma: no branch
+                self._base["state"] = "ready"
+                _write_sidecar(self._sidecar, self._base)
+
+    def finish(self, rc: int) -> None:
+        """Publish the terminal `exited` sidecar and a final live-screen frame."""
+        self._base.update(state="exited", bridge_exit=rc)
+        _write_sidecar(self._sidecar, self._base)
+        if self._tap is not None:
+            _write_screen_frame(self._tap.sidecar, self._tap.screen, self._seq, "exited")
+
+
+def _load_pty_process() -> Any:
+    """Return pywinpty's ``PtyProcess`` (the Windows ConPTY backend), or raise off-Windows.
+
+    Isolated behind a seam so :func:`_run_keeper_conpty` is testable on POSIX — where the
+    win32-only ``pywinpty`` isn't installed — by patching this with a fake. The early
+    platform guard also keeps the type checker from resolving the win32-only import on a
+    POSIX host.
+    """
+    if sys.platform != "win32":
+        raise RuntimeError("the ConPTY keeper backend is Windows-only")
+    from winpty import PtyProcess  # pragma: no cover - win32-only; exercised on the VM
+
+    return PtyProcess  # pragma: no cover - win32-only
+
+
+def _run_keeper_conpty(
+    bridge_argv: list[str],
+    sidecar: Path,
+    cwd: str | None,
+    screen_sidecar: Path | None,
+) -> int:
+    """Windows ConPTY backend for :func:`run_keeper` (the analogue of its POSIX pty path).
+
+    Spawns the bridge on a ConPTY pseudo-console via pywinpty, then drains it through the
+    shared :class:`_KeeperDrain`. ConPTY always fragments output with cursor escapes (like
+    the POSIX TUI-winsize case), so a pyte screen is built unconditionally for URL
+    reassembly when pyte is present — the raw-byte scrape rarely survives ConPTY alone.
+    Setup/spawn failures are recorded in the sidecar and returned as a code, never raised.
+    """
+    base: dict[str, object] = {
+        "keeper_pid": os.getpid(),
+        "bridge_pid": None,
+        "bridge_proc_start": None,
+        "connect_url": None,
+        "session_id": None,
+        "state": "starting",
+        "error": None,
+    }
+    _write_sidecar(sidecar, base)
+
+    try:
+        pty_process = _load_pty_process()
+    except Exception as exc:  # noqa: BLE001 — record + return, never raise (see run_keeper)
+        base.update(state="error", error=f"pywinpty unavailable: {exc}")
+        _write_sidecar(sidecar, base)
+        return 72
+    os.environ["PYWINPTY_BLOCK"] = "0"  # non-blocking read() so the loop can also poll liveness
+
+    # Build a pyte screen for URL reassembly whenever pyte is available (ConPTY fragments the
+    # URL regardless of size); the live-view tap stays gated on screen_sidecar in the drain.
+    # Screen setup must never take the keeper down: on failure the screen is simply absent
+    # (raw-bytes scrape only) and, when a live view was requested, its sidecar explains why.
+    screen: PtyScreen | None = None
+    screen_error: tuple[str, str] | None = None
+    try:
+        screen = PtyScreen()
+    except PyteUnavailableError as exc:
+        screen_error = ("unavailable", str(exc))
+    except Exception as exc:  # noqa: BLE001 — see above; degrade, never raise
+        screen_error = ("error", f"screen init: {exc}")
+    if screen_error is not None and screen_sidecar is not None:
+        _write_screen_status(screen_sidecar, 0, screen_error[0], screen_error[1])
+
+    dimensions = (SCREEN_ROWS, SCREEN_COLS) if screen is not None else (24, 80)
+    try:
+        proc = pty_process.spawn(
+            bridge_argv, cwd=cwd, env=procutil.child_env(), dimensions=dimensions
+        )
+    except Exception as exc:  # noqa: BLE001 — record + return, never raise (see run_keeper)
+        base.update(state="error", error=f"conpty spawn failed: {exc}")
+        _write_sidecar(sidecar, base)
+        return 71
+
+    base["bridge_pid"] = proc.pid
+    base["bridge_proc_start"] = _proc_start(proc.pid)
+    _write_sidecar(sidecar, base)
+
+    drain = _KeeperDrain(base, sidecar, screen, screen_sidecar)
+    # Drain until the ConPTY closes. Gate the loop on the buffer, NOT on isalive(): a fast-exiting
+    # bridge can leave a final chunk (its connect URL or exit banner) buffered after the process
+    # handle already reports dead, so read that tail first and consult isalive() only on an EMPTY
+    # read to decide exit-vs-idle.
+    read_error: str | None = None
+    while True:
+        try:
+            data = proc.read(65536)  # str; "" when no data (PYWINPTY_BLOCK=0)
+        except EOFError:
+            # End-of-stream, or an idle non-blocking read some pywinpty builds surface as EOFError:
+            # a still-alive bridge is idle (keep polling); a dead one is closed and drained.
+            if not proc.isalive():
+                break
+            data = ""
+        except OSError as exc:
+            # A genuine read-channel error, NOT mere idle — the ConPTY is unusable, so the bridge
+            # can be neither observed nor driven. Fail closed: stop and record it, rather than spin
+            # converting the error to no-data and promoting a broken stream to "ready".
+            read_error = f"conpty read failed: {exc}"
+            break
+        if data:
+            drain.feed(data.encode("utf-8", "replace"))
+        elif not proc.isalive():
+            break  # no buffered output and the bridge has exited
+        else:
+            time.sleep(0.05)  # alive but idle; yield before re-polling
+        drain.tick()
+
+    if read_error is not None:
+        # The stream broke: terminate the (possibly still-running) bridge so we neither leak an
+        # undrivable process nor block wait() below on one we can no longer observe.
+        base["error"] = read_error
+        with contextlib.suppress(Exception):
+            proc.terminate()
+    rc = proc.wait() or 0
+    drain.finish(rc)
+    try:
+        proc.close()
+    except Exception:  # noqa: BLE001,S110 — teardown close must never crash the keeper
+        pass
+    return rc
+
+
 def run_keeper(
     bridge_argv: list[str],
     sidecar: Path,
@@ -188,7 +401,13 @@ def run_keeper(
     When ``screen_sidecar`` is given (the opt-in live-screen tap, #534), the same drained
     chunks are also fed into a pyte emulator and a redacted, cells-only frame is republished
     there — strictly best-effort, never affecting the drain, discovery, or the bridge.
+
+    On Windows there is no POSIX pty; the ConPTY backend (:func:`_run_keeper_conpty`)
+    serves the same contract via pywinpty.
     """
+    if sys.platform == "win32":
+        return _run_keeper_conpty(bridge_argv, sidecar, cwd, screen_sidecar)
+
     import fcntl
     import pty
     import termios
@@ -286,95 +505,24 @@ def run_keeper(
     poller = select.poll()
     poller.register(master, select.POLLIN)
 
-    # The pyte emulator built above backs the connect-URL reassembly always, and — when the
-    # live-view sidecar was requested — the opt-in redacted screen republished at most every
-    # _SCREEN_FLUSH_INTERVAL (#534). `tap` pairs the screen with that sidecar for the live view;
-    # `screen` alone drives URL extraction. screen is None when no live view was requested or
-    # pyte is unavailable (the keeper then drains as before, scraping the URL from raw bytes).
-    # `dirty` debounces live-view writes to changed screens only.
-    tap: _ScreenTap | None = (
-        _ScreenTap(screen, screen_sidecar)
-        if screen is not None and screen_sidecar is not None
-        else None
-    )
-    screen_seq = 0
-    screen_dirty = False
-    last_screen_write = 0.0
-
-    buf = bytearray()
-    url_found = False
-    url_deadline = time.monotonic() + _URL_TIMEOUT
+    # `screen` (built above for URL reassembly + the opt-in live view) and its drain state
+    # now live in the shared _KeeperDrain — the same publish path the Windows ConPTY backend
+    # feeds. The keeper here owns only the POSIX master-fd I/O: poll for data, read a chunk,
+    # hand it to the drain; between reads, let the drain throttle the live view + time out the
+    # URL scrape.
+    drain = _KeeperDrain(base, sidecar, screen, screen_sidecar)
     while proc.poll() is None:
         try:
             if poller.poll(500):  # ms; truthy when the master fd has data (no FD_SETSIZE limit)
                 chunk = os.read(master, 65536)
                 if chunk:
-                    if screen is not None:
-                        try:
-                            screen.feed(chunk)
-                            screen_dirty = True
-                        except Exception as exc:  # noqa: BLE001 — best-effort, never kill the bridge
-                            # A feed failure disables both screen consumers for the rest of the
-                            # session: the live view (if any) reports a terminal `error` status
-                            # instead of a silently-frozen `live` screen, and URL extraction
-                            # falls back to the raw-bytes regex below. The bridge is unaffected.
-                            if tap is not None:  # pragma: no cover - tap is set with screen
-                                screen_seq += 1
-                                _write_screen_status(
-                                    tap.sidecar, screen_seq, "error", f"screen feed: {exc}"
-                                )
-                                tap = None
-                            screen = None
-                    if not url_found:
-                        buf.extend(chunk)
-                        # Scrape the connect URL from the raw bytes first, then — at the TUI
-                        # winsize, where claude fragments it with cursor moves — the pyte screen
-                        # (#665). Either source yields the same UN-redacted session id.
-                        session_id = _scan_connect_url(buf, screen)
-                        if session_id is not None:
-                            base.update(
-                                connect_url=f"https://claude.ai/code/{session_id}",
-                                session_id=session_id,
-                                state="ready",
-                            )
-                            _write_sidecar(sidecar, base)
-                            url_found = True
-                            buf = bytearray()  # keep draining, stop accumulating
+                    drain.feed(chunk)
         except (OSError, BlockingIOError):
             time.sleep(0.2)
-        if tap is not None and screen_dirty:
-            now = time.monotonic()
-            if now - last_screen_write >= _SCREEN_FLUSH_INTERVAL:
-                screen_seq = _write_screen_frame(tap.sidecar, tap.screen, screen_seq, "live")
-                screen_dirty = False
-                last_screen_write = now
-        if not url_found and time.monotonic() > url_deadline:
-            # The connect URL never appeared. Stop accumulating an unbounded buffer.
-            url_found = True
-            buf = bytearray()
-            # A bridge still alive past the URL timeout is connected and usable: the
-            # connect URL is a deep-link nicety, not a liveness signal. Publish "ready"
-            # (URL stays null if unseen) so Clauster promotes it to RUNNING instead of
-            # false-ERRORing a healthy bridge. This covers BOTH a `--continue` resume
-            # (which reconnects without re-printing the URL) AND a fresh start on a
-            # newer claude build (>2.1.161) that connects without ever printing the
-            # claude.ai/code/session_… line the scrape depends on. A bridge that
-            # genuinely failed to start has already exited, so the loop has broken; we
-            # only reach here while proc.poll() is None — i.e. the bridge is alive.
-            # no branch: state is always "starting" here — the only other transition
-            # (URL found -> "ready") also sets url_found, which this arm excludes.
-            if base.get("state") == "starting":  # pragma: no branch
-                base["state"] = "ready"
-                _write_sidecar(sidecar, base)
+        drain.tick()
 
     rc = proc.poll() or 0
-    base.update(state="exited", bridge_exit=rc)
-    _write_sidecar(sidecar, base)
-    if tap is not None:
-        # Final frame so a late viewer sees the last screen state, marked exited. This is the
-        # terminal write, so the returned seq is intentionally not captured (capturing it would
-        # be a dead assignment); any future write added after this must re-capture the seq.
-        _write_screen_frame(tap.sidecar, tap.screen, screen_seq, "exited")
+    drain.finish(rc)
     try:
         os.close(master)
     except OSError:

@@ -104,6 +104,15 @@ pty = [
     # clear "install clauster[pty]" error when absent. If a future build ever bundles pyte,
     # add an LGPL THIRD_PARTY_NOTICES entry and honor the relink terms.
     "pyte>=0.8.2",
+    # Interactive Session on Windows (#892): the POSIX pty keeper uses os.openpty +
+    # termios, absent on Windows, so the keeper drives a ConPTY pseudo-console via
+    # pywinpty instead (MIT; ConPTY needs Win10 1803+, with a winpty fallback). win32-only
+    # marker — no wheels/meaning elsewhere. Lazily imported (pty_keeper._load_pty_process).
+    # Being MIT, nothing *forces* it out of the frozen binary (unlike pyte's LGPL) — but ConPTY
+    # reassembles the connect URL via pyte, and the binary ships no extras anyway, so it rides
+    # this extra: `pip install 'clauster[pty]'` enables it; the frozen binary falls back to
+    # Server Mode. A detect/offer-install flow for the extras is tracked in #904.
+    "pywinpty>=2.0; sys_platform == 'win32'",
 ]
 fuzz = [
     # Standalone-fuzzing convenience extra: `uv pip install '.[fuzz]'` then

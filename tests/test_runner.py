@@ -2727,6 +2727,58 @@ def test_popen_win32_detaches_with_new_process_group(runner_config, monkeypatch,
     assert captured["stderr"] is subprocess.STDOUT
 
 
+def test_conpty_keeper_available_false_on_posix():
+    from clauster import runner as runner_mod
+
+    assert runner_mod._conpty_keeper_available() is False
+
+
+def test_popen_keeper_win32_detaches_process(runner_config, monkeypatch, tmp_path):
+    # The Windows keeper detaches with DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so it
+    # survives a Clauster restart (start_new_session is a POSIX no-op on Windows).
+    captured: dict = {}
+
+    class _FakeProc:
+        pid = 4321
+
+    def _fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+        return _FakeProc()
+
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(subprocess, "DETACHED_PROCESS", 0x00000008, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(sys, "platform", "win32")
+    runner._popen_keeper(
+        runner_config[0].projects_root / "alpha",
+        tmp_path / "b.keeper.json",
+        ["claude", "--remote-control"],
+    )
+    assert captured["creationflags"] == (0x00000008 | 0x00000200)
+    assert "start_new_session" not in captured
+    assert captured["stdin"] is subprocess.DEVNULL
+
+
+def test_is_pty_mode_win32_falls_back_without_pywinpty(runner_config, monkeypatch):
+    from clauster import runner as runner_mod
+
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(runner_mod.sys, "platform", "win32")
+    monkeypatch.setattr(runner_mod, "_conpty_keeper_available", lambda: False)
+    assert runner._is_pty_mode(requested="pty") is False  # Server Mode fallback
+
+
+def test_is_pty_mode_win32_honors_pty_with_pywinpty(runner_config, monkeypatch):
+    from clauster import runner as runner_mod
+
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr(runner_mod.sys, "platform", "win32")
+    monkeypatch.setattr(runner_mod, "_conpty_keeper_available", lambda: True)
+    assert runner._is_pty_mode(requested="pty") is True  # ConPTY keeper honored
+    assert runner._is_pty_mode(requested="standard") is False
+
+
 # ----- #867 L4: stale-pointer prune -----------------------------------------------
 
 
