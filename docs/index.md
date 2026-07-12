@@ -17,13 +17,13 @@ and exposes to the Claude remote-control controller. Clauster supports two
 launch modes, selected per instance via `claude.launch_mode`. They are **not
 interchangeable** — each has its own argv and readiness logic.
 
-| | **Server Mode** (default) | **Interactive Session** (opt-in, POSIX) |
+| | **Server Mode** (default) | **Interactive Session** (opt-in) |
 | --- | --- | --- |
 | Command form | `claude remote-control` (subcommand) | `claude --remote-control` (flag) |
 | Sessions | multi-session server | single session |
 | Restart behaviour | spawns a fresh, empty context — no conversation resume | genuinely restores prior context (`--continue` true resume) |
 | Process model | headless server | runs under a **PTY keeper** sidecar that owns the PTY |
-| Platform | all | POSIX only — falls back to Server Mode on Windows |
+| Platform | all | POSIX pty, or a Windows ConPTY keeper with the `pty` extra (else falls back to Server Mode) |
 
 The mode is recorded on a bridge **at launch**: editing `claude.launch_mode`
 seeds the mode for *new* bridges only and never re-modes a running or stopped
