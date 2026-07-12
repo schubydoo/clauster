@@ -181,11 +181,11 @@ jobs:
               --cov-report=xml --junitxml=junit.xml -o junit_family=legacy || rc=$?
           else
             # macOS/Windows: keep the fail-under gate off (no single OS reaches
-            # 96% on its own), but DO emit coverage.xml so each OS's coverage can
-            # be uploaded under its own Codecov flag — per-OS visibility on the
-            # platform branches Linux can't exercise.
+            # 96% on its own), but DO emit coverage.xml + junit.xml so each OS's
+            # coverage AND test results upload under its own Codecov flag — per-OS
+            # visibility on the platform branches Linux can't exercise.
             uv run --python "$PYTHON_VERSION" pytest -q --durations=15 --cov-fail-under=0 \
-              --cov-report=xml || rc=$?
+              --cov-report=xml --junitxml=junit.xml -o junit_family=legacy || rc=$?
           fi
           dur=$(( $(date +%s) - start ))
           {
@@ -216,15 +216,23 @@ jobs:
           files: coverage.xml
           flags: ${{ runner.os }}
           fail_ci_if_error: false
-      # Test results only need a single upload — keep it on the Linux 3.13 gate
-      # cell (always present in both the subset and the full matrix; only that
-      # branch writes junit.xml).
+      # Upload test results once per OS — the always-present gate cell for each
+      # (Linux 3.13 / macOS 3.12 / Windows 3.14, in both the subset and the full
+      # matrix) — tagged with its OS as a Codecov flag, mirroring the coverage
+      # upload, so Test Analytics (flaky/slow tests) breaks out per platform. One
+      # cell per OS (not every matrix cell) keeps the duration metrics from
+      # double-counting Python versions. Every cell now writes junit.xml (pytest step).
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() && runner.os == 'Linux' && matrix.python == '3.13' && github.event.pull_request.user.login != 'clauster-ci[bot]' }}
+        if: >-
+          ${{ !cancelled() && github.event.pull_request.user.login != 'clauster-ci[bot]'
+          && ((runner.os == 'Linux' && matrix.python == '3.13')
+          || (runner.os == 'macOS' && matrix.python == '3.12')
+          || (runner.os == 'Windows' && matrix.python == '3.14')) }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: junit.xml
+          flags: ${{ runner.os }}
           report_type: test_results
           fail_ci_if_error: false
 
