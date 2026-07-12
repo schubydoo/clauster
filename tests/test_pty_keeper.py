@@ -601,3 +601,306 @@ def test_run_keeper_tap_failure_never_kills_bridge(
     disabled = _read(screen)
     assert disabled["state"] == "error" and "feed" in disabled["error"]
     assert disabled["screen"] is None
+
+
+# -- Windows ConPTY backend (#892) -----------------------------------------------------
+# Driven on POSIX against a scriptable fake pywinpty PtyProcess injected through the
+# _load_pty_process seam, so the ConPTY drain/scrape/exit path is covered on the Linux
+# gate. The real ConPTY (pywinpty) is exercised on the Windows VM.
+
+
+def _fake_conpty(
+    *,
+    chunks=(),
+    exit_code=0,
+    spawn_error=None,
+    read_eof=False,
+    close_raises=None,
+    alive_reads=None,
+    eof_at=(),
+    oserror_at=(),
+):
+    """Build a fake pywinpty ``PtyProcess`` class scripted to emit ``chunks`` then exit.
+
+    ``alive_reads`` models real pywinpty liveness — the OS process handle, independent of
+    buffered bytes: ``isalive()`` returns False after that many ``read`` calls even while
+    chunks remain, so the exit-with-buffered-tail race is representable. Left None, the
+    process reports alive exactly while chunks remain (the simple case).
+    """
+    calls: list[dict] = []
+
+    class _FakeConPty:
+        def __init__(self) -> None:
+            self._chunks = list(chunks)
+            self.pid = 4321
+            self._reads = 0
+
+        @classmethod
+        def spawn(cls, argv, cwd=None, env=None, dimensions=(24, 80)):
+            calls.append({"argv": argv, "cwd": cwd, "env": env, "dimensions": dimensions})
+            if spawn_error is not None:
+                raise spawn_error
+            return cls()
+
+        def isalive(self) -> bool:
+            if alive_reads is not None:
+                return self._reads < alive_reads
+            return bool(self._chunks)
+
+        def read(self, size: int = 1024) -> str:
+            self._reads += 1
+            if self._reads in oserror_at:
+                raise OSError("conpty channel broke")  # a genuine read-channel error, not idle
+            if self._reads in eof_at:
+                raise EOFError  # models an idle non-blocking read surfaced as EOFError
+            if self._chunks:
+                return self._chunks.pop(0)
+            if read_eof:
+                raise EOFError
+            return ""  # non-blocking: no data available
+
+        def terminate(self, force: bool = False) -> None:
+            calls.append({"terminated": True})
+
+        def wait(self):
+            return exit_code
+
+        def close(self) -> None:
+            calls.append({"closed": True})
+            if close_raises is not None:
+                raise close_raises
+
+    _FakeConPty.calls = calls
+    return _FakeConPty
+
+
+def test_load_pty_process_raises_off_windows() -> None:
+    from clauster import pty_keeper
+
+    with pytest.raises(RuntimeError, match="Windows-only"):
+        pty_keeper._load_pty_process()
+
+
+def test_run_keeper_conpty_scrapes_url_and_records_exit(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    fake = _fake_conpty(
+        chunks=["Continue at https://claude.ai/code/session_01CONPTYAAAAAAAAAAAAAA\r\n"],
+        exit_code=0,
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(
+        ["claude", "--remote-control"], sidecar, str(tmp_path), None
+    )
+    assert rc == 0
+    data = _read(sidecar)
+    assert data["state"] == "exited"
+    assert data["session_id"] == "session_01CONPTYAAAAAAAAAAAAAA"
+    assert data["connect_url"].endswith("session_01CONPTYAAAAAAAAAAAAAA")
+    assert data["bridge_pid"] == 4321
+    assert fake.calls[0]["argv"] == ["claude", "--remote-control"]
+    assert fake.calls[0]["dimensions"] == (pty_keeper.SCREEN_ROWS, pty_keeper.SCREEN_COLS)
+
+
+def test_run_keeper_conpty_spawn_failure(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    fake = _fake_conpty(spawn_error=OSError("no conpty"))
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    assert rc == 71
+    data = _read(sidecar)
+    assert data["state"] == "error"
+    assert "conpty spawn failed" in data["error"]
+
+
+def test_run_keeper_conpty_url_timeout_promotes_ready(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper, "_URL_TIMEOUT", 0.0)  # deadline immediately past
+    fake = _fake_conpty(chunks=["no url in this output\r\n"], exit_code=0)
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    assert rc == 0
+    data = _read(sidecar)
+    assert data["state"] == "exited"  # ran to completion
+    assert data["connect_url"] is None  # never scraped a URL, promoted via the deadline
+
+
+def test_run_keeper_conpty_writes_screen_sidecar(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    fake = _fake_conpty(
+        chunks=[
+            "Continue at https://claude.ai/code/session_01SCREENAAAAAAAAAAAAAA\r\n",
+            "more output\r\n",
+        ],
+        exit_code=0,
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    monkeypatch.setattr(pty_keeper, "_SCREEN_FLUSH_INTERVAL", 0.0)  # flush a frame every tick
+    sidecar = tmp_path / "b.keeper.json"
+    screen = tmp_path / "b.screen.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, screen)
+    assert rc == 0
+    frame = _read(screen)
+    assert frame["state"] in ("live", "exited")
+    assert "screen" in frame
+
+
+def test_run_keeper_conpty_pyte_unavailable_falls_back_to_raw(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    def _no_pyte():
+        raise pty_keeper.PyteUnavailableError("install clauster[pty]")
+
+    monkeypatch.setattr(pty_keeper, "PtyScreen", _no_pyte)
+    fake = _fake_conpty(
+        chunks=["https://claude.ai/code/session_01NOPYTEAAAAAAAAAAAAAA\r\n"], exit_code=0
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    screen = tmp_path / "b.screen.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, screen)
+    assert rc == 0
+    assert _read(screen)["state"] == "unavailable"  # dormant view explained to a viewer
+    assert (
+        _read(sidecar)["session_id"] == "session_01NOPYTEAAAAAAAAAAAAAA"
+    )  # raw scrape still works
+
+
+def test_run_keeper_conpty_screen_init_error(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    def _boom():
+        raise RuntimeError("pyte exploded")
+
+    monkeypatch.setattr(pty_keeper, "PtyScreen", _boom)
+    fake = _fake_conpty(chunks=["https://claude.ai/code/session_01INITERRAAAAAAAAAAA\r\n"])
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    screen = tmp_path / "b.screen.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, screen)
+    assert rc == 0
+    err = _read(screen)
+    assert err["state"] == "error" and "screen init" in err["error"]
+
+
+def test_run_keeper_conpty_close_error_swallowed(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    fake = _fake_conpty(chunks=["hi\r\n"], exit_code=0, close_raises=OSError("bad handle"))
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    assert rc == 0  # a close() failure during teardown never crashes the keeper
+    assert _read(sidecar)["state"] == "exited"
+
+
+def test_run_keeper_conpty_handles_read_eof(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    fake = _fake_conpty(chunks=["hi\r\n"], exit_code=3, read_eof=True)
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    assert rc == 3
+    assert _read(sidecar)["state"] == "exited"
+
+
+def test_run_keeper_conpty_idle_eoferror_keeps_session(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    # A pywinpty build that surfaces an idle non-blocking read as EOFError must NOT tear down a
+    # still-alive bridge (Greptile #903) — the connect URL can still arrive on a later read.
+    fake = _fake_conpty(
+        chunks=["Continue at https://claude.ai/code/session_01IDLEEOFAAAAAAAAAA\r\n"],
+        exit_code=0,
+        alive_reads=2,
+        eof_at={1},
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    assert rc == 0
+    assert _read(sidecar)["session_id"] == "session_01IDLEEOFAAAAAAAAAA"
+
+
+def test_run_keeper_conpty_read_error_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    # A non-EOF read error (a broken ConPTY channel) while the bridge is still alive must fail
+    # closed (Greptile #903): record the error + terminate the undrivable bridge, NOT keep polling
+    # and promote a broken stream to "ready".
+    fake = _fake_conpty(chunks=["boot\r\n"], exit_code=0, oserror_at={2}, alive_reads=5)
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    data = _read(sidecar)
+    assert "conpty read failed" in (data["error"] or "")
+    assert data["state"] == "exited"  # broken stream → exited-with-error, never a false "ready"
+    assert {"terminated": True} in fake.calls  # the undrivable bridge was terminated
+
+
+def test_run_keeper_conpty_drains_exit_tail(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    # The bridge handle reports dead (alive_reads=0) while its final chunks — including the
+    # connect URL — are still buffered; the loop must read that tail, not stop at isalive().
+    fake = _fake_conpty(
+        chunks=["boot\r\n", "Continue at https://claude.ai/code/session_01TAILAAAAAAAAAAAAAA\r\n"],
+        exit_code=0,
+        alive_reads=0,
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    assert rc == 0
+    assert _read(sidecar)["session_id"] == "session_01TAILAAAAAAAAAAAAAA"  # buffered tail drained
+
+
+def test_run_keeper_conpty_idles_then_exits(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    # An empty read while the bridge is still alive → the loop sleeps and re-polls, not exit.
+    fake = _fake_conpty(
+        chunks=["", "Continue at https://claude.ai/code/session_01IDLEAAAAAAAAAAAAAA\r\n"],
+        exit_code=0,
+        alive_reads=2,
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    assert rc == 0
+    assert _read(sidecar)["session_id"] == "session_01IDLEAAAAAAAAAAAAAA"
+
+
+def test_run_keeper_conpty_pywinpty_import_failure(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    def _boom():
+        raise ImportError("no winpty")
+
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", _boom)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper._run_keeper_conpty(["claude"], sidecar, None, None)
+    assert rc == 72
+    data = _read(sidecar)
+    assert data["state"] == "error" and "pywinpty unavailable" in data["error"]
+
+
+def test_run_keeper_dispatches_to_conpty_on_win32(tmp_path: Path, monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    monkeypatch.setattr(pty_keeper.sys, "platform", "win32")
+    fake = _fake_conpty(
+        chunks=["https://claude.ai/code/session_01DISPATCHAAAAAAAAAAA\r\n"], exit_code=0
+    )
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake)
+    sidecar = tmp_path / "b.keeper.json"
+    rc = pty_keeper.run_keeper(["claude"], sidecar, cwd=str(tmp_path))
+    assert rc == 0
+    assert _read(sidecar)["session_id"] == "session_01DISPATCHAAAAAAAAAAA"

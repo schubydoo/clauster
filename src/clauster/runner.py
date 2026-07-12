@@ -94,6 +94,25 @@ def _hash_session_ref(session_id: str | None, secret: bytes) -> str | None:
     return hmac.new(secret, session_id.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
 
+def _conpty_keeper_available() -> bool:
+    """Return True on Windows when pywinpty (the ConPTY keeper backend, ``pty`` extra) is present.
+
+    Interactive Session on Windows runs the bridge under a ConPTY pseudo-console via
+    pywinpty (:mod:`clauster.pty_keeper`); without the extra there is no keeper, so the
+    launch falls back to Server Mode. The early platform guard both encodes the
+    Windows-only requirement and keeps the type checker from resolving the win32-only
+    import on a POSIX host.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import winpty  # noqa: F401  # pragma: no cover - win32-only; exercised on the VM
+
+        return True  # pragma: no cover - win32-only
+    except Exception:  # noqa: BLE001  # pragma: no cover - win32-only
+        return False
+
+
 class SpawnError(RuntimeError):
     """Raised when a bridge cannot be spawned (unknown project, untrusted, etc.)."""
 
@@ -1572,7 +1591,7 @@ class SessionRunner:
         *,
         requested: str | None = None,
     ) -> bool:
-        """Whether the bridge launches under the PTY keeper (Interactive Session). POSIX only.
+        """Whether the bridge launches under the PTY keeper (Interactive Session).
 
         A bridge's mode is fixed at first launch. Precedence: an explicit
         *requested* mode (the per-launch picker) wins for a fresh start; else when
@@ -1581,11 +1600,12 @@ class SessionRunner:
         about the same bridge; else the global ``claude.launch_mode`` seeds a
         brand-new bridge. Without honoring *prior*, editing the config under a
         running/stopped bridge would silently flip its mode on the next resume
-        while stop still treated it as the old mode. Windows always falls back to
-        standard (pty is POSIX-only).
+        while stop still treated it as the old mode. On Windows the keeper rides a
+        ConPTY (pywinpty); without the ``pty`` extra installed it falls back to
+        Server Mode (:func:`_conpty_keeper_available`).
         """
-        if sys.platform == "win32":
-            return False
+        if sys.platform == "win32" and not _conpty_keeper_available():
+            return False  # no pywinpty → Server Mode fallback (ConPTY keeper unavailable)
         if requested is not None:
             return requested == "pty"
         if prior is not None:
@@ -1698,13 +1718,30 @@ class SessionRunner:
             # keeper inherits them into its own os.environ and re-emits them (still
             # secret-scrubbed) when it spawns the bridge via child_env(), so the pty
             # bridge gets the same extended PATH/env as the standard path.
+            keeper_env = procutil.child_env(self._bridge_env_overlay())
+            # Detach the keeper so it outlives a Clauster restart. POSIX: its own session
+            # (setsid). Windows: DETACHED_PROCESS drops the shared console so a clauster
+            # exit / CTRL can't reach it, plus CREATE_NEW_PROCESS_GROUP for a clean group
+            # (start_new_session is a POSIX no-op there).
+            if sys.platform == "win32":
+                return subprocess.Popen(
+                    cmd,
+                    cwd=str(cwd),
+                    stdin=subprocess.DEVNULL,
+                    stdout=err_fh,
+                    stderr=subprocess.STDOUT,
+                    env=keeper_env,
+                    creationflags=(
+                        subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                    ),
+                )
             return subprocess.Popen(
                 cmd,
                 cwd=str(cwd),
                 stdin=subprocess.DEVNULL,
                 stdout=err_fh,
                 stderr=subprocess.STDOUT,
-                env=procutil.child_env(self._bridge_env_overlay()),
+                env=keeper_env,
                 start_new_session=True,
             )
         finally:
