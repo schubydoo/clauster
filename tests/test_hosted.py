@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from contextlib import asynccontextmanager
 
 import pytest
@@ -28,9 +27,9 @@ from clauster.hosted_state import HostedStateStore
 from clauster.models import InstanceStatus, RemoteControlInstance
 from conftest import wait_until
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="claustrum hosted channel is POSIX-only (AF_UNIX)"
-)
+# Runs on Windows too: the fake daemon serves a named pipe there and the hosted
+# engine drives it over the same client transport (no AF_UNIX dependency in the
+# engine itself — the stop() escalation sends "INT"/"KILL" as RPC strings).
 
 _PID = "01HOSTEDSESSION0000000000"
 _BIN = "/usr/bin/claude"

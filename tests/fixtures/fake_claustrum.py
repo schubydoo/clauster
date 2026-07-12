@@ -1,7 +1,8 @@
 """Scriptable in-process fake claustrum daemon for client tests.
 
 The ``fake_claude`` pattern, but for the NDJSON JSON-RPC daemon protocol: an
-``asyncio`` ``AF_UNIX`` server that speaks just enough of
+``asyncio`` ``AF_UNIX`` server (or a Windows named pipe, advertised via
+``rpc.pipe`` like the real daemon's ``-listen-pipe``) that speaks just enough of
 ``claustrum/docs/PROTOCOL.md`` to exercise :mod:`clauster.claustrum_client` —
 auth gating, the ``server.*``/``process.*`` methods, per-process ``seq`` stream
 frames with replay-on-reattach, and a hook to drop a connection mid-stream.
@@ -15,8 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
+import secrets
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 # The 18 methods server.capabilities self-describes, in returned order.
@@ -81,18 +86,54 @@ class FakeClaustrum:
         self._processes: dict[str, _Process] = {}
         self._writers: set[asyncio.StreamWriter] = set()
         self._server: asyncio.AbstractServer | None = None
+        # Windows named-pipe transport (start_serving_pipe): the daemon has no
+        # AF_UNIX socket there, so it serves a pipe and advertises it via rpc.pipe.
+        self._pipe_server: Any | None = None
+        self._pipe_name: str | None = None
+        self._rpc_pipe_path: Path | None = None
 
     async def start(self) -> None:
-        """Begin listening on the unix socket."""
+        """Begin listening — AF_UNIX on POSIX, a Windows named pipe on win32.
+
+        Windows asyncio has no ``start_unix_server``; the real daemon's opt-in
+        ``-listen-pipe`` transport is mirrored here — serve a named pipe (over the
+        Proactor loop's ``start_serving_pipe``) and advertise its name via a
+        ``rpc.pipe`` file beside the socket path (claustrum #134), so
+        :class:`~clauster.claustrum_client.ClaustrumClient` discovers and dials it.
+        """
+        if sys.platform == "win32":
+            loop = asyncio.get_running_loop()
+            self._pipe_name = rf"\\.\pipe\clauster-fake-{secrets.token_hex(8)}"
+
+            def _factory() -> asyncio.StreamReaderProtocol:
+                # Bridge the low-level pipe server to the same StreamReader/writer
+                # handler start_unix_server uses, so _handle is transport-agnostic.
+                reader = asyncio.StreamReader(limit=_MAX_LINE_BYTES, loop=loop)
+                return asyncio.StreamReaderProtocol(reader, self._handle, loop=loop)
+
+            # start_serving_pipe lives only on the win32 ProactorEventLoop.
+            proactor: Any = loop
+            [self._pipe_server] = await proactor.start_serving_pipe(_factory, self._pipe_name)
+            rpc_pipe = Path(self.socket_path).parent / "rpc.pipe"
+            rpc_pipe.write_text(self._pipe_name, encoding="utf-8")
+            self._rpc_pipe_path = rpc_pipe
+            return
         self._server = await asyncio.start_unix_server(
             self._handle, path=self.socket_path, limit=_MAX_LINE_BYTES
         )
 
     async def stop(self) -> None:
-        """Close every connection and stop the server."""
+        """Close every connection and stop the server (socket or pipe)."""
         for writer in list(self._writers):
             self._safe_close(writer)
         self._writers.clear()
+        if self._pipe_server is not None:
+            self._pipe_server.close()  # PipeServer has no async wait_closed
+            self._pipe_server = None
+        if self._rpc_pipe_path is not None:
+            with contextlib.suppress(OSError):
+                self._rpc_pipe_path.unlink()
+            self._rpc_pipe_path = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()

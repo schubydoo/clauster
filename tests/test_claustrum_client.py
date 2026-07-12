@@ -26,12 +26,13 @@ from clauster.claustrum_client import (
 )
 from conftest import wait_until
 
-# The claustrum client speaks JSON-RPC over an AF_UNIX socket; asyncio has no
-# start_unix_server/open_unix_connection on Windows (same posture as the pty
-# tests). The Windows CI cell runs with --cov-fail-under=0, so skipping here
-# costs no coverage there; the gate is enforced on the Linux cell.
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="claustrum client is POSIX-only (AF_UNIX)"
+# On Windows the fake daemon serves a named pipe (advertised via rpc.pipe) and
+# the client dials it, so these run there too — same transport the real daemon
+# uses. A single frame larger than the pipe's message buffer can't cross it,
+# though, so the few big-payload cases below carry their own win32 skip.
+_WIN_MSG_PIPE_CAP = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="frame exceeds the Windows message-mode pipe buffer (fake-fixture limit)",
 )
 
 
@@ -117,7 +118,9 @@ async def test_open_connection_posix_dials_unix_socket(monkeypatch, tmp_path):
         seen.update(path=path, limit=limit)
         return ("R", "W")
 
-    monkeypatch.setattr(cc.asyncio, "open_unix_connection", fake_unix)
+    # raising=False: asyncio has no open_unix_connection attribute on Windows, but the
+    # monkeypatched platform="linux" still routes through it — inject the mock either way.
+    monkeypatch.setattr(cc.asyncio, "open_unix_connection", fake_unix, raising=False)
     sock = str(tmp_path / "rpc.sock")
     assert await cc._open_claustrum_connection(sock, limit=123) == ("R", "W")
     assert seen == {"path": sock, "limit": 123}
@@ -140,7 +143,9 @@ async def test_open_connection_windows_dials_named_pipe(monkeypatch, tmp_path):
         raise AssertionError("AF_UNIX socket dialed on Windows")
 
     monkeypatch.setattr(cc, "_open_windows_pipe_connection", fake_pipe)
-    monkeypatch.setattr(cc.asyncio, "open_unix_connection", boom_unix)
+    # raising=False: no open_unix_connection on Windows; the win32 branch must never
+    # reach it, and this guard asserts exactly that on both platforms.
+    monkeypatch.setattr(cc.asyncio, "open_unix_connection", boom_unix, raising=False)
     assert await cc._open_claustrum_connection(str(tmp_path / "rpc.sock"), limit=99) == (
         "PR",
         "PW",
@@ -339,7 +344,7 @@ async def test_unsubscribe_stops_delivery():
         await _drain(queue, timeout=0.2)
 
 
-async def test_stdin_roundtrip_and_chunking(fake_claustrum):
+async def test_stdin_roundtrip(fake_claustrum):
     fake = await fake_claustrum()
     async with ClaustrumClient(fake.socket_path, fake.token) as client:
         await client.spawn("p1", "claude")
@@ -347,9 +352,15 @@ async def test_stdin_roundtrip_and_chunking(fake_claustrum):
         await client.stdin("p1", payload)
         assert fake.stdin_received["p1"] == payload
 
+
+@_WIN_MSG_PIPE_CAP  # each 700 KiB chunk's base64 line exceeds the message-pipe buffer
+async def test_stdin_large_payload_chunks(fake_claustrum):
+    fake = await fake_claustrum()
+    async with ClaustrumClient(fake.socket_path, fake.token) as client:
+        await client.spawn("p1", "claude")
         big = b"Z" * (_STDIN_CHUNK_BYTES * 2 + 17)
         await client.stdin("p1", big)
-        assert fake.stdin_received["p1"] == payload + big
+        assert fake.stdin_received["p1"] == big
 
 
 async def test_stdin_unknown_process_errors(fake_claustrum):
