@@ -99,10 +99,22 @@ from .runner import (
     SessionRunner,
     SpawnError,
     UnknownProject,
+    _conpty_keeper_available,
 )
 from .trust import is_trusted
 
 logger = logging.getLogger(__name__)
+
+
+def _pty_supported() -> bool:
+    """Whether Interactive Session (pty) can launch on this host, for the dashboard mode picker.
+
+    POSIX always (`pty.openpty`); on Windows only when the ConPTY keeper's `pywinpty` (the
+    `pty` extra) is installed — otherwise a `launch_mode: pty` request falls back to Server
+    Mode, so the picker shouldn't offer it (#914). Mirrors the runner's launch-time gate.
+    """
+    return sys.platform != "win32" or _conpty_keeper_available()
+
 
 _SESSION_COOKIE = "clauster_session"
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -1287,7 +1299,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             {
                 "p": proj,
                 "idx": 0,
-                "pty_supported": sys.platform != "win32",
+                "pty_supported": _pty_supported(),
                 # Same canonical label map the dashboard grid loop passes through (#685);
                 # the standalone row render must carry it too so the launch <select>'s
                 # <option> text and the bypass hint render identically here.
@@ -4399,8 +4411,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # JS permLabel()/permissionEffect() helpers, and the config editor.
             "permission_labels": PERMISSION_LABELS,
             "bypass_desktop_hint": BYPASS_DESKTOP_HINT,
-            # pty (true-resume) is POSIX-only; hide the option on Windows hosts.
-            "pty_supported": sys.platform != "win32",
+            # Interactive Session (true-resume pty) works on POSIX always and on Windows
+            # via the ConPTY keeper when the `pty` extra (pywinpty) is installed (#914).
+            "pty_supported": _pty_supported(),
             # Usage badge: mode ("cost"|"tokens"|"off"), the currency code + its
             # resolved symbol, the static USD->display multiplier, and whether
             # cache tokens count toward the displayed token total. mode "off"
