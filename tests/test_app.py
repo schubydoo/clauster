@@ -74,10 +74,11 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
-def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config):
-    # #534 S5: the per-bridge "Live terminal" control + the xterm.js assets render ONLY when the
-    # (default-off) claude.pty_screen_enabled tap is on. The button itself is further gated
-    # client-side on i.resume_mode === 'pty' (pty bridges have no PTY-less analog).
+def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config, monkeypatch):
+    # #534 S5 / #904: the per-bridge "Live terminal" control + the xterm.js assets render ONLY
+    # when the (default-off) claude.pty_screen_enabled tap is on AND the optional `pty` extra
+    # (pyte) is present. The button is further gated client-side on i.resume_mode === 'pty'.
+    monkeypatch.setattr("clauster.deps.probe", lambda entry: True)  # pretend pyte installed
     on = TestClient(create_app(load_config(write_config("claude:\n  pty_screen_enabled: true\n"))))
     body = on.get("/").text
     assert "/static/vendor/xterm/js/xterm.js" in body
@@ -89,6 +90,39 @@ def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config):
     body_off = off.get("/").text
     assert "/static/vendor/xterm/js/xterm.js" not in body_off
     assert "togglePtyScreen(i.rk)" not in body_off
+
+
+def test_live_terminal_greyed_when_pty_extra_missing(write_config, monkeypatch):
+    # #904: tap ON but the optional `pty` extra (pyte) is ABSENT — the control must not vanish
+    # silently. It renders greyed + disabled with a static install hint, and neither the
+    # functional @click button nor the xterm.js assets (which would be dead weight) are shipped.
+    monkeypatch.setattr("clauster.deps.probe", lambda entry: False)  # pyte not importable
+    client = TestClient(
+        create_app(load_config(write_config("claude:\n  pty_screen_enabled: true\n")))
+    )
+    body = client.get("/").text
+    # Greyed control ships: disabled button + the static hint prose (no Alpine reactivity).
+    assert "requires the <code>pty</code> extra" in body
+    assert "pip install &#39;clauster[pty]&#39;" in body  # environment-correct hint, autoescaped
+    # The functional live-view surface stays out: no toggle @click button, no xterm.js.
+    assert "togglePtyScreen(i.rk)" not in body
+    assert "/static/vendor/xterm/js/xterm.js" not in body
+
+
+def test_live_terminal_hint_is_prose_not_a_run_command_when_frozen(write_config, monkeypatch):
+    # #904: on a frozen binary the pty extra can't be pip-installed and the managed install
+    # command isn't built yet, so the greyed hint must read as PROSE (a docs pointer), never
+    # "run <a non-command>" — the "run" verb + pip form are gated to non-frozen.
+    monkeypatch.setattr("clauster.deps.probe", lambda entry: False)
+    monkeypatch.setattr("clauster.deps.is_frozen", lambda: True)
+    client = TestClient(
+        create_app(load_config(write_config("claude:\n  pty_screen_enabled: true\n")))
+    )
+    body = client.get("/").text
+    assert "requires the <code>pty</code> extra" in body  # still names the extra
+    assert "not bundled in the standalone binary" in body  # prose docs pointer
+    assert "extra — run <code>" not in body  # no "run <command>" framing for the prose hint
+    assert "pip install" not in body  # the dead-end pip form is not shown on the frozen binary
 
 
 def test_live_terminal_client_side_fit_wiring(write_config):

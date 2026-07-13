@@ -161,6 +161,17 @@ want the full supply-chain check.
     set (a bundled module would always win), so the separately installed `pyte` is loaded
     on demand.
 
+!!! note "Optional extras"
+    A few capabilities live behind optional `pip` **extras** that the default install and
+    the signed standalone binary deliberately do not bundle. The `pty` extra
+    (`pip install 'clauster[pty]'`) enables the read-only live terminal view (`pyte`, LGPL)
+    and the Windows ConPTY keeper for Interactive Session (`pywinpty`, Windows-only); the
+    `notify` extra (`pip install 'clauster[notify]'`) enables outbound bridge-lifecycle
+    notifications (`apprise`). Each is optional — a missing extra only leaves its feature
+    dormant, never breaks a launch. `clauster doctor` reports every extra (`OK` when present,
+    `WARN` when missing, with the install hint), and on the standalone binary the hint points
+    at the side-install path instead of `pip`.
+
 ## Scoop (Windows)
 
 On Windows, [Scoop](https://scoop.sh) installs the standalone binary and keeps it

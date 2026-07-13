@@ -42,6 +42,7 @@ from . import (
     config_write_skills,
     config_write_subagents,
     config_writer,
+    deps,
     environments,
     login_shepherd,
     login_status,
@@ -4433,6 +4434,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # Live pty-screen view (#534): the per-bridge "Live terminal" button only
             # renders when the (default-off) tap is enabled; it streams /ws/pty-screen.
             "pty_screen_enabled": config.claude.pty_screen_enabled,
+            # Optional `pty` extra presence (#904): pyte backs the live-terminal render
+            # and is NOT bundled in the signed binary (LGPL). Detected separately from the
+            # config tap so the control can render enabled-but-greyed with an install hint
+            # when the operator turned the tap on without the extra — no silent no-op.
+            "pty_extra_present": deps.probe(deps.by_key("pyte")),
+            "pty_extra_hint": deps.install_hint(deps.by_key("pyte")),
+            # Whether the hint is a runnable command (pip form) vs prose (frozen binary — the
+            # managed install command isn't built yet): the template only prepends "run" for a
+            # real command, so the frozen hint never reads as a command to run.
+            "pty_extra_is_command": not deps.is_frozen(),
             # Browser (Web Notifications) channel (#541): the master switch plus the
             # per-event toggles the client honours when a polled instance transitions.
             # The client requests Notification permission only when the channel is on.

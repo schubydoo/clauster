@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
-from . import claude_cli, config_write_mcp, environments, procutil
+from . import claude_cli, config_write_mcp, deps, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import Project, _load_trusted_paths, trust_state_for
 from .state import CURRENT_SCHEMA, StateStore
@@ -159,7 +159,40 @@ def run_doctor(
     if node_tc is not None:
         checks.append(node_tc)
 
+    # optional-extras presence (#904): OK when importable, WARN when missing. Never FAIL —
+    # extras are optional and a FAIL would flip doctor's exit code for a dormant feature.
+    checks.extend(_check_extras())
+
     return checks, all(c.status != FAIL for c in checks)
+
+
+def _check_extras() -> list[Check]:
+    """Report each optional extra's presence (#904): OK if importable, else WARN.
+
+    Extras are optional capabilities the default install / signed binary may not
+    bundle (``pyte``/``pywinpty`` for the live terminal + Windows ConPTY keeper,
+    ``apprise`` for notifications). Detection is a side-effect-free
+    :func:`clauster.deps.probe` (never imports the module). Off-platform entries
+    (a win32-only extra on a POSIX host) are skipped — the capability can't run
+    there, so its absence isn't worth reporting. WARN, never FAIL: a missing extra
+    only leaves its feature dormant, and a FAIL would wrongly flip doctor's exit
+    code. The detail names the capability and the environment-correct install hint.
+    """
+    checks: list[Check] = []
+    for entry in deps.EXTRAS:
+        if not deps.applies(entry):
+            continue
+        if deps.probe(entry):
+            checks.append(Check(f"extra:{entry.key}", OK, f"{entry.capability_label} available"))
+        else:
+            checks.append(
+                Check(
+                    f"extra:{entry.key}",
+                    WARN,
+                    f"{entry.capability_label} unavailable — {deps.install_hint(entry)}",
+                )
+            )
+    return checks
 
 
 def project_preflight_checks(project: Project, claude_json: Path | None = None) -> list[Check]:
@@ -683,7 +716,7 @@ def _service_launch_command(python: str | None) -> tuple[str, list[str]]:
     """
     if python is not None:
         return python, ["-m", "clauster"]
-    if getattr(sys, "frozen", False):
+    if deps.is_frozen():
         # PyInstaller: sys.executable is the clauster binary, not an interpreter.
         return sys.executable, []
     script = shutil.which("clauster")

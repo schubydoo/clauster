@@ -18,8 +18,9 @@
   </script>
   <link rel="icon" href="{{ request.scope.root_path }}/static/favicon.svg?v={{ asset_version }}" type="image/svg+xml">
   <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/tabler/css/tabler.min.css?v={{ asset_version }}">
-  {% if pty_screen_enabled %}
-  {# xterm.js renders the read-only live pty-screen view (#534); only loaded when the tap is on. #}
+  {% if pty_screen_enabled and pty_extra_present %}
+  {# xterm.js renders the read-only live pty-screen view (#534); only loaded when the tap is on
+     AND the optional `pty` extra (pyte) is present — greyed control below when it's missing. #}
   <link rel="stylesheet" href="{{ request.scope.root_path }}/static/vendor/xterm/css/xterm.css?v={{ asset_version }}">
   <script defer src="{{ request.scope.root_path }}/static/vendor/xterm/js/xterm.js?v={{ asset_version }}"></script>
   {% endif %}
@@ -673,6 +674,7 @@
                   {# Read-only live terminal (#534): pty bridges only — standard bridges have no PTY.
                      The whole control is server-gated on pty_screen_enabled (no markup when off). #}
                   <template x-if="i.resume_mode === 'pty'">
+                    {% if pty_extra_present %}
                     <button type="button" class="btn btn-sm btn-ghost-secondary" @click="togglePtyScreen(i.rk)"
                             :aria-expanded="!!(ptyScreen[i.rk] && ptyScreen[i.rk].open)"
                             {# Only reference the host id while the panel is mounted — the div lives
@@ -681,6 +683,20 @@
                             title="Read-only live view of this bridge's terminal screen.">
                       <svg class="ico me-1" aria-hidden="true"><use href="#ic-terminal"/></svg><span
                         x-text="ptyScreen[i.rk] && ptyScreen[i.rk].open ? 'Hide terminal' : 'Live terminal'">Live terminal</span></button>
+                    {% else %}
+                    {# The tap is on but the optional `pty` extra (pyte) is missing (#904) — the live
+                       view can't render, so show the control GREYED + disabled with a static install
+                       hint rather than silently omitting it. Static server-side (no Alpine state). #}
+                    <span class="d-inline-flex align-items-center">
+                      {# Native `disabled` puts the control out of tab order and conveys the
+                         state to assistive tech; the reason is the adjacent visible hint span,
+                         which sits right after it in reading order. #}
+                      <button type="button" class="btn btn-sm btn-ghost-secondary" disabled
+                              title="Live terminal requires the pty extra ({{ pty_extra_hint }}).">
+                        <svg class="ico me-1" aria-hidden="true"><use href="#ic-terminal"/></svg>Live terminal</button>
+                      <span class="text-muted small ms-2">requires the <code>pty</code> extra — {% if pty_extra_is_command %}run <code>{{ pty_extra_hint }}</code>{% else %}{{ pty_extra_hint }}{% endif %}</span>
+                    </span>
+                    {% endif %}
                   </template>
                   {% endif %}
                   {# Read-only transcript viewer trigger on the live-session row (#866): opens the
@@ -787,7 +803,7 @@
                        x-text="logs[i.rk].lines.join('\n')"></pre>
                 </div>
               </template>
-              {% if pty_screen_enabled %}
+              {% if pty_screen_enabled and pty_extra_present %}
               {# Read-only live terminal (#534). The xterm.js Terminal is created on open and
                  disposed on hide; it lives in a module-level registry, NOT Alpine state, so its
                  internals are never wrapped in a reactive Proxy (cf. #310/#315). The wire is

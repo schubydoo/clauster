@@ -206,6 +206,7 @@ component_management:
       name: cli & config
       paths:
         - src/clauster/ops.py
+        - src/clauster/deps.py # #904 — optional-extras detection for doctor + UI greying
         - src/clauster/config.py
         - src/clauster/config_editor.py
         - src/clauster/config_writer.py
