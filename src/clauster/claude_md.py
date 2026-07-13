@@ -44,7 +44,6 @@ import hashlib
 import json
 import logging
 import os
-import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -62,15 +61,6 @@ LOCAL_FILENAME = "CLAUDE.local.md"
 MAX_BYTES = 64 * 1024  # 64 KB cap (spec §5); shared by the config-write surface below
 _AUDIT_FILE = "claude_md_audit.log"
 _log = logging.getLogger("clauster.claude_md")
-
-# Serializes the config-write surface's read-hash→write critical section. Unlike the
-# JSON-subtree writers (whose stale-hash check runs *inside* the same lock as the
-# atomic replace, via `locked_replace_json_file`'s mutate callback),
-# `config_file_writer.write_file` takes already-computed content, not a mutate hook —
-# so the hash check here happens as a separate step before the call. A per-process
-# lock closes that window between two concurrent PUTs (each dispatched to a worker
-# thread via `asyncio.to_thread`, same reasoning as `config_writer._write_lock`).
-_write_lock = threading.Lock()
 
 
 class ClaudeMdError(RuntimeError):
@@ -330,20 +320,22 @@ def _write_scoped(root: Path, relative: str, content: str, expected_hash: str | 
     file has no prior state to guard.
     """
     cw.validate_candidate(content, validate_content)
-    target = _resolve(root, relative)
-    with _write_lock:
-        try:
-            current = target.read_bytes()
-            found = True
-        except FileNotFoundError:
-            current = b""
-            found = False
+
+    def _verify_unchanged(current: bytes | None) -> None:
+        # Runs INSIDE write_file's per-target lock (the same lock the editor's
+        # write_claude_md holds), so the stale-hash check and the replace are one
+        # critical section across BOTH surfaces — neither can validate old bytes then
+        # lost-update the other. `found` (existence) is tracked separately from content:
+        # an existing but empty file (the "blank" op) still requires a hash, so a later
+        # expected_hash=None PUT is a 409, not a silent overwrite.
+        found = current is not None
         if expected_hash is None:
             if found:
                 raise cw.StaleConfigWriteError(f"{relative} already exists; a hash is required")
-        elif cw.hash_bytes(current) != expected_hash:
+        elif cw.hash_bytes(current or b"") != expected_hash:
             raise cw.StaleConfigWriteError(f"{relative} changed on disk since it was loaded")
-        fw.write_file(root, relative, content)
+
+    fw.write_file(root, relative, content, verify=_verify_unchanged)
 
 
 def read_project_claude_md(project_dir: Path) -> tuple[str, str, bool]:

@@ -150,6 +150,7 @@ def write_file(
     content: str | bytes,
     *,
     mode: int = 0o600,
+    verify: Callable[[bytes | None], None] | None = None,
 ) -> Path:
     """Atomically create or replace the single file ``root/relative``.
 
@@ -162,11 +163,25 @@ def write_file(
     :mod:`clauster.claude_json`'s existing-mode-preservation behavior), so replacing a
     file someone hardened to something other than the default never silently
     re-permissions it.
+
+    ``verify``, if given, is called with the target's current bytes (or ``None`` if the
+    target is absent) INSIDE the per-target lock, immediately before the atomic replace.
+    A read-modify-write (e.g. an optimistic stale-hash guard) therefore stays a single
+    critical section against every other writer of this target — including callers on a
+    *different* code path that lock the same target — so two requests can't both validate
+    the old contents and then lost-update. ``verify`` raising aborts the write (nothing is
+    replaced); the exception propagates unchanged.
     """
     target = resolve_contained_path(root, relative)
     data = content.encode("utf-8") if isinstance(content, str) else content
     target.parent.mkdir(parents=True, exist_ok=True)
     with _locked(target):
+        if verify is not None:
+            try:
+                current: bytes | None = target.read_bytes()
+            except FileNotFoundError:
+                current = None
+            verify(current)  # raises to abort the write — still holding the lock
         fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=".tmp")
         tmp = Path(tmp_name)
         try:
