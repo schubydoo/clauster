@@ -116,6 +116,30 @@ def test_write_stale_base_sha_conflict(tmp_path):
     assert (proj / "CLAUDE.md").read_text() == "current\n"  # unchanged
 
 
+def test_write_stale_base_sha_conflict_check_runs_inside_lock(tmp_path, monkeypatch):
+    # The base_sha256 read-check-write is one critical section (#914) so two concurrent
+    # same-project saves can't both pass the guard and lost-update: the conflict read runs
+    # under the target's lock — assert it's held at raise time.
+    from clauster import atomicio
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("current\n")
+    target = proj / "CLAUDE.md"
+    real_read = read_claude_md
+    seen: dict = {}
+
+    def _spy_read(path):
+        # read_claude_md is called inside the write's critical section — capture lock state.
+        seen["locked"] = atomicio.inproc_path_lock(target).locked()
+        return real_read(path)
+
+    monkeypatch.setattr("clauster.claude_md.read_claude_md", _spy_read)
+    with pytest.raises(ClaudeMdConflict):
+        write_claude_md(proj, "mine\n", base_sha256=_sha("what-i-loaded\n"))
+    assert seen["locked"] is True  # the conflict guard read ran under the lock
+
+
 def test_write_matching_base_sha_succeeds(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -128,7 +152,7 @@ def test_write_replace_failure_cleans_tmp_and_raises(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setattr(
-        "clauster.claude_md.os.replace",
+        "clauster.claude_md.atomicio.replace_with_retry",
         lambda s, d: (_ for _ in ()).throw(OSError("cross-device")),
     )
     with pytest.raises(ClaudeMdError):
@@ -143,7 +167,7 @@ def test_write_replace_failure_tolerates_unlink_failure(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setattr(
-        "clauster.claude_md.os.replace",
+        "clauster.claude_md.atomicio.replace_with_retry",
         lambda s, d: (_ for _ in ()).throw(OSError("cross-device")),
     )
     real_unlink = Path.unlink
@@ -156,6 +180,61 @@ def test_write_replace_failure_tolerates_unlink_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "unlink", boom_unlink)
     with pytest.raises(ClaudeMdError, match="could not write"):
         write_claude_md(proj, "hello\n")
+
+
+def test_write_non_oserror_mid_write_removes_unique_temp(tmp_path, monkeypatch):
+    # A non-OSError BaseException (e.g. KeyboardInterrupt) mid-write must remove the UNIQUE
+    # temp and re-raise as-is — a unique CLAUDE.md.<pid>.<hex>.tmp can't self-heal like the
+    # old fixed name, so it would otherwise accumulate next to CLAUDE.md.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setattr(
+        "clauster.claude_md.atomicio.replace_with_retry",
+        lambda s, d: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    with pytest.raises(KeyboardInterrupt):  # re-raised as-is, NOT wrapped in ClaudeMdError
+        write_claude_md(proj, "hello\n")
+    assert list(proj.glob("CLAUDE.md*")) == []  # unique temp removed, no debris
+
+
+def test_write_claude_md_holds_per_path_lock_during_replace(tmp_path, monkeypatch):
+    # The fixed-name temp write is serialized under the per-path in-process lock (#914) so two
+    # concurrent saves to the same project can't move/clobber the same CLAUDE.md.tmp mid-replace.
+    from clauster import atomicio
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    target = proj / "CLAUDE.md"
+    seen: dict = {}
+
+    def _spy_replace(src, dst):
+        # The write must run INSIDE the target's lock — assert it's held right now.
+        seen["locked"] = atomicio.inproc_path_lock(target).locked()
+        Path(src).replace(dst)
+
+    monkeypatch.setattr("clauster.claude_md.atomicio.replace_with_retry", _spy_replace)
+    write_claude_md(proj, "hello\n")
+    assert seen["locked"] is True
+
+
+def test_write_claude_md_uses_unique_temp_name(tmp_path, monkeypatch):
+    # A UNIQUE temp name (not a fixed CLAUDE.md.tmp) so a second clauster PROCESS saving the
+    # same project can't clobber this one's temp mid-replace — the inproc lock is intra-process
+    # only (#914).
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    seen: list = []
+
+    def _spy_replace(src, dst):
+        seen.append(Path(src).name)
+        Path(src).replace(dst)
+
+    monkeypatch.setattr("clauster.claude_md.atomicio.replace_with_retry", _spy_replace)
+    write_claude_md(proj, "one\n")
+    write_claude_md(proj, "two\n")
+    assert seen[0] != "CLAUDE.md.tmp" and seen[1] != "CLAUDE.md.tmp"  # not the fixed shared name
+    assert seen[0] != seen[1]  # unique per write
+    assert all(n.startswith("CLAUDE.md.") and n.endswith(".tmp") for n in seen)
 
 
 def test_write_audit_failure_does_not_fail_write(tmp_path, monkeypatch):
