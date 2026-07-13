@@ -182,6 +182,21 @@ def test_write_replace_failure_tolerates_unlink_failure(tmp_path, monkeypatch):
         write_claude_md(proj, "hello\n")
 
 
+def test_write_non_oserror_mid_write_removes_unique_temp(tmp_path, monkeypatch):
+    # A non-OSError BaseException (e.g. KeyboardInterrupt) mid-write must remove the UNIQUE
+    # temp and re-raise as-is — a unique CLAUDE.md.<pid>.<hex>.tmp can't self-heal like the
+    # old fixed name, so it would otherwise accumulate next to CLAUDE.md.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.setattr(
+        "clauster.claude_md.atomicio.replace_with_retry",
+        lambda s, d: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    with pytest.raises(KeyboardInterrupt):  # re-raised as-is, NOT wrapped in ClaudeMdError
+        write_claude_md(proj, "hello\n")
+    assert list(proj.glob("CLAUDE.md*")) == []  # unique temp removed, no debris
+
+
 def test_write_claude_md_holds_per_path_lock_during_replace(tmp_path, monkeypatch):
     # The fixed-name temp write is serialized under the per-path in-process lock (#914) so two
     # concurrent saves to the same project can't move/clobber the same CLAUDE.md.tmp mid-replace.
