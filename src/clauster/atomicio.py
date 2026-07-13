@@ -285,7 +285,12 @@ def _apply_owner_only_acl(path: Path) -> str | None:
     ]
     try:  # noqa: S603 — absolute icacls, list-argv, no shell
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
-    except OSError as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
+        # subprocess.SubprocessError covers TimeoutExpired (a hung/wedged icacls hitting the
+        # 30s cap) — which is NOT an OSError, so catching only OSError would let the timeout
+        # escape and fail the whole state write, breaking the best-effort contract. Any
+        # subprocess-layer failure degrades to a reason string → warn + proceed on the
+        # inherited ACL, never a raised write.
         return f"icacls failed to run: {exc}"
     if proc.returncode != 0:
         return f"icacls exited {proc.returncode}: {proc.stderr.strip()}"
