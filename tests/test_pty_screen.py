@@ -271,8 +271,20 @@ def test_find_authorize_url_osc8_rejects_hidden_unknown_host():
     scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
     scr.feed(_osc8("https://evil.example/cai/oauth/authorize?code=x", label="Click here"))
     assert scr.find_authorize_url() is None
-    # ...but the real link (a known auth host) still resolves via the same fallback.
+    # ...but the real link (known auth host + authorize path) still resolves via the same fallback.
     scr.feed(_osc8(_OSC8_AUTH, label="Open"))
+    assert scr.find_authorize_url() == _OSC8_AUTH
+
+
+def test_find_authorize_url_osc8_rejects_hidden_known_host_non_authorize():
+    # A hidden OSC 8 link on an ALLOWED host but NOT the authorize endpoint (status./marketing.
+    # pass the host check yet aren't the setup-token authorize URL) must not be returned — a
+    # hidden target requires BOTH a known auth host AND an authorize path (Greptile P1 security).
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(_osc8("https://status.claude.com/incidents/42", label="status"))
+    scr.feed(_osc8("https://marketing.claude.com/promo", label="promo"))
+    assert scr.find_authorize_url() is None
+    scr.feed(_osc8(_OSC8_AUTH, label="authorize"))
     assert scr.find_authorize_url() == _OSC8_AUTH
 
 

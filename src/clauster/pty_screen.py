@@ -538,10 +538,15 @@ class PtyScreen:
         # ConPTY renders the authorize URL as an OSC 8 hyperlink whose target pyte drops from
         # the display (#905); fall back to the URI captured from the raw OSC 8 sequences. An
         # OSC 8 target is HIDDEN from the operator (they see only the link label), so — unlike
-        # the visible text path — it can't be eyeballed: require a known Claude/Anthropic auth
-        # host so a stray or hidden hyperlink on an unknown host can never be handed back as the
-        # authorize URL. The real link is on claude.com, a known host, so nothing is lost.
-        return _select_authorize_url(u for u in osc8_urls if _is_known_auth_host(_url_host(u)))
+        # the visible text path, which the operator can eyeball — a hidden target must clear a
+        # STRICTER bar: it is handed back only if it is BOTH on a known Claude/Anthropic auth
+        # host AND an authorize-endpoint path. That blocks a hidden decoy on an unknown host
+        # AND a hidden non-authorize link on an allowed host (e.g. status./marketing.claude.com,
+        # which pass the host check but are not the authorize endpoint). The real link is
+        # `claude.com/cai/oauth/authorize`, which clears both, so nothing is lost.
+        return _select_authorize_url(
+            u for u in osc8_urls if _is_known_auth_host(_url_host(u)) and _is_authorize_path(u)
+        )
 
     def find_oauth_token(self) -> str | None:
         """Scan the reassembled screen for ``setup-token``'s printed OAuth token, or None.
