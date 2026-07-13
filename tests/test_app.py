@@ -926,6 +926,17 @@ def test_dashboard_transcript_viewer_trigger_and_modal_render(write_config):
     assert page.count('window.location.assign(ROOT + "/login")') >= 1
 
 
+def test_dashboard_live_session_row_has_transcript_button(write_config):
+    # #866: the live desktop/bridge session row carries its own read-only Transcript
+    # trigger (distinct data-test from the project-row one), wired to openTranscripts
+    # with the row's project, and hidden for ANY worktree-spawn bridge (standard or
+    # interactive) whose transcript lives under a different cwd (not in this viewer).
+    page = _client(write_config).get("/").text
+    assert 'data-test="transcript-trigger-session"' in page
+    assert "openTranscripts(i.project)" in page  # dynamic, per live session
+    assert "i.spawn_mode !== 'worktree'" in page  # worktree-spawn gated (mode-agnostic)
+
+
 def test_dashboard_transcript_content_uses_x_text_not_x_html(write_config):
     # CRITICAL safety (#431): turn content is server-redacted but still untrusted
     # agent/user output — rendering it as HTML would be stored XSS. The turn body MUST
