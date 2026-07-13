@@ -99,9 +99,19 @@ class DaemonSpawnError(ClaustrumError):
 _SUN_PATH_MAX = 104
 
 
+def _af_unix_in_use() -> bool:
+    """Return whether claustrum dials an AF_UNIX socket (POSIX) vs a Windows named pipe.
+
+    A seam so the ``sun_path`` length gate is testable on every OS *without* monkeypatching
+    the global ``os.name`` — flipping that on Windows makes ``pathlib.Path`` pick an
+    uninstantiable flavour and crashes the whole xdist worker.
+    """
+    return os.name == "posix"
+
+
 def _check_unix_socket_path(sock: Path) -> None:
     """Raise a clear :class:`ClaustrumError` if the AF_UNIX socket path exceeds ``sun_path``."""
-    if os.name != "posix":
+    if not _af_unix_in_use():
         return
     # ``os.fsencode`` counts the exact bytes the AF_UNIX layer binds (the filesystem
     # encoding), not whatever ``str.encode`` defaults to on a non-UTF-8 POSIX host.
