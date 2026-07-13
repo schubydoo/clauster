@@ -18,6 +18,14 @@ cp clauster.yml.example clauster.yml   # edit projects_root
 uv run clauster
 ```
 
+A [`justfile`](justfile) and a [`Makefile`](Makefile) wrap these commands, so
+`just setup` / `make setup` do the first three lines and `just check` /
+`make check` run every pre-PR gate below in one shot. Both run the same commands —
+use whichever you have (`just` is a separate install; `make` ships with most
+systems). The `uv run …` invocations documented here remain the source of truth.
+Local dev pins Python **3.13** via [`.python-version`](.python-version) to match
+the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
+
 ## Before opening a PR
 
 - **Tests + coverage** — `uv run pytest`; the suite must pass and stay at or
