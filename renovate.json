@@ -108,6 +108,13 @@
       "automerge": true
     },
     {
+      "description": "Auto-merge the python base-image PATCH bumps (e.g. 3.14.6 -> 3.14.7) once CI passes. The Dockerfile pins the explicit patch tag (`3.14.X-slim-trixie`) rather than the floating `3.14` tag, so a CPython bugfix release is a named, reviewable-in-history version PR instead of the opaque digest-only bump the floating tag produced — while still auto-flowing so CVE/bugfix patches don't accumulate (same intent as the digest rule above). A MINOR bump (3.15) is a real interpreter upgrade that the CI support matrix must move with, so it is left as a manual, reviewed PR.",
+      "matchManagers": ["dockerfile"],
+      "matchPackageNames": ["python"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true
+    },
+    {
       "description": "Group security-tooling actions — same security.yml scanners, useful to review together.",
       "matchManagers": ["github-actions"],
       "matchPackageNames": [
