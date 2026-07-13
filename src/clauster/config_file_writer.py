@@ -20,11 +20,13 @@ of JSON subtrees:
   explicit ``..``/``.``/empty path component, or a component that is a symlink
   resolving outside the root. Raises :class:`PathEscapeError` **before any I/O**.
 * **flock** — :func:`write_file`, :func:`replace_tree`, and :func:`delete_path` each
-  hold an advisory ``flock`` (a sidecar ``<target>.lock``, never the target itself, so
-  ``os.replace`` swapping the inode never orphans a held lock) across their whole
-  operation, the same technique :mod:`clauster.claude_json` uses for
-  ``~/.claude.json``. POSIX-only; degrades to a best-effort no-op elsewhere (the
-  atomic replace still prevents a torn file/tree).
+  hold an advisory ``flock`` across their whole operation via
+  :func:`atomicio.cross_process_lock`. The lock file lives in the deployment state dir
+  (keyed by the target's realpath), **not** in a sidecar ``<target>.lock`` beside the
+  target — so a config write leaves no visible lock artifact in the project dir, and it
+  shares ONE lock file with the CLAUDE.md editor path so the two mutually exclude
+  (follow-up to #915). POSIX-only; degrades to a best-effort no-op elsewhere (the atomic
+  replace still prevents a torn file/tree).
 * **Temp-file / temp-dir + atomic rename** — a file create/replace is a single
   ``mkstemp`` + ``os.replace`` (always atomic on POSIX, same filesystem). A directory
   create (target absent) is a single rename of a freshly built sibling temp dir — also
@@ -53,11 +55,6 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-
-try:
-    import fcntl  # POSIX only; Windows has no flock equivalent we rely on here.
-except ImportError:  # pragma: no cover - exercised only on Windows
-    fcntl = None  # type: ignore[assignment]
 
 from . import atomicio
 from .config_write import redact_secret_lines
@@ -119,29 +116,19 @@ def _locked(target: Path):
 
     An **in-process lock** (:func:`atomicio.inproc_path_lock`) serializes THIS process's
     own concurrent writers of ``target`` on every OS — the primary guard on Windows, where
-    ``fcntl`` is unavailable. On POSIX an advisory ``flock`` is *additionally* taken via a
-    sidecar ``<target>.lock`` (never ``target`` itself — an atomic replace swaps the inode,
-    orphaning a lock held on the old one), the identical technique
-    :func:`clauster.claude_json._locked` uses, which also serializes *other processes*. Where
-    ``fcntl`` is unavailable (Windows) or the lock file can't be opened, only the in-process
-    lock applies and the atomic replace still prevents a torn file/tree.
+    ``fcntl`` is unavailable. Layered under it, :func:`atomicio.cross_process_lock` takes an
+    advisory ``flock`` that serializes *other processes* too. That lock file now lives in the
+    deployment state dir (keyed by ``target``'s realpath), **not** in a sidecar
+    ``<target>.lock`` beside the target — so a config write no longer litters the project
+    dir with a visible lock artifact, and it shares ONE lock file with the CLAUDE.md editor
+    path (:func:`clauster.claude_md.write_claude_md`), which takes the same cross-process lock
+    on the same target (follow-up to #915). Inproc-first then cross-process, in that order, so
+    the two never deadlock. Where ``fcntl`` is unavailable (Windows) or the lock dir isn't
+    configured, only the in-process lock applies (the latter warns, never silently) and the
+    atomic replace still prevents a torn file/tree.
     """
-    with atomicio.inproc_path_lock(target):
-        if fcntl is None:
-            yield
-            return
-        lock_path = target.parent / f"{target.name}.lock"
-        try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        except OSError:
-            yield
-            return
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            os.close(fd)  # implicitly releases the flock
+    with atomicio.inproc_path_lock(target), atomicio.cross_process_lock(target):
+        yield
 
 
 def write_file(

@@ -154,11 +154,15 @@ def write_claude_md(
     # only coordinates threads within one process. Same directory ⇒ os.replace stays an atomic
     # same-filesystem rename; write_text keeps the umask-based mode (unlike mkstemp's 0600).
     tmp = target.with_name(f"{target.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
-    # Serialize this process's concurrent saves for the SAME project under one per-path lock so
-    # the base_sha256 read-check-write is a single critical section: two overlapping saves can't
-    # both pass the conflict guard and then lost-update. `read_claude_md` takes no inproc lock,
-    # so it can't deadlock.
-    with atomicio.inproc_path_lock(target):
+    # Serialize concurrent saves for the SAME project so the base_sha256 read-check-write is a
+    # single critical section: two overlapping saves can't both pass the conflict guard and then
+    # lost-update. `inproc_path_lock` covers THIS process's threads; `cross_process_lock` covers
+    # a SECOND clauster process — including one writing the same CLAUDE.md via the config-write
+    # path (`config_file_writer._locked`), which takes the same cross-process lock on the same
+    # target, so the editor and config-write surfaces mutually exclude (follow-up to #915).
+    # Inproc-first then cross-process, matching the config-write order, so the two never deadlock;
+    # `read_claude_md` takes neither lock, so it can't re-enter either.
+    with atomicio.inproc_path_lock(target), atomicio.cross_process_lock(target):
         current = read_claude_md(project_path)
         if base_sha256 is not None and current.sha256 != base_sha256:
             raise ClaudeMdConflict(f"{FILENAME} changed on disk since it was loaded")

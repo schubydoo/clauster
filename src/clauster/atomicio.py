@@ -14,15 +14,24 @@ so the write path here:
 * ``flush`` + ``fsync`` the temp before ``os.replace`` and best-effort ``fsync`` the
   directory after, so a crash can't leave an empty/half-written target.
 
-Two cross-OS helpers here are shared by the JSON writers too (#914):
+Cross-OS helpers here are shared by the JSON writers too (#914):
 :func:`inproc_path_lock` serializes THIS process's concurrent same-file writers on
 every OS (POSIX ``fcntl.flock`` doesn't cover a second thread reliably on Windows —
 it isn't available there at all), and :func:`replace_with_retry` retries the atomic
 rename over a transient Windows sharing violation.
+
+:func:`cross_process_lock` (follow-up to #915) adds the missing *cross-process* guard
+for config/CLAUDE.md writes: both the CLAUDE.md editor and the config-write path hold
+its ``flock`` on a lock file KEYED BY THE TARGET but living in the deployment state dir
+(:func:`configure_lock_dir`), not beside the target — so two clauster processes editing
+the same ``<project>/CLAUDE.md`` mutually exclude without littering the project dir with
+a visible ``CLAUDE.md.lock``.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import logging
 import os
 import shutil
@@ -31,6 +40,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX only; Windows has no flock equivalent we rely on here.
+except ImportError:  # pragma: no cover - exercised only on Windows
+    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +62,18 @@ _INPROC_REGISTRY_LOCK = threading.Lock()
 # first touch of a given directory shells out.
 _SECURED_DIRS: set[str] = set()
 _SECURED_DIRS_LOCK = threading.Lock()
+
+# Cross-PROCESS serialization of config/CLAUDE.md read-modify-writes (follow-up to #915).
+# Both the CLAUDE.md editor (`claude_md.write_claude_md`) and the config-write path
+# (`config_file_writer._locked`) take a `flock` on a lock file KEYED BY THE TARGET but
+# HELD IN THIS DIRECTORY (the deployment state dir), not beside the target — so two
+# clauster PROCESSES editing the same `<project>/CLAUDE.md` mutually exclude WITHOUT
+# littering the project dir with a visible `CLAUDE.md.lock`. `configure_lock_dir` is
+# called once in `create_app`; until then the flock is skipped (in-process lock still
+# holds) and a WARNING fires once so the degrade is never silent.
+_LOCK_DIR: Path | None = None
+_LOCK_DIR_LOCK = threading.Lock()
+_CROSS_PROCESS_UNCONFIGURED_WARNED = False
 
 #: SYSTEM's well-known, language-neutral SID (icacls grants use it so a non-English
 #: Windows doesn't break on a localized "SYSTEM" account name).
@@ -84,6 +110,106 @@ def inproc_path_lock(path: Path) -> threading.Lock:
             lock = threading.Lock()
             _INPROC_LOCKS[key] = lock
         return lock
+
+
+def configure_lock_dir(path: Path) -> None:
+    """Set the state-dir directory that holds cross-process lock files, owner-only.
+
+    Called once early in ``create_app`` (before any request can write) with
+    ``<state_dir>/locks`` so the flock in :func:`cross_process_lock` lands in the
+    deployment state dir, never beside the target. The dir is created owner-only via
+    :func:`ensure_private_dir` (the lock files hold no secrets, but the state dir must
+    stay ``0700`` regardless). Idempotent — safe to call again with the same path.
+
+    The cross-process guarantee is scoped to ONE deployment's state dir: two clauster
+    deployments with *different* state dirs sharing a ``projects_root`` would derive the
+    same digest under different dirs and NOT mutually exclude. That's acceptable — clauster
+    is single-operator / single-deployment by design — but it is a narrowing vs a sidecar
+    beside the target, which any two processes touching that file would have shared.
+    """
+    global _LOCK_DIR
+    resolved = path.expanduser()
+    ensure_private_dir(resolved)
+    with _LOCK_DIR_LOCK:
+        _LOCK_DIR = resolved
+
+
+def _cross_process_lock_file(target: Path) -> Path | None:
+    """Return the state-dir lock-file path for ``target``, or ``None`` if unconfigured.
+
+    Keyed by the SAME normalized realpath (:func:`_lock_key`) both write paths use, so
+    the CLAUDE.md editor's target and the config-write path's target for the project-root
+    ``CLAUDE.md`` hash to ONE lock file and therefore mutually exclude. A truncated
+    SHA-256 of the key names the file (a stable, filesystem-safe, collision-resistant
+    handle) so nothing about the target's path leaks into the lock dir's listing.
+    """
+    with _LOCK_DIR_LOCK:
+        lock_dir = _LOCK_DIR
+    if lock_dir is None:
+        return None
+    digest = hashlib.sha256(_lock_key(target).encode()).hexdigest()[:32]
+    return lock_dir / f"{digest}.lock"
+
+
+@contextlib.contextmanager
+def cross_process_lock(target: Path):
+    """Hold an exclusive ``flock`` across processes for a write to ``target``.
+
+    The lock file lives in the configured state dir (:func:`configure_lock_dir`), keyed
+    by ``target``'s realpath, so two clauster PROCESSES writing the same file serialize
+    without a lock artifact appearing beside the target. Layered UNDER the caller's
+    :func:`inproc_path_lock` (always acquired inproc-first, cross-process-second, in that
+    order everywhere) so the two never deadlock; this manager acquires no inproc lock.
+
+    Degrades — never silently:
+
+    * ``fcntl`` unavailable (Windows): yield without a flock. The inproc lock is the only
+      guard there today, so this is no regression.
+    * lock dir not configured (test-only misuse — ``create_app`` always configures it):
+      log a WARNING **once** and yield. The inproc lock still serializes this process's
+      own writers; only the cross-process guard is missing, and the operator is told.
+
+    The lock file is **never unlinked** — it is created ``O_CREAT`` and left in place. This
+    is deliberate: deleting it would reintroduce the classic ``flock``+``unlink`` inode race
+    (two processes could end up locking different inodes of a recreated file). The files are
+    bounded by the number of distinct config/CLAUDE.md targets ever written (small), so the
+    accumulation is a non-issue; a future "cleanup" must NOT prune them.
+    """
+    if fcntl is None:
+        yield
+        return
+    lock_file = _cross_process_lock_file(target)
+    if lock_file is None:
+        _warn_cross_process_unconfigured()
+        yield
+        return
+    # Self-heal a vanished lock dir (removed by hand under a running service, or on evicted
+    # tmpfs): `exist_ok=True` is a cheap stat in the common case, and `mode=0o700` keeps a
+    # recreated `locks/` owner-only. NOT `parents=True` — that would recreate a vanished
+    # `state_dir` (the parent, which holds `session.secret` + claustrum tokens) at 0o755,
+    # silently un-doing `ensure_private_dir`'s 0o700; instead a missing state_dir raises
+    # FileNotFoundError, the right fail-loud outcome (a gone state_dir is a genuine fault).
+    # `os.open` likewise stays unwrapped — a real permission/IO fault is worth surfacing.
+    lock_file.parent.mkdir(exist_ok=True, mode=0o700)
+    fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # implicitly releases the flock
+
+
+def _warn_cross_process_unconfigured() -> None:
+    """Log the "lock dir not configured" warning at most once per process."""
+    global _CROSS_PROCESS_UNCONFIGURED_WARNED
+    with _LOCK_DIR_LOCK:
+        if _CROSS_PROCESS_UNCONFIGURED_WARNED:
+            return
+        _CROSS_PROCESS_UNCONFIGURED_WARNED = True
+    logger.warning(
+        "cross-process file lock dir not configured; config/CLAUDE.md writes are "
+        "serialized in-process only"
+    )
 
 
 def replace_with_retry(src: Path, dst: Path, *, attempts: int = 5, delay: float = 0.05) -> None:
