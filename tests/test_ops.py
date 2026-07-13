@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from clauster import deps
 from clauster.config import load_config
 from clauster.ops import (
     FAIL,
@@ -18,6 +19,7 @@ from clauster.ops import (
     WARN,
     _check_auth,
     _check_claude_login,
+    _check_extras,
     _check_node_toolchain,
     _check_port,
     _check_repo_freshness,
@@ -116,6 +118,44 @@ def test_doctor_git_missing_warns(write_config, tmp_path, monkeypatch):
     monkeypatch.setattr("clauster.ops.shutil.which", lambda n: None)
     by = {c.name: c for c in run_doctor(_cfg_file(write_config, tmp_path))[0]}
     assert by["git"].status == WARN
+
+
+# ----- optional-extras rows (#904) --------------------------------------
+
+
+def test_check_extras_warns_with_install_hint_when_missing(monkeypatch):
+    monkeypatch.setattr(deps, "probe", lambda entry: False)
+    monkeypatch.setattr(deps.sys, "platform", "linux")  # pywinpty (win32-only) is skipped
+    by = {c.name: c for c in _check_extras()}
+    assert set(by) == {"extra:pyte", "extra:apprise"}
+    assert by["extra:pyte"].status == WARN
+    assert "Live terminal view (#534)" in by["extra:pyte"].detail
+    assert "pip install 'clauster[pty]'" in by["extra:pyte"].detail
+    assert by["extra:apprise"].status == WARN
+
+
+def test_check_extras_ok_when_present(monkeypatch):
+    monkeypatch.setattr(deps, "probe", lambda entry: True)
+    monkeypatch.setattr(deps.sys, "platform", "linux")
+    by = {c.name: c for c in _check_extras()}
+    assert by["extra:pyte"].status == OK
+    assert "available" in by["extra:pyte"].detail
+
+
+def test_check_extras_includes_win32_entry_only_on_windows(monkeypatch):
+    monkeypatch.setattr(deps, "probe", lambda entry: False)
+    monkeypatch.setattr(deps.sys, "platform", "win32")
+    names = {c.name for c in _check_extras()}
+    assert "extra:pywinpty" in names
+
+
+def test_doctor_includes_extra_rows_never_failing(write_config, tmp_path):
+    checks, ok = run_doctor(_cfg_file(write_config, tmp_path))
+    extra_rows = [c for c in checks if c.name.startswith("extra:")]
+    assert extra_rows  # at least pyte + apprise on a POSIX host
+    # Extras are optional: a missing one WARNs but must never FAIL (which would flip the
+    # doctor exit code for a dormant feature).
+    assert all(c.status in {OK, WARN} for c in extra_rows)
 
 
 def test_repo_freshness_none_for_non_git_install(tmp_path):

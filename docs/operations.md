@@ -72,6 +72,7 @@ It prints one line per check and exits non-zero if any check **fails**. Checks:
 | `version` | For a from-source checkout, whether `HEAD` is behind its last-fetched upstream. | **WARN** if behind; absent for PyPI/Docker installs. |
 | `port` | (CLI only) whether the listen port is free to bind. | **WARN** if already in use. |
 | `systemd` | The loaded `clauster.service` uses a non-reaping `KillMode` (see below). | **WARN** if it would reap live pty bridges. |
+| `extra:*` | Each optional [extra](installation.md) (`pty`/`notify`) is importable in the running interpreter. | **WARN** if missing (with the install hint) — never FAIL; a missing extra only leaves its feature dormant. A Windows-only extra is skipped off-Windows. |
 
 `claude-login` deserves a callout: it is the cause of the classic "bridge runs
 but is dead" failure mode — the bridge process starts, but the inherited
