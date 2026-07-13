@@ -37,18 +37,20 @@ point of the feature).
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 
-from . import claude_cli, procutil
+from . import claude_cli, procutil, redact
 from .pty_screen import SCREEN_ROWS, PtyScreen, PyteUnavailableError, extract_authorize_url
 
 _T = TypeVar("_T")
@@ -117,31 +119,142 @@ class NotActiveError(LoginShepherdError):
     """No login flow is currently in progress."""
 
 
-def _redact(text: str) -> str:
-    """Best-effort mask of a token-shaped value in captured output before it is logged.
+def _is_win32() -> bool:
+    """Whether we're on Windows (seam so `_spawn_pty`'s ConPTY branch is testable on POSIX).
+
+    Isolated behind a function — like `pty_keeper._load_pty_process`'s platform guard — so a
+    POSIX test can drive the win32 `setup-token` transport (`_spawn_conpty`) by patching this,
+    without mutating the shared `sys.platform` singleton (which would also flip `shutil.which`).
+    """
+    return sys.platform == "win32"
+
+
+def _redact(text: str, pasted_secrets: Iterable[str] = ()) -> str:
+    r"""Best-effort mask of secret-shaped values in captured output before it is logged/returned.
 
     Defense in depth only: the primary guarantee is that the pasted code and the
     parsed token are never themselves passed to a logging call. This additionally
     scrubs a `CLAUDE_CODE_OAUTH_TOKEN=...` line (in case the raw subprocess output
     ever needs to be logged for diagnostics) so the secret value never lands in a
     log line even indirectly.
+
+    `pasted_secrets` are the operator-pasted OAuth codes registered by `_write_code`. On
+    the POSIX pty transport a `termios` ECHO-disable keeps a pasted code out of the output
+    at the source (`_spawn_pty`), and a plain pipe never mirrors stdin into stdout — but a
+    **Windows ConPTY echoes written input back into its read stream** and the parent can't
+    disable that the way `termios` does, so the code can land in `flow.buffer`. Masking each
+    registered code here closes that leak on the returned/logged "Captured output" too. A
+    no-op on POSIX/pipe (nothing to match); empty codes are never registered so `str.replace`
+    is never handed the empty string (which would splice the mask between every character).
+
+    Terminal escapes are stripped FIRST so a fragmented echo can't slip a code past the
+    substring match: a ConPTY echo could interleave escapes (e.g. bracketed-paste `\x1b[200~`
+    markers) INSIDE the pasted code, and `redact.strip_ansi` collapses those so the code is
+    reassembled contiguously before matching (it also cleans the diagnostic). Secrets are then
+    masked longest-first, so a later code that extends an earlier one (`ABC` then `ABCDEF`)
+    can't leave its suffix behind when the prefix is masked first. Over-redaction (a code that
+    also appears elsewhere) is harmless; only under-match would leak. This layer is still
+    defense-in-depth — the primary guarantee is that the code is never handed to a logging call
+    and is only ever returned as this redacted "Captured output"; on real Windows the ConPTY was
+    verified not to echo the pasted code at all (#912).
     """
-    return _TOKEN_RE.sub("CLAUDE_CODE_OAUTH_TOKEN=<redacted>", text)
+    text = redact.strip_ansi(text)
+    text = _TOKEN_RE.sub("CLAUDE_CODE_OAUTH_TOKEN=<redacted>", text)
+    for secret in sorted({s for s in pasted_secrets if s}, key=len, reverse=True):
+        text = text.replace(secret, "<redacted-code>")
+    return text
+
+
+class _ConPtyPopen:
+    """Minimal `subprocess.Popen`-compatible lifecycle adapter over a pywinpty `PtyProcess`.
+
+    The shepherd's flow lifecycle (`start`/`submit_code`/`poll`/`_teardown`/`_wait_for`) drives
+    its subprocess through the `Popen` subset `poll()` / `wait(timeout)` / `terminate()` /
+    `kill()` plus the `stdin`/`stdout` attributes. pywinpty's `PtyProcess` exposes the same
+    intent through a different shape — `isalive()`, a no-timeout blocking `wait()`, and
+    `terminate(force=)` for a hard kill — so this adapts it so the existing, delicately-ordered
+    teardown code runs UNCHANGED on the ConPTY transport (only spawn/read/write get a win32
+    branch). Reads and writes go through the raw `PtyProcess` (`flow.pty_process`), never this
+    adapter; `stdin`/`stdout` are `None` exactly as they are for the POSIX pty `_Flow`.
+
+    Only the confirmed `PtyProcess` surface is used (`isalive`/`wait`/`terminate`) — no reliance
+    on `exitstatus` — so it matches the fake used to cover this path on POSIX.
+
+    **All handle access is serialized behind a shared lock.** The reader thread (`_pump_conpty`)
+    and the control thread (this shim's `poll`/`wait`/`terminate`/`kill`, plus `_write_code` and
+    `_teardown`) both touch the SAME pywinpty `PtyProcess` — unlike `pty_keeper`, whose ConPTY
+    loop is single-threaded and so never overlaps a `read` with a `terminate`/`close`. pywinpty
+    doesn't document thread-safety for concurrent native handle calls, so `_spawn_conpty` builds
+    one lock and hands it to this shim AND stores it on `flow.pty_lock`; every native call takes
+    it, restoring `pty_keeper`'s one-op-at-a-time invariant. Deadlock-free by construction: the
+    lock is never held across a blocking call (`read()` is non-blocking under `PYWINPTY_BLOCK=0`)
+    nor across the `wait()` sleep, and it's never acquired re-entrantly.
+    """
+
+    stdin = None
+    stdout = None
+
+    def __init__(self, proc: Any, lock: threading.Lock | None = None) -> None:
+        """Wrap the live pywinpty `PtyProcess`, serializing handle access behind `lock`."""
+        self._proc = proc
+        self._lock = lock or threading.Lock()
+
+    def poll(self) -> int | None:
+        """Return the exit code if the process has exited, else None (never blocks)."""
+        with self._lock:
+            if self._proc.isalive():
+                return None
+            # Dead → `wait()` returns the cached status immediately without blocking. It may
+            # return None on some pywinpty builds → coerce to 0.
+            return self._proc.wait() or 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Block until the process exits (or raise `subprocess.TimeoutExpired`).
+
+        pywinpty's `wait()` has no timeout, so poll `isalive()` on the shared cadence and
+        raise the same `TimeoutExpired` the callers already handle once the deadline passes.
+        The lock is dropped across the sleep so the reader thread can make progress.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self._lock:
+                if not self._proc.isalive():
+                    return self._proc.wait() or 0
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(cmd="claude setup-token", timeout=timeout or 0)
+            time.sleep(_POLL_INTERVAL_SECONDS)
+
+    def terminate(self) -> None:
+        """Signal the process to terminate (graceful)."""
+        with self._lock:
+            self._proc.terminate()
+
+    def kill(self) -> None:
+        """Force-kill the process (pywinpty's `terminate(force=True)`)."""
+        with self._lock:
+            self._proc.terminate(force=True)
 
 
 @dataclass
 class _Flow:
     """State for the single active login subprocess.
 
-    ``screen``/``master_fd`` are set ONLY for a `setup-token` PTY flow (#846); both are
-    None for a plain-pipe `login` flow. Their presence is the single source of truth for
-    which transport a flow uses — every read/write/teardown site below branches on
-    ``flow.screen is not None`` rather than carrying a second is-pty flag that could drift
-    out of sync with it.
+    ``screen`` is set for BOTH `setup-token` PTY transports (#846 POSIX pty and #905 Windows
+    ConPTY); ``master_fd`` is the POSIX-pty control fd and ``pty_process`` is its Windows-ConPTY
+    analogue (the pywinpty `PtyProcess`). Exactly one of them is set on a `setup-token` flow and
+    both are None on a plain-pipe `login` flow — their presence is the single source of truth
+    for which transport a flow uses, so every read/write/teardown site below branches on them
+    rather than carrying a separate is-pty flag that could drift out of sync.
+
+    ``pasted_secrets`` are the operator-pasted OAuth codes `_write_code` registers so `_redact`
+    can scrub them from any returned/logged output — load-bearing only on the ConPTY transport,
+    which echoes written input back (see `_redact`), and harmless defense-in-depth elsewhere.
+    ``pty_lock`` serializes native access to ``pty_process`` between the reader and control
+    threads (used only by the ConPTY transport; see `_ConPtyPopen`), a no-op cost elsewhere.
     """
 
     mode: Mode
-    proc: subprocess.Popen
+    proc: subprocess.Popen | _ConPtyPopen
     lock: threading.Lock = field(default_factory=threading.Lock)
     submit_lock: threading.Lock = field(default_factory=threading.Lock)
     buffer: list[str] = field(default_factory=list)
@@ -149,6 +262,9 @@ class _Flow:
     stdin_closed: bool = False
     screen: PtyScreen | None = None
     master_fd: int | None = None
+    pty_process: Any = None
+    pty_lock: threading.Lock = field(default_factory=threading.Lock)
+    pasted_secrets: list[str] = field(default_factory=list)
 
     def snapshot(self) -> str:
         """Return everything captured from the subprocess so far."""
@@ -257,6 +373,12 @@ class LoginShepherd:
                 f"subscription sign-in instead, or install it: {exc}"
             ) from exc
 
+        # Windows has no `os.openpty`/`termios`; the setup-token TUI runs on a ConPTY instead
+        # (#905). The `screen` above is transport-agnostic (both paths scan the pyte-rendered
+        # screen for the URL/token), so hand it to the ConPTY spawn and return early.
+        if _is_win32():
+            return self._spawn_conpty(mode, resolved_binary, screen)
+
         import fcntl
         import struct
         import termios
@@ -316,6 +438,66 @@ class LoginShepherd:
         flow = _Flow(mode=mode, proc=proc, screen=screen, master_fd=master_fd)
         reader = threading.Thread(
             target=_pump_pty, args=(flow,), name="login-shepherd-pty-reader", daemon=True
+        )
+        flow.reader_thread = reader
+        reader.start()
+        return flow
+
+    def _spawn_conpty(self, mode: Mode, resolved_binary: str, screen: PtyScreen) -> _Flow:
+        r"""Spawn `claude setup-token` on a Windows ConPTY (pywinpty) — win32 `_spawn_pty` (#905).
+
+        Windows has no `os.openpty`/`termios`, so the setup-token TUI runs on a ConPTY
+        pseudo-console via pywinpty, reusing `pty_keeper._load_pty_process` (the same seam the
+        keeper's ConPTY backend uses, so this is testable on POSIX with a fake). The already-built
+        `screen` is shared — ConPTY fragments the authorize URL with cursor escapes exactly like a
+        TUI over a POSIX pty, so both paths scan the pyte-RENDERED screen. `PYWINPTY_BLOCK=0` makes
+        `read()` non-blocking so `_pump_conpty` can also poll liveness. The `PtyProcess` is wrapped
+        in `_ConPtyPopen` so `start`/`submit_code`/`poll`/`_teardown`'s `Popen`-shaped lifecycle
+        runs unchanged.
+
+        **No `termios` ECHO-disable here — the POSIX security backstop does not exist on Windows.**
+        A ConPTY echoes written input back into its output as a property of the *child's* console
+        input mode, which the parent keeper can't clear the way `_spawn_pty` clears the slave's
+        `ECHO` lflag. So the operator-pasted code could be echoed into `flow.buffer`; the
+        echo-redaction defense (`_write_code` registers the code in `flow.pasted_secrets`, and
+        `_redact` masks it) keeps it out of any returned/logged surface instead. Spawn failure
+        fails closed with a clear message and leaves no flow behind, mirroring the POSIX path.
+        """
+        from . import pty_keeper
+
+        try:
+            pty_process_cls = pty_keeper._load_pty_process()
+        except Exception as exc:  # noqa: BLE001 — RuntimeError off-win32 / ImportError if absent
+            raise LoginShepherdError(
+                "the long-lived-token mode needs the `pty` extra (pywinpty) on Windows — use "
+                f"subscription sign-in instead, or install it: {exc}"
+            ) from exc
+        # Non-blocking reads so the reader loop can poll liveness (as `pty_keeper` does); a
+        # process-global toggle scoped to pywinpty, harmless to set unconditionally here.
+        os.environ["PYWINPTY_BLOCK"] = "0"
+        argv = [resolved_binary, "setup-token"]
+        try:
+            pty_process = pty_process_cls.spawn(
+                argv,
+                env=procutil.child_env(),
+                dimensions=(SCREEN_ROWS, _LOGIN_PTY_COLS),
+            )
+        except Exception as exc:  # noqa: BLE001 — any pywinpty spawn error → fail closed, no flow
+            raise LoginShepherdError(f"failed to start claude {mode}: {exc}") from exc
+
+        # One lock guards every native `pty_process` call — the reader (`_pump_conpty`) and the
+        # control thread (`_ConPtyPopen`/`_write_code`/`_teardown`) both touch this handle. See
+        # `_ConPtyPopen`'s docstring for why (pywinpty concurrency) and why it can't deadlock.
+        handle_lock = threading.Lock()
+        flow = _Flow(
+            mode=mode,
+            proc=_ConPtyPopen(pty_process, handle_lock),
+            screen=screen,
+            pty_process=pty_process,
+            pty_lock=handle_lock,
+        )
+        reader = threading.Thread(
+            target=_pump_conpty, args=(flow,), name="login-shepherd-conpty-reader", daemon=True
         )
         flow.reader_thread = reader
         reader.start()
@@ -399,9 +581,9 @@ class LoginShepherd:
                 reason = f"no authorize URL appeared within {START_TIMEOUT_SECONDS:.0f}s"
             raise LoginShepherdError(
                 f"claude {mode} did not produce a usable login: {reason}. "
-                f"Captured output:\n{_redact(output)}"
+                f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
             )
-        return {"authorize_url": url, "output": _redact(output)}
+        return {"authorize_url": url, "output": _redact(output, flow.pasted_secrets)}
 
     def submit_code(self, code: str) -> dict:
         """Write the operator-pasted `code` to the active subprocess's stdin.
@@ -490,12 +672,32 @@ class LoginShepherd:
     def _write_code(self, flow: _Flow, code: str) -> None:
         """Write the operator-pasted `code` to `flow`'s active subprocess.
 
-        Branches on transport: a PTY flow (`flow.master_fd` set) writes raw bytes to the
-        pty master with `os.write` (what a human's terminal keystrokes would do); a
-        plain-pipe flow writes through `proc.stdin` as before. Both sides swallow a
-        failed write (the subprocess may have already exited) and surface it as a log
-        warning rather than raising past the caller — never logs `code` itself.
+        Branches on transport: a Windows ConPTY flow (`flow.pty_process` set) writes through
+        pywinpty's `PtyProcess.write`; a POSIX PTY flow (`flow.master_fd` set) writes raw bytes
+        to the pty master with `os.write` (what a human's terminal keystrokes would do); a
+        plain-pipe flow writes through `proc.stdin` as before. Every side swallows a failed write
+        (the subprocess may have already exited) and surfaces it as a log warning rather than
+        raising past the caller — never logs `code` itself.
+
+        Registers `code` in `flow.pasted_secrets` FIRST — before any write — so `_redact` can
+        scrub it from returned/logged output even if the write only partially lands. Load-bearing
+        on the ConPTY transport (which echoes the write back into the read stream, see `_redact`)
+        and harmless defense-in-depth on POSIX/pipe. Empty codes are never registered so the
+        `str.replace` in `_redact` is never handed the empty string.
         """
+        if code:
+            flow.pasted_secrets.append(code)
+        if flow.pty_process is not None:
+            if flow.stdin_closed:
+                return
+            try:
+                with flow.pty_lock:  # serialize with the reader/teardown (see `_ConPtyPopen`)
+                    flow.pty_process.write(code + "\n")
+            except Exception as exc:  # noqa: BLE001 — a dead ConPTY can raise pywinpty-specific errors
+                _log.warning(
+                    "login_shepherd: writing code to %s conpty failed: %s", flow.mode, exc
+                )
+            return
         if flow.master_fd is not None:
             if flow.stdin_closed:
                 return
@@ -560,7 +762,7 @@ class LoginShepherd:
         else:
             message = (
                 f"claude {flow.mode} exited with code {exit_code}. "
-                f"Captured output:\n{_redact(output)}"
+                f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
             )
         result: dict = {"ok": ok, "message": message}
         if token:
@@ -589,6 +791,12 @@ class LoginShepherd:
         reader. Only AFTER the reader has joined is our control fd closed — the pty master,
         or (for a plain-pipe flow, whose reader watches stdout and so was never affected)
         the child's stdin. Closing it last means it is never pulled from under a live read.
+
+        The Windows ConPTY reader (`_pump_conpty`) isn't blocked on a read — pywinpty reads are
+        non-blocking and it polls `isalive()` — so it exits on its own once the child dies; the
+        same stop-child-first-then-join-then-close order still holds, and the pywinpty handle is
+        closed last (in place of the pty master). Its `close()` is broadly guarded below since a
+        stale ConPTY can raise a pywinpty-specific error, not just `OSError`.
         """
         # Stop the child FIRST — for a PTY flow this is what unblocks the reader: closing
         # master_fd out from under a blocked os.read does not interrupt it on macOS/BSD,
@@ -601,23 +809,35 @@ class LoginShepherd:
                 flow.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 flow.proc.kill()
-                flow.proc.wait(timeout=5)
+                # Swallow a second timeout too: `_ConPtyPopen.wait` genuinely raises
+                # `TimeoutExpired` (unlike a POSIX `Popen` after SIGKILL, which reaps at once),
+                # and an unguarded raise here would skip the reader join, the control-end close,
+                # AND the `self._flow = None` clear below — stranding the flow `active` forever.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    flow.proc.wait(timeout=5)
         # The reader is now unblocked by the child's EOF/EIO on the still-open fd.
         if flow.reader_thread is not None:
             flow.reader_thread.join(timeout=5)
-        # Close our write/control end LAST — the pty master, else the plain-pipe stdin —
-        # once the reader has joined, so it is never pulled from under an active read.
-        # `stdin_closed` guards idempotency (and doubles as "no more writes owed").
+        # Close our write/control end LAST — the ConPTY handle, else the pty master, else the
+        # plain-pipe stdin — once the reader has joined, so it is never pulled from under an
+        # active read. `stdin_closed` guards idempotency (and doubles as "no more writes owed").
         try:
-            if flow.master_fd is not None:
+            if flow.pty_process is not None:
+                if not flow.stdin_closed:
+                    flow.stdin_closed = True
+                    with flow.pty_lock:  # serialize the close with any last reader access
+                        flow.pty_process.close()
+            elif flow.master_fd is not None:
                 if not flow.stdin_closed:
                     flow.stdin_closed = True
                     os.close(flow.master_fd)
             elif flow.proc.stdin is not None:
                 flow.stdin_closed = True
                 flow.proc.stdin.close()
-        except (OSError, ValueError):
-            pass
+        except Exception as exc:  # noqa: BLE001 — a teardown close (incl. pywinpty) must never raise
+            # Never silently: a close failure can't be surfaced to the caller mid-teardown, but
+            # log it at debug so it isn't wholly invisible (the flow is cleared either way).
+            _log.debug("login_shepherd: closing the %s control end failed: %s", flow.mode, exc)
         if not already_cleared:
             with self._flow_lock:
                 if self._flow is flow:
@@ -679,6 +899,58 @@ def _pump_pty(flow: _Flow) -> None:
         except Exception as exc:  # noqa: BLE001 — a render hiccup must never kill the reader
             _log.debug("login_shepherd: pty screen feed failed for %s: %s", flow.mode, exc)
         flow.append(chunk.decode("utf-8", errors="replace"))
+
+
+def _pump_conpty(flow: _Flow) -> None:
+    """Background-thread reader for the Windows ConPTY transport (#905, analogue of `_pump_pty`).
+
+    pywinpty's non-blocking `PtyProcess.read()` (with `PYWINPTY_BLOCK=0`) returns a `str` and
+    surfaces both EOF and — on some builds — an idle no-data read as `EOFError`, unlike the
+    POSIX `os.read` bytes/`EIO` contract `_pump_pty` handles. Each chunk is `screen.feed()`d
+    (so `find_authorize_url`/`find_oauth_token` scan the pyte-RENDERED screen — ConPTY fragments
+    the URL with cursor escapes) and best-effort-appended to `flow.buffer` for
+    `snapshot()`/`_redact()`, matching `_pump_pty`'s uniform buffer.
+
+    The loop ends only when the process is no longer alive: an idle `EOFError`/empty read on a
+    still-alive process yields and keeps polling, while the same on a dead one breaks. Every
+    native handle call (`read`/`isalive`) takes `flow.pty_lock` so it never overlaps the control
+    thread's `terminate`/`wait`/`close` on the same handle (see `_ConPtyPopen`). It is also
+    extra-defensive about read errors — a read can still fail with a pywinpty-specific error, not
+    just `OSError`; ANY such error is treated as end-of-stream and breaks the loop rather than
+    propagating (a daemon reader has no caller to observe an exception).
+    """
+    pty_process = flow.pty_process
+    screen = flow.screen
+    if pty_process is None or screen is None:  # pragma: no cover - defensive, always paired
+        return
+    lock = flow.pty_lock  # serialize native handle access with the control thread
+    while True:
+        try:
+            with lock:
+                data = pty_process.read(65536)  # str; "" when no data (PYWINPTY_BLOCK=0)
+        except EOFError:
+            # EOF, or an idle non-blocking read some pywinpty builds surface as EOFError: a
+            # still-alive process is merely idle (keep polling); a dead one is drained → break.
+            with lock:
+                alive = pty_process.isalive()
+            if not alive:
+                break
+            data = ""
+        except Exception as exc:  # noqa: BLE001 — genuine read error or ConPTY closed under us
+            _log.debug("login_shepherd: conpty read ended for %s: %s", flow.mode, exc)
+            break
+        if not data:
+            with lock:
+                alive = pty_process.isalive()
+            if not alive:
+                break
+            time.sleep(_POLL_INTERVAL_SECONDS)  # alive but idle; yield before re-polling
+            continue
+        try:
+            screen.feed(data.encode("utf-8", "replace"))
+        except Exception as exc:  # noqa: BLE001 — a render hiccup must never kill the reader
+            _log.debug("login_shepherd: conpty screen feed failed for %s: %s", flow.mode, exc)
+        flow.append(data)
 
 
 def _stable_match_finder(find: Callable[[], _T | None]) -> Callable[[str], _T | None]:
