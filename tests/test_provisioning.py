@@ -198,6 +198,7 @@ def test_clone_rename_conflict_is_target_exists(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_GIT_MODE", "ok")
 
     def boom(src, dst):
+        Path(dst).mkdir()  # simulate the TOCTOU: the target appeared between _safe_target and now
         raise FileExistsError(dst)
 
     monkeypatch.setattr("clauster.provisioning.os.rename", boom)
@@ -211,6 +212,26 @@ def test_clone_rename_conflict_is_target_exists(tmp_path, monkeypatch):
         )
     leftover = [p for p in tmp_path.glob(".proj.*clone-tmp")]
     assert leftover == []  # temp dir cleaned up on the failed rename
+
+
+def test_clone_rename_transient_failure_is_clone_failed(tmp_path, monkeypatch):
+    # A rename failure where the target does NOT exist (e.g. a Windows sharing violation while
+    # an AV scanner holds the fresh tree) is a transient finalize failure — surfaced as
+    # CloneFailed, never mislabeled "already exists" (#914).
+    monkeypatch.setenv("FAKE_GIT_MODE", "ok")
+    monkeypatch.setattr(
+        "clauster.provisioning.os.rename",
+        lambda s, d: (_ for _ in ()).throw(PermissionError("sharing violation")),
+    )
+    with pytest.raises(CloneFailed):
+        clone_project(
+            tmp_path,
+            "proj",
+            "https://10.0.0.1/r.git",
+            cfg=_cfg(allow_private_hosts=True),
+            git_binary=_gitbin(),
+        )
+    assert [p for p in tmp_path.glob(".proj.*clone-tmp")] == []  # temp cleaned
 
 
 def test_url_no_host_rejected():

@@ -573,6 +573,20 @@ def test_install_service(kind, marker, capsys):
     assert marker in capsys.readouterr().out
 
 
+def test_install_service_windows_warns_when_nssm_missing(monkeypatch, capsys):
+    # install-service windows warns upfront if `nssm` isn't on PATH (#914) — not fatal.
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None if name == "nssm" else "/x/" + name)
+    assert cli.main(["install-service", "windows", "-c", "/etc/clauster/clauster.yml"]) == 0
+    err = capsys.readouterr().err
+    assert "nssm" in err and "not on PATH" in err
+
+
+def test_install_service_windows_no_warn_when_nssm_present(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/nssm")
+    assert cli.main(["install-service", "windows", "-c", "/etc/clauster/clauster.yml"]) == 0
+    assert "not on PATH" not in capsys.readouterr().err
+
+
 def test_install_service_bad_kind_exits_2():
     with pytest.raises(SystemExit) as ei:  # argparse choices -> exit 2
         cli.main(["install-service", "upstart"])

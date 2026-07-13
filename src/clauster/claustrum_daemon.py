@@ -92,6 +92,37 @@ class DaemonSpawnError(ClaustrumError):
     """The ``claustrum -serve`` launcher failed to start a usable daemon."""
 
 
+# AF_UNIX ``sun_path`` is a fixed C buffer — 104 bytes on macOS/BSD, 108 on Linux; a longer
+# socket path fails bind/connect with an opaque ``OSError``. Preflight against the SMALLER cap
+# so a ``state_dir`` that works on Linux doesn't silently break on macOS (#914). Windows dials a
+# named pipe (no such limit), so this is POSIX-only.
+_SUN_PATH_MAX = 104
+
+
+def _af_unix_in_use() -> bool:
+    """Return whether claustrum dials an AF_UNIX socket (POSIX) vs a Windows named pipe.
+
+    A seam so the ``sun_path`` length gate is testable on every OS *without* monkeypatching
+    the global ``os.name`` — flipping that on Windows makes ``pathlib.Path`` pick an
+    uninstantiable flavour and crashes the whole xdist worker.
+    """
+    return os.name == "posix"
+
+
+def _check_unix_socket_path(sock: Path) -> None:
+    """Raise a clear :class:`ClaustrumError` if the AF_UNIX socket path exceeds ``sun_path``."""
+    if not _af_unix_in_use():
+        return
+    # ``os.fsencode`` counts the exact bytes the AF_UNIX layer binds (the filesystem
+    # encoding), not whatever ``str.encode`` defaults to on a non-UTF-8 POSIX host.
+    length = len(os.fsencode(sock))
+    if length >= _SUN_PATH_MAX:
+        raise ClaustrumError(
+            f"claustrum socket path is {length} bytes, over the AF_UNIX limit of {_SUN_PATH_MAX} "
+            f"— shorten `state_dir` (or set `claustrum.socket_path`). Path: {sock}"
+        )
+
+
 class ClaustrumDaemon:
     """Connect-or-spawn manager for one deployment's claustrum daemon.
 
@@ -109,6 +140,7 @@ class ClaustrumDaemon:
         self._socket = (
             Path(self._cfg.socket_path) if self._cfg.socket_path else self._dir / "daemon.sock"
         )
+        _check_unix_socket_path(self._socket)  # fail early on a too-long AF_UNIX path (#914)
         self._token_path = self._dir / "token"
         self._log_path = self._dir / "daemon.log"
         self._token: str | None = None

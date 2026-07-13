@@ -44,11 +44,11 @@ import hashlib
 import json
 import logging
 import os
-import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import atomicio
 from . import config_file_writer as fw
 from . import config_write as cw
 from .models import ClaudeMdDoc
@@ -61,15 +61,6 @@ LOCAL_FILENAME = "CLAUDE.local.md"
 MAX_BYTES = 64 * 1024  # 64 KB cap (spec §5); shared by the config-write surface below
 _AUDIT_FILE = "claude_md_audit.log"
 _log = logging.getLogger("clauster.claude_md")
-
-# Serializes the config-write surface's read-hash→write critical section. Unlike the
-# JSON-subtree writers (whose stale-hash check runs *inside* the same lock as the
-# atomic replace, via `locked_replace_json_file`'s mutate callback),
-# `config_file_writer.write_file` takes already-computed content, not a mutate hook —
-# so the hash check here happens as a separate step before the call. A per-process
-# lock closes that window between two concurrent PUTs (each dispatched to a worker
-# thread via `asyncio.to_thread`, same reasoning as `config_writer._write_lock`).
-_write_lock = threading.Lock()
 
 
 class ClaudeMdError(RuntimeError):
@@ -158,22 +149,40 @@ def write_claude_md(
             f"{FILENAME} is {len(encoded)} bytes, over the {MAX_BYTES} byte cap"
         )
 
-    current = read_claude_md(project_path)
-    if base_sha256 is not None and current.sha256 != base_sha256:
-        raise ClaudeMdConflict(f"{FILENAME} changed on disk since it was loaded")
-
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, target)
-    except OSError as exc:
-        # Atomic write failed (disk full, read-only, cross-device) — clean up the
-        # partial temp file and surface a 4xx instead of leaking an orphan + raw 500.
+    # A UNIQUE temp name (not a fixed `CLAUDE.md.tmp`) so a second clauster PROCESS saving the
+    # same project can never move/clobber this one's temp mid-replace — the inproc lock below
+    # only coordinates threads within one process. Same directory ⇒ os.replace stays an atomic
+    # same-filesystem rename; write_text keeps the umask-based mode (unlike mkstemp's 0600).
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
+    # Serialize this process's concurrent saves for the SAME project under one per-path lock so
+    # the base_sha256 read-check-write is a single critical section: two overlapping saves can't
+    # both pass the conflict guard and then lost-update. `read_claude_md` takes no inproc lock,
+    # so it can't deadlock.
+    with atomicio.inproc_path_lock(target):
+        current = read_claude_md(project_path)
+        if base_sha256 is not None and current.sha256 != base_sha256:
+            raise ClaudeMdConflict(f"{FILENAME} changed on disk since it was loaded")
         try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise ClaudeMdError(f"could not write {FILENAME}: {exc}") from exc
+            try:
+                # newline="\n" keeps CLAUDE.md byte-identical across OSes (the default would
+                # translate to CRLF on Windows, #914); the replace retries a transient Windows
+                # sharing violation (the `claude` CLI may hold the file open).
+                tmp.write_text(content, encoding="utf-8", newline="\n")
+                atomicio.replace_with_retry(tmp, target)
+            except OSError as exc:
+                # Atomic write failed (disk full, read-only, cross-device) — surface a 4xx
+                # instead of a raw 500 (the temp is removed by the outer handler below).
+                raise ClaudeMdError(f"could not write {FILENAME}: {exc}") from exc
+        except BaseException:
+            # Any failure (incl. KeyboardInterrupt/SystemExit) removes the UNIQUE temp so a
+            # distinct CLAUDE.md.<pid>.<hex>.tmp doesn't accumulate next to CLAUDE.md — the
+            # fixed-name path used to self-heal via truncate-overwrite; a unique name can't.
+            # The unlink is best-effort (never mask the real error), then re-raise as-is.
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     new_sha = _sha256(content)
     if state_dir is not None:
@@ -311,20 +320,22 @@ def _write_scoped(root: Path, relative: str, content: str, expected_hash: str | 
     file has no prior state to guard.
     """
     cw.validate_candidate(content, validate_content)
-    target = _resolve(root, relative)
-    with _write_lock:
-        try:
-            current = target.read_bytes()
-            found = True
-        except FileNotFoundError:
-            current = b""
-            found = False
+
+    def _verify_unchanged(current: bytes | None) -> None:
+        # Runs INSIDE write_file's per-target lock (the same lock the editor's
+        # write_claude_md holds), so the stale-hash check and the replace are one
+        # critical section across BOTH surfaces — neither can validate old bytes then
+        # lost-update the other. `found` (existence) is tracked separately from content:
+        # an existing but empty file (the "blank" op) still requires a hash, so a later
+        # expected_hash=None PUT is a 409, not a silent overwrite.
+        found = current is not None
         if expected_hash is None:
             if found:
                 raise cw.StaleConfigWriteError(f"{relative} already exists; a hash is required")
-        elif cw.hash_bytes(current) != expected_hash:
+        elif cw.hash_bytes(current or b"") != expected_hash:
             raise cw.StaleConfigWriteError(f"{relative} changed on disk since it was loaded")
-        fw.write_file(root, relative, content)
+
+    fw.write_file(root, relative, content, verify=_verify_unchanged)
 
 
 def read_project_claude_md(project_dir: Path) -> tuple[str, str, bool]:
