@@ -116,6 +116,30 @@ def test_write_stale_base_sha_conflict(tmp_path):
     assert (proj / "CLAUDE.md").read_text() == "current\n"  # unchanged
 
 
+def test_write_stale_base_sha_conflict_check_runs_inside_lock(tmp_path, monkeypatch):
+    # The base_sha256 read-check-write is one critical section (#914) so two concurrent
+    # same-project saves can't both pass the guard and lost-update: the conflict read runs
+    # under the target's lock — assert it's held at raise time.
+    from clauster import atomicio
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("current\n")
+    target = proj / "CLAUDE.md"
+    real_read = read_claude_md
+    seen: dict = {}
+
+    def _spy_read(path):
+        # read_claude_md is called inside the write's critical section — capture lock state.
+        seen["locked"] = atomicio.inproc_path_lock(target).locked()
+        return real_read(path)
+
+    monkeypatch.setattr("clauster.claude_md.read_claude_md", _spy_read)
+    with pytest.raises(ClaudeMdConflict):
+        write_claude_md(proj, "mine\n", base_sha256=_sha("what-i-loaded\n"))
+    assert seen["locked"] is True  # the conflict guard read ran under the lock
+
+
 def test_write_matching_base_sha_succeeds(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()

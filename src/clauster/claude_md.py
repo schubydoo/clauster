@@ -158,15 +158,15 @@ def write_claude_md(
             f"{FILENAME} is {len(encoded)} bytes, over the {MAX_BYTES} byte cap"
         )
 
-    current = read_claude_md(project_path)
-    if base_sha256 is not None and current.sha256 != base_sha256:
-        raise ClaudeMdConflict(f"{FILENAME} changed on disk since it was loaded")
-
     tmp = target.with_suffix(target.suffix + ".tmp")
-    # Serialize this process's concurrent saves for the SAME project: the temp name is a
-    # fixed `CLAUDE.md.tmp`, so two overlapping writers would otherwise move/clobber the
-    # same temp mid-replace (lost or corrupted content). One lock per resolved target path.
+    # Serialize this process's concurrent saves for the SAME project under one per-path lock so
+    # the base_sha256 read-check-write is a single critical section: two overlapping saves can't
+    # both pass the conflict guard and then lost-update, and the fixed `CLAUDE.md.tmp` name can't
+    # be moved/clobbered mid-replace. `read_claude_md` takes no inproc lock, so it can't deadlock.
     with atomicio.inproc_path_lock(target):
+        current = read_claude_md(project_path)
+        if base_sha256 is not None and current.sha256 != base_sha256:
+            raise ClaudeMdConflict(f"{FILENAME} changed on disk since it was loaded")
         try:
             # newline="\n" keeps CLAUDE.md byte-identical across OSes (the default would
             # translate to CRLF on Windows, #914); the replace retries a transient Windows
