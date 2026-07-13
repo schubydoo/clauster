@@ -33,13 +33,15 @@ typecheck:
 docs-lint:
 	bash scripts/lint-docs.sh
 
-# All pre-PR gates: lint, format check, types, tests, docs
+# All pre-PR gates: lint, format check, types, changeset lint, tests, docs, CSP guard
 check:
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run pyright src/clauster
+	uv run python scripts/lint_changesets.py
 	uv run pytest
 	bash scripts/lint-docs.sh
+	node scripts/check_csp_expressions.mjs
 
 # Run the dev server against ./clauster.yml
 run:
