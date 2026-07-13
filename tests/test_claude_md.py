@@ -128,7 +128,7 @@ def test_write_replace_failure_cleans_tmp_and_raises(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setattr(
-        "clauster.claude_md.os.replace",
+        "clauster.claude_md.atomicio.replace_with_retry",
         lambda s, d: (_ for _ in ()).throw(OSError("cross-device")),
     )
     with pytest.raises(ClaudeMdError):
@@ -143,7 +143,7 @@ def test_write_replace_failure_tolerates_unlink_failure(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setattr(
-        "clauster.claude_md.os.replace",
+        "clauster.claude_md.atomicio.replace_with_retry",
         lambda s, d: (_ for _ in ()).throw(OSError("cross-device")),
     )
     real_unlink = Path.unlink

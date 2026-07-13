@@ -35,6 +35,8 @@ import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from . import atomicio
+
 try:
     import fcntl  # POSIX only; Windows has no flock equivalent we rely on here.
 except ImportError:  # pragma: no cover - exercised only on Windows
@@ -56,27 +58,32 @@ def _is_posix() -> bool:
 def _locked(claude_json: Path) -> Iterator[None]:
     """Hold an exclusive advisory lock for a read-modify-write of ``claude_json``.
 
-    Uses a sidecar ``<file>.lock`` (never the target itself — ``os.replace``
-    swaps the inode, which would orphan a lock held on the old one). POSIX-only;
-    where ``fcntl`` is unavailable (Windows) or the lock file can't be opened,
-    this degrades to a best-effort no-op rather than blocking the write — the
-    atomic replace still prevents a torn file.
+    An **in-process lock** (:func:`atomicio.inproc_path_lock`) serializes THIS process's
+    own concurrent writers of the same file on every OS — the primary guard on Windows,
+    where ``fcntl.flock`` is unavailable. On POSIX an advisory ``flock`` is *additionally*
+    taken via a sidecar ``<file>.lock`` (never the target itself — ``os.replace`` swaps the
+    inode, orphaning a lock held on the old one), which also serializes *other processes*.
+    Where ``fcntl`` is unavailable (Windows) or the lock file can't be opened, only the
+    in-process lock applies and the atomic replace still prevents a torn file. (Neither lock
+    coordinates with the ``claude`` CLI, which takes no lock — that's the atomic replace +
+    the caller's external-edit hash guard's job.)
     """
-    if fcntl is None:
-        yield
-        return
-    lock_path = claude_json.with_suffix(claude_json.suffix + ".lock")
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError as exc:
-        _log.warning("could not open %s; proceeding without a lock: %s", lock_path, exc)
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)  # implicitly releases the flock
+    with atomicio.inproc_path_lock(claude_json):
+        if fcntl is None:
+            yield
+            return
+        lock_path = claude_json.with_suffix(claude_json.suffix + ".lock")
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            _log.warning("could not open %s; proceeding without a lock: %s", lock_path, exc)
+            yield
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # implicitly releases the flock
 
 
 def _read_claude_json(claude_json: Path) -> tuple[str | None, dict]:
@@ -188,7 +195,7 @@ def _atomic_write_json(
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(render(data))
             if _is_posix():
                 try:
@@ -196,7 +203,7 @@ def _atomic_write_json(
                 except FileNotFoundError:
                     mode = 0o600
                 os.fchmod(fh.fileno(), mode)
-        os.replace(tmp, path)
+        atomicio.replace_with_retry(tmp, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()

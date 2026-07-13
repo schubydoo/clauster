@@ -43,12 +43,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import atomicio
 from . import config_file_writer as fw
 from . import config_write as cw
 from .models import ClaudeMdDoc
@@ -164,8 +164,11 @@ def write_claude_md(
 
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, target)
+        # newline="\n" keeps CLAUDE.md byte-identical across OSes (the default would
+        # translate to CRLF on Windows, #914); the replace retries a transient Windows
+        # sharing violation (the `claude` CLI may hold the file open).
+        tmp.write_text(content, encoding="utf-8", newline="\n")
+        atomicio.replace_with_retry(tmp, target)
     except OSError as exc:
         # Atomic write failed (disk full, read-only, cross-device) — clean up the
         # partial temp file and surface a 4xx instead of leaking an orphan + raw 500.

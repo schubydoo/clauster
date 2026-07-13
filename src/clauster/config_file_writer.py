@@ -59,6 +59,7 @@ try:
 except ImportError:  # pragma: no cover - exercised only on Windows
     fcntl = None  # type: ignore[assignment]
 
+from . import atomicio
 from .config_write import redact_secret_lines
 
 
@@ -116,28 +117,31 @@ def resolve_contained_path(root: Path, relative: str | os.PathLike[str]) -> Path
 def _locked(target: Path):
     """Hold an exclusive advisory lock for an operation on ``target``.
 
-    Uses a sidecar ``<target>.lock`` (never ``target`` itself — an atomic replace
-    swaps the inode, which would orphan a lock held on the old one), the identical
-    technique :func:`clauster.claude_json._locked` uses. POSIX-only; where ``fcntl``
-    is unavailable (Windows) or the lock file can't be opened, this degrades to a
-    best-effort no-op rather than blocking the write — the atomic replace still
-    prevents a torn file/tree.
+    An **in-process lock** (:func:`atomicio.inproc_path_lock`) serializes THIS process's
+    own concurrent writers of ``target`` on every OS — the primary guard on Windows, where
+    ``fcntl`` is unavailable. On POSIX an advisory ``flock`` is *additionally* taken via a
+    sidecar ``<target>.lock`` (never ``target`` itself — an atomic replace swaps the inode,
+    orphaning a lock held on the old one), the identical technique
+    :func:`clauster.claude_json._locked` uses, which also serializes *other processes*. Where
+    ``fcntl`` is unavailable (Windows) or the lock file can't be opened, only the in-process
+    lock applies and the atomic replace still prevents a torn file/tree.
     """
-    if fcntl is None:
-        yield
-        return
-    lock_path = target.parent / f"{target.name}.lock"
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)  # implicitly releases the flock
+    with atomicio.inproc_path_lock(target):
+        if fcntl is None:
+            yield
+            return
+        lock_path = target.parent / f"{target.name}.lock"
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            yield
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # implicitly releases the flock
 
 
 def write_file(
@@ -174,7 +178,7 @@ def write_file(
                     except FileNotFoundError:
                         existing_mode = mode
                     os.fchmod(fh.fileno(), existing_mode)
-            os.replace(tmp, target)
+            atomicio.replace_with_retry(tmp, target)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
