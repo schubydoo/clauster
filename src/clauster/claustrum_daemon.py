@@ -103,7 +103,9 @@ def _check_unix_socket_path(sock: Path) -> None:
     """Raise a clear :class:`ClaustrumError` if the AF_UNIX socket path exceeds ``sun_path``."""
     if os.name != "posix":
         return
-    length = len(str(sock).encode())
+    # ``os.fsencode`` counts the exact bytes the AF_UNIX layer binds (the filesystem
+    # encoding), not whatever ``str.encode`` defaults to on a non-UTF-8 POSIX host.
+    length = len(os.fsencode(sock))
     if length >= _SUN_PATH_MAX:
         raise ClaustrumError(
             f"claustrum socket path is {length} bytes, over the AF_UNIX limit of {_SUN_PATH_MAX} "

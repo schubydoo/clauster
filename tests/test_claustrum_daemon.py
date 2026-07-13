@@ -584,19 +584,25 @@ async def test_spawn_scrubs_ambient_daemon_sentinel(make_daemon, monkeypatch):
     assert env.get("CLAUSTRUM_KEEP_THIS") == "ok"  # unrelated env preserved
 
 
-def test_check_unix_socket_path_rejects_too_long():
+def test_check_unix_socket_path_rejects_too_long(monkeypatch):
     # A socket path over the AF_UNIX sun_path limit fails early with a clear error (#914).
+    # Pin os.name to "posix" so the raise-branch runs on a Windows CI runner too (where the
+    # check is otherwise a no-op) — the assertion is about the POSIX length gate.
     from clauster.claustrum_daemon import _SUN_PATH_MAX, ClaustrumError, _check_unix_socket_path
 
+    monkeypatch.setattr("clauster.claustrum_daemon.os.name", "posix")
     too_long = Path("/tmp") / ("x" * _SUN_PATH_MAX) / "d.sock"
     with pytest.raises(ClaustrumError, match="AF_UNIX limit"):
         _check_unix_socket_path(too_long)
 
 
-def test_check_unix_socket_path_ok_when_short(tmp_path):
+def test_check_unix_socket_path_ok_when_short(monkeypatch):
+    # Pin os.name to "posix" and use a guaranteed-short literal path — a real macOS tmp_path
+    # (/private/var/folders/…) is itself over 104 bytes and would spuriously trip the gate.
     from clauster.claustrum_daemon import _check_unix_socket_path
 
-    _check_unix_socket_path(tmp_path / "d.sock")  # comfortably short — must not raise
+    monkeypatch.setattr("clauster.claustrum_daemon.os.name", "posix")
+    _check_unix_socket_path(Path("/tmp/d.sock"))  # comfortably short — must not raise
 
 
 def test_check_unix_socket_path_skipped_off_posix(monkeypatch):
