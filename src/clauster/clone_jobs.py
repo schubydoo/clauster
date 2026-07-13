@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -98,13 +98,13 @@ class CloneJob:
             self._terminate()
         return True
 
-    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+    def subscribe(self) -> asyncio.Queue[Mapping[str, Any]]:
         """Register a watcher and return its private (bounded) event queue."""
         sub = _Subscriber(queue=asyncio.Queue(maxsize=_CLONE_QUEUE_MAXSIZE))
         self._subscribers.append(sub)
         return sub.queue
 
-    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+    def unsubscribe(self, queue: asyncio.Queue[Mapping[str, Any]]) -> None:
         """Drop a watcher's queue (called when its WebSocket closes)."""
         self._subscribers = [s for s in self._subscribers if s.queue is not queue]
 

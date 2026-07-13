@@ -37,9 +37,12 @@ import binascii
 import json
 import logging
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .hosted_events import DaemonStreamEvent
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +97,11 @@ class _Subscriber:
     uses ``"gap"``.
     """
 
-    queue: asyncio.Queue[dict[str, Any]]
+    queue: asyncio.Queue[Mapping[str, Any]]
     dropped: int = 0
     overflow_type: str = "overflow"
 
-    def offer(self, event: dict[str, Any]) -> None:
+    def offer(self, event: Mapping[str, Any]) -> None:
         """Enqueue ``event`` for this watcher, never blocking the caller."""
         if self.dropped:
             marker = {"type": self.overflow_type, "dropped": self.dropped}
@@ -139,17 +142,17 @@ class ProcessStream:
         # Per-channel byte buffers for line re-assembly across split frames.
         self._buffers: dict[str, bytes] = {"stdout": b"", "stderr": b""}
 
-    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+    def subscribe(self) -> asyncio.Queue[Mapping[str, Any]]:
         """Register a watcher and return its private bounded event queue."""
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self._queue_maxsize)
+        queue: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue(maxsize=self._queue_maxsize)
         self._subscribers.append(_Subscriber(queue))
         return queue
 
-    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+    def unsubscribe(self, queue: asyncio.Queue[Mapping[str, Any]]) -> None:
         """Drop a watcher's queue (called when its consumer goes away)."""
         self._subscribers = [s for s in self._subscribers if s.queue is not queue]
 
-    def _broadcast(self, event: dict[str, Any]) -> None:
+    def _broadcast(self, event: DaemonStreamEvent) -> None:
         for sub in self._subscribers:
             sub.offer(event)
 

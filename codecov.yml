@@ -117,6 +117,7 @@ component_management:
       name: hosted channel
       paths:
         - src/clauster/hosted.py
+        - src/clauster/hosted_events.py
         - src/clauster/hosted_state.py
         - src/clauster/claustrum_client.py
         - src/clauster/claustrum_daemon.py
