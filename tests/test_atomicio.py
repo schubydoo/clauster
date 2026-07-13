@@ -272,6 +272,21 @@ def test_ensure_private_dir_windows_warns_on_icacls_oserror(tmp_path, monkeypatc
     assert "icacls failed to run" in caplog.text
 
 
+def test_ensure_private_dir_windows_warns_on_icacls_timeout(tmp_path, monkeypatch, caplog):
+    # A hung/wedged icacls hits subprocess.run's 30s timeout → TimeoutExpired, which is a
+    # subprocess.SubprocessError, NOT an OSError. Best-effort must still catch it: warn +
+    # proceed on the inherited ACL, never let the timeout fail the state write.
+    import subprocess
+
+    atomicio._SECURED_DIRS.clear()
+    _fake_icacls(monkeypatch, [], run_error=subprocess.TimeoutExpired(cmd="icacls", timeout=30))
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise despite the timeout
+    assert d.exists()
+    assert "icacls failed to run" in caplog.text
+
+
 def test_ensure_private_dir_windows_failed_acl_attempted_once(tmp_path, monkeypatch, caplog):
     # A host without a working icacls must not re-shell (or re-warn) on every write: the dir
     # is marked attempted after the first touch regardless of outcome.
