@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from clauster import atomicio as _atomicio
 from clauster.app import create_app
 from clauster.claude_md import (
     MAX_BYTES,
@@ -268,6 +269,9 @@ def test_write_claude_md_leaves_no_lock_in_project_dir(tmp_path):
     assert not any(c.name.endswith(".lock") for c in proj.iterdir())
 
 
+@pytest.mark.skipif(
+    _atomicio.fcntl is None, reason="cross-process flock warning is POSIX-only; Windows no-ops it"
+)
 def test_write_claude_md_warns_once_when_lock_dir_unconfigured(tmp_path, caplog):
     # Unconfigured cross-process lock (test-only; create_app always configures it) → the
     # write still succeeds under the inproc lock, but the degrade is logged, never silent.

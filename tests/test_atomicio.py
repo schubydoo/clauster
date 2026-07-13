@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import stat
 import sys
 import threading
@@ -16,6 +17,13 @@ from clauster.atomicio import atomic_write_text, ensure_private_dir
 
 # Perm assertions are POSIX-only; Windows has no 0700/0600 mode bits.
 _posix = pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+
+# cross_process_lock's flock (lock-file creation, the unconfigured warning, the self-heal)
+# only runs where fcntl exists; on Windows (fcntl is None) it deliberately no-ops, so tests
+# asserting that flock behavior must skip there — keyed on the ACTUAL gate, not sys.platform.
+_needs_flock = pytest.mark.skipif(
+    atomicio.fcntl is None, reason="cross-process flock is POSIX-only; Windows no-ops it"
+)
 
 
 def test_atomic_write_text_creates_file_and_parents(tmp_path):
@@ -435,6 +443,7 @@ def test_cross_process_lock_file_same_realpath_shares_one_file(tmp_path):
     )
 
 
+@_needs_flock
 def test_cross_process_lock_creates_lock_file_in_state_dir(tmp_path):
     lock_dir = tmp_path / "locks"
     atomicio.configure_lock_dir(lock_dir)
@@ -446,6 +455,38 @@ def test_cross_process_lock_creates_lock_file_in_state_dir(tmp_path):
     assert not (target.parent).exists() or not list(target.parent.glob("*.lock"))
 
 
+@_needs_flock
+def test_cross_process_lock_self_heals_vanished_lock_dir(tmp_path):
+    # If the configured lock dir (a subdir of state_dir) is removed under a running service
+    # (or on evicted tmpfs) while state_dir survives, the next lock recreates it OWNER-ONLY
+    # and succeeds — self-heal like main's old sidecar did, not a hard-fail on every write.
+    lock_dir = tmp_path / "state" / "locks"
+    atomicio.configure_lock_dir(lock_dir)
+    shutil.rmtree(lock_dir)  # only `locks/` vanishes; the parent `state/` survives
+    assert not lock_dir.exists()
+    target = tmp_path / "proj" / "CLAUDE.md"
+    with atomicio.cross_process_lock(target):  # must NOT raise — recreates the dir
+        pass
+    assert lock_dir.is_dir() and list(lock_dir.glob("*.lock"))
+    # @_needs_flock only runs on POSIX, so the mode is always meaningful here.
+    assert stat.S_IMODE(lock_dir.stat().st_mode) == 0o700  # recreated owner-only
+
+
+@_needs_flock
+def test_cross_process_lock_fails_loud_when_state_dir_gone(tmp_path):
+    # A vanished *state_dir* (the lock dir's PARENT — it holds session.secret + tokens) must
+    # NOT be silently recreated world-readable via parents=True: the mkdir has no parents=True,
+    # so a missing state_dir raises FileNotFoundError (a genuine fault worth surfacing) rather
+    # than degrading past — matching the fail-loud-not-open contract.
+    lock_dir = tmp_path / "state" / "locks"
+    atomicio.configure_lock_dir(lock_dir)
+    shutil.rmtree(tmp_path / "state")  # the whole state dir vanishes
+    with pytest.raises(FileNotFoundError):
+        with atomicio.cross_process_lock(tmp_path / "proj" / "CLAUDE.md"):
+            pass
+
+
+@_needs_flock
 def test_cross_process_lock_warns_once_when_unconfigured(tmp_path, caplog):
     # Unconfigured → NEVER silent: warn once, then yield (inproc lock still holds).
     target = tmp_path / "CLAUDE.md"

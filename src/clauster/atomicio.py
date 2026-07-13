@@ -183,10 +183,14 @@ def cross_process_lock(target: Path):
         _warn_cross_process_unconfigured()
         yield
         return
-    # `os.open` is intentionally NOT wrapped in a best-effort try/except (fail loud, never a
-    # silent unguarded write): the lock dir is created owner-only in `create_app` and lives on
-    # the same local volume as the rest of the state, so an open failure here is a real fault
-    # worth surfacing, not degrading past.
+    # Self-heal a vanished lock dir (removed by hand under a running service, or on evicted
+    # tmpfs): `exist_ok=True` is a cheap stat in the common case, and `mode=0o700` keeps a
+    # recreated `locks/` owner-only. NOT `parents=True` — that would recreate a vanished
+    # `state_dir` (the parent, which holds `session.secret` + claustrum tokens) at 0o755,
+    # silently un-doing `ensure_private_dir`'s 0o700; instead a missing state_dir raises
+    # FileNotFoundError, the right fail-loud outcome (a gone state_dir is a genuine fault).
+    # `os.open` likewise stays unwrapped — a real permission/IO fault is worth surfacing.
+    lock_file.parent.mkdir(exist_ok=True, mode=0o700)
     fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
