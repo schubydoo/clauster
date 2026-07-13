@@ -6,6 +6,7 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
+from clauster import app as app_mod
 from clauster.app import create_app
 from clauster.config import load_config
 
@@ -1130,3 +1131,21 @@ def test_launch_popover_pty_worktree_controls(write_config):
     # The warn-don't-block collision hint (git projects, where worktree is offered).
     assert 'data-test="pty-collision-hint"' in page
     assert "choose\n                              Spawn: worktree to isolate this one." in page
+
+
+# --- Interactive Session mode-picker gate: _pty_supported (#914) ---
+
+
+def test_pty_supported_true_on_posix(monkeypatch):
+    monkeypatch.setattr(app_mod.sys, "platform", "linux")
+    assert app_mod._pty_supported() is True
+
+
+def test_pty_supported_on_windows_reflects_conpty_keeper(monkeypatch):
+    # On Windows the picker offers Interactive Session only when the ConPTY keeper (pywinpty)
+    # is present; without it a `launch_mode: pty` request would fall back to Server Mode.
+    monkeypatch.setattr(app_mod.sys, "platform", "win32")
+    monkeypatch.setattr(app_mod, "_conpty_keeper_available", lambda: True)
+    assert app_mod._pty_supported() is True
+    monkeypatch.setattr(app_mod, "_conpty_keeper_available", lambda: False)
+    assert app_mod._pty_supported() is False

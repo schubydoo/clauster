@@ -130,6 +130,33 @@ def test_write_file_no_leftover_temp_file(tmp_path: Path) -> None:
     _no_orphans(tmp_path)
 
 
+def test_write_file_verify_sees_current_bytes_and_can_abort(tmp_path: Path) -> None:
+    # verify() runs inside the per-target lock right before the replace: it sees the
+    # target's current bytes (None if absent) and its raise aborts the write entirely.
+    seen: list = []
+
+    def _record(current):
+        seen.append(current)
+
+    fw.write_file(tmp_path, "note.txt", "first", verify=_record)
+    assert seen == [None]  # absent target → None
+    fw.write_file(tmp_path, "note.txt", "second", verify=_record)
+    assert seen[1] == b"first"  # existing target → its current bytes
+    assert (tmp_path / "note.txt").read_text() == "second"
+
+
+def test_write_file_verify_raise_aborts_write(tmp_path: Path) -> None:
+    fw.write_file(tmp_path, "note.txt", "keep")
+
+    def _boom(current):
+        raise ValueError("stale")
+
+    with pytest.raises(ValueError, match="stale"):
+        fw.write_file(tmp_path, "note.txt", "overwrite", verify=_boom)
+    assert (tmp_path / "note.txt").read_text() == "keep"  # unchanged
+    _no_orphans(tmp_path)  # no temp left behind by the aborted write
+
+
 @needs_posix
 def test_write_file_new_file_gets_requested_mode(tmp_path: Path) -> None:
     fw.write_file(tmp_path, "secret.txt", "s", mode=0o600)
