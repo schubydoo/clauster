@@ -202,6 +202,26 @@ def test_write_claude_md_holds_per_path_lock_during_replace(tmp_path, monkeypatc
     assert seen["locked"] is True
 
 
+def test_write_claude_md_uses_unique_temp_name(tmp_path, monkeypatch):
+    # A UNIQUE temp name (not a fixed CLAUDE.md.tmp) so a second clauster PROCESS saving the
+    # same project can't clobber this one's temp mid-replace — the inproc lock is intra-process
+    # only (#914).
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    seen: list = []
+
+    def _spy_replace(src, dst):
+        seen.append(Path(src).name)
+        Path(src).replace(dst)
+
+    monkeypatch.setattr("clauster.claude_md.atomicio.replace_with_retry", _spy_replace)
+    write_claude_md(proj, "one\n")
+    write_claude_md(proj, "two\n")
+    assert seen[0] != "CLAUDE.md.tmp" and seen[1] != "CLAUDE.md.tmp"  # not the fixed shared name
+    assert seen[0] != seen[1]  # unique per write
+    assert all(n.startswith("CLAUDE.md.") and n.endswith(".tmp") for n in seen)
+
+
 def test_write_audit_failure_does_not_fail_write(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()

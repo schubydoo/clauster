@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -158,11 +159,15 @@ def write_claude_md(
             f"{FILENAME} is {len(encoded)} bytes, over the {MAX_BYTES} byte cap"
         )
 
-    tmp = target.with_suffix(target.suffix + ".tmp")
+    # A UNIQUE temp name (not a fixed `CLAUDE.md.tmp`) so a second clauster PROCESS saving the
+    # same project can never move/clobber this one's temp mid-replace — the inproc lock below
+    # only coordinates threads within one process. Same directory ⇒ os.replace stays an atomic
+    # same-filesystem rename; write_text keeps the umask-based mode (unlike mkstemp's 0600).
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
     # Serialize this process's concurrent saves for the SAME project under one per-path lock so
     # the base_sha256 read-check-write is a single critical section: two overlapping saves can't
-    # both pass the conflict guard and then lost-update, and the fixed `CLAUDE.md.tmp` name can't
-    # be moved/clobbered mid-replace. `read_claude_md` takes no inproc lock, so it can't deadlock.
+    # both pass the conflict guard and then lost-update. `read_claude_md` takes no inproc lock,
+    # so it can't deadlock.
     with atomicio.inproc_path_lock(target):
         current = read_claude_md(project_path)
         if base_sha256 is not None and current.sha256 != base_sha256:
