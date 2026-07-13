@@ -1559,6 +1559,27 @@ def test_redact_ignores_an_empty_pasted_code() -> None:
     assert ls._redact("unchanged text", [""]) == "unchanged text"
 
 
+def test_redact_masks_longest_secret_first_no_stranded_suffix() -> None:
+    # Greptile P1: if two codes accumulate over a flow and a later one EXTENDS an earlier
+    # (`ABC` then `ABCDEF`), masking the prefix first would strand the suffix (`DEF`). Masking
+    # longest-first must scrub the whole thing regardless of registration order.
+    out = ls._redact("code was ABCDEF here", ["ABC", "ABCDEF"])
+    assert "ABCDEF" not in out and "DEF" not in out
+    assert "<redacted-code>" in out
+
+
+def test_redact_reassembles_an_escape_fragmented_code() -> None:
+    # Greptile P2: a ConPTY echo could interleave a terminal escape INSIDE the pasted code, so
+    # a raw substring match would miss the fragmented secret. The escape must split the code
+    # (not merely wrap it) for this to guard the fix — with escapes only around the secret it
+    # stays contiguous and the OLD code masks it too. `_redact` strips escapes first, so the
+    # reassembled `SECRETCODE` is masked; the `<redacted-code>` assertion fails under the old code.
+    fragmented = "prompt SEC\x1b[0mRETCODE tail"  # ESC-split mid-token
+    out = ls._redact(fragmented, ["SECRETCODE"])
+    assert "SECRETCODE" not in out
+    assert "<redacted-code>" in out
+
+
 # --- _ConPtyPopen lifecycle shim ----------------------------------------------------
 
 

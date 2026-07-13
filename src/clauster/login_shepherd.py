@@ -50,7 +50,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
-from . import claude_cli, procutil
+from . import claude_cli, procutil, redact
 from .pty_screen import SCREEN_ROWS, PtyScreen, PyteUnavailableError, extract_authorize_url
 
 _T = TypeVar("_T")
@@ -130,7 +130,7 @@ def _is_win32() -> bool:
 
 
 def _redact(text: str, pasted_secrets: Iterable[str] = ()) -> str:
-    """Best-effort mask of secret-shaped values in captured output before it is logged/returned.
+    r"""Best-effort mask of secret-shaped values in captured output before it is logged/returned.
 
     Defense in depth only: the primary guarantee is that the pasted code and the
     parsed token are never themselves passed to a logging call. This additionally
@@ -147,17 +147,21 @@ def _redact(text: str, pasted_secrets: Iterable[str] = ()) -> str:
     no-op on POSIX/pipe (nothing to match); empty codes are never registered so `str.replace`
     is never handed the empty string (which would splice the mask between every character).
 
-    Masking is a plain substring `replace` over the RAW buffer, whereas URL/token *extraction*
-    reads the pyte-RENDERED screen (ConPTY fragments those with cursor escapes). Console
-    input-echo is contiguous, so the substring match is sufficient in practice; and this whole
-    layer is defense-in-depth — the primary guarantee (the code is never handed to a logging
-    call, and never itself returned except as the redacted "Captured output") stands regardless.
-    Over-redaction (a code that also appears elsewhere) is harmless; the risk is only under-match.
+    Terminal escapes are stripped FIRST so a fragmented echo can't slip a code past the
+    substring match: a ConPTY echo could interleave escapes (e.g. bracketed-paste `\x1b[200~`
+    markers) INSIDE the pasted code, and `redact.strip_ansi` collapses those so the code is
+    reassembled contiguously before matching (it also cleans the diagnostic). Secrets are then
+    masked longest-first, so a later code that extends an earlier one (`ABC` then `ABCDEF`)
+    can't leave its suffix behind when the prefix is masked first. Over-redaction (a code that
+    also appears elsewhere) is harmless; only under-match would leak. This layer is still
+    defense-in-depth — the primary guarantee is that the code is never handed to a logging call
+    and is only ever returned as this redacted "Captured output"; on real Windows the ConPTY was
+    verified not to echo the pasted code at all (#912).
     """
+    text = redact.strip_ansi(text)
     text = _TOKEN_RE.sub("CLAUDE_CODE_OAUTH_TOKEN=<redacted>", text)
-    for secret in pasted_secrets:
-        if secret:
-            text = text.replace(secret, "<redacted-code>")
+    for secret in sorted({s for s in pasted_secrets if s}, key=len, reverse=True):
+        text = text.replace(secret, "<redacted-code>")
     return text
 
 
