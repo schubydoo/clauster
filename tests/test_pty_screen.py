@@ -253,12 +253,44 @@ def test_osc8_urls_are_fifo_capped():
     assert scr.find_authorize_url() == _OSC8_AUTH
 
 
-def test_osc8_carry_stays_bounded_under_an_unterminated_flood():
-    # A ConPTY output flood with an unterminated escape must not grow the carry without
-    # bound (memory safety) — it is capped at _OSC8_MAX_CARRY.
+@pytest.mark.parametrize("cut", [1, 2])
+def test_find_authorize_url_osc8_split_inside_the_opener(cut):
+    # A chunk boundary landing INSIDE the 3-byte opener (ESC | ]8, or ESC] | 8) must still
+    # reassemble — the carry retains the trailing partial opener (reviewer follow-up).
+    seq = _osc8(_OSC8_AUTH)
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(seq[:cut])
+    assert scr.find_authorize_url() is None
+    scr.feed(seq[cut:])
+    assert scr.find_authorize_url() == _OSC8_AUTH
+
+
+def test_find_authorize_url_osc8_rejects_hidden_unknown_host():
+    # An OSC 8 target is invisible to the operator (they see only the label), so a hidden
+    # authorize-path link on an UNKNOWN host must never be handed back (Greptile P2 security).
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(_osc8("https://evil.example/cai/oauth/authorize?code=x", label="Click here"))
+    assert scr.find_authorize_url() is None
+    # ...but the real link (a known auth host) still resolves via the same fallback.
+    scr.feed(_osc8(_OSC8_AUTH, label="Open"))
+    assert scr.find_authorize_url() == _OSC8_AUTH
+
+
+def test_osc8_carry_bounded_under_an_unterminated_opener():
+    # An unterminated OSC 8 opener with a pathologically long URI must not grow the carry
+    # without bound (memory safety) — it is capped at _OSC8_MAX_CARRY, and captures nothing.
+    scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
+    scr.feed(b"\x1b]8;;https://claude.com/" + b"a" * 20000)  # no ST/BEL terminator
+    assert len(scr._osc8_carry) <= pty_screen._OSC8_MAX_CARRY
+    assert scr.find_authorize_url() is None
+
+
+def test_osc8_carry_empty_when_no_opener_in_flood():
+    # A flood with no OSC 8 opener carries nothing — the carry targets `ESC ] 8`, so an
+    # unrelated escape stream never accumulates (Greptile P2: carry not misdirected).
     scr = PtyScreen(cols=100, rows=6, capture_osc8=True)
     scr.feed(b"\x1b" + b"0011Ignore" * 20000)
-    assert len(scr._osc8_carry) <= pty_screen._OSC8_MAX_CARRY
+    assert scr._osc8_carry == b""
     assert scr.find_authorize_url() is None
 
 

@@ -461,12 +461,15 @@ class PtyScreen:
         """Record OSC 8 hyperlink URIs from ``data`` (caller holds ``self._lock``).
 
         Scans ``carry + data`` so a hyperlink split across two :meth:`feed` chunks still
-        matches, then carries the tail from its last ``ESC`` (where an unterminated escape
-        would begin), capped at :data:`_OSC8_MAX_CARRY`. ``_osc8_seen`` dedups so no URI is
-        double-counted even if a completed sequence's trailing bytes are re-carried, and
-        ``_osc8_urls`` is FIFO-evicted at :data:`_OSC8_MAX_URLS`. Only ``https://`` URIs are
-        retained — parity with the text path's ``https``-only :data:`_URL_RE`, and it keeps a
-        stray TUI hyperlink (``file://``, ``vscode://``) from ever surfacing as an authorize URL.
+        matches, then carries the tail from the last OSC 8 **opener** (``ESC ] 8``) — the only
+        sequence being reassembled, so a trailing non-OSC escape can't misdirect the carry —
+        or a trailing *partial* opener when the chunk boundary splits the 3-byte marker itself
+        (``…ESC`` / ``…ESC ]``), capped at :data:`_OSC8_MAX_CARRY`. ``_osc8_seen`` dedups so no
+        URI is double-counted
+        even if a completed sequence is re-carried, and ``_osc8_urls`` is FIFO-evicted at
+        :data:`_OSC8_MAX_URLS`. Only ``https://`` URIs are retained — parity with the text
+        path's ``https``-only :data:`_URL_RE`, keeping a stray TUI hyperlink (``file://``,
+        ``vscode://``) from ever surfacing as an authorize URL.
         """
         buf = self._osc8_carry + data
         for url in extract_osc8_hyperlinks(buf):
@@ -475,8 +478,15 @@ class PtyScreen:
                 self._osc8_urls.append(url)
                 if len(self._osc8_urls) > _OSC8_MAX_URLS:
                     self._osc8_seen.discard(self._osc8_urls.pop(0))
-        esc = buf.rfind(b"\x1b")
-        self._osc8_carry = buf[esc:][-_OSC8_MAX_CARRY:] if esc != -1 else b""
+        opener = buf.rfind(b"\x1b]8")
+        if opener != -1:
+            self._osc8_carry = buf[opener:][-_OSC8_MAX_CARRY:]
+        elif buf.endswith(b"\x1b]"):  # chunk boundary landed inside the 3-byte opener
+            self._osc8_carry = b"\x1b]"
+        elif buf.endswith(b"\x1b"):
+            self._osc8_carry = b"\x1b"
+        else:
+            self._osc8_carry = b""
 
     def find_session_id(self) -> str | None:
         """Scan the reassembled screen for the bridge's ``session_<id>``, or None.
@@ -526,9 +536,12 @@ class PtyScreen:
         if url is not None:
             return url
         # ConPTY renders the authorize URL as an OSC 8 hyperlink whose target pyte drops from
-        # the display (#905); fall back to the URI captured from the raw OSC 8 sequences,
-        # run through the SAME selection rule as the text scan.
-        return _select_authorize_url(osc8_urls)
+        # the display (#905); fall back to the URI captured from the raw OSC 8 sequences. An
+        # OSC 8 target is HIDDEN from the operator (they see only the link label), so — unlike
+        # the visible text path — it can't be eyeballed: require a known Claude/Anthropic auth
+        # host so a stray or hidden hyperlink on an unknown host can never be handed back as the
+        # authorize URL. The real link is on claude.com, a known host, so nothing is lost.
+        return _select_authorize_url(u for u in osc8_urls if _is_known_auth_host(_url_host(u)))
 
     def find_oauth_token(self) -> str | None:
         """Scan the reassembled screen for ``setup-token``'s printed OAuth token, or None.
