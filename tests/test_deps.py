@@ -76,8 +76,12 @@ def test_install_hint_pip_form_when_not_frozen(monkeypatch):
     assert deps.install_hint(deps.by_key("apprise")) == "pip install 'clauster[notify]'"
 
 
-def test_install_hint_deps_command_when_frozen(monkeypatch):
-    # The frozen binary ignores site-packages, so `pip install` is a dead end — point at the
-    # side-install command instead (delivered in the follow-up slice).
+def test_install_hint_points_at_docs_when_frozen(monkeypatch):
+    # The frozen binary ignores site-packages, so `pip install` is a dead end — and the managed
+    # `clauster deps install` command is a later slice, so the hint must NOT name it yet (that
+    # would be a dead-end command). Point at the docs until slice 2 ships the command.
     monkeypatch.setattr(deps, "is_frozen", lambda: True)
-    assert deps.install_hint(deps.by_key("pyte")) == "clauster deps install pty"
+    hint = deps.install_hint(deps.by_key("pyte"))
+    assert "standalone binary" in hint  # prose, not a command
+    assert "clauster deps install" not in hint  # not a not-yet-real command
+    assert "pip install" not in hint  # pip is a dead end on the frozen binary

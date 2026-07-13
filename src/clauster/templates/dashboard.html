@@ -694,7 +694,7 @@
                       <button type="button" class="btn btn-sm btn-ghost-secondary" disabled
                               title="Live terminal requires the pty extra ({{ pty_extra_hint }}).">
                         <svg class="ico me-1" aria-hidden="true"><use href="#ic-terminal"/></svg>Live terminal</button>
-                      <span class="text-muted small ms-2">requires the <code>pty</code> extra — run <code>{{ pty_extra_hint }}</code></span>
+                      <span class="text-muted small ms-2">requires the <code>pty</code> extra — {% if pty_extra_is_command %}run <code>{{ pty_extra_hint }}</code>{% else %}{{ pty_extra_hint }}{% endif %}</span>
                     </span>
                     {% endif %}
                   </template>

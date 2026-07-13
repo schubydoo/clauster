@@ -109,6 +109,22 @@ def test_live_terminal_greyed_when_pty_extra_missing(write_config, monkeypatch):
     assert "/static/vendor/xterm/js/xterm.js" not in body
 
 
+def test_live_terminal_hint_is_prose_not_a_run_command_when_frozen(write_config, monkeypatch):
+    # #904: on a frozen binary the pty extra can't be pip-installed and the managed install
+    # command isn't built yet, so the greyed hint must read as PROSE (a docs pointer), never
+    # "run <a non-command>" — the "run" verb + pip form are gated to non-frozen.
+    monkeypatch.setattr("clauster.deps.probe", lambda entry: False)
+    monkeypatch.setattr("clauster.deps.is_frozen", lambda: True)
+    client = TestClient(
+        create_app(load_config(write_config("claude:\n  pty_screen_enabled: true\n")))
+    )
+    body = client.get("/").text
+    assert "requires the <code>pty</code> extra" in body  # still names the extra
+    assert "not bundled in the standalone binary" in body  # prose docs pointer
+    assert "extra — run <code>" not in body  # no "run <command>" framing for the prose hint
+    assert "pip install" not in body  # the dead-end pip form is not shown on the frozen binary
+
+
 def test_live_terminal_client_side_fit_wiring(write_config):
     # #641: the fixed-geometry (120x40) live terminal scales to the panel client-side with a
     # CSS transform — no wire-protocol/resize change. Assert the fit helper, its open-time +

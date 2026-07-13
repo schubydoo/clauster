@@ -4440,6 +4440,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # when the operator turned the tap on without the extra — no silent no-op.
             "pty_extra_present": deps.probe(deps.by_key("pyte")),
             "pty_extra_hint": deps.install_hint(deps.by_key("pyte")),
+            # Whether the hint is a runnable command (pip form) vs prose (frozen binary — the
+            # managed install command isn't built yet): the template only prepends "run" for a
+            # real command, so the frozen hint never reads as a command to run.
+            "pty_extra_is_command": not deps.is_frozen(),
             # Browser (Web Notifications) channel (#541): the master switch plus the
             # per-event toggles the client honours when a polled instance transitions.
             # The client requests Notification permission only when the channel is on.
