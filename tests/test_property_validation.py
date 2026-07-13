@@ -26,7 +26,7 @@ from hypothesis import strategies as st
 
 from clauster import redact
 from clauster.config import CloneConfig
-from clauster.discovery import PROJECT_NAME_RE, is_valid_project_name
+from clauster.discovery import _WIN_RESERVED_NAMES, PROJECT_NAME_RE, is_valid_project_name
 from clauster.provisioning import (
     BlockedCloneHost,
     InvalidCloneUrl,
@@ -63,7 +63,11 @@ def test_name_acceptance_matches_single_component_invariant(name: str) -> None:
     # contract so a future refactor that reimplements is_valid_project_name
     # without delegating to PROJECT_NAME_RE would diverge here and fail. The
     # independent structural checks below are what verify the safety property.
-    assert accepted == (PROJECT_NAME_RE.fullmatch(name) is not None)
+    # Acceptance is the regex match minus the Windows reserved device names (#914),
+    # which pass the char class but can't be created as directories on Windows.
+    assert accepted == (
+        PROJECT_NAME_RE.fullmatch(name) is not None and name.upper() not in _WIN_RESERVED_NAMES
+    )
     if accepted:
         # The defining safety property: a sole path segment, 1..64 chars, no
         # separator / parent-ref / NUL that a join could turn into traversal.

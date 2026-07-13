@@ -21,6 +21,12 @@ def test_is_valid_project_name():
     assert not is_valid_project_name("../escape")
     assert not is_valid_project_name("")
     assert not is_valid_project_name("x" * 65)
+    # Windows reserved device names (#914): pass the char regex but can't be dirs on Windows.
+    assert not is_valid_project_name("CON")
+    assert not is_valid_project_name("nul")  # case-insensitive
+    assert not is_valid_project_name("COM1")
+    assert not is_valid_project_name("LPT9")
+    assert is_valid_project_name("console")  # a reserved name as a substring is fine
 
 
 def test_discovers_directories_and_badges(projects_root, tmp_path):
