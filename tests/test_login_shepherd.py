@@ -20,25 +20,36 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from clauster import login_shepherd as ls
+from clauster import pty_keeper
 from clauster.app import create_app
 from clauster.config import ClausterConfig
 
-FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
-
-# The fake `claude` stub is a POSIX shebang script; on Windows it isn't a valid Win32
-# executable, so every test here (all of them spawn it) is POSIX-gated — same idiom as
-# tests/test_config_write_mcp_cli.py's `_POSIX_ONLY`.
-_POSIX_ONLY = pytest.mark.skipif(
-    sys.platform == "win32", reason="fake_claude stub is a POSIX script, not a Win32 executable"
+# The fake `claude` stub is a POSIX shebang script; on Windows CreateProcess can't run it
+# directly, so tests point the configured binary at the same-named `.cmd` wrapper, which
+# shells it through `python` — the established idiom from tests/test_config_write_mcp_cli.py.
+_WIN_STUB_SUFFIX = ".cmd" if sys.platform == "win32" else ""
+FAKE_CLAUDE = (
+    Path(__file__).resolve().parent / "fixtures" / "fake_claude" / f"claude{_WIN_STUB_SUFFIX}"
 )
-pytestmark = _POSIX_ONLY
+
+# The plain-pipe `login` (subscription) transport, the pure URL/redact/route helpers, and the
+# ConPTY setup-token path (driven via a fake pywinpty behind the `_load_pty_process` seam) all
+# run on Windows via the `.cmd` wrapper / the fake — so this module is NO LONGER blanket-gated
+# (#905). Only the POSIX `setup-token` PTY transport — `os.openpty`/`termios`/a real `master_fd`,
+# and the route/flow tests that spawn a real `setup-token` (which on Windows takes the ConPTY
+# path needing real pywinpty, not the fake `.cmd` stub) — stays POSIX-only via `@_POSIX_ONLY`.
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX setup-token PTY transport (os.openpty/termios)"
+)
 
 
 @pytest.fixture
@@ -59,6 +70,7 @@ def test_start_login_parses_authorize_url(shepherd, monkeypatch) -> None:
         shepherd.cancel()
 
 
+@_POSIX_ONLY
 def test_start_setup_token_parses_authorize_url(shepherd, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
     try:
@@ -321,6 +333,7 @@ def test_popen_failure_is_wrapped(shepherd, monkeypatch) -> None:
 # --- setup-token PTY transport (#846): fail-closed + spawn-failure paths -----------
 
 
+@_POSIX_ONLY
 def test_setup_token_fails_closed_without_pyte(shepherd, monkeypatch) -> None:
     # The long-lived-token mode needs the optional `pty` extra (pyte). Without it,
     # `PtyScreen()` raises `PyteUnavailableError` — `_spawn_pty` must turn that into a
@@ -335,6 +348,7 @@ def test_setup_token_fails_closed_without_pyte(shepherd, monkeypatch) -> None:
     assert not shepherd.is_active()
 
 
+@_POSIX_ONLY
 def test_setup_token_openpty_failure_is_wrapped(shepherd, monkeypatch) -> None:
     # A pty-open failure (e.g. the process fd table is exhausted) must be wrapped in
     # LoginShepherdError, not an unhandled OSError, and leave no flow behind.
@@ -347,6 +361,7 @@ def test_setup_token_openpty_failure_is_wrapped(shepherd, monkeypatch) -> None:
     assert not shepherd.is_active()
 
 
+@_POSIX_ONLY
 def test_setup_token_popen_failure_closes_both_fds(shepherd, monkeypatch) -> None:
     # A Popen() failure on the PTY path must close BOTH the master and slave fds it
     # already opened (never leak them) and surface as LoginShepherdError, not a bare
@@ -369,6 +384,7 @@ def test_setup_token_popen_failure_closes_both_fds(shepherd, monkeypatch) -> Non
     assert len(closed) == 2  # master + slave, both reclaimed
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_is_sized_wide_not_the_80_col_default(shepherd, monkeypatch) -> None:
     # Live-smoke-test regression (#846 follow-up): a bare os.openpty() defaults to 80
     # columns, which wraps (and thus truncates) claude setup-token's ~450-char authorize
@@ -397,6 +413,7 @@ def test_setup_token_pty_is_sized_wide_not_the_80_col_default(shepherd, monkeypa
         shepherd.cancel()
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_winsize_ioctl_failure_is_best_effort(shepherd, monkeypatch) -> None:
     # A TIOCSWINSZ failure must NOT abort the spawn (unlike the ECHO-disable failure below,
     # which is security-critical and fails closed) — it only risks the rare wrap/truncation
@@ -422,6 +439,7 @@ def test_setup_token_pty_winsize_ioctl_failure_is_best_effort(shepherd, monkeypa
         shepherd.cancel()
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_full_flow_start_submit_token(shepherd, monkeypatch) -> None:
     # End-to-end PTY happy path: start() scrapes the authorize URL from the rendered
     # screen, submit_code() writes to the pty master (not a stdin pipe), and the
@@ -439,6 +457,7 @@ def test_setup_token_pty_full_flow_start_submit_token(shepherd, monkeypatch) -> 
     assert not shepherd.is_active()
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_reject_code_fails_without_token(shepherd, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "reject_code")
     shepherd.start("setup-token")
@@ -448,6 +467,7 @@ def test_setup_token_pty_reject_code_fails_without_token(shepherd, monkeypatch) 
     assert not shepherd.is_active()
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_never_echoes_the_pasted_code_back(shepherd, monkeypatch) -> None:
     # Security regression guard: a pty's line discipline echoes back whatever is
     # written to it by DEFAULT (unlike `login`'s plain subprocess.PIPE, where a stdin
@@ -465,6 +485,7 @@ def test_setup_token_pty_never_echoes_the_pasted_code_back(shepherd, monkeypatch
     assert not shepherd.is_active()
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_echo_disable_failure_is_wrapped(shepherd, monkeypatch) -> None:
     # A termios.tcsetattr failure while disabling local echo must fail closed (never
     # silently spawn with echo left on, which would risk leaking the pasted code) and
@@ -489,6 +510,7 @@ def test_setup_token_pty_echo_disable_failure_is_wrapped(shepherd, monkeypatch) 
     assert len(closed) == 2  # master + slave, both reclaimed
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_cancel_closes_master_fd(shepherd, monkeypatch) -> None:
     # cancel() must close the pty master (not leak it) and reap the subprocess even
     # though this transport has no proc.stdin pipe to close.
@@ -503,6 +525,7 @@ def test_setup_token_pty_cancel_closes_master_fd(shepherd, monkeypatch) -> None:
         os.fstat(master_fd)  # the fd was closed, not leaked
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_write_code_after_close_is_a_noop(shepherd, monkeypatch) -> None:
     # _write_code must not raise once the pty master has already been torn down
     # (flow.stdin_closed guards a double-close / write-after-close).
@@ -513,6 +536,7 @@ def test_setup_token_pty_write_code_after_close_is_a_noop(shepherd, monkeypatch)
     shepherd._write_code(flow, "too-late")  # noqa: SLF001 - must not raise
 
 
+@_POSIX_ONLY
 def test_setup_token_pty_write_code_survives_a_broken_fd(shepherd, caplog) -> None:
     # A write to an already-closed/broken pty master must be logged, not raised, past
     # _write_code — mirrors test_submit_code_survives_a_closed_stdin for the PTY path.
@@ -532,6 +556,7 @@ def test_setup_token_pty_write_code_survives_a_broken_fd(shepherd, caplog) -> No
     assert any("writing code" in r.getMessage() for r in caplog.records)
 
 
+@_POSIX_ONLY
 def test_teardown_pty_flow_already_stdin_closed_skips_the_close(shepherd) -> None:
     # _teardown on a PTY flow whose master was already closed (stdin_closed=True) must SKIP
     # re-closing it (no double-close) and still clear the flow. Built on a fake already-exited
@@ -550,6 +575,7 @@ def test_teardown_pty_flow_already_stdin_closed_skips_the_close(shepherd) -> Non
     assert shepherd._flow is None
 
 
+@_POSIX_ONLY
 def test_pump_pty_survives_a_non_eio_read_error() -> None:
     # A non-EIO OSError from os.read (e.g. EBADF from a concurrently-closed fd) must
     # still be treated as end-of-stream, not propagated past the reader thread.
@@ -563,6 +589,7 @@ def test_pump_pty_survives_a_non_eio_read_error() -> None:
     assert flow.snapshot() == ""
 
 
+@_POSIX_ONLY
 def test_pump_pty_treats_eio_as_clean_eof(monkeypatch) -> None:
     # On Linux a child exit makes os.read raise OSError(EIO); on macOS/BSD the pty
     # often returns b"" instead (see the empty-read test below), so the EIO branch is
@@ -583,6 +610,7 @@ def test_pump_pty_treats_eio_as_clean_eof(monkeypatch) -> None:
     assert flow.snapshot() == ""
 
 
+@_POSIX_ONLY
 def test_pump_pty_treats_an_empty_read_as_eof(monkeypatch) -> None:
     # Some platforms/kernels may return b"" instead of raising EIO once the child's
     # side of the pty is gone (a plain pipe's ordinary clean-EOF shape) — the reader
@@ -598,6 +626,7 @@ def test_pump_pty_treats_an_empty_read_as_eof(monkeypatch) -> None:
     assert flow.snapshot() == ""
 
 
+@_POSIX_ONLY
 def test_pump_pty_survives_a_screen_feed_error(monkeypatch) -> None:
     # A pyte feed failure must not crash the reader thread — the read loop keeps
     # draining (falling back to the buffer for text) instead of dying mid-stream.
@@ -622,6 +651,7 @@ def test_pump_pty_survives_a_screen_feed_error(monkeypatch) -> None:
     assert "hello" in flow.snapshot()
 
 
+@_POSIX_ONLY
 def test_pump_pty_noop_when_unpaired() -> None:
     # Defensive: a _Flow with only one of screen/master_fd set (shouldn't happen in
     # practice — they're always set together) must return immediately, not crash.
@@ -699,6 +729,7 @@ def test_second_start_while_active_is_rejected(shepherd, monkeypatch) -> None:
         shepherd.cancel()
 
 
+@_POSIX_ONLY
 def test_cancel_then_start_again_succeeds(shepherd, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
     shepherd.start("login")
@@ -724,6 +755,7 @@ def test_submit_code_success_login(shepherd, monkeypatch) -> None:
     assert not shepherd.is_active()  # torn down after a terminal outcome
 
 
+@_POSIX_ONLY
 def test_submit_code_success_setup_token_returns_token_once(shepherd, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_TOKEN", "canned-token-value-xyz")
@@ -762,6 +794,7 @@ def test_submit_code_survives_a_closed_stdin(shepherd, monkeypatch, caplog) -> N
     assert any("writing code" in r.getMessage() for r in caplog.records)
 
 
+@_POSIX_ONLY
 def test_submit_code_keys_off_fresh_poll_not_stale_wait_flag(shepherd, monkeypatch) -> None:
     # Finding 2 (timeout-boundary race): a completed OAuth (exit 0) that `_wait_for` failed
     # to observe as `exited` must STILL be reported as success + drain the token, because
@@ -824,6 +857,7 @@ def test_poll_still_running_returns_pending(shepherd, monkeypatch) -> None:
     shepherd.cancel()
 
 
+@_POSIX_ONLY
 def test_poll_after_completion_returns_terminal_and_reaps(shepherd, monkeypatch) -> None:
     # The core of the pending flow: a slow login that finishes AFTER submit_code returned
     # pending. poll() must observe the exit, return the TERMINAL result (with token for
@@ -844,6 +878,7 @@ def test_poll_after_completion_returns_terminal_and_reaps(shepherd, monkeypatch)
     assert not shepherd.is_active()  # reaped by poll()
 
 
+@_POSIX_ONLY
 def test_poll_after_success_exit_returns_ok_and_token(shepherd, monkeypatch) -> None:
     # A setup-token flow that exits 0 with a token line: poll() surfaces ok + the token once.
     # setup-token is a PTY flow (#846) — write the code to the pty master (os.write), not
@@ -901,6 +936,7 @@ def test_cancel_reaps_a_running_subprocess(shepherd, monkeypatch) -> None:
 # --- redaction: the pasted code / token never appear in logs ------------------------
 
 
+@_POSIX_ONLY
 def test_code_and_token_never_logged(shepherd, monkeypatch, caplog) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_TOKEN", "super-secret-token-value")
@@ -1195,6 +1231,7 @@ def test_login_mode_works_regardless_of_allow_setup_token(tmp_path: Path, monkey
         assert c.post("/api/login-shepherd/cancel").status_code == 200
 
 
+@_POSIX_ONLY
 def test_setup_token_works_when_both_gates_are_on(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
     with _client(tmp_path, enabled=True, allow_setup_token=True) as c:
@@ -1411,3 +1448,472 @@ def test_setup_token_control_absent_when_whole_surface_disabled(tmp_path: Path) 
         resp = c.get("/")
         assert resp.status_code == 200
         assert "Create a long-lived token" not in resp.text
+
+
+# --- Windows ConPTY setup-token transport (#905) ------------------------------------
+#
+# The win32 setup-token path runs on a ConPTY via pywinpty, which isn't installed (nor
+# importable) on the POSIX CI cell — so these drive it through a FAKE pywinpty `PtyProcess`
+# behind the `pty_keeper._load_pty_process` seam, with `_is_win32()` patched True. There is no
+# real pty, so (unlike the `@_POSIX_ONLY` transport above) they run on EVERY OS. The real
+# ConPTY is exercised on the Windows VM.
+
+
+def _make_fake_conpty(
+    *,
+    url="https://claude.ai/oauth/authorize?fake=1",
+    token="conpty-token-xyz",
+    exit_code=0,
+    echo=False,
+    reject=False,
+    spawn_error=None,
+    no_url=False,
+):
+    """Build a fake pywinpty `PtyProcess` class scripted like the fake_claude setup-token TUI.
+
+    Emits an authorize URL on spawn, then — once a code is `write()`n — emits the token (or a
+    rejection) and exits. `echo=True` mirrors the written code back into the read stream the way
+    a real ConPTY echoes input, so the echo-redaction defense can be exercised.
+    """
+
+    class _FakeConPty:
+        spawn_calls: list = []
+
+        def __init__(self):
+            self._lock = threading.Lock()
+            self._queue: list[str] = []
+            self._alive = True
+            self._exit = exit_code
+            self.pid = 4321
+            self.writes: list[str] = []
+            self.terminated: list[bool] = []
+            self.closed = False
+            if not no_url:
+                self._queue.append(f"Open this URL to authorize: {url}\r\n")
+
+        @classmethod
+        def spawn(cls, argv, cwd=None, env=None, dimensions=(24, 80)):
+            cls.spawn_calls.append(
+                {"argv": argv, "cwd": cwd, "env": env, "dimensions": dimensions}
+            )
+            if spawn_error is not None:
+                raise spawn_error
+            return cls()
+
+        def isalive(self):
+            with self._lock:
+                return self._alive
+
+        def read(self, size=1024):
+            with self._lock:
+                if self._queue:
+                    return self._queue.pop(0)
+                return ""  # non-blocking: no data available
+
+        def write(self, s):
+            with self._lock:
+                self.writes.append(s)
+                if echo:
+                    self._queue.append(s)  # a real ConPTY echoes written input back
+                if reject:
+                    self._queue.append("Error: invalid code\r\n")
+                    self._exit = 1
+                elif token:
+                    self._queue.append(f"CLAUDE_CODE_OAUTH_TOKEN={token}\r\n")
+                self._alive = False
+            return len(s)
+
+        def terminate(self, force=False):
+            with self._lock:
+                self.terminated.append(force)
+                self._alive = False
+
+        def wait(self):
+            return self._exit
+
+        def close(self):
+            self.closed = True
+
+    return _FakeConPty
+
+
+def _use_conpty(monkeypatch, fake_cls) -> None:
+    """Route `setup-token` onto the ConPTY path with `fake_cls` standing in for pywinpty."""
+    monkeypatch.setattr(ls, "_is_win32", lambda: True)
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", lambda: fake_cls)
+
+
+# --- _redact() pasted-code masking --------------------------------------------------
+
+
+def test_redact_masks_a_registered_pasted_code() -> None:
+    # The ConPTY echo defense: a registered pasted code is scrubbed from redacted output.
+    out = ls._redact("you pasted SECRET-CODE-123 just now", ["SECRET-CODE-123"])
+    assert "SECRET-CODE-123" not in out
+    assert "<redacted-code>" in out
+
+
+def test_redact_ignores_an_empty_pasted_code() -> None:
+    # An empty secret must never be handed to str.replace (it would splice the mask between
+    # every character) — `_write_code` never registers one, and `_redact` skips it defensively.
+    assert ls._redact("unchanged text", [""]) == "unchanged text"
+
+
+# --- _ConPtyPopen lifecycle shim ----------------------------------------------------
+
+
+class _ShimProc:
+    """Minimal pywinpty stand-in for `_ConPtyPopen` unit tests."""
+
+    def __init__(self, alive_seq=None, exit_code=0):
+        self._alive_seq = list(alive_seq) if alive_seq is not None else None
+        self._alive = True
+        self.exit_code = exit_code
+        self.terminated: list[bool] = []
+
+    def isalive(self):
+        if self._alive_seq is not None:
+            return self._alive_seq.pop(0) if self._alive_seq else False
+        return self._alive
+
+    def wait(self):
+        return self.exit_code
+
+    def terminate(self, force=False):
+        self.terminated.append(force)
+        self._alive = False
+
+
+def test_conpty_popen_poll_none_while_alive_then_exit_code() -> None:
+    proc = _ShimProc(exit_code=3)
+    shim = ls._ConPtyPopen(proc)
+    assert shim.poll() is None  # alive
+    proc._alive = False
+    assert shim.poll() == 3  # exited → the cached code, never blocking
+
+    assert shim.stdin is None and shim.stdout is None  # PTY-style: no pipes
+
+
+def test_conpty_popen_poll_coerces_a_none_exit_status_to_zero() -> None:
+    # pywinpty's `wait()` can return None on some builds; poll()/wait() must coerce it to 0.
+    proc = _ShimProc(exit_code=None)
+    proc._alive = False
+    assert ls._ConPtyPopen(proc).poll() == 0
+
+
+def test_conpty_popen_wait_returns_code_once_the_process_dies() -> None:
+    proc = _ShimProc(alive_seq=[True, False], exit_code=7)
+    assert ls._ConPtyPopen(proc).wait(timeout=5) == 7
+
+
+def test_conpty_popen_wait_blocks_without_a_timeout() -> None:
+    proc = _ShimProc(alive_seq=[True, False], exit_code=0)
+    assert ls._ConPtyPopen(proc).wait() == 0  # timeout=None → poll until dead
+
+
+def test_conpty_popen_wait_times_out_when_the_process_stays_alive() -> None:
+    proc = _ShimProc()  # isalive() always True
+    with pytest.raises(subprocess.TimeoutExpired):
+        ls._ConPtyPopen(proc).wait(timeout=0.2)
+
+
+def test_conpty_popen_terminate_and_kill_map_to_pywinpty() -> None:
+    proc = _ShimProc()
+    shim = ls._ConPtyPopen(proc)
+    shim.terminate()
+    shim.kill()
+    assert proc.terminated == [False, True]  # terminate → force=False, kill → force=True
+
+
+# --- _spawn_conpty + full start/submit flow -----------------------------------------
+
+
+def test_conpty_full_flow_start_submit_token(shepherd, monkeypatch) -> None:
+    # End-to-end ConPTY happy path: start() scrapes the authorize URL from the pyte screen,
+    # submit_code() writes through pywinpty's `PtyProcess.write` (not os.write / a pipe), and
+    # the printed CLAUDE_CODE_OAUTH_TOKEN is scraped via PtyScreen.find_oauth_token().
+    fake = _make_fake_conpty(token="conpty-flow-token")
+    _use_conpty(monkeypatch, fake)
+    result = shepherd.start("setup-token")
+    assert result["authorize_url"] == "https://claude.ai/oauth/authorize?fake=1"
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    assert flow.pty_process is not None
+    assert flow.master_fd is None  # ConPTY transport, not a POSIX pty
+    assert flow.proc.stdin is None and flow.proc.stdout is None
+    outcome = shepherd.submit_code("the-pasted-code")
+    assert outcome["ok"] is True
+    assert outcome["token"] == "conpty-flow-token"
+    assert fake.spawn_calls[0]["argv"] == [str(FAKE_CLAUDE), "setup-token"]
+    assert fake.spawn_calls[0]["dimensions"] == (ls.SCREEN_ROWS, ls._LOGIN_PTY_COLS)
+    assert os.environ["PYWINPTY_BLOCK"] == "0"
+    assert not shepherd.is_active()
+
+
+def test_conpty_spawn_passes_the_child_env(shepherd, monkeypatch) -> None:
+    fake = _make_fake_conpty()
+    _use_conpty(monkeypatch, fake)
+    try:
+        shepherd.start("setup-token")
+        env = fake.spawn_calls[0]["env"]
+        assert env is not None and "PATH" in env  # procutil.child_env() was threaded through
+    finally:
+        shepherd.cancel()
+
+
+def test_conpty_never_echoes_the_pasted_code_back(shepherd, monkeypatch) -> None:
+    # THE security core (#905): a ConPTY echoes written input back into its output — the parent
+    # can't disable that the way POSIX termios ECHO-off does — so the operator-pasted code lands
+    # in flow.buffer. The echo-redaction defense (`_write_code` registers it, `_redact` masks it)
+    # must keep the secret out of the returned/logged failure message.
+    fake = _make_fake_conpty(reject=True, echo=True)
+    _use_conpty(monkeypatch, fake)
+    shepherd.start("setup-token")
+    secret_code = "SUPER-SECRET-CONPTY-CODE-MUST-NOT-LEAK"
+    outcome = shepherd.submit_code(secret_code)
+    assert outcome["ok"] is False
+    assert secret_code not in outcome["message"]  # scrubbed even though the ConPTY echoed it
+    assert "<redacted-code>" in outcome["message"]  # ...and visibly redacted, not just dropped
+    assert not shepherd.is_active()
+
+
+def test_conpty_reject_code_fails_without_token(shepherd, monkeypatch) -> None:
+    fake = _make_fake_conpty(reject=True)
+    _use_conpty(monkeypatch, fake)
+    shepherd.start("setup-token")
+    outcome = shepherd.submit_code("a-bad-code")
+    assert outcome["ok"] is False
+    assert "token" not in outcome
+    assert not shepherd.is_active()
+
+
+def test_conpty_load_failure_fails_closed(shepherd, monkeypatch) -> None:
+    # pywinpty absent/unimportable on Windows → a clear fail-closed error, no flow left behind.
+    monkeypatch.setattr(ls, "_is_win32", lambda: True)
+
+    def _boom():
+        raise ImportError("No module named 'winpty'")
+
+    monkeypatch.setattr(pty_keeper, "_load_pty_process", _boom)
+    with pytest.raises(ls.LoginShepherdError, match="pywinpty"):
+        shepherd.start("setup-token")
+    assert not shepherd.is_active()
+
+
+def test_conpty_spawn_failure_is_wrapped(shepherd, monkeypatch) -> None:
+    fake = _make_fake_conpty(spawn_error=OSError("ConPTY unavailable"))
+    _use_conpty(monkeypatch, fake)
+    with pytest.raises(ls.LoginShepherdError, match="failed to start claude setup-token"):
+        shepherd.start("setup-token")
+    assert not shepherd.is_active()
+
+
+def test_conpty_cancel_closes_the_pty_process(shepherd, monkeypatch) -> None:
+    fake = _make_fake_conpty()
+    _use_conpty(monkeypatch, fake)
+    shepherd.start("setup-token")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    pty_process = flow.pty_process
+    shepherd.cancel()
+    assert not shepherd.is_active()
+    assert pty_process.closed is True  # the ConPTY handle was closed, not leaked
+
+
+# --- _write_code (ConPTY branch) ----------------------------------------------------
+
+
+def test_conpty_write_code_after_close_is_a_noop() -> None:
+    scr = ls.PtyScreen()
+    fake = _make_fake_conpty()()
+    flow = ls._Flow(mode="setup-token", proc=ls._ConPtyPopen(fake), screen=scr, pty_process=fake)
+    flow.stdin_closed = True
+    ls.LoginShepherd("x")._write_code(flow, "too-late")  # noqa: SLF001 - must not write/raise
+    assert fake.writes == []
+
+
+def test_conpty_write_code_empty_code_is_not_registered_as_a_secret() -> None:
+    # An empty code must never be registered (else `_redact`'s str.replace would be handed "").
+    scr = ls.PtyScreen()
+    fake = _make_fake_conpty()()
+    flow = ls._Flow(mode="setup-token", proc=ls._ConPtyPopen(fake), screen=scr, pty_process=fake)
+    ls.LoginShepherd("x")._write_code(flow, "")  # noqa: SLF001 - internals test
+    assert flow.pasted_secrets == []
+
+
+def test_conpty_write_code_survives_a_broken_write(caplog) -> None:
+    scr = ls.PtyScreen()
+
+    class _BrokenPty:
+        def write(self, _s):
+            raise OSError("conpty write channel is gone")
+
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_BrokenPty())  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING, logger="clauster.login_shepherd"):
+        ls.LoginShepherd("x")._write_code(flow, "a-code")  # noqa: SLF001 - must not raise
+    assert any("writing code" in r.getMessage() for r in caplog.records)
+    assert "a-code" in flow.pasted_secrets  # still registered for redaction despite the failure
+
+
+# --- _pump_conpty reader ------------------------------------------------------------
+
+
+def test_pump_conpty_feeds_chunks_then_ends_on_exit() -> None:
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def __init__(self):
+            self._chunks = ["CLAUDE_CODE_OAUTH_TOKEN=abc\r\n"]
+
+        def read(self, _n):
+            return self._chunks.pop(0) if self._chunks else ""
+
+        def isalive(self):
+            return bool(self._chunks)
+
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    ls._pump_conpty(flow)
+    assert "CLAUDE_CODE_OAUTH_TOKEN=abc" in flow.snapshot()
+
+
+def test_pump_conpty_idle_eoferror_while_alive_keeps_polling() -> None:
+    # An idle non-blocking read some pywinpty builds surface as EOFError must NOT end the loop
+    # while the process is still alive — only a dead one breaks.
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def __init__(self):
+            self._alive_reads = 2
+
+        def read(self, _n):
+            raise EOFError
+
+        def isalive(self):
+            self._alive_reads -= 1
+            return self._alive_reads > 0
+
+    ls._pump_conpty(
+        ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    )  # returns once isalive() goes False — must not hang or raise
+
+
+def test_pump_conpty_eoferror_when_dead_ends_the_loop() -> None:
+    # An EOFError raised once the process is already dead is a genuine end-of-stream → break.
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def read(self, _n):
+            raise EOFError
+
+        def isalive(self):
+            return False
+
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    ls._pump_conpty(flow)  # EOF + dead → clean break, no hang
+    assert flow.snapshot() == ""
+
+
+def test_pump_conpty_empty_read_while_alive_then_dead() -> None:
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def __init__(self):
+            self._alive_reads = 2
+
+        def read(self, _n):
+            return ""  # non-blocking idle
+
+        def isalive(self):
+            self._alive_reads -= 1
+            return self._alive_reads > 0
+
+    ls._pump_conpty(
+        ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    )  # idle-then-dead must break cleanly
+
+
+def test_pump_conpty_read_error_is_end_of_stream() -> None:
+    # A read that raises (a genuine channel error, or the ConPTY closed by a concurrent
+    # teardown) is treated as end-of-stream and breaks the loop, never propagating.
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def read(self, _n):
+            raise OSError("conpty read channel broke")
+
+        def isalive(self):
+            return True
+
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    ls._pump_conpty(flow)  # must return without raising despite isalive() staying True
+    assert flow.snapshot() == ""
+
+
+def test_pump_conpty_survives_a_screen_feed_error() -> None:
+    scr = ls.PtyScreen()
+
+    def _boom(_data):
+        raise RuntimeError("pyte choked")
+
+    scr.feed = _boom  # type: ignore[method-assign]
+
+    class _Pty:
+        def __init__(self):
+            self._chunks = ["hello\r\n"]
+
+        def read(self, _n):
+            return self._chunks.pop(0) if self._chunks else ""
+
+        def isalive(self):
+            return bool(self._chunks)
+
+    flow = ls._Flow(mode="setup-token", proc=object(), screen=scr, pty_process=_Pty())  # type: ignore[arg-type]
+    ls._pump_conpty(flow)  # feed() failure must not kill the reader; buffer still fills
+    assert "hello" in flow.snapshot()
+
+
+def test_pump_conpty_noop_when_unpaired() -> None:
+    flow = ls._Flow(mode="setup-token", proc=object())  # type: ignore[arg-type]
+    ls._pump_conpty(flow)  # pty_process/screen both None -> immediate no-op
+    assert flow.snapshot() == ""
+
+
+# --- _teardown (ConPTY branch) ------------------------------------------------------
+
+
+def test_teardown_conpty_already_stdin_closed_skips_the_close() -> None:
+    scr = ls.PtyScreen()
+    fake = _make_fake_conpty()()
+    fake._alive = False  # already exited → teardown skips terminate/wait
+    flow = ls._Flow(mode="setup-token", proc=ls._ConPtyPopen(fake), screen=scr, pty_process=fake)
+    flow.stdin_closed = True  # ConPTY already closed → the close must be skipped, not retried
+    sh = ls.LoginShepherd("x")
+    sh._flow = flow  # noqa: SLF001 - internals test
+    sh._teardown(flow)  # noqa: SLF001 - must not re-close and must clear the flow
+    assert fake.closed is False  # skipped, since stdin_closed was already set
+    assert sh._flow is None
+
+
+def test_teardown_conpty_close_error_is_swallowed() -> None:
+    scr = ls.PtyScreen()
+
+    class _Pty:
+        def __init__(self):
+            self._alive = False
+
+        def isalive(self):
+            return self._alive
+
+        def wait(self):
+            return 0
+
+        def terminate(self, force=False):
+            pass
+
+        def close(self):
+            raise RuntimeError("pywinpty close blew up")
+
+    fake = _Pty()
+    flow = ls._Flow(mode="setup-token", proc=ls._ConPtyPopen(fake), screen=scr, pty_process=fake)
+    sh = ls.LoginShepherd("x")
+    sh._flow = flow  # noqa: SLF001 - internals test
+    sh._teardown(flow)  # noqa: SLF001 - a close() that raises must never propagate
+    assert sh._flow is None
