@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import shutil
 import ssl
 import sys
 import time
@@ -688,6 +689,16 @@ def _install_service(
     closed with a clear hint rather than a traceback.
     """
     unit = ops.render_service_unit(kind, config_path=config_path, user=user)
+    if kind == "windows" and shutil.which("nssm") is None:
+        # The generated Windows script drives `nssm`; warn upfront if it isn't on PATH so the
+        # operator isn't surprised by a non-working service later (#914). Not fatal — printing
+        # the script is still useful (they can install nssm, then run it).
+        print(
+            "clauster: WARNING — the Windows service script uses `nssm` (https://nssm.cc), which "
+            "is not on PATH. Install it and add it to PATH before running the script, or "
+            "`nssm install` will fail.",
+            file=sys.stderr,
+        )
     if write is False:
         print(unit)
         return 0
@@ -995,8 +1006,11 @@ def _set_process_title(config: ClausterConfig) -> None:
 def _reexec() -> None:  # pragma: no cover - replaces the process image; tested via monkeypatch
     """Re-exec this interpreter in place with the same argv (the #483 restart mechanism).
 
-    ``os.execv`` replaces the current process image — same PID, fresh code + config
-    (config is read at startup). Called only after the uvicorn server has shut down
+    ``os.execv`` replaces the current process image — same PID on POSIX, fresh code + config
+    (config is read at startup). On Windows ``os.execv`` is emulated as spawn-new-then-exit,
+    so the PID changes and an nssm-managed service sees the exit and applies its own restart
+    action — the in-place, same-PID guarantee is POSIX-only (#914). Called only after the
+    uvicorn server has shut down
     gracefully and released its listening socket, so the new image can re-bind. The
     indirection is a deliberate seam: tests monkeypatch this to assert the restart
     endpoint triggers exactly one re-exec without actually replacing the test process.
@@ -1072,11 +1086,11 @@ def _run(config_path: str | None) -> int:
     app.state.uvicorn_server = server
     server.run()  # blocks until graceful shutdown (Ctrl-C, SIGTERM, or restart request)
     # If the shutdown was an in-app restart request, re-exec in place now that the
-    # socket is released. Re-exec is uniform across systemd/launchd/terminal/Docker,
-    # keeps the same PID (systemd's MainPID stays valid), and reloads config (read at
-    # startup). Running bridges + hosted sessions survive the swap (their processes outlive
-    # the same-PID re-exec) and reattach on startup (#663). Any other shutdown path
-    # (signal) falls through to a normal exit.
+    # socket is released. Re-exec keeps the same PID on POSIX (systemd's MainPID stays valid)
+    # and reloads config (read at startup); on Windows `os.execv` changes the PID and an
+    # nssm-managed service applies its own restart action (#914). Running bridges + hosted
+    # sessions survive the swap (their processes outlive the re-exec) and reattach on startup
+    # (#663). Any other shutdown path (signal) falls through to a normal exit.
     if getattr(app.state, "restart_requested", False):
         _reexec()
     return 0

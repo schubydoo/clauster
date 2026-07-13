@@ -20,19 +20,16 @@ claustrum client, so these tests drive them directly on an unstarted
 
 from __future__ import annotations
 
-import sys
 from typing import Any, cast
 
-import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from clauster.claustrum_client import ClaustrumClient
 from clauster.hosted import HostedSession
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="hosted channel is POSIX-only (AF_UNIX)"
-)
+# No platform gate (#914): `_emit`/`subscribe` are pure in-memory ops that never touch the
+# claustrum client or any AF_UNIX socket, so the fan-out invariants run on every OS.
 
 _PID = "01HOSTEDPROPTEST000000000"
 _BIN = "/usr/bin/claude"

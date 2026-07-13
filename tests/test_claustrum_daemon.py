@@ -582,3 +582,27 @@ async def test_spawn_scrubs_ambient_daemon_sentinel(make_daemon, monkeypatch):
     assert "CLAUSTRUM_TOKEN_PIPE" not in env
     assert "CLAUSTER_SESSION_SECRET" not in env  # Clauster secret scrubbed (procutil.child_env)
     assert env.get("CLAUSTRUM_KEEP_THIS") == "ok"  # unrelated env preserved
+
+
+def test_check_unix_socket_path_rejects_too_long():
+    # A socket path over the AF_UNIX sun_path limit fails early with a clear error (#914).
+    from clauster.claustrum_daemon import _SUN_PATH_MAX, ClaustrumError, _check_unix_socket_path
+
+    too_long = Path("/tmp") / ("x" * _SUN_PATH_MAX) / "d.sock"
+    with pytest.raises(ClaustrumError, match="AF_UNIX limit"):
+        _check_unix_socket_path(too_long)
+
+
+def test_check_unix_socket_path_ok_when_short(tmp_path):
+    from clauster.claustrum_daemon import _check_unix_socket_path
+
+    _check_unix_socket_path(tmp_path / "d.sock")  # comfortably short — must not raise
+
+
+def test_check_unix_socket_path_skipped_off_posix(monkeypatch):
+    # Windows dials a named pipe (no sun_path limit), so the check is a no-op there.
+    from clauster.claustrum_daemon import _check_unix_socket_path
+
+    long_sock = Path("/tmp") / ("x" * 300) / "d.sock"  # build BEFORE patching os.name
+    monkeypatch.setattr("clauster.claustrum_daemon.os.name", "nt")
+    _check_unix_socket_path(long_sock)  # non-posix → no-op, must not raise

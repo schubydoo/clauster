@@ -35,6 +35,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -523,12 +524,17 @@ def stop_background_job(
             pass  # exited between checks — that's the goal
         except OSError as exc:
             raise StopError(f"could not signal session {job_id} (pid {pid}): {exc}") from exc
-        settled = _await_exit(pid, proc_start, timeout=settle_timeout)
-        if not settled:
+        exited = _await_exit(pid, proc_start, timeout=settle_timeout)
+        if not exited:
             raise StopError(
                 f"session {job_id} did not settle within {settle_timeout:g}s "
                 "(not force-killing — that would orphan the cloud session)"
             )
+        # On POSIX the double-SIGINT is an orderly, cloud-DEREGISTERING shutdown → settled.
+        # On Windows `os.kill(pid, SIGINT)` is a hard TerminateProcess (SIGINT isn't a console
+        # control event there), so the worker is force-killed and the cloud session is NOT
+        # deregistered — report `settled=False` honestly, never a false clean stop (#914).
+        settled = sys.platform != "win32"
     else:
         # No validated-live worker to signal: the cloud-deregistering double-SIGINT
         # never ran, so we CANNOT confirm the cloud session was deregistered. It may
@@ -556,7 +562,13 @@ def stop_background_job(
             removed = True
             detail = f"{detail}; {forced_detail}" if detail else forced_detail
     if not settled:
-        note = "no live worker found — cloud stop not confirmed (re-check `claude agents`)"
+        if pid is not None and sys.platform == "win32":
+            note = (
+                "hard-killed on Windows (no orderly SIGINT stop); the cloud session may linger "
+                "and re-registers on next launch — re-check `claude agents`"
+            )
+        else:
+            note = "no live worker found — cloud stop not confirmed (re-check `claude agents`)"
         detail = f"{detail}; {note}" if detail else note
     return {"id": job_id, "settled": settled, "removed": removed, "detail": detail}
 

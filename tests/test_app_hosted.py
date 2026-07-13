@@ -656,8 +656,12 @@ def test_ws_hosted_handles_stream_teardown(write_config, projects_root):
 # routes — so the route↔manager wiring and the lifespan reattach_all/aclose path
 # are exercised end-to-end, not just at the stub boundary.
 
+# The hosted channel itself is NOT POSIX-only (Windows dials a named pipe, #902) — these
+# live-daemon e2e tests skip on Windows only because the `_LiveFakeDaemon` harness below serves
+# an AF_UNIX `.sock`. The Windows named-pipe transport is covered by test_claustrum_client (dials
+# the fake pipe on win32) + test_claustrum_daemon (`_simulate_win32` spawn). (#914)
 _POSIX_ONLY = pytest.mark.skipif(
-    sys.platform == "win32", reason="claustrum hosted channel is POSIX-only (AF_UNIX)"
+    sys.platform == "win32", reason="_LiveFakeDaemon harness serves an AF_UNIX socket (see note)"
 )
 
 
