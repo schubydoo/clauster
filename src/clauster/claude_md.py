@@ -163,20 +163,24 @@ def write_claude_md(
         raise ClaudeMdConflict(f"{FILENAME} changed on disk since it was loaded")
 
     tmp = target.with_suffix(target.suffix + ".tmp")
-    try:
-        # newline="\n" keeps CLAUDE.md byte-identical across OSes (the default would
-        # translate to CRLF on Windows, #914); the replace retries a transient Windows
-        # sharing violation (the `claude` CLI may hold the file open).
-        tmp.write_text(content, encoding="utf-8", newline="\n")
-        atomicio.replace_with_retry(tmp, target)
-    except OSError as exc:
-        # Atomic write failed (disk full, read-only, cross-device) — clean up the
-        # partial temp file and surface a 4xx instead of leaking an orphan + raw 500.
+    # Serialize this process's concurrent saves for the SAME project: the temp name is a
+    # fixed `CLAUDE.md.tmp`, so two overlapping writers would otherwise move/clobber the
+    # same temp mid-replace (lost or corrupted content). One lock per resolved target path.
+    with atomicio.inproc_path_lock(target):
         try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise ClaudeMdError(f"could not write {FILENAME}: {exc}") from exc
+            # newline="\n" keeps CLAUDE.md byte-identical across OSes (the default would
+            # translate to CRLF on Windows, #914); the replace retries a transient Windows
+            # sharing violation (the `claude` CLI may hold the file open).
+            tmp.write_text(content, encoding="utf-8", newline="\n")
+            atomicio.replace_with_retry(tmp, target)
+        except OSError as exc:
+            # Atomic write failed (disk full, read-only, cross-device) — clean up the
+            # partial temp file and surface a 4xx instead of leaking an orphan + raw 500.
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise ClaudeMdError(f"could not write {FILENAME}: {exc}") from exc
 
     new_sha = _sha256(content)
     if state_dir is not None:

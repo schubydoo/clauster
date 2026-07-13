@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import stat
 import sys
 import threading
@@ -224,34 +225,65 @@ def test_ensure_private_dir_windows_acl_is_cached_per_process(tmp_path, monkeypa
     assert len(calls) == 1
 
 
-def test_ensure_private_dir_windows_fails_closed_on_icacls_nonzero(tmp_path, monkeypatch):
+def test_ensure_private_dir_windows_warns_but_proceeds_on_icacls_nonzero(
+    tmp_path, monkeypatch, caplog
+):
+    # Best-effort (#914): a non-zero icacls exit warns loudly and proceeds on the inherited
+    # ACL rather than blocking every write — a fail-closed raise here bricked valid installs.
     atomicio._SECURED_DIRS.clear()
     calls: list = []
     _fake_icacls(monkeypatch, calls, returncode=5)
-    with pytest.raises(OSError, match="icacls could not secure"):
-        ensure_private_dir(tmp_path / "state")
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise
+    assert d.exists()
+    assert any("owner-only ACL" in r.message for r in caplog.records)
+    assert "exited 5" in caplog.text
 
 
-def test_ensure_private_dir_windows_fails_closed_when_icacls_missing(tmp_path, monkeypatch):
+def test_ensure_private_dir_windows_warns_when_icacls_missing(tmp_path, monkeypatch, caplog):
     atomicio._SECURED_DIRS.clear()
     _fake_icacls(monkeypatch, [], which=None)
-    with pytest.raises(OSError, match="icacls not found"):
-        ensure_private_dir(tmp_path / "state")
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise
+    assert d.exists()
+    assert "icacls not found on PATH" in caplog.text
 
 
-def test_ensure_private_dir_windows_fails_closed_without_username(tmp_path, monkeypatch):
+def test_ensure_private_dir_windows_warns_without_username(tmp_path, monkeypatch, caplog):
     atomicio._SECURED_DIRS.clear()
     _fake_icacls(monkeypatch, [])
     monkeypatch.delenv("USERNAME", raising=False)
-    with pytest.raises(OSError, match="USERNAME is unset"):
-        ensure_private_dir(tmp_path / "state")
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise
+    assert d.exists()
+    assert "USERNAME is unset" in caplog.text
 
 
-def test_ensure_private_dir_windows_fails_closed_on_icacls_oserror(tmp_path, monkeypatch):
+def test_ensure_private_dir_windows_warns_on_icacls_oserror(tmp_path, monkeypatch, caplog):
     atomicio._SECURED_DIRS.clear()
     _fake_icacls(monkeypatch, [], run_error=OSError("spawn failed"))
-    with pytest.raises(OSError, match="icacls failed to secure"):
-        ensure_private_dir(tmp_path / "state")
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise
+    assert d.exists()
+    assert "icacls failed to run" in caplog.text
+
+
+def test_ensure_private_dir_windows_failed_acl_attempted_once(tmp_path, monkeypatch, caplog):
+    # A host without a working icacls must not re-shell (or re-warn) on every write: the dir
+    # is marked attempted after the first touch regardless of outcome.
+    atomicio._SECURED_DIRS.clear()
+    calls: list = []
+    _fake_icacls(monkeypatch, calls, returncode=5)
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)
+        ensure_private_dir(d)  # second touch: no re-shell, no second warning
+    assert len(calls) == 1
+    assert sum("owner-only ACL" in r.message for r in caplog.records) == 1
 
 
 # --- in-process write lock (#914) ---

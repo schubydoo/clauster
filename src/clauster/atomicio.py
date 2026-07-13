@@ -7,7 +7,7 @@ so the write path here:
 * tightens the containing directory to ``0700`` even if it already existed (a bare
   ``mkdir(mode=0o700)`` only sets the mode on *creation*, so a pre-existing,
   looser dir would otherwise keep its perms while holding the secret) — and on
-  Windows, where ``chmod`` is a no-op, sets an explicit owner-only ACL instead
+  Windows, where ``chmod`` is a no-op, sets an explicit owner-only ACL best-effort
   (see :func:`ensure_private_dir` / :func:`_restrict_windows_acl`);
 * writes through a UNIQUE temp file (``mkstemp``, mode ``0600``) so a reader never
   sees a partial write and two concurrent writers can't clobber one fixed ``.tmp``;
@@ -23,6 +23,7 @@ rename over a transient Windows sharing violation.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -30,6 +31,8 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # In-process serialization of same-file read-modify-writes (#914). `fcntl.flock` is
 # POSIX-only, so on Windows two of THIS process's concurrent config writers would race
@@ -105,27 +108,50 @@ def replace_with_retry(src: Path, dst: Path, *, attempts: int = 5, delay: float 
 
 
 def _restrict_windows_acl(path: Path) -> None:
-    """Set an explicit owner-only ACL on ``path`` (Windows), the analogue of POSIX ``0700``.
+    """Best-effort owner-only ACL on ``path`` (Windows), the analogue of POSIX ``0700``.
 
-    ``chmod`` is a no-op on Windows, so without this the state dir (which holds
-    ``session.secret``, the auth-signing key) is only as private as its *inherited* parent
-    ACL — a ``state_dir`` relocated outside the user profile could be world-readable. Uses
-    built-in ``icacls`` to remove inheritance and grant Full control to only the current user
-    and SYSTEM. **Fail-closed:** a missing ``icacls``, a missing ``USERNAME``, or a non-zero
-    exit raises (never store the secret under a dir we couldn't secure), mirroring the POSIX
-    ``chmod``-raises path. Cached once per process (``icacls`` is a subprocess and this runs
-    on every write).
+    ``chmod`` is a no-op on Windows, so this uses built-in ``icacls`` to remove inheritance
+    and grant Full control to only the current user and SYSTEM — the analogue of ``0700`` for
+    the state dir that holds ``session.secret`` (the auth-signing key).
+
+    **Best-effort, not fail-closed:** the default ``state_dir`` under ``%USERPROFILE%`` already
+    inherits a user + SYSTEM + Administrators ACL (never world-readable), so this only strips
+    inheritance as defense-in-depth. If ``icacls`` can't run — absent from ``PATH``, no
+    ``USERNAME`` to name the grantee (a domain / service account resolves to a short or empty
+    name), or a non-zero exit — we log a loud WARNING and proceed on the inherited ACL rather
+    than block every state write, which would brick an otherwise-valid Windows install. Attempted
+    once per directory per process regardless of outcome (``icacls`` is a subprocess and this
+    runs on every write), so a host without a working ``icacls`` doesn't re-shell or re-warn.
     """
     key = _lock_key(path)
     with _SECURED_DIRS_LOCK:
         if key in _SECURED_DIRS:
             return
+    reason = _apply_owner_only_acl(path)
+    if reason is not None:
+        logger.warning(
+            "could not set an owner-only ACL on %s (%s) — relying on its inherited ACL; if "
+            "state_dir is outside your user profile, tighten its permissions manually",
+            path,
+            reason,
+        )
+    with _SECURED_DIRS_LOCK:
+        _SECURED_DIRS.add(key)
+
+
+def _apply_owner_only_acl(path: Path) -> str | None:
+    """Grant owner-only Full control on ``path`` via ``icacls``; return an error reason or None.
+
+    Returns ``None`` on success, or a short human-readable reason string on any failure
+    (caller logs it). Split out from :func:`_restrict_windows_acl` so the caching + warning
+    policy is testable apart from the subprocess mechanics.
+    """
     icacls = shutil.which("icacls")
     if icacls is None:
-        raise OSError(f"cannot secure {path}: icacls not found on PATH")
+        return "icacls not found on PATH"
     user = os.environ.get("USERNAME")
     if not user:
-        raise OSError(f"cannot secure {path}: USERNAME is unset, cannot grant an owner ACL")
+        return "USERNAME is unset, cannot name the ACL grantee"
     argv = [
         icacls,
         str(path),
@@ -138,13 +164,10 @@ def _restrict_windows_acl(path: Path) -> None:
     try:  # noqa: S603 — absolute icacls, list-argv, no shell
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
     except OSError as exc:
-        raise OSError(f"icacls failed to secure {path}: {exc}") from exc
+        return f"icacls failed to run: {exc}"
     if proc.returncode != 0:
-        raise OSError(
-            f"icacls could not secure {path} (exit {proc.returncode}): {proc.stderr.strip()}"
-        )
-    with _SECURED_DIRS_LOCK:
-        _SECURED_DIRS.add(key)
+        return f"icacls exited {proc.returncode}: {proc.stderr.strip()}"
+    return None
 
 
 def ensure_private_dir(path: Path) -> None:
@@ -155,8 +178,8 @@ def ensure_private_dir(path: Path) -> None:
     and must stay owner-only. On POSIX a ``chmod`` failure is raised (fail closed: we
     must not store the secret under a dir we can't secure). On Windows, where ``chmod``
     is a no-op, an explicit owner-only ACL is set instead (:func:`_restrict_windows_acl`),
-    also fail-closed — so the owner-only guarantee holds regardless of where ``state_dir``
-    points, not merely via the inherited parent ACL.
+    best-effort — the default state dir already inherits a private ACL, so a failed
+    tightening warns rather than blocking every write (see that function).
     """
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if _is_windows():

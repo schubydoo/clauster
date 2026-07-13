@@ -158,6 +158,26 @@ def test_write_replace_failure_tolerates_unlink_failure(tmp_path, monkeypatch):
         write_claude_md(proj, "hello\n")
 
 
+def test_write_claude_md_holds_per_path_lock_during_replace(tmp_path, monkeypatch):
+    # The fixed-name temp write is serialized under the per-path in-process lock (#914) so two
+    # concurrent saves to the same project can't move/clobber the same CLAUDE.md.tmp mid-replace.
+    from clauster import atomicio
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    target = proj / "CLAUDE.md"
+    seen: dict = {}
+
+    def _spy_replace(src, dst):
+        # The write must run INSIDE the target's lock — assert it's held right now.
+        seen["locked"] = atomicio.inproc_path_lock(target).locked()
+        Path(src).replace(dst)
+
+    monkeypatch.setattr("clauster.claude_md.atomicio.replace_with_retry", _spy_replace)
+    write_claude_md(proj, "hello\n")
+    assert seen["locked"] is True
+
+
 def test_write_audit_failure_does_not_fail_write(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()
