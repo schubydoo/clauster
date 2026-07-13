@@ -299,9 +299,15 @@ def clone_project(
 
     try:
         os.rename(tmp, target)
-    except OSError as exc:  # target appeared between _safe_target and now (TOCTOU)
+    except OSError as exc:
         shutil.rmtree(tmp, ignore_errors=True)
-        raise TargetExists(f"a directory named {name!r} already exists") from exc
+        if target.exists():
+            # The target appeared between _safe_target and now (TOCTOU).
+            raise TargetExists(f"a directory named {name!r} already exists") from exc
+        # `os.rename` can also fail transiently on Windows (e.g. an antivirus scanner holding
+        # the freshly cloned tree open → sharing violation); don't mislabel that as an
+        # already-exists conflict — surface the real finalize failure (#914).
+        raise CloneFailed(f"could not finalize the clone of {name!r}: {exc}") from exc
     return target
 
 

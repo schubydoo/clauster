@@ -18,6 +18,16 @@ from .models import Project, TrustState
 # its name is a safe single path component.
 PROJECT_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
+# Windows reserved DEVICE names (#914): `mkdir("CON")` etc. raise a non-FileExistsError
+# `OSError` on Windows (they're device handles, not paths), which the create/clone paths
+# don't catch → a raw 500 instead of a clean 4xx. They pass `PROJECT_NAME_RE` (all letters),
+# so reject them explicitly — on every OS, so behavior is uniform (they're never useful names).
+_WIN_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
 CLAUDE_JSON = Path("~/.claude.json").expanduser()
 
 # Discovery is hit on every /api/projects (4s poll) and many runner paths; an
@@ -31,8 +41,14 @@ DISCOVERY_CACHE_TTL_SECONDS = 2.0
 
 
 def is_valid_project_name(name: str) -> bool:
-    """Whether ``name`` is a safe single path component (path-traversal defense)."""
-    return PROJECT_NAME_RE.fullmatch(name) is not None
+    """Whether ``name`` is a safe single path component (path-traversal defense).
+
+    Also rejects Windows reserved device names (``CON``, ``NUL``, ``COM1``…), which pass the
+    character regex but can't be created as directories on Windows (#914).
+    """
+    if PROJECT_NAME_RE.fullmatch(name) is None:
+        return False
+    return name.upper() not in _WIN_RESERVED_NAMES
 
 
 def _load_trusted_paths(claude_json: Path) -> set[Path]:

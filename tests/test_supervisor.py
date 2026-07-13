@@ -554,6 +554,9 @@ def test_live_session_pid_fails_closed_on_nonint_pid(monkeypatch):
 
 def _stop_setup(monkeypatch, tmp_path, *, alive_seq, rm=None, pid=4242, proc_start=999):
     """Wire stop_background_job's side-effecting deps; return (roster_path, kills)."""
+    # Pin POSIX so `settled` reflects the orderly double-SIGINT stop deterministically on any
+    # host (on Windows the double-SIGINT hard-kills → settled=False; see the win32 test). (#914)
+    monkeypatch.setattr(supervisor.sys, "platform", "linux")
     monkeypatch.setattr(supervisor, "resolve_binary", lambda b: "/abs/claude")
     roster = _roster(tmp_path, {_JID: {"pid": pid, "procStart": proc_start}})
     it = iter(alive_seq)
@@ -586,6 +589,18 @@ def test_stop_no_live_worker_is_unconfirmed_not_clean(tmp_path, monkeypatch, cap
     assert res["settled"] is False and res["removed"] is True
     assert "stop not confirmed" in res["detail"]
     assert "cloud deregistration not confirmed" in caplog.text
+
+
+def test_stop_on_windows_is_hard_kill_not_a_clean_stop(tmp_path, monkeypatch):
+    # On Windows os.kill(SIGINT) is a hard TerminateProcess (SIGINT isn't a console event), so
+    # the worker is force-killed and the cloud session isn't deregistered — report settled=False
+    # with an honest note, never a false clean stop (#914).
+    roster, kills = _stop_setup(monkeypatch, tmp_path, alive_seq=[True, False])
+    monkeypatch.setattr(supervisor.sys, "platform", "win32")  # override the setup's POSIX pin
+    res = supervisor.stop_background_job(_JID, roster_json=roster)
+    assert res["settled"] is False  # hard-killed, not an orderly cloud-deregistering stop
+    assert res["removed"] is True
+    assert "hard-killed on Windows" in res["detail"]
 
 
 def test_stop_job_absent_from_roster_just_rm(tmp_path, monkeypatch):

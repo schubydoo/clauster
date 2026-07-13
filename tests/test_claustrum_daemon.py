@@ -582,3 +582,43 @@ async def test_spawn_scrubs_ambient_daemon_sentinel(make_daemon, monkeypatch):
     assert "CLAUSTRUM_TOKEN_PIPE" not in env
     assert "CLAUSTER_SESSION_SECRET" not in env  # Clauster secret scrubbed (procutil.child_env)
     assert env.get("CLAUSTRUM_KEEP_THIS") == "ok"  # unrelated env preserved
+
+
+def test_af_unix_in_use_matches_os_name():
+    # The seam mirrors os.name so the length gate is testable via a patchable boundary
+    # instead of monkeypatching the global os.name (which crashes pathlib on Windows).
+    import os as _os
+
+    from clauster.claustrum_daemon import _af_unix_in_use
+
+    assert _af_unix_in_use() == (_os.name == "posix")
+
+
+def test_check_unix_socket_path_rejects_too_long(monkeypatch):
+    # A socket path over the AF_UNIX sun_path limit fails early with a clear error (#914).
+    # Force the AF_UNIX branch via the seam (NOT os.name) so the raise-branch runs on a
+    # Windows CI runner too — patching os.name="posix" there makes pathlib uninstantiable.
+    from clauster import claustrum_daemon as cd
+
+    monkeypatch.setattr(cd, "_af_unix_in_use", lambda: True)
+    too_long = Path("/tmp") / ("x" * cd._SUN_PATH_MAX) / "d.sock"
+    with pytest.raises(cd.ClaustrumError, match="AF_UNIX limit"):
+        cd._check_unix_socket_path(too_long)
+
+
+def test_check_unix_socket_path_ok_when_short(monkeypatch):
+    # Force the AF_UNIX branch and use a guaranteed-short literal path — a real macOS tmp_path
+    # (/private/var/folders/…) is itself over 104 bytes and would spuriously trip the gate.
+    from clauster import claustrum_daemon as cd
+
+    monkeypatch.setattr(cd, "_af_unix_in_use", lambda: True)
+    cd._check_unix_socket_path(Path("/tmp/d.sock"))  # comfortably short — must not raise
+
+
+def test_check_unix_socket_path_skipped_off_posix(monkeypatch):
+    # Windows dials a named pipe (no sun_path limit), so the check is a no-op there.
+    from clauster import claustrum_daemon as cd
+
+    monkeypatch.setattr(cd, "_af_unix_in_use", lambda: False)
+    long_sock = Path("/tmp") / ("x" * 300) / "d.sock"
+    cd._check_unix_socket_path(long_sock)  # non-posix → no-op, must not raise

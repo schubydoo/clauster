@@ -699,6 +699,19 @@
                     {% endif %}
                   </template>
                   {% endif %}
+                  {# Read-only transcript viewer trigger on the live-session row (#866): opens the
+                     same project-keyed session-history modal as the project row, with this bridge's
+                     live session sorted to the top (live-first). Hidden for ANY worktree-spawn bridge
+                     (standard OR interactive): a worktree session runs in its own cwd, so its .jsonl
+                     lands under a different sanitized-cwd dir and is neither listed by this
+                     project-keyed viewer nor by live_session_uuids (runner.py) — the button would open
+                     transcripts that don't include this session. Distinct data-test from the project-row one. #}
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="transcript-trigger-session"
+                          @click="openTranscripts(i.project)"
+                          x-show="i.spawn_mode !== 'worktree'" x-cloak
+                          :title="'View read-only session transcripts for ' + i.project"
+                          :aria-label="'View transcripts for ' + i.project">
+                    <svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>Transcript</button>
                   <button type="button" class="btn btn-sm btn-outline-danger" @click="stop(i.rk)"
                           :disabled="isStopping(i.rk)">
                     <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.rk)" x-cloak></span>
