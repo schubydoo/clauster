@@ -217,6 +217,70 @@ def test_write_claude_md_holds_per_path_lock_during_replace(tmp_path, monkeypatc
     assert seen["locked"] is True
 
 
+def test_write_claude_md_acquires_cross_process_lock(tmp_path, monkeypatch):
+    # The editor must take atomicio.cross_process_lock for the target — the SAME shared
+    # cross-process lock the config-write path takes — so the two write paths mutually
+    # exclude across processes (follow-up to #915). Spy that it is entered for the target.
+    from clauster import atomicio
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    target = proj / "CLAUDE.md"
+    seen: list[Path] = []
+    real = atomicio.cross_process_lock
+
+    def _spy(t):
+        seen.append(t)
+        return real(t)
+
+    monkeypatch.setattr("clauster.claude_md.atomicio.cross_process_lock", _spy)
+    write_claude_md(proj, "hello\n")
+    assert seen == [target]
+
+
+def test_write_claude_md_shares_lock_file_with_config_write_path(tmp_path):
+    # The editor's target and the config-write path's target for the project-root CLAUDE.md
+    # must resolve to ONE cross-process lock file — that shared file is what serializes the
+    # two surfaces. Confirm both map to the same lock file under a configured lock dir.
+    from clauster import atomicio, claude_md
+    from clauster import config_file_writer as fw
+
+    atomicio.configure_lock_dir(tmp_path / "locks")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    editor_target = claude_md._target(proj)
+    config_write_target = fw.resolve_contained_path(proj, "CLAUDE.md")
+    assert atomicio._cross_process_lock_file(editor_target) == atomicio._cross_process_lock_file(
+        config_write_target
+    )
+
+
+def test_write_claude_md_leaves_no_lock_in_project_dir(tmp_path):
+    # De-litter regression: after a write the project dir holds CLAUDE.md but NO `.lock`
+    # (the cross-process lock lives in the configured state dir), even with it configured.
+    from clauster import atomicio
+
+    atomicio.configure_lock_dir(tmp_path / "locks")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    write_claude_md(proj, "hello\n")
+    assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "hello\n"
+    assert not any(c.name.endswith(".lock") for c in proj.iterdir())
+
+
+def test_write_claude_md_warns_once_when_lock_dir_unconfigured(tmp_path, caplog):
+    # Unconfigured cross-process lock (test-only; create_app always configures it) → the
+    # write still succeeds under the inproc lock, but the degrade is logged, never silent.
+    import logging
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    with caplog.at_level(logging.WARNING, logger="clauster.atomicio"):
+        write_claude_md(proj, "hello\n")
+    assert (proj / "CLAUDE.md").read_text(encoding="utf-8") == "hello\n"
+    assert any("cross-process file lock dir not configured" in r.message for r in caplog.records)
+
+
 def test_write_claude_md_uses_unique_temp_name(tmp_path, monkeypatch):
     # A UNIQUE temp name (not a fixed CLAUDE.md.tmp) so a second clauster PROCESS saving the
     # same project can't clobber this one's temp mid-replace — the inproc lock is intra-process
@@ -287,6 +351,17 @@ def _client(write_config, tmp_path) -> TestClient:
     )
     runner = SessionRunner(cfg, claude_json=claude_json)
     return TestClient(create_app(cfg, runner=runner))
+
+
+def test_create_app_configures_cross_process_lock_dir(write_config, tmp_path):
+    # create_app must point the cross-process lock at <state_dir>/locks before any request
+    # can write, so prod is ALWAYS configured (the warn-once path is then test-only misuse).
+    from clauster import atomicio
+
+    cfg = load_config(write_config(f"state_dir: {tmp_path}/.state\n"))
+    create_app(cfg)
+    assert atomicio._LOCK_DIR == (Path(cfg.state_dir).expanduser() / "locks")
+    assert atomicio._LOCK_DIR.is_dir()
 
 
 def test_get_claude_md_absent(write_config, tmp_path):

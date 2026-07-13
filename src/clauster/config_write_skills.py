@@ -438,9 +438,10 @@ def write_skill(
     :func:`~clauster.config_file_writer.resolve_contained_path` against the staging
     dir before it is written) — a ``../`` or absolute member path aborts the whole
     write before any promote. The build writes members directly rather than via
-    :func:`~clauster.config_file_writer.write_file` so no per-file ``.lock`` sidecar
-    lands inside (and is then promoted as part of) the skill tree — see the inline
-    comment in ``_build``.
+    :func:`~clauster.config_file_writer.write_file` because the staging dir is private
+    and uncontested until ``replace_tree`` promotes it under one cross-process lock, so
+    per-member locking would be pure redundant overhead — see the inline comment in
+    ``_build``.
     """
     if not is_valid_skill_name(name):
         raise cw.PathEscapeError(f"invalid skill name: {name!r}")
@@ -481,15 +482,12 @@ def write_skill(
         raise cw.StaleConfigWriteError(f"skill {name!r} changed on disk since it was loaded")
 
     def _build(staging: Path) -> None:
-        # Contained, direct writes -- NOT fw.write_file(), which additionally takes
-        # its own per-file flock via a sidecar "<file>.lock" next to the target. That
-        # sidecar is meant to be a long-lived lock file beside a real, standalone
-        # target (mirroring clauster.claude_json's pattern); calling it once per
-        # member here would leave a permanent "<name>.lock" INSIDE the staging dir,
-        # which then gets promoted as part of the skill's own tree. The staging dir
-        # is already private and uncontested until replace_tree's own flock-guarded
-        # promotion, so per-file locking here would be both wrong (pollutes the
-        # tree) and redundant.
+        # Contained, direct writes -- NOT fw.write_file(), which additionally takes its
+        # own cross-process flock per target. The staging dir is a fresh, private,
+        # uncontested tree that no other writer can see until replace_tree promotes it
+        # under a single cross-process lock, so taking a per-member lock here would be
+        # pure redundant overhead (and would open/close a state-dir lock file per file
+        # for nothing). replace_tree's own lock is the only contention point.
         for relative, content in files.items():
             target = fw.resolve_contained_path(staging, relative)
             target.parent.mkdir(parents=True, exist_ok=True)

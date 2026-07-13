@@ -369,3 +369,116 @@ def test_atomic_write_text_writes_lf_not_crlf(tmp_path):
     target = tmp_path / "f.txt"
     atomic_write_text(target, "a\nb\nc\n")
     assert target.read_bytes() == b"a\nb\nc\n"  # byte-identical cross-OS, never \r\n
+
+
+# --- cross-process lock: state-dir lock file, no target-dir litter (follow-up to #915) ---
+
+
+def test_configure_lock_dir_creates_owner_only_dir(tmp_path):
+    lock_dir = tmp_path / "state" / "locks"
+    atomicio.configure_lock_dir(lock_dir)
+    assert lock_dir.is_dir()
+    if sys.platform != "win32":
+        assert stat.S_IMODE(lock_dir.stat().st_mode) == 0o700
+    assert atomicio._LOCK_DIR == lock_dir
+
+
+def test_cross_process_lock_file_none_when_unconfigured(tmp_path):
+    # No lock dir set → no lock file (the manager warns + degrades to inproc-only).
+    assert atomicio._cross_process_lock_file(tmp_path / "CLAUDE.md") is None
+
+
+def test_cross_process_lock_file_lives_in_lock_dir_not_target_dir(tmp_path):
+    lock_dir = tmp_path / "locks"
+    atomicio.configure_lock_dir(lock_dir)
+    target = tmp_path / "proj" / "CLAUDE.md"
+    lock_file = atomicio._cross_process_lock_file(target)
+    assert lock_file is not None
+    assert lock_file.parent == lock_dir  # in the state dir, NOT beside the target
+    assert lock_file.suffix == ".lock"
+    assert lock_file.parent != target.parent
+
+
+def test_cross_process_lock_file_same_realpath_shares_one_file(tmp_path):
+    # The editor target and the config-write target for the SAME project-root CLAUDE.md
+    # both go through `_lock_key` (realpath), so they must hash to ONE lock file — this is
+    # what makes the two write paths mutually exclude.
+    atomicio.configure_lock_dir(tmp_path / "locks")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "CLAUDE.md").write_text("x")
+    editor_target = (proj / "CLAUDE.md").resolve()
+    # A different path form (via a symlink to the project dir) that realpaths to the same file.
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(proj, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - Windows without symlink priv
+        pytest.skip("symlinks unavailable")
+    aliased_target = link / "CLAUDE.md"
+    assert atomicio._cross_process_lock_file(editor_target) == atomicio._cross_process_lock_file(
+        aliased_target
+    )
+
+
+def test_cross_process_lock_creates_lock_file_in_state_dir(tmp_path):
+    lock_dir = tmp_path / "locks"
+    atomicio.configure_lock_dir(lock_dir)
+    target = tmp_path / "proj" / "CLAUDE.md"
+    with atomicio.cross_process_lock(target):
+        pass
+    # The lock file lands in the state dir; nothing appears in the target's (absent) dir.
+    assert list(lock_dir.glob("*.lock"))
+    assert not (target.parent).exists() or not list(target.parent.glob("*.lock"))
+
+
+def test_cross_process_lock_warns_once_when_unconfigured(tmp_path, caplog):
+    # Unconfigured → NEVER silent: warn once, then yield (inproc lock still holds).
+    target = tmp_path / "CLAUDE.md"
+    with caplog.at_level(logging.WARNING, logger="clauster.atomicio"):
+        with atomicio.cross_process_lock(target):
+            pass
+        with atomicio.cross_process_lock(target):  # second entry must NOT warn again
+            pass
+    msg = "cross-process file lock dir not configured"
+    warnings = [r for r in caplog.records if msg in r.message]
+    assert len(warnings) == 1
+
+
+def test_cross_process_lock_noop_without_fcntl(tmp_path, monkeypatch, caplog):
+    # Windows (no fcntl): yield without a flock and WITHOUT the unconfigured warning — the
+    # inproc lock is the only guard there today, so this is not a regression.
+    monkeypatch.setattr(atomicio, "fcntl", None)
+    with caplog.at_level(logging.WARNING, logger="clauster.atomicio"):
+        with atomicio.cross_process_lock(tmp_path / "CLAUDE.md"):
+            pass
+    assert not any("lock dir not configured" in r.message for r in caplog.records)
+
+
+def test_cross_process_lock_serializes_across_lock_instances(tmp_path):
+    # Two threads whose critical sections would overlap are serialized by the flock even
+    # though they never touch the inproc lock — the property that makes two PROCESSES mutually
+    # exclude. Skipped where fcntl is unavailable.
+    if atomicio.fcntl is None:  # pragma: no cover - POSIX-only
+        pytest.skip("fcntl unavailable")
+    atomicio.configure_lock_dir(tmp_path / "locks")
+    target = tmp_path / "proj" / "CLAUDE.md"
+    counter_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def worker() -> None:
+        nonlocal active, max_active
+        with atomicio.cross_process_lock(target):
+            with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with counter_lock:
+                active -= 1
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert max_active == 1

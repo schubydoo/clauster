@@ -28,6 +28,7 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from . import (
     __version__,
+    atomicio,
     auth,
     claude_cli,
     claude_md,
@@ -562,6 +563,11 @@ async def stream_until_disconnect(
 def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> FastAPI:
     """Build and wire the FastAPI app (routes, middleware, static, bridge poll loop)."""
     runner = runner or SessionRunner(config)
+    # Point the cross-process config/CLAUDE.md write lock at a state-dir directory (not the
+    # project dir) BEFORE any request can write, so the CLAUDE.md editor and the config-write
+    # path share one flock without littering project dirs with a `CLAUDE.md.lock` (follow-up to
+    # #915). Configured here in prod ⇒ the warn-once "unconfigured" path is test-only misuse.
+    atomicio.configure_lock_dir(Path(config.state_dir).expanduser() / "locks")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

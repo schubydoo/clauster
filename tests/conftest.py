@@ -143,6 +143,28 @@ def _reset_nvm_bin_dir_cache():
 
 
 @pytest.fixture(autouse=True)
+def _reset_atomicio_lock_dir():
+    """Reset atomicio's process-wide cross-process lock-dir state around each test.
+
+    ``configure_lock_dir`` sets a module global (in prod, once in ``create_app``). A test
+    that configures it to a ``tmp_path`` subdir would otherwise leak that (soon-deleted)
+    dir into every later test in the same xdist worker — a config write in an unrelated
+    test would then try to open a lock file under a path that no longer exists. Reset to
+    the unconfigured state before AND after each test, and clear the warn-once latch so the
+    "unconfigured" warning is assertable in isolation.
+    """
+    from clauster import atomicio
+
+    def _reset() -> None:
+        atomicio._LOCK_DIR = None
+        atomicio._CROSS_PROCESS_UNCONFIGURED_WARNED = False
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
 def _dispose_db_engines():
     """Dispose any DB engine a test leaves open, after each test.
 

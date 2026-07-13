@@ -3,8 +3,10 @@
 Covers strict path containment (traversal / absolute-path / symlink-escape all
 REJECTED before any I/O), the file writer's atomic create/replace, the redacted read
 path, the directory-tree writer's atomic create/replace (including the two-rename
-swap for an existing tree), delete (file + tree, idempotent), and the advisory flock
-serializing concurrent writers on the same target.
+swap for an existing tree), delete (file + tree, idempotent), and the cross-process
+lock serializing concurrent writers on the same target (now via
+:func:`atomicio.cross_process_lock`, whose lock file lives in the state dir, not a
+sidecar beside the target — so a write leaves NO ``.lock`` in the target dir).
 """
 
 from __future__ import annotations
@@ -16,28 +18,28 @@ from pathlib import Path
 
 import pytest
 
+from clauster import atomicio
 from clauster import config_file_writer as fw
 
-# POSIX-only markers, mirroring test_claude_json.py / test_trust.py: on Windows the
-# advisory flock (fcntl) is absent so `_locked` is a documented best-effort no-op (no
-# `.lock` sidecar), and Unix permission bits aren't honored (stat reports 0o666). Gate
-# the assertions that check those two POSIX-specific behaviors; the leftover-file tests
-# instead assert the *cross-platform* invariant (no stray .tmp/.staging/.trash), the
-# same idiom test_claude_json.py uses (assert the bad file is absent, not exact
-# directory contents).
+# POSIX-only marker, mirroring test_claude_json.py / test_trust.py: on Windows Unix
+# permission bits aren't honored (stat reports 0o666). Gate the assertions that check
+# that POSIX-specific behavior; the leftover-file tests instead assert the
+# *cross-platform* invariant (no stray .tmp/.staging/.trash), the same idiom
+# test_claude_json.py uses (assert the bad file is absent, not exact directory contents).
 needs_posix = pytest.mark.skipif(os.name != "posix", reason="POSIX file-mode semantics")
 
 
 def _no_orphans(parent: Path) -> None:
-    """Assert no stray temp/staging/trash artifacts linger in ``parent`` (any platform).
+    """Assert no stray temp/staging/trash/lock artifacts linger in ``parent`` (any platform).
 
-    The advisory-lock ``.lock`` sidecar is expected to linger on POSIX (same as the
-    Foundation's ``claude_json._locked``) and is simply absent on Windows, so it is not
-    checked here; only the transient write artifacts, which must NEVER be orphaned, are.
+    The cross-process lock file now lives in the configured state dir, not beside the
+    target, so no ``.lock`` sidecar is ever created in ``parent`` — assert that too,
+    alongside the transient write artifacts, which must NEVER be orphaned.
     """
     for child in parent.iterdir():
         name = child.name
         assert not name.endswith(".tmp"), f"orphaned temp file: {name}"
+        assert not name.endswith(".lock"), f"lock sidecar in target dir: {name}"
         assert ".staging-" not in name, f"orphaned staging dir: {name}"
         assert ".trash-" not in name, f"orphaned trash dir: {name}"
 
@@ -124,8 +126,8 @@ def test_write_file_rejects_path_escape_before_any_io(tmp_path: Path) -> None:
 
 def test_write_file_no_leftover_temp_file(tmp_path: Path) -> None:
     fw.write_file(tmp_path, "note.txt", "hello")
-    # No stray .tmp is ever left (cross-platform); the .lock sidecar may linger on POSIX
-    # and is absent on Windows, so _no_orphans deliberately ignores it.
+    # No stray .tmp is ever left (cross-platform), and no `.lock` sidecar is created in the
+    # target dir (the cross-process lock lives in the state dir now) — _no_orphans asserts both.
     assert (tmp_path / "note.txt").exists()
     _no_orphans(tmp_path)
 
@@ -381,19 +383,21 @@ def test_delete_path_no_trash_leftover(tmp_path: Path) -> None:
     fw.replace_tree(tmp_path, "skill", _populate({"SKILL.md": "x"}))
     fw.delete_path(tmp_path, "skill")
     # The target directory is gone; no `.trash-*` lingers (it is always cleaned up after
-    # the swap). The `.lock` sidecar may linger on POSIX / is absent on Windows, so
-    # _no_orphans deliberately ignores it.
+    # the swap) and no `.lock` sidecar is created (the cross-process lock lives in the
+    # state dir now, so _no_orphans asserts its absence here).
     assert not (tmp_path / "skill").exists()
     _no_orphans(tmp_path)
 
 
-# --- flock: serializes concurrent writers on the SAME target -----------------------
+# --- lock: serializes concurrent writers on the SAME target ------------------------
 
 
-@pytest.mark.skipif(fw.fcntl is None, reason="advisory flock is POSIX-only (no fcntl)")
 def test_locked_serializes_concurrent_file_writers(tmp_path: Path, monkeypatch) -> None:
     # Same shape as test_trust.py's flock regression test: slow down the guarded
     # section and assert the in-flight count of concurrent writers never exceeds 1.
+    # The in-process lock serializes these same-process threads on every OS; layering the
+    # cross-process flock under it (state dir configured) never breaks that.
+    atomicio.configure_lock_dir(tmp_path / "state-locks")
     counter_lock = threading.Lock()
     active = 0
     max_active = 0
@@ -422,29 +426,31 @@ def test_locked_serializes_concurrent_file_writers(tmp_path: Path, monkeypatch) 
     for t in threads:
         t.join()
 
-    assert max_active == 1  # flock fully serialized the writers
+    assert max_active == 1  # the lock fully serialized the writers
     assert (tmp_path / "shared.txt").exists()
 
 
-def test_locked_noop_without_fcntl(tmp_path: Path, monkeypatch) -> None:
-    # On a platform without fcntl (Windows) the lock degrades to a no-op: the write
-    # still completes and no .lock sidecar is created.
-    monkeypatch.setattr(fw, "fcntl", None)
+def test_locked_delegates_to_cross_process_lock(tmp_path: Path, monkeypatch) -> None:
+    # `_locked` must acquire atomicio.cross_process_lock for the target — that shared
+    # cross-process lock is what makes the config-write path mutually exclude with the
+    # CLAUDE.md editor path (both lock the same target). Spy that it is entered.
+    target = fw.resolve_contained_path(tmp_path, "note.txt")
+    seen: list[Path] = []
+    real = atomicio.cross_process_lock
+
+    def _spy(t):
+        seen.append(t)
+        return real(t)
+
+    monkeypatch.setattr(fw.atomicio, "cross_process_lock", _spy)
+    fw.write_file(tmp_path, "note.txt", "hello")
+    assert seen == [target]
+
+
+def test_locked_leaves_no_lock_sidecar_in_target_dir(tmp_path: Path) -> None:
+    # De-litter regression (follow-up to #915): even with the cross-process lock configured,
+    # a write leaves NO `.lock` in the project/target dir — the lock file lives in the state dir.
+    atomicio.configure_lock_dir(tmp_path / "state-locks")
     fw.write_file(tmp_path, "note.txt", "hello")
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "hello"
-    assert not (tmp_path / "note.txt.lock").exists()
-
-
-def test_locked_lockfile_open_failure_is_best_effort(tmp_path: Path, monkeypatch) -> None:
-    # If the .lock sidecar can't be opened, never block the write — proceed unlocked
-    # (the atomic replace still protects the file).
-    real_open = fw.os.open
-
-    def boom(path, *args, **kwargs):
-        if str(path).endswith(".lock"):
-            raise OSError("simulated: cannot open lock file")
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(fw.os, "open", boom)
-    fw.write_file(tmp_path, "note.txt", "hello")
-    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "hello"
+    assert not any(c.name.endswith(".lock") for c in tmp_path.iterdir())
