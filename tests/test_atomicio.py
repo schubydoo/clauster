@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import stat
 import sys
+import threading
+import time
+import types
 
 import pytest
 
@@ -171,15 +175,197 @@ def test_fsync_dir_ignores_fsync_error(tmp_path, monkeypatch):
     atomicio.fsync_dir(tmp_path)  # must not raise
 
 
-def test_ensure_private_dir_ignores_chmod_failure_on_windows(tmp_path, monkeypatch):
-    # On Windows (os.name == "nt") there are no POSIX mode bits, so a chmod failure is a
-    # no-op that is ignored — only POSIX fails closed (covered by the test above).
-    import pathlib
+# --- Windows owner-only ACL (#914): driven on POSIX via the `_is_windows` seam + fake icacls ---
 
-    def _boom(self, *a, **k):
-        raise OSError("no chmod")
 
-    monkeypatch.setattr(atomicio.os, "name", "nt")
-    monkeypatch.setattr(pathlib.Path, "chmod", _boom)
-    ensure_private_dir(tmp_path / "win")  # simulated Windows: must NOT raise
-    assert (tmp_path / "win").exists()  # the primary behavior (mkdir) still happened
+def _fake_icacls(monkeypatch, calls, *, returncode=0, run_error=None, which="icacls"):
+    """Wire up a simulated Windows: _is_windows True, a fake icacls, a captured subprocess.run."""
+    monkeypatch.setattr(atomicio, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        atomicio.shutil,
+        "which",
+        (lambda name: None) if which is None else (lambda name: f"/x/{name}"),
+    )
+    monkeypatch.setenv("USERNAME", "someuser")
+
+    def _run(argv, **kwargs):
+        calls.append(argv)
+        if run_error is not None:
+            raise run_error
+        return types.SimpleNamespace(returncode=returncode, stderr="access denied", stdout="")
+
+    monkeypatch.setattr(atomicio.subprocess, "run", _run)
+
+
+def test_ensure_private_dir_windows_sets_owner_only_acl(tmp_path, monkeypatch):
+    # On Windows, chmod is a no-op, so ensure_private_dir sets an explicit owner-only ACL via
+    # icacls: remove inheritance + grant Full to only the current user and SYSTEM (SID).
+    atomicio._SECURED_DIRS.clear()
+    calls: list = []
+    _fake_icacls(monkeypatch, calls)
+    d = tmp_path / "state"
+    ensure_private_dir(d)
+    assert d.exists()
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0].endswith("icacls")
+    assert str(d) in argv
+    assert "/inheritance:r" in argv
+    assert "someuser:(OI)(CI)F" in argv
+    assert "*S-1-5-18:(OI)(CI)F" in argv  # SYSTEM's language-neutral SID
+
+
+def test_ensure_private_dir_windows_acl_is_cached_per_process(tmp_path, monkeypatch):
+    atomicio._SECURED_DIRS.clear()
+    calls: list = []
+    _fake_icacls(monkeypatch, calls)
+    d = tmp_path / "state"
+    ensure_private_dir(d)
+    ensure_private_dir(d)  # second touch must NOT re-shell to icacls
+    assert len(calls) == 1
+
+
+def test_ensure_private_dir_windows_warns_but_proceeds_on_icacls_nonzero(
+    tmp_path, monkeypatch, caplog
+):
+    # Best-effort (#914): a non-zero icacls exit warns loudly and proceeds on the inherited
+    # ACL rather than blocking every write — a fail-closed raise here bricked valid installs.
+    atomicio._SECURED_DIRS.clear()
+    calls: list = []
+    _fake_icacls(monkeypatch, calls, returncode=5)
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise
+    assert d.exists()
+    assert any("owner-only ACL" in r.message for r in caplog.records)
+    assert "exited 5" in caplog.text
+
+
+def test_ensure_private_dir_windows_warns_when_icacls_missing(tmp_path, monkeypatch, caplog):
+    atomicio._SECURED_DIRS.clear()
+    _fake_icacls(monkeypatch, [], which=None)
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise
+    assert d.exists()
+    assert "icacls not found on PATH" in caplog.text
+
+
+def test_ensure_private_dir_windows_warns_without_username(tmp_path, monkeypatch, caplog):
+    atomicio._SECURED_DIRS.clear()
+    _fake_icacls(monkeypatch, [])
+    monkeypatch.delenv("USERNAME", raising=False)
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise
+    assert d.exists()
+    assert "USERNAME is unset" in caplog.text
+
+
+def test_ensure_private_dir_windows_warns_on_icacls_oserror(tmp_path, monkeypatch, caplog):
+    atomicio._SECURED_DIRS.clear()
+    _fake_icacls(monkeypatch, [], run_error=OSError("spawn failed"))
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)  # must NOT raise
+    assert d.exists()
+    assert "icacls failed to run" in caplog.text
+
+
+def test_ensure_private_dir_windows_failed_acl_attempted_once(tmp_path, monkeypatch, caplog):
+    # A host without a working icacls must not re-shell (or re-warn) on every write: the dir
+    # is marked attempted after the first touch regardless of outcome.
+    atomicio._SECURED_DIRS.clear()
+    calls: list = []
+    _fake_icacls(monkeypatch, calls, returncode=5)
+    d = tmp_path / "state"
+    with caplog.at_level(logging.WARNING):
+        ensure_private_dir(d)
+        ensure_private_dir(d)  # second touch: no re-shell, no second warning
+    assert len(calls) == 1
+    assert sum("owner-only ACL" in r.message for r in caplog.records) == 1
+
+
+# --- in-process write lock (#914) ---
+
+
+def test_inproc_path_lock_same_path_shares_one_lock(tmp_path):
+    a = atomicio.inproc_path_lock(tmp_path / "f")
+    b = atomicio.inproc_path_lock(tmp_path / "f")
+    c = atomicio.inproc_path_lock(tmp_path / "g")
+    assert a is b  # same file → same lock (serializes our own writers)
+    assert a is not c
+
+
+def test_inproc_path_lock_serializes_concurrent_writers(tmp_path):
+    # With the lock held across a read-modify-write, five racing threads never lose an update.
+    target = tmp_path / "counter"
+    seen: list[int] = []
+
+    def rmw() -> None:
+        with atomicio.inproc_path_lock(target):
+            v = seen[-1] if seen else 0
+            time.sleep(0.005)  # widen the interleave window
+            seen.append(v + 1)
+
+    threads = [threading.Thread(target=rmw) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert seen == [1, 2, 3, 4, 5]  # strictly serialized, no lost update
+
+
+# --- os.replace retry over a Windows sharing violation (#914) ---
+
+
+def test_replace_with_retry_succeeds_first_try(tmp_path):
+    src = tmp_path / "s"
+    src.write_text("x")
+    atomicio.replace_with_retry(src, tmp_path / "d")
+    assert (tmp_path / "d").read_text() == "x"
+    assert not src.exists()
+
+
+def test_replace_with_retry_retries_permission_error_then_succeeds(tmp_path, monkeypatch):
+    src = tmp_path / "s"
+    src.write_text("x")
+    dst = tmp_path / "d"
+    real = atomicio.os.replace
+    n = {"c": 0}
+
+    def flaky(s, d):
+        n["c"] += 1
+        if n["c"] < 3:
+            raise PermissionError("sharing violation")
+        real(s, d)
+
+    monkeypatch.setattr(atomicio.os, "replace", flaky)
+    monkeypatch.setattr(atomicio.time, "sleep", lambda _s: None)
+    atomicio.replace_with_retry(src, dst)
+    assert n["c"] == 3
+    assert dst.read_text() == "x"
+
+
+def test_replace_with_retry_rejects_nonpositive_attempts(tmp_path):
+    # attempts < 1 would run zero iterations = a silent no-write; reject it (never a silent drop).
+    with pytest.raises(ValueError, match="attempts must be"):
+        atomicio.replace_with_retry(tmp_path / "s", tmp_path / "d", attempts=0)
+
+
+def test_replace_with_retry_gives_up_and_reraises(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        atomicio.os, "replace", lambda s, d: (_ for _ in ()).throw(PermissionError("locked"))
+    )
+    monkeypatch.setattr(atomicio.time, "sleep", lambda _s: None)
+    with pytest.raises(PermissionError):
+        atomicio.replace_with_retry(tmp_path / "s", tmp_path / "d", attempts=3)
+
+
+# --- newline: LF, never CRLF, on any OS (#914) ---
+
+
+def test_atomic_write_text_writes_lf_not_crlf(tmp_path):
+    target = tmp_path / "f.txt"
+    atomic_write_text(target, "a\nb\nc\n")
+    assert target.read_bytes() == b"a\nb\nc\n"  # byte-identical cross-OS, never \r\n
