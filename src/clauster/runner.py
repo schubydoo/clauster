@@ -1000,16 +1000,11 @@ class SessionRunner:
                 )
         # --- end per-mode spawn policy ---------------------------------------
 
-        # Trust as part of the spawn (#775 --trust) — but only here, after every option
-        # has validated and any idempotent early-return has passed, so an option-rejected
-        # spawn never leaves the directory trusted, and never before this under the lock so
-        # it can't race a concurrent spawn/stop. (A cancellation *after* this point leaves
-        # the trust grant in place by design: trust is a persistent, standalone operator
-        # authorization, exactly as trust_project writes it, independent of any bridge.)
-        if trust:
-            await asyncio.to_thread(trust_directory, proj.path, self._claude_json)
-            invalidate_discovery_cache()
-        if not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
+        # Workspace-trust gate. Without --trust an untrusted directory fails closed here
+        # (fast, before any spawn side effect). With --trust we do NOT trust yet — the
+        # trust write is deferred until after the capacity check below, so a rejected
+        # start (bad option OR a full bridge cap) never leaves the directory trusted.
+        if not trust and not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
             raise NotTrusted(
                 f"directory not trusted: {proj.path}. Use the Trust action before starting."
             )
@@ -1071,6 +1066,17 @@ class SessionRunner:
                     f"max_bridges={max_bridges} reached ({live} live); "
                     "stop a bridge before starting another"
                 )
+
+        # --trust (#775): every rejection — option validation, the idempotency
+        # early-returns, and the bridge cap above — has now passed, so trust the
+        # directory as part of the spawn. Deferred to here, after the LAST raise, so a
+        # rejected start never persists trust; still under the per-project spawn lock so
+        # it can't race a concurrent spawn/stop. A launch failure or cancellation AFTER
+        # this keeps the grant by design — trust is a standalone, persistent operator
+        # authorization, exactly as trust_project writes it, independent of any bridge.
+        if trust:
+            await asyncio.to_thread(trust_directory, proj.path, self._claude_json)
+            invalidate_discovery_cache()
 
         # Prune old bridge-log sets per the retention policy before creating this
         # spawn's set (so the new files are never a deletion candidate). Off the loop;

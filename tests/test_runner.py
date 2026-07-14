@@ -24,6 +24,7 @@ from clauster.models import (
 from clauster.runner import (
     _STALE_POINTER_TTL_SECONDS,
     AdoptionUnavailable,
+    CapacityExceeded,
     InstanceStillLive,
     InvalidSpawnOption,
     NotTrusted,
@@ -1018,6 +1019,26 @@ async def test_spawn_trust_true_invalid_option_does_not_trust(
         await runner.spawn("alpha", trust=True, custom_name="bad\x01name")
 
     assert not is_trusted(proj.path, empty_trust)  # validation failed → no trust side effect
+
+
+async def test_spawn_trust_true_capacity_full_does_not_trust(runner_config, tmp_path, monkeypatch):
+    # #775 regression (Greptile P1, 2nd pass): --trust is applied AFTER the bridge-cap
+    # check too, so a start rejected by CapacityExceeded also leaves NO trust side effect.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _ = runner_config
+    config = config.model_copy(deep=True)
+    config.instance_defaults.max_bridges = 1
+    empty_trust = tmp_path / "untrusted.json"
+    empty_trust.write_text("{}")
+    runner = SessionRunner(config, claude_json=empty_trust)
+    proj = runner._resolve_project("alpha")
+    # A live bridge for ANOTHER project already fills the single-bridge cap.
+    _seed(runner, "beta", mode="standard", status=InstanceStatus.RUNNING)
+
+    with pytest.raises(CapacityExceeded):
+        await runner.spawn("alpha", trust=True)
+
+    assert not is_trusted(proj.path, empty_trust)  # cap rejection → no trust side effect
 
 
 async def test_spawn_crash_is_error(runner_config, monkeypatch):
