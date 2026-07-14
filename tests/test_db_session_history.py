@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from clauster.db import bootstrap
 from clauster.db.engine import create_db_engine
 from clauster.db.persistence import Persistence
-from clauster.db.stores import HistoryEvent, ProjectRollup, SessionHistoryStore
+from clauster.db.stores import CostSnapshot, HistoryEvent, ProjectRollup, SessionHistoryStore
 
 
 @pytest.fixture
@@ -155,18 +155,20 @@ def test_terminal_row_carries_cost_snapshot_nonterminal_does_not(store):
         project_name="alpha",
         mode="pty",
         kind="ended",
-        cost_usd=4.2,
-        input_tokens=100,
-        output_tokens=50,
-        cache_creation_tokens=10,
-        cache_read_tokens=5,
+        cost=CostSnapshot(
+            cost_usd=4.2,
+            input_tokens=100,
+            output_tokens=50,
+            cache_creation_tokens=10,
+            cache_read_tokens=5,
+        ),
     )
     events = {e.kind: e for e in store.history_for("alpha")}
-    assert events["spawned"].cost_usd is None
-    assert events["spawned"].input_tokens is None
-    assert events["ended"].cost_usd == 4.2
-    assert events["ended"].input_tokens == 100
-    assert events["ended"].cache_read_tokens == 5
+    assert events["spawned"].cost.cost_usd is None
+    assert events["spawned"].cost.input_tokens is None
+    assert events["ended"].cost.cost_usd == 4.2
+    assert events["ended"].cost.input_tokens == 100
+    assert events["ended"].cost.cache_read_tokens == 5
 
 
 def test_append_defaults_at_to_now_when_omitted(store):
@@ -190,8 +192,7 @@ def test_rollup_uses_latest_terminal_row_cost(store):
         mode="pty",
         kind="ended",
         at=base + timedelta(hours=1),
-        cost_usd=1.0,
-        input_tokens=10,
+        cost=CostSnapshot(cost_usd=1.0, input_tokens=10),
     )
     # A second, later session ends with a larger cumulative snapshot — the rollup must
     # reflect the most recent terminal row, not the first.
@@ -201,13 +202,12 @@ def test_rollup_uses_latest_terminal_row_cost(store):
         mode="pty",
         kind="ended",
         at=base + timedelta(hours=3),
-        cost_usd=3.5,
-        input_tokens=42,
+        cost=CostSnapshot(cost_usd=3.5, input_tokens=42),
     )
     rollup = store.rollup_for("alpha")
     assert isinstance(rollup, ProjectRollup)
-    assert rollup.total_cost_usd == 3.5
-    assert rollup.input_tokens == 42
+    assert rollup.cost.cost_usd == 3.5
+    assert rollup.cost.input_tokens == 42
     assert rollup.event_count == 4
     last_used = (
         rollup.last_used.replace(tzinfo=UTC)
@@ -219,9 +219,11 @@ def test_rollup_uses_latest_terminal_row_cost(store):
 
 def test_rollup_crash_counts_as_terminal(store):
     store.append(project_name="alpha", mode="standard", kind="spawned")
-    store.append(project_name="alpha", mode="standard", kind="crashed", cost_usd=0.75)
+    store.append(
+        project_name="alpha", mode="standard", kind="crashed", cost=CostSnapshot(cost_usd=0.75)
+    )
     rollup = store.rollup_for("alpha")
-    assert rollup.total_cost_usd == 0.75
+    assert rollup.cost.cost_usd == 0.75
 
 
 def test_rollup_with_no_terminal_row_has_null_cost(store):
@@ -230,8 +232,8 @@ def test_rollup_with_no_terminal_row_has_null_cost(store):
     rollup = store.rollup_for("alpha")
     assert rollup.last_used is not None
     assert rollup.event_count == 2
-    assert rollup.total_cost_usd is None
-    assert rollup.input_tokens is None
+    assert rollup.cost.cost_usd is None
+    assert rollup.cost.input_tokens is None
 
 
 def test_rollup_for_unknown_project_is_empty(store):
@@ -239,7 +241,7 @@ def test_rollup_for_unknown_project_is_empty(store):
     assert rollup == ProjectRollup(project_name="ghost")
     assert rollup.last_used is None
     assert rollup.event_count == 0
-    assert rollup.total_cost_usd is None
+    assert rollup.cost.cost_usd is None
 
 
 # ----- batched sortmeta (the dashboard-sort N+1 fix) ----------------------
@@ -249,11 +251,19 @@ def test_sortmeta_for_all_batches_projects(store):
     base = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
     store.append(project_name="alpha", mode="pty", kind="spawned", at=base)
     store.append(
-        project_name="alpha", mode="pty", kind="ended", at=base + timedelta(hours=1), cost_usd=1.0
+        project_name="alpha",
+        mode="pty",
+        kind="ended",
+        at=base + timedelta(hours=1),
+        cost=CostSnapshot(cost_usd=1.0),
     )
     # alpha's later terminal row carries the snapshot the sort must use.
     store.append(
-        project_name="alpha", mode="pty", kind="ended", at=base + timedelta(hours=3), cost_usd=3.5
+        project_name="alpha",
+        mode="pty",
+        kind="ended",
+        at=base + timedelta(hours=3),
+        cost=CostSnapshot(cost_usd=3.5),
     )
     store.append(
         project_name="beta", mode="standard", kind="spawned", at=base + timedelta(hours=2)
@@ -293,7 +303,7 @@ def test_sortmeta_for_all_chunks_large_name_lists(store, monkeypatch):
             mode="pty",
             kind="ended",
             at=base + timedelta(minutes=i),
-            cost_usd=float(i),
+            cost=CostSnapshot(cost_usd=float(i)),
         )
     meta = store.sortmeta_for_all(names)
     assert set(meta) == set(names)  # every chunk merged, none dropped
@@ -305,7 +315,7 @@ def test_sortmeta_for_all_chunks_large_name_lists(store, monkeypatch):
 
 def test_deleting_project_cascades_to_session_events(persistence, store):
     store.append(project_name="alpha", mode="pty", kind="spawned")
-    store.append(project_name="alpha", mode="pty", kind="ended", cost_usd=1.0)
+    store.append(project_name="alpha", mode="pty", kind="ended", cost=CostSnapshot(cost_usd=1.0))
     with persistence.session_factory() as session, session.begin():
         session.execute(text("DELETE FROM projects WHERE name = 'alpha'"))
     assert store.history_for("alpha") == []
@@ -316,12 +326,14 @@ def test_deleting_project_cascades_to_session_events(persistence, store):
 
 def test_history_persists_across_reopen(tmp_path):
     p1 = Persistence(tmp_path)
-    p1.session_history_store().append(project_name="alpha", mode="pty", kind="ended", cost_usd=2.0)
+    p1.session_history_store().append(
+        project_name="alpha", mode="pty", kind="ended", cost=CostSnapshot(cost_usd=2.0)
+    )
     p1.dispose()
     p2 = Persistence(tmp_path)
     try:
         rollup = p2.session_history_store().rollup_for("alpha")
-        assert rollup.total_cost_usd == 2.0
+        assert rollup.cost.cost_usd == 2.0
         assert rollup.event_count == 1
     finally:
         p2.dispose()

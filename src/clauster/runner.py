@@ -55,6 +55,7 @@ from .config import (
     SpawnMode,
 )
 from .db.persistence import Persistence
+from .db.stores import CostSnapshot
 from .discovery import (
     discover_projects_cached,
     invalidate_discovery_cache,
@@ -3073,16 +3074,23 @@ class SessionRunner:
             project: str, mode: str, session_ref: str | None, usage: ProjectUsage | None
         ) -> None:
             totals = usage.totals if usage is not None else None
+            cost = (
+                CostSnapshot(
+                    cost_usd=usage.cost_usd(),
+                    input_tokens=totals.input if totals is not None else None,
+                    output_tokens=totals.output if totals is not None else None,
+                    cache_creation_tokens=totals.cache_creation if totals is not None else None,
+                    cache_read_tokens=totals.cache_read if totals is not None else None,
+                )
+                if usage is not None
+                else CostSnapshot()
+            )
             self._history.append(
                 project_name=project,
                 mode=mode,
                 kind=kind,
                 session_ref=session_ref,
-                cost_usd=usage.cost_usd() if usage is not None else None,
-                input_tokens=totals.input if totals is not None else None,
-                output_tokens=totals.output if totals is not None else None,
-                cache_creation_tokens=totals.cache_creation if totals is not None else None,
-                cache_read_tokens=totals.cache_read if totals is not None else None,
+                cost=cost,
             )
 
         try:

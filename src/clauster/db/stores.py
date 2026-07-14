@@ -229,12 +229,46 @@ class HostedStateStore:
 
 
 @dataclass(frozen=True)
+class CostSnapshot:
+    """The end-of-session cost/token cluster carried on a history row.
+
+    A single value object for the five fields that used to be spelled out on every
+    history DTO (:class:`HistoryEvent`, :class:`ProjectRollup`, the store's write
+    signature). All are ``None`` until a terminal (``ended`` / ``crashed``) row
+    records them, so a default :class:`CostSnapshot` is the "no totals yet" state.
+    """
+
+    cost_usd: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
+
+    @classmethod
+    def from_row(cls, row: SessionEvent) -> CostSnapshot:
+        """Read the cost/token columns off a persisted row into a snapshot."""
+        return cls(
+            cost_usd=row.cost_usd,
+            input_tokens=row.input_tokens,
+            output_tokens=row.output_tokens,
+            cache_creation_tokens=row.cache_creation_tokens,
+            cache_read_tokens=row.cache_read_tokens,
+        )
+
+
+# The "no totals yet" snapshot — shared as the default for pre-terminal rows and the
+# store's write signature (a frozen instance is immutable, so one singleton is safe and
+# keeps it out of dataclass-field / argument-default call positions).
+_NO_COST = CostSnapshot()
+
+
+@dataclass(frozen=True)
 class HistoryEvent:
     """One session-history row as the read API hands it out (a plain value object).
 
-    A read-only snapshot of a :class:`~clauster.db.models.SessionEvent` row.
-    Token / cost fields are populated only on a terminal (``ended`` / ``crashed``)
-    row; they are ``None`` on ``spawned`` / ``ready`` rows.
+    A read-only snapshot of a :class:`~clauster.db.models.SessionEvent` row. The
+    :attr:`cost` totals are populated only on a terminal (``ended`` / ``crashed``)
+    row; they are all ``None`` on ``spawned`` / ``ready`` rows.
     """
 
     id: int
@@ -243,11 +277,7 @@ class HistoryEvent:
     kind: str
     at: datetime
     session_ref: str | None = None
-    cost_usd: float | None = None
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    cache_creation_tokens: int | None = None
-    cache_read_tokens: int | None = None
+    cost: CostSnapshot = _NO_COST
 
 
 @dataclass(frozen=True)
@@ -255,20 +285,16 @@ class ProjectRollup:
     """Per-project "last used / total cost" derived straight from the history table.
 
     ``last_used`` is the most recent event timestamp for the project (``None`` when
-    it has no history). ``total_cost_usd`` / token fields are the cumulative
-    end-of-session snapshot from the project's most recent terminal row — the same
-    ballpark figure :mod:`clauster.usage` produces — or ``None`` when no terminal
-    row has been recorded yet. ``event_count`` is the project's total row count.
+    it has no history). :attr:`cost` is the cumulative end-of-session snapshot from
+    the project's most recent terminal row — the same ballpark figure
+    :mod:`clauster.usage` produces — with all-``None`` fields when no terminal row
+    has been recorded yet. ``event_count`` is the project's total row count.
     """
 
     project_name: str
     last_used: datetime | None = None
     event_count: int = 0
-    total_cost_usd: float | None = None
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    cache_creation_tokens: int | None = None
-    cache_read_tokens: int | None = None
+    cost: CostSnapshot = _NO_COST
 
 
 def _to_event(row: SessionEvent) -> HistoryEvent:
@@ -280,11 +306,7 @@ def _to_event(row: SessionEvent) -> HistoryEvent:
         kind=row.kind,
         at=row.at,
         session_ref=row.session_ref,
-        cost_usd=row.cost_usd,
-        input_tokens=row.input_tokens,
-        output_tokens=row.output_tokens,
-        cache_creation_tokens=row.cache_creation_tokens,
-        cache_read_tokens=row.cache_read_tokens,
+        cost=CostSnapshot.from_row(row),
     )
 
 
@@ -311,18 +333,14 @@ class SessionHistoryStore:
         kind: str,
         at: datetime | None = None,
         session_ref: str | None = None,
-        cost_usd: float | None = None,
-        input_tokens: int | None = None,
-        output_tokens: int | None = None,
-        cache_creation_tokens: int | None = None,
-        cache_read_tokens: int | None = None,
+        cost: CostSnapshot = _NO_COST,
     ) -> bool:
         """Append one lifecycle event; return whether it was written.
 
         Ensures a parent :class:`~clauster.db.models.Project` row exists (the FK
         target, mirroring :meth:`StateStore._sync`) before inserting. Best-effort:
         on any DB error the failure is logged and ``False`` returned — a lost
-        history row must never break the bridge lifecycle. ``cost``/token fields are
+        history row must never break the bridge lifecycle. The ``cost`` totals are
         only meaningful on a terminal (``ended`` / ``crashed``) row.
         """
         try:
@@ -336,11 +354,11 @@ class SessionHistoryStore:
                         kind=kind,
                         at=at if at is not None else datetime.now(tz=UTC),
                         session_ref=session_ref,
-                        cost_usd=cost_usd,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cache_creation_tokens=cache_creation_tokens,
-                        cache_read_tokens=cache_read_tokens,
+                        cost_usd=cost.cost_usd,
+                        input_tokens=cost.input_tokens,
+                        output_tokens=cost.output_tokens,
+                        cache_creation_tokens=cost.cache_creation_tokens,
+                        cache_read_tokens=cost.cache_read_tokens,
                     )
                 )
             return True
@@ -393,11 +411,11 @@ class SessionHistoryStore:
     def rollup_for(self, project_name: str) -> ProjectRollup:
         """Return a project's "last used / total cost" rollup; empty on a DB error.
 
-        ``last_used`` is the project's most recent event timestamp. The cost / token
+        ``last_used`` is the project's most recent event timestamp. The :attr:`cost`
         totals come from the project's most recent terminal (``ended`` / ``crashed``)
         row, which carries the cumulative end-of-session snapshot. A project with no
-        history (or on a DB error) yields a rollup with ``last_used=None`` and
-        ``total_cost_usd=None`` — never a crash.
+        history (or on a DB error) yields a rollup with ``last_used=None`` and an
+        empty :class:`CostSnapshot` — never a crash.
         """
         try:
             with self._sessions() as session:
@@ -424,11 +442,7 @@ class SessionHistoryStore:
                     project_name=project_name,
                     last_used=last_used,
                     event_count=count,
-                    total_cost_usd=terminal.cost_usd if terminal else None,
-                    input_tokens=terminal.input_tokens if terminal else None,
-                    output_tokens=terminal.output_tokens if terminal else None,
-                    cache_creation_tokens=terminal.cache_creation_tokens if terminal else None,
-                    cache_read_tokens=terminal.cache_read_tokens if terminal else None,
+                    cost=CostSnapshot.from_row(terminal) if terminal else _NO_COST,
                 )
         except SQLAlchemyError as exc:
             _log.warning(
