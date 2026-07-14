@@ -193,7 +193,17 @@ def test_logs_stale_missing_file_exits_2(cfg, tmp_path, capsys):
     # exit 0 with no output / --follow hang.
     _FakeEngine.log_path = tmp_path / "gone.log"  # never created
     assert main(["logs", "-c", cfg, "i1"]) == 2
-    assert "no longer on disk" in capsys.readouterr().err
+    assert "cannot read bridge log" in capsys.readouterr().err
+
+
+def test_logs_unreadable_path_exits_2(cfg, tmp_path, capsys):
+    # An existing but unreadable path (here a directory) also fails closed — the
+    # open() probe surfaces it, not just the missing-file case.
+    d = tmp_path / "logdir"
+    d.mkdir()
+    _FakeEngine.log_path = d
+    assert main(["logs", "-c", cfg, "i1"]) == 2
+    assert "cannot read bridge log" in capsys.readouterr().err
 
 
 def test_logs_one_shot_prints_tail(cfg, tmp_path, capsys):
@@ -234,7 +244,7 @@ def test_logs_follow_stops_if_file_vanishes(cfg, tmp_path, capsys, monkeypatch):
     assert main(["logs", "-c", cfg, "i1", "--follow"]) == 1
     out = capsys.readouterr()
     assert out.out.splitlines() == ["initial"]  # the one-shot tail printed before the vanish
-    assert "vanished" in out.err
+    assert "became unreadable" in out.err
 
 
 # -- open ----------------------------------------------------------------------

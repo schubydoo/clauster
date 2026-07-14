@@ -15,6 +15,7 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .engine import ClausterEngine
@@ -100,6 +101,22 @@ def cmd_sessions(config: ClausterConfig, *, as_json: bool) -> int:
     return 0
 
 
+def _log_read_error(path: Path) -> str | None:
+    """Return why ``path`` can't be read as a log file, or ``None`` if it opens fine.
+
+    The tail helpers (:mod:`clauster.logstream`) deliberately swallow file errors so a
+    momentary hiccup never crashes the live WebSocket stream — but for a one-shot CLI
+    read that turns a missing / directory / permission-denied path into a silent
+    "0 lines, exit 0". A single ``open`` probe surfaces all of those uniformly so
+    ``logs`` can fail closed instead.
+    """
+    try:
+        with path.open("rb"):
+            return None
+    except OSError as exc:
+        return exc.strerror or str(exc)
+
+
 def cmd_logs(config: ClausterConfig, identity: str, *, follow: bool) -> int:
     """Tail a bridge's redacted log; ``--follow`` streams new lines until interrupted."""
     with ClausterEngine(config) as engine:
@@ -111,12 +128,9 @@ def cmd_logs(config: ClausterConfig, identity: str, *, follow: bool) -> int:
                 file=sys.stderr,
             )
             return 2
-        if not path.exists():
-            # A stale persisted path (log rotated/deleted): the tail helpers swallow the
-            # missing file, so guard here — otherwise `logs` exits 0 with no output and
-            # `--follow` waits forever, both looking like success (fail closed, #775).
+        if (err := _log_read_error(path)) is not None:
             print(
-                f"clauster: bridge log for {identity!r} is no longer on disk ({path})",
+                f"clauster: cannot read bridge log for {identity!r} ({path}): {err}",
                 file=sys.stderr,
             )
             return 2
@@ -129,13 +143,13 @@ def cmd_logs(config: ClausterConfig, identity: str, *, follow: bool) -> int:
         try:
             while True:
                 time.sleep(_FOLLOW_INTERVAL)
-                if not path.exists():
-                    # The log vanished mid-follow (rotated/deleted): the reader would
-                    # swallow it and the loop would sleep forever showing nothing. Fail
-                    # closed with a diagnostic rather than a silent idle stream.
+                if (err := _log_read_error(path)) is not None:
+                    # The log became unreadable mid-follow (rotated/deleted/replaced):
+                    # the reader would swallow it and the loop would sleep forever
+                    # showing nothing. Fail closed rather than a silent idle stream.
                     print(
-                        f"clauster: bridge log for {identity!r} vanished ({path}); "
-                        "stopping follow",
+                        f"clauster: bridge log for {identity!r} became unreadable ({path}): "
+                        f"{err}; stopping follow",
                         file=sys.stderr,
                     )
                     return 1
