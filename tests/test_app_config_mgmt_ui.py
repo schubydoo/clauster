@@ -205,3 +205,34 @@ def test_scope_and_surface_toggles_expose_aria_pressed(write_config):
     assert html.count(":aria-pressed") >= 5  # 3 scope buttons + >=2 surface tabs
     assert "aria-pressed=\"configMgmt.scope === 'project'\"" in html
     assert 'aria-pressed="configMgmt.surface === s.key"' in html
+
+
+# ---- #848: non-interactive auth callout in the login-shepherd card ------------
+
+_LS_ON = "login_shepherd:\n  enabled: true\n"
+_LS_ON_CW_ON = "login_shepherd:\n  enabled: true\nconfig_write:\n  enabled: true\n"
+
+
+def test_noninteractive_auth_callout_links_to_config_when_both_enabled(write_config):
+    # With login-shepherd AND config-write on, the callout deep-links to the
+    # settings editor so the operator can set the key/token/apiKeyHelper without SSH.
+    html = _html(write_config, _LS_ON_CW_ON)
+    assert 'data-test="noninteractive-auth"' in html
+    assert 'data-test="noninteractive-auth-open"' in html
+    assert 'data-test="noninteractive-auth-hint"' not in html
+
+
+def test_noninteractive_auth_callout_hints_when_config_write_off(write_config):
+    # login-shepherd on but config-write off: fail closed — show the "enable
+    # config_write" hint instead of a dead link into a 404 surface.
+    html = _html(write_config, _LS_ON)
+    assert 'data-test="noninteractive-auth"' in html
+    assert 'data-test="noninteractive-auth-open"' not in html
+    assert 'data-test="noninteractive-auth-hint"' in html
+
+
+def test_noninteractive_auth_callout_absent_when_login_shepherd_off(write_config):
+    # The callout lives inside the login-shepherd card, so config-write alone
+    # (shepherd off) must not surface it.
+    html = _html(write_config, _ON)
+    assert 'data-test="noninteractive-auth"' not in html

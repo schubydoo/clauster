@@ -1250,6 +1250,35 @@
                 <button class="btn btn-sm mt-1" @click="startAnother()" :disabled="busy">Start another</button>
               </div>
             </template>
+
+            {# Non-interactive runtime-account auth (#848): apiKeyHelper / API key /
+               OAuth-token deployments don't use the interactive flow above. Surface
+               them next to it so an operator lands on the no-SSH config path. The
+               secret-write plumbing already ships (#772/#773/#765); this only links
+               to it, and stays fail-closed on the config_write.enabled gate. #}
+            <hr class="my-3">
+            <h4 class="mb-1" data-test="noninteractive-auth">Already authenticate non-interactively?</h4>
+            <p class="text-secondary small mb-2">
+              If this account uses an <code>ANTHROPIC_API_KEY</code>, a stored
+              <code>CLAUDE_CODE_OAUTH_TOKEN</code>, or an <code>apiKeyHelper</code>
+              command instead of an interactive login, set it in
+              <code>settings.json</code> without SSH:
+            </p>
+            {% if config_write_enabled %}
+            <ul class="text-secondary small mb-2 ps-3">
+              <li><code>ANTHROPIC_API_KEY</code> / <code>CLAUDE_CODE_OAUTH_TOKEN</code> — add an <strong>env</strong> row.</li>
+              <li><code>apiKeyHelper</code> — add the key in <strong>Raw JSON</strong> mode.</li>
+            </ul>
+            <button type="button" class="btn btn-sm btn-ghost-secondary"
+                    data-test="noninteractive-auth-open" @click="openAuthConfig()">
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-tool"/></svg>Open Claude Code config
+            </button>
+            {% else %}
+            <p class="text-secondary small mb-0" data-test="noninteractive-auth-hint">
+              Enable the Claude Code config editor (<code>config_write.enabled</code>) to set
+              these from the dashboard, or configure them over SSH.
+            </p>
+            {% endif %}
           </div>
         </div>
       </div>
