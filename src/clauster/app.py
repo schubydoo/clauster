@@ -68,10 +68,10 @@ from .clone_jobs import CloneJob, CloneJobManager
 from .config import BYPASS_DESKTOP_HINT, PERMISSION_LABELS, PERMISSION_MODES, ClausterConfig
 from .db.stores import ApiTokenStore
 from .discovery import (
-    discover_projects_cached,
     invalidate_discovery_cache,
     is_valid_project_name,
 )
+from .engine import ClausterEngine
 from .hosted import HostedManager, HostedSessionError
 from .models import (
     BackgroundJob,
@@ -563,6 +563,10 @@ async def stream_until_disconnect(
 def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> FastAPI:
     """Build and wire the FastAPI app (routes, middleware, static, bridge poll loop)."""
     runner = runner or SessionRunner(config)
+    # Shared read facade (#775): built over the app's own runner so routes and the
+    # headless CLI drive one code path. Injected runner ⇒ engine.dispose() is a no-op
+    # (the app owns the runner's lifecycle via the poll loop / lifespan).
+    engine = ClausterEngine(config, runner=runner)
     # Point the cross-process config/CLAUDE.md write lock at a state-dir directory (not the
     # project dir) BEFORE any request can write, so the CLAUDE.md editor and the config-write
     # path share one flock without littering project dirs with a `CLAUDE.md.lock` (follow-up to
@@ -1055,12 +1059,9 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         return resp
 
     async def list_projects() -> list[Project]:
-        projects = await asyncio.to_thread(discover_projects_cached, config.projects_root)
-        # Surface the config bypass-ceiling per project so the UI can gate the option
-        # (discovery has no config knowledge; the app layer owns this).
-        for p in projects:
-            p.allow_bypass_permissions = config.allows_bypass(p.name)
-        return projects
+        # Shared facade (#775): the CLI and this route go through the same
+        # discover-then-stamp-bypass path, so the two can't drift.
+        return await asyncio.to_thread(engine.list_projects)
 
     @app.get("/healthz")
     async def healthz(request: Request) -> dict:
