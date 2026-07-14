@@ -381,6 +381,30 @@ extra dependency.
 | `allow_setup_token` | bool | `false` | A **second, independent** opt-in for the `setup-token` mode (`claude setup-token`), which mints a long-lived `CLAUDE_CODE_OAUTH_TOKEN` the operator copies out of the browser — a durable credential, strictly more dangerous than the ordinary `login` mode's short-lived OAuth handshake. Requires `login_shepherd.enabled` too; with this off, only the `login` mode is offered (a `setup-token` request 404s, the same invisible-surface shape as the whole disabled surface). Off by default; **not** web-editable. |
 <!-- END GEN: login_shepherd -->
 
+### Non-interactive runtime-account auth (apiKeyHelper / API key / token)
+
+Some deployments authenticate the runtime `claude` account **without** an interactive
+login. These historically required SSH; the config editor lets you set them from the
+dashboard, and the login-shepherd panel links to them next to the interactive flows.
+
+Runtime-account auth is **account-wide**, so it belongs in **User**-scope `settings.json`
+(`~/.claude/settings.json`) — a project's `settings.json` would only affect that project
+and would leave the account itself unsigned-in. Editing User scope requires **both**
+`config_write.enabled` and `config_write.allow_user_scope`; the login panel links
+straight to the User-scope settings editor when both are on, and shows a hint to enable
+them (or use SSH) when they are not.
+
+| Mechanism | Where it goes (User scope) | When to use it |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | an **`env`** row (config editor → User → Settings → Rows) | Console / API (pay-as-you-go) billing rather than a Claude subscription. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | an **`env`** row | A long-lived token minted by `claude setup-token` (the same value the shepherd's `setup-token` mode prints) — pin it once instead of re-running the OAuth handshake. |
+| `apiKeyHelper` | a top-level `settings.json` key (config editor → User → Settings → **Raw JSON**) | A custom command that mints/rotates the auth value on demand. Set `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` (an `env` row) to control how often it is re-invoked. |
+
+Secret-shaped values are masked on read and written through the config editor's
+redaction path — the same surface as any other `env` row or `settings.json` key. The
+login detector (`claude auth status --json`) already reports all three as logged-in, so
+an account configured this way is **not** nagged to sign in.
+
 ## `usage` — per-project cost/token badge (`UsageConfig`)
 
 <!-- BEGIN GEN: usage -->

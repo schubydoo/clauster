@@ -1181,6 +1181,18 @@
       openMcpApprovalsFor(name) {
         this.openConfigMgmt({ project: name, surface: "mcp", scope: "project" });
       },
+      // Non-interactive runtime-account auth (#848): jump to the settings.json
+      // editor so an operator can set ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN
+      // (env rows) or apiKeyHelper (raw JSON) without SSH. Pin USER scope
+      // explicitly — runtime-account auth is account-wide, and passing scope
+      // stops openConfigMgmt from inheriting a stale project/local scope left by a
+      // prior open (which would save the key into the wrong settings.json while the
+      // account stays unsigned-in). The template only renders the button when user
+      // scope is editable (config_write.allow_user_scope), so this never lands on a
+      // scope the write surface would 403. The config-write surface owns write + redaction.
+      openAuthConfig() {
+        this.openConfigMgmt({ surface: "settings", scope: "user" });
+      },
       closeConfigMgmt() {
         const c = this.configMgmt;
         c.open = false;
