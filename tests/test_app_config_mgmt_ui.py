@@ -211,18 +211,32 @@ def test_scope_and_surface_toggles_expose_aria_pressed(write_config):
 
 _LS_ON = "login_shepherd:\n  enabled: true\n"
 _LS_ON_CW_ON = "login_shepherd:\n  enabled: true\nconfig_write:\n  enabled: true\n"
+_LS_ON_CW_USER = (
+    "login_shepherd:\n  enabled: true\nconfig_write:\n  enabled: true\n  allow_user_scope: true\n"
+)
 
 
-def test_noninteractive_auth_callout_links_to_config_when_both_enabled(write_config):
-    # With login-shepherd AND config-write on, the callout deep-links to the
-    # settings editor so the operator can set the key/token/apiKeyHelper without SSH.
-    html = _html(write_config, _LS_ON_CW_ON)
+def test_noninteractive_auth_links_to_user_scope_when_user_scope_editable(write_config):
+    # The deep link renders only when config-write AND allow_user_scope are on, so
+    # openAuthConfig() can pin User scope — where account-wide auth belongs — instead
+    # of inheriting a stale project/local scope.
+    html = _html(write_config, _LS_ON_CW_USER)
     assert 'data-test="noninteractive-auth"' in html
     assert 'data-test="noninteractive-auth-open"' in html
+    assert 'data-test="noninteractive-auth-userscope-hint"' not in html
     assert 'data-test="noninteractive-auth-hint"' not in html
 
 
-def test_noninteractive_auth_callout_hints_when_config_write_off(write_config):
+def test_noninteractive_auth_hints_user_scope_when_allow_user_scope_off(write_config):
+    # config-write on but allow_user_scope off: no deep link (it would land on a
+    # project scope the account never reads) — a hint to enable User scope instead.
+    html = _html(write_config, _LS_ON_CW_ON)
+    assert 'data-test="noninteractive-auth"' in html
+    assert 'data-test="noninteractive-auth-userscope-hint"' in html
+    assert 'data-test="noninteractive-auth-open"' not in html
+
+
+def test_noninteractive_auth_hints_when_config_write_off(write_config):
     # login-shepherd on but config-write off: fail closed — show the "enable
     # config_write" hint instead of a dead link into a 404 surface.
     html = _html(write_config, _LS_ON)
@@ -231,7 +245,7 @@ def test_noninteractive_auth_callout_hints_when_config_write_off(write_config):
     assert 'data-test="noninteractive-auth-hint"' in html
 
 
-def test_noninteractive_auth_callout_absent_when_login_shepherd_off(write_config):
+def test_noninteractive_auth_absent_when_login_shepherd_off(write_config):
     # The callout lives inside the login-shepherd card, so config-write alone
     # (shepherd off) must not surface it.
     html = _html(write_config, _ON)

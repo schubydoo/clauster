@@ -384,16 +384,21 @@ extra dependency.
 ### Non-interactive runtime-account auth (apiKeyHelper / API key / token)
 
 Some deployments authenticate the runtime `claude` account **without** an interactive
-login. These historically required SSH; the config editor (`config_write.enabled`)
-lets you set them from the dashboard, and the login-shepherd panel links to them next
-to the interactive flows. Each is a `settings.json` entry, so `config_write.enabled`
-must be on (the login panel shows a hint to enable it when it is off):
+login. These historically required SSH; the config editor lets you set them from the
+dashboard, and the login-shepherd panel links to them next to the interactive flows.
 
-| Mechanism | Where it goes | When to use it |
+Runtime-account auth is **account-wide**, so it belongs in **User**-scope `settings.json`
+(`~/.claude/settings.json`) — a project's `settings.json` would only affect that project
+and would leave the account itself unsigned-in. Editing User scope requires **both**
+`config_write.enabled` and `config_write.allow_user_scope`; the login panel links
+straight to the User-scope settings editor when both are on, and shows a hint to enable
+them (or use SSH) when they are not.
+
+| Mechanism | Where it goes (User scope) | When to use it |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | a `settings.json` **`env`** row (config editor → Settings → Rows) | Console / API (pay-as-you-go) billing rather than a Claude subscription. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | a `settings.json` **`env`** row | A long-lived token minted by `claude setup-token` (the same value the shepherd's `setup-token` mode prints) — pin it once instead of re-running the OAuth handshake. |
-| `apiKeyHelper` | a top-level `settings.json` key (config editor → Settings → **Raw JSON**) | A custom command that mints/rotates the auth value on demand. Set `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` (an `env` row) to control how often it is re-invoked. |
+| `ANTHROPIC_API_KEY` | an **`env`** row (config editor → User → Settings → Rows) | Console / API (pay-as-you-go) billing rather than a Claude subscription. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | an **`env`** row | A long-lived token minted by `claude setup-token` (the same value the shepherd's `setup-token` mode prints) — pin it once instead of re-running the OAuth handshake. |
+| `apiKeyHelper` | a top-level `settings.json` key (config editor → User → Settings → **Raw JSON**) | A custom command that mints/rotates the auth value on demand. Set `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` (an `env` row) to control how often it is re-invoked. |
 
 Secret-shaped values are masked on read and written through the config editor's
 redaction path — the same surface as any other `env` row or `settings.json` key. The

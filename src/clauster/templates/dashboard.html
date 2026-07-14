@@ -1264,19 +1264,32 @@
               command instead of an interactive login, set it in
               <code>settings.json</code> without SSH:
             </p>
-            {% if config_write_enabled %}
+            {# Runtime-account auth is account-wide, so it belongs in USER-scope
+               settings.json — which the config editor only writes under the
+               config_write.allow_user_scope opt-in. Offer the deep link (pinned to
+               User scope) only when that's on; otherwise fail closed to a hint so an
+               operator never saves the key into a project's settings.json where it
+               wouldn't authenticate the account. #}
+            {% if config_write_enabled and config_write_allow_user_scope %}
             <ul class="text-secondary small mb-2 ps-3">
               <li><code>ANTHROPIC_API_KEY</code> / <code>CLAUDE_CODE_OAUTH_TOKEN</code> — add an <strong>env</strong> row.</li>
               <li><code>apiKeyHelper</code> — add the key in <strong>Raw JSON</strong> mode.</li>
             </ul>
             <button type="button" class="btn btn-sm btn-ghost-secondary"
                     data-test="noninteractive-auth-open" @click="openAuthConfig()">
-              <svg class="ico me-1" aria-hidden="true"><use href="#ic-tool"/></svg>Open Claude Code config
+              <svg class="ico me-1" aria-hidden="true"><use href="#ic-tool"/></svg>Open Claude Code config (User scope)
             </button>
+            {% elif config_write_enabled %}
+            <p class="text-secondary small mb-0" data-test="noninteractive-auth-userscope-hint">
+              Runtime-account auth belongs in <strong>User</strong> scope. Enable
+              <code>config_write.allow_user_scope</code> to set it from the dashboard, or
+              configure it over SSH.
+            </p>
             {% else %}
             <p class="text-secondary small mb-0" data-test="noninteractive-auth-hint">
-              Enable the Claude Code config editor (<code>config_write.enabled</code>) to set
-              these from the dashboard, or configure them over SSH.
+              Enable the Claude Code config editor (<code>config_write.enabled</code> +
+              <code>allow_user_scope</code>) to set these from the dashboard, or configure
+              them over SSH.
             </p>
             {% endif %}
           </div>
