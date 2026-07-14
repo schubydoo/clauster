@@ -7,10 +7,14 @@ FastAPI routes call it in-process (constructed with the app's own runner, so no
 second runner is built), and the CLI drives the same methods with **no web server
 running**.
 
-Slice A (this module) exposes only the **read/observe** surface — listing
-projects, live instances, and working sessions; resolving a bridge's connect URL;
-and tailing its (redacted) log. It performs no spawn/stop/send; those land in the
-write slice. Two usage shapes:
+The **read/observe** surface (Slice A) lists projects, live instances, and working
+sessions; resolves a bridge's connect URL; and tails its (redacted) log. The
+**write** surface (Slice B) adds :meth:`start` and :meth:`stop` — the same
+``spawn_detailed`` / ``stop`` the FastAPI routes drive, so headless and browser
+launches share one code path and one set of policy checks. ``send`` (a hosted
+session's conversation turn) is deliberately out of scope: a hosted session lives
+in-memory in the running web-app process, so it needs the running-server proxy
+refinement (or the in-process MCP, #527), not a serverless CLI. Two usage shapes:
 
 * **Web app** — ``ClausterEngine(config, runner=app_runner)``. The runner already
   runs its poll loop under the FastAPI lifespan, so the app never calls
@@ -36,8 +40,9 @@ from .runner import SessionRunner
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .config import ClausterConfig
+    from .config import ClausterConfig, PermissionMode, ResumeMode, SandboxMode, SpawnMode
     from .models import Project, RemoteControlInstance, WorkingSession
+    from .runner import SpawnOutcome
 
 
 class ClausterEngine(AbstractContextManager["ClausterEngine"]):
@@ -102,6 +107,63 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         if resolved is None:
             return None
         return self._runner.get_instance(resolved)
+
+    # -- write: spawn / stop --------------------------------------------------
+
+    async def start(
+        self,
+        project: str,
+        *,
+        spawn_mode: SpawnMode | None = None,
+        permission_mode: PermissionMode | None = None,
+        resume_mode: ResumeMode | None = None,
+        custom_name: str | None = None,
+        sandbox: SandboxMode | None = None,
+        trust: bool = False,
+    ) -> SpawnOutcome:
+        """Spawn (or hand back an already-live) bridge for ``project``; return the outcome.
+
+        Mirrors the ``POST /api/instances`` route: the same
+        :meth:`~clauster.runner.SessionRunner.spawn_detailed`, so the per-mode policy,
+        the standard-singleton cap, and option validation are identical whether a
+        bridge is started from the browser or headless. ``resume_mode`` picks the
+        bridge mode (``"standard"``/``"pty"``) with **no hidden coercion**, exactly
+        as the launch-mode picker does.
+
+        A headless caller must :meth:`hydrate` first: ``spawn_detailed``'s idempotency
+        check reads the in-memory registry, so without a reattach a fresh CLI runner
+        can't see a bridge the live service already started and would launch a second.
+
+        ``trust`` accepts the workspace-trust dialog for the project (the CLI's
+        ``--trust``, the headless equivalent of the dashboard's explicit Trust
+        action). It is passed into ``spawn_detailed``, which applies it *after* option
+        validation and under the per-project spawn lock — so an invalid option fails
+        without leaving the directory trusted, and the trust write is atomic with the
+        spawn. Left off, an untrusted directory raises
+        :class:`~clauster.runner.NotTrusted` rather than being trusted implicitly.
+        """
+        return await self._runner.spawn_detailed(
+            project,
+            spawn_mode=spawn_mode,
+            permission_mode=permission_mode,
+            resume_mode=resume_mode,
+            custom_name=custom_name,
+            sandbox=sandbox,
+            trust=trust,
+        )
+
+    async def stop(self, identity: str) -> RemoteControlInstance | None:
+        """Stop the bridge resolved from ``identity``; ``None`` when none matches.
+
+        Resolves an id / prefix / bridge identity the same way the ``DELETE`` route
+        does (:meth:`~clauster.runner.SessionRunner.resolve_bridge_id`), so a headless
+        stop targets exactly the instance the operator named. A headless caller must
+        :meth:`hydrate` first so the registry is populated for the resolve.
+        """
+        resolved = self._runner.resolve_bridge_id(identity)
+        if resolved is None:
+            return None
+        return await self._runner.stop(resolved)
 
     # -- connect url / logs ---------------------------------------------------
 

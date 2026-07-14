@@ -791,12 +791,13 @@ class SessionRunner:
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
         sandbox: SandboxMode | None = None,
+        trust: bool = False,
     ) -> RemoteControlInstance:
         """Spawn a bridge for ``name`` and return the instance (see :meth:`spawn_detailed`).
 
         Thin wrapper for callers that only need the instance; :meth:`spawn_detailed`
         additionally reports whether anything was actually launched and any
-        non-blocking spawn warnings (#778).
+        non-blocking spawn warnings (#778). ``trust`` (#775) is forwarded unchanged.
         """
         outcome = await self.spawn_detailed(
             name,
@@ -807,6 +808,7 @@ class SessionRunner:
             resume_target=resume_target,
             custom_name=custom_name,
             sandbox=sandbox,
+            trust=trust,
         )
         return outcome.instance
 
@@ -821,6 +823,7 @@ class SessionRunner:
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
         sandbox: SandboxMode | None = None,
+        trust: bool = False,
     ) -> SpawnOutcome:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
 
@@ -863,6 +866,15 @@ class SessionRunner:
         while a standard bridge is concurrently live (both allowed per project since
         #777) would resolve against the standard bridge and hand it back instead.
 
+        ``trust`` (the headless CLI's ``--trust``, #775) accepts the workspace-trust
+        dialog for the project as part of this spawn. It is applied *after* option
+        validation and under the per-project spawn lock — so an invalid option (a bad
+        ``custom_name``, a forbidden permission mode, a worktree on a non-git project)
+        raises without leaving the directory trusted, and the trust write can't race a
+        concurrent spawn/stop. Left False, an untrusted directory raises
+        :class:`NotTrusted` (unchanged). The dashboard trusts via a separate explicit
+        action (:meth:`trust_project`); this is the headless equivalent, kept atomic.
+
         Returns a :class:`SpawnOutcome`: ``created`` is False when an already-live
         instance was returned instead of launching (with ``reason``), and
         ``warnings`` carries non-blocking advisories (the pty no-worktree collision
@@ -878,6 +890,7 @@ class SessionRunner:
                 resume_target=resume_target,
                 custom_name=custom_name,
                 sandbox=sandbox,
+                trust=trust,
             )
 
     def _spawn_lock_for(self, name: str) -> asyncio.Lock:
@@ -901,6 +914,7 @@ class SessionRunner:
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
         sandbox: SandboxMode | None = None,
+        trust: bool = False,
     ) -> SpawnOutcome:
         # Body of spawn_detailed(), always run under the per-project lock (see spawn()).
         proj = self._resolve_project(name)
@@ -986,7 +1000,11 @@ class SessionRunner:
                 )
         # --- end per-mode spawn policy ---------------------------------------
 
-        if not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
+        # Workspace-trust gate. Without --trust an untrusted directory fails closed here
+        # (fast, before any spawn side effect). With --trust we do NOT trust yet — the
+        # trust write is deferred until after the capacity check below, so a rejected
+        # start (bad option OR a full bridge cap) never leaves the directory trusted.
+        if not trust and not await asyncio.to_thread(is_trusted, proj.path, self._claude_json):
             raise NotTrusted(
                 f"directory not trusted: {proj.path}. Use the Trust action before starting."
             )
@@ -1048,6 +1066,17 @@ class SessionRunner:
                     f"max_bridges={max_bridges} reached ({live} live); "
                     "stop a bridge before starting another"
                 )
+
+        # --trust (#775): every rejection — option validation, the idempotency
+        # early-returns, and the bridge cap above — has now passed, so trust the
+        # directory as part of the spawn. Deferred to here, after the LAST raise, so a
+        # rejected start never persists trust; still under the per-project spawn lock so
+        # it can't race a concurrent spawn/stop. A launch failure or cancellation AFTER
+        # this keeps the grant by design — trust is a standalone, persistent operator
+        # authorization, exactly as trust_project writes it, independent of any bridge.
+        if trust:
+            await asyncio.to_thread(trust_directory, proj.path, self._claude_json)
+            invalidate_discovery_cache()
 
         # Prune old bridge-log sets per the retention policy before creating this
         # spawn's set (so the new files are never a deletion candidate). Off the loop;

@@ -38,6 +38,9 @@ class _FakeRunner:
         self.rediscovered = 0
         self.persist_arg: bool | None = None
         self.persistence = _FakePersistence()
+        self.spawn_calls: list[tuple[str, dict]] = []
+        self.stopped: list[str] = []
+        self.trusted: list[str] = []
 
     def list_instances(self) -> list[RemoteControlInstance]:
         return list(self._instances.values())
@@ -51,6 +54,20 @@ class _FakeRunner:
     async def rediscover(self, *, persist: bool = True) -> None:
         self.rediscovered += 1
         self.persist_arg = persist
+
+    async def spawn_detailed(self, name: str, **kw: object):
+        from clauster.runner import SpawnOutcome
+
+        self.spawn_calls.append((name, kw))
+        inst = next(iter(self._instances.values()))
+        return SpawnOutcome(instance=inst, created=True)
+
+    async def stop(self, instance_id: str) -> RemoteControlInstance:
+        self.stopped.append(instance_id)
+        return self._instances[instance_id]
+
+    async def trust_project(self, name: str) -> None:
+        self.trusted.append(name)
 
 
 def _engine(tmp_path: Path, projects_root: Path, runner: _FakeRunner) -> ClausterEngine:
@@ -109,6 +126,71 @@ def test_working_sessions_probes_inspector_read_only(tmp_path, projects_root, mo
 
     assert engine.working_sessions() == [sess]
     assert seen["binary"]  # the configured claude binary was passed through
+
+
+# -- write: start / stop -------------------------------------------------------
+
+
+def test_start_delegates_options_to_spawn_detailed(tmp_path, projects_root):
+    inst = RemoteControlInstance(instance_id="i1", project="alpha", label="alpha")
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json", instances=[inst])
+    engine = _engine(tmp_path, projects_root, runner)
+
+    outcome = asyncio.run(
+        engine.start(
+            "alpha",
+            spawn_mode="worktree",
+            permission_mode="plan",
+            resume_mode="pty",
+            custom_name="mybridge",
+            sandbox="on",
+        )
+    )
+
+    assert outcome.instance is inst and outcome.created is True
+    name, kw = runner.spawn_calls[0]
+    assert name == "alpha"
+    # Every option is forwarded unchanged — no hidden coercion of the bridge mode.
+    assert kw == {
+        "spawn_mode": "worktree",
+        "permission_mode": "plan",
+        "resume_mode": "pty",
+        "custom_name": "mybridge",
+        "sandbox": "on",
+        "trust": False,
+    }
+
+
+def test_start_passes_trust_into_spawn_not_a_separate_write(tmp_path, projects_root):
+    inst = RemoteControlInstance(instance_id="i1", project="alpha", label="alpha")
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json", instances=[inst])
+    engine = _engine(tmp_path, projects_root, runner)
+
+    asyncio.run(engine.start("alpha", trust=True))
+
+    # --trust flows through spawn_detailed (applied after validation, atomically),
+    # NOT a separate pre-spawn trust_project write that a later invalid option couldn't
+    # roll back.
+    _, kw = runner.spawn_calls[0]
+    assert kw["trust"] is True
+    assert runner.trusted == []  # engine no longer calls trust_project directly
+
+
+def test_stop_resolves_then_delegates(tmp_path, projects_root):
+    inst = RemoteControlInstance(instance_id="i1", project="alpha", label="alpha")
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json", instances=[inst])
+    engine = _engine(tmp_path, projects_root, runner)
+
+    assert asyncio.run(engine.stop("i1")) is inst
+    assert runner.stopped == ["i1"]
+
+
+def test_stop_unknown_identity_returns_none_without_delegating(tmp_path, projects_root):
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json")
+    engine = _engine(tmp_path, projects_root, runner)
+
+    assert asyncio.run(engine.stop("nope")) is None
+    assert runner.stopped == []  # never called runner.stop for an unresolved id
 
 
 # -- connect_url: session link, else composer link, else None ------------------

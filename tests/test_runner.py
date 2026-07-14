@@ -24,11 +24,14 @@ from clauster.models import (
 from clauster.runner import (
     _STALE_POINTER_TTL_SECONDS,
     AdoptionUnavailable,
+    CapacityExceeded,
     InstanceStillLive,
+    InvalidSpawnOption,
     NotTrusted,
     SessionRunner,
     UnknownProject,
 )
+from clauster.trust import is_trusted
 from conftest import _raise_cancelled
 
 # Fixed instance_id UUIDs for seeding StateStore (keyed by instance_id since #777).
@@ -979,6 +982,63 @@ async def test_spawn_untrusted_refused(runner_config, tmp_path, monkeypatch):
     runner = SessionRunner(config, claude_json=empty_trust)
     with pytest.raises(NotTrusted):
         await runner.spawn("alpha")
+
+
+async def test_spawn_trust_true_trusts_untrusted_dir_then_spawns(
+    runner_config, tmp_path, monkeypatch
+):
+    # #775 --trust: an untrusted directory is trusted as part of the spawn instead of
+    # raising NotTrusted, and the bridge comes up.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _ = runner_config
+    empty_trust = tmp_path / "untrusted.json"
+    empty_trust.write_text("{}")
+    runner = SessionRunner(config, claude_json=empty_trust)
+    proj = runner._resolve_project("alpha")
+    assert not is_trusted(proj.path, empty_trust)
+
+    inst = await runner.spawn("alpha", trust=True)
+
+    assert inst.status is InstanceStatus.RUNNING
+    assert is_trusted(proj.path, empty_trust)  # trust was written as part of the spawn
+
+
+async def test_spawn_trust_true_invalid_option_does_not_trust(
+    runner_config, tmp_path, monkeypatch
+):
+    # #775 regression: --trust must be applied AFTER option validation, so a rejected
+    # spawn (here a control-char custom name) never leaves the directory trusted.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _ = runner_config
+    empty_trust = tmp_path / "untrusted.json"
+    empty_trust.write_text("{}")
+    runner = SessionRunner(config, claude_json=empty_trust)
+    proj = runner._resolve_project("alpha")
+
+    with pytest.raises(InvalidSpawnOption):
+        await runner.spawn("alpha", trust=True, custom_name="bad\x01name")
+
+    assert not is_trusted(proj.path, empty_trust)  # validation failed → no trust side effect
+
+
+async def test_spawn_trust_true_capacity_full_does_not_trust(runner_config, tmp_path, monkeypatch):
+    # #775 regression (Greptile P1, 2nd pass): --trust is applied AFTER the bridge-cap
+    # check too, so a start rejected by CapacityExceeded also leaves NO trust side effect.
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    config, _ = runner_config
+    config = config.model_copy(deep=True)
+    config.instance_defaults.max_bridges = 1
+    empty_trust = tmp_path / "untrusted.json"
+    empty_trust.write_text("{}")
+    runner = SessionRunner(config, claude_json=empty_trust)
+    proj = runner._resolve_project("alpha")
+    # A live bridge for ANOTHER project already fills the single-bridge cap.
+    _seed(runner, "beta", mode="standard", status=InstanceStatus.RUNNING)
+
+    with pytest.raises(CapacityExceeded):
+        await runner.spawn("alpha", trust=True)
+
+    assert not is_trusted(proj.path, empty_trust)  # cap rejection → no trust side effect
 
 
 async def test_spawn_crash_is_error(runner_config, monkeypatch):
