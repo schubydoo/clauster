@@ -15,7 +15,8 @@ Two modes, with DIFFERENT transports (live-verified, #846):
 * ``setup-token`` — ``claude setup-token`` is a full TUI. It prints essentially nothing on
   a plain pipe (verified: 1 byte in 12s) and only renders its
   ``https://claude.com/cai/oauth/authorize?...`` URL under a real terminal. So this mode is
-  spawned under a PTY (:func:`os.openpty`) and its raw bytes are fed through
+  spawned under a PTY (POSIX :func:`os.openpty`; Windows ConPTY via pywinpty, #905) and its
+  raw bytes are fed through
   :class:`clauster.pty_screen.PtyScreen` (reusing the pyte emulator already built for the
   live pty-screen view, #534) — the RENDERED screen text is what gets scanned for the
   authorize URL and the printed ``CLAUDE_CODE_OAUTH_TOKEN=...`` token, exactly like

@@ -35,7 +35,7 @@ start when either of these holds:
 
 1. **Non-loopback bind without enforced auth.** A `host` outside
    `{127.0.0.1, ::1, localhost}` requires `auth.enabled: true` together with
-   `password_required` (and a hash) or `reverse_proxy.enabled` — unless you
+   `password_required` (and a hash), an `api_token_hash`, or `reverse_proxy.enabled` — unless you
    explicitly opt out with `auth.allow_unauthenticated_network`.
 2. **`password_required` with no `password_hash`.** This would lock everyone out
    (or be silently skipped), so startup is refused with a clear message.
@@ -239,7 +239,8 @@ Three layers:
    bridge prints in full; not bearer credentials, but kept off the stream).
 2. **Secret-shape redaction (defense-in-depth).** A conservative allow-list of
    obvious secret shapes — GitHub tokens (`ghp_`/`gho_`/… , `github_pat_`),
-   GitLab PATs (`glpat-`), AWS access-key IDs (`AKIA…`), OpenAI/Anthropic-style
+   Clauster API tokens (`clauster_pat_…`), GitLab PATs (`glpat-`), AWS access-key
+   IDs (`AKIA…`), OpenAI/Anthropic-style
    `sk-…`, Slack `xox[baprs]-…`, and `Authorization: Bearer …` headers.
 3. The bridge's own `[REDACTED]` output for most secrets — never relied on alone.
 

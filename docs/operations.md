@@ -70,6 +70,7 @@ It prints one line per check and exits non-zero if any check **fails**. Checks:
 | `auth` | Auth is internally consistent and enforced for the bind (the same rule that refuses to start). | **FAIL** for a non-loopback bind without enforced auth. |
 | `workspace-trust` | Whether `projects_root` has accepted Claude's workspace-trust dialog. | **WARN** if untrusted — advisory, recoverable from the UI (trust-on-start). |
 | `version` | For a from-source checkout, whether `HEAD` is behind its last-fetched upstream. | **WARN** if behind; absent for PyPI/Docker installs. |
+| `node-toolchain` | On an nvm host, whether nvm's default `node` is reachable on a spawned bridge's `PATH`. | **WARN** if missing or not on the bridge `PATH` — advisory; only present on POSIX nvm hosts. |
 | `port` | (CLI only) whether the listen port is free to bind. | **WARN** if already in use. |
 | `systemd` | The loaded `clauster.service` uses a non-reaping `KillMode` (see below). | **WARN** if it would reap live pty bridges. |
 | `extra:*` | Each optional [extra](installation.md) (`pty`/`notify`) is importable in the running interpreter. | **WARN** if missing (with the install hint) — never FAIL; a missing extra only leaves its feature dormant. A Windows-only extra is skipped off-Windows. |
