@@ -1,0 +1,26 @@
+# Windows-only coverage config (#929). Passed via `--cov-config=.coveragerc-win`
+# ONLY on the Windows CI job — Linux/macOS use pyproject's [tool.coverage.*].
+#
+# Windows physically can't run clauster's POSIX code (fcntl/os.openpty/termios/
+# dir-fsync/pwd), and the ConPTY keeper is exercised via a fake process seam on
+# Linux rather than a real spawn, so those lines read as "missed" on Windows even
+# though they are fully covered on Linux + macOS. This config removes that
+# un-runnable code from the WINDOWS measurement so a meaningful high floor can gate
+# the Windows-reachable surface. Keep the base [run]/[report] in lockstep with
+# pyproject.toml — `test_coverage_configs_consistent` enforces it.
+[run]
+branch = true
+omit =
+    tests/*
+    src/clauster/templates/*
+    src/clauster/static/*
+    # POSIX pty keeper + Windows ConPTY runtime: never spawned for real in the test
+    # suite (fake `_load_pty_process` seam), so it's covered on Linux, not Windows.
+    */clauster/pty_keeper.py
+
+[report]
+exclude_also =
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    # POSIX-only lines, tagged in-source; excluded from the Windows run only.
+    skip-on-win

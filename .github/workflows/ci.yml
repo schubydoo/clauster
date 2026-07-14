@@ -126,11 +126,13 @@ jobs:
           fi
 
   # --------------------------------------------------------------------
-  # Unit tests across the matrix `setup` emitted. The 96% coverage gate
-  # lives in pyproject addopts (--cov-fail-under=96); only Linux enforces
-  # it (macOS/Windows report coverage but pass --cov-fail-under=0, since
-  # branches like Linux jiffies / Windows O_BINARY are platform-specific
-  # and no single OS reaches 96%). Skipped wholesale on a docs-only PR.
+  # Unit tests across the matrix `setup` emitted. A consistent 98% coverage
+  # gate applies on ALL THREE OSes (#929): the floor lives in pyproject
+  # addopts (--cov-fail-under=98). Linux + macOS (both POSIX) hold it
+  # directly; Windows measures through `.coveragerc-win`, which omits the
+  # POSIX/ConPTY surface it physically can't run so the Windows-reachable
+  # code holds the same 98% (see the pytest step below). Skipped wholesale
+  # on a docs-only PR.
   # --------------------------------------------------------------------
   tests:
     name: tests (${{ matrix.os }}, ${{ matrix.python }})
@@ -176,15 +178,20 @@ jobs:
           # timing is still written when pytest fails (the default shell is `bash -eo pipefail`).
           start=$(date +%s)
           rc=0
-          if [ "$RUNNER_OS" = "Linux" ]; then
+          # Consistent 98% coverage floor on ALL THREE OSes (#929) — the gate lives in
+          # pyproject addopts (--cov-fail-under=98). macOS is POSIX, so it runs the same
+          # code as Linux and holds the floor directly. Windows physically can't run
+          # clauster's POSIX code (fcntl/os.openpty/termios/dir-fsync) and its ConPTY
+          # keeper is exercised via a fake process seam on Linux, so Windows measures
+          # through `.coveragerc-win`, which excludes that un-runnable surface (omit
+          # pty_keeper + `# pragma: skip-on-win`); the Windows-REACHABLE code then holds
+          # the same 98%. Every OS still emits coverage.xml + junit.xml for its Codecov flag.
+          if [ "$RUNNER_OS" = "Windows" ]; then
             uv run --python "$PYTHON_VERSION" pytest -q --durations=15 \
+              --cov-config=.coveragerc-win \
               --cov-report=xml --junitxml=junit.xml -o junit_family=legacy || rc=$?
           else
-            # macOS/Windows: keep the fail-under gate off (no single OS reaches
-            # 96% on its own), but DO emit coverage.xml + junit.xml so each OS's
-            # coverage AND test results upload under its own Codecov flag — per-OS
-            # visibility on the platform branches Linux can't exercise.
-            uv run --python "$PYTHON_VERSION" pytest -q --durations=15 --cov-fail-under=0 \
+            uv run --python "$PYTHON_VERSION" pytest -q --durations=15 \
               --cov-report=xml --junitxml=junit.xml -o junit_family=legacy || rc=$?
           fi
           dur=$(( $(date +%s) - start ))

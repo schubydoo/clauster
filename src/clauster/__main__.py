@@ -1052,11 +1052,11 @@ def _warn_if_key_world_readable(key: Path) -> None:
     """
     if os.name != "posix":
         return
-    try:
+    try:  # pragma: skip-on-win
         mode = key.stat().st_mode
     except OSError:  # pragma: no cover - the key was just resolved+readable; racey unlink only
         return
-    if mode & 0o077:
+    if mode & 0o077:  # pragma: skip-on-win
         print(
             f"clauster: WARNING — tls.key_file {key} is group/other-accessible "
             f"(mode {mode & 0o777:#o}); a private key should be accessible only by its owner. "

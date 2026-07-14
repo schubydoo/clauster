@@ -199,7 +199,7 @@ def cross_process_lock(target: Path):
         os.close(fd)  # implicitly releases the flock
 
 
-def _warn_cross_process_unconfigured() -> None:
+def _warn_cross_process_unconfigured() -> None:  # pragma: skip-on-win
     """Log the "lock dir not configured" warning at most once per process."""
     global _CROSS_PROCESS_UNCONFIGURED_WARNED
     with _LOCK_DIR_LOCK:
@@ -316,7 +316,7 @@ def ensure_private_dir(path: Path) -> None:
     if _is_windows():
         _restrict_windows_acl(path)
         return
-    try:
+    try:  # pragma: skip-on-win
         path.chmod(0o700)
     except OSError:
         # A chmod failure would leave a pre-existing dir that holds the session secret
@@ -383,7 +383,7 @@ def fsync_dir(directory: Path) -> None:
         dir_fd = os.open(directory, os.O_RDONLY)
     except OSError:
         return
-    try:
+    try:  # pragma: skip-on-win
         os.fsync(dir_fd)
     except OSError:
         pass

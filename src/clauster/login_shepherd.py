@@ -384,11 +384,11 @@ class LoginShepherd:
         import termios
 
         argv = [resolved_binary, "setup-token"]
-        try:
+        try:  # pragma: skip-on-win — POSIX pty path; Windows returned via _spawn_conpty above
             master_fd, slave_fd = os.openpty()
         except OSError as exc:
             raise LoginShepherdError(f"failed to open a pty for claude {mode}: {exc}") from exc
-        try:
+        try:  # pragma: skip-on-win — POSIX termios/fcntl
             fcntl.ioctl(
                 slave_fd,
                 termios.TIOCSWINSZ,
@@ -401,7 +401,7 @@ class LoginShepherd:
             # fatal to the login flow, so log at debug and keep going rather than abort
             # the spawn (unlike the ECHO disable below, which IS security-critical).
             _log.debug("login_shepherd: failed to widen pty winsize for %s: %s", mode, exc)
-        try:
+        try:  # pragma: skip-on-win — POSIX termios ECHO disable
             attrs = termios.tcgetattr(slave_fd)
             attrs[3] &= ~termios.ECHO  # lflags &= ~ECHO
             termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
@@ -411,7 +411,7 @@ class LoginShepherd:
             raise LoginShepherdError(
                 f"failed to disable pty echo for claude {mode}: {exc}"
             ) from exc
-        try:
+        try:  # pragma: skip-on-win — POSIX pty-backed Popen (slave_fd stdio)
             proc = subprocess.Popen(  # noqa: S603 — list-argv, absolute binary, no shell
                 argv,
                 stdin=slave_fd,
@@ -698,7 +698,7 @@ class LoginShepherd:
                     "login_shepherd: writing code to %s conpty failed: %s", flow.mode, exc
                 )
             return
-        if flow.master_fd is not None:
+        if flow.master_fd is not None:  # pragma: skip-on-win — POSIX pty master fd
             if flow.stdin_closed:
                 return
             try:
@@ -827,7 +827,7 @@ class LoginShepherd:
                     flow.stdin_closed = True
                     with flow.pty_lock:  # serialize the close with any last reader access
                         flow.pty_process.close()
-            elif flow.master_fd is not None:
+            elif flow.master_fd is not None:  # pragma: skip-on-win — POSIX pty master fd
                 if not flow.stdin_closed:
                     flow.stdin_closed = True
                     os.close(flow.master_fd)
@@ -857,7 +857,7 @@ def _pump_stdout(flow: _Flow) -> None:
         pass
 
 
-def _pump_pty(flow: _Flow) -> None:
+def _pump_pty(flow: _Flow) -> None:  # pragma: skip-on-win — POSIX pty reader (master_fd)
     """Background-thread target: feed `flow.master_fd`'s raw bytes into its `PtyScreen`.
 
     The `setup-token` PTY reader (#846): reads raw bytes off the pty master and

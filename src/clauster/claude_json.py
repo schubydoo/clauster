@@ -197,7 +197,7 @@ def _atomic_write_json(
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(render(data))
-            if _is_posix():
+            if _is_posix():  # pragma: skip-on-win
                 try:
                     mode = stat.S_IMODE(path.stat().st_mode)
                 except FileNotFoundError:

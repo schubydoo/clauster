@@ -430,7 +430,7 @@ class ClaustrumDaemon:
             # below so a write failure is cleaned up + fail-closed, never left on disk.
             token_file = self._socket.parent / f"token-handoff.{secrets.token_hex(8)}.tmp"
             argv += ["-token-file", str(token_file)]
-        else:
+        else:  # pragma: skip-on-win
             # POSIX: feed the token over the launcher's stdin (fd 0) — nothing on disk.
             argv += ["-token-fd", "0"]
             # POSIX-only detach into a new session (setsid); omitted entirely on Windows
@@ -465,7 +465,9 @@ class ClaustrumDaemon:
             self._error = f"could not launch claustrum: {exc}"
             raise DaemonSpawnError(self._error) from exc
 
-        if token_file is None:  # POSIX: hand the token to the launcher over its stdin pipe.
+        if (
+            token_file is None
+        ):  # pragma: skip-on-win  # POSIX: hand the token to the launcher over its stdin pipe.
             stdin = proc.stdin
             if stdin is None:  # pragma: no cover - stdin=PIPE always yields a writer
                 log_file.close()

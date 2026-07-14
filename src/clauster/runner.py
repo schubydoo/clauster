@@ -965,7 +965,7 @@ class SessionRunner:
                         "one per project, so the existing bridge was returned"
                     ),
                 )
-        else:
+        else:  # pragma: skip-on-win — pty branch: pywinpty-gated, unreachable on Windows CI
             # PTY sessions: N per project allowed; idempotent ONLY for the specific
             # instance being resumed (resume_target), never a coincidentally-live
             # other-mode/other instance — returning that would hand back the wrong
@@ -1868,7 +1868,7 @@ class SessionRunner:
         if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
             self._emit_lifecycle("ready", instance)  # only on the transition, not every poll
 
-    async def _spawn_pty(
+    async def _spawn_pty(  # pragma: skip-on-win — pty mode is pywinpty-gated, off on Windows CI
         self,
         instance: RemoteControlInstance,
         proj: Project,
@@ -2181,7 +2181,7 @@ class SessionRunner:
             log_path = instance.bridge_debug_log_path
             if log_path is None:
                 return  # nothing to read from; leave it for the poll loop
-            if instance.resume_mode == "pty":
+            if instance.resume_mode == "pty":  # pragma: skip-on-win — pty-mode (pywinpty-gated)
                 # PTY bridges register via the keeper sidecar, not the subcommand's
                 # bridge-log markers; readiness is the connect URL appearing there.
                 sidecar = self._sidecar_path_for(log_path)
