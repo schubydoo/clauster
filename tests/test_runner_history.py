@@ -58,7 +58,7 @@ async def test_spawn_records_spawned_row(runner_config):
     [event] = runner._history.history_for("alpha")
     assert event.kind == "spawned"
     assert event.mode == "standard"
-    assert event.cost_usd is None  # non-terminal -> no cost
+    assert event.cost.cost_usd is None  # non-terminal -> no cost
 
 
 async def test_ready_records_ready_row_with_pty_mode(runner_config):
@@ -99,11 +99,11 @@ async def test_stop_records_ended_row_with_cost_snapshot(runner_config):
 
     [event] = runner._history.history_for("alpha")
     assert event.kind == "ended"
-    assert event.cost_usd is not None and event.cost_usd > 0
-    assert event.input_tokens == 1000  # summed from the transcript
+    assert event.cost.cost_usd is not None and event.cost.cost_usd > 0
+    assert event.cost.input_tokens == 1000  # summed from the transcript
 
     rollup = runner._history.rollup_for("alpha")
-    assert rollup.total_cost_usd == event.cost_usd
+    assert rollup.cost.cost_usd == event.cost.cost_usd
     assert rollup.last_used is not None
 
 
@@ -119,7 +119,7 @@ async def test_crash_records_crashed_row(runner_config):
 
     [event] = runner._history.history_for("alpha")
     assert event.kind == "crashed"
-    assert event.cost_usd is not None  # crash is terminal -> snapshot taken
+    assert event.cost.cost_usd is not None  # crash is terminal -> snapshot taken
 
 
 async def test_terminal_event_without_transcripts_records_zero_cost(runner_config):
@@ -135,8 +135,8 @@ async def test_terminal_event_without_transcripts_records_zero_cost(runner_confi
 
     [event] = runner._history.history_for("alpha")
     assert event.kind == "ended"
-    assert event.cost_usd == 0.0
-    assert event.input_tokens == 0
+    assert event.cost.cost_usd == 0.0
+    assert event.cost.input_tokens == 0
 
 
 async def test_terminal_event_records_null_cost_when_transcript_read_fails(
@@ -158,8 +158,8 @@ async def test_terminal_event_records_null_cost_when_transcript_read_fails(
 
     [event] = runner._history.history_for("alpha")
     assert event.kind == "ended"
-    assert event.cost_usd is None
-    assert event.input_tokens is None
+    assert event.cost.cost_usd is None
+    assert event.cost.input_tokens is None
 
 
 async def test_record_event_hashes_session_ref_never_raw(runner_config):
@@ -227,7 +227,7 @@ async def test_terminal_event_records_row_when_project_path_lookup_fails(
 
     [event] = runner._history.history_for("alpha")  # the row IS recorded
     assert event.kind == "crashed"
-    assert event.cost_usd is None  # only the cost is dropped
+    assert event.cost.cost_usd is None  # only the cost is dropped
     assert "session-history cost snapshot failed" in caplog.text
 
 
@@ -252,7 +252,7 @@ async def test_terminal_event_records_row_when_cost_snapshot_raises_non_oserror(
 
     [event] = runner._history.history_for("alpha")  # the row IS recorded
     assert event.kind == "ended"
-    assert event.cost_usd is None  # only the cost is dropped
+    assert event.cost.cost_usd is None  # only the cost is dropped
     assert "session-history cost snapshot failed" in caplog.text
 
 
@@ -299,7 +299,7 @@ def test_record_event_sync_path_appends_inline(runner_config):
     assert not runner._notify_tasks  # never scheduled a task
     [event] = runner._history.history_for("alpha")
     assert event.kind == "ended"
-    assert event.cost_usd is not None and event.cost_usd > 0
+    assert event.cost.cost_usd is not None and event.cost.cost_usd > 0
 
 
 def test_record_event_sync_path_swallows_store_failure(runner_config, caplog):
@@ -356,5 +356,5 @@ async def test_terminal_event_records_null_cost_when_project_unknown(runner_conf
 
     [event] = runner._history.history_for("ghost")  # the terminal row IS recorded
     assert event.kind == "ended"
-    assert event.cost_usd is None  # no path -> no snapshot -> null cost
+    assert event.cost.cost_usd is None  # no path -> no snapshot -> null cost
     assert "session-history cost snapshot failed" not in caplog.text  # not the OSError branch
