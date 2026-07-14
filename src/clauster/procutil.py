@@ -352,9 +352,9 @@ def reap_if_exited(pid: int) -> None:
     """
     if not hasattr(os, "WNOHANG"):  # Windows: no child reaping needed
         return
-    try:
+    try:  # pragma: skip-on-win
         os.waitpid(pid, os.WNOHANG)
-    except (ChildProcessError, OSError):
+    except (ChildProcessError, OSError):  # pragma: skip-on-win
         pass
 
 

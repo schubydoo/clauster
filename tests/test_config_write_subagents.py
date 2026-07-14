@@ -406,18 +406,23 @@ def test_list_tolerates_non_utf8_file(tmp_path: Path) -> None:
     assert entry["description"] is None
 
 
-def test_list_skips_unreadable_file(tmp_path: Path) -> None:
-    if os.name != "posix" or os.geteuid() == 0:
-        pytest.skip("permission bits are meaningless on this platform/as root")
+def test_list_skips_unreadable_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # config_write_subagents.py 471-474: a listable-but-unreadable .md is skipped (the
+    # `read_bytes` OSError -> continue branch). Induce the OSError by monkeypatching the
+    # read so the handler runs on every OS, not just where POSIX chmod bits bite.
     agents_dir = sub.project_agents_dir(tmp_path)
     agents_dir.mkdir(parents=True)
     unreadable = agents_dir / "unreadable.md"
     unreadable.write_bytes(_MINIMAL.encode("utf-8"))
-    unreadable.chmod(0o000)
-    try:
-        agents = sub.list_project_agents(tmp_path)
-    finally:
-        unreadable.chmod(0o600)  # restore so tmp_path cleanup can remove it
+    real_read_bytes = Path.read_bytes
+
+    def boom(self: Path) -> bytes:
+        if self.name == "unreadable.md":
+            raise OSError("simulated unreadable file")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    agents = sub.list_project_agents(tmp_path)
     assert not any(a["name"] == "unreadable" for a in agents)
 
 

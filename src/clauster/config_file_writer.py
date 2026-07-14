@@ -174,7 +174,7 @@ def write_file(
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
-                if _is_posix():
+                if _is_posix():  # pragma: skip-on-win
                     try:
                         existing_mode = stat.S_IMODE(target.stat().st_mode)
                     except FileNotFoundError:

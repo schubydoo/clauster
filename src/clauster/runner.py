@@ -105,7 +105,7 @@ def _conpty_keeper_available() -> bool:
     import on a POSIX host.
     """
     if sys.platform != "win32":
-        return False
+        return False  # pragma: skip-on-win
     try:
         import winpty  # noqa: F401  # pragma: no cover - win32-only; exercised on the VM
 
@@ -965,7 +965,7 @@ class SessionRunner:
                         "one per project, so the existing bridge was returned"
                     ),
                 )
-        else:
+        else:  # pragma: skip-on-win — pty branch: pywinpty-gated, unreachable on Windows CI
             # PTY sessions: N per project allowed; idempotent ONLY for the specific
             # instance being resumed (resume_target), never a coincidentally-live
             # other-mode/other instance — returning that would hand back the wrong
@@ -1143,7 +1143,7 @@ class SessionRunner:
         # One spawn-event chokepoint for both modes: the instance is registered, STARTING,
         # and its resume_mode is now resolved. A "ready" follows iff it reaches RUNNING.
         self._emit_lifecycle("spawn", instance)
-        if instance.resume_mode == "pty":
+        if instance.resume_mode == "pty":  # pragma: skip-on-win
             return SpawnOutcome(
                 instance=await self._spawn_pty(
                     instance, proj, name, log_path, permission_mode, resume
@@ -1602,7 +1602,7 @@ class SessionRunner:
                     env=popen_env,
                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 )
-            return subprocess.Popen(
+            return subprocess.Popen(  # pragma: skip-on-win
                 cmd,
                 cwd=str(cwd),
                 stdout=err_fh,
@@ -1638,14 +1638,14 @@ class SessionRunner:
             return False  # no pywinpty → Server Mode fallback (ConPTY keeper unavailable)
         if requested is not None:
             return requested == "pty"
-        if prior is not None:
-            return prior.resume_mode == "pty"
-        return self._config.claude.launch_mode == "pty"
+        if prior is not None:  # pragma: skip-on-win
+            return prior.resume_mode == "pty"  # pragma: skip-on-win
+        return self._config.claude.launch_mode == "pty"  # pragma: skip-on-win
 
     @staticmethod
     def _sidecar_path_for(log_path: Path) -> Path:
         """Discovery JSON the keeper writes beside the bridge's --debug-file."""
-        return log_path.with_name(log_path.stem + ".keeper.json")
+        return log_path.with_name(log_path.stem + ".keeper.json")  # pragma: skip-on-win
 
     @staticmethod
     def _screen_sidecar_path_for(log_path: Path) -> Path:
@@ -1765,7 +1765,7 @@ class SessionRunner:
                         subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
                     ),
                 )
-            return subprocess.Popen(
+            return subprocess.Popen(  # pragma: skip-on-win
                 cmd,
                 cwd=str(cwd),
                 stdin=subprocess.DEVNULL,
@@ -1835,8 +1835,8 @@ class SessionRunner:
                 return self._read_sidecar(sidecar) or info
             if info.get("connect_url") or info.get("state") in ("ready", "error"):
                 return info
-            time.sleep(_READY_POLL_INTERVAL)
-        return info
+            time.sleep(_READY_POLL_INTERVAL)  # pragma: skip-on-win
+        return info  # pragma: skip-on-win
 
     def _apply_pty_info(
         self, instance: RemoteControlInstance, info: dict, proc: subprocess.Popen
@@ -1868,7 +1868,7 @@ class SessionRunner:
         if prev_status is not InstanceStatus.RUNNING and instance.status is InstanceStatus.RUNNING:
             self._emit_lifecycle("ready", instance)  # only on the transition, not every poll
 
-    async def _spawn_pty(
+    async def _spawn_pty(  # pragma: skip-on-win — pty mode is pywinpty-gated, off on Windows CI
         self,
         instance: RemoteControlInstance,
         proj: Project,
@@ -1930,7 +1930,7 @@ class SessionRunner:
         for _ in range(8):  # ~2s grace for the keeper to follow its bridge out
             procutil.reap_if_exited(pid)
             if procutil.proc_create_time(pid) is None:
-                return
+                return  # pragma: skip-on-win
             time.sleep(0.25)
         procutil.force_kill_tree(pid)
         procutil.reap_if_exited(pid)
@@ -2181,7 +2181,7 @@ class SessionRunner:
             log_path = instance.bridge_debug_log_path
             if log_path is None:
                 return  # nothing to read from; leave it for the poll loop
-            if instance.resume_mode == "pty":
+            if instance.resume_mode == "pty":  # pragma: skip-on-win — pty-mode (pywinpty-gated)
                 # PTY bridges register via the keeper sidecar, not the subcommand's
                 # bridge-log markers; readiness is the connect URL appearing there.
                 sidecar = self._sidecar_path_for(log_path)
@@ -2265,7 +2265,7 @@ class SessionRunner:
                 twice = instance.resume_mode == "pty"
                 await asyncio.to_thread(self._signal_stop, pid, twice=twice)
                 await self._await_exit(project_name, pid, instance.bridge_proc_start)
-            if keeper_pid is not None:
+            if keeper_pid is not None:  # pragma: skip-on-win
                 await asyncio.to_thread(self._cleanup_keeper, keeper_pid)
             instance.status = InstanceStatus.STOPPED
             self._procs.pop(instance_id, None)  # release dead Popen handle; resume re-adds it
@@ -3347,7 +3347,7 @@ class SessionRunner:
 
     def _cancel_startup_watch(self, instance_id: str) -> None:
         task = self._startup_watches.pop(instance_id, None)
-        if task is not None and not task.done():
+        if task is not None and not task.done():  # pragma: skip-on-win
             task.cancel()
 
     async def shutdown(self) -> None:

@@ -72,17 +72,17 @@ def _locked(claude_json: Path) -> Iterator[None]:
         if fcntl is None:
             yield
             return
-        lock_path = claude_json.with_suffix(claude_json.suffix + ".lock")
-        try:
+        lock_path = claude_json.with_suffix(claude_json.suffix + ".lock")  # pragma: skip-on-win
+        try:  # pragma: skip-on-win
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        except OSError as exc:
+        except OSError as exc:  # pragma: skip-on-win
             _log.warning("could not open %s; proceeding without a lock: %s", lock_path, exc)
             yield
             return
-        try:
+        try:  # pragma: skip-on-win
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
-        finally:
+        finally:  # pragma: skip-on-win
             os.close(fd)  # implicitly releases the flock
 
 
@@ -197,7 +197,7 @@ def _atomic_write_json(
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(render(data))
-            if _is_posix():
+            if _is_posix():  # pragma: skip-on-win
                 try:
                     mode = stat.S_IMODE(path.stat().st_mode)
                 except FileNotFoundError:

@@ -285,7 +285,7 @@ def _atomic_write(dest: Path, data: bytes, mode: int) -> None:
             # Belt-and-suspenders: umask can mask bits off the open() mode, so
             # re-assert the intended mode on the fd before any key bytes land.
             # os.fchmod is POSIX-only; the mode bits are meaningless on Windows.
-            if hasattr(os, "fchmod"):
+            if hasattr(os, "fchmod"):  # pragma: skip-on-win
                 os.fchmod(fd, mode)
             os.write(fd, data)
         finally:

@@ -218,4 +218,5 @@ notes and [#904](https://github.com/schubydoo/clauster/issues/904).
 - **Validate before spawning.** Resolve binaries to absolute paths and validate
     project names before any subprocess; pass list-argv, never `shell=True`.
 - Style + docstrings enforced by ruff (`E/F/I/W/UP/B/S/D`, 99 cols); the test
-    suite gates coverage at 96%.
+    suite gates coverage at 96% on all three OSes (Windows measures through
+    `.coveragerc-win`, which excludes the POSIX/ConPTY code it can't run).

@@ -166,7 +166,10 @@ markers = [
 ]
 
 [tool.coverage.run]
-omit = ["tests/*"]
+# templates/ + static/ are bundled data assets, not Python — `--cov=src/clauster`
+# would otherwise try to parse the Jinja templates and emit a per-file
+# `CoverageWarning: Couldn't parse …` (cosmetic, no effect on the numbers).
+omit = ["tests/*", "src/clauster/templates/*", "src/clauster/static/*"]
 
 [tool.coverage.report]
 exclude_also = [

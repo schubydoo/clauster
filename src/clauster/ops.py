@@ -745,7 +745,7 @@ def _home_for_user(user: str | None) -> str:
         try:
             import pwd
 
-            return pwd.getpwnam(user).pw_dir
+            return pwd.getpwnam(user).pw_dir  # pragma: skip-on-win
         except (KeyError, ImportError, OSError):
             # Lookup miss (user not yet created / non-POSIX host): guess the home root
             # from the rendering host's platform — macOS homes live under /Users.

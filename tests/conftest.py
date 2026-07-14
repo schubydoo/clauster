@@ -14,6 +14,34 @@ from typing import Any
 import pytest
 from hypothesis import settings
 
+
+def _can_create_symlink() -> bool:
+    """Whether this runner can create a symlink (probed once, at import).
+
+    POSIX always can; Windows needs the create-symlink privilege — admin or Developer
+    Mode — which the GitHub ``windows-latest`` runner and the project's Windows test VM
+    both have. So the symlink-escape *defense* tests should run wherever symlinks are
+    actually available (Windows included) rather than being blanket-skipped on win32;
+    they fall back to a skip only on a locked-down box that genuinely can't create one.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        target = Path(d) / "t"
+        target.write_text("x")
+        try:
+            (Path(d) / "l").symlink_to(target)
+        except (OSError, NotImplementedError):
+            return False
+        return True
+
+
+#: Skip only where symlinks truly can't be created (see :func:`_can_create_symlink`),
+#: NOT unconditionally on Windows — an admin Windows runner exercises the symlink-escape
+#: defenses for real (#929).
+needs_symlink = pytest.mark.skipif(
+    not _can_create_symlink(),
+    reason="symlink creation unavailable (needs privilege / Developer Mode on Windows)",
+)
+
 # --- Live-account safety: pin HOME BEFORE any clauster import -------------------------
 #
 # The ``_isolate_clauster_home`` fixture below is function-scoped, so it cannot protect

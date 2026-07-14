@@ -373,7 +373,10 @@ class ClaustrumDaemon:
         failed spawn can leave the token on disk, and it must not linger there
         (fail-closed on secrets). A no-op on POSIX, where ``token_file`` is ``None``.
         """
-        if token_file is not None:
+        # no branch: token_file is win32-only (always set on Windows, always None on
+        # POSIX), so this guard is one-way per platform — the untaken edge is covered on
+        # the *other* OS, never partial in reality.
+        if token_file is not None:  # pragma: no branch
             with contextlib.suppress(OSError):
                 token_file.unlink()
 
@@ -430,7 +433,7 @@ class ClaustrumDaemon:
             # below so a write failure is cleaned up + fail-closed, never left on disk.
             token_file = self._socket.parent / f"token-handoff.{secrets.token_hex(8)}.tmp"
             argv += ["-token-file", str(token_file)]
-        else:
+        else:  # pragma: skip-on-win
             # POSIX: feed the token over the launcher's stdin (fd 0) — nothing on disk.
             argv += ["-token-fd", "0"]
             # POSIX-only detach into a new session (setsid); omitted entirely on Windows
@@ -447,7 +450,8 @@ class ClaustrumDaemon:
         try:
             # Windows: write the token handoff here, inside the guard, so a write failure
             # (bad dir / perms / disk full) is cleaned up + surfaced, not leaked on disk.
-            if token_file is not None:
+            # no branch: win32-only guard (see _unlink_token_handoff) — one-way per platform.
+            if token_file is not None:  # pragma: no branch
                 token_file.write_text(token, encoding="utf-8")
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -465,7 +469,9 @@ class ClaustrumDaemon:
             self._error = f"could not launch claustrum: {exc}"
             raise DaemonSpawnError(self._error) from exc
 
-        if token_file is None:  # POSIX: hand the token to the launcher over its stdin pipe.
+        if (
+            token_file is None
+        ):  # pragma: skip-on-win  # POSIX: hand the token to the launcher over its stdin pipe.
             stdin = proc.stdin
             if stdin is None:  # pragma: no cover - stdin=PIPE always yields a writer
                 log_file.close()

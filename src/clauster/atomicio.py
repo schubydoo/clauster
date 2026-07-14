@@ -178,8 +178,8 @@ def cross_process_lock(target: Path):
     if fcntl is None:
         yield
         return
-    lock_file = _cross_process_lock_file(target)
-    if lock_file is None:
+    lock_file = _cross_process_lock_file(target)  # pragma: skip-on-win
+    if lock_file is None:  # pragma: skip-on-win
         _warn_cross_process_unconfigured()
         yield
         return
@@ -190,16 +190,16 @@ def cross_process_lock(target: Path):
     # silently un-doing `ensure_private_dir`'s 0o700; instead a missing state_dir raises
     # FileNotFoundError, the right fail-loud outcome (a gone state_dir is a genuine fault).
     # `os.open` likewise stays unwrapped — a real permission/IO fault is worth surfacing.
-    lock_file.parent.mkdir(exist_ok=True, mode=0o700)
-    fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
+    lock_file.parent.mkdir(exist_ok=True, mode=0o700)  # pragma: skip-on-win
+    fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)  # pragma: skip-on-win
+    try:  # pragma: skip-on-win
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
-    finally:
+    finally:  # pragma: skip-on-win
         os.close(fd)  # implicitly releases the flock
 
 
-def _warn_cross_process_unconfigured() -> None:
+def _warn_cross_process_unconfigured() -> None:  # pragma: skip-on-win
     """Log the "lock dir not configured" warning at most once per process."""
     global _CROSS_PROCESS_UNCONFIGURED_WARNED
     with _LOCK_DIR_LOCK:
@@ -316,9 +316,9 @@ def ensure_private_dir(path: Path) -> None:
     if _is_windows():
         _restrict_windows_acl(path)
         return
-    try:
+    try:  # pragma: skip-on-win
         path.chmod(0o700)
-    except OSError:
+    except OSError:  # pragma: skip-on-win
         # A chmod failure would leave a pre-existing dir that holds the session secret
         # potentially too permissive — fail closed rather than silently degrade.
         raise
@@ -383,9 +383,9 @@ def fsync_dir(directory: Path) -> None:
         dir_fd = os.open(directory, os.O_RDONLY)
     except OSError:
         return
-    try:
+    try:  # pragma: skip-on-win
         os.fsync(dir_fd)
-    except OSError:
+    except OSError:  # pragma: skip-on-win
         pass
-    finally:
+    finally:  # pragma: skip-on-win
         os.close(dir_fd)
