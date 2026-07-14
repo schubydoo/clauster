@@ -61,6 +61,11 @@ _COMMANDS = {
     "config",
     "mcp",
     "api-token",
+    "projects",
+    "status",
+    "sessions",
+    "logs",
+    "open",
 }
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
@@ -210,6 +215,27 @@ def main(argv: list[str] | None = None) -> int:
     token_revoke_p.add_argument("-c", "--config", help="path to clauster.yml")
     token_revoke_p.add_argument("label", help="the token's label")
 
+    # Headless read commands over the shared engine facade (#775, Slice A).
+    projects_p = sub.add_parser("projects", help="list discoverable projects (no server)")
+    projects_p.add_argument("-c", "--config", help="path to clauster.yml")
+    projects_p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    status_p = sub.add_parser("status", help="list bridge instances and their status")
+    status_p.add_argument("-c", "--config", help="path to clauster.yml")
+    status_p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    sessions_p = sub.add_parser("sessions", help="list live working sessions")
+    sessions_p.add_argument("-c", "--config", help="path to clauster.yml")
+    sessions_p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    logs_p = sub.add_parser("logs", help="tail a bridge's redacted log")
+    logs_p.add_argument("-c", "--config", help="path to clauster.yml")
+    logs_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    logs_p.add_argument(
+        "-f", "--follow", action="store_true", help="stream new lines until Ctrl-C"
+    )
+    open_p = sub.add_parser("open", help="print a bridge's connect URL")
+    open_p.add_argument("-c", "--config", help="path to clauster.yml")
+    open_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    open_p.add_argument("--launch", action="store_true", help="also open the URL in a browser")
+
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
     if argv and argv[0] not in _COMMANDS and argv[0] not in _TOP_LEVEL_FLAGS:
         argv = ["run", *argv]
@@ -259,6 +285,20 @@ def main(argv: list[str] | None = None) -> int:
             return _api_token_revoke(args.config, args.label)
         token_p.print_help(sys.stderr)
         return 2
+    if args.command in ("projects", "status", "sessions", "logs", "open"):
+        # Lazy-imported so the hot `run` path never pays for the engine/CLI import graph.
+        from . import cli_read
+
+        config = _load_or_exit(args.config)
+        if args.command == "projects":
+            return cli_read.cmd_projects(config, as_json=args.json)
+        if args.command == "status":
+            return cli_read.cmd_status(config, as_json=args.json)
+        if args.command == "sessions":
+            return cli_read.cmd_sessions(config, as_json=args.json)
+        if args.command == "logs":
+            return cli_read.cmd_logs(config, args.instance, follow=args.follow)
+        return cli_read.cmd_open(config, args.instance, launch=args.launch)
     return _run(getattr(args, "config", None))
 
 

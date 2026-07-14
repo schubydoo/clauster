@@ -316,6 +316,18 @@ clauster keepers              # list or stop orphaned pty keepers
 clauster usage <transcript>   # token + approximate cost for a session transcript
 ```
 
+Headless **read** commands drive the same engine the web UI uses, with no server
+running — they are read-only and never write the running service's shared state.
+`projects`, `status`, and `sessions` take `--json` for scriptable output.
+
+```text
+clauster projects                  # list discoverable projects (git / trust / bypass)
+clauster status                    # list bridge instances and their status
+clauster sessions                  # list live working sessions (claude agents)
+clauster logs <instance> [-f]      # tail a bridge's redacted log (--follow to stream)
+clauster open <instance>           # print a bridge's connect URL (--launch opens a browser)
+```
+
 `clauster doctor` confirms `claude` is found and new enough and that
 `projects_root` and the state dir are usable — run it before your first spawn
 and fix any ✗.

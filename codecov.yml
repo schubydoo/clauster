@@ -214,5 +214,7 @@ component_management:
         - src/clauster/models.py
         - src/clauster/claude_cli.py
         - src/clauster/reconcile.py # #650 — `clauster config reconcile` subcommand
+        - src/clauster/engine.py # #775 — shared read facade for the app + headless CLI
+        - src/clauster/cli_read.py # #775 — headless read commands (projects/status/sessions/logs/open)
         - src/clauster/__main__.py
         - src/clauster/__init__.py

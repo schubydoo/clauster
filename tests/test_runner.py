@@ -134,6 +134,23 @@ async def test_persist_serializes_concurrent_callers(runner_config, monkeypatch)
     assert max_overlap == 1  # the lock kept the two saves from overlapping
 
 
+async def test_rediscover_persist_false_skips_state_write(runner_config, monkeypatch):
+    # The headless read CLI (#775) calls rediscover(persist=False): it reattaches into
+    # the in-memory registry but must NEVER write the shared state store, so a
+    # `clauster status` run beside the live service can't clobber its state.json.
+    runner = _make_runner(runner_config)
+    calls = {"n": 0}
+
+    async def spy_persist():
+        calls["n"] += 1
+
+    monkeypatch.setattr(runner, "_persist", spy_persist)
+    await runner.rediscover(persist=False)
+    assert calls["n"] == 0  # read-only: no write
+    await runner.rediscover()  # the default still persists
+    assert calls["n"] == 1
+
+
 def _db_load(state_dir):
     """Return the persisted StateStore records on ``state_dir``, then dispose."""
     with _db_persistence(state_dir) as persistence:

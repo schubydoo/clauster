@@ -2536,7 +2536,7 @@ class SessionRunner:
             return RemoteControlInstance(**kwargs)
         return None
 
-    async def rediscover(self) -> None:
+    async def rediscover(self, *, persist: bool = True) -> None:
         """Re-detect bridges after a restart: reattach live ones, resurrect dead ones.
 
         A bridge found *alive* is reattached as RUNNING. A discovered project whose
@@ -2544,6 +2544,10 @@ class SessionRunner:
         Clauster was down — e.g. a host reboot) is resurrected as a STOPPED,
         resumable card instead of being dropped; one with no persisted record is
         left absent (nothing to resume).
+
+        ``persist=False`` reattaches into the in-memory registry only and skips the
+        trailing state write — the read-only mode the headless CLI (#775) uses so a
+        ``clauster status`` never clobbers the running service's shared ``state.json``.
         """
         for proj in self._discovered().values():
             if self.get_instance_for_project(proj.name) is not None:
@@ -2611,7 +2615,8 @@ class SessionRunner:
                 instance_id=persisted_iid,
             )
             self._instances[instance.instance_id] = instance
-        await self._persist()
+        if persist:
+            await self._persist()
 
     @staticmethod
     def _instance_from_pointer(
