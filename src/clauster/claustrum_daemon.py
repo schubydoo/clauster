@@ -262,7 +262,8 @@ class ClaustrumDaemon:
         self._dir.mkdir(parents=True, exist_ok=True)
         try:
             self._dir.chmod(0o700)
-        except OSError:  # pragma: no cover - chmod can fail on exotic filesystems
+        except OSError:
+            # Best-effort tightening: a chmod failure (odd fs / perms) is logged, not fatal.
             logger.warning("claustrum: could not chmod %s to 0700", self._dir)
 
     def _read_or_create_token(self) -> str:
@@ -473,7 +474,7 @@ class ClaustrumDaemon:
             token_file is None
         ):  # pragma: skip-on-win  # POSIX: hand the token to the launcher over its stdin pipe.
             stdin = proc.stdin
-            if stdin is None:  # pragma: no cover - stdin=PIPE always yields a writer
+            if stdin is None:
                 log_file.close()
                 raise DaemonSpawnError("claustrum launcher exposes no stdin pipe")
             try:
@@ -483,7 +484,7 @@ class ClaustrumDaemon:
             except (
                 OSError,
                 ConnectionError,
-            ):  # pragma: no cover - racy; backstopped by returncode
+            ):  # non-fatal: a real failure still surfaces via the returncode check below
                 # The launcher may have already read its token and closed fd 0; any
                 # real failure surfaces via the returncode / poll below.
                 logger.debug("claustrum: writing token to launcher stdin failed (already closed?)")

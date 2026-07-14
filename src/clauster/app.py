@@ -1842,7 +1842,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return HTTPException(status_code=404, detail=str(exc))
         if isinstance(exc, config_write_plugins.MarketplaceNotFoundError):
             return HTTPException(status_code=404, detail=str(exc))
-        return HTTPException(status_code=400, detail=str(exc))  # pragma: no cover - defensive
+        return HTTPException(status_code=400, detail=str(exc))
 
     @app.get("/api/config-write/mcp")
     async def api_config_write_mcp_read(scope: str = "project", project: str = "") -> dict:

@@ -534,6 +534,20 @@ def test_key_perms_warning_skipped_on_non_posix(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().err == ""
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode-bit check path")
+def test_key_perms_warning_silent_when_stat_raises_oserror(capsys):
+    # The key was just resolved+readable, so a stat() OSError here means a racey unlink.
+    # The hygiene check must return silently (no warning, no raise), never fail-closed.
+    # _warn_if_key_world_readable only calls key.stat(), so a stand-in whose .stat()
+    # raises drives the real try/except without touching the filesystem.
+    class _RaceyKey:
+        def stat(self):
+            raise OSError("simulated: key vanished between resolve and stat")
+
+    cli._warn_if_key_world_readable(_RaceyKey())
+    assert capsys.readouterr().err == ""
+
+
 def test_run_reexecs_when_restart_requested(write_config, tmp_path, monkeypatch):
     # #483: when the in-app restart endpoint flips app.state.restart_requested during
     # serve(), _run re-execs in place exactly once after the server returns.
@@ -733,6 +747,25 @@ def test_set_process_title_swallows_runtime_error(projects_root, monkeypatch):
     fake = type("S", (), {"setproctitle": staticmethod(boom)})
     monkeypatch.setattr(cli, "_setproctitle", fake)
     cli._set_process_title(ClausterConfig(projects_root=projects_root, instance_name="dev"))
+
+
+def test_import_without_setproctitle_degrades_to_noop(projects_root, monkeypatch):
+    # setproctitle is a hard dep, but the import guard degrades to None on an exotic
+    # platform where the wheel is missing. Force `import setproctitle` to raise by
+    # poisoning sys.modules, reload, and assert the fallback fired AND that a retitle
+    # with a real title still no-ops instead of crashing — then reload to restore.
+    import importlib
+
+    monkeypatch.setitem(sys.modules, "setproctitle", None)
+    try:
+        importlib.reload(cli)
+        assert cli._setproctitle is None
+        # A title WOULD be produced (instance_name set), so this exercises the
+        # `_setproctitle is not None` guard being False, not the empty-title path.
+        cli._set_process_title(ClausterConfig(projects_root=projects_root, instance_name="dev"))
+    finally:
+        monkeypatch.undo()
+        importlib.reload(cli)
 
 
 def test_api_token_list_db_error_exits_1_not_empty(write_config, tmp_path, capsys, monkeypatch):

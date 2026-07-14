@@ -107,10 +107,10 @@ def _conpty_keeper_available() -> bool:
     if sys.platform != "win32":
         return False  # pragma: skip-on-win
     try:
-        import winpty  # noqa: F401  # pragma: no cover - win32-only; exercised on the VM
+        import winpty  # noqa: F401
 
-        return True  # pragma: no cover - win32-only
-    except Exception:  # noqa: BLE001  # pragma: no cover - win32-only
+        return True
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -1380,7 +1380,7 @@ class SessionRunner:
             for p in paths:
                 try:
                     st = p.stat()
-                except OSError:  # pragma: no cover - TOCTOU only; is_file() already stat-filtered
+                except OSError:
                     continue
                 mtime, size = max(mtime, st.st_mtime), size + st.st_size
             return mtime, size

@@ -12,6 +12,7 @@ POSIX-only: the daemon uses ``AF_UNIX`` + ``setsid`` and is skipped on Windows.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import signal
@@ -543,6 +544,87 @@ async def test_spawn_uses_token_fd_over_stdin_on_posix(make_daemon, monkeypatch)
     assert "-token-fd" in call["argv"]
     assert "-token-file" not in call["argv"]
     assert call["kwargs"]["stdin"] == asyncio.subprocess.PIPE
+
+
+async def test_prepare_dir_swallows_chmod_failure_and_warns(make_daemon, monkeypatch, caplog):
+    # Best-effort tightening: a chmod failure on the state dir is logged, never raised, so a
+    # daemon on an odd filesystem still starts (the dir is created with 0700-intent regardless).
+    import pathlib
+
+    def _boom(self, *_a, **_k):
+        raise OSError("chmod denied")
+
+    monkeypatch.setattr(pathlib.Path, "chmod", _boom)
+    daemon = make_daemon()
+    with caplog.at_level(logging.WARNING, logger="clauster.claustrum_daemon"):
+        daemon._prepare_dir()  # must not raise despite the chmod OSError
+    assert any(
+        "could not chmod" in r.getMessage() and "0700" in r.getMessage() for r in caplog.records
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="asserts the POSIX _spawn stdin branch, which Windows never takes",
+)
+async def test_spawn_posix_no_stdin_pipe_fails_closed(make_daemon, monkeypatch):
+    # POSIX: if the launcher subprocess has no stdin writer, the token can't be handed over —
+    # fail closed with DaemonSpawnError rather than silently spawning an unauthenticated daemon.
+    class _FakeProc:
+        stdin = None  # PIPE should always yield a writer; a None writer must fail closed
+
+        async def wait(self):  # pragma: no cover - the None-stdin guard raises before wait()
+            return 0
+
+        def kill(self):  # pragma: no cover - not reached
+            pass
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    with pytest.raises(DaemonSpawnError, match="no stdin pipe"):
+        await daemon._spawn("t" * 64, asyncio.get_running_loop().time() + 5.0)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="asserts the POSIX _spawn stdin branch, which Windows never takes",
+)
+async def test_spawn_posix_stdin_write_failure_is_swallowed(make_daemon, monkeypatch, caplog):
+    # A write/drain failure to the launcher's stdin is non-fatal (the launcher may have already
+    # read its token and closed fd 0): _spawn swallows it, logs a debug line, and lets the
+    # returncode decide. Here wait()==0, so a clean spawn returns without propagating the OSError.
+    class _FakeStdin:
+        def write(self, _data):
+            raise OSError("broken pipe: launcher already closed fd 0")
+
+        async def drain(self):  # pragma: no cover - write() raises first
+            pass
+
+        def close(self):  # pragma: no cover - unreached after write() raises
+            pass
+
+    class _FakeProc:
+        stdin = _FakeStdin()
+
+        async def wait(self):
+            return 0
+
+        def kill(self):  # pragma: no cover - not reached on the exit-0 path
+            pass
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    daemon = make_daemon()
+    daemon._prepare_dir()
+    with caplog.at_level(logging.DEBUG, logger="clauster.claustrum_daemon"):
+        await daemon._spawn("t" * 64, asyncio.get_running_loop().time() + 5.0)  # must not raise
+    assert any("writing token to launcher stdin failed" in r.getMessage() for r in caplog.records)
 
 
 # -- env-sentinel scrub (claustrum daemonize collision) --------------------

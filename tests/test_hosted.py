@@ -1531,6 +1531,30 @@ async def test_pump_tolerates_event_without_seq(fake_claustrum):
         assert session.daemon_last_seq == before
 
 
+async def test_pump_overflow_event_emits_gap(fake_claustrum):
+    # An "overflow" event on the source stream (the daemon dropped N frames for a slow
+    # client) is surfaced to watchers as a {"type": "gap", "dropped": N} marker, not
+    # swallowed, so the UI can flag the discontinuity.
+    async with _session(fake_claustrum) as (_fake, session):
+        queue = session.subscribe()
+        session._source.put_nowait({"type": "overflow", "dropped": 3})
+        gap = await _drain_until(queue, "gap")
+        assert gap["type"] == "gap"
+        assert gap["dropped"] == 3
+
+
+async def test_pump_ignores_unknown_event_type(fake_claustrum):
+    # An event whose type is neither line/exit/overflow falls through the dispatch and is
+    # skipped without crashing; the pump keeps draining, so a following overflow still
+    # surfaces its gap. Covers the elif-chain fall-through arc.
+    async with _session(fake_claustrum) as (_fake, session):
+        queue = session.subscribe()
+        session._source.put_nowait({"type": "heartbeat", "seq": 1})
+        session._source.put_nowait({"type": "overflow", "dropped": 2})
+        gap = await _drain_until(queue, "gap")
+        assert gap["dropped"] == 2
+
+
 async def test_manager_public_persist_invokes_store(fake_claustrum, tmp_path):
     store = HostedStateStore(tmp_path)
     async with _manager(fake_claustrum) as (_fake, client, mgr):

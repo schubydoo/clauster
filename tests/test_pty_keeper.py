@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -603,6 +604,24 @@ def test_run_keeper_tap_failure_never_kills_bridge(
     assert disabled["screen"] is None
 
 
+def test_keeper_drain_feed_failure_without_tap_disables_screen(tmp_path: Path) -> None:
+    """A feed() error with a screen but no live-view tap disables the screen and never writes."""
+    from clauster import pty_keeper
+
+    class _BoomFeed:
+        def feed(self, data):  # noqa: ANN001, ANN202 — test stub
+            raise RuntimeError("feed boom")
+
+    base: dict[str, object] = {"state": "starting"}
+    drain = pty_keeper._KeeperDrain(base, tmp_path / "k.json", _BoomFeed(), None)
+    assert drain._tap is None  # no screen_sidecar => no tap, exercising the False branch
+
+    drain.feed(b"not a url\r\n")
+
+    assert drain._screen is None  # the raising screen was disabled
+    assert not (tmp_path / "k.json").exists()  # no sidecar write on a non-URL chunk
+
+
 # -- Windows ConPTY backend (#892) -----------------------------------------------------
 # Driven on POSIX against a scriptable fake pywinpty PtyProcess injected through the
 # _load_pty_process seam, so the ConPTY drain/scrape/exit path is covered on the Linux
@@ -679,6 +698,20 @@ def test_load_pty_process_raises_off_windows() -> None:
 
     with pytest.raises(RuntimeError, match="Windows-only"):
         pty_keeper._load_pty_process()
+
+
+def test_load_pty_process_returns_winpty_class_on_windows(monkeypatch) -> None:
+    from clauster import pty_keeper
+
+    class _FakePtyProcess:
+        pass
+
+    fake_winpty = types.ModuleType("winpty")
+    fake_winpty.PtyProcess = _FakePtyProcess
+    monkeypatch.setitem(sys.modules, "winpty", fake_winpty)
+    monkeypatch.setattr(pty_keeper.sys, "platform", "win32")
+
+    assert pty_keeper._load_pty_process() is _FakePtyProcess
 
 
 def test_run_keeper_conpty_scrapes_url_and_records_exit(tmp_path: Path, monkeypatch) -> None:

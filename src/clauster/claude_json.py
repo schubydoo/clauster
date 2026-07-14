@@ -39,7 +39,7 @@ from . import atomicio
 
 try:
     import fcntl  # POSIX only; Windows has no flock equivalent we rely on here.
-except ImportError:  # pragma: no cover - exercised only on Windows
+except ImportError:
     fcntl = None  # type: ignore[assignment]
 
 _log = logging.getLogger("clauster.claude_json")

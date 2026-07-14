@@ -217,7 +217,7 @@ class _KeeperDrain:
                 # A feed failure disables both screen consumers for the rest of the session:
                 # the live view (if any) reports a terminal `error`, and URL extraction falls
                 # back to the raw-bytes regex below. The bridge is unaffected.
-                if self._tap is not None:  # pragma: no cover - tap is set with screen
+                if self._tap is not None:
                     self._seq += 1
                     _write_screen_status(
                         self._tap.sidecar, self._seq, "error", f"screen feed: {exc}"
@@ -275,9 +275,9 @@ def _load_pty_process() -> Any:
     """
     if sys.platform != "win32":
         raise RuntimeError("the ConPTY keeper backend is Windows-only")
-    from winpty import PtyProcess  # pragma: no cover - win32-only; exercised on the VM
+    from winpty import PtyProcess
 
-    return PtyProcess  # pragma: no cover - win32-only
+    return PtyProcess
 
 
 def _run_keeper_conpty(

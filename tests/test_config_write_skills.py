@@ -528,6 +528,29 @@ def test_list_skills_includes_supporting_files(tmp_path: Path) -> None:
     assert listing[0]["files"] == ["scripts/x.sh"]
 
 
+def test_list_skills_excludes_member_when_resolve_oserror(tmp_path: Path, monkeypatch) -> None:
+    # A regular member whose resolve() raises OSError (a racing IO/permission fault)
+    # fails closed in _is_contained_regular_file: it is silently excluded from `files`
+    # rather than surfaced or raised -- it can never be offered for a later read.
+    sk.write_skill(
+        tmp_path,
+        "my-skill",
+        {sk.SKILL_FILENAME: _VALID_MD, "scripts/x.sh": "echo hi"},
+        expected_hash=None,
+        confirm_scripts=sk.SCRIPT_CONFIRM_TOKEN,
+    )
+    real_resolve = Path.resolve
+
+    def _boom(self, *a, **k):
+        if self.name == "x.sh":  # only the one member file's resolve faults
+            raise OSError("resolve failed")
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(Path, "resolve", _boom)
+    listing = sk.list_skills(tmp_path)
+    assert listing[0]["files"] == []  # the un-resolvable member is dropped
+
+
 def test_list_skills_files_use_posix_separators(tmp_path: Path) -> None:
     # A nested member key is always forward-slash, on every OS (logical member keys,
     # not host filesystem paths — no backslash even on Windows).

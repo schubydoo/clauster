@@ -163,7 +163,7 @@ def _url_host(url: str) -> str:
     """Return the lowercased host of ``url`` (empty string if unparseable)."""
     try:
         return (urlsplit(url).hostname or "").lower()
-    except ValueError:  # pragma: no cover - urlsplit is very lenient; defensive only
+    except ValueError:
         return ""
 
 
@@ -175,7 +175,7 @@ def _url_path(url: str) -> str:
     """
     try:
         return urlsplit(url).path
-    except ValueError:  # pragma: no cover - urlsplit is very lenient; defensive only
+    except ValueError:
         return ""
 
 

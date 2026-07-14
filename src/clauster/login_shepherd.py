@@ -613,11 +613,11 @@ class LoginShepherd:
         with flow.submit_lock:
             # Re-check under the per-flow lock: a concurrent submit may have already
             # driven this flow to a terminal outcome and torn it down while we waited.
-            # Defensive concurrency guard — deterministically exercising the race that
-            # trips it isn't practical with a C-level lock, so the reject arm is
-            # pragma-excluded rather than tested with a brittle timing hack.
+            # Defensive concurrency guard against a teardown that lands while we hold
+            # `submit_lock` — the reject arm is exercised by faking `submit_lock` to
+            # clear `self._flow` on entry (see the login_shepherd tests).
             with self._flow_lock:
-                if self._flow is not flow:  # pragma: no cover - concurrent-teardown guard
+                if self._flow is not flow:
                     raise NotActiveError("no login flow is in progress")
 
             self._write_code(flow, code)
@@ -661,7 +661,7 @@ class LoginShepherd:
 
         with flow.submit_lock:
             with self._flow_lock:
-                if self._flow is not flow:  # pragma: no cover - concurrent-teardown guard
+                if self._flow is not flow:
                     raise NotActiveError("no login flow is in progress")
             exit_code = flow.proc.poll()
             if exit_code is None:

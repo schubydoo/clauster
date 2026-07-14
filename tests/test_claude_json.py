@@ -268,3 +268,27 @@ def test_locked_replace_non_posix_skips_chmod(tmp_path: Path, monkeypatch) -> No
     f = tmp_path / ".mcp.json"
     cj.locked_replace_json_file(f, lambda raw: {"k": 1}, render=json.dumps)
     assert json.loads(f.read_text(encoding="utf-8")) == {"k": 1}
+
+
+def test_import_without_fcntl_degrades_module_to_none(monkeypatch):
+    # The POSIX-only `import fcntl` guard: on a platform lacking fcntl (Windows) the
+    # module still imports and degrades `fcntl` to None. Force the ImportError on this
+    # POSIX host by making the real import of `fcntl` raise, reload, and assert the
+    # fallback actually fired — then reload again to restore the real module.
+    import builtins
+    import importlib
+
+    real_import = builtins.__import__
+
+    def no_fcntl(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ImportError("simulated: platform without fcntl")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_fcntl)
+    try:
+        importlib.reload(cj)
+        assert cj.fcntl is None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(cj)

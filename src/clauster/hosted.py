@@ -447,7 +447,7 @@ class HostedSession:
                 elif etype == "exit":
                     self._on_exit(event.get("exit_code"))
                     return
-                elif etype == "overflow":  # pragma: no cover - client-queue overflow (CL-1 tests)
+                elif etype == "overflow":
                     self._emit({"type": "gap", "dropped": event.get("dropped", 0)})
         except asyncio.CancelledError:
             raise

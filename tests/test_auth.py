@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import sys
 
 import pytest
@@ -484,4 +485,19 @@ def test_secret_unreadable_on_disk_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(auth.time, "sleep", lambda *_: None)
     monkeypatch.setattr(pathlib.Path, "read_bytes", _unreadable)
     with pytest.raises(RuntimeError, match="last read error"):
+        auth.load_or_create_secret(tmp_path)
+
+
+def test_secret_short_write_fails_closed(tmp_path, monkeypatch):
+    # A short os.write of the 32-byte secret would leave a truncated key on disk —
+    # refuse to boot rather than persist and later sign with it. Force os.write to
+    # report one byte short and assert the guard raises rather than fsyncing a stub.
+    real_write = os.write
+
+    def _short_write(fd, data):
+        real_write(fd, data)  # actually write so the fd/file are consistent
+        return len(data) - 1  # ...but report a short write
+
+    monkeypatch.setattr(os, "write", _short_write)
+    with pytest.raises(OSError, match="short write creating"):
         auth.load_or_create_secret(tmp_path)

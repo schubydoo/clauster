@@ -791,6 +791,42 @@ def test_submit_code_without_active_flow_raises(shepherd) -> None:
         shepherd.submit_code("anything")
 
 
+class _ClearFlowOnEnter:
+    """A fake `submit_lock` that tears the flow down the instant it is entered.
+
+    Deterministically drives the concurrent-teardown race: acquiring the per-flow
+    `submit_lock` is exactly where a competing submit/cancel could have already
+    reaped `self._flow`, so entering this fake clears it, and the guard's re-check
+    under `_flow_lock` then sees `self._flow is not flow` and rejects.
+    """
+
+    def __init__(self, shepherd):
+        self._shepherd = shepherd
+
+    def __enter__(self):
+        self._shepherd._flow = None  # noqa: SLF001 - simulate a concurrent teardown
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_submit_code_rejects_when_flow_torn_down_under_submit_lock(shepherd, monkeypatch) -> None:
+    # The concurrent-teardown guard inside `submit_lock`: if the active flow is reaped
+    # while this submit holds the per-flow lock, the re-check must raise NotActiveError
+    # rather than write to a reaped process. Fake the lock to clear `self._flow` on entry.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    shepherd.start("login")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    flow.submit_lock = _ClearFlowOnEnter(shepherd)  # noqa: SLF001 - drive the race
+    try:
+        with pytest.raises(ls.NotActiveError):
+            shepherd.submit_code("the-code")
+    finally:
+        shepherd._flow = flow  # noqa: SLF001 - restore so cancel() reaps the live proc
+        shepherd.cancel()
+
+
 def test_submit_code_survives_a_closed_stdin(shepherd, monkeypatch, caplog) -> None:
     # If the subprocess already exited (closed its stdin pipe) by the time the operator
     # submits a code, writing must not raise past submit_code — it's logged and the
@@ -852,6 +888,22 @@ def test_submit_code_slow_verification_is_not_killed(shepherd, monkeypatch) -> N
 def test_poll_without_active_flow_raises(shepherd) -> None:
     with pytest.raises(ls.NotActiveError):
         shepherd.poll()
+
+
+def test_poll_rejects_when_flow_torn_down_under_submit_lock(shepherd, monkeypatch) -> None:
+    # Same concurrent-teardown guard as submit_code, on the poll() path: a flow reaped
+    # while poll holds the per-flow lock must raise NotActiveError, never poll a reaped
+    # process. Fake the lock to clear `self._flow` on entry so the re-check trips.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    shepherd.start("login")
+    flow = shepherd._flow  # noqa: SLF001 - internals test
+    flow.submit_lock = _ClearFlowOnEnter(shepherd)  # noqa: SLF001 - drive the race
+    try:
+        with pytest.raises(ls.NotActiveError):
+            shepherd.poll()
+    finally:
+        shepherd._flow = flow  # noqa: SLF001 - restore so cancel() reaps the live proc
+        shepherd.cancel()
 
 
 def test_poll_still_running_returns_pending(shepherd, monkeypatch) -> None:

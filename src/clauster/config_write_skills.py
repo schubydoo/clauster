@@ -288,7 +288,7 @@ def _is_contained_regular_file(path: Path, root_resolved: Path) -> bool:
         return False
     try:
         real = path.resolve()
-    except OSError:  # pragma: no cover - broken/racing symlink; fail closed
+    except OSError:
         return False
     return real == root_resolved or root_resolved in real.parents
 
