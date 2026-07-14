@@ -37,7 +37,7 @@ import json
 import logging
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +46,7 @@ from typing import Any
 from . import procutil
 from .claustrum_client import ClaustrumClient, ClaustrumError, ProcessStream, _Subscriber
 from .config import PermissionMode
+from .hosted_events import GapRangeEvent, HostedEvent, StdinFrame
 from .models import InstanceStatus, RemoteControlInstance
 from .redact import sanitize_line
 from .state import KeyedStore
@@ -171,7 +172,7 @@ class HostedSession:
         # Highest *daemon* frame seq drained — the reattach replay cursor across
         # clauster restarts (distinct from _event_seq, the clauster-side ring seq).
         self.daemon_last_seq = 0
-        self._ring: deque[dict[str, Any]] = deque(maxlen=ring_size)
+        self._ring: deque[Mapping[str, Any]] = deque(maxlen=ring_size)
         self._event_seq = 0
         # Subscriber list: the DEPTH-bound (per-subscriber queue) is bounded above by
         # _queue_maxsize; the BREADTH-bound (list length) is the count of live WS
@@ -183,7 +184,7 @@ class HostedSession:
         # rather than writing a control_response into a session being killed.
         self._stopping = False
         self._stream: ProcessStream | None = None
-        self._source: asyncio.Queue[dict[str, Any]] | None = None
+        self._source: asyncio.Queue[Mapping[str, Any]] | None = None
         self._pump_task: asyncio.Task[None] | None = None
 
     @property
@@ -400,7 +401,7 @@ class HostedSession:
                 # Latch the terminal status here from the stream's recorded exit code.
                 self._on_exit(self._stream.exit_code)
 
-    def subscribe(self, after_seq: int = 0) -> asyncio.Queue[dict[str, Any]]:
+    def subscribe(self, after_seq: int = 0) -> asyncio.Queue[Mapping[str, Any]]:
         """Register a browser watcher, replaying ring events past ``after_seq``.
 
         Returns a bounded queue pre-loaded with every retained event whose
@@ -408,17 +409,22 @@ class HostedSession:
         already evicted past the cursor), then fed live. :meth:`unsubscribe` when
         the consumer goes away.
         """
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self._queue_maxsize)
+        queue: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue(maxsize=self._queue_maxsize)
         sub = _Subscriber(queue, overflow_type="gap")
         if self._ring and self._ring[0]["event_seq"] > after_seq + 1:
-            sub.offer({"type": "gap", "from_seq": after_seq, "to_seq": self._ring[0]["event_seq"]})
+            gap: GapRangeEvent = {
+                "type": "gap",
+                "from_seq": after_seq,
+                "to_seq": self._ring[0]["event_seq"],
+            }
+            sub.offer(gap)
         for event in self._ring:
             if event["event_seq"] > after_seq:
                 sub.offer(event)
         self._subscribers.append(sub)
         return queue
 
-    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+    def unsubscribe(self, queue: asyncio.Queue[Mapping[str, Any]]) -> None:
         """Drop a watcher's queue (called when its consumer disconnects)."""
         self._subscribers = [s for s in self._subscribers if s.queue is not queue]
 
@@ -556,7 +562,7 @@ class HostedSession:
         self._resolve_parked()
         self._emit({"type": "exit", "exit_code": self.exit_code})
 
-    async def _write_stdin(self, frame: dict[str, Any]) -> None:
+    async def _write_stdin(self, frame: StdinFrame) -> None:
         """Serialize one NDJSON frame and write it to the agent's stdin."""
         data = (json.dumps(frame, separators=(",", ":")) + "\n").encode("utf-8")
         await self._client.stdin(self._process_id, data)
@@ -574,7 +580,7 @@ class HostedSession:
             }
         )
 
-    def _emit(self, payload: dict[str, Any]) -> None:
+    def _emit(self, payload: HostedEvent) -> None:
         """Stamp an ``event_seq``, append to the ring, and fan out to subscribers."""
         self._event_seq += 1
         event = {"event_seq": self._event_seq, **payload}
