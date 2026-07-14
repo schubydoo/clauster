@@ -29,7 +29,7 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
 ## Before opening a PR
 
 - **Tests + coverage** — `uv run pytest`; the suite must pass and stay at or
-  above the **98%** coverage gate (enforced in CI on all three OSes; Windows
+  above the **96%** coverage gate (enforced in CI on all three OSes; Windows
   measures through `.coveragerc-win`, which excludes the POSIX/ConPTY code it
   can't run so it holds the same floor).
 - **Lint, format, types** —
@@ -85,7 +85,7 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
   instead and should add the changeset by hand.)
 
 CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.14
-(all merge-blocking; each OS enforces a consistent 98% coverage gate — Windows
+(all merge-blocking; each OS enforces a consistent 96% coverage gate — Windows
 via `.coveragerc-win`, which excludes the POSIX/ConPTY code it can't run), plus
 lint, security scanners, and dependency review. Internal PRs run a representative
 subset of the OS/Python legs; the full matrix runs on release and fork PRs.

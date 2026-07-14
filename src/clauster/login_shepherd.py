@@ -330,40 +330,12 @@ class LoginShepherd:
 
         `claude setup-token` is a full TUI: it prints essentially nothing on a plain pipe
         and only renders its authorize URL under a real terminal, so it needs a real PTY
-        rather than the `login` mode's `subprocess.PIPE`s. Builds the `PtyScreen` emulator
-        FIRST — before opening the pty or spawning anything — so a missing `pyte` (the
-        optional `pty` extra) fails closed with a clear, actionable message and leaves no
-        subprocess and no flow behind. `start_new_session=True` gives the child its own
-        session (mirroring `pty_keeper`'s detached-bridge spawn); `close_fds=True` keeps
-        the child from inheriting unrelated open fds. The slave fd is closed in the
-        parent right after spawn — the child holds its own dup via stdin/stdout/stderr,
-        so the parent only needs the master to read/write the session.
-
-        **Local echo is disabled on the slave BEFORE spawn (security-critical, not
-        cosmetic).** A pty's line discipline echoes back whatever is written to it by
-        default — unlike the `login` mode's plain `subprocess.PIPE`, where a write to
-        `stdin` is never mirrored into `stdout`. Since `submit_code()` writes the
-        operator-pasted code to this same fd (`os.write`, standing in for a human's
-        keystrokes), an un-tweaked pty would echo that code straight back through the
-        master into `flow.buffer` — and from there into the redacted-output failure
-        message `_finalize_exited`/`start()` return to the caller. `_TOKEN_RE`-based
-        redaction only masks a `CLAUDE_CODE_OAUTH_TOKEN=...` line, not an arbitrary
-        pasted code, so that would be a real secret leak into the API response (and
-        anywhere that response is logged upstream). Disabling `ECHO` closes it at the
-        source — this fails closed too: a `termios` failure aborts the spawn rather
-        than risk running with echo silently left on.
-
-        **The pty is sized WIDE (`_LOGIN_PTY_COLS`), not left at the `os.openpty()`
-        default of 80x24 (live-smoke-test regression, #846 follow-up).** Real `claude
-        setup-token` wraps its authorize URL at the terminal's column width; at the
-        default 80 cols a ~450-char URL wraps across multiple screen rows, and
-        `PtyScreen.find_authorize_url()` (over `"\\n".join(display)`) then truncates it
-        at the first wrap point. Sizing the slave's winsize wide keeps the URL on one
-        rendered row, and `screen` is built at the SAME width (`PtyScreen(cols=...)`) so
-        pyte doesn't re-wrap/re-truncate it down to its own default geometry. Best-effort
-        like `pty_keeper`'s existing winsize ioctl (a failure here only risks the
-        rare-but-now-defended-against wrap case, never a crash) — the ECHO-disable above
-        stays fail-closed since it is security-critical, not cosmetic.
+        rather than the `login` mode's `subprocess.PIPE`s. Builds the transport-agnostic
+        `PtyScreen` emulator FIRST — before opening any pty or spawning anything — so a
+        missing `pyte` (the optional `pty` extra) fails closed with a clear, actionable
+        message and leaves no subprocess and no flow behind. Then hands the screen to the
+        Windows ConPTY transport (`_spawn_conpty`) or the POSIX `os.openpty` transport
+        (`_spawn_pty_posix`); both scan the same pyte-rendered screen for the URL/token.
         """
         try:
             screen = PtyScreen(cols=_LOGIN_PTY_COLS, rows=SCREEN_ROWS, capture_osc8=True)
@@ -378,17 +350,44 @@ class LoginShepherd:
         # screen for the URL/token), so hand it to the ConPTY spawn and return early.
         if _is_win32():
             return self._spawn_conpty(mode, resolved_binary, screen)
+        return self._spawn_pty_posix(mode, resolved_binary, screen)  # pragma: skip-on-win
 
+    def _spawn_pty_posix(  # pragma: skip-on-win
+        self, mode: Mode, resolved_binary: str, screen: PtyScreen
+    ) -> _Flow:
+        r"""POSIX `os.openpty` + `termios` transport for `_spawn_pty` (#846).
+
+        The win32 counterpart of `_spawn_conpty`: `_spawn_pty` builds the transport-
+        agnostic `PtyScreen` and diverts win32 to the ConPTY path, then calls this only
+        on POSIX (`os.openpty`/`termios` don't exist on Windows), so the whole method is
+        excluded from the Windows coverage run (`skip-on-win`).
+
+        **Local echo is disabled on the slave BEFORE spawn (security-critical, not
+        cosmetic).** A pty's line discipline echoes back whatever is written to it, so an
+        un-tweaked pty would echo the operator's pasted code (written to this same fd by
+        `submit_code`) straight back through the master into `flow.buffer` and the
+        redacted-output failure message — a real secret leak, since `_TOKEN_RE` redaction
+        only masks a `CLAUDE_CODE_OAUTH_TOKEN=...` line, not an arbitrary pasted code.
+        Disabling `ECHO` closes it at the source and fails closed (a `termios` failure
+        aborts the spawn rather than risk running with echo silently left on).
+
+        The pty is sized WIDE (`_LOGIN_PTY_COLS`), not the `os.openpty()` 80-col default,
+        so `claude setup-token`'s ~450-char authorize URL renders on one row instead of
+        wrapping (which `PtyScreen.find_authorize_url` would truncate). Best-effort — a
+        winsize `ioctl` failure only risks the rare wrap case, never a crash (unlike the
+        security-critical ECHO disable). `start_new_session=True` detaches the child;
+        the slave fd is closed in the parent right after spawn (the child holds its dup).
+        """
         import fcntl
         import struct
         import termios
 
         argv = [resolved_binary, "setup-token"]
-        try:  # pragma: skip-on-win — POSIX pty path; Windows returned via _spawn_conpty above
+        try:
             master_fd, slave_fd = os.openpty()
         except OSError as exc:
             raise LoginShepherdError(f"failed to open a pty for claude {mode}: {exc}") from exc
-        try:  # pragma: skip-on-win — POSIX termios/fcntl
+        try:
             fcntl.ioctl(
                 slave_fd,
                 termios.TIOCSWINSZ,
@@ -401,7 +400,7 @@ class LoginShepherd:
             # fatal to the login flow, so log at debug and keep going rather than abort
             # the spawn (unlike the ECHO disable below, which IS security-critical).
             _log.debug("login_shepherd: failed to widen pty winsize for %s: %s", mode, exc)
-        try:  # pragma: skip-on-win — POSIX termios ECHO disable
+        try:
             attrs = termios.tcgetattr(slave_fd)
             attrs[3] &= ~termios.ECHO  # lflags &= ~ECHO
             termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
@@ -411,7 +410,7 @@ class LoginShepherd:
             raise LoginShepherdError(
                 f"failed to disable pty echo for claude {mode}: {exc}"
             ) from exc
-        try:  # pragma: skip-on-win — POSIX pty-backed Popen (slave_fd stdio)
+        try:
             proc = subprocess.Popen(  # noqa: S603 — list-argv, absolute binary, no shell
                 argv,
                 stdin=slave_fd,

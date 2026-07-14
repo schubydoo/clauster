@@ -126,13 +126,15 @@ jobs:
           fi
 
   # --------------------------------------------------------------------
-  # Unit tests across the matrix `setup` emitted. A consistent 98% coverage
+  # Unit tests across the matrix `setup` emitted. A consistent 96% coverage
   # gate applies on ALL THREE OSes (#929): the floor lives in pyproject
-  # addopts (--cov-fail-under=98). Linux + macOS (both POSIX) hold it
+  # addopts (--cov-fail-under=96). Linux + macOS (both POSIX) hold it
   # directly; Windows measures through `.coveragerc-win`, which omits the
   # POSIX/ConPTY surface it physically can't run so the Windows-reachable
-  # code holds the same 98% (see the pytest step below). Skipped wholesale
-  # on a docs-only PR.
+  # code holds the same 96% (see the pytest step below). 96 (not higher) so
+  # the known coverage.py TRACER NOISE on Python 3.11/3.14 (~1% of executed
+  # lines dropped vs 3.12/3.13 — a coverage.py artifact, not real gaps) stays
+  # comfortably within margin on every cell. Skipped wholesale on a docs-only PR.
   # --------------------------------------------------------------------
   tests:
     name: tests (${{ matrix.os }}, ${{ matrix.python }})
@@ -178,14 +180,14 @@ jobs:
           # timing is still written when pytest fails (the default shell is `bash -eo pipefail`).
           start=$(date +%s)
           rc=0
-          # Consistent 98% coverage floor on ALL THREE OSes (#929) — the gate lives in
-          # pyproject addopts (--cov-fail-under=98). macOS is POSIX, so it runs the same
+          # Consistent 96% coverage floor on ALL THREE OSes (#929) — the gate lives in
+          # pyproject addopts (--cov-fail-under=96). macOS is POSIX, so it runs the same
           # code as Linux and holds the floor directly. Windows physically can't run
           # clauster's POSIX code (fcntl/os.openpty/termios/dir-fsync) and its ConPTY
           # keeper is exercised via a fake process seam on Linux, so Windows measures
           # through `.coveragerc-win`, which excludes that un-runnable surface (omit
           # pty_keeper + `# pragma: skip-on-win`); the Windows-REACHABLE code then holds
-          # the same 98%. Every OS still emits coverage.xml + junit.xml for its Codecov flag.
+          # the same 96%. Every OS still emits coverage.xml + junit.xml for its Codecov flag.
           if [ "$RUNNER_OS" = "Windows" ]; then
             uv run --python "$PYTHON_VERSION" pytest -q --durations=15 \
               --cov-config=.coveragerc-win \

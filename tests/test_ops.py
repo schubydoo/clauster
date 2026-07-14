@@ -17,6 +17,7 @@ from clauster.ops import (
     FAIL,
     OK,
     WARN,
+    Check,
     _check_auth,
     _check_claude_login,
     _check_extras,
@@ -157,6 +158,17 @@ def test_doctor_includes_extra_rows_never_failing(write_config, tmp_path):
     # Extras are optional: a missing one WARNs but must never FAIL (which would flip the
     # doctor exit code for a dormant feature).
     assert all(c.status in {OK, WARN} for c in extra_rows)
+
+
+def test_doctor_appends_repo_freshness_when_present(write_config, tmp_path, monkeypatch):
+    # ops.py:150 — run_doctor appends the repo-freshness Check when _check_repo_freshness
+    # returns one (an editable/from-source install). A wheel / non-git install returns None
+    # and the append is skipped (the Windows-CI / no-.git case), so mock a Check here so the
+    # append line is covered on every OS.
+    fresh = Check("source", OK, "up to date")
+    monkeypatch.setattr("clauster.ops._check_repo_freshness", lambda *a, **k: fresh)
+    checks, _ok = run_doctor(_cfg_file(write_config, tmp_path))
+    assert fresh in checks
 
 
 def test_repo_freshness_none_for_non_git_install(tmp_path):

@@ -354,7 +354,7 @@ def reap_if_exited(pid: int) -> None:
         return
     try:  # pragma: skip-on-win
         os.waitpid(pid, os.WNOHANG)
-    except (ChildProcessError, OSError):
+    except (ChildProcessError, OSError):  # pragma: skip-on-win
         pass
 
 

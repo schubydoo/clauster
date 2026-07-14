@@ -333,7 +333,17 @@ def test_popen_failure_is_wrapped(shepherd, monkeypatch) -> None:
 # --- setup-token PTY transport (#846): fail-closed + spawn-failure paths -----------
 
 
-@_POSIX_ONLY
+def test_is_win32_reflects_real_platform() -> None:
+    # `_is_win32` is a patch seam everywhere else, so its own one line
+    # (`return sys.platform == "win32"`) is otherwise only covered where an *unmocked*
+    # spawn happens to hit it — which never runs on the Windows CI cell. Call the real
+    # function directly so it's covered on every OS.
+    assert ls._is_win32() is (sys.platform == "win32")
+
+
+# NOT @_POSIX_ONLY: `PtyScreen` is patched to raise, so the pyte-absent fail-closed path
+# runs BEFORE the `_is_win32()` transport split — it's platform-neutral (covers the
+# `except PyteUnavailableError` on Windows too).
 def test_setup_token_fails_closed_without_pyte(shepherd, monkeypatch) -> None:
     # The long-lived-token mode needs the optional `pty` extra (pyte). Without it,
     # `PtyScreen()` raises `PyteUnavailableError` — `_spawn_pty` must turn that into a
