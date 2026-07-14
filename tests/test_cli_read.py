@@ -188,15 +188,27 @@ def test_logs_unknown_instance_exits_2(cfg, capsys):
     assert "no bridge log" in capsys.readouterr().err
 
 
+def test_logs_stale_missing_file_exits_2(cfg, tmp_path, capsys):
+    # A resolved but nonexistent log path (rotated/deleted) must fail closed, not
+    # exit 0 with no output / --follow hang.
+    _FakeEngine.log_path = tmp_path / "gone.log"  # never created
+    assert main(["logs", "-c", cfg, "i1"]) == 2
+    assert "no longer on disk" in capsys.readouterr().err
+
+
 def test_logs_one_shot_prints_tail(cfg, tmp_path, capsys):
-    _FakeEngine.log_path = tmp_path / "b.log"
+    log = tmp_path / "b.log"
+    log.touch()
+    _FakeEngine.log_path = log
     _FakeEngine.log_reads = [(10, ["first line", "second line"])]
     assert main(["logs", "-c", cfg, "i1"]) == 0
     assert capsys.readouterr().out.splitlines() == ["first line", "second line"]
 
 
 def test_logs_follow_streams_until_interrupt(cfg, tmp_path, capsys, monkeypatch):
-    _FakeEngine.log_path = tmp_path / "b.log"
+    log = tmp_path / "b.log"
+    log.touch()
+    _FakeEngine.log_path = log
     _FakeEngine.log_reads = [(10, ["initial"]), (20, ["streamed"])]
     calls = {"n": 0}
 

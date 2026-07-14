@@ -111,6 +111,15 @@ def cmd_logs(config: ClausterConfig, identity: str, *, follow: bool) -> int:
                 file=sys.stderr,
             )
             return 2
+        if not path.exists():
+            # A stale persisted path (log rotated/deleted): the tail helpers swallow the
+            # missing file, so guard here — otherwise `logs` exits 0 with no output and
+            # `--follow` waits forever, both looking like success (fail closed, #775).
+            print(
+                f"clauster: bridge log for {identity!r} is no longer on disk ({path})",
+                file=sys.stderr,
+            )
+            return 2
         offset = engine.initial_log_offset(path)
         offset, lines = engine.read_log_lines(path, offset)
         for line in lines:
