@@ -31,6 +31,7 @@ from clauster.provisioning import (
     create_project,
     validate_clone_url,
 )
+from conftest import needs_symlink
 
 FAKE_GIT = Path(__file__).resolve().parent / "fixtures" / "fake_git"
 
@@ -587,7 +588,7 @@ def test_route_create_git_init_unavailable_503(write_config, monkeypatch):
 # ----- audited coverage gaps (2026-07 audit) -----------------------------
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privilege on Windows")
+@needs_symlink
 def test_create_project_symlink_escaping_root_rejected(tmp_path):
     # provisioning.py 86-87: a validly-NAMED entry that RESOLVES outside projects_root
     # (a symlink planted inside it) must be refused by the resolve()-based guard —
@@ -609,26 +610,26 @@ def test_create_project_git_init_without_git_binary(tmp_path, monkeypatch):
         create_project(tmp_path, "nogit", git_init=True)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission semantics")
-def test_dir_size_walk_warns_on_unstattable_file(tmp_path, caplog):
+def test_dir_size_walk_warns_on_unstattable_file(tmp_path, caplog, monkeypatch):
     # provisioning.py 231-234: an unstattable file undercounts the post-clone size cap;
-    # the walk must log the gap (never silent) and keep counting the rest.
-    if os.geteuid() == 0:
-        pytest.skip("root bypasses permission checks")
+    # the walk must log the gap (never silent) and keep counting the rest. Induce the
+    # OSError by monkeypatching stat for one file so the handler runs on every OS.
     from clauster.provisioning import _dir_size_mb
 
     d = tmp_path / "clone"
     d.mkdir()
-    (d / "ok.bin").write_bytes(b"x" * 1024)
-    locked = d / "locked"
-    locked.mkdir()
-    (locked / "hidden.bin").write_bytes(b"y" * 4096)
-    locked.chmod(0o600)  # listable (r) but children unstattable (no x)
-    try:
-        with caplog.at_level("WARNING", logger="clauster.provisioning"):
-            size = _dir_size_mb(d)
-    finally:
-        locked.chmod(0o700)
+    (d / "ok.bin").write_bytes(b"x" * 1024)  # stattable -> counted
+    (d / "locked.bin").write_bytes(b"y" * 4096)  # unstattable -> undercounted
+    real_stat = Path.stat
+
+    def boom(self, *args, **kwargs):
+        if self.name == "locked.bin":
+            raise OSError("simulated unstattable file")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", boom)
+    with caplog.at_level("WARNING", logger="clauster.provisioning"):
+        size = _dir_size_mb(d)
     assert any("could not stat" in r.message for r in caplog.records)  # surfaced, not silent
     assert 0 < size < 0.01  # the stattable file still counted; the walk continued
 

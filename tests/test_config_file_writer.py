@@ -12,6 +12,7 @@ sidecar beside the target — so a write leaves NO ``.lock`` in the target dir).
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -54,8 +55,12 @@ def test_resolve_contained_path_ok(tmp_path: Path) -> None:
 
 
 def test_resolve_contained_path_rejects_absolute(tmp_path: Path) -> None:
+    # config_file_writer.py 103-104: an absolute `relative` is rejected outright. Use an
+    # OS-appropriate absolute path so `Path.is_absolute()` is True on Windows too (a POSIX
+    # "/etc/passwd" is NOT absolute on Windows and would miss this branch there).
+    abs_path = r"C:\Windows\system32" if sys.platform == "win32" else "/etc/passwd"
     with pytest.raises(fw.PathEscapeError):
-        fw.resolve_contained_path(tmp_path, "/etc/passwd")
+        fw.resolve_contained_path(tmp_path, abs_path)
 
 
 def test_resolve_contained_path_rejects_dotdot_traversal(tmp_path: Path) -> None:

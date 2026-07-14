@@ -34,6 +34,7 @@ from clauster.ops import (
     restore_backup,
     run_doctor,
 )
+from conftest import needs_symlink
 
 # .cmd on Windows so the version probe resolves on Python 3.11 too (3.12+ would
 # find the sibling claude.cmd via PATHEXT, but 3.11 won't — be explicit).
@@ -1045,19 +1046,12 @@ def test_check_port_probe_oserror_treated_as_free(monkeypatch):
     assert c.status == OK and "free" in c.detail
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission semantics")
-def test_state_dir_uncreatable_ancestor_fails(tmp_path):
-    # ops.py 298->300 + 300: an absent state_dir whose nearest existing ancestor is
-    # not writable is a FAIL — doctor must say the dir can't even be created.
-    if os.geteuid() == 0:
-        pytest.skip("root bypasses permission checks")
-    ro = tmp_path / "ro"
-    ro.mkdir()
-    ro.chmod(0o555)
-    try:
-        c = _check_state_dir_writable(ro / "a" / "b")
-    finally:
-        ro.chmod(0o755)
+def test_state_dir_uncreatable_ancestor_fails(tmp_path, monkeypatch):
+    # ops.py 357->359 + 359: an absent state_dir whose nearest existing ancestor is
+    # not writable is a FAIL — doctor must say the dir can't even be created. Force the
+    # not-writable verdict via os.access so the FAIL branch runs on every OS.
+    monkeypatch.setattr("clauster.ops.os.access", lambda path, mode: False)
+    c = _check_state_dir_writable(tmp_path / "a" / "b")
     assert c.status == FAIL and "can't be created" in c.detail
 
 
@@ -1095,7 +1089,7 @@ def test_restore_empty_config_dir_leaves_config_none(tmp_path):
     assert not (tmp_path / "c.yml").exists()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privilege on Windows")
+@needs_symlink
 def test_safe_extract_refuses_member_escaping_through_dest_symlink(tmp_path):
     # ops.py 433-434: a member whose parts are clean (no '..', not absolute) can still
     # RESOLVE outside the destination through a pre-existing symlink inside it. The
@@ -1112,6 +1106,33 @@ def test_safe_extract_refuses_member_escaping_through_dest_symlink(tmp_path):
         info = tarfile.TarInfo("link/evil.txt")
         info.size = len(data)
         tar.addfile(info, io.BytesIO(data))
+    with pytest.raises(ValueError, match="escapes destination"):
+        _safe_extract_tar(arch, dest)
+    assert not (outside / "evil.txt").exists()  # nothing landed outside dest
+
+
+def test_safe_extract_refuses_member_resolving_outside_dest(tmp_path, monkeypatch):
+    # ops.py 528: the resolve()-based containment guard rejects a member whose parts are
+    # clean (no '..', not absolute) but whose RESOLVED target lands outside dest. The
+    # symlink test above proves this on a real FS (POSIX-only via needs_symlink); this
+    # forces the same resolved-escape via monkeypatch so line 528 runs on every OS.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    outside = tmp_path / "outside"
+    arch = tmp_path / "evil.tar.gz"
+    with tarfile.open(arch, "w:gz") as tar:
+        data = b"pwned"
+        info = tarfile.TarInfo("evil.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    real_resolve = Path.resolve
+
+    def fake_resolve(self, *args, **kwargs):
+        if self.name == "evil.txt":  # the joined (dest / rel) target
+            return outside / "evil.txt"
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
     with pytest.raises(ValueError, match="escapes destination"):
         _safe_extract_tar(arch, dest)
     assert not (outside / "evil.txt").exists()  # nothing landed outside dest

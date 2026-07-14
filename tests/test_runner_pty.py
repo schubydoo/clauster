@@ -536,6 +536,19 @@ def test_signal_stop_twice_sends_two_signals(monkeypatch) -> None:
     assert calls == [1234, 1234]  # the flag-form TUI needs the confirming second press
 
 
+def test_signal_stop_swallows_oserror(monkeypatch, caplog) -> None:
+    # runner.py 2379-2382: a stop signal to an already-exited/unsignalable pid must be a
+    # no-op (logged at DEBUG), never raised out of stop(). Force os.kill to raise OSError
+    # so the handler runs on every OS (Windows os.kill can't be exercised with a real pid).
+    def boom(_pid: int, _sig: int) -> None:
+        raise OSError("not signalable")
+
+    monkeypatch.setattr("clauster.runner.os.kill", boom)
+    with caplog.at_level("DEBUG", logger="clauster.runner"):
+        SessionRunner._signal_stop(1234)  # must not raise
+    assert any("was a no-op" in r.getMessage() for r in caplog.records)
+
+
 # ----- integration: real keeper + fake claude flag form ---------------------
 
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import sys
 from pathlib import Path
 
 import pytest
@@ -27,6 +26,7 @@ from clauster import config_write as cw
 from clauster import config_write_skills as sk
 from clauster.app import create_app
 from clauster.config import load_config
+from conftest import needs_symlink
 
 _VALID_MD = "---\ndescription: does a thing\n---\nInstructions here.\n"
 
@@ -338,7 +338,7 @@ def test_write_skill_rejects_absolute_member_path(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
+@needs_symlink
 def test_read_skill_file_rejects_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path / "outside_secret.txt"
     outside.write_bytes(b"top secret\n")
@@ -351,7 +351,7 @@ def test_read_skill_file_rejects_symlink_escape(tmp_path: Path) -> None:
         sk.read_skill_file(tmp_path, "my-skill", "escape.txt")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
+@needs_symlink
 def test_list_skills_does_not_read_symlinked_skill_md(tmp_path: Path) -> None:
     # A symlinked SKILL.md pointing at an outside secret must NOT be followed: the
     # skill lists as has_skill_md=False and the target content never surfaces
@@ -368,7 +368,7 @@ def test_list_skills_does_not_read_symlinked_skill_md(tmp_path: Path) -> None:
     assert "TOPSECRET_LEAKED_VALUE" not in repr(listing)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
+@needs_symlink
 def test_list_skills_does_not_enumerate_symlinked_member(tmp_path: Path) -> None:
     # A member symlink targeting an outside file must NOT be enumerated in `files`
     # (so it can never be offered up for a later read that would leak the target).
@@ -384,7 +384,7 @@ def test_list_skills_does_not_enumerate_symlinked_member(tmp_path: Path) -> None
     assert listing[0]["files"] == ["real.sh"]  # symlinked member skipped
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
+@needs_symlink
 def test_list_skills_skips_member_under_symlinked_subdir(tmp_path: Path) -> None:
     # A regular file is not itself a symlink, but if it lives under a symlinked
     # subdir that escapes the skill dir, its resolved path escapes and it is skipped.
@@ -400,7 +400,7 @@ def test_list_skills_skips_member_under_symlinked_subdir(tmp_path: Path) -> None
     assert listing[0]["files"] == []  # nothing under the escaping symlinked subdir
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks only")
+@needs_symlink
 def test_delete_skill_rejects_symlinked_skill_name(tmp_path: Path) -> None:
     outside = tmp_path / "outside_dir"
     outside.mkdir()

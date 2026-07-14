@@ -82,6 +82,21 @@ async def test_connect_unreachable_raises():
         await client.connect()
 
 
+async def test_connect_wraps_oserror_as_daemon_unreachable(monkeypatch):
+    # claustrum_client.py 333-334: an OSError dialing the daemon is wrapped as
+    # DaemonUnreachable (fail-closed). Monkeypatch the connection opener to raise OSError
+    # so this runs cross-platform, independent of the POSIX-socket vs Windows-pipe branch.
+    from clauster import claustrum_client as cc
+
+    async def boom(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(cc, "_open_claustrum_connection", boom)
+    client = ClaustrumClient("/some/claustrum.sock", "tok")
+    with pytest.raises(DaemonUnreachable):
+        await client.connect()
+
+
 # ----- transport selection: AF_UNIX socket vs Windows named pipe (#891) --------
 # claustrum #134 adds an opt-in Windows named-pipe transport, discovered via an
 # `rpc.pipe` file beside the socket. These exercise the client's platform branch on
