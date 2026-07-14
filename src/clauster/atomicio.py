@@ -43,7 +43,7 @@ from pathlib import Path
 
 try:
     import fcntl  # POSIX only; Windows has no flock equivalent we rely on here.
-except ImportError:  # pragma: no cover - exercised only on Windows
+except ImportError:
     fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)

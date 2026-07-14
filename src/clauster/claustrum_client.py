@@ -231,12 +231,13 @@ def _read_pipe_name(socket_path: str) -> str | None:
 
 async def _open_windows_pipe_connection(
     name: str, *, limit: int
-) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:  # pragma: no cover - Windows-only runtime
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Open a ``(reader, writer)`` pair over a Windows named pipe.
 
     asyncio has no high-level ``open_pipe_connection``, so this mirrors what
     ``open_unix_connection`` does internally, over ``ProactorEventLoop.create_pipe_connection``.
-    Only reachable on win32; validated on the Windows test VM, not the POSIX CI runners.
+    Used on win32 at runtime, but the body is transport-agnostic: it is unit-tested on POSIX
+    by injecting a fake ``create_pipe_connection`` onto the running loop (the only win32 dep).
     """
     # Typed Any: create_pipe_connection lives on the win32 ProactorEventLoop, not the
     # AbstractEventLoop base, so a precise annotation would fail type-checking off-Windows.

@@ -386,6 +386,27 @@ def test_generate_self_signed_missing_cryptography_raises(tmp_path):
             generate_self_signed(tmp_path, ["localhost"])
 
 
+def test_imports_missing_cryptography_raises_runtimeerror_chaining_the_cause(monkeypatch):
+    # Drive the REAL try/except in _imports (not a patched _imports): a call-time missing
+    # `cryptography` surfaces as a RuntimeError carrying the `pip install` hint, with the
+    # original ModuleNotFoundError preserved as __cause__ (fail-closed, not swallowed).
+    import builtins
+
+    from clauster import tls_provision
+
+    real_import = builtins.__import__
+
+    def no_crypto(name, *args, **kwargs):
+        if name == "cryptography" or name.startswith("cryptography."):
+            raise ModuleNotFoundError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_crypto)
+    with pytest.raises(RuntimeError, match="pip install cryptography") as exc_info:
+        tls_provision._imports()
+    assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
+
+
 # ---------------------------------------------------------------------------
 # Key-material safety: key bytes must never appear in exception messages
 # ---------------------------------------------------------------------------

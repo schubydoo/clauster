@@ -52,7 +52,7 @@ from .tls_provision import generate_self_signed
 # we degrade to a no-op instead.
 try:
     import setproctitle as _setproctitle
-except ImportError:  # pragma: no cover - defensive: a cosmetic retitle must not break startup
+except ImportError:  # defensive: a cosmetic retitle must not break startup
     _setproctitle = None
 
 _COMMANDS = {
@@ -1054,7 +1054,7 @@ def _warn_if_key_world_readable(key: Path) -> None:
         return
     try:  # pragma: skip-on-win
         mode = key.stat().st_mode
-    except OSError:  # pragma: no cover - the key was just resolved+readable; racey unlink only
+    except OSError:  # pragma: skip-on-win — racey unlink only; POSIX-only (os.name guard above)
         return
     if mode & 0o077:  # pragma: skip-on-win
         print(

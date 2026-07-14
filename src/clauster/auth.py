@@ -100,7 +100,7 @@ def load_or_create_secret(state_dir: Path) -> bytes:
         return _read_existing_secret(path)
     try:
         secret = secrets.token_bytes(32)
-        if os.write(fd, secret) != len(secret):  # pragma: no cover - 32B never short-writes
+        if os.write(fd, secret) != len(secret):
             raise OSError(f"short write creating {path}")
         os.fsync(
             fd

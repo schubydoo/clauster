@@ -210,6 +210,69 @@ def test_read_pipe_name_propagates_read_error(monkeypatch, tmp_path):
         cc._read_pipe_name(str(tmp_path / "rpc.sock"))
 
 
+async def test_open_windows_pipe_connection_wires_reader_writer(monkeypatch):
+    """The real Windows pipe helper builds a working reader/writer over create_pipe_connection.
+
+    The ONLY win32-specific dependency is ``loop.create_pipe_connection``; inject a fake one onto
+    the running (POSIX) loop and drive the REAL helper unpatched — asserting the StreamReader /
+    StreamWriter pair actually reads, writes, and honors the caller's limit.
+    """
+    from clauster import claustrum_client as cc
+
+    seen: dict = {}
+
+    class _FakePipeTransport(asyncio.Transport):
+        # Subclasses asyncio.Transport so pause_reading/resume_reading raise NotImplementedError
+        # (the flow-control contract StreamReader expects), mirroring a real one-way pipe read.
+        def __init__(self):
+            super().__init__()
+            self.writes: list[bytes] = []
+            self._closing = False
+
+        def write(self, data):
+            self.writes.append(bytes(data))
+
+        def is_closing(self):
+            return self._closing
+
+        def close(self):
+            self._closing = True
+
+        def get_extra_info(self, name, default=None):
+            return default
+
+    async def fake_create_pipe_connection(protocol_factory, name):
+        seen["name"] = name
+        proto = protocol_factory()
+        transport = _FakePipeTransport()
+        proto.connection_made(transport)
+        seen["transport"] = transport
+        return transport, proto
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "create_pipe_connection", fake_create_pipe_connection, raising=False)
+
+    pipe = r"\\.\pipe\claustrum-wire"
+    reader, writer = await cc._open_windows_pipe_connection(pipe, limit=16)
+
+    assert isinstance(reader, asyncio.StreamReader)
+    assert isinstance(writer, asyncio.StreamWriter)
+    assert seen["name"] == pipe  # dialed the exact pipe name
+
+    # The writer really wraps the injected transport.
+    writer.write(b"ping\n")
+    assert seen["transport"].writes == [b"ping\n"]
+
+    # The reader really receives bytes over the same pipe.
+    reader.feed_data(b"pong\n")
+    assert await reader.readline() == b"pong\n"
+
+    # The StreamReader was built with the caller's limit: a line past it raises (limit honored).
+    reader.feed_data(b"x" * 64)
+    with pytest.raises(ValueError, match="chunk exceed the limit"):
+        await reader.readline()
+
+
 async def test_read_loop_survives_oversized_frame(caplog):
     # A frame larger than _MAX_LINE_BYTES makes readline() raise ValueError (wrapping
     # asyncio's LimitOverrunError). The reader must tear down cleanly via _fail_pending —

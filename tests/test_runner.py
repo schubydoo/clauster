@@ -2810,6 +2810,28 @@ def test_conpty_keeper_available_false_on_posix():
     assert runner_mod._conpty_keeper_available() is False
 
 
+def test_conpty_keeper_available_true_when_winpty_imports(monkeypatch):
+    # Force the win32 branch on this POSIX host and inject an importable ``winpty``:
+    # the real function reaches its ``import winpty`` -> ``return True`` path.
+    import types
+
+    from clauster import runner as runner_mod
+
+    monkeypatch.setattr(runner_mod.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winpty", types.ModuleType("winpty"))
+    assert runner_mod._conpty_keeper_available() is True
+
+
+def test_conpty_keeper_available_false_when_winpty_import_fails(monkeypatch):
+    # win32 branch, but ``import winpty`` raises (mapped to None in sys.modules): the
+    # real ``except`` arm fails closed to False (no keeper -> Server Mode fallback).
+    from clauster import runner as runner_mod
+
+    monkeypatch.setattr(runner_mod.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winpty", None)
+    assert runner_mod._conpty_keeper_available() is False
+
+
 def test_popen_keeper_win32_detaches_process(runner_config, monkeypatch, tmp_path):
     # The Windows keeper detaches with DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so it
     # survives a Clauster restart (start_new_session is a POSIX no-op on Windows).
@@ -2959,6 +2981,42 @@ def test_prune_tolerates_stat_oserror(runner_config, monkeypatch):
     runner._prune_one_pointer(
         config.projects_root / "alpha", _prune_cutoff()
     )  # logged, not raised
+
+
+def test_prune_logs_tolerates_stat_oserror(runner_config, monkeypatch):
+    # A per-file stat() OSError inside _prune_logs' _stat closure (a TOCTOU race) is
+    # skipped, not raised: the aged set still dates off its surviving sibling and is
+    # pruned, and the fresh set survives. Default retention keeps age-pruning at 30d.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    aged = runner._log_dir / "alpha-1000-0.log"
+    aged_raw = runner._log_dir / "alpha-1000-0.raw.log"  # same spawn set as `aged`
+    fresh = runner._log_dir / "beta-2000-0.log"
+    for p in (aged, aged_raw, fresh):
+        p.write_text("x")
+    old = time.time() - 40 * 86400  # older than the 30-day default
+    os.utime(aged, (old, old))
+    os.utime(aged_raw, (old, old))
+
+    real_stat = Path.stat
+
+    def _boom(self, *a, **k):
+        # aged_raw's stat fails wherever it's called. To pin the failure to the
+        # _stat() closure (not the is_file() listing filter -- 3.12's is_file() stats
+        # bare, 3.13's doesn't), is_file() is stubbed below so the listing never stats.
+        if self.name == "alpha-1000-0.raw.log":
+            raise OSError("stat failed")
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "is_file", lambda self, **k: True)  # temp dir holds only test files
+    monkeypatch.setattr(Path, "stat", _boom)
+    runner._prune_logs(protected=set())  # tolerated, not raised
+    monkeypatch.undo()  # restore real stat/is_file so the existence asserts below are honest
+
+    assert not aged.exists()  # aged set still dated off `aged` and pruned
+    assert not aged_raw.exists()  # its sibling went with the set despite the stat error
+    assert fresh.exists()  # the fresh set survived
 
 
 def test_prune_clear_returns_false_is_noop(runner_config, monkeypatch):

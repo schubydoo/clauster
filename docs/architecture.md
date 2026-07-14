@@ -201,11 +201,12 @@ Legend: ✓ works · ✗ not available (honest platform gap) · 🟡 in progress
 | Directory `fsync` (crash durability) | ✓ | ✓ | ✓ | POSIX `fsync`s the parent directory after a rename; Windows can't `fsync` a directory handle, but NTFS **journals** the metadata so the rename is recovered on reboot — equivalent durability via a different mechanism. |
 | Service-unit install (`install-service`) | ✓ | ✓ | ✓ † | Renders a systemd unit on Linux, a launchd plist on macOS (`launchd` kind), and an nssm install script on Windows (`windows` kind) — `ops.render_service_unit`. † Windows requires `nssm` installed + on `PATH` before running the generated script. |
 
-The remaining gaps above are honest platform differences, not defects — they're why
-the Windows per-OS coverage flag sits a little below 100% (the POSIX-only branches it
-can't run), while the union across all three platforms is 100%. Only the Linux CI cell
-enforces the coverage gate (`--cov-fail-under=96`); the per-OS flags add visibility, not
-a gate. The **ConPTY keeper and the live pty-screen view both need
+The remaining gaps above are honest platform differences, not defects. All three OS
+cells enforce the same `--cov-fail-under=96` gate; Windows measures through
+`.coveragerc-win`, which excludes the POSIX/ConPTY code it genuinely can't run, so each
+platform holds the floor on the code it actually executes (all three currently sit at
+100% on their runnable surface, and the union across platforms is 100%). The per-OS
+Codecov flags add visibility on top of the gate. The **ConPTY keeper and the live pty-screen view both need
 the `pty` extra** (`pip install 'clauster[pty]'`, pulling pywinpty on Windows and pyte
 everywhere); it is intentionally not bundled in the standalone binary — see the module
 notes and [#904](https://github.com/schubydoo/clauster/issues/904).

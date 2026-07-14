@@ -266,7 +266,7 @@ class LoginStatusCache:
         """
         try:
             result = self._probe(self._binary, self._claude_json)
-        except Exception:  # pragma: no cover - check_login_status never raises
+        except Exception:
             _log.exception("login-status refresh probe raised unexpectedly")
             result = LoginStatus(False, None, None, "login-status probe failed")
         with self._lock:

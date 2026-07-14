@@ -61,9 +61,7 @@ def _imports():
         )
         from cryptography.hazmat.primitives.asymmetric import rsa  # type: ignore[import-not-found]
         from cryptography.x509.oid import NameOID  # type: ignore[import-not-found]
-    # pragma: cryptography is a core dep, so this ModuleNotFoundError path can't be
-    # exercised in-suite (can't uninstall the package mid-run) — hence no cover.
-    except ModuleNotFoundError as exc:  # pragma: no cover
+    except ModuleNotFoundError as exc:
         raise RuntimeError(
             "tls.provision = self-signed requires the 'cryptography' package — "
             "install it with: pip install cryptography  (or reinstall: pip install clauster)"

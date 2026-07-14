@@ -394,6 +394,20 @@ def test_unwrap_display_mixed_wrapped_and_unwrapped_rows():
     assert pty_screen._unwrap_display(["hello", "world ", "tail"]) == "helloworld \ntail"
 
 
+# --- _url_host / _url_path: malformed-IPv6 authority falls back to empty ---------------
+
+
+def test_url_host_returns_empty_for_malformed_ipv6_bracket_url():
+    # urlsplit('http://[::1/authorize') raises ValueError('Invalid IPv6 URL'); the public
+    # _url_host must swallow it and degrade to an empty host, never propagate.
+    assert pty_screen._url_host("http://[::1/authorize") == ""
+
+
+def test_url_path_returns_empty_for_malformed_ipv6_bracket_url():
+    # Same malformed IPv6 authority through _url_path's urlsplit — degrades to empty path.
+    assert pty_screen._url_path("http://[::1/authorize") == ""
+
+
 def test_find_oauth_token_scrapes_the_rendered_screen():
     scr = PtyScreen(cols=80, rows=3)
     scr.feed(b"Login successful.\r\nCLAUDE_CODE_OAUTH_TOKEN=canned-token-value-xyz")

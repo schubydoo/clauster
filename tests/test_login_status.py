@@ -393,3 +393,34 @@ def test_cache_wait_for_pending_refresh_noop_when_idle():
     # No refresh in flight (nothing ever read) -> the helper is a harmless no-op.
     cache = _cache(_CountingProbe(LOGGED_IN))
     cache.wait_for_pending_refresh()  # must not raise
+
+
+class _RaisingProbe:
+    """A probe that always raises, to exercise `_refresh`'s fail-closed except."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, binary, claude_json):
+        self.calls += 1
+        raise RuntimeError("probe blew up")
+
+
+def test_cache_probe_that_raises_fails_closed_and_clears_refreshing():
+    # `_refresh`'s broad except must convert an unexpected probe failure into a
+    # fail-closed result AND still clear the single-flight flag, so a one-off failure
+    # can't wedge the cache into "never refresh again". Assert the surfaced result and
+    # that a later stale read actually re-probes (proving `_refreshing` was cleared).
+    clock = _ManualClock()
+    probe = _RaisingProbe()
+    cache = _cache(probe, clock=clock, ttl_s=30.0)
+    cache.read()  # cold-start kicks the probe, which raises
+    cache.wait_for_pending_refresh()
+    settled = cache.read()
+    assert settled == LoginStatus(False, None, None, "login-status probe failed")
+    assert probe.calls == 1
+    # A stale read re-probes -> the flag was cleared, not wedged True.
+    clock.now = 31.0
+    cache.read()
+    cache.wait_for_pending_refresh()
+    assert probe.calls == 2
