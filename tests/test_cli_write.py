@@ -207,3 +207,11 @@ def test_stop_vanished_project_exit_2(cfg, capsys):
     _FakeEngine.raise_on_stop = UnknownProject("project alpha gone")
     assert main(["stop", "-c", cfg, "abc1234567"]) == 2
     assert "project alpha gone" in capsys.readouterr().err
+
+
+def test_stop_signalling_oserror_exit_1_not_traceback(cfg, capsys):
+    # runner.stop() can raise OSError (signalling a dead/reused pid) — the CLI must
+    # surface it and exit 1, not leak a traceback past the documented failure path.
+    _FakeEngine.raise_on_stop = OSError("no such process")
+    assert main(["stop", "-c", cfg, "abc1234567"]) == 1
+    assert "could not stop" in capsys.readouterr().err

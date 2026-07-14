@@ -157,19 +157,23 @@ def test_start_delegates_options_to_spawn_detailed(tmp_path, projects_root):
         "resume_mode": "pty",
         "custom_name": "mybridge",
         "sandbox": "on",
+        "trust": False,
     }
-    assert runner.trusted == []  # trust=False → no trust write
 
 
-def test_start_trusts_before_spawn_when_requested(tmp_path, projects_root):
+def test_start_passes_trust_into_spawn_not_a_separate_write(tmp_path, projects_root):
     inst = RemoteControlInstance(instance_id="i1", project="alpha", label="alpha")
     runner = _FakeRunner(claude_json=tmp_path / "claude.json", instances=[inst])
     engine = _engine(tmp_path, projects_root, runner)
 
     asyncio.run(engine.start("alpha", trust=True))
 
-    assert runner.trusted == ["alpha"]  # --trust wrote trust for the project
-    assert runner.spawn_calls  # and still spawned
+    # --trust flows through spawn_detailed (applied after validation, atomically),
+    # NOT a separate pre-spawn trust_project write that a later invalid option couldn't
+    # roll back.
+    _, kw = runner.spawn_calls[0]
+    assert kw["trust"] is True
+    assert runner.trusted == []  # engine no longer calls trust_project directly
 
 
 def test_stop_resolves_then_delegates(tmp_path, projects_root):

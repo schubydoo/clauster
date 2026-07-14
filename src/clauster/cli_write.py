@@ -133,6 +133,12 @@ def cmd_stop(config: ClausterConfig, identity: str, *, as_json: bool) -> int:
         # The instance resolved but its project has since vanished (the route's 404).
         print(f"clauster: {exc}", file=sys.stderr)
         return 2
+    except OSError as exc:
+        # Signalling the bridge / reaping its keeper failed (dead or reused pid, revoked
+        # perms). Surface it and exit 1 (tried but could not) rather than leaking a
+        # traceback past the documented failure path.
+        print(f"clauster: could not stop {identity!r}: {exc}", file=sys.stderr)
+        return 1
     if instance is None:
         print(f"clauster: no managed instance: {identity!r}", file=sys.stderr)
         return 2

@@ -134,19 +134,14 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         check reads the in-memory registry, so without a reattach a fresh CLI runner
         can't see a bridge the live service already started and would launch a second.
 
-        ``trust`` accepts the workspace-trust dialog for the project before spawning
-        (the CLI's ``--trust``, the headless equivalent of the dashboard's explicit
-        Trust action). Left off, an untrusted directory raises
+        ``trust`` accepts the workspace-trust dialog for the project (the CLI's
+        ``--trust``, the headless equivalent of the dashboard's explicit Trust
+        action). It is passed into ``spawn_detailed``, which applies it *after* option
+        validation and under the per-project spawn lock — so an invalid option fails
+        without leaving the directory trusted, and the trust write is atomic with the
+        spawn. Left off, an untrusted directory raises
         :class:`~clauster.runner.NotTrusted` rather than being trusted implicitly.
-        The trust write happens *before* ``spawn_detailed`` validates the launch
-        options, so a later invalid option (a bad ``--name``) still leaves the
-        directory trusted — intentional: ``--trust`` is a deliberate, persistent,
-        stand-alone authorization (as it is in the dashboard), not contingent on the
-        rest of the spawn succeeding. ``trust_project`` still validates the project
-        name first, so trust is never written for an unresolved project.
         """
-        if trust:
-            await self._runner.trust_project(project)
         return await self._runner.spawn_detailed(
             project,
             spawn_mode=spawn_mode,
@@ -154,6 +149,7 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
             resume_mode=resume_mode,
             custom_name=custom_name,
             sandbox=sandbox,
+            trust=trust,
         )
 
     async def stop(self, identity: str) -> RemoteControlInstance | None:
