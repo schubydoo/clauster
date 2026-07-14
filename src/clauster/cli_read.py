@@ -129,6 +129,16 @@ def cmd_logs(config: ClausterConfig, identity: str, *, follow: bool) -> int:
         try:
             while True:
                 time.sleep(_FOLLOW_INTERVAL)
+                if not path.exists():
+                    # The log vanished mid-follow (rotated/deleted): the reader would
+                    # swallow it and the loop would sleep forever showing nothing. Fail
+                    # closed with a diagnostic rather than a silent idle stream.
+                    print(
+                        f"clauster: bridge log for {identity!r} vanished ({path}); "
+                        "stopping follow",
+                        file=sys.stderr,
+                    )
+                    return 1
                 offset, new_lines = engine.read_log_lines(path, offset)
                 for line in new_lines:
                     print(line)

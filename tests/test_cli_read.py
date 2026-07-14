@@ -222,6 +222,21 @@ def test_logs_follow_streams_until_interrupt(cfg, tmp_path, capsys, monkeypatch)
     assert capsys.readouterr().out.splitlines() == ["initial", "streamed"]
 
 
+def test_logs_follow_stops_if_file_vanishes(cfg, tmp_path, capsys, monkeypatch):
+    # If the log is deleted after --follow starts, fail closed (exit 1 + diagnostic)
+    # instead of sleeping forever showing nothing.
+    log = tmp_path / "b.log"
+    log.touch()
+    _FakeEngine.log_path = log
+    _FakeEngine.log_reads = [(10, ["initial"])]
+
+    monkeypatch.setattr(cli_read.time, "sleep", lambda _s: log.unlink())  # vanish mid-follow
+    assert main(["logs", "-c", cfg, "i1", "--follow"]) == 1
+    out = capsys.readouterr()
+    assert out.out.splitlines() == ["initial"]  # the one-shot tail printed before the vanish
+    assert "vanished" in out.err
+
+
 # -- open ----------------------------------------------------------------------
 
 
