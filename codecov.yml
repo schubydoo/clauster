@@ -216,5 +216,6 @@ component_management:
         - src/clauster/reconcile.py # #650 — `clauster config reconcile` subcommand
         - src/clauster/engine.py # #775 — shared read facade for the app + headless CLI
         - src/clauster/cli_read.py # #775 — headless read commands (projects/status/sessions/logs/open)
+        - src/clauster/cli_write.py # #775 — headless write commands (start/stop)
         - src/clauster/__main__.py
         - src/clauster/__init__.py

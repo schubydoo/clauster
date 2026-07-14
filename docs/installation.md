@@ -328,6 +328,29 @@ clauster logs <instance> [-f]      # tail a bridge's redacted log (--follow to s
 clauster open <instance>           # print a bridge's connect URL (--launch opens a browser)
 ```
 
+Headless **write** commands spawn and stop bridges through that same engine —
+identical mode policy, singleton cap, and option validation to the dashboard. Both
+take `--json`; `start` exits non-zero on failure (`2` = bad request — unknown
+project, untrusted directory, invalid option; `1` = clauster tried and could not —
+bridge cap or launch failure). They are meant for driving clauster with **no
+server running**. A concurrent live server is not corrupted — the command first
+re-detects live bridges (so an already-live bridge is handed back, never
+duplicated) and the state file is written atomically — but the two processes
+otherwise write `state.json` last-writer-wins; since that record is
+non-authoritative (the server re-derives live bridges from the OS on its next
+poll), a lost write self-heals rather than dropping a running bridge.
+
+```text
+clauster start <project> [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \
+               [--name NAME] [--sandbox default|on|off] [--trust] [--json]
+clauster stop  <instance> [--json]        # stop a bridge by id / prefix / identity
+```
+
+`--mode` picks the bridge mode with no hidden coercion (the two modes are not
+interchangeable); `--trust` accepts the workspace-trust dialog before starting
+(otherwise an untrusted directory is refused). Sending a conversation turn to a
+running hosted session is not a headless command — it needs the live server.
+
 `clauster doctor` confirms `claude` is found and new enough and that
 `projects_root` and the state dir are usable — run it before your first spawn
 and fix any ✗.

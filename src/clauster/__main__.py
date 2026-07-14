@@ -3,7 +3,9 @@
 Subcommands: ``run`` (default), ``hash-password``, ``hash-token``,
 ``hash-metrics-token``, ``doctor``, ``backup``, ``restore``, ``migrate``,
 ``install-service``, ``reap-environments``, ``keepers``, ``usage``,
-``config reconcile``, ``mcp``, ``api-token issue/list/rotate/revoke``.
+``config reconcile``, ``mcp``, ``api-token issue/list/rotate/revoke``, and the
+headless engine commands ``projects``/``status``/``sessions``/``logs``/``open``
+(read) plus ``start``/``stop`` (write) that drive clauster with no server running.
 Bare ``clauster`` and ``clauster -c <cfg>`` still mean ``run`` for
 backward compatibility.
 """
@@ -28,7 +30,15 @@ import uvicorn
 from . import __version__, claude_cli, environments, ops, pty_keeper, usage
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
-from .config import ClausterConfig, load_config, resolve_cert_path
+from .config import (
+    PERMISSION_MODES,
+    RESUME_MODES,
+    SANDBOX_MODES,
+    SPAWN_MODES,
+    ClausterConfig,
+    load_config,
+    resolve_cert_path,
+)
 from .db.bootstrap import MigrationError
 from .db.persistence import Persistence
 from .logging_config import setup_logging
@@ -66,6 +76,8 @@ _COMMANDS = {
     "sessions",
     "logs",
     "open",
+    "start",
+    "stop",
 }
 _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
@@ -235,6 +247,39 @@ def main(argv: list[str] | None = None) -> int:
     open_p.add_argument("-c", "--config", help="path to clauster.yml")
     open_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
     open_p.add_argument("--launch", action="store_true", help="also open the URL in a browser")
+    start_p = sub.add_parser("start", help="start a bridge for a project (no server)")
+    start_p.add_argument("-c", "--config", help="path to clauster.yml")
+    start_p.add_argument("project", help="project name to start a bridge for")
+    start_p.add_argument(
+        "--mode",
+        dest="resume_mode",
+        choices=RESUME_MODES,
+        help="bridge mode: standard (remote-control) or pty (true-resume interactive session)",
+    )
+    start_p.add_argument(
+        "--spawn-mode", choices=SPAWN_MODES, help="working directory strategy (default same-dir)"
+    )
+    start_p.add_argument(
+        "--permission-mode",
+        choices=PERMISSION_MODES,
+        help="claude permission mode for the session",
+    )
+    start_p.add_argument(
+        "--name", help="custom display name for a standard bridge (ignored for pty)"
+    )
+    start_p.add_argument(
+        "--sandbox", choices=SANDBOX_MODES, help="per-launch sandbox toggle for a standard bridge"
+    )
+    start_p.add_argument(
+        "--trust",
+        action="store_true",
+        help="accept the workspace-trust dialog for the project before starting",
+    )
+    start_p.add_argument("--json", action="store_true", help="emit JSON instead of a status line")
+    stop_p = sub.add_parser("stop", help="stop a bridge by instance id / identity")
+    stop_p.add_argument("-c", "--config", help="path to clauster.yml")
+    stop_p.add_argument("instance", help="instance id (or a prefix / bridge identity)")
+    stop_p.add_argument("--json", action="store_true", help="emit JSON instead of a status line")
 
     # Treat bare `clauster` / `clauster -c x` as `run` for backward compatibility.
     if argv and argv[0] not in _COMMANDS and argv[0] not in _TOP_LEVEL_FLAGS:
@@ -299,6 +344,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "logs":
             return cli_read.cmd_logs(config, args.instance, follow=args.follow)
         return cli_read.cmd_open(config, args.instance, launch=args.launch)
+    if args.command in ("start", "stop"):
+        # Lazy-imported so the hot `run` path never pays for the engine/CLI import graph.
+        from . import cli_write
+
+        config = _load_or_exit(args.config)
+        if args.command == "start":
+            return cli_write.cmd_start(
+                config,
+                args.project,
+                spawn_mode=args.spawn_mode,
+                permission_mode=args.permission_mode,
+                resume_mode=args.resume_mode,
+                custom_name=args.name,
+                sandbox=args.sandbox,
+                trust=args.trust,
+                as_json=args.json,
+            )
+        return cli_write.cmd_stop(config, args.instance, as_json=args.json)
     return _run(getattr(args, "config", None))
 
 
