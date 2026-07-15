@@ -29,6 +29,7 @@ param(
     [switch]$Yes,
     [switch]$KeepConfig,
     [switch]$KeepData,
+    [switch]$KeepDeps,
     [switch]$Help
 )
 
@@ -41,12 +42,14 @@ function Write-Err($m)  { Write-Host "[ERR ]  $m" -ForegroundColor Red }
 
 function Show-Usage {
     Write-Host @'
-Usage: uninstall.ps1 [-DryRun] [-Yes] [-KeepConfig] [-KeepData] [-Help]
+Usage: uninstall.ps1 [-DryRun] [-Yes] [-KeepConfig] [-KeepData] [-KeepDeps] [-Help]
 
   -DryRun       Show what would be removed without removing anything.
   -Yes          Do not prompt for confirmation.
   -KeepConfig   Preserve clauster.yml (moved aside to a printed backup path).
   -KeepData     Preserve clauster.db (moved aside to a printed backup path).
+  -KeepDeps     Preserve side-installed optional deps (pty/notify extras, Shawl) in
+                <state_dir>\deps (moved aside to a printed backup path).
   -Help         Show this help.
 '@
 }
@@ -114,6 +117,18 @@ function Uninstall-Clauster {
     $binaryPath = Join-Path $installDir 'clauster.exe'
     $stateDir   = Resolve-StateDir
     $configPath = Resolve-ConfigPath
+    # Side-installed optional deps live under <state_dir>\deps (pip extras + bin\shawl.exe). Removed
+    # with the state dir below; enumerated in the plan, and -KeepDeps preserves them (#904).
+    $depsDir = Join-Path $stateDir 'deps'
+    $managedDeps = @()
+    if (Test-Path -LiteralPath $depsDir) {
+        foreach ($k in @('pyte', 'pywinpty', 'apprise')) {
+            if (Get-ChildItem -LiteralPath $depsDir -Directory -Filter "$k-*.dist-info" -ErrorAction SilentlyContinue) {
+                $managedDeps += $k
+            }
+        }
+        if (Test-Path -LiteralPath (Join-Path $depsDir 'bin\shawl.exe')) { $managedDeps += 'shawl' }
+    }
 
     $script:RemovalFailed = $false  # set true by Remove-Target on any removal error
 
@@ -143,6 +158,11 @@ function Uninstall-Clauster {
     Write-Host ''
     Write-Info ("Detected install method(s): " + $(if ($detected.Count) { $detected -join ', ' } else { 'none' }))
     Write-Info ("State directory:            $stateDir" + $(if (Test-Path -LiteralPath $stateDir) { '' } else { ' (absent)' }))
+    if ($managedDeps.Count) {
+        $depsSummary = ($managedDeps -join ', ')
+        if ($KeepDeps) { Write-Info "Side-installed deps:        $depsSummary (KEPT - moved to backup)" }
+        else { Write-Info "Side-installed deps:        $depsSummary (in $depsDir; keep with -KeepDeps)" }
+    }
     Write-Info ("Config file:                " + $(if ($configPath) { $configPath } else { '<none found>' }))
     Write-Host ''
 
@@ -215,8 +235,17 @@ function Uninstall-Clauster {
         Move-Item -LiteralPath $src -Destination $backupDir -Force
         Write-Ok "Kept ${label}: $backupDir\$(Split-Path -Leaf $src)"
     }
+    function Save-AsideDir([string]$src, [string]$label) {
+        if (-not (Test-Path -LiteralPath $src -PathType Container)) { return }
+        if ($DryRun) { Write-Host "  would keep ${label}: move $src -> $backupDir\"; return }
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        Move-Item -LiteralPath $src -Destination $backupDir -Force
+        Write-Ok "Kept ${label}: $backupDir\$(Split-Path -Leaf $src)"
+    }
     if ($KeepConfig -and $configExists) { Save-Aside $configPath 'config' }
     if ($KeepData) { Save-Aside (Join-Path $stateDir 'clauster.db') 'database' }
+    # Move side-installed deps aside BEFORE the whole state_dir is removed below, so they survive.
+    if ($KeepDeps) { Save-AsideDir $depsDir 'side-installed deps' }
 
     # --- 3) State directory (guarded) --------------------------------------
     if ($stateExists) {

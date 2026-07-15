@@ -476,6 +476,9 @@ Options (same names on both, `--flag` on the shell script, `-Flag` on PowerShell
 - `--keep-config` / `-KeepConfig` — preserve `clauster.yml` for a future reinstall
   (moved aside to a printed backup path).
 - `--keep-data` / `-KeepData` — preserve `clauster.db` the same way.
+- `--keep-deps` / `-KeepDeps` — preserve side-installed optional deps (the `pty`/`notify`
+  extras and Shawl in `<state_dir>/deps`) the same way, so a reinstall needn't re-download
+  them. The uninstaller enumerates what it found there before removing anything.
 - `-y` / `-Yes` — skip the confirmation prompt.
 
 The uninstaller is deliberately conservative: it never deletes a path outside the

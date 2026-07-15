@@ -455,6 +455,13 @@ prints an explicit notice and requires confirmation before downloading (`--yes` 
 the prompt); it never auto-installs. `deps uninstall <extra>` removes the extra's own
 distribution from the managed dir (shared transitive dependencies are left in place).
 
+`clauster deps install shawl` (Windows only) is the same mechanism for a **binary**
+dependency: it downloads the pinned [Shawl](https://github.com/mtkennerly/shawl)
+service wrapper from its GitHub release, verifies it against a hardcoded SHA-256, and
+places `shawl.exe` under `<state_dir>/deps/bin`. `clauster install-service windows`
+then wraps Clauster as a service with it (`shawl add … -- clauster run -c <cfg>`) — so
+Windows service install needs Shawl present (doctor's `binary:shawl` row confirms it).
+
 ### Recovering from a corrupted state database
 
 Runtime state lives in the SQLite `clauster.db` under your `state_dir` (the live
