@@ -113,19 +113,16 @@ def probe(entry: Extra) -> bool:
 
 
 def install_hint(entry: Extra) -> str:
-    """Return an environment-correct one-line install hint for ``entry``.
+    """Return an environment-correct one-line install *command* for ``entry``.
 
     A normal pip/uv install resolves the extra through the package index
-    (``pip install 'clauster[pty]'``). The frozen binary can't pip-install and the
-    managed ``clauster deps install`` command is a later #904 slice, so until it
-    exists the frozen hint points at the docs rather than naming a command that
-    doesn't run yet — kept honest so doctor never hands out a dead-end command.
+    (``pip install 'clauster[pty]'``). The frozen binary can't pip-install into itself, so it
+    bundles pip and offers the managed ``clauster deps install <extra>`` command instead (#904
+    slice 2b) — a real, runnable command on the binary. Both forms are runnable, so callers
+    render either with a "run" imperative.
     """
     if is_frozen():
-        # Generic prose (not a command): the extra is already named by every surface that
-        # shows this (the doctor row + the dashboard hint), and no runnable install command
-        # exists on the frozen binary yet — so callers render it WITHOUT a "run" imperative.
-        return "not bundled in the standalone binary; see the install docs"
+        return f"clauster deps install {entry.extra_name}"
     return f"pip install 'clauster[{entry.extra_name}]'"
 
 

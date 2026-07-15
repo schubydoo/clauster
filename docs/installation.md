@@ -149,17 +149,15 @@ want the full supply-chain check.
     **Windows**, SmartScreen may warn on first launch; choose **More info → Run
     anyway** (installing via Scoop, below, avoids the browser-download prompt).
 
-!!! note "The live terminal view needs a Python install"
+!!! note "The live terminal view needs the `pty` extra"
     The optional read-only live terminal view ([`pty_screen_enabled`](configuration.md))
     depends on [`pyte`](https://pypi.org/project/pyte/), which
-    is LGPL-licensed and so **is not bundled in the standalone binary**. To use the live
-    view, run Clauster from a `pip`/`uv`/`pipx` install with the `[pty]` extra
-    (`pip install 'clauster[pty]'`) instead of the binary — everything else works on the
-    binary. To keep the binary but still enable the view without bundling any LGPL code,
-    `pip install --target=/your/chosen/dir pyte` and set the `CLAUSTER_PYTE_PATH`
-    environment variable to that directory: the binary appends it to `sys.path` only when
-    set (a bundled module would always win), so the separately installed `pyte` is loaded
-    on demand.
+    is LGPL-licensed and so **is not bundled in the standalone binary**. On the binary, install
+    it with `clauster deps install pty` (the binary bundles `pip` and side-installs the wheel
+    into `<state_dir>/deps`, which it adds to `sys.path` at startup — no LGPL code is relinked
+    into the Apache-2.0 binary); restart afterwards. From a `pip`/`uv`/`pipx` install, use the
+    `[pty]` extra instead (`pip install 'clauster[pty]'`). As a manual alternative on the binary,
+    `pip install --target=/your/chosen/dir pyte` and set `CLAUSTER_PYTE_PATH` to that directory.
 
 !!! note "Optional extras"
     A few capabilities live behind optional `pip` **extras** that the default install and

@@ -337,17 +337,16 @@ def _pyte_unavailable_message() -> str:
 
     On the standalone PyInstaller binary ``pyte`` is not bundled (LGPL-licensed) and a side
     ``pip``/``uv`` install lands in an environment the frozen binary never reads, so plain
-    ``install clauster[pty]`` is a dead end. Name the two working paths instead: point
-    :data:`PYTE_PATH_ENV` at a directory holding an installed ``pyte``, or run clauster from
-    a ``pip``/``uv`` install with the ``[pty]`` extra.
+    ``install clauster[pty]`` is a dead end. Name the working paths instead: the managed
+    ``clauster deps install pty`` (the binary bundles pip, #904 slice 2b), or point
+    :data:`PYTE_PATH_ENV` at a directory holding an installed ``pyte``.
     """
     if getattr(sys, "frozen", False):
         return (
             "the live terminal view is unavailable in the standalone binary: 'pyte' is "
-            "LGPL-licensed and is not bundled. To enable it, either set the "
-            f"{PYTE_PATH_ENV} environment variable to a directory containing an installed "
-            "'pyte', or run clauster from a pip/uv install with the extra instead: "
-            "pip install 'clauster[pty]'."
+            "LGPL-licensed and is not bundled. Install it with 'clauster deps install pty', "
+            f"or set the {PYTE_PATH_ENV} environment variable to a directory containing an "
+            "installed 'pyte'."
         )
     return "the live pty-screen view needs the optional 'pyte' dependency; install clauster[pty]"
 
