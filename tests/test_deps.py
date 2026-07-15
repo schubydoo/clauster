@@ -710,3 +710,16 @@ def test_uninstall_binary_dep_unlink_error_returns_1(tmp_path, capsys):
     (bindir / "shawl.exe").mkdir()  # a directory where the exe is → unlink raises OSError
     rc = deps.uninstall_binary_dep("shawl", tmp_path)
     assert rc == 1 and "could not remove" in capsys.readouterr().err
+
+
+def test_install_binary_dep_atomic_replaces_existing(tmp_path, monkeypatch):
+    # Installing over an existing shawl.exe replaces it atomically and leaves no .tmp behind
+    # (a partial write must never truncate the working binary).
+    data, _dep = _install_fake_shawl(monkeypatch)
+    bindir = deps.managed_bin_dir(tmp_path)
+    bindir.mkdir(parents=True)
+    (bindir / "shawl.exe").write_bytes(b"OLD-BINARY")
+    rc = deps.install_binary_dep("shawl", tmp_path, assume_yes=True, fetch=lambda _u: data)
+    assert rc == 0
+    assert (bindir / "shawl.exe").read_bytes() == b"MZ-fake-shawl"
+    assert not (bindir / "shawl.exe.tmp").exists()

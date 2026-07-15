@@ -587,11 +587,19 @@ def install_binary_dep(
     except (KeyError, zipfile.BadZipFile, OSError) as exc:
         _err(f"could not extract {dep.member} from the archive: {exc}")
         return 1
+    # Atomic install: write to a sibling temp then replace, so a partial write (e.g. a full disk)
+    # never truncates a previously-working binary — the old one stays until the swap succeeds.
+    tmp = dest.with_name(dest.name + ".tmp")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(payload)
-        dest.chmod(0o755)  # no-op semantics on Windows; harmless if a POSIX host ever fetches it
+        tmp.write_bytes(payload)
+        tmp.chmod(0o755)  # no-op semantics on Windows; harmless if a POSIX host ever fetches it
+        tmp.replace(dest)  # os.replace — atomic within the managed dir (same filesystem)
     except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)  # don't leave a half-written temp behind
+        except OSError:
+            pass  # best-effort cleanup — the original write error is what we report
         _err(f"could not write {dest}: {exc}")
         return 1
     _err(f"installed {dep.label} {dep.version} at {dest}")

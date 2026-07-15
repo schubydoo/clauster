@@ -950,11 +950,15 @@ def _register_windows_service(config_path: str | None, state_dir: str | None) ->
     except ValueError as exc:  # an illegal `"` in a path
         print(f"clauster: {exc}", file=sys.stderr)
         return 2
-    for argv in commands:
+    # commands[0] is `shawl add` (it does the `sc create`); once it succeeds the service EXISTS.
+    # If a later step (sc config / sc start) fails we roll it back — otherwise a retry dies at
+    # `shawl add` ("already exists"), stranding a half-registered service to delete by hand.
+    for index, argv in enumerate(commands):
         try:
             result = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
         except OSError as exc:
             print(f"clauster: could not run {argv[0]!r}: {exc}", file=sys.stderr)
+            _rollback_windows_service(created=index > 0)
             return 1
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
@@ -968,9 +972,32 @@ def _register_windows_service(config_path: str | None, state_dir: str | None) ->
                 "from an Administrator prompt.",
                 file=sys.stderr,
             )
+            _rollback_windows_service(created=index > 0)
             return 1
     print("clauster: registered and started the Clauster service (via Shawl).", file=sys.stderr)
     return 0
+
+
+def _rollback_windows_service(*, created: bool) -> None:
+    """Delete a half-registered ``Clauster`` service so a retry starts clean (best-effort).
+
+    Only runs when ``shawl add`` already created the service (``created``) but a later step failed;
+    without it, the next ``install-service windows --write`` would fail at ``shawl add`` ("already
+    exists"). A failure to delete (e.g. still not elevated) is surfaced, not swallowed.
+    """
+    if not created:
+        return
+    result = subprocess.run(  # noqa: S603, S607 - fixed argv, `sc` is a System32 binary
+        ["sc", "delete", "Clauster"], capture_output=True, text=True, check=False
+    )
+    if result.returncode == 0:
+        print("clauster: rolled back the partially-registered service.", file=sys.stderr)
+    else:
+        print(
+            "clauster: could not roll back the partial 'Clauster' service — remove it with "
+            "`sc delete Clauster` (elevated) before retrying.",
+            file=sys.stderr,
+        )
 
 
 def _reap_environments(config_path: str | None, archive: bool, force_delete: bool) -> int:

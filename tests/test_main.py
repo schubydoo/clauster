@@ -1080,3 +1080,33 @@ def test_install_service_windows_write_handles_spawn_error(monkeypatch, capsys):
     rc = cli.main(["install-service", "windows", "--write"])
     assert rc == 1
     assert "could not run" in capsys.readouterr().err
+
+
+def test_install_service_windows_write_rolls_back_partial(monkeypatch, capsys):
+    # shawl add succeeds but sc config fails → the created service is rolled back (sc delete) so a
+    # retry isn't blocked by "already exists".
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+    calls: list[list[str]] = []
+
+    def run(argv, **_k):
+        calls.append(argv)
+        rc = 1 if argv[:2] == ["sc", "config"] else 0  # add ok, config fails, delete ok
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    assert cli.main(["install-service", "windows", "--write"]) == 1
+    assert ["sc", "delete", "Clauster"] in calls
+    assert "rolled back" in capsys.readouterr().err
+
+
+def test_install_service_windows_write_rollback_delete_failure_is_surfaced(monkeypatch, capsys):
+    # If the rollback delete ALSO fails (still not elevated), say so + tell them to remove it.
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+
+    def run(argv, **_k):
+        rc = 0 if argv[1:2] == ["add"] else 1  # only `<shawl> add` succeeds; config + delete fail
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="Access is denied")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    assert cli.main(["install-service", "windows", "--write"]) == 1
+    assert "could not roll back" in capsys.readouterr().err
