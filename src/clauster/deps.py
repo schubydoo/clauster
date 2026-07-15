@@ -357,11 +357,11 @@ def uninstall_extra(extra_name: str, state_dir: str | Path) -> int:
             if name and canonical_name(name) in wanted:
                 (removed if _remove_distribution(dist, target) else incomplete).append(name)
     if incomplete:
-        # No RECORD manifest → nothing to drive removal, so we must NOT claim success (the extra
-        # would remain on disk and load again). Surface it loudly + fail (#933 review).
+        # Couldn't fully remove (no RECORD manifest, or a file was locked/permission-denied), so
+        # files remain and would reload — we must NOT claim success. Surface loudly + fail (#933).
         _err(
-            f"{', '.join(incomplete)} has no RECORD manifest in {target}; could not remove it "
-            f"automatically — delete its files under {target} by hand."
+            f"could not fully remove {', '.join(incomplete)} from {target} (no RECORD manifest, "
+            f"or a file was locked/undeletable); delete any leftover files under {target} by hand."
         )
     if removed:
         _err(f"removed {', '.join(removed)} from {target}")
@@ -373,17 +373,18 @@ def uninstall_extra(extra_name: str, state_dir: str | Path) -> int:
 def _remove_distribution(dist: importlib.metadata.Distribution, target: Path) -> bool:
     """Delete every RECORD file of ``dist`` under ``target``, prune emptied dirs; return success.
 
-    Returns ``True`` when the distribution has a RECORD manifest to act on (the removable case),
-    ``False`` when it has none — the caller must not then claim the extra was removed, since
-    without a manifest nothing can be deleted and the files remain on disk. Best-effort per file
-    (an already-absent or unreadable file is skipped, not fatal — the goal is convergence on
-    "gone"), then empty parent directories are pruned bottom-up, never climbing above ``target``.
+    Returns ``True`` only when the distribution was fully removed. ``False`` when it has no RECORD
+    manifest to act on, OR when a manifest file survives the unlink (locked — e.g. a running
+    process holds a Windows ``.pyd`` — or permission-denied): the caller must not then claim the
+    extra was removed, since files remain on disk and would reload. An already-absent file is fine
+    (nothing left behind); empty parent dirs are pruned bottom-up, never climbing above ``target``.
     """
     files = dist.files
     if not files:
         return False
     dirs: set[Path] = set()
     boundary = target.resolve()
+    left_behind = False
     for rel in files:
         located = Path(str(dist.locate_file(rel)))
         # Containment guard: a tampered RECORD could list a `../`-escaping path. Never unlink
@@ -392,17 +393,25 @@ def _remove_distribution(dist: importlib.metadata.Distribution, target: Path) ->
         try:
             resolved = located.resolve()
         except OSError:
+            # Can't even resolve the entry (e.g. a symlink loop) → can't confirm it's gone, so
+            # don't claim full removal. Fail closed rather than silently skip a maybe-present file.
+            left_behind = True
             continue
         if boundary != resolved and boundary not in resolved.parents:
-            continue
+            continue  # escapes the managed dir — not ours to remove
         try:
             located.unlink()
+        except FileNotFoundError:
+            pass  # already gone — nothing left behind
         except OSError:
-            pass  # already gone / unreadable — best-effort removal
+            # Locked (e.g. a running process holds a Windows .pyd) or permission-denied: the
+            # file SURVIVES, so the extra is NOT fully removed. Record it and don't claim success.
+            left_behind = True
+            continue
         dirs.add(located.parent)
     for directory in sorted(dirs, key=lambda d: len(str(d)), reverse=True):
         _prune_empty_dirs(directory, stop=target)
-    return True
+    return not left_behind
 
 
 def _prune_empty_dirs(directory: Path, *, stop: Path) -> None:

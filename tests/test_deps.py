@@ -237,17 +237,51 @@ def test_add_deps_dir_swallows_path_errors(monkeypatch, tmp_path):
     assert all("deps" not in p for p in sys.path[len(sys.path) - 1 :])
 
 
-def test_remove_distribution_swallows_unlink_errors(tmp_path):
-    # A RECORD entry whose unlink() fails (here it resolves to a directory) is best-effort —
-    # swallowed, never propagated. (importlib pre-filters already-absent files, so this is the
-    # path that actually exercises the guard.)
+def test_remove_distribution_reports_failure_on_undeletable_file(tmp_path):
+    # A RECORD entry whose unlink() fails (here a directory; models a locked Windows .pyd) must be
+    # reported as a FAILED removal (False), not swallowed as success — the file survives on disk.
     import types
 
-    a_dir = tmp_path / "notafile"
-    a_dir.mkdir()
-    fake = types.SimpleNamespace(files=["notafile"], locate_file=lambda _rel: str(a_dir))
-    deps._remove_distribution(fake, tmp_path)  # OSError from unlinking a dir must not escape
-    assert a_dir.exists()  # unremovable entry left in place, no crash
+    stuck = tmp_path / "stuck"
+    stuck.mkdir()
+    fake = types.SimpleNamespace(files=["stuck"], locate_file=lambda _rel: str(stuck))
+    assert deps._remove_distribution(fake, tmp_path) is False  # OSError caught, but not "removed"
+    assert stuck.exists()  # left in place, no crash
+
+
+def test_remove_distribution_treats_already_gone_file_as_removed(tmp_path):
+    # A RECORD entry that vanished before unlink (race) raises FileNotFoundError → not left behind,
+    # so removal still counts as success (nothing of the extra remains).
+    import types
+
+    target = tmp_path / "deps"
+    target.mkdir()
+    fake = types.SimpleNamespace(files=["gone"], locate_file=lambda _rel: str(target / "gone"))
+    assert deps._remove_distribution(fake, target) is True
+
+
+def test_uninstall_extra_reports_incomplete_on_undeletable_file(tmp_path, capsys):
+    # A RECORD-listed file that can't be unlinked (locked .pyd, permission denied) must make
+    # uninstall report failure + exit 1, not falsely claim "removed" (#933 review round 2).
+    depsdir = tmp_path / "deps"
+    (depsdir / "apprise").mkdir(parents=True)
+    (depsdir / "apprise" / "stuck").mkdir()  # a dir where a file is listed → unlink fails
+    info = depsdir / "apprise-1.9.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: apprise\nVersion: 1.9.0\n", encoding="utf-8"
+    )
+    (info / "RECORD").write_text(
+        "apprise/stuck,,\napprise-1.9.0.dist-info/METADATA,,\napprise-1.9.0.dist-info/RECORD,,\n",
+        encoding="utf-8",
+    )
+    rc = deps.uninstall_extra("notify", tmp_path)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "could not fully remove" in err and "removed" not in err
+    assert (
+        depsdir / "apprise" / "stuck"
+    ).exists()  # the undeletable file survives, honestly reported
 
 
 def test_remove_distribution_refuses_to_escape_managed_dir(tmp_path):
@@ -266,8 +300,9 @@ def test_remove_distribution_refuses_to_escape_managed_dir(tmp_path):
     assert outside.exists()  # escaping entry left untouched
 
 
-def test_remove_distribution_skips_unresolvable_entry(monkeypatch, tmp_path):
-    # If a RECORD entry's path can't be resolved (OSError), skip it rather than crash.
+def test_remove_distribution_reports_failure_on_unresolvable_entry(monkeypatch, tmp_path):
+    # If a RECORD entry's path can't even be resolved (OSError, e.g. a symlink loop), fail closed:
+    # the entry is unprocessable so removal can't be confirmed → return False, never crash.
     import types
 
     target = tmp_path / "deps"
@@ -281,7 +316,27 @@ def test_remove_distribution_skips_unresolvable_entry(monkeypatch, tmp_path):
 
     monkeypatch.setattr(deps.Path, "resolve", _selective)
     fake = types.SimpleNamespace(files=["boom"], locate_file=lambda _rel: str(target / "boom"))
-    deps._remove_distribution(fake, target)  # boundary resolves; the entry is skipped, no raise
+    assert deps._remove_distribution(fake, target) is False  # unprocessable → not a clean removal
+
+
+def test_remove_distribution_one_survivor_fails_the_whole_dist(tmp_path):
+    # Mixed manifest: one file removes cleanly, one can't (a dir → unlink fails). A single survivor
+    # must flip the whole distribution to failure, and the removable file is still deleted.
+    import types
+
+    target = tmp_path / "deps"
+    (target / "pkg").mkdir(parents=True)
+    gone = target / "pkg" / "mod.py"
+    gone.write_text("x", encoding="utf-8")
+    stuck = target / "pkg" / "locked"
+    stuck.mkdir()  # unlink fails → survivor
+    fake = types.SimpleNamespace(
+        files=["pkg/mod.py", "pkg/locked"],
+        locate_file=lambda rel: str(target / rel),
+    )
+    assert deps._remove_distribution(fake, target) is False  # one survivor fails the dist
+    assert not gone.exists()  # the removable file was still deleted
+    assert stuck.exists()  # the survivor remains, honestly reported
 
 
 def test_prune_empty_dirs_swallows_resolve_error(monkeypatch, tmp_path):
