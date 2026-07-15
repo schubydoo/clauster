@@ -171,6 +171,13 @@ want the full supply-chain check.
     dormant, never breaks a launch. `clauster doctor` reports every extra (`OK` when present,
     `WARN` when missing, with the install hint), and on the standalone binary the hint points
     at the side-install path instead of `pip`.
+    On the standalone binary you don't need to set `CLAUSTER_PYTE_PATH` per-extra: the binary
+    also adds a managed `<state_dir>/deps` directory to its import path at startup, so anything
+    installed there (`pip install --target=<state_dir>/deps <dist>` from any Python) loads on the
+    next start —
+    [`clauster deps`](operations.md#clauster-deps-inspect-and-manage-optional-extras)
+    manages that directory (`clauster deps list` shows each extra's status; `clauster deps install
+    <extra>` / `uninstall <extra>` populate or clear it).
 
 ## Scoop (Windows)
 

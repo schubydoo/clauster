@@ -151,6 +151,21 @@ def test_check_extras_includes_win32_entry_only_on_windows(monkeypatch):
     assert "extra:pywinpty" in names
 
 
+def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, monkeypatch):
+    # doctor must add <state_dir>/deps to sys.path (frozen-only, inside deps.add_...) BEFORE the
+    # extra probes, so a side-installed extra isn't misreported as unavailable on frozen (#933).
+    import clauster.ops as ops_mod
+
+    cfg = _cfg_file(write_config, tmp_path)
+    order: list[str] = []
+    real_check = ops_mod._check_extras
+    monkeypatch.setattr(deps, "add_deps_dir_to_sys_path", lambda sd: order.append(f"add:{sd}"))
+    monkeypatch.setattr(ops_mod, "_check_extras", lambda: order.append("probe") or real_check())
+    run_doctor(cfg, check_port=False)
+    # Both that it ran with the right state_dir AND that it ran before the extra probes.
+    assert order == [f"add:{load_config(cfg).state_dir}", "probe"]
+
+
 def test_doctor_includes_extra_rows_never_failing(write_config, tmp_path):
     checks, ok = run_doctor(_cfg_file(write_config, tmp_path))
     extra_rows = [c for c in checks if c.name.startswith("extra:")]
