@@ -460,20 +460,22 @@ dependency: it downloads the pinned [Shawl](https://github.com/mtkennerly/shawl)
 service wrapper from its GitHub release, verifies it against a hardcoded SHA-256, and
 places `shawl.exe` under `<state_dir>/deps/bin`.
 
-**Installing Clauster as a Windows service is two steps, in order:**
+**Installing Clauster as a Windows service is two steps, from an elevated prompt:**
 
 ```powershell
-clauster deps install shawl -c C:\clauster\clauster.yml     # 1. fetch the Shawl wrapper
-clauster install-service windows -c C:\clauster\clauster.yml --write install-clauster.bat
-.\install-clauster.bat                                       # 2. run elevated: registers + starts
+clauster deps install shawl          # 1. fetch the Shawl wrapper (once)
+clauster install-service windows --write   # 2. register + start the service
 ```
 
-Step 2's generated script wraps Clauster with the managed Shawl (`shawl add --name
-Clauster … -- clauster run -c <cfg>`, then `sc start`), so it needs Shawl from step 1
-present — `clauster install-service windows` warns if it isn't, and `clauster doctor`
-shows a `binary:shawl` row. The Windows uninstaller (`uninstall.ps1`) stops and
-deletes the `Clauster` service before removing the binary, so nothing is left pointing
-at a removed executable.
+Add `-c <path>` to either only if your config isn't in the default search location.
+Like `install-service systemd/launchd --write`, `--write` on Windows *applies* the
+service directly — it runs `shawl add --name Clauster … -- clauster run -c <cfg>`
+(which does the `sc create`), then `sc config … start= auto` and `sc start`. It needs
+Shawl from step 1 and an elevated prompt (it fails with a clear "re-run as
+Administrator" if not). Omit `--write` to just print those commands for inspection.
+`clauster doctor` shows a `binary:shawl` row. The Windows uninstaller (`uninstall.ps1`)
+stops and deletes the `Clauster` service before removing the binary, so nothing is
+left pointing at a removed executable.
 
 ### Recovering from a corrupted state database
 

@@ -17,6 +17,7 @@ import getpass
 import os
 import shutil
 import ssl
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -154,8 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         const=True,
         default=False,
         metavar="PATH",
-        help="write the unit to PATH (or the conventional location) instead of printing it; "
-        "may need privileges (e.g. sudo) for a system path",
+        help="apply the service instead of printing it: write the unit to PATH / the conventional "
+        "location (systemd, launchd), or register + start it (windows). May need elevation "
+        "(sudo / an Administrator prompt).",
     )
 
     reap_p = sub.add_parser(
@@ -894,19 +896,21 @@ def _install_service(
         except (FileNotFoundError, ValueError):
             state_dir = None
     unit = ops.render_service_unit(kind, config_path=config_path, user=user, state_dir=state_dir)
-    if kind == "windows" and not _shawl_available(state_dir):
-        # The generated Windows script wraps Clauster with Shawl; warn upfront if it isn't
-        # installed so a non-registering service later isn't a surprise. Not fatal — the script is
-        # still useful (they can install shawl, then run it).
-        print(
-            "clauster: WARNING — the Windows service script wraps Clauster with Shawl "
-            "(https://github.com/mtkennerly/shawl), which isn't installed. Run "
-            "`clauster deps install shawl` before the script, or `shawl add` will fail.",
-            file=sys.stderr,
-        )
     if write is False:
+        # Inspection form: print the unit / plist / .bat. On Windows, note if Shawl is missing so
+        # the `--write` that follows (which registers the service via Shawl) will succeed.
         print(unit)
+        if kind == "windows" and not _shawl_available(state_dir):
+            print(
+                "clauster: note — Shawl isn't installed yet; run `clauster deps install shawl` "
+                "before `clauster install-service windows --write`.",
+                file=sys.stderr,
+            )
         return 0
+    if kind == "windows":
+        # --write on Windows REGISTERS + starts the service directly (needs an elevated prompt),
+        # the imperative equivalent of writing a systemd unit / launchd plist — no .bat to run.
+        return _register_windows_service(config_path, state_dir)
     dest = Path(write) if isinstance(write, str) else ops.default_service_path(kind)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -922,14 +926,50 @@ def _install_service(
             "clauster: next: sudo systemctl daemon-reload && sudo systemctl restart clauster",
             file=sys.stderr,
         )
-    elif kind == "launchd":
+    else:  # launchd
         print(f"clauster: next: launchctl load {dest}", file=sys.stderr)
-    else:
+    return 0
+
+
+def _register_windows_service(config_path: str | None, state_dir: str | None) -> int:
+    """Register + start the Clauster Windows service via Shawl (run from an elevated prompt).
+
+    Runs the same commands ``install-service windows`` prints — ``shawl add`` (which does the
+    ``sc create``), ``sc config … start= auto``, then ``sc start`` — in sequence. Fails closed:
+    a missing Shawl or a non-zero ``sc``/``shawl`` exit (e.g. not elevated → access denied) is
+    surfaced with a clear hint and a non-zero return, never a partial success reported as done.
+    """
+    if not _shawl_available(state_dir):
         print(
-            f"clauster: next: run {dest} from an elevated prompt "
-            "(needs Shawl — clauster deps install shawl)",
+            "clauster: Shawl isn't installed — run `clauster deps install shawl` first.",
             file=sys.stderr,
         )
+        return 1
+    try:
+        commands = ops.windows_service_commands(config_path=config_path, state_dir=state_dir)
+    except ValueError as exc:  # an illegal `"` in a path
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 2
+    for argv in commands:
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
+        except OSError as exc:
+            print(f"clauster: could not run {argv[0]!r}: {exc}", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            print(
+                f"clauster: `{' '.join(argv)}` failed (exit {result.returncode})"
+                + (f": {detail}" if detail else ""),
+                file=sys.stderr,
+            )
+            print(
+                "clauster: registering a Windows service needs elevation — re-run this "
+                "from an Administrator prompt.",
+                file=sys.stderr,
+            )
+            return 1
+    print("clauster: registered and started the Clauster service (via Shawl).", file=sys.stderr)
     return 0
 
 

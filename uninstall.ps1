@@ -216,8 +216,15 @@ function Uninstall-Clauster {
     if ($servicePresent) {
         Write-Info "Removing Windows service '$serviceName' (needs elevation)..."
         Invoke-Step "sc.exe stop $serviceName; sc.exe delete $serviceName" {
-            & sc.exe stop $serviceName | Out-Null
+            & sc.exe stop $serviceName | Out-Null   # a not-running service failing to stop is benign
             & sc.exe delete $serviceName | Out-Null
+            # sc.exe delete needs elevation; a non-elevated run fails with "Access is denied" (exit 5)
+            # which PS 5.1 does NOT turn into a terminating error. Check it so we never report a clean
+            # uninstall while the service is left pointing at a removed binary (fail loud, like Remove-Target).
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn "Could not delete service '$serviceName' (exit $LASTEXITCODE) - re-run elevated, or: sc.exe delete $serviceName"
+                $script:RemovalFailed = $true
+            }
         }
     }
 

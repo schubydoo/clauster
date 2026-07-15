@@ -893,19 +893,12 @@ def render_service_unit(
     # no nssm-on-PATH requirement. Shawl lives in the managed deps bin dir (`clauster deps install
     # shawl`); fall back to a bare `shawl` from PATH when the state dir is unknown. A `"` is
     # illegal in a Windows path, so _bat_quote_safe raises on one rather than risk broken quoting.
+    # The .bat is the inspectable form; `windows_service_commands` (below) builds the SAME three
+    # commands as argv for `install-service windows --write` to run directly. Keep them in sync.
     exe_q = _bat_quote_safe(exe)
     wd_q = _bat_quote_safe(wd)
     quoted = " ".join(f'"{_bat_quote_safe(a)}"' for a in cmd_args)
-    # Build the shawl path with ntpath (always backslashes) so a Windows unit generated on a POSIX
-    # host still points at `<state_dir>\deps\bin\shawl.exe` rather than a mixed-separator path.
-    shawl_exe = (
-        ntpath.join(
-            ntpath.normpath(str(state_dir)), deps.DEPS_SUBDIR, deps.BIN_SUBDIR, "shawl.exe"
-        )
-        if state_dir
-        else "shawl"
-    )
-    shawl_q = _bat_quote_safe(shawl_exe)
+    shawl_q = _bat_quote_safe(_managed_shawl_path(state_dir))
     return (
         "@echo off\n"
         "REM Install Clauster as a Windows service via Shawl (https://github.com/mtkennerly/shawl).\n"
@@ -914,3 +907,45 @@ def render_service_unit(
         "sc config Clauster start= auto\n"
         "sc start Clauster\n"
     )
+
+
+def _managed_shawl_path(state_dir: str | None) -> str:
+    """Return the managed ``shawl.exe`` path (ntpath, always backslashes) or a bare ``shawl``.
+
+    ntpath keeps the path backslash-correct even when a Windows unit is generated on a POSIX host;
+    a ``None`` state dir falls back to resolving ``shawl`` from ``PATH``.
+    """
+    if not state_dir:
+        return "shawl"
+    return ntpath.join(
+        ntpath.normpath(str(state_dir)), deps.DEPS_SUBDIR, deps.BIN_SUBDIR, "shawl.exe"
+    )
+
+
+def windows_service_commands(
+    *,
+    python: str | None = None,
+    config_path: str | None = None,
+    workdir: str | None = None,
+    state_dir: str | None = None,
+) -> list[list[str]]:
+    """Return the argv commands that register + start the Clauster Windows service via Shawl.
+
+    ``install-service windows --write`` runs these directly (from an elevated prompt); the
+    ``windows`` kind of :func:`render_service_unit` renders the SAME commands as an inspectable
+    ``.bat``. Shawl's ``add`` does the ``sc create``; ``sc config … start= auto`` + ``sc start``
+    finish it. A ``"`` in any interpolated path is illegal on Windows and would break the mirrored
+    ``.bat`` quoting, so it is rejected here too rather than run.
+    """
+    exe, launch = _service_launch_command(python)
+    cfg = config_path or "/etc/clauster/clauster.yml"
+    wd = workdir or str(Path(cfg).expanduser().parent)
+    cmd_args = [*launch, "run", "-c", cfg]
+    shawl_exe = _managed_shawl_path(state_dir)
+    for path in (shawl_exe, exe, wd):
+        _bat_quote_safe(path)  # validation only: raises on an illegal `"` in a path
+    return [
+        [shawl_exe, "add", "--name", "Clauster", "--cwd", wd, "--", exe, *cmd_args],
+        ["sc", "config", "Clauster", "start=", "auto"],
+        ["sc", "start", "Clauster"],
+    ]
