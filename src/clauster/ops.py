@@ -161,6 +161,10 @@ def run_doctor(
 
     # optional-extras presence (#904): OK when importable, WARN when missing. Never FAIL —
     # extras are optional and a FAIL would flip doctor's exit code for a dormant feature.
+    # Put any side-installed extras on sys.path first (frozen-only, idempotent with `_run`) so the
+    # probes reflect what the server will actually import — otherwise doctor reports a managed-dir
+    # install as "unavailable" even though the frozen binary loads it on the next start (#933).
+    deps.add_deps_dir_to_sys_path(config.state_dir)
     checks.extend(_check_extras())
 
     return checks, all(c.status != FAIL for c in checks)

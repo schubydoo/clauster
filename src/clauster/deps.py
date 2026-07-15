@@ -340,8 +340,9 @@ def uninstall_extra(extra_name: str, state_dir: str | Path) -> int:
     distribution's RECORD files are deleted and the emptied directories pruned (never above the
     managed dir). Only the extra's own top-level distribution(s) are removed — shared/transitive
     dependencies stay (removing them safely needs a dependency graph; the bulk uninstaller that
-    clears the whole managed dir is #904 slice 2b). Exit codes: ``2`` unknown extra, ``0``
-    otherwise (removing an absent extra is a no-op, not an error — the end state already holds).
+    clears the whole managed dir is #904 slice 2b). Exit codes: ``2`` unknown extra, ``1`` when a
+    matched distribution has no RECORD manifest so its files couldn't be removed, ``0`` otherwise
+    (removing an absent extra is a no-op, not an error — the end state already holds).
     """
     if extra_name not in extra_names():
         _err(f"unknown extra {extra_name!r}; choose from {', '.join(extra_names())}")
@@ -349,29 +350,41 @@ def uninstall_extra(extra_name: str, state_dir: str | Path) -> int:
     target = managed_deps_dir(state_dir)
     wanted = {canonical_name(entry.dist) for entry in extras_for(extra_name)}
     removed: list[str] = []
+    incomplete: list[str] = []
     if target.is_dir():
         for dist in importlib.metadata.distributions(path=[str(target)]):
             name = _dist_name(dist)
             if name and canonical_name(name) in wanted:
-                _remove_distribution(dist, target)
-                removed.append(name)
-    if not removed:
+                (removed if _remove_distribution(dist, target) else incomplete).append(name)
+    if incomplete:
+        # No RECORD manifest → nothing to drive removal, so we must NOT claim success (the extra
+        # would remain on disk and load again). Surface it loudly + fail (#933 review).
+        _err(
+            f"{', '.join(incomplete)} has no RECORD manifest in {target}; could not remove it "
+            f"automatically — delete its files under {target} by hand."
+        )
+    if removed:
+        _err(f"removed {', '.join(removed)} from {target}")
+    if not removed and not incomplete:
         _err(f"{extra_name} is not installed in {target}")
-        return 0
-    _err(f"removed {', '.join(removed)} from {target}")
-    return 0
+    return 1 if incomplete else 0
 
 
-def _remove_distribution(dist: importlib.metadata.Distribution, target: Path) -> None:
-    """Delete every RECORD file of ``dist`` under ``target`` and prune emptied directories.
+def _remove_distribution(dist: importlib.metadata.Distribution, target: Path) -> bool:
+    """Delete every RECORD file of ``dist`` under ``target``, prune emptied dirs; return success.
 
-    Best-effort per file (an already-absent or unreadable file is skipped, not fatal — the goal
-    is convergence on "gone"), then empty parent directories are pruned bottom-up, never climbing
-    above ``target``.
+    Returns ``True`` when the distribution has a RECORD manifest to act on (the removable case),
+    ``False`` when it has none — the caller must not then claim the extra was removed, since
+    without a manifest nothing can be deleted and the files remain on disk. Best-effort per file
+    (an already-absent or unreadable file is skipped, not fatal — the goal is convergence on
+    "gone"), then empty parent directories are pruned bottom-up, never climbing above ``target``.
     """
+    files = dist.files
+    if not files:
+        return False
     dirs: set[Path] = set()
     boundary = target.resolve()
-    for rel in dist.files or []:
+    for rel in files:
         located = Path(str(dist.locate_file(rel)))
         # Containment guard: a tampered RECORD could list a `../`-escaping path. Never unlink
         # anything that resolves outside the managed dir — mirrors _prune_empty_dirs' boundary
@@ -389,6 +402,7 @@ def _remove_distribution(dist: importlib.metadata.Distribution, target: Path) ->
         dirs.add(located.parent)
     for directory in sorted(dirs, key=lambda d: len(str(d)), reverse=True):
         _prune_empty_dirs(directory, stop=target)
+    return True
 
 
 def _prune_empty_dirs(directory: Path, *, stop: Path) -> None:

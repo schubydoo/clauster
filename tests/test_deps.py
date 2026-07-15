@@ -407,6 +407,24 @@ def test_uninstall_extra_tolerates_a_missing_record_file(tmp_path, capsys):
     assert not (depsdir / "apprise").exists()
 
 
+def test_uninstall_extra_reports_incomplete_without_record(tmp_path, capsys):
+    # A dist with no RECORD manifest can't be removed — uninstall must NOT falsely claim success
+    # (the files would remain and reload on restart). Fail loud + non-zero, leave files in place.
+    depsdir = tmp_path / "deps"
+    (depsdir / "apprise").mkdir(parents=True)
+    (depsdir / "apprise" / "__init__.py").write_text("x", encoding="utf-8")
+    info = depsdir / "apprise-1.9.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: apprise\nVersion: 1.9.0\n", encoding="utf-8"
+    )  # deliberately NO RECORD
+    rc = deps.uninstall_extra("notify", tmp_path)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "no RECORD" in err and "removed" not in err
+    assert (depsdir / "apprise" / "__init__.py").exists()  # left on disk, not falsely "removed"
+
+
 def test_uninstall_extra_leaves_other_extras(tmp_path):
     depsdir = tmp_path / "deps"
     _fake_dist(depsdir, "apprise", "1.9.0", ["apprise/__init__.py"])
