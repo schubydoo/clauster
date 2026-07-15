@@ -510,3 +510,202 @@ def test_default_pip_main_delegates_to_pip_cli(monkeypatch):
     monkeypatch.setattr(importlib, "import_module", lambda name: fake)
     assert deps._default_pip_main(["install", "x"]) == 3
     assert seen == [["install", "x"]]
+
+
+# ----- managed binary dependencies (shawl, #904 slice 2b) ------------------
+
+
+def _fake_shawl_zip(content: bytes = b"MZ-fake-shawl") -> tuple[bytes, str]:
+    """Build an in-memory zip containing ``shawl.exe`` + return (bytes, sha256)."""
+    import hashlib
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("shawl.exe", content)
+    data = buf.getvalue()
+    return data, hashlib.sha256(data).hexdigest()
+
+
+def _install_fake_shawl(monkeypatch, content: bytes = b"MZ-fake-shawl"):
+    """Register a fake win32 shawl BinaryDep matching a fake zip; return (zip bytes, dep)."""
+    data, sha = _fake_shawl_zip(content)
+    dep = deps.BinaryDep(
+        key="shawl",
+        label="Shawl (test)",
+        platform_marker="win32",
+        version="vT",
+        url="https://example.invalid/shawl.zip",
+        sha256=sha,
+        member="shawl.exe",
+        dest="shawl.exe",
+    )
+    monkeypatch.setattr(deps, "BINARY_DEPS", (dep,))
+    monkeypatch.setattr(deps.sys, "platform", "win32")  # so applies() passes
+    return data, dep
+
+
+def test_binary_dep_registry_and_lookup():
+    assert deps.binary_dep_names() == ("shawl",)
+    assert deps.binary_dep_for("shawl").platform_marker == "win32"
+    with pytest.raises(KeyError):
+        deps.binary_dep_for("nope")
+
+
+def test_managed_bin_dir_is_deps_slash_bin(tmp_path):
+    assert deps.managed_bin_dir(tmp_path) == tmp_path / "deps" / "bin"
+
+
+def test_installed_binary_path_none_then_present(tmp_path):
+    assert deps.installed_binary_path("shawl", tmp_path) is None
+    exe = deps.managed_bin_dir(tmp_path) / "shawl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    assert deps.installed_binary_path("shawl", tmp_path) == exe
+
+
+def test_install_binary_dep_unknown_returns_2(tmp_path, capsys):
+    assert deps.install_binary_dep("nope", tmp_path, assume_yes=True) == 2
+    assert "unknown binary" in capsys.readouterr().err
+
+
+def test_install_binary_dep_off_platform_returns_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(deps.sys, "platform", "linux")  # shawl is win32-only
+    assert deps.install_binary_dep("shawl", tmp_path, assume_yes=True) == 2
+    assert "only for win32" in capsys.readouterr().err
+
+
+def test_install_binary_dep_downloads_verifies_places(tmp_path, monkeypatch):
+    data, _dep = _install_fake_shawl(monkeypatch)
+    rc = deps.install_binary_dep("shawl", tmp_path, assume_yes=True, fetch=lambda _url: data)
+    assert rc == 0
+    exe = deps.managed_bin_dir(tmp_path) / "shawl.exe"
+    assert exe.read_bytes() == b"MZ-fake-shawl"
+
+
+def test_install_binary_dep_declined_does_not_fetch(tmp_path, monkeypatch):
+    _install_fake_shawl(monkeypatch)
+    calls: list[str] = []
+    rc = deps.install_binary_dep(
+        "shawl", tmp_path, fetch=lambda u: calls.append(u) or b"", confirm=lambda _p: "n"
+    )
+    assert rc == 1 and calls == []
+
+
+def test_install_binary_dep_eof_declines(tmp_path, monkeypatch, capsys):
+    _install_fake_shawl(monkeypatch)
+
+    def _eof(_p):
+        raise EOFError
+
+    rc = deps.install_binary_dep("shawl", tmp_path, fetch=lambda _u: b"x", confirm=_eof)
+    assert rc == 1 and "aborted" in capsys.readouterr().err
+
+
+def test_install_binary_dep_checksum_mismatch_refuses(tmp_path, monkeypatch, capsys):
+    _install_fake_shawl(monkeypatch)  # dep.sha256 matches the fake zip
+    rc = deps.install_binary_dep("shawl", tmp_path, assume_yes=True, fetch=lambda _u: b"tampered")
+    assert rc == 1
+    assert "checksum mismatch" in capsys.readouterr().err
+    assert not (deps.managed_bin_dir(tmp_path) / "shawl.exe").exists()  # nothing written
+
+
+def test_install_binary_dep_download_failure_returns_1(tmp_path, monkeypatch, capsys):
+    _install_fake_shawl(monkeypatch)
+
+    def _boom(_url):
+        raise OSError("network down")
+
+    assert deps.install_binary_dep("shawl", tmp_path, assume_yes=True, fetch=_boom) == 1
+    assert "download failed" in capsys.readouterr().err
+
+
+def test_install_binary_dep_bad_zip_returns_1(tmp_path, monkeypatch, capsys):
+    # A payload matching the pinned sha but not a valid zip → surfaced, not a crash.
+    import hashlib
+
+    junk = b"not a zip"
+    dep = deps.BinaryDep(
+        key="shawl",
+        label="Shawl",
+        platform_marker="win32",
+        version="vT",
+        url="https://example.invalid/x.zip",
+        sha256=hashlib.sha256(junk).hexdigest(),
+        member="shawl.exe",
+        dest="shawl.exe",
+    )
+    monkeypatch.setattr(deps, "BINARY_DEPS", (dep,))
+    monkeypatch.setattr(deps.sys, "platform", "win32")
+    rc = deps.install_binary_dep("shawl", tmp_path, assume_yes=True, fetch=lambda _u: junk)
+    assert rc == 1
+    assert "could not extract" in capsys.readouterr().err
+
+
+def test_install_binary_dep_write_failure_returns_1(tmp_path, monkeypatch, capsys):
+    data, _dep = _install_fake_shawl(monkeypatch)
+    # A regular file where the bin dir should go makes the mkdir/write fail.
+    (tmp_path / "deps").mkdir()
+    (tmp_path / "deps" / "bin").write_text("not a dir", encoding="utf-8")
+    rc = deps.install_binary_dep("shawl", tmp_path, assume_yes=True, fetch=lambda _u: data)
+    assert rc == 1
+    assert "could not write" in capsys.readouterr().err
+
+
+def test_default_fetch_refuses_non_https():
+    with pytest.raises(ValueError, match="non-https"):
+        deps._default_fetch("http://insecure.example/x.zip")
+
+
+def test_uninstall_binary_dep_unknown_returns_2(tmp_path, capsys):
+    assert deps.uninstall_binary_dep("nope", tmp_path) == 2
+    assert "unknown binary" in capsys.readouterr().err
+
+
+def test_uninstall_binary_dep_absent_is_a_noop(tmp_path, capsys):
+    assert deps.uninstall_binary_dep("shawl", tmp_path) == 0
+    assert "not installed" in capsys.readouterr().err
+
+
+def test_uninstall_binary_dep_removes_and_prunes(tmp_path, capsys):
+    bindir = deps.managed_bin_dir(tmp_path)
+    bindir.mkdir(parents=True)
+    (bindir / "shawl.exe").write_bytes(b"x")
+    rc = deps.uninstall_binary_dep("shawl", tmp_path)
+    assert rc == 0
+    assert "removed shawl" in capsys.readouterr().err
+    assert not (bindir / "shawl.exe").exists()
+    assert not bindir.exists()  # emptied bin dir pruned
+
+
+def test_default_fetch_reads_https(monkeypatch):
+    import urllib.request
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"PAYLOAD"
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=60: _Resp())
+    assert deps._default_fetch("https://example.invalid/x.zip") == b"PAYLOAD"
+
+
+def test_install_binary_dep_confirm_accept_proceeds(tmp_path, monkeypatch):
+    data, _dep = _install_fake_shawl(monkeypatch)
+    rc = deps.install_binary_dep("shawl", tmp_path, fetch=lambda _u: data, confirm=lambda _p: "y")
+    assert rc == 0
+    assert (deps.managed_bin_dir(tmp_path) / "shawl.exe").exists()
+
+
+def test_uninstall_binary_dep_unlink_error_returns_1(tmp_path, capsys):
+    bindir = deps.managed_bin_dir(tmp_path)
+    bindir.mkdir(parents=True)
+    (bindir / "shawl.exe").mkdir()  # a directory where the exe is → unlink raises OSError
+    rc = deps.uninstall_binary_dep("shawl", tmp_path)
+    assert rc == 1 and "could not remove" in capsys.readouterr().err

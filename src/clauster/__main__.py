@@ -209,18 +209,24 @@ def main(argv: list[str] | None = None) -> int:
     deps_list_p = deps_sub.add_parser("list", help="show optional extras + their status")
     deps_list_p.add_argument("-c", "--config", help="path to clauster.yml")
     deps_install_p = deps_sub.add_parser(
-        "install", help="side-install an extra's wheels beside the binary"
+        "install", help="side-install an extra's wheels (or a managed binary) beside the binary"
     )
     deps_install_p.add_argument("-c", "--config", help="path to clauster.yml")
     deps_install_p.add_argument(
-        "extra", choices=deps.extra_names(), help="extra to install (e.g. pty, notify)"
+        "extra",
+        choices=(*deps.extra_names(), *deps.binary_dep_names()),
+        help="what to install (e.g. pty, notify, or the shawl service wrapper)",
     )
     deps_install_p.add_argument(
         "--yes", action="store_true", help="skip the provenance confirmation prompt"
     )
-    deps_uninstall_p = deps_sub.add_parser("uninstall", help="remove a side-installed extra")
+    deps_uninstall_p = deps_sub.add_parser(
+        "uninstall", help="remove a side-installed extra/binary"
+    )
     deps_uninstall_p.add_argument("-c", "--config", help="path to clauster.yml")
-    deps_uninstall_p.add_argument("extra", choices=deps.extra_names(), help="extra to remove")
+    deps_uninstall_p.add_argument(
+        "extra", choices=(*deps.extra_names(), *deps.binary_dep_names()), help="what to remove"
+    )
 
     mcp_p = sub.add_parser(
         "mcp", help="run the read-only MCP server over stdio (list + status, #527)"
@@ -639,19 +645,31 @@ def _deps_list(config_path: str | None) -> int:
             else:
                 status, detail = "missing", entry.capability_label
             print(f"{name:<8} {entry.dist:<10} {status:<10} {detail}")
+    for dep in deps.BINARY_DEPS:
+        if not deps.applies(dep):
+            status, detail = "n/a", f"{dep.label} (other platform)"
+        elif deps.installed_binary_path(dep.key, config.state_dir):
+            status, detail = "installed", f"{dep.label} {dep.version} in deps dir"
+        else:
+            status, detail = "missing", dep.label
+        print(f"{dep.key:<8} {'(binary)':<10} {status:<10} {detail}")
     return 0
 
 
-def _deps_install(config_path: str | None, extra: str, *, assume_yes: bool) -> int:
-    """Side-install ``extra``'s wheels into the managed deps dir (delegates to :mod:`deps`)."""
+def _deps_install(config_path: str | None, target: str, *, assume_yes: bool) -> int:
+    """Side-install ``target`` (a pip extra, or a managed binary like ``shawl``) into deps."""
     config = _load_or_exit(config_path)
-    return deps.install_extra(extra, config.state_dir, assume_yes=assume_yes)
+    if target in deps.binary_dep_names():
+        return deps.install_binary_dep(target, config.state_dir, assume_yes=assume_yes)
+    return deps.install_extra(target, config.state_dir, assume_yes=assume_yes)
 
 
-def _deps_uninstall(config_path: str | None, extra: str) -> int:
-    """Remove ``extra``'s side-installed wheels from the managed deps dir."""
+def _deps_uninstall(config_path: str | None, target: str) -> int:
+    """Remove ``target`` (a pip extra, or a managed binary like ``shawl``) from the deps dir."""
     config = _load_or_exit(config_path)
-    return deps.uninstall_extra(extra, config.state_dir)
+    if target in deps.binary_dep_names():
+        return deps.uninstall_binary_dep(target, config.state_dir)
+    return deps.uninstall_extra(target, config.state_dir)
 
 
 def _backup(config_path: str | None, output: str) -> int:
@@ -849,6 +867,13 @@ def _reconcile(config_path: str | None, *, dry_run: bool, assume_yes: bool) -> i
     return 0
 
 
+def _shawl_available(state_dir: str | None) -> bool:
+    """Return whether Shawl is installed — in the managed ``deps/bin`` dir or on ``PATH``."""
+    if state_dir is not None and deps.installed_binary_path("shawl", state_dir) is not None:
+        return True
+    return shutil.which("shawl") is not None
+
+
 def _install_service(
     kind: str, config_path: str | None, user: str | None, write: bool | str = False
 ) -> int:
@@ -859,15 +884,24 @@ def _install_service(
     write that the process can't perform (a system path without privileges) fails
     closed with a clear hint rather than a traceback.
     """
-    unit = ops.render_service_unit(kind, config_path=config_path, user=user)
-    if kind == "windows" and shutil.which("nssm") is None:
-        # The generated Windows script drives `nssm`; warn upfront if it isn't on PATH so the
-        # operator isn't surprised by a non-working service later (#914). Not fatal — printing
-        # the script is still useful (they can install nssm, then run it).
+    state_dir: str | None = None
+    if kind == "windows":
+        # Point the generated service at the managed shawl.exe. Best-effort: install-service must
+        # still render without a fully-valid config, so a load failure falls back to a bare `shawl`
+        # on PATH (state_dir=None) rather than erroring.
+        try:
+            state_dir = str(load_config(config_path).state_dir)
+        except (FileNotFoundError, ValueError):
+            state_dir = None
+    unit = ops.render_service_unit(kind, config_path=config_path, user=user, state_dir=state_dir)
+    if kind == "windows" and not _shawl_available(state_dir):
+        # The generated Windows script wraps Clauster with Shawl; warn upfront if it isn't
+        # installed so a non-registering service later isn't a surprise. Not fatal — the script is
+        # still useful (they can install shawl, then run it).
         print(
-            "clauster: WARNING — the Windows service script uses `nssm` (https://nssm.cc), which "
-            "is not on PATH. Install it and add it to PATH before running the script, or "
-            "`nssm install` will fail.",
+            "clauster: WARNING — the Windows service script wraps Clauster with Shawl "
+            "(https://github.com/mtkennerly/shawl), which isn't installed. Run "
+            "`clauster deps install shawl` before the script, or `shawl add` will fail.",
             file=sys.stderr,
         )
     if write is False:
@@ -892,7 +926,8 @@ def _install_service(
         print(f"clauster: next: launchctl load {dest}", file=sys.stderr)
     else:
         print(
-            f"clauster: next: run {dest} from an elevated prompt (needs nssm on PATH)",
+            f"clauster: next: run {dest} from an elevated prompt "
+            "(needs Shawl — clauster deps install shawl)",
             file=sys.stderr,
         )
     return 0
@@ -1179,9 +1214,9 @@ def _reexec() -> None:  # pragma: no cover - replaces the process image; tested 
 
     ``os.execv`` replaces the current process image — same PID on POSIX, fresh code + config
     (config is read at startup). On Windows ``os.execv`` is emulated as spawn-new-then-exit,
-    so the PID changes and an nssm-managed service sees the exit and applies its own restart
-    action — the in-place, same-PID guarantee is POSIX-only (#914). Called only after the
-    uvicorn server has shut down
+    so the PID changes and a Shawl-managed service sees the exit and restarts it (Shawl restarts
+    on a non-zero exit) — the in-place, same-PID guarantee is POSIX-only (#914). Called only after
+    the uvicorn server has shut down
     gracefully and released its listening socket, so the new image can re-bind. The
     indirection is a deliberate seam: tests monkeypatch this to assert the restart
     endpoint triggers exactly one re-exec without actually replacing the test process.
@@ -1263,8 +1298,8 @@ def _run(config_path: str | None) -> int:
     server.run()  # blocks until graceful shutdown (Ctrl-C, SIGTERM, or restart request)
     # If the shutdown was an in-app restart request, re-exec in place now that the
     # socket is released. Re-exec keeps the same PID on POSIX (systemd's MainPID stays valid)
-    # and reloads config (read at startup); on Windows `os.execv` changes the PID and an
-    # nssm-managed service applies its own restart action (#914). Running bridges + hosted
+    # and reloads config (read at startup); on Windows `os.execv` changes the PID and a
+    # Shawl-managed service restarts it on the non-zero exit (#914). Running bridges + hosted
     # sessions survive the swap (their processes outlive the re-exec) and reattach on startup
     # (#663). Any other shutdown path (signal) falls through to a normal exit.
     if getattr(app.state, "restart_requested", False):

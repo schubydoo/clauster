@@ -13,9 +13,12 @@ without importing it: no LGPL relinking, no import side effects, no import cost.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import importlib.util
+import io
 import sys
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,12 +89,12 @@ def by_key(key: str) -> Extra:
     raise KeyError(key)
 
 
-def applies(entry: Extra) -> bool:
-    """Return whether ``entry`` is relevant on the current platform.
+def applies(entry: Extra | BinaryDep) -> bool:
+    """Return whether ``entry`` (an :class:`Extra` or :class:`BinaryDep`) is relevant here.
 
     A ``None`` marker applies everywhere; otherwise the entry is only relevant when
-    its marker matches :data:`sys.platform` (e.g. ``pywinpty`` on ``"win32"``), so
-    doctor and the UI don't nag a Linux host about a Windows-only extra.
+    its marker matches :data:`sys.platform` (e.g. ``pywinpty``/``shawl`` on ``"win32"``), so
+    doctor and the UI don't nag a Linux host about a Windows-only extra or binary.
     """
     return entry.platform_marker is None or sys.platform == entry.platform_marker
 
@@ -429,3 +432,181 @@ def _prune_empty_dirs(directory: Path, *, stop: Path) -> None:
 def _err(message: str) -> None:
     """Print a ``clauster:``-prefixed message to stderr (CLI convention: prose on stderr)."""
     print(f"clauster: {message}", file=sys.stderr)
+
+
+# ----- managed binary dependencies (#904 slice 2b): Shawl, the Windows service wrapper -------
+#
+# Some clauster capabilities need a standalone *binary*, not a pip extra. The Windows
+# ``install-service`` path wraps clauster as a service with Shawl (mtkennerly/shawl on GitHub,
+# MIT) — a single .exe. ``clauster deps install shawl`` fetches the pinned GitHub release, refuses
+# it unless it matches a hardcoded SHA-256, and places ``shawl.exe`` under ``<state_dir>/deps/bin``
+# where install-service points the service at it. This is a download-verify-place, not pip — but it
+# shares the managed dir + provenance gate with the extras.
+
+BIN_SUBDIR = "bin"
+
+#: Shown before a binary side-install. Unlike the pip extras, the artifact is pinned to an exact
+#: SHA-256 (so it can't silently change), but it is still a third-party binary fetched over the
+#: network and not covered by the Clauster release signature — so we still notice + confirm.
+PROVENANCE_NOTICE_BINARY = (
+    "This downloads a third-party binary from its GitHub release and checks it against a pinned\n"
+    "SHA-256. It is NOT covered by the Clauster release signature — you are trusting that\n"
+    "project's release, pinned to the exact build below."
+)
+
+
+@dataclass(frozen=True)
+class BinaryDep:
+    """One managed standalone-binary dependency: a pinned release archive + the exe inside it.
+
+    ``platform_marker`` mirrors :class:`Extra` (a :data:`sys.platform` value, e.g. ``"win32"``),
+    so :func:`applies` gates it off-platform. ``url``/``sha256`` pin an exact release archive;
+    ``member`` is the file to extract from that archive and ``dest`` its filename under the managed
+    ``bin`` dir. Bumping the version means updating ``version``/``url``/``sha256`` together.
+    """
+
+    key: str
+    label: str
+    platform_marker: str
+    version: str
+    url: str
+    sha256: str
+    member: str
+    dest: str
+
+
+BINARY_DEPS: tuple[BinaryDep, ...] = (
+    # Bump version + url + sha256 together; Renovate can't track a source-pinned checksum, so
+    # this is a periodic manual refresh — tracked post-1.0 by #934.
+    BinaryDep(
+        key="shawl",
+        label="Windows service wrapper (Shawl)",
+        platform_marker="win32",
+        version="v1.9.0",
+        url="https://github.com/mtkennerly/shawl/releases/download/v1.9.0/shawl-v1.9.0-win64.zip",
+        sha256="f883c5d09c9beae2efaeabd8513e7d3f57cd1d0864cec3df4f4a7b6ee904351c",
+        member="shawl.exe",
+        dest="shawl.exe",
+    ),
+)
+
+
+def binary_dep_names() -> tuple[str, ...]:
+    """Return the registered managed-binary keys (e.g. ``("shawl",)``)."""
+    return tuple(dep.key for dep in BINARY_DEPS)
+
+
+def binary_dep_for(key: str) -> BinaryDep:
+    """Return the :class:`BinaryDep` for ``key`` (raises ``KeyError`` if unknown)."""
+    for dep in BINARY_DEPS:
+        if dep.key == key:
+            return dep
+    raise KeyError(key)
+
+
+def managed_bin_dir(state_dir: str | Path) -> Path:
+    """Return the managed binary directory ``<state_dir>/deps/bin`` (holds e.g. ``shawl.exe``)."""
+    return managed_deps_dir(state_dir) / BIN_SUBDIR
+
+
+def installed_binary_path(key: str, state_dir: str | Path) -> Path | None:
+    """Return the managed path of binary ``key`` if it is installed, else ``None``."""
+    dest = managed_bin_dir(state_dir) / binary_dep_for(key).dest
+    return dest if dest.is_file() else None
+
+
+def _default_fetch(url: str) -> bytes:
+    """Fetch ``url`` over HTTPS and return the body (a monkeypatchable seam for tests).
+
+    The URL is a hardcoded ``https`` GitHub release constant (never user input) and the payload is
+    SHA-256-verified by the caller, so an ``urlopen`` here is not an injection/SSRF surface.
+    """
+    import urllib.request
+
+    if not url.startswith("https://"):  # defensive: only ever fetch our pinned https release URLs
+        raise ValueError(f"refusing to fetch non-https url: {url}")
+    with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - pinned https, sha256-verified
+        return resp.read()
+
+
+def install_binary_dep(
+    key: str,
+    state_dir: str | Path,
+    *,
+    assume_yes: bool = False,
+    fetch: Callable[[str], bytes] | None = None,
+    confirm: Callable[[str], str] = input,
+) -> int:
+    """Download + verify + place a managed binary (e.g. ``shawl``); return an exit code.
+
+    Fetches the pinned release archive, refuses it unless its SHA-256 matches the hardcoded pin,
+    extracts the exe into ``<state_dir>/deps/bin``, and (best-effort) marks it executable. Prints
+    the provenance notice + requires confirmation unless ``assume_yes``; ``fetch``/``confirm`` are
+    test seams. Exit codes: ``2`` unknown/off-platform, ``1`` declined / download / checksum /
+    extract / write failure, ``0`` installed.
+    """
+    if key not in binary_dep_names():
+        _err(f"unknown binary {key!r}; choose from {', '.join(binary_dep_names())}")
+        return 2
+    dep = binary_dep_for(key)
+    if not applies(dep):
+        _err(f"{dep.label} is only for {dep.platform_marker}; not applicable on this platform")
+        return 2
+    dest = managed_bin_dir(state_dir) / dep.dest
+    print(PROVENANCE_NOTICE_BINARY, file=sys.stderr)
+    _err(f"will download {dep.label} {dep.version} and install it at {dest}")
+    if not assume_yes:
+        try:
+            reply = confirm("Proceed? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            reply = ""
+        if reply.strip().lower() not in ("y", "yes"):
+            _err("aborted — nothing installed")
+            return 1
+    runner = fetch or _default_fetch
+    try:
+        data = runner(dep.url)
+    except (OSError, ValueError) as exc:
+        _err(f"download failed: {exc}")
+        return 1
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != dep.sha256:
+        _err(f"checksum mismatch for {dep.url}: expected {dep.sha256}, got {actual} — refusing")
+        return 1
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            payload = archive.read(dep.member)
+    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        _err(f"could not extract {dep.member} from the archive: {exc}")
+        return 1
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(payload)
+        dest.chmod(0o755)  # no-op semantics on Windows; harmless if a POSIX host ever fetches it
+    except OSError as exc:
+        _err(f"could not write {dest}: {exc}")
+        return 1
+    _err(f"installed {dep.label} {dep.version} at {dest}")
+    return 0
+
+
+def uninstall_binary_dep(key: str, state_dir: str | Path) -> int:
+    """Remove a managed binary (e.g. ``shawl``) from ``<state_dir>/deps/bin``; return an exit code.
+
+    Exit codes: ``2`` unknown binary, ``0`` otherwise (removing an absent binary is a no-op).
+    """
+    if key not in binary_dep_names():
+        _err(f"unknown binary {key!r}; choose from {', '.join(binary_dep_names())}")
+        return 2
+    dest = managed_bin_dir(state_dir) / binary_dep_for(key).dest
+    try:
+        dest.unlink()
+    except FileNotFoundError:
+        _err(f"{key} is not installed in {dest.parent}")
+        return 0
+    except OSError as exc:
+        _err(f"could not remove {dest}: {exc}")
+        return 1
+    _prune_empty_dirs(dest.parent, stop=managed_deps_dir(state_dir))
+    _err(f"removed {key} from {dest.parent}")
+    return 0
