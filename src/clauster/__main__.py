@@ -17,6 +17,7 @@ import getpass
 import os
 import shutil
 import ssl
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -154,8 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         const=True,
         default=False,
         metavar="PATH",
-        help="write the unit to PATH (or the conventional location) instead of printing it; "
-        "may need privileges (e.g. sudo) for a system path",
+        help="apply the service instead of printing it: write the unit to PATH / the conventional "
+        "location (systemd, launchd), or register + start it (windows). May need elevation "
+        "(sudo / an Administrator prompt).",
     )
 
     reap_p = sub.add_parser(
@@ -209,18 +211,24 @@ def main(argv: list[str] | None = None) -> int:
     deps_list_p = deps_sub.add_parser("list", help="show optional extras + their status")
     deps_list_p.add_argument("-c", "--config", help="path to clauster.yml")
     deps_install_p = deps_sub.add_parser(
-        "install", help="side-install an extra's wheels beside the binary"
+        "install", help="side-install an extra's wheels (or a managed binary) beside the binary"
     )
     deps_install_p.add_argument("-c", "--config", help="path to clauster.yml")
     deps_install_p.add_argument(
-        "extra", choices=deps.extra_names(), help="extra to install (e.g. pty, notify)"
+        "extra",
+        choices=(*deps.extra_names(), *deps.binary_dep_names()),
+        help="what to install (e.g. pty, notify, or the shawl service wrapper)",
     )
     deps_install_p.add_argument(
         "--yes", action="store_true", help="skip the provenance confirmation prompt"
     )
-    deps_uninstall_p = deps_sub.add_parser("uninstall", help="remove a side-installed extra")
+    deps_uninstall_p = deps_sub.add_parser(
+        "uninstall", help="remove a side-installed extra/binary"
+    )
     deps_uninstall_p.add_argument("-c", "--config", help="path to clauster.yml")
-    deps_uninstall_p.add_argument("extra", choices=deps.extra_names(), help="extra to remove")
+    deps_uninstall_p.add_argument(
+        "extra", choices=(*deps.extra_names(), *deps.binary_dep_names()), help="what to remove"
+    )
 
     mcp_p = sub.add_parser(
         "mcp", help="run the read-only MCP server over stdio (list + status, #527)"
@@ -639,19 +647,31 @@ def _deps_list(config_path: str | None) -> int:
             else:
                 status, detail = "missing", entry.capability_label
             print(f"{name:<8} {entry.dist:<10} {status:<10} {detail}")
+    for dep in deps.BINARY_DEPS:
+        if not deps.applies(dep):
+            status, detail = "n/a", f"{dep.label} (other platform)"
+        elif deps.installed_binary_path(dep.key, config.state_dir):
+            status, detail = "installed", f"{dep.label} {dep.version} in deps dir"
+        else:
+            status, detail = "missing", dep.label
+        print(f"{dep.key:<8} {'(binary)':<10} {status:<10} {detail}")
     return 0
 
 
-def _deps_install(config_path: str | None, extra: str, *, assume_yes: bool) -> int:
-    """Side-install ``extra``'s wheels into the managed deps dir (delegates to :mod:`deps`)."""
+def _deps_install(config_path: str | None, target: str, *, assume_yes: bool) -> int:
+    """Side-install ``target`` (a pip extra, or a managed binary like ``shawl``) into deps."""
     config = _load_or_exit(config_path)
-    return deps.install_extra(extra, config.state_dir, assume_yes=assume_yes)
+    if target in deps.binary_dep_names():
+        return deps.install_binary_dep(target, config.state_dir, assume_yes=assume_yes)
+    return deps.install_extra(target, config.state_dir, assume_yes=assume_yes)
 
 
-def _deps_uninstall(config_path: str | None, extra: str) -> int:
-    """Remove ``extra``'s side-installed wheels from the managed deps dir."""
+def _deps_uninstall(config_path: str | None, target: str) -> int:
+    """Remove ``target`` (a pip extra, or a managed binary like ``shawl``) from the deps dir."""
     config = _load_or_exit(config_path)
-    return deps.uninstall_extra(extra, config.state_dir)
+    if target in deps.binary_dep_names():
+        return deps.uninstall_binary_dep(target, config.state_dir)
+    return deps.uninstall_extra(target, config.state_dir)
 
 
 def _backup(config_path: str | None, output: str) -> int:
@@ -849,6 +869,13 @@ def _reconcile(config_path: str | None, *, dry_run: bool, assume_yes: bool) -> i
     return 0
 
 
+def _shawl_available(state_dir: str | None) -> bool:
+    """Return whether Shawl is installed — in the managed ``deps/bin`` dir or on ``PATH``."""
+    if state_dir is not None and deps.installed_binary_path("shawl", state_dir) is not None:
+        return True
+    return shutil.which("shawl") is not None
+
+
 def _install_service(
     kind: str, config_path: str | None, user: str | None, write: bool | str = False
 ) -> int:
@@ -859,20 +886,31 @@ def _install_service(
     write that the process can't perform (a system path without privileges) fails
     closed with a clear hint rather than a traceback.
     """
-    unit = ops.render_service_unit(kind, config_path=config_path, user=user)
-    if kind == "windows" and shutil.which("nssm") is None:
-        # The generated Windows script drives `nssm`; warn upfront if it isn't on PATH so the
-        # operator isn't surprised by a non-working service later (#914). Not fatal — printing
-        # the script is still useful (they can install nssm, then run it).
-        print(
-            "clauster: WARNING — the Windows service script uses `nssm` (https://nssm.cc), which "
-            "is not on PATH. Install it and add it to PATH before running the script, or "
-            "`nssm install` will fail.",
-            file=sys.stderr,
-        )
+    state_dir: str | None = None
+    if kind == "windows":
+        # Point the generated service at the managed shawl.exe. Best-effort: install-service must
+        # still render without a fully-valid config, so a load failure falls back to a bare `shawl`
+        # on PATH (state_dir=None) rather than erroring.
+        try:
+            state_dir = str(load_config(config_path).state_dir)
+        except (FileNotFoundError, ValueError):
+            state_dir = None
+    unit = ops.render_service_unit(kind, config_path=config_path, user=user, state_dir=state_dir)
     if write is False:
+        # Inspection form: print the unit / plist / .bat. On Windows, note if Shawl is missing so
+        # the `--write` that follows (which registers the service via Shawl) will succeed.
         print(unit)
+        if kind == "windows" and not _shawl_available(state_dir):
+            print(
+                "clauster: note — Shawl isn't installed yet; run `clauster deps install shawl` "
+                "before `clauster install-service windows --write`.",
+                file=sys.stderr,
+            )
         return 0
+    if kind == "windows":
+        # --write on Windows REGISTERS + starts the service directly (needs an elevated prompt),
+        # the imperative equivalent of writing a systemd unit / launchd plist — no .bat to run.
+        return _register_windows_service(config_path, state_dir)
     dest = Path(write) if isinstance(write, str) else ops.default_service_path(kind)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -888,14 +926,84 @@ def _install_service(
             "clauster: next: sudo systemctl daemon-reload && sudo systemctl restart clauster",
             file=sys.stderr,
         )
-    elif kind == "launchd":
+    else:  # launchd
         print(f"clauster: next: launchctl load {dest}", file=sys.stderr)
-    else:
+    return 0
+
+
+def _register_windows_service(config_path: str | None, state_dir: str | None) -> int:
+    """Register + start the Clauster Windows service via Shawl (run from an elevated prompt).
+
+    Runs the same commands ``install-service windows`` prints — ``shawl add`` (which does the
+    ``sc create``), ``sc config … start= auto``, then ``sc start`` — in sequence. Fails closed:
+    a missing Shawl or a non-zero ``sc``/``shawl`` exit (e.g. not elevated → access denied) is
+    surfaced with a clear hint and a non-zero return, never a partial success reported as done.
+    """
+    if not _shawl_available(state_dir):
         print(
-            f"clauster: next: run {dest} from an elevated prompt (needs nssm on PATH)",
+            "clauster: Shawl isn't installed — run `clauster deps install shawl` first.",
             file=sys.stderr,
         )
+        return 1
+    try:
+        commands = ops.windows_service_commands(config_path=config_path, state_dir=state_dir)
+    except ValueError as exc:  # an illegal `"` in a path
+        print(f"clauster: {exc}", file=sys.stderr)
+        return 2
+    # commands[0] is `shawl add` (it does the `sc create`); once it succeeds the service EXISTS.
+    # If a later step (sc config / sc start) fails we roll it back — otherwise a retry dies at
+    # `shawl add` ("already exists"), stranding a half-registered service to delete by hand.
+    for index, argv in enumerate(commands):
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
+        except OSError as exc:
+            print(f"clauster: could not run {argv[0]!r}: {exc}", file=sys.stderr)
+            _rollback_windows_service(created=index > 0)
+            return 1
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            print(
+                f"clauster: `{' '.join(argv)}` failed (exit {result.returncode})"
+                + (f": {detail}" if detail else ""),
+                file=sys.stderr,
+            )
+            print(
+                "clauster: registering a Windows service needs elevation — re-run this "
+                "from an Administrator prompt.",
+                file=sys.stderr,
+            )
+            _rollback_windows_service(created=index > 0)
+            return 1
+    print("clauster: registered and started the Clauster service (via Shawl).", file=sys.stderr)
     return 0
+
+
+def _rollback_windows_service(*, created: bool) -> None:
+    """Delete a half-registered ``Clauster`` service so a retry starts clean (best-effort).
+
+    Only runs when ``shawl add`` already created the service (``created``) but a later step failed;
+    without it, the next ``install-service windows --write`` would fail at ``shawl add`` ("already
+    exists"). A failure to delete (e.g. still not elevated) is surfaced, not swallowed.
+    """
+    if not created:
+        return
+    manual = (
+        "clauster: could not roll back the partial 'Clauster' service — remove it with "
+        "`sc delete Clauster` (elevated) before retrying."
+    )
+    try:
+        result = subprocess.run(  # noqa: S603, S607 - fixed argv, `sc` is a System32 binary
+            ["sc", "delete", "Clauster"], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        # The rollback itself couldn't even launch `sc` — surface the manual step, never let this
+        # helper raise (it runs on an already-failing path and must not mask the real error).
+        print(manual, file=sys.stderr)
+        return
+    if result.returncode == 0:
+        print("clauster: rolled back the partially-registered service.", file=sys.stderr)
+    else:
+        print(manual, file=sys.stderr)
 
 
 def _reap_environments(config_path: str | None, archive: bool, force_delete: bool) -> int:
@@ -1179,9 +1287,9 @@ def _reexec() -> None:  # pragma: no cover - replaces the process image; tested 
 
     ``os.execv`` replaces the current process image — same PID on POSIX, fresh code + config
     (config is read at startup). On Windows ``os.execv`` is emulated as spawn-new-then-exit,
-    so the PID changes and an nssm-managed service sees the exit and applies its own restart
-    action — the in-place, same-PID guarantee is POSIX-only (#914). Called only after the
-    uvicorn server has shut down
+    so the PID changes and a Shawl-managed service sees the exit and restarts it (Shawl restarts
+    on a non-zero exit) — the in-place, same-PID guarantee is POSIX-only (#914). Called only after
+    the uvicorn server has shut down
     gracefully and released its listening socket, so the new image can re-bind. The
     indirection is a deliberate seam: tests monkeypatch this to assert the restart
     endpoint triggers exactly one re-exec without actually replacing the test process.
@@ -1263,8 +1371,8 @@ def _run(config_path: str | None) -> int:
     server.run()  # blocks until graceful shutdown (Ctrl-C, SIGTERM, or restart request)
     # If the shutdown was an in-app restart request, re-exec in place now that the
     # socket is released. Re-exec keeps the same PID on POSIX (systemd's MainPID stays valid)
-    # and reloads config (read at startup); on Windows `os.execv` changes the PID and an
-    # nssm-managed service applies its own restart action (#914). Running bridges + hosted
+    # and reloads config (read at startup); on Windows `os.execv` changes the PID and a
+    # Shawl-managed service restarts it on the non-zero exit (#914). Running bridges + hosted
     # sessions survive the swap (their processes outlive the re-exec) and reattach on startup
     # (#663). Any other shutdown path (signal) falls through to a normal exit.
     if getattr(app.state, "restart_requested", False):

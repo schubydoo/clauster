@@ -448,16 +448,34 @@ platform-only extra such as `pywinpty` off Windows).
 `deps install <extra>` fetches the extra's wheels into a managed `<state_dir>/deps`
 directory that the standalone binary adds to its import path at startup, so the
 capability loads on the next restart (a normal `pip`/`uv` install resolves extras
-the usual way and doesn't need this). Because those wheels come from PyPI and are
-**not** covered by the release signature, the command prints an explicit notice and
-requires confirmation before downloading (`--yes` skips the prompt); it never
-auto-installs. Installing needs `pip` importable on the running interpreter — that
-holds in a `pip`/`uv`/`pipx` install today, and the standalone binary gains the
-in-place installer with its bundled-`pip` build ([#904](https://github.com/schubydoo/clauster/issues/904));
-until then, on the binary you can `pip install --target=<state_dir>/deps <dist>`
-from any Python and it is picked up on the next start just the same. `deps uninstall
-<extra>` removes the extra's own distribution from the managed dir (shared transitive
-dependencies are left in place).
+the usual way and doesn't need this). The standalone binary bundles `pip` so it can
+run the install itself — no separate Python environment required. Because those
+wheels come from PyPI and are **not** covered by the release signature, the command
+prints an explicit notice and requires confirmation before downloading (`--yes` skips
+the prompt); it never auto-installs. `deps uninstall <extra>` removes the extra's own
+distribution from the managed dir (shared transitive dependencies are left in place).
+
+`clauster deps install shawl` (Windows only) is the same mechanism for a **binary**
+dependency: it downloads the pinned [Shawl](https://github.com/mtkennerly/shawl)
+service wrapper from its GitHub release, verifies it against a hardcoded SHA-256, and
+places `shawl.exe` under `<state_dir>/deps/bin`.
+
+**Installing Clauster as a Windows service is two steps, from an elevated prompt:**
+
+```powershell
+clauster deps install shawl          # 1. fetch the Shawl wrapper (once)
+clauster install-service windows --write   # 2. register + start the service
+```
+
+Add `-c <path>` to either only if your config isn't in the default search location.
+Like `install-service systemd/launchd --write`, `--write` on Windows *applies* the
+service directly — it runs `shawl add --name Clauster … -- clauster run -c <cfg>`
+(which does the `sc create`), then `sc config … start= auto` and `sc start`. It needs
+Shawl from step 1 and an elevated prompt (it fails with a clear "re-run as
+Administrator" if not). Omit `--write` to just print those commands for inspection.
+`clauster doctor` shows a `binary:shawl` row. The Windows uninstaller (`uninstall.ps1`)
+stops and deletes the `Clauster` service before removing the binary, so nothing is
+left pointing at a removed executable.
 
 ### Recovering from a corrupted state database
 

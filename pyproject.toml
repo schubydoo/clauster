@@ -81,6 +81,13 @@ package = [
     # Standalone-binary builds (see clauster.spec + scripts/build-binary.sh).
     # Built in CI / a full environment, not in the dev sandbox.
     "pyinstaller>=6.0",
+    # pip is bundled INTO the binary (clauster.spec `collect_all("pip")`) so the frozen binary
+    # can drive `clauster deps install <extra>` in-process (#904 slice 2b). It must be present in
+    # the BUILD env for PyInstaller to collect it (uv venvs omit pip by default). Upper-bounded
+    # because the side-install uses pip's private `pip._internal.cli.main.main`, which can drift
+    # across majors — raise the ceiling deliberately after verifying a new pip against deps.py.
+    # Keeping this current / evaluating a switch to bundled-uv is tracked post-1.0 by #935.
+    "pip>=24.0,<27",
 ]
 docs = [
     # Build the mkdocs-material documentation site (see mkdocs.yml + docs/).

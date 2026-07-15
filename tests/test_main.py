@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -579,7 +580,7 @@ def test_run_does_not_reexec_on_normal_shutdown(write_config, tmp_path, monkeypa
     [
         ("systemd", "[Service]"),
         ("launchd", "<plist"),
-        ("windows", "nssm install Clauster"),
+        ("windows", "add --name Clauster"),
     ],
 )
 def test_install_service(kind, marker, capsys):
@@ -587,18 +588,19 @@ def test_install_service(kind, marker, capsys):
     assert marker in capsys.readouterr().out
 
 
-def test_install_service_windows_warns_when_nssm_missing(monkeypatch, capsys):
-    # install-service windows warns upfront if `nssm` isn't on PATH (#914) — not fatal.
-    monkeypatch.setattr(cli.shutil, "which", lambda name: None if name == "nssm" else "/x/" + name)
+def test_install_service_windows_warns_when_shawl_missing(monkeypatch, capsys):
+    # install-service windows warns upfront if Shawl isn't installed (managed dir or PATH) — not
+    # fatal, the script still prints (they can `clauster deps install shawl`, then run it).
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)  # shawl not on PATH
     assert cli.main(["install-service", "windows", "-c", "/etc/clauster/clauster.yml"]) == 0
     err = capsys.readouterr().err
-    assert "nssm" in err and "not on PATH" in err
+    assert "Shawl" in err and "clauster deps install shawl" in err
 
 
-def test_install_service_windows_no_warn_when_nssm_present(monkeypatch, capsys):
-    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/nssm")
+def test_install_service_windows_no_warn_when_shawl_present(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/shawl")
     assert cli.main(["install-service", "windows", "-c", "/etc/clauster/clauster.yml"]) == 0
-    assert "not on PATH" not in capsys.readouterr().err
+    assert "isn't installed" not in capsys.readouterr().err
 
 
 def test_install_service_bad_kind_exits_2():
@@ -679,24 +681,57 @@ def test_install_service_write_non_permission_oserror_returns_1(tmp_path, capsys
     assert "privileges" not in err.lower()  # the sudo hint is PermissionError-only
 
 
-@pytest.mark.parametrize(
-    "kind,marker,hint",
-    [
-        ("launchd", "<plist", "launchctl load"),
-        ("windows", "nssm install Clauster", "elevated prompt"),
-    ],
-)
-def test_install_service_write_prints_platform_next_step(kind, marker, hint, tmp_path, capsys):
-    # The --write next-step hint is platform-specific: launchctl on macOS, an
-    # elevated nssm prompt on Windows (systemd's daemon-reload hint is covered above).
-    dest = tmp_path / f"clauster.{kind}"
+def test_install_service_write_prints_launchd_next_step(tmp_path, capsys):
+    # launchd --write writes the plist + prints the launchctl next-step (systemd covered above;
+    # windows --write registers directly, covered separately below).
+    dest = tmp_path / "clauster.launchd"
     rc = cli.main(
-        ["install-service", kind, "-c", "/etc/clauster/clauster.yml", "--write", str(dest)]
+        ["install-service", "launchd", "-c", "/etc/clauster/clauster.yml", "--write", str(dest)]
     )
     assert rc == 0
-    assert marker in dest.read_text(encoding="utf-8")
+    assert "<plist" in dest.read_text(encoding="utf-8")
     err = capsys.readouterr().err
-    assert str(dest) in err and hint in err
+    assert str(dest) in err and "launchctl load" in err
+
+
+def _fake_run(calls, *, returncode=0, stderr=""):
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=returncode, stdout="", stderr=stderr)
+
+    return run
+
+
+def test_install_service_windows_write_registers_service(monkeypatch, capsys):
+    # --write on Windows runs the registration commands directly (shawl add + sc), no .bat.
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run(calls))
+    rc = cli.main(["install-service", "windows", "-c", "/etc/clauster/clauster.yml", "--write"])
+    assert rc == 0
+    assert any("add" in c and "Clauster" in c for c in calls)  # shawl add
+    assert ["sc", "start", "Clauster"] in calls
+    assert "registered and started" in capsys.readouterr().err.lower()
+
+
+def test_install_service_windows_write_needs_shawl(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: False)
+    rc = cli.main(["install-service", "windows", "--write"])
+    assert rc == 1
+    assert "clauster deps install shawl" in capsys.readouterr().err
+
+
+def test_install_service_windows_write_surfaces_sc_failure(monkeypatch, capsys):
+    # A non-zero sc/shawl exit (e.g. not elevated → access denied) fails closed with an
+    # elevation hint + non-zero return — never a partial-then-"done".
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+    monkeypatch.setattr(
+        cli.subprocess, "run", _fake_run([], returncode=5, stderr="Access is denied")
+    )
+    rc = cli.main(["install-service", "windows", "--write"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Access is denied" in err and "elevat" in err.lower()
 
 
 def test_install_service_write_without_path_uses_default(tmp_path, monkeypatch, capsys):
@@ -969,3 +1004,125 @@ def test_deps_list_reports_installed_but_not_loaded(write_config, tmp_path, caps
     assert rc == 0
     out = capsys.readouterr().out
     assert "installed" in out and "1.9.0" in out and "restart to load" in out
+
+
+def test_deps_install_routes_binary_to_binary_dep(write_config, tmp_path, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        cli.deps,
+        "install_binary_dep",
+        lambda key, state_dir, *, assume_yes: calls.update(key=key, yes=assume_yes) or 0,
+    )
+    rc = cli.main(["deps", "install", "shawl", "-c", _cfg(write_config, tmp_path), "--yes"])
+    assert rc == 0
+    assert calls == {"key": "shawl", "yes": True}
+
+
+def test_deps_uninstall_routes_binary_to_binary_dep(write_config, tmp_path, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        cli.deps, "uninstall_binary_dep", lambda key, state_dir: calls.update(key=key) or 0
+    )
+    rc = cli.main(["deps", "uninstall", "shawl", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 0 and calls["key"] == "shawl"
+
+
+def test_deps_list_includes_shawl_binary(write_config, tmp_path, capsys):
+    rc = cli.main(["deps", "list", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "shawl" in out and "(binary)" in out
+
+
+def test_deps_list_shawl_status_on_win32(write_config, tmp_path, monkeypatch, capsys):
+    # On Windows the shawl binary row flips missing → installed once it's in the managed bin dir.
+    monkeypatch.setattr(cli.deps.sys, "platform", "win32")
+    cfg = _cfg(write_config, tmp_path)
+    cli.main(["deps", "list", "-c", cfg])
+    line = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("shawl"))
+    assert "missing" in line
+    exe = cli.deps.managed_bin_dir(f"{tmp_path}/.cstate") / "shawl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    cli.main(["deps", "list", "-c", cfg])
+    line2 = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("shawl"))
+    assert "installed" in line2
+
+
+def test_shawl_available_true_via_managed_dir(tmp_path):
+    exe = cli.deps.managed_bin_dir(tmp_path) / "shawl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    assert cli._shawl_available(str(tmp_path)) is True
+
+
+def test_install_service_windows_write_rejects_bad_path(monkeypatch, capsys):
+    # An illegal `"` in a path makes windows_service_commands raise → surfaced as exit 2.
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+
+    def _boom(**_k):
+        raise ValueError("path contains an illegal double-quote: 'C:\\\\a\"b'")
+
+    monkeypatch.setattr(cli.ops, "windows_service_commands", _boom)
+    rc = cli.main(["install-service", "windows", "--write"])
+    assert rc == 2
+    assert "double-quote" in capsys.readouterr().err
+
+
+def test_install_service_windows_write_handles_spawn_error(monkeypatch, capsys):
+    # If shawl.exe can't be launched (FileNotFoundError from subprocess), fail closed, not crash.
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+
+    def _boom(argv, **_k):
+        raise FileNotFoundError("shawl.exe")
+
+    monkeypatch.setattr(cli.subprocess, "run", _boom)
+    rc = cli.main(["install-service", "windows", "--write"])
+    assert rc == 1
+    assert "could not run" in capsys.readouterr().err
+
+
+def test_install_service_windows_write_rolls_back_partial(monkeypatch, capsys):
+    # shawl add succeeds but sc config fails → the created service is rolled back (sc delete) so a
+    # retry isn't blocked by "already exists".
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+    calls: list[list[str]] = []
+
+    def run(argv, **_k):
+        calls.append(argv)
+        rc = 1 if argv[:2] == ["sc", "config"] else 0  # add ok, config fails, delete ok
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    assert cli.main(["install-service", "windows", "--write"]) == 1
+    assert ["sc", "delete", "Clauster"] in calls
+    assert "rolled back" in capsys.readouterr().err
+
+
+def test_install_service_windows_write_rollback_delete_failure_is_surfaced(monkeypatch, capsys):
+    # If the rollback delete ALSO fails (still not elevated), say so + tell them to remove it.
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+
+    def run(argv, **_k):
+        rc = 0 if argv[1:2] == ["add"] else 1  # only `<shawl> add` succeeds; config + delete fail
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="Access is denied")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    assert cli.main(["install-service", "windows", "--write"]) == 1
+    assert "could not roll back" in capsys.readouterr().err
+
+
+def test_install_service_windows_write_rollback_spawn_error_is_surfaced(monkeypatch, capsys):
+    # If the rollback `sc delete` itself can't even launch (OSError), the helper must not raise —
+    # surface the manual-cleanup step instead of a traceback escaping an already-failing path.
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+
+    def run(argv, **_k):
+        if argv == ["sc", "delete", "Clauster"]:
+            raise FileNotFoundError("sc")  # rollback spawn fails
+        rc = 1 if argv[:2] == ["sc", "config"] else 0  # add ok, config fails → triggers rollback
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    assert cli.main(["install-service", "windows", "--write"]) == 1
+    assert "could not roll back" in capsys.readouterr().err

@@ -13,9 +13,12 @@ without importing it: no LGPL relinking, no import side effects, no import cost.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import importlib.util
+import io
 import sys
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,12 +89,12 @@ def by_key(key: str) -> Extra:
     raise KeyError(key)
 
 
-def applies(entry: Extra) -> bool:
-    """Return whether ``entry`` is relevant on the current platform.
+def applies(entry: Extra | BinaryDep) -> bool:
+    """Return whether ``entry`` (an :class:`Extra` or :class:`BinaryDep`) is relevant here.
 
     A ``None`` marker applies everywhere; otherwise the entry is only relevant when
-    its marker matches :data:`sys.platform` (e.g. ``pywinpty`` on ``"win32"``), so
-    doctor and the UI don't nag a Linux host about a Windows-only extra.
+    its marker matches :data:`sys.platform` (e.g. ``pywinpty``/``shawl`` on ``"win32"``), so
+    doctor and the UI don't nag a Linux host about a Windows-only extra or binary.
     """
     return entry.platform_marker is None or sys.platform == entry.platform_marker
 
@@ -113,19 +116,16 @@ def probe(entry: Extra) -> bool:
 
 
 def install_hint(entry: Extra) -> str:
-    """Return an environment-correct one-line install hint for ``entry``.
+    """Return an environment-correct one-line install *command* for ``entry``.
 
     A normal pip/uv install resolves the extra through the package index
-    (``pip install 'clauster[pty]'``). The frozen binary can't pip-install and the
-    managed ``clauster deps install`` command is a later #904 slice, so until it
-    exists the frozen hint points at the docs rather than naming a command that
-    doesn't run yet — kept honest so doctor never hands out a dead-end command.
+    (``pip install 'clauster[pty]'``). The frozen binary can't pip-install into itself, so it
+    bundles pip and offers the managed ``clauster deps install <extra>`` command instead (#904
+    slice 2b) — a real, runnable command on the binary. Both forms are runnable, so callers
+    render either with a "run" imperative.
     """
     if is_frozen():
-        # Generic prose (not a command): the extra is already named by every surface that
-        # shows this (the doctor row + the dashboard hint), and no runnable install command
-        # exists on the frozen binary yet — so callers render it WITHOUT a "run" imperative.
-        return "not bundled in the standalone binary; see the install docs"
+        return f"clauster deps install {entry.extra_name}"
     return f"pip install 'clauster[{entry.extra_name}]'"
 
 
@@ -153,8 +153,9 @@ PROVENANCE_NOTICE = (
 class DepsPipUnavailableError(RuntimeError):
     """Raised when pip can't be imported to drive a managed side-install.
 
-    The frozen binary will bundle pip once #904 slice 2b lands; until then (and on any
-    stripped/older build) pip is absent, so this surfaces with a clear fallback hint.
+    The frozen binary bundles pip (``clauster.spec`` ``collect_all("pip")``), so this normally
+    can't happen there; it surfaces only on a stripped/older build — or a non-frozen environment
+    that lacks pip — with a clear fallback hint.
     """
 
 
@@ -260,11 +261,11 @@ def installed_versions(state_dir: str | Path) -> dict[str, str]:
 def _default_pip_main(argv: list[str]) -> int:
     """Run pip in-process via its private CLI entry, returning pip's exit code.
 
-    Uses ``pip._internal.cli.main.main`` rather than ``runpy.run_module("pip")``: even once pip
-    is bundled, PyInstaller collects pip's modules but not the dynamically imported
-    ``pip.__main__``, so ``runpy`` fails in-frozen while the private entry works both frozen and
-    unfrozen (spike, 2026-07-14). The frozen binary does NOT bundle pip yet — that arrives with
-    the ``--collect-all pip`` spec change in #904 slice 2b — so on today's binary this raises
+    Uses ``pip._internal.cli.main.main`` rather than ``runpy.run_module("pip")``: PyInstaller
+    collects pip's modules (via ``clauster.spec`` ``collect_all("pip")``) but not the dynamically
+    imported ``pip.__main__``, so ``runpy`` fails in-frozen while the private entry works both
+    frozen and unfrozen (spike, 2026-07-14). The frozen binary bundles pip, so this resolves there;
+    a stripped/older build (or a non-frozen env without pip) raises
     :class:`DepsPipUnavailableError`, which the caller turns into a clean error + fallback hint.
     The private API is pinned at build time — guard it.
     """
@@ -432,3 +433,196 @@ def _prune_empty_dirs(directory: Path, *, stop: Path) -> None:
 def _err(message: str) -> None:
     """Print a ``clauster:``-prefixed message to stderr (CLI convention: prose on stderr)."""
     print(f"clauster: {message}", file=sys.stderr)
+
+
+# ----- managed binary dependencies (#904 slice 2b): Shawl, the Windows service wrapper -------
+#
+# Some clauster capabilities need a standalone *binary*, not a pip extra. The Windows
+# ``install-service`` path wraps clauster as a service with Shawl (mtkennerly/shawl on GitHub,
+# MIT) — a single .exe. ``clauster deps install shawl`` fetches the pinned GitHub release, refuses
+# it unless it matches a hardcoded SHA-256, and places ``shawl.exe`` under ``<state_dir>/deps/bin``
+# where install-service points the service at it. This is a download-verify-place, not pip — but it
+# shares the managed dir + provenance gate with the extras.
+
+BIN_SUBDIR = "bin"
+
+#: Shown before a binary side-install. Unlike the pip extras, the artifact is pinned to an exact
+#: SHA-256 (so it can't silently change), but it is still a third-party binary fetched over the
+#: network and not covered by the Clauster release signature — so we still notice + confirm.
+PROVENANCE_NOTICE_BINARY = (
+    "This downloads a third-party binary from its GitHub release and checks it against a pinned\n"
+    "SHA-256. It is NOT covered by the Clauster release signature — you are trusting that\n"
+    "project's release, pinned to the exact build below."
+)
+
+
+@dataclass(frozen=True)
+class BinaryDep:
+    """One managed standalone-binary dependency: a pinned release archive + the exe inside it.
+
+    ``platform_marker`` mirrors :class:`Extra` (a :data:`sys.platform` value, e.g. ``"win32"``),
+    so :func:`applies` gates it off-platform. ``url``/``sha256`` pin an exact release archive;
+    ``member`` is the file to extract from that archive and ``dest`` its filename under the managed
+    ``bin`` dir. Bumping the version means updating ``version``/``url``/``sha256`` together.
+    """
+
+    key: str
+    label: str
+    platform_marker: str
+    version: str
+    url: str
+    sha256: str
+    member: str
+    dest: str
+
+
+BINARY_DEPS: tuple[BinaryDep, ...] = (
+    # Bump version + url + sha256 together; Renovate can't track a source-pinned checksum, so
+    # this is a periodic manual refresh — tracked post-1.0 by #934.
+    BinaryDep(
+        key="shawl",
+        label="Windows service wrapper (Shawl)",
+        platform_marker="win32",
+        version="v1.9.0",
+        url="https://github.com/mtkennerly/shawl/releases/download/v1.9.0/shawl-v1.9.0-win64.zip",
+        sha256="f883c5d09c9beae2efaeabd8513e7d3f57cd1d0864cec3df4f4a7b6ee904351c",
+        member="shawl.exe",
+        dest="shawl.exe",
+    ),
+)
+
+
+def binary_dep_names() -> tuple[str, ...]:
+    """Return the registered managed-binary keys (e.g. ``("shawl",)``)."""
+    return tuple(dep.key for dep in BINARY_DEPS)
+
+
+def binary_dep_for(key: str) -> BinaryDep:
+    """Return the :class:`BinaryDep` for ``key`` (raises ``KeyError`` if unknown)."""
+    for dep in BINARY_DEPS:
+        if dep.key == key:
+            return dep
+    raise KeyError(key)
+
+
+def managed_bin_dir(state_dir: str | Path) -> Path:
+    """Return the managed binary directory ``<state_dir>/deps/bin`` (holds e.g. ``shawl.exe``)."""
+    return managed_deps_dir(state_dir) / BIN_SUBDIR
+
+
+def installed_binary_path(key: str, state_dir: str | Path) -> Path | None:
+    """Return the managed path of binary ``key`` if it is installed, else ``None``."""
+    dest = managed_bin_dir(state_dir) / binary_dep_for(key).dest
+    return dest if dest.is_file() else None
+
+
+#: Upper bound on a managed-binary download (Shawl's win64 zip is ~1.3 MB). A body larger than this
+#: is truncated by the capped read → its SHA-256 won't match → refused; the cap only bounds memory
+#: so a misbehaving (but cert-valid) endpoint can't stream an unbounded body in.
+_MAX_FETCH_BYTES = 64 * 1024 * 1024
+
+
+def _default_fetch(url: str) -> bytes:
+    """Fetch ``url`` over HTTPS and return the body (a monkeypatchable seam for tests).
+
+    The URL is a hardcoded ``https`` GitHub release constant (never user input) and the payload is
+    SHA-256-verified by the caller, so an ``urlopen`` here is not an injection/SSRF surface. The
+    read is capped at :data:`_MAX_FETCH_BYTES` to bound memory (an over-cap body fails the sha256).
+    """
+    import urllib.request
+
+    if not url.startswith("https://"):  # defensive: only ever fetch our pinned https release URLs
+        raise ValueError(f"refusing to fetch non-https url: {url}")
+    with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - pinned https, sha256-verified
+        return resp.read(_MAX_FETCH_BYTES)
+
+
+def install_binary_dep(
+    key: str,
+    state_dir: str | Path,
+    *,
+    assume_yes: bool = False,
+    fetch: Callable[[str], bytes] | None = None,
+    confirm: Callable[[str], str] = input,
+) -> int:
+    """Download + verify + place a managed binary (e.g. ``shawl``); return an exit code.
+
+    Fetches the pinned release archive, refuses it unless its SHA-256 matches the hardcoded pin,
+    extracts the exe into ``<state_dir>/deps/bin``, and (best-effort) marks it executable. Prints
+    the provenance notice + requires confirmation unless ``assume_yes``; ``fetch``/``confirm`` are
+    test seams. Exit codes: ``2`` unknown/off-platform, ``1`` declined / download / checksum /
+    extract / write failure, ``0`` installed.
+    """
+    if key not in binary_dep_names():
+        _err(f"unknown binary {key!r}; choose from {', '.join(binary_dep_names())}")
+        return 2
+    dep = binary_dep_for(key)
+    if not applies(dep):
+        _err(f"{dep.label} is only for {dep.platform_marker}; not applicable on this platform")
+        return 2
+    dest = managed_bin_dir(state_dir) / dep.dest
+    print(PROVENANCE_NOTICE_BINARY, file=sys.stderr)
+    _err(f"will download {dep.label} {dep.version} and install it at {dest}")
+    if not assume_yes:
+        try:
+            reply = confirm("Proceed? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            reply = ""
+        if reply.strip().lower() not in ("y", "yes"):
+            _err("aborted — nothing installed")
+            return 1
+    runner = fetch or _default_fetch
+    try:
+        data = runner(dep.url)
+    except (OSError, ValueError) as exc:
+        _err(f"download failed: {exc}")
+        return 1
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != dep.sha256:
+        _err(f"checksum mismatch for {dep.url}: expected {dep.sha256}, got {actual} — refusing")
+        return 1
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            payload = archive.read(dep.member)
+    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        _err(f"could not extract {dep.member} from the archive: {exc}")
+        return 1
+    # Atomic install: write to a sibling temp then replace, so a partial write (e.g. a full disk)
+    # never truncates a previously-working binary — the old one stays until the swap succeeds.
+    tmp = dest.with_name(dest.name + ".tmp")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(payload)
+        tmp.chmod(0o755)  # no-op semantics on Windows; harmless if a POSIX host ever fetches it
+        tmp.replace(dest)  # os.replace — atomic within the managed dir (same filesystem)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)  # don't leave a half-written temp behind
+        except OSError:
+            pass  # best-effort cleanup — the original write error is what we report
+        _err(f"could not write {dest}: {exc}")
+        return 1
+    _err(f"installed {dep.label} {dep.version} at {dest}")
+    return 0
+
+
+def uninstall_binary_dep(key: str, state_dir: str | Path) -> int:
+    """Remove a managed binary (e.g. ``shawl``) from ``<state_dir>/deps/bin``; return an exit code.
+
+    Exit codes: ``2`` unknown binary, ``0`` otherwise (removing an absent binary is a no-op).
+    """
+    if key not in binary_dep_names():
+        _err(f"unknown binary {key!r}; choose from {', '.join(binary_dep_names())}")
+        return 2
+    dest = managed_bin_dir(state_dir) / binary_dep_for(key).dest
+    try:
+        dest.unlink()
+    except FileNotFoundError:
+        _err(f"{key} is not installed in {dest.parent}")
+        return 0
+    except OSError as exc:
+        _err(f"could not remove {dest}: {exc}")
+        return 1
+    _prune_empty_dirs(dest.parent, stop=managed_deps_dir(state_dir))
+    _err(f"removed {key} from {dest.parent}")
+    return 0

@@ -536,9 +536,9 @@ def test_missing_pyte_raises_clear_error(monkeypatch):
 
 def test_missing_pyte_frozen_binary_message(monkeypatch):
     # On the standalone (frozen) binary, with the opt-in env var UNSET, pyte stays absent
-    # (LGPL, not bundled), so the error must name the binary limitation AND both escape
-    # hatches — the CLAUSTER_PYTE_PATH env var and the pip/uv `[pty]` install — instead of
-    # the dead-end `install clauster[pty]` a binary user cannot act on (#699).
+    # (LGPL, not bundled), so the error must name the binary limitation AND both working paths
+    # — the managed `clauster deps install pty` (#904 slice 2b) and the CLAUSTER_PYTE_PATH env
+    # var — instead of the dead-end `install clauster[pty]` a binary user cannot act on (#699).
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.delenv(pty_screen.PYTE_PATH_ENV, raising=False)
     monkeypatch.setitem(sys.modules, "pyte", None)
@@ -546,6 +546,7 @@ def test_missing_pyte_frozen_binary_message(monkeypatch):
         PtyScreen()
     msg = str(exc_info.value)
     assert "standalone binary" in msg
+    assert "clauster deps install pty" in msg  # the managed install command (binary bundles pip)
     assert pty_screen.PYTE_PATH_ENV in msg
 
 

@@ -846,10 +846,22 @@ def test_service_systemd_path_quoted_for_space_in_home(monkeypatch):
 
 
 def test_service_windows():
+    # Without a state_dir the batch falls back to a bare `shawl` (resolved from PATH).
     unit = render_service_unit(
         "windows", python="C:\\py\\python.exe", config_path="C:\\clauster.yml"
     )
-    assert "nssm install Clauster" in unit
+    assert '"shawl" add --name Clauster' in unit
+    assert "sc config Clauster start= auto" in unit
+    assert "nssm" not in unit
+
+
+def test_service_windows_points_at_managed_shawl_when_state_dir_given():
+    # With a state_dir, the service binPath references the managed <state_dir>/deps/bin/shawl.exe
+    # that `clauster deps install shawl` places, not a bare PATH lookup.
+    unit = render_service_unit(
+        "windows", python="C:\\py\\python.exe", config_path="C:\\clauster.yml", state_dir="C:\\st"
+    )
+    assert '"C:\\st\\deps\\bin\\shawl.exe" add --name Clauster' in unit
 
 
 def test_service_launchd_escapes_xml_special_chars():
@@ -1237,3 +1249,41 @@ def test_restore_swap_failure_into_fresh_dest_cleans_staging(write_config, tmp_p
 
     assert not dest.exists()  # never half-created
     assert not list(tmp_path.glob(".fresh.restore-*"))  # staged dir cleaned up
+
+
+def test_check_binary_deps_warns_when_shawl_missing(monkeypatch, tmp_path):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    monkeypatch.setattr(ops.shutil, "which", lambda name: None)  # not on PATH, not in managed dir
+    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    assert by["binary:shawl"].status == WARN
+    assert "clauster deps install shawl" in by["binary:shawl"].detail
+
+
+def test_check_binary_deps_ok_via_managed_dir(monkeypatch, tmp_path):
+    from clauster import deps, ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    monkeypatch.setattr(ops.shutil, "which", lambda name: None)
+    exe = deps.managed_bin_dir(tmp_path) / "shawl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    assert by["binary:shawl"].status == OK
+
+
+def test_check_binary_deps_ok_via_path(monkeypatch, tmp_path):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    monkeypatch.setattr(ops.shutil, "which", lambda name: "/usr/bin/shawl")
+    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    assert by["binary:shawl"].status == OK
+
+
+def test_check_binary_deps_skips_off_platform(monkeypatch, tmp_path):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")  # shawl is win32-only
+    assert ops._check_binary_deps(tmp_path) == []

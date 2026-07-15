@@ -47,6 +47,7 @@ DRY_RUN=0
 ASSUME_YES=0
 KEEP_CONFIG=0
 KEEP_DATA=0
+KEEP_DEPS=0
 
 usage() {
     cat <<EOF
@@ -56,6 +57,8 @@ Usage: uninstall.sh [options]
   -y, --yes        Do not prompt for confirmation.
   --keep-config    Preserve clauster.yml (moved aside to a printed backup path).
   --keep-data      Preserve clauster.db (moved aside to a printed backup path).
+  --keep-deps      Preserve side-installed optional deps (pty/notify extras, Shawl)
+                   in <state_dir>/deps (moved aside to a printed backup path).
   -h, --help       Show this help.
 EOF
 }
@@ -66,6 +69,7 @@ while [ $# -gt 0 ]; do
         -y|--yes)      ASSUME_YES=1 ;;
         --keep-config) KEEP_CONFIG=1 ;;
         --keep-data)   KEEP_DATA=1 ;;
+        --keep-deps)   KEEP_DEPS=1 ;;
         -h|--help)     usage; exit 0 ;;
         *)             err "Unknown option: $1"; usage; exit 2 ;;
     esac
@@ -139,6 +143,23 @@ INSTALL_DIR="${CLAUSTER_INSTALL_DIR:-${HOME}/.local/bin}"
 BINARY_PATH="${INSTALL_DIR}/${TOOL_NAME}"
 STATE_DIR="$(resolve_state_dir)"
 CONFIG_PATH="$(resolve_config)"
+# Side-installed optional deps live under <state_dir>/deps (pip extras' wheels + a bin/ with
+# Shawl). They're removed WITH the state dir below, but we enumerate them in the plan and offer
+# --keep-deps so they aren't silently discarded (#904).
+DEPS_DIR="${STATE_DIR}/deps"
+
+# Report clauster's KNOWN optional deps present in the managed dir (not their transitive wheels).
+list_managed_deps() {
+    [ -d "$DEPS_DIR" ] || return 0
+    local names="" known di
+    for known in pyte pywinpty apprise; do
+        for di in "$DEPS_DIR/${known}"-*.dist-info; do
+            [ -d "$di" ] && { names="${names:+$names, }${known}"; break; }
+        done
+    done
+    [ -f "$DEPS_DIR/bin/shawl.exe" ] && names="${names:+$names, }shawl"
+    echo "$names"
+}
 # Service unit paths. The defaults are where install-service writes them; the
 # overrides exist so the uninstaller stays testable without a real service unit
 # (the CI smoke test + local tests pin them at a throwaway path).
@@ -178,6 +199,14 @@ info "Clauster uninstaller${DRY_RUN:+ (dry run)}"
 echo
 info "Detected install method(s): ${DETECTED[*]:-none}"
 info "State directory:            ${STATE_DIR}$( [ -d "$STATE_DIR" ] || printf ' (absent)')"
+MANAGED_DEPS="$(list_managed_deps)"
+if [ -n "$MANAGED_DEPS" ]; then
+    if [ "$KEEP_DEPS" -eq 1 ]; then
+        info "Side-installed deps:        ${MANAGED_DEPS} (KEPT — moved to backup)"
+    else
+        info "Side-installed deps:        ${MANAGED_DEPS} (in ${DEPS_DIR}; keep with --keep-deps)"
+    fi
+fi
 info "Config file:                ${CONFIG_PATH:-<none found>}"
 if [ -e "$SYSTEMD_UNIT" ]; then info "systemd unit:               ${SYSTEMD_UNIT}"; fi
 if [ -e "$LAUNCHD_PLIST" ]; then info "launchd agent:              ${LAUNCHD_PLIST}"; fi
@@ -266,8 +295,20 @@ preserve() {  # preserve <src> <label>
     mv -f "$src" "$BACKUP_DIR/"
     ok "Kept ${label}: ${BACKUP_DIR}/$(basename "$src")"
 }
+preserve_dir() {  # preserve_dir <src-dir> <label>
+    local src="$1" label="$2"
+    [ -d "$src" ] || return 0
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf "  would keep %s: move %s -> %s/\n" "$label" "$src" "$BACKUP_DIR"; return
+    fi
+    mkdir -p "$BACKUP_DIR"
+    mv -f "$src" "$BACKUP_DIR/"
+    ok "Kept ${label}: ${BACKUP_DIR}/$(basename "$src")"
+}
 [ "$KEEP_CONFIG" -eq 1 ] && [ -n "$CONFIG_PATH" ] && preserve "$CONFIG_PATH" "config"
 [ "$KEEP_DATA" -eq 1 ] && preserve "${STATE_DIR}/clauster.db" "database"
+# Move side-installed deps aside BEFORE the whole state_dir is removed below, so they survive.
+[ "$KEEP_DEPS" -eq 1 ] && preserve_dir "$DEPS_DIR" "side-installed deps"
 
 # 4) State directory (guarded). Removed WHOLE, in both modes: with --keep-data the
 # preserve step above already moved clauster.db out to the backup, so nothing else

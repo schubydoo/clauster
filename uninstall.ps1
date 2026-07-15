@@ -29,6 +29,7 @@ param(
     [switch]$Yes,
     [switch]$KeepConfig,
     [switch]$KeepData,
+    [switch]$KeepDeps,
     [switch]$Help
 )
 
@@ -41,12 +42,14 @@ function Write-Err($m)  { Write-Host "[ERR ]  $m" -ForegroundColor Red }
 
 function Show-Usage {
     Write-Host @'
-Usage: uninstall.ps1 [-DryRun] [-Yes] [-KeepConfig] [-KeepData] [-Help]
+Usage: uninstall.ps1 [-DryRun] [-Yes] [-KeepConfig] [-KeepData] [-KeepDeps] [-Help]
 
   -DryRun       Show what would be removed without removing anything.
   -Yes          Do not prompt for confirmation.
   -KeepConfig   Preserve clauster.yml (moved aside to a printed backup path).
   -KeepData     Preserve clauster.db (moved aside to a printed backup path).
+  -KeepDeps     Preserve side-installed optional deps (pty/notify extras, Shawl) in
+                <state_dir>\deps (moved aside to a printed backup path).
   -Help         Show this help.
 '@
 }
@@ -114,6 +117,23 @@ function Uninstall-Clauster {
     $binaryPath = Join-Path $installDir 'clauster.exe'
     $stateDir   = Resolve-StateDir
     $configPath = Resolve-ConfigPath
+    # Side-installed optional deps live under <state_dir>\deps (pip extras + bin\shawl.exe). Removed
+    # with the state dir below; enumerated in the plan, and -KeepDeps preserves them (#904).
+    $depsDir = Join-Path $stateDir 'deps'
+    $managedDeps = @()
+    if (Test-Path -LiteralPath $depsDir) {
+        foreach ($k in @('pyte', 'pywinpty', 'apprise')) {
+            if (Get-ChildItem -LiteralPath $depsDir -Directory -Filter "$k-*.dist-info" -ErrorAction SilentlyContinue) {
+                $managedDeps += $k
+            }
+        }
+        if (Test-Path -LiteralPath (Join-Path $depsDir 'bin\shawl.exe')) { $managedDeps += 'shawl' }
+    }
+    # Windows service registered by `install-service windows` (Shawl-wrapped, named "Clauster").
+    # Detected so uninstall stops + deletes it — otherwise it lingers pointing at a removed binary.
+    # The name is overridable ($CLAUSTER_WINDOWS_SERVICE) so tests can target a throwaway service.
+    $serviceName = if ($env:CLAUSTER_WINDOWS_SERVICE) { $env:CLAUSTER_WINDOWS_SERVICE } else { 'Clauster' }
+    $servicePresent = [bool](Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
 
     $script:RemovalFailed = $false  # set true by Remove-Target on any removal error
 
@@ -143,16 +163,23 @@ function Uninstall-Clauster {
     Write-Host ''
     Write-Info ("Detected install method(s): " + $(if ($detected.Count) { $detected -join ', ' } else { 'none' }))
     Write-Info ("State directory:            $stateDir" + $(if (Test-Path -LiteralPath $stateDir) { '' } else { ' (absent)' }))
+    if ($managedDeps.Count) {
+        $depsSummary = ($managedDeps -join ', ')
+        if ($KeepDeps) { Write-Info "Side-installed deps:        $depsSummary (KEPT - moved to backup)" }
+        else { Write-Info "Side-installed deps:        $depsSummary (in $depsDir; keep with -KeepDeps)" }
+    }
+    if ($servicePresent) { Write-Info "Windows service:            $serviceName" }
     Write-Info ("Config file:                " + $(if ($configPath) { $configPath } else { '<none found>' }))
     Write-Host ''
 
     $stateExists  = Test-Path -LiteralPath $stateDir
     $configExists = $configPath -and (Test-Path -LiteralPath $configPath)
-    if ($detected.Count -eq 0 -and -not $stateExists -and -not $configExists) {
-        throw 'No clauster install found (no binary/package, state dir, or config). Nothing to do.'
+    if ($detected.Count -eq 0 -and -not $stateExists -and -not $configExists -and -not $servicePresent) {
+        throw 'No clauster install found (no binary/package, state dir, config, or service). Nothing to do.'
     }
-    # Fail closed: leftover files with no identifiable install method are ambiguous.
-    if ($detected.Count -eq 0) {
+    # Fail closed: leftover files with no identifiable install method are ambiguous. A registered
+    # "Clauster" service IS unambiguously ours, so its presence lets the run proceed (and remove it).
+    if ($detected.Count -eq 0 -and -not $servicePresent) {
         Write-Warn 'Could not identify how clauster was installed (no binary/package found).'
         Write-Warn 'Leaving files in place. If you know they are clauster''s, remove them manually:'
         if ($stateExists)  { Write-Warn "  Remove-Item -Recurse -Force '$stateDir'" }
@@ -182,7 +209,26 @@ function Uninstall-Clauster {
         if ($DryRun) { Write-Host "  would: $desc" } else { & $action }
     }
 
-    # --- 1) Package / binary, per detected method --------------------------
+    # --- 1) Windows service (stop + delete) --------------------------------
+    # Do this BEFORE removing the binary so the service isn't left pointing at a deleted exe. The
+    # service was registered by Shawl (`shawl add` = sc create); `sc delete` unregisters it (Shawl
+    # exits when its wrapped process is stopped, so no separate Shawl teardown is needed).
+    if ($servicePresent) {
+        Write-Info "Removing Windows service '$serviceName' (needs elevation)..."
+        Invoke-Step "sc.exe stop $serviceName; sc.exe delete $serviceName" {
+            & sc.exe stop $serviceName | Out-Null   # a not-running service failing to stop is benign
+            & sc.exe delete $serviceName | Out-Null
+            # sc.exe delete needs elevation; a non-elevated run fails with "Access is denied" (exit 5)
+            # which PS 5.1 does NOT turn into a terminating error. Check it so we never report a clean
+            # uninstall while the service is left pointing at a removed binary (fail loud, like Remove-Target).
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn "Could not delete service '$serviceName' (exit $LASTEXITCODE) - re-run elevated, or: sc.exe delete $serviceName"
+                $script:RemovalFailed = $true
+            }
+        }
+    }
+
+    # --- 2) Package / binary, per detected method --------------------------
     foreach ($m in $detected) {
         switch -Wildcard ($m) {
             'uv tool' { Write-Info 'Removing uv tool...';   Invoke-Step 'uv tool uninstall clauster'   { & uv tool uninstall clauster } }
@@ -206,7 +252,7 @@ function Uninstall-Clauster {
         }
     }
 
-    # --- 2) Preserve config / data on request ------------------------------
+    # --- 3) Preserve config / data on request ------------------------------
     $backupDir = Join-Path $env:USERPROFILE 'clauster-uninstall-backup'
     function Save-Aside([string]$src, [string]$label) {
         if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { return }
@@ -215,10 +261,19 @@ function Uninstall-Clauster {
         Move-Item -LiteralPath $src -Destination $backupDir -Force
         Write-Ok "Kept ${label}: $backupDir\$(Split-Path -Leaf $src)"
     }
+    function Save-AsideDir([string]$src, [string]$label) {
+        if (-not (Test-Path -LiteralPath $src -PathType Container)) { return }
+        if ($DryRun) { Write-Host "  would keep ${label}: move $src -> $backupDir\"; return }
+        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        Move-Item -LiteralPath $src -Destination $backupDir -Force
+        Write-Ok "Kept ${label}: $backupDir\$(Split-Path -Leaf $src)"
+    }
     if ($KeepConfig -and $configExists) { Save-Aside $configPath 'config' }
     if ($KeepData) { Save-Aside (Join-Path $stateDir 'clauster.db') 'database' }
+    # Move side-installed deps aside BEFORE the whole state_dir is removed below, so they survive.
+    if ($KeepDeps) { Save-AsideDir $depsDir 'side-installed deps' }
 
-    # --- 3) State directory (guarded) --------------------------------------
+    # --- 4) State directory (guarded) --------------------------------------
     if ($stateExists) {
         if (Test-StateDirSafe $stateDir) {
             # Removed WHOLE in both modes: with -KeepData the DB was already moved to the
@@ -234,7 +289,7 @@ function Uninstall-Clauster {
         }
     }
 
-    # --- 4) Config yaml (unless kept / already moved aside) ----------------
+    # --- 5) Config yaml (unless kept / already moved aside) ----------------
     if (-not $KeepConfig -and $configExists -and (Test-Path -LiteralPath $configPath)) {
         Write-Info 'Removing config file...'
         Remove-Target $configPath
