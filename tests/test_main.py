@@ -1110,3 +1110,19 @@ def test_install_service_windows_write_rollback_delete_failure_is_surfaced(monke
     monkeypatch.setattr(cli.subprocess, "run", run)
     assert cli.main(["install-service", "windows", "--write"]) == 1
     assert "could not roll back" in capsys.readouterr().err
+
+
+def test_install_service_windows_write_rollback_spawn_error_is_surfaced(monkeypatch, capsys):
+    # If the rollback `sc delete` itself can't even launch (OSError), the helper must not raise —
+    # surface the manual-cleanup step instead of a traceback escaping an already-failing path.
+    monkeypatch.setattr(cli, "_shawl_available", lambda _sd: True)
+
+    def run(argv, **_k):
+        if argv == ["sc", "delete", "Clauster"]:
+            raise FileNotFoundError("sc")  # rollback spawn fails
+        rc = 1 if argv[:2] == ["sc", "config"] else 0  # add ok, config fails → triggers rollback
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="boom")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    assert cli.main(["install-service", "windows", "--write"]) == 1
+    assert "could not roll back" in capsys.readouterr().err

@@ -987,17 +987,23 @@ def _rollback_windows_service(*, created: bool) -> None:
     """
     if not created:
         return
-    result = subprocess.run(  # noqa: S603, S607 - fixed argv, `sc` is a System32 binary
-        ["sc", "delete", "Clauster"], capture_output=True, text=True, check=False
+    manual = (
+        "clauster: could not roll back the partial 'Clauster' service — remove it with "
+        "`sc delete Clauster` (elevated) before retrying."
     )
+    try:
+        result = subprocess.run(  # noqa: S603, S607 - fixed argv, `sc` is a System32 binary
+            ["sc", "delete", "Clauster"], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        # The rollback itself couldn't even launch `sc` — surface the manual step, never let this
+        # helper raise (it runs on an already-failing path and must not mask the real error).
+        print(manual, file=sys.stderr)
+        return
     if result.returncode == 0:
         print("clauster: rolled back the partially-registered service.", file=sys.stderr)
     else:
-        print(
-            "clauster: could not roll back the partial 'Clauster' service — remove it with "
-            "`sc delete Clauster` (elevated) before retrying.",
-            file=sys.stderr,
-        )
+        print(manual, file=sys.stderr)
 
 
 def _reap_environments(config_path: str | None, archive: bool, force_delete: bool) -> int:
