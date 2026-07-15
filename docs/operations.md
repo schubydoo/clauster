@@ -428,6 +428,37 @@ clauster keepers -c /etc/clauster/clauster.yml --kill 12345 # stop one by keeper
 keeper still attached to a card. On success it stops the keeper (and its bridge
 subtree) and removes the stale sidecar.
 
+### `clauster deps` — inspect and manage optional extras
+
+A few capabilities live behind optional `pip` **extras** the signed standalone
+binary deliberately does not bundle (`pty` → `pyte`/`pywinpty`, `notify` →
+`apprise`; see [Optional extras](installation.md#standalone-binary-no-python)).
+`clauster deps` reports their status and manages a side-install beside the binary:
+
+```sh
+clauster deps list                 -c /etc/clauster/clauster.yml  # status of every extra
+clauster deps install pty          -c /etc/clauster/clauster.yml  # fetch into <state_dir>/deps
+clauster deps uninstall pty        -c /etc/clauster/clauster.yml  # remove it again
+```
+
+`deps list` reports each extra as **loaded** (importable now), **installed**
+(present in the managed dir, pending a restart), **missing**, or **n/a** (a
+platform-only extra such as `pywinpty` off Windows).
+
+`deps install <extra>` fetches the extra's wheels into a managed `<state_dir>/deps`
+directory that the standalone binary adds to its import path at startup, so the
+capability loads on the next restart (a normal `pip`/`uv` install resolves extras
+the usual way and doesn't need this). Because those wheels come from PyPI and are
+**not** covered by the release signature, the command prints an explicit notice and
+requires confirmation before downloading (`--yes` skips the prompt); it never
+auto-installs. Installing needs `pip` importable on the running interpreter — that
+holds in a `pip`/`uv`/`pipx` install today, and the standalone binary gains the
+in-place installer with its bundled-`pip` build ([#904](https://github.com/schubydoo/clauster/issues/904));
+until then, on the binary you can `pip install --target=<state_dir>/deps <dist>`
+from any Python and it is picked up on the next start just the same. `deps uninstall
+<extra>` removes the extra's own distribution from the managed dir (shared transitive
+dependencies are left in place).
+
 ### Recovering from a corrupted state database
 
 Runtime state lives in the SQLite `clauster.db` under your `state_dir` (the live

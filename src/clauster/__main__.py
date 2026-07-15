@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 import uvicorn
 
-from . import __version__, claude_cli, environments, ops, pty_keeper, usage
+from . import __version__, claude_cli, deps, environments, ops, pty_keeper, usage
 from .app import create_app
 from .auth import hash_password, make_hasher, mint_metrics_token, mint_token
 from .config import (
@@ -69,6 +69,7 @@ _COMMANDS = {
     "keepers",
     "usage",
     "config",
+    "deps",
     "mcp",
     "api-token",
     "projects",
@@ -200,6 +201,27 @@ def main(argv: list[str] | None = None) -> int:
         help="apply the proposed replacements non-interactively (no prompts)",
     )
 
+    # deps: manage optional pip extras for the standalone binary (#904). The binary can't
+    # pip-install into itself, so `deps install <extra>` side-installs the extra's wheels into
+    # <state_dir>/deps, which the server adds to sys.path at startup (frozen only).
+    deps_p = sub.add_parser("deps", help="manage optional extras for the standalone binary")
+    deps_sub = deps_p.add_subparsers(dest="deps_command")
+    deps_list_p = deps_sub.add_parser("list", help="show optional extras + their status")
+    deps_list_p.add_argument("-c", "--config", help="path to clauster.yml")
+    deps_install_p = deps_sub.add_parser(
+        "install", help="side-install an extra's wheels beside the binary"
+    )
+    deps_install_p.add_argument("-c", "--config", help="path to clauster.yml")
+    deps_install_p.add_argument(
+        "extra", choices=deps.extra_names(), help="extra to install (e.g. pty, notify)"
+    )
+    deps_install_p.add_argument(
+        "--yes", action="store_true", help="skip the provenance confirmation prompt"
+    )
+    deps_uninstall_p = deps_sub.add_parser("uninstall", help="remove a side-installed extra")
+    deps_uninstall_p.add_argument("-c", "--config", help="path to clauster.yml")
+    deps_uninstall_p.add_argument("extra", choices=deps.extra_names(), help="extra to remove")
+
     mcp_p = sub.add_parser(
         "mcp", help="run the read-only MCP server over stdio (list + status, #527)"
     )
@@ -312,6 +334,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.config_command == "reconcile":
             return _reconcile(args.config, dry_run=args.dry_run, assume_yes=args.yes)
         config_p.print_help(sys.stderr)
+        return 2
+    if args.command == "deps":
+        if args.deps_command == "list":
+            return _deps_list(args.config)
+        if args.deps_command == "install":
+            return _deps_install(args.config, args.extra, assume_yes=args.yes)
+        if args.deps_command == "uninstall":
+            return _deps_uninstall(args.config, args.extra)
+        deps_p.print_help(sys.stderr)
         return 2
     if args.command == "mcp":
         # Imported lazily so the common `run` path never pays for the MCP server's
@@ -584,6 +615,43 @@ def _load_or_exit(config_path: str | None):
     except (FileNotFoundError, ValueError) as exc:
         print(f"clauster: config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
+
+
+def _deps_list(config_path: str | None) -> int:
+    """List each optional extra: capability, whether it's importable, and any managed version.
+
+    ``loaded`` = importable now (installed or already on ``sys.path``); ``installed`` = present in
+    ``<state_dir>/deps`` but pending a restart; ``missing`` = absent; ``n/a`` = a platform-scoped
+    entry (e.g. ``pywinpty``) that doesn't apply here. The table goes to stdout so it can be piped.
+    """
+    config = _load_or_exit(config_path)
+    installed = deps.installed_versions(config.state_dir)
+    print(f"{'EXTRA':<8} {'DIST':<10} {'STATUS':<10} DETAIL")
+    for name in deps.extra_names():
+        for entry in deps.extras_for(name):
+            if not deps.applies(entry):
+                status, detail = "n/a", f"{entry.capability_label} (other platform)"
+            elif deps.probe(entry):
+                status, detail = "loaded", entry.capability_label
+            elif version := installed.get(deps.canonical_name(entry.dist)):
+                status = "installed"
+                detail = f"{entry.capability_label} — {version} in deps dir; restart to load"
+            else:
+                status, detail = "missing", entry.capability_label
+            print(f"{name:<8} {entry.dist:<10} {status:<10} {detail}")
+    return 0
+
+
+def _deps_install(config_path: str | None, extra: str, *, assume_yes: bool) -> int:
+    """Side-install ``extra``'s wheels into the managed deps dir (delegates to :mod:`deps`)."""
+    config = _load_or_exit(config_path)
+    return deps.install_extra(extra, config.state_dir, assume_yes=assume_yes)
+
+
+def _deps_uninstall(config_path: str | None, extra: str) -> int:
+    """Remove ``extra``'s side-installed wheels from the managed deps dir."""
+    config = _load_or_exit(config_path)
+    return deps.uninstall_extra(extra, config.state_dir)
 
 
 def _backup(config_path: str | None, output: str) -> int:
@@ -1129,6 +1197,11 @@ def _run(config_path: str | None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         print(f"clauster: config error: {exc}", file=sys.stderr)
         return 2
+
+    # Put any side-installed optional extras (`clauster deps install <extra>`, #904) on sys.path
+    # before create_app imports anything that needs them. Frozen-binary-only + best-effort — a
+    # no-op on a normal install, where extras resolve through site-packages.
+    deps.add_deps_dir_to_sys_path(config.state_dir)
 
     try:
         version = claude_cli.claude_version(config.claude.binary)

@@ -11,7 +11,7 @@ Key modules under `src/clauster/`:
 | Module | Responsibility |
 | --- | --- |
 | `app.py` | FastAPI app factory; routes, middleware, cookie/session/WS wiring. |
-| `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `api-token` (`issue`/`list`/`rotate`/`revoke`), `mcp`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`, `config` (with `config reconcile`), and the headless session commands `start`/`stop`/`status`/`sessions`/`projects`/`logs`/`open`). |
+| `__main__.py` | CLI entry point and subcommands (`run`, `hash-password`, `hash-token`, `hash-metrics-token`, `api-token` (`issue`/`list`/`rotate`/`revoke`), `mcp`, `doctor`, `backup`/`restore`/`migrate`, `install-service`, `reap-environments`, `keepers`, `usage`, `config` (with `config reconcile`), `deps` (`list`/`install`/`uninstall` optional extras), and the headless session commands `start`/`stop`/`status`/`sessions`/`projects`/`logs`/`open`). |
 | `runner.py` | `SessionRunner` — spawn / stop / observe **standard** `claude remote-control` bridges. |
 | `pty_keeper.py` | Sidecar that owns a true-resume (**pty**) bridge's PTY. |
 | `discovery.py` | Project discovery under `projects_root`; `~/.claude.json` paths. |

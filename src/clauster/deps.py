@@ -13,9 +13,16 @@ without importing it: no LGPL relinking, no import side effects, no import cost.
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from email.message import Message
 
 
 def is_frozen() -> bool:
@@ -120,3 +127,285 @@ def install_hint(entry: Extra) -> str:
         # exists on the frozen binary yet — so callers render it WITHOUT a "run" imperative.
         return "not bundled in the standalone binary; see the install docs"
     return f"pip install 'clauster[{entry.extra_name}]'"
+
+
+# ----- managed side-install for the frozen binary (#904 slice 2) -----------
+#
+# The standalone binary can't ``pip install`` an extra into itself and ignores
+# site-packages, so ``clauster deps install <extra>`` fetches the extra's wheels
+# into a managed ``<state_dir>/deps`` directory that :func:`add_deps_dir_to_sys_path`
+# puts on ``sys.path`` at startup. All pure-Python orchestration lives here (the
+# pip invocation is a monkeypatchable seam); the CLI wiring is in ``__main__``.
+
+DEPS_SUBDIR = "deps"
+
+#: Shown before any managed install: the wheels come from PyPI, NOT the signed
+#: release, so the operator is trusting PyPI + the publishers directly. Printing
+#: this and requiring confirmation keeps the provenance boundary honest and keeps
+#: LGPL ``pyte`` in a separate user directory that is never relinked into the binary.
+PROVENANCE_NOTICE = (
+    "This downloads third-party wheels from the Python Package Index into a managed\n"
+    "directory beside your Clauster state. They are NOT covered by the Clauster release\n"
+    "signature — installing them means trusting PyPI and the wheel publishers directly."
+)
+
+
+class DepsPipUnavailableError(RuntimeError):
+    """Raised when pip can't be imported to drive a managed side-install.
+
+    The frozen binary will bundle pip once #904 slice 2b lands; until then (and on any
+    stripped/older build) pip is absent, so this surfaces with a clear fallback hint.
+    """
+
+
+def managed_deps_dir(state_dir: str | Path) -> Path:
+    """Return the managed side-install directory ``<state_dir>/deps``.
+
+    Single source of truth for where ``deps install`` writes and where
+    :func:`add_deps_dir_to_sys_path` looks, so the two can never drift apart.
+    """
+    return Path(state_dir).expanduser() / DEPS_SUBDIR
+
+
+def extra_names() -> tuple[str, ...]:
+    """Return the distinct pip-extra names in registry order (e.g. ``("pty", "notify")``)."""
+    ordered: list[str] = []
+    for entry in EXTRAS:
+        if entry.extra_name not in ordered:
+            ordered.append(entry.extra_name)
+    return tuple(ordered)
+
+
+def extras_for(extra_name: str) -> tuple[Extra, ...]:
+    """Return every registered :class:`Extra` belonging to ``extra_name`` (all platforms).
+
+    Platform filtering is the caller's job (via :func:`applies`) so ``deps list`` can show a
+    Windows-only entry on Linux while ``deps install`` skips it — see the two call sites.
+    """
+    return tuple(entry for entry in EXTRAS if entry.extra_name == extra_name)
+
+
+def canonical_name(name: str) -> str:
+    """Return a PEP 503-canonicalised distribution name for case/separator-insensitive matching.
+
+    Mirrors PEP 503 normalisation (lowercase; runs of ``-``, ``_``, ``.`` collapse to a
+    single ``-``) so a RECORD's ``Name`` matches our registry's ``dist`` regardless of how
+    the wheel spelled it.
+    """
+    out = []
+    prev_dash = False
+    for ch in name.lower():
+        if ch in "-_.":
+            if not prev_dash:
+                out.append("-")
+            prev_dash = True
+        else:
+            out.append(ch)
+            prev_dash = False
+    return "".join(out).strip("-")
+
+
+def add_deps_dir_to_sys_path(state_dir: str | Path) -> None:
+    """Append the managed deps dir to ``sys.path`` so side-installed extras import (frozen only).
+
+    Generalises the ``pyte`` env-var shim (``pty_screen._maybe_add_external_pyte_path``) to the
+    managed ``<state_dir>/deps`` directory that ``clauster deps install`` populates. Frozen-only:
+    a normal pip/uv install resolves extras through site-packages, so the managed dir is consulted
+    only for the standalone binary, which ignores site-packages. APPEND (never prepend) so a
+    bundled/installed copy always wins and the side-install is a fallback — matching the pyte shim.
+    Best-effort: a missing dir or an ``expanduser``/OS error is swallowed, never raised from the
+    startup path.
+    """
+    if not is_frozen():
+        return
+    try:
+        target = managed_deps_dir(state_dir)
+        if not target.is_dir():
+            return
+        path_str = str(target)
+    except (OSError, RuntimeError):
+        return
+    if path_str not in sys.path:
+        sys.path.append(path_str)
+
+
+def _dist_name(dist: importlib.metadata.Distribution) -> str | None:
+    """Return a distribution's ``Name`` header, or ``None`` if absent.
+
+    Reads through the underlying :class:`email.message.Message` via ``.get`` — the safe accessor
+    that returns ``None`` for a missing header. (``metadata["Name"]`` returns ``None`` too but is
+    deprecated for it, and ``PackageMetadata`` doesn't type ``.get`` — hence the cast.)
+    """
+    return cast("Message", dist.metadata).get("Name")
+
+
+def installed_versions(state_dir: str | Path) -> dict[str, str]:
+    """Return ``{canonical dist name: version}`` for distributions in the managed deps dir.
+
+    Reads wheel metadata from ``<state_dir>/deps`` via :func:`importlib.metadata.distributions`
+    (scoped to that path, so nothing from the ambient environment leaks in). An absent directory
+    yields ``{}``; a distribution with no ``Name`` is skipped rather than crashing the listing.
+    """
+    target = managed_deps_dir(state_dir)
+    if not target.is_dir():
+        return {}
+    found: dict[str, str] = {}
+    for dist in importlib.metadata.distributions(path=[str(target)]):
+        name = _dist_name(dist)
+        if name:
+            found[canonical_name(name)] = dist.version
+    return found
+
+
+def _default_pip_main(argv: list[str]) -> int:
+    """Run pip in-process via its private CLI entry, returning pip's exit code.
+
+    Uses ``pip._internal.cli.main.main`` rather than ``runpy.run_module("pip")``: even once pip
+    is bundled, PyInstaller collects pip's modules but not the dynamically imported
+    ``pip.__main__``, so ``runpy`` fails in-frozen while the private entry works both frozen and
+    unfrozen (spike, 2026-07-14). The frozen binary does NOT bundle pip yet — that arrives with
+    the ``--collect-all pip`` spec change in #904 slice 2b — so on today's binary this raises
+    :class:`DepsPipUnavailableError`, which the caller turns into a clean error + fallback hint.
+    The private API is pinned at build time — guard it.
+    """
+    # import_module (not a static import) keeps pip out of the declared dependency graph:
+    # it's bundled into the frozen binary at build time and present in a dev env, but is not
+    # a runtime requirement of the wheel, so a static import would be an unresolved reference.
+    try:
+        pip_cli = importlib.import_module("pip._internal.cli.main")
+    except ImportError as exc:  # pip genuinely absent (stripped/older frozen build)
+        raise DepsPipUnavailableError(
+            "pip is unavailable to install extras — reinstall Clauster from a Python "
+            "environment with pip, or use `pip install 'clauster[...]'` directly."
+        ) from exc
+    return int(pip_cli.main(argv))
+
+
+def install_extra(
+    extra_name: str,
+    state_dir: str | Path,
+    *,
+    assume_yes: bool = False,
+    pip_main: Callable[[list[str]], int] | None = None,
+    confirm: Callable[[str], str] = input,
+) -> int:
+    """Side-install ``extra_name``'s wheels into the managed deps dir; return an exit code.
+
+    Prints the :data:`PROVENANCE_NOTICE` and requires confirmation (unless ``assume_yes``) before
+    fetching anything — never auto-installs. Platform-irrelevant entries are skipped via
+    :func:`applies` (so ``deps install pty`` pulls only ``pyte`` on Linux, ``pyte`` + ``pywinpty``
+    on Windows). ``pip_main``/``confirm`` are seams for testing. Exit codes: ``2`` unknown extra,
+    ``1`` declined / mkdir or pip failure, ``0`` installed.
+    """
+    if extra_name not in extra_names():
+        _err(f"unknown extra {extra_name!r}; choose from {', '.join(extra_names())}")
+        return 2
+    dists = [entry.dist for entry in extras_for(extra_name) if applies(entry)]
+    target = managed_deps_dir(state_dir)
+    print(PROVENANCE_NOTICE, file=sys.stderr)
+    _err(f"will install {', '.join(dists)} into {target}")
+    if not assume_yes:
+        try:
+            reply = confirm("Proceed? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            # No usable stdin (piped/closed) or Ctrl-C: fail closed — treat as a decline.
+            reply = ""
+        if reply.strip().lower() not in ("y", "yes"):
+            _err("aborted — nothing installed")
+            return 1
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _err(f"could not create {target}: {exc}")
+        return 1
+    runner = pip_main or _default_pip_main
+    # --upgrade so a re-install into an existing --target dir refreshes rather than erroring.
+    argv = ["install", "--target", str(target), "--upgrade", *dists]
+    try:
+        rc = runner(argv)
+    except DepsPipUnavailableError as exc:
+        _err(str(exc))
+        return 1
+    if rc != 0:
+        _err(f"pip install failed (exit {rc})")
+        return 1
+    _err(f"installed {extra_name} into {target} — restart Clauster to load the new capability.")
+    return 0
+
+
+def uninstall_extra(extra_name: str, state_dir: str | Path) -> int:
+    """Remove ``extra_name``'s distributions from the managed deps dir; return an exit code.
+
+    pip can't uninstall from a ``--target`` directory, so removal is manual: each matching
+    distribution's RECORD files are deleted and the emptied directories pruned (never above the
+    managed dir). Only the extra's own top-level distribution(s) are removed — shared/transitive
+    dependencies stay (removing them safely needs a dependency graph; the bulk uninstaller that
+    clears the whole managed dir is #904 slice 2b). Exit codes: ``2`` unknown extra, ``0``
+    otherwise (removing an absent extra is a no-op, not an error — the end state already holds).
+    """
+    if extra_name not in extra_names():
+        _err(f"unknown extra {extra_name!r}; choose from {', '.join(extra_names())}")
+        return 2
+    target = managed_deps_dir(state_dir)
+    wanted = {canonical_name(entry.dist) for entry in extras_for(extra_name)}
+    removed: list[str] = []
+    if target.is_dir():
+        for dist in importlib.metadata.distributions(path=[str(target)]):
+            name = _dist_name(dist)
+            if name and canonical_name(name) in wanted:
+                _remove_distribution(dist, target)
+                removed.append(name)
+    if not removed:
+        _err(f"{extra_name} is not installed in {target}")
+        return 0
+    _err(f"removed {', '.join(removed)} from {target}")
+    return 0
+
+
+def _remove_distribution(dist: importlib.metadata.Distribution, target: Path) -> None:
+    """Delete every RECORD file of ``dist`` under ``target`` and prune emptied directories.
+
+    Best-effort per file (an already-absent or unreadable file is skipped, not fatal — the goal
+    is convergence on "gone"), then empty parent directories are pruned bottom-up, never climbing
+    above ``target``.
+    """
+    dirs: set[Path] = set()
+    boundary = target.resolve()
+    for rel in dist.files or []:
+        located = Path(str(dist.locate_file(rel)))
+        # Containment guard: a tampered RECORD could list a `../`-escaping path. Never unlink
+        # anything that resolves outside the managed dir — mirrors _prune_empty_dirs' boundary
+        # (defense-in-depth; the provenance gate is the first line, this is the second).
+        try:
+            resolved = located.resolve()
+        except OSError:
+            continue
+        if boundary != resolved and boundary not in resolved.parents:
+            continue
+        try:
+            located.unlink()
+        except OSError:
+            pass  # already gone / unreadable — best-effort removal
+        dirs.add(located.parent)
+    for directory in sorted(dirs, key=lambda d: len(str(d)), reverse=True):
+        _prune_empty_dirs(directory, stop=target)
+
+
+def _prune_empty_dirs(directory: Path, *, stop: Path) -> None:
+    """Remove ``directory`` and empty parents, walking up but never past ``stop``."""
+    try:
+        current = directory.resolve()
+        boundary = stop.resolve()
+    except OSError:
+        return
+    while current != boundary and boundary in current.parents:
+        try:
+            current.rmdir()  # only succeeds on an empty directory
+        except OSError:
+            break
+        current = current.parent
+
+
+def _err(message: str) -> None:
+    """Print a ``clauster:``-prefixed message to stderr (CLI convention: prose on stderr)."""
+    print(f"clauster: {message}", file=sys.stderr)

@@ -895,3 +895,77 @@ def test_cookie_warning_silent_behind_tls_reverse_proxy(projects_root, capsys):
     config.auth.reverse_proxy.enabled = True
     cli._warn_if_cookie_insecure(config)
     assert "WARNING" not in capsys.readouterr().err
+
+
+# ----- deps: optional-extras lifecycle (#904 slice 2a) ------------------
+
+
+def test_deps_list_runs_and_prints_table(write_config, tmp_path, capsys):
+    rc = cli.main(["deps", "list", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "EXTRA" in out and "DIST" in out
+    assert "apprise" in out  # the notify extra's dist always appears in the listing
+
+
+def test_deps_install_delegates_to_deps_module(write_config, tmp_path, monkeypatch):
+    calls = {}
+
+    def _stub(extra, state_dir, *, assume_yes):
+        calls.update(extra=extra, state_dir=str(state_dir), assume_yes=assume_yes)
+        return 0
+
+    monkeypatch.setattr(cli.deps, "install_extra", _stub)
+    rc = cli.main(["deps", "install", "notify", "-c", _cfg(write_config, tmp_path), "--yes"])
+    assert rc == 0
+    assert calls["extra"] == "notify"
+    assert calls["assume_yes"] is True
+    assert calls["state_dir"].endswith(".cstate")  # resolved from config, not a literal
+
+
+def test_deps_uninstall_delegates_to_deps_module(write_config, tmp_path, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        cli.deps, "uninstall_extra", lambda extra, state_dir: calls.update(extra=extra) or 0
+    )
+    rc = cli.main(["deps", "uninstall", "notify", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 0
+    assert calls["extra"] == "notify"
+
+
+def test_deps_no_subcommand_prints_help_and_returns_2(capsys):
+    rc = cli.main(["deps"])
+    assert rc == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_deps_install_rejects_unknown_extra(write_config, tmp_path):
+    # argparse `choices` rejects an unknown extra before any handler runs (exit 2).
+    with pytest.raises(SystemExit) as ei:
+        cli.main(["deps", "install", "bogus", "-c", _cfg(write_config, tmp_path)])
+    assert ei.value.code == 2
+
+
+def test_run_puts_side_installed_extras_on_sys_path(write_config, tmp_path, monkeypatch):
+    # `run` must add <state_dir>/deps to sys.path (frozen-only, inside deps.add_...) BEFORE
+    # create_app imports anything that needs an extra. Assert the wiring calls it once.
+    _stub_server(monkeypatch)
+    seen = []
+    monkeypatch.setattr(cli.deps, "add_deps_dir_to_sys_path", lambda sd: seen.append(str(sd)))
+    rc = cli.main(["run", "-c", _cfg(write_config, tmp_path)])
+    assert rc == 0
+    assert len(seen) == 1 and seen[0].endswith(".cstate")
+
+
+def test_deps_list_reports_installed_but_not_loaded(write_config, tmp_path, capsys):
+    # A dist present in <state_dir>/deps but not importable shows "installed …; restart to load".
+    cfg = _cfg(write_config, tmp_path)
+    info = tmp_path / ".cstate" / "deps" / "apprise-1.9.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: apprise\nVersion: 1.9.0\n", encoding="utf-8"
+    )
+    rc = cli.main(["deps", "list", "-c", cfg])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "installed" in out and "1.9.0" in out and "restart to load" in out
