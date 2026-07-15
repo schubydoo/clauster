@@ -689,7 +689,8 @@ def test_default_fetch_reads_https(monkeypatch):
         def __exit__(self, *a):
             return False
 
-        def read(self):
+        def read(self, amt=None):  # the cap arg is passed now (_MAX_FETCH_BYTES)
+            assert amt == deps._MAX_FETCH_BYTES
             return b"PAYLOAD"
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=60: _Resp())

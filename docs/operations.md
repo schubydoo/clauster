@@ -458,9 +458,22 @@ distribution from the managed dir (shared transitive dependencies are left in pl
 `clauster deps install shawl` (Windows only) is the same mechanism for a **binary**
 dependency: it downloads the pinned [Shawl](https://github.com/mtkennerly/shawl)
 service wrapper from its GitHub release, verifies it against a hardcoded SHA-256, and
-places `shawl.exe` under `<state_dir>/deps/bin`. `clauster install-service windows`
-then wraps Clauster as a service with it (`shawl add … -- clauster run -c <cfg>`) — so
-Windows service install needs Shawl present (doctor's `binary:shawl` row confirms it).
+places `shawl.exe` under `<state_dir>/deps/bin`.
+
+**Installing Clauster as a Windows service is two steps, in order:**
+
+```powershell
+clauster deps install shawl -c C:\clauster\clauster.yml     # 1. fetch the Shawl wrapper
+clauster install-service windows -c C:\clauster\clauster.yml --write install-clauster.bat
+.\install-clauster.bat                                       # 2. run elevated: registers + starts
+```
+
+Step 2's generated script wraps Clauster with the managed Shawl (`shawl add --name
+Clauster … -- clauster run -c <cfg>`, then `sc start`), so it needs Shawl from step 1
+present — `clauster install-service windows` warns if it isn't, and `clauster doctor`
+shows a `binary:shawl` row. The Windows uninstaller (`uninstall.ps1`) stops and
+deletes the `Clauster` service before removing the binary, so nothing is left pointing
+at a removed executable.
 
 ### Recovering from a corrupted state database
 

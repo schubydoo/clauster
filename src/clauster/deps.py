@@ -153,8 +153,9 @@ PROVENANCE_NOTICE = (
 class DepsPipUnavailableError(RuntimeError):
     """Raised when pip can't be imported to drive a managed side-install.
 
-    The frozen binary will bundle pip once #904 slice 2b lands; until then (and on any
-    stripped/older build) pip is absent, so this surfaces with a clear fallback hint.
+    The frozen binary bundles pip (``clauster.spec`` ``collect_all("pip")``), so this normally
+    can't happen there; it surfaces only on a stripped/older build — or a non-frozen environment
+    that lacks pip — with a clear fallback hint.
     """
 
 
@@ -260,11 +261,11 @@ def installed_versions(state_dir: str | Path) -> dict[str, str]:
 def _default_pip_main(argv: list[str]) -> int:
     """Run pip in-process via its private CLI entry, returning pip's exit code.
 
-    Uses ``pip._internal.cli.main.main`` rather than ``runpy.run_module("pip")``: even once pip
-    is bundled, PyInstaller collects pip's modules but not the dynamically imported
-    ``pip.__main__``, so ``runpy`` fails in-frozen while the private entry works both frozen and
-    unfrozen (spike, 2026-07-14). The frozen binary does NOT bundle pip yet — that arrives with
-    the ``--collect-all pip`` spec change in #904 slice 2b — so on today's binary this raises
+    Uses ``pip._internal.cli.main.main`` rather than ``runpy.run_module("pip")``: PyInstaller
+    collects pip's modules (via ``clauster.spec`` ``collect_all("pip")``) but not the dynamically
+    imported ``pip.__main__``, so ``runpy`` fails in-frozen while the private entry works both
+    frozen and unfrozen (spike, 2026-07-14). The frozen binary bundles pip, so this resolves there;
+    a stripped/older build (or a non-frozen env without pip) raises
     :class:`DepsPipUnavailableError`, which the caller turns into a clean error + fallback hint.
     The private API is pinned at build time — guard it.
     """
@@ -515,18 +516,25 @@ def installed_binary_path(key: str, state_dir: str | Path) -> Path | None:
     return dest if dest.is_file() else None
 
 
+#: Upper bound on a managed-binary download (Shawl's win64 zip is ~1.3 MB). A body larger than this
+#: is truncated by the capped read → its SHA-256 won't match → refused; the cap only bounds memory
+#: so a misbehaving (but cert-valid) endpoint can't stream an unbounded body in.
+_MAX_FETCH_BYTES = 64 * 1024 * 1024
+
+
 def _default_fetch(url: str) -> bytes:
     """Fetch ``url`` over HTTPS and return the body (a monkeypatchable seam for tests).
 
     The URL is a hardcoded ``https`` GitHub release constant (never user input) and the payload is
-    SHA-256-verified by the caller, so an ``urlopen`` here is not an injection/SSRF surface.
+    SHA-256-verified by the caller, so an ``urlopen`` here is not an injection/SSRF surface. The
+    read is capped at :data:`_MAX_FETCH_BYTES` to bound memory (an over-cap body fails the sha256).
     """
     import urllib.request
 
     if not url.startswith("https://"):  # defensive: only ever fetch our pinned https release URLs
         raise ValueError(f"refusing to fetch non-https url: {url}")
     with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - pinned https, sha256-verified
-        return resp.read()
+        return resp.read(_MAX_FETCH_BYTES)
 
 
 def install_binary_dep(
