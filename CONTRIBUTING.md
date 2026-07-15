@@ -102,7 +102,7 @@ reading the bridge debug log, the `KillMode` restart caveat, and backup/recovery
 Clauster **self-hosts** its front-end dependencies (no CDN) so the dashboard works
 on an air-gapped / loopback deploy and `script-src` / `connect-src` stay `'self'`.
 Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/static/vendor)
-(Alpine is the one exception — it sits flat at `static/alpine.min.js`). To add or update one:
+(Alpine is the one exception — it sits flat at `static/alpine.csp.min.js`). To add or update one:
 
 1. **Fetch the published dist** — `npm pack <pkg>@<version>` then `tar xzf` and copy the
    prebuilt files in (mirror an existing layout, e.g. `vendor/tabler/{css,js}/`). Don't

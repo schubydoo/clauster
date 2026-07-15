@@ -22,8 +22,9 @@ keeper, not Clauster, must hold the master fd. The keeper:
 
 Discovery is file-based and stop is a signal to the bridge pid, so Clauster
 needs no socket to the keeper: a restarted Clauster re-reads the sidecar and
-stops the bridge with ``SIGINT`` (twice — see :mod:`clauster.runner`). POSIX
-only; Windows has no ``pty`` and keeps the subcommand / recap path.
+stops the bridge with ``SIGINT`` (twice — see :mod:`clauster.runner`). The POSIX
+backend uses ``os.openpty``; Windows runs the same detached-keeper model over a
+ConPTY pseudo-console (pywinpty) — see :func:`_run_keeper_conpty`.
 """
 
 from __future__ import annotations
