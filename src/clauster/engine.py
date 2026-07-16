@@ -169,6 +169,23 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
             return None
         return await self._runner.stop(resolved)
 
+    async def resume(self, identity: str) -> RemoteControlInstance | None:
+        """Resume the stopped/crashed bridge resolved from ``identity``; ``None`` if none.
+
+        The headless mirror of ``POST /api/instances/{id}/resume`` for the bridge
+        channel: resolves the id / prefix / bridge identity exactly like :meth:`stop`
+        (so a resume targets the instance the operator named), then re-spawns it into
+        its prior conversation via :meth:`~clauster.runner.SessionRunner.resume`, which
+        reuses the instance's stored spawn/permission/resume modes. A headless caller
+        must :meth:`hydrate` first so the registry is populated for the resolve.
+        Bridge-scoped like the rest of the engine — hosted-session resume stays behind
+        the app's hosted manager, not this facade.
+        """
+        resolved = self._runner.resolve_bridge_id(identity)
+        if resolved is None:
+            return None
+        return await self._runner.resume(resolved)
+
     # -- connect url / logs ---------------------------------------------------
 
     def connect_url(self, identity: str) -> str | None:

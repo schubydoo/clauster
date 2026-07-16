@@ -85,14 +85,24 @@ def test_ping_returns_empty_result(server):
 # --------------------------------------------------------------------------- #
 # Protocol: tools/list
 # --------------------------------------------------------------------------- #
-def test_tools_list_exposes_exactly_the_two_readonly_tools(server):
+def test_tools_list_exposes_read_and_write_tools(server):
     resp = _handle(server, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = [t["name"] for t in resp["result"]["tools"]]
-    assert names == ["list_sessions", "session_status"]
+    # Read tools plus the #527 write slice (bridge channel).
+    assert names == [
+        "list_sessions",
+        "session_status",
+        "spawn_session",
+        "stop_session",
+        "resume_session",
+    ]
     for tool in resp["result"]["tools"]:
         assert tool["inputSchema"]["type"] == "object"
-    # No mutation tool is ever advertised (read-only v1 invariant).
-    assert not any(n in names for n in ("spawn_session", "stop_session", "resume_session"))
+    # The write tools declare their required fields (fail-closed schema).
+    by_name = {t["name"]: t for t in resp["result"]["tools"]}
+    assert by_name["spawn_session"]["inputSchema"]["required"] == ["project"]
+    assert by_name["stop_session"]["inputSchema"]["required"] == ["id"]
+    assert by_name["resume_session"]["inputSchema"]["required"] == ["id"]
 
 
 # --------------------------------------------------------------------------- #
@@ -187,11 +197,188 @@ def test_tools_call_unknown_tool_is_an_iserror_result(server):
             "jsonrpc": "2.0",
             "id": 7,
             "method": "tools/call",
-            "params": {"name": "spawn_session", "arguments": {}},
+            "params": {"name": "no_such_tool", "arguments": {}},
         },
     )
     assert resp["result"]["isError"] is True
     assert "unknown tool" in resp["result"]["content"][0]["text"]
+
+
+# --------------------------------------------------------------------------- #
+# Write tools (#527 write slice) — spawn / stop / resume over a fake engine
+# --------------------------------------------------------------------------- #
+class _FakeEngine:
+    """Stand-in for ClausterEngine: a sync CM with async start/stop/resume/hydrate.
+
+    Records the call it received (class attrs) so a test can assert the exact
+    params the tool threaded through; ``result``/``raise_with`` shape the outcome.
+    """
+
+    calls: dict = {}
+    hydrated_before_op = None
+    start_result = None
+    stop_result = None
+    resume_result = None
+    raise_with = None
+
+    def __init__(self, config, **kwargs):
+        type(self).calls = {}
+        type(self).hydrated_before_op = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return None
+
+    async def hydrate(self):
+        # Recorded separately so a later start/stop/resume (which replaces `calls`)
+        # can still be checked to have run AFTER hydrate.
+        type(self).hydrated_before_op = True
+
+    async def start(self, project, **kw):
+        type(self).calls = {"op": "start", "project": project, **kw}
+        if type(self).raise_with is not None:
+            raise type(self).raise_with
+        return type(self).start_result
+
+    async def stop(self, identity):
+        type(self).calls = {"op": "stop", "identity": identity}
+        if type(self).raise_with is not None:
+            raise type(self).raise_with
+        return type(self).stop_result
+
+    async def resume(self, identity):
+        type(self).calls = {"op": "resume", "identity": identity}
+        if type(self).raise_with is not None:
+            raise type(self).raise_with
+        return type(self).resume_result
+
+
+@pytest.fixture
+def fake_engine(monkeypatch):
+    """Patch the engine the write handlers import lazily from ``clauster.engine``."""
+    from clauster import engine as engine_mod
+
+    _FakeEngine.start_result = None
+    _FakeEngine.stop_result = None
+    _FakeEngine.resume_result = None
+    _FakeEngine.raise_with = None
+    monkeypatch.setattr(engine_mod, "ClausterEngine", _FakeEngine)
+    return _FakeEngine
+
+
+def _call(server, name, arguments):
+    return _handle(
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    )
+
+
+def _payload(resp):
+    """The parsed tool-result dict from a (non-error) tools/call response."""
+    assert resp["result"]["isError"] is False, resp["result"]["content"][0]["text"]
+    return json.loads(resp["result"]["content"][0]["text"])
+
+
+def _bridge(project="alpha", status="running", **kw):
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    return RemoteControlInstance(
+        project=project, label=project, status=InstanceStatus(status), **kw
+    )
+
+
+def test_spawn_session_threads_options_and_defaults_trust_false(server, fake_engine):
+    from clauster.runner import SpawnOutcome
+
+    fake_engine.start_result = SpawnOutcome(
+        instance=_bridge("alpha"), created=True, warnings=["w"]
+    )
+    resp = _call(
+        server,
+        "spawn_session",
+        {"project": "alpha", "resume_mode": "pty", "spawn_mode": "worktree"},
+    )
+    body = _payload(resp)
+    assert body["created"] is True
+    assert body["warnings"] == ["w"]
+    assert body["session"]["project"] == "alpha"
+    # The picked options reached the engine, and trust defaulted CLOSED (False).
+    assert fake_engine.calls["op"] == "start"
+    assert fake_engine.calls["project"] == "alpha"
+    assert fake_engine.calls["resume_mode"] == "pty"
+    assert fake_engine.calls["spawn_mode"] == "worktree"
+    assert fake_engine.calls["trust"] is False
+    assert fake_engine.hydrated_before_op is True  # hydrate ran before the spawn
+
+
+def test_spawn_session_requires_project(server, fake_engine):
+    resp = _call(server, "spawn_session", {})
+    assert resp["result"]["isError"] is True
+    assert "project" in resp["result"]["content"][0]["text"]
+
+
+def test_spawn_session_rejects_non_bool_trust(server, fake_engine):
+    resp = _call(server, "spawn_session", {"project": "alpha", "trust": "yes"})
+    assert resp["result"]["isError"] is True
+    assert "trust" in resp["result"]["content"][0]["text"]
+
+
+def test_spawn_session_rejects_non_string_option(server, fake_engine):
+    # A wire-type guard: a JSON number for an optional string field is refused
+    # before it can reach the runner (never coerced).
+    resp = _call(server, "spawn_session", {"project": "alpha", "spawn_mode": 7})
+    assert resp["result"]["isError"] is True
+    assert "spawn_mode" in resp["result"]["content"][0]["text"]
+
+
+def test_spawn_session_untrusted_surfaces_as_iserror(server, fake_engine):
+    from clauster.runner import NotTrusted
+
+    fake_engine.raise_with = NotTrusted("directory not trusted: /x")
+    resp = _call(server, "spawn_session", {"project": "alpha"})
+    assert resp["result"]["isError"] is True
+    assert "not trusted" in resp["result"]["content"][0]["text"]
+
+
+def test_stop_session_reports_stopped(server, fake_engine):
+    fake_engine.stop_result = _bridge("alpha", status="stopped")
+    body = _payload(_call(server, "stop_session", {"id": "alpha"}))
+    assert body["stopped"] is True
+    assert body["session"]["project"] == "alpha"
+    assert fake_engine.calls == {"op": "stop", "identity": "alpha"}
+
+
+def test_stop_session_unknown_id_reports_not_stopped(server, fake_engine):
+    fake_engine.stop_result = None
+    body = _payload(_call(server, "stop_session", {"id": "ghost"}))
+    assert body == {"stopped": False, "id": "ghost"}
+
+
+def test_resume_session_reports_resumed(server, fake_engine):
+    fake_engine.resume_result = _bridge("alpha", status="running")
+    body = _payload(_call(server, "resume_session", {"id": "alpha"}))
+    assert body["resumed"] is True
+    assert body["session"]["project"] == "alpha"
+    assert fake_engine.calls == {"op": "resume", "identity": "alpha"}
+
+
+def test_resume_session_unknown_id_reports_not_resumed(server, fake_engine):
+    fake_engine.resume_result = None
+    body = _payload(_call(server, "resume_session", {"id": "ghost"}))
+    assert body == {"resumed": False, "id": "ghost"}
+
+
+def test_stop_session_requires_id(server, fake_engine):
+    resp = _call(server, "stop_session", {})
+    assert resp["result"]["isError"] is True
+    assert "non-empty" in resp["result"]["content"][0]["text"]
 
 
 def test_tools_call_non_object_arguments_is_an_iserror_result(server):
@@ -298,7 +485,13 @@ def test_serve_handshake_then_tools_list_over_stdio(cfg):
     init = json.loads(writer.lines[0])
     assert init["result"]["serverInfo"]["name"] == "clauster"
     listed = json.loads(writer.lines[1])
-    assert [t["name"] for t in listed["result"]["tools"]] == ["list_sessions", "session_status"]
+    assert [t["name"] for t in listed["result"]["tools"]] == [
+        "list_sessions",
+        "session_status",
+        "spawn_session",
+        "stop_session",
+        "resume_session",
+    ]
     # Framing invariant: never an embedded newline inside a message.
     assert all("\n" not in line for line in writer.lines)
 
@@ -455,6 +648,35 @@ def test_handle_known_method_as_notification_gets_no_reply(server):
 def test_gather_sessions_empty_when_nothing_running(cfg):
     sessions = asyncio.run(mcp_server.gather_sessions(cfg))
     assert sessions == []
+
+
+def test_spawn_then_stop_over_real_engine(cfg, server, monkeypatch):
+    """End-to-end wiring: spawn_session really starts a bridge (fake claude), then
+    stop_session ends it — proving the tools drive the actual ClausterEngine, not
+    just a fake. ``trust: true`` accepts the per-project trust the same way the CLI
+    ``--trust`` does (the fixture trusts projects_root, not each subdir)."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+
+    spawned = _payload(_call(server, "spawn_session", {"project": "alpha", "trust": True}))
+    assert spawned["created"] is True
+    assert spawned["session"]["project"] == "alpha"
+    assert spawned["session"]["status"] == "running"
+
+    stopped = _payload(_call(server, "stop_session", {"id": "alpha"}))
+    assert stopped["stopped"] is True
+    assert stopped["session"]["project"] == "alpha"
+
+
+def test_spawn_untrusted_project_refused_over_real_engine(cfg, server, monkeypatch, tmp_path):
+    """spawn_session fails CLOSED on an untrusted directory: trust defaults False, so
+    the real NotTrusted from the runner surfaces as an isError result (no auto-trust)."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    # Point at an untrusted project the runner_config's claude.json never trusted.
+    (cfg.projects_root / "untrusted").mkdir(exist_ok=True)
+
+    resp = _call(server, "spawn_session", {"project": "untrusted"})
+    assert resp["result"]["isError"] is True
+    assert "trust" in resp["result"]["content"][0]["text"].lower()
 
 
 def test_gather_sessions_includes_persisted_bridge(cfg):

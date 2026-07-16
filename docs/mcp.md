@@ -5,11 +5,17 @@ server over stdio, so an MCP client — Claude Desktop, Claude Code, or any othe
 MCP host — can ask Clauster about its sessions through tools instead of the web
 UI.
 
-This is the **read-only v1** (issue #527). It exposes two tools that *report*
-session state and nothing that changes it: there is no spawn / stop / resume and
-no token auth in this version. Those are deliberately deferred to a follow-up.
-The server reuses the same read machinery the dashboard's `/api` routes use, so
-it sees exactly what the dashboard sees.
+It exposes **read** tools (`list_sessions`, `session_status`) that report session
+state, and **write** tools (`spawn_session`, `stop_session`, `resume_session`,
+issue #527) that drive the bridge lifecycle. The server reuses the same machinery
+the dashboard's `/api` routes use — the read tools see exactly what the dashboard
+sees, and the write tools go through the same engine facade, so option validation,
+the standard-singleton cap, and workspace-trust behave identically headless or in
+the browser.
+
+The stdio transport is **local-privileged** (reachable only by a process the
+operator launched on the host), so it carries no token auth — a future
+daemon-socket transport can add it.
 
 ## Running it
 
@@ -84,10 +90,46 @@ Returns `{"found": true, "session": {...}}` for a match, or
 `{"found": false, "id": "<id>"}` for an unknown id. A blank/missing `id` comes
 back as a tool error rather than a guess.
 
+### `spawn_session`
+
+Starts a `claude` bridge for a project (the bridge channel — the same as the
+dashboard's **Run Claude here**).
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `project` | string (required) | The project name to start in. |
+| `resume_mode` | string | `standard` (multi-session server) or `pty` (single interactive session, true-resume). |
+| `spawn_mode` | string | `same-dir` · `worktree` · `session`. |
+| `permission_mode` | string | The claude permission mode. |
+| `custom_name` | string | Display name (standard/Server Mode only). |
+| `sandbox` | string | `default` · `on` · `off` (standard only). |
+| `trust` | boolean | Accept the workspace-trust dialog for this project. **Defaults to `false`** — an untrusted directory is refused unless you pass `true`, the headless equivalent of the dashboard's Trust action. |
+
+Returns `{"created": <bool>, "reason": ..., "warnings": [...], "session": {...}}`.
+`created` is `false` when an already-live standard bridge was handed back instead
+of launching a second (the one-per-project cap). Bad options, a forbidden
+permission mode, or an untrusted directory come back as an `isError` result.
+
+### `stop_session` / `resume_session`
+
+Stop, or resume into its prior conversation, the bridge named by an `id` (a
+project name / id / prefix as returned by `list_sessions`) — resolved exactly
+like the dashboard's DELETE / resume routes.
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `id` | string (required) | The bridge id to stop / resume. |
+
+`stop_session` returns `{"stopped": <bool>, ...}`; `resume_session` returns
+`{"resumed": <bool>, ...}` — the boolean is `false` (with the id echoed back) when
+no managed bridge matches. Both are **bridge channel only**; hosted-session
+resume stays in the dashboard.
+
 ## Scope and safety
 
-- **Read-only.** No tool mutates state; `spawn` / `stop` / `resume` are not
-  exposed in v1.
+- **Trust is never auto-granted.** `spawn_session` defaults `trust` to `false`, so
+  an MCP client cannot silently trust and execute code in an untrusted directory —
+  it must pass `trust: true` deliberately, the same gate as the dashboard.
 - **Fail closed.** A tool that errors is returned as an `isError` tool result,
   never a silent empty success and never a server crash.
 - **No secrets on egress.** Output reuses Clauster's existing redaction and

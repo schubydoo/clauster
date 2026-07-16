@@ -40,6 +40,7 @@ class _FakeRunner:
         self.persistence = _FakePersistence()
         self.spawn_calls: list[tuple[str, dict]] = []
         self.stopped: list[str] = []
+        self.resumed: list[str] = []
         self.trusted: list[str] = []
 
     def list_instances(self) -> list[RemoteControlInstance]:
@@ -64,6 +65,10 @@ class _FakeRunner:
 
     async def stop(self, instance_id: str) -> RemoteControlInstance:
         self.stopped.append(instance_id)
+        return self._instances[instance_id]
+
+    async def resume(self, instance_id: str) -> RemoteControlInstance:
+        self.resumed.append(instance_id)
         return self._instances[instance_id]
 
     async def trust_project(self, name: str) -> None:
@@ -191,6 +196,23 @@ def test_stop_unknown_identity_returns_none_without_delegating(tmp_path, project
 
     assert asyncio.run(engine.stop("nope")) is None
     assert runner.stopped == []  # never called runner.stop for an unresolved id
+
+
+def test_resume_resolves_then_delegates(tmp_path, projects_root):
+    inst = RemoteControlInstance(instance_id="i1", project="alpha", label="alpha")
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json", instances=[inst])
+    engine = _engine(tmp_path, projects_root, runner)
+
+    assert asyncio.run(engine.resume("i1")) is inst
+    assert runner.resumed == ["i1"]
+
+
+def test_resume_unknown_identity_returns_none_without_delegating(tmp_path, projects_root):
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json")
+    engine = _engine(tmp_path, projects_root, runner)
+
+    assert asyncio.run(engine.resume("nope")) is None
+    assert runner.resumed == []  # never called runner.resume for an unresolved id
 
 
 # -- connect_url: session link, else composer link, else None ------------------
