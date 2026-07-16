@@ -198,6 +198,51 @@ async def test_persist_drops_stopped_card_whose_row_another_process_forgot(runne
     assert own.instance_id in records  # while genuinely-new instances still persist
 
 
+async def test_persist_drops_crashed_card_whose_row_another_process_forgot(runner_config):
+    # Round 3: row-backedness (not status) is the ownership signal — a card that went
+    # CRASHED (or any dead state) after its row was saved must equally not write a
+    # row back that another process has since forgotten.
+    config, claude_json = runner_config
+    with _other_process_store(config) as store:
+        store.save({"iid-c": {"project_name": "beta", "label": "crashed-then-forgotten"}})
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.rediscover(persist=False)
+    card = runner.get_instance_for_project("beta")
+    assert card is not None
+    card.status = InstanceStatus.CRASHED  # what poll_once records when the bridge dies
+
+    with _other_process_store(config) as store:
+        store.save({})
+
+    await runner._persist()
+    with _other_process_store(config) as store:
+        assert "iid-c" not in store.load()
+
+
+async def test_persist_keeps_never_saved_error_instance(runner_config):
+    # The flip side of the ownership signal: a spawn that failed straight to ERROR was
+    # never saved (not row-backed), so its FIRST persist must still write it — the
+    # dead-card guard must never eat a genuinely new record.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    failed = _fake_instance("alpha")
+    failed.status = InstanceStatus.ERROR
+    runner._instances[failed.instance_id] = failed
+
+    await runner._persist()
+    with _other_process_store(config) as store:
+        records = store.load()
+    assert failed.instance_id in records  # first save landed
+    # ...and once saved (row-backed), an external forget now sticks:
+    with _other_process_store(config) as store:
+        store.save({})
+    await runner._persist()  # no in-memory change; dedup must not mask the drop
+    runner._instances[_fake_instance("gamma").instance_id] = _fake_instance("gamma")
+    await runner._persist()
+    with _other_process_store(config) as store:
+        assert failed.instance_id not in store.load()
+
+
 async def test_forget_of_row_another_process_already_forgot_raises(runner_config):
     # forget refreshes its merge base at entry, so a record that only survives in this
     # process's construction-time snapshot is honestly reported as unknown.

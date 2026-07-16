@@ -366,6 +366,13 @@ class SessionRunner:
         # never affects a bridge's lifecycle.
         self._history = self._persistence.session_history_store()
         self._persisted: dict[str, dict] = self._state.load()
+        # Instance ids whose row this process has OBSERVED in (or saved to) the store —
+        # grown on every base load/refresh and every successful save, never pruned by
+        # a refresh. The persist subset uses it as the ownership signal (#951): a dead
+        # card that is row-backed yet absent from the fresh base was forgotten by
+        # another process and must not be written back; a never-saved instance still
+        # gets its first save. Bounded by the instances this process ever sees.
+        self._row_backed: set[str] = set(self._persisted)
         self._last_saved: dict[str, dict] | None = None
         # Serialize concurrent persists (startup-watch / stop / poll loop can interleave
         # on the event loop). The DB store's per-row prune raises StaleDataError when a
@@ -708,17 +715,19 @@ class SessionRunner:
                 "sandbox_mode": inst.sandbox_mode,
             }
             for inst in self._instances.values()
-            # #951 round 2: a STOPPED card is (at most) a VIEW of its persisted row —
-            # rediscover materializes one from the row, and nothing but the row backs
-            # it. If the freshly refreshed base no longer holds its id, another process
-            # forgot it since this card was built; writing it back through this overlay
-            # would undo that delete on every later persist. A NEW instance this
-            # process just spawned is never dropped here: it isn't in the base yet,
-            # but it isn't STOPPED either (STARTING/RUNNING/ERROR all persist). The
-            # one degenerate loss — a stop whose intent-persist ALSO failed — only
-            # occurs when the store is already failing its best-effort writes.
-            if not (
-                inst.status is InstanceStatus.STOPPED and inst.instance_id not in self._persisted
+            # #951 rounds 2+3: a dead card (STOPPED/CRASHED/ERROR) whose row this
+            # process KNOWS reached the store (``_row_backed``) but is gone from the
+            # freshly refreshed base was forgotten by another process — the card is
+            # only a view of that row, and writing it back through this overlay would
+            # undo the delete on every later persist. Row-backedness (not status) is
+            # the ownership signal: a NEVER-saved instance (fresh spawn, or a spawn
+            # that failed straight to ERROR) is not in the base either, but it isn't
+            # row-backed, so it still gets its first save. A live STARTING/RUNNING
+            # bridge is ground truth regardless and always persists.
+            if (
+                inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+                or inst.instance_id not in self._row_backed
+                or inst.instance_id in self._persisted
             )
         }
         # Overlay live instances onto the previously-persisted map rather than
@@ -764,6 +773,9 @@ class SessionRunner:
             )
             return False
         self._persisted = loaded
+        # UNION, never replace: an id we saved that is now missing from the store is
+        # exactly the cross-process-deletion signal the persist subset keys on.
+        self._row_backed |= set(loaded)
         return True
 
     async def _persist(self, *, drop: str | None = None) -> None:
@@ -813,6 +825,7 @@ class SessionRunner:
         # Keep the merge base in sync with what's on disk so the next overlay builds
         # on the latest saved state (live modes that changed this round are retained).
         self._persisted = subset
+        self._row_backed |= set(subset)  # everything just saved is now row-backed
 
     # ----- discovery helpers ---------------------------------------------
 
