@@ -25,7 +25,7 @@ import pytest
 from clauster import atomicio
 from clauster.db.persistence import Persistence
 from clauster.models import InstanceStatus, RemoteControlInstance
-from clauster.runner import SessionRunner, UnknownProject
+from clauster.runner import SessionRunner, SpawnError, UnknownProject
 
 _POSIX_ONLY = pytest.mark.skipif(
     sys.platform == "win32", reason="fcntl flock is POSIX-only; Windows keeps in-process locking"
@@ -239,6 +239,27 @@ async def test_resume_of_card_another_process_forgot_is_refused(runner_config):
     assert runner.get_instance_for_project("beta") is None  # the stale card is gone
     with _other_process_store(config) as store:
         assert "iid-r" not in store.load()  # and nothing recreated the row
+
+
+async def test_resume_gate_fails_closed_when_refresh_fails(runner_config, monkeypatch):
+    # Round 5: when the base refresh itself fails, the stale-resume gate must not
+    # decide from the known-stale snapshot — the resume is refused as retryable, and
+    # the card is KEPT (we could not learn whether its row is actually gone).
+    config, claude_json = runner_config
+    with _other_process_store(config) as store:
+        store.save({"iid-r": {"project_name": "beta", "label": "unverifiable"}})
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.rediscover(persist=False)
+    card = runner.get_instance_for_project("beta")
+    assert card is not None
+
+    def _boom():
+        raise OSError("state load failed: locked")
+
+    monkeypatch.setattr(runner._state, "load_strict", _boom)
+    with pytest.raises(SpawnError, match="could not verify"):
+        await runner.resume(card.instance_id)
+    assert runner.get_instance_for_project("beta") is card  # kept for the retry
 
 
 async def test_persist_keeps_never_saved_error_instance(runner_config):

@@ -1128,25 +1128,33 @@ class SessionRunner:
         # _persist must see the shared store as it is NOW, not as it was when this
         # runner was constructed — a headless writer's construction-time snapshot can
         # predate rows the web app has since added or forgotten.
-        await self._refresh_persisted()
+        refreshed = await self._refresh_persisted()
         # Stale-resume gate (#951 round 4): resuming a DEAD card whose row-backed
         # record is gone from the fresh base would relaunch — and re-persist — a
         # session another clauster process explicitly forgot, silently undoing that
         # delete. Fail closed with the truth instead, and drop the card (it was only
         # a view of the deleted row). A LIVE resume target is untouched — it falls
-        # through to the idempotent already-running return below.
+        # through to the idempotent already-running return below. When the refresh
+        # itself failed, the gate must not decide from the known-stale snapshot
+        # (#951 round 5): refuse the resume as retryable — WITHOUT dropping the card,
+        # since we couldn't learn whether its row is actually gone. A plain (non-
+        # resume) spawn proceeds on a failed refresh: the store is non-authoritative
+        # and launching bridges must not depend on it; _persist re-checks on its own.
         if resume and resume_target is not None:
             iid = resume_target.instance_id
-            if (
-                resume_target.status not in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
-                and iid in self._row_backed
-                and iid not in self._persisted
-            ):
-                self._instances.pop(iid, None)
-                raise UnknownProject(
-                    f"session {iid} was forgotten by another clauster process — "
-                    "nothing left to resume"
-                )
+            dead = resume_target.status not in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+            if dead and iid in self._row_backed:
+                if not refreshed:
+                    raise SpawnError(
+                        f"could not verify session {iid} against the shared state store "
+                        "(transient read failure) — try the resume again"
+                    )
+                if iid not in self._persisted:
+                    self._instances.pop(iid, None)
+                    raise UnknownProject(
+                        f"session {iid} was forgotten by another clauster process — "
+                        "nothing left to resume"
+                    )
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode
