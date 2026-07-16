@@ -15,10 +15,10 @@ module-scoped ``open_server``.
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 import pytest
+from _helpers import STATUS_TIMEOUT, open_desktop_launch, trust_and_start
 
 if TYPE_CHECKING:
     from _driver import AgentBrowser
@@ -27,15 +27,9 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.e2e
 
-# A bridge spawn waits on the fake claude's readiness markers, then the dashboard's
-# 4s poll reconciles state — give the trust-and-start status transition headroom.
-_STATUS_TIMEOUT = 20_000
-
-# The New-project form: its toggle (the only primary button in the Projects zone
-# header) and the submit (scoped to the form's own .mt-3 block, so the warn-banner's
-# button can't be mistaken for it).
-_NEW_PROJECT_TOGGLE = "section.zone-projects .zone-actions button.btn-primary"
-_NEW_PROJECT_SUBMIT = 'div[x-show="np.open"] .mt-3 button.btn-primary'
+# The New-project form's toggle and submit, via their stable data-test hooks.
+_NEW_PROJECT_TOGGLE = '[data-test="new-project-toggle"]'
+_NEW_PROJECT_SUBMIT = '[data-test="new-project-submit"]'
 
 
 def test_overflow_menu_opens_claude_md_editor_and_saves(
@@ -53,13 +47,9 @@ def test_overflow_menu_opens_claude_md_editor_and_saves(
 
     # Trust the directory (the only path to trust is the launch gate); once RUNNING the
     # write path is allowed. The bridge stays up so the editor shows its running banner.
-    browser.click('[data-project="beta"] .launch-anchor button')
-    browser.expect_visible('[data-project="beta"] .launch-pop')
-    browser.check('[data-project="beta"] input[name="lm-beta"][value="desktop"]')
-    browser.click('[data-project="beta"] .launch-pop button.btn-primary.w-100')
-    browser.check('[data-project="beta"] .alert-warning input[type="checkbox"]')
-    browser.click('[data-project="beta"] .alert-warning button.btn-warning')
-    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
+    open_desktop_launch(browser, "beta")
+    trust_and_start(browser, "beta")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
 
     editor = '[data-project="beta"] textarea.cmd-text'
     block = '[data-project="beta"] .border.rounded'  # the editor block (x-if template)
@@ -79,13 +69,13 @@ def test_overflow_menu_opens_claude_md_editor_and_saves(
     # Edit and Save; the green "saved" confirmation appears (no reload). DES-03 (#694)
     # swapped the leading ✓ glyph for a Tabler check SVG, so assert on the word only.
     browser.fill(editor, "# beta\n\nedited by e2e\n")
-    browser.click(f"{block} button.btn-primary")
+    browser.click(f'{block} [data-test="cmd-save"]')
     browser.expect_text(f"{block} .text-green", "saved")
 
     # Re-opening the editor shows the persisted edit (Cancel, then reopen). Assert the
     # Cancel button is present first, so an auto-collapse-on-save regression fails here
     # explicitly rather than as an opaque no-op click + later hidden-state assertion.
-    cancel = f"{block} .btn-list button:not(.btn-primary)"
+    cancel = f'{block} [data-test="cmd-cancel"]'
     browser.expect_visible(cancel)
     browser.click(cancel)
     browser.expect_hidden(editor)
@@ -93,12 +83,9 @@ def test_overflow_menu_opens_claude_md_editor_and_saves(
     browser.click('[data-project="beta"] .card-menu .dropdown-item')
     # A textarea's *value* (not its DOM text) carries the persisted edit; the reopen
     # re-fetches from disk asynchronously, so poll the value (agent-browser strips the
-    # trailing newline). The driver has no expect_value, so poll get_value here.
+    # trailing newline) via the driver's expect_value.
     browser.expect_visible(editor)
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and browser.get_value(editor) != "# beta\n\nedited by e2e":
-        time.sleep(0.2)
-    assert browser.get_value(editor) == "# beta\n\nedited by e2e"
+    browser.expect_value(editor, "# beta\n\nedited by e2e")
 
 
 def test_new_project_form_validation_and_clone_toggle(
@@ -151,7 +138,7 @@ def test_create_empty_project_inserts_row_in_place(
 
     # The new row appears in place (the create API call can be slow in CI, so give it
     # the same headroom as the other waitable assertions)...
-    browser.expect_visible('[data-project="delta"]', timeout_ms=_STATUS_TIMEOUT)
+    browser.expect_visible('[data-project="delta"]', timeout_ms=STATUS_TIMEOUT)
     browser.expect_text('[data-project="delta"]', "delta")
     # ...and the page never navigated (sentinel intact).
     assert browser.eval_js("window.__e2e_no_reload") == "true", (
@@ -160,5 +147,5 @@ def test_create_empty_project_inserts_row_in_place(
 
     # The inserted row is fully interactive without a refresh: it has its own launch
     # popover, which opens on click.
-    browser.click('[data-project="delta"] .launch-anchor button')
+    browser.click('[data-project="delta"] [data-test="run-launch"]')
     browser.expect_visible('[data-project="delta"] .launch-pop')

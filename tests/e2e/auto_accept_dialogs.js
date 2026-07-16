@@ -8,9 +8,13 @@
 // navigation via AGENT_BROWSER_INIT_SCRIPTS (see _driver.py), so it is in place before
 // any app/Alpine code runs and overrides window.confirm for the lifetime of the page.
 //
-// TODO(agent-browser-dialog-api): if a future agent-browser adds native dialog handling
-// (e.g. `--dialog-accept`), prefer it and drop this override — otherwise this would
-// silently shadow it and a test asserting a confirm *appears* would pass vacuously.
+// NOTE(agent-browser-dialog-api, re-evaluated 2026-07-16 at 0.29.x): agent-browser now
+// ships `agent-browser dialog accept|dismiss|status` (alert/beforeunload are even
+// auto-accepted natively). Evaluated and REJECTED as a wholesale replacement: the
+// native command is an async per-occurrence follow-up, so every confirm-guarded click
+// site in the suite would need a paired dialog call — a bigger, flakier refactor than
+// this one synchronous override with no test-value gain. Revisit only if a test ever
+// needs to assert that a confirm APPEARS (this override shadows that signal).
 window.confirm = () => true;
 window.alert = () => {};
 window.prompt = (_message, fallback) => (fallback == null ? "" : fallback);

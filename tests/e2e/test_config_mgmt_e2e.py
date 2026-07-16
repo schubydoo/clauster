@@ -11,6 +11,7 @@ unit-tested; this proves the wired Alpine flow round-trips to a real running ser
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -157,11 +158,11 @@ def test_config_mgmt_settings_env_duplicate_key_blocks_save(
     browser.expect_visible('[data-test="cm-settings-env-key"]')
     browser.click('[data-test="cm-settings-env-add"]')
     browser.expect_count('[data-test="cm-settings-env-key"]', 2)
-    # Give both rows the same key (target each row's input by table row position).
-    tbl = '[data-test="cm-settings-env-table"] tbody'
+    # Give both rows the same key (each <tr> carries an indexed data-test hook, so no
+    # positional nth-of-type selector that a wrapping-markup change could mis-target).
     key_in = '[data-test="cm-settings-env-key"]'
-    browser.fill(f"{tbl} tr:nth-of-type(1) {key_in}", "DUP")
-    browser.fill(f"{tbl} tr:nth-of-type(2) {key_in}", "DUP")
+    browser.fill(f'[data-test="cm-settings-env-row-0"] {key_in}', "DUP")
+    browser.fill(f'[data-test="cm-settings-env-row-1"] {key_in}', "DUP")
     browser.fill('[data-test="cm-confirm"]', "alpha")
 
     browser.expect_visible('[data-test="cm-settings-env-dupe"]')
@@ -375,6 +376,77 @@ def test_config_mgmt_skill_edit_and_delete_round_trip(
     browser.click('[data-test="cm-skill-delete-go"]')
     browser.expect_visible('[data-test="cm-saved"]')
     assert not skill_md.parent.exists(), "expected the deleted skill directory to be gone"
+
+
+def test_config_mgmt_hooks_save_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Saving the Hooks JSON writes the project ``.claude/settings.json`` hooks block.
+
+    Every sibling surface (CLAUDE.md, settings, permissions, MCP, skills, subagents)
+    had a save round-trip; hooks only had a loads test (#763 audit gap). The command
+    is inert data on write — validate-never-execute — so the assertion is purely that
+    the block lands on disk verbatim.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_value('[data-test="cm-hooks-text"]', "{}")
+
+    hooks = {"SessionStart": [{"hooks": [{"type": "command", "command": "echo e2e-hook"}]}]}
+    browser.fill('[data-test="cm-hooks-text"]', json.dumps(hooks))
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+
+    saved = projects_root / "alpha" / ".claude" / "settings.json"
+    assert saved.exists(), "expected alpha/.claude/settings.json to be written"
+    on_disk = json.loads(saved.read_text(encoding="utf-8"))
+    assert on_disk.get("hooks") == hooks
+
+
+def test_config_mgmt_subagent_delete_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Deleting a subagent via the list's typed-confirm removes its .md from disk.
+
+    The sibling skills surface covered create+delete; subagents only covered create
+    (#763 audit gap) — this drives the DELETE endpoint through the UI's own gate.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    agent_md = projects_root / "alpha" / ".claude" / "agents" / "deleteme.md"
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')
+
+    # Create the subagent to act on (same flow the create round-trip pins).
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')
+    browser.fill('[data-test="cm-agent-name"]', "deleteme")
+    browser.fill(
+        '[data-test="cm-agent-content"]',
+        "---\nname: deleteme\ndescription: doomed e2e agent\n---\nGone soon.\n",
+    )
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    browser.click('[data-test="cm-agent-save"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+    assert agent_md.exists(), "expected alpha/.claude/agents/deleteme.md to be written"
+
+    # Delete it from the list: per-name Delete → typed confirm → gone from disk.
+    browser.expect_visible('[data-test="cm-agent-del-deleteme"]')
+    browser.click('[data-test="cm-agent-del-deleteme"]')
+    browser.expect_visible('[data-test="cm-agent-delete-confirm"]')
+    browser.fill('[data-test="cm-agent-delete-input"]', "alpha")
+    browser.click('[data-test="cm-agent-delete-go"]')
+    browser.expect_visible('[data-test="cm-saved"]')
+    assert not agent_md.exists(), "expected the deleted subagent .md to be gone"
 
 
 def test_config_mgmt_plugins_tab_lists_and_acts(

@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from _helpers import STATUS_TIMEOUT, open_desktop_launch, trust_and_start
 
 if TYPE_CHECKING:
     from _driver import AgentBrowser
@@ -34,33 +35,11 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.e2e
 
-# A bridge spawn (or its failure) waits on the fake claude exiting / writing markers,
-# then the dashboard's poll reconciles state — give the transitions generous headroom
-# (matches test_bridge_e2e).
-_STATUS_TIMEOUT = 20_000
-
 # The fake's PTY-session id and the bearer token it logs only with FAKE_CLAUDE_LOG_EXTRA
 # set (see tests/fixtures/fake_claude/claude) — these MUST NOT survive into the streamed
 # view (redacted by sanitize_line over the WS).
 _RAW_SESSION_ID = "session_01TESTPTYSESSIONAAAAA"
 _RAW_TOKEN = "sk-FAKEFAKEFAKEFAKEFAKE"
-
-
-def _open_desktop_launch(browser: AgentBrowser, project: str) -> None:
-    """Open the project's launch popover and select the desktop (bridge) mode."""
-    browser.click(f'[data-project="{project}"] .launch-anchor button')
-    browser.expect_visible(f'[data-project="{project}"] .launch-pop')
-    browser.check(f'[data-project="{project}"] input[name="lm-{project}"][value="desktop"]')
-
-
-def _trust_and_start(browser: AgentBrowser, project: str) -> None:
-    """Click Run, then satisfy the trust gate (checkbox enables Trust & start)."""
-    browser.click(f'[data-project="{project}"] .launch-pop button.btn-primary.w-100')
-    trust_start = f'[data-project="{project}"] .alert-warning button.btn-warning'
-    browser.expect_visible(trust_start)
-    browser.check(f'[data-project="{project}"] .alert-warning input[type="checkbox"]')
-    browser.expect_enabled(trust_start)
-    browser.click(trust_start)
 
 
 def test_failed_action_surfaces_inline_error(
@@ -76,8 +55,8 @@ def test_failed_action_surfaces_inline_error(
     browser.goto(trust_fail_bridge_server.url)
     browser.expect_visible('[data-project="gamma"]')
 
-    _open_desktop_launch(browser, "gamma")
-    _trust_and_start(browser, "gamma")
+    open_desktop_launch(browser, "gamma")
+    trust_and_start(browser, "gamma")
 
     # The inline error block (errorOf -> the persistent action-error alert, distinct from
     # the in-popover trust/bypass alerts and the spawn-failure detail, which all also carry
@@ -86,7 +65,7 @@ def test_failed_action_surfaces_inline_error(
     # the row and `is visible` resolves the first (the hidden bypass-confirm), so it would
     # spuriously time out.
     error_block = '[data-project="gamma"] [data-test="inline-error"]'
-    browser.expect_visible(error_block, timeout_ms=_STATUS_TIMEOUT)
+    browser.expect_visible(error_block, timeout_ms=STATUS_TIMEOUT)
     assert browser.get_text(error_block).strip(), "inline error block rendered empty"
 
     # ...and it is genuinely persistent, independent of the toast. The failed action also
@@ -95,7 +74,7 @@ def test_failed_action_surfaces_inline_error(
     # thing: dismiss the (persistent) error toast via its close button, confirm it clears
     # only on that explicit dismiss, and confirm the inline block is STILL shown.
     toast = ".toast-stack .alert-danger"
-    browser.expect_visible(toast, timeout_ms=_STATUS_TIMEOUT)  # error toast appears...
+    browser.expect_visible(toast, timeout_ms=STATUS_TIMEOUT)  # error toast appears...
     # ...and clears only on explicit dismiss (no 4.5s auto-hide). Scope the close click to
     # the error toast's own button so a stray success toast can't be the one dismissed.
     browser.click(f"{toast} .btn-close")
@@ -115,19 +94,19 @@ def test_live_log_tail_populates_and_redacts(
 
     # Trust-on-start a real (fake) bridge; it reaches RUNNING and surfaces in the
     # Active zone with the Logs toggle.
-    _open_desktop_launch(browser, "gamma")
-    _trust_and_start(browser, "gamma")
-    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
+    open_desktop_launch(browser, "gamma")
+    trust_and_start(browser, "gamma")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
 
-    logs_btn = 'section.zone-active button:has(use[href="#ic-logs"])'
+    logs_btn = 'section.zone-active [data-test="bridge-logs-toggle"]'
     log_view = "section.zone-active pre.log-view"
     browser.click(logs_btn)
     browser.expect_visible(log_view)
 
     # The tail populates with the bridge's marker lines, then specifically with the
     # ANSI + deep-link line the fake emitted (its readable marker survives redaction).
-    browser.expect_text(log_view, "[bridge:work]", timeout_ms=_STATUS_TIMEOUT)
-    browser.expect_text(log_view, "[bridge:link]", timeout_ms=_STATUS_TIMEOUT)
+    browser.expect_text(log_view, "[bridge:work]", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_text(log_view, "[bridge:link]", timeout_ms=STATUS_TIMEOUT)
     browser.expect_text(log_view, "Continue at")
 
     streamed = browser.get_text(log_view)

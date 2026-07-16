@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 import pytest
+from _helpers import STATUS_TIMEOUT, open_desktop_launch, trust_and_start
 
 if TYPE_CHECKING:
     from _driver import AgentBrowser
@@ -39,13 +40,10 @@ pytestmark = pytest.mark.e2e
 # launch popover is open.
 _BYPASS_OPTION = 'option[value="bypassPermissions"]'
 
-# A trust write + the dashboard's status poll need headroom on a slow CI host.
-_GATE_TIMEOUT = 20_000
-
-# The Maintenance block (x-data="reaper()") only renders when reaper.ui_enabled is set;
-# its toggle reveals the panel whose <h3> title is "Clean up leftover environments".
-_REAPER_BLOCK = 'div[x-data="reaper()"]'
-_REAPER_TOGGLE = f"{_REAPER_BLOCK} > button"
+# The Maintenance block only renders when reaper.ui_enabled is set; its toggle
+# reveals the panel whose <h3> title is "Clean up leftover environments".
+_REAPER_BLOCK = '[data-test="reaper-panel"]'
+_REAPER_TOGGLE = '[data-test="reaper-toggle"]'
 _REAPER_TITLE = f"{_REAPER_BLOCK} h3.card-title"
 
 
@@ -99,25 +97,20 @@ def test_bypass_requires_typed_confirmation_before_spawn(
     browser.expect_visible('[data-project="gamma"]')
 
     # Open the desktop launch and choose the footgun permission, then Run. The dir is
-    # untrusted, so the trust prompt appears first (the order is trust → bypass).
-    browser.click('[data-project="gamma"] .launch-anchor button')
-    browser.expect_visible('[data-project="gamma"] .launch-pop')
-    browser.check('[data-project="gamma"] input[name="lm-gamma"][value="desktop"]')
+    # untrusted, so the trust prompt appears first (the order is trust → bypass); Trust &
+    # start re-enters start(): now trusted + bypass selected → the typed confirm appears
+    # instead of a spawn. Target the bypass block by its own data-test hook — a bare
+    # `.alert-danger` matches FOUR blocks in the row (bypass-confirm, mcp-approval-block,
+    # inline-error, the spawn-failure detail) and only resolves right by DOM-order luck.
+    open_desktop_launch(browser, "gamma")
     browser.select("#perm-gamma", "bypassPermissions")
-    browser.click('[data-project="gamma"] .launch-pop button.btn-primary.w-100')
-    trust_start = '[data-project="gamma"] .alert-warning button.btn-warning'
-    browser.expect_visible(trust_start)
-
-    # Trust & start re-enters start(): now trusted + bypass selected → the typed
-    # confirm appears instead of a spawn.
-    browser.check('[data-project="gamma"] .alert-warning input[type="checkbox"]')
-    browser.click(trust_start)
-    confirm = '[data-project="gamma"] .alert-danger'
-    browser.expect_visible(confirm, timeout_ms=_GATE_TIMEOUT)
+    trust_and_start(browser, "gamma")
+    confirm = '[data-project="gamma"] [data-test="bypass-confirm"]'
+    browser.expect_visible(confirm, timeout_ms=STATUS_TIMEOUT)
     browser.expect_text(confirm, "Type the project name to confirm")
 
     # A wrong name keeps "Start with bypass" disabled — nothing can spawn, gate stays up.
-    start_bypass = f"{confirm} button.btn-danger"
+    start_bypass = f'{confirm} [data-test="bypass-start-go"]'
     browser.fill(f'{confirm} input[type="text"]', "not-gamma")
     browser.expect_disabled(start_bypass)
     browser.expect_visible(confirm)

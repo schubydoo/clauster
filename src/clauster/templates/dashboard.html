@@ -259,9 +259,9 @@
                 {# Session-shape chips (#779): a project can run one standard bridge plus N
                    interactive sessions, so mark which one this row is — and whether the
                    interactive session is isolated in its own git worktree. #}
-                <span class="badge bg-cyan-lt ms-1" x-show="i.resume_mode === 'pty'" x-cloak
+                <span class="badge bg-cyan-lt ms-1" data-test="interactive-chip" x-show="i.resume_mode === 'pty'" x-cloak
                       title="Interactive Session (single-session, true-resume)">interactive</span>
-                <span class="badge bg-secondary-lt text-secondary ms-1"
+                <span class="badge bg-secondary-lt text-secondary ms-1" data-test="worktree-chip"
                       x-show="i.resume_mode === 'pty' && i.spawn_mode === 'worktree'" x-cloak
                       title="Runs in its own git worktree — isolated from other sessions' edits.">worktree</span>
 {% endmacro %}
@@ -637,7 +637,9 @@
 
           <!-- desktop (claude.ai / Desktop bridge) sessions -->
           <template x-for="i in activeBridges()" :key="i.rk">
-            <div class="list-group-item sess-row" :class="bridgeRailClass(i.rk)" x-show="activeFilter === 'all' || activeFilter === 'desktop'">
+            <div class="list-group-item sess-row" :class="bridgeRailClass(i.rk)"
+                 :data-resume-mode="i.resume_mode" :data-spawn-mode="i.spawn_mode"
+                 x-show="activeFilter === 'all' || activeFilter === 'desktop'">
               <div class="d-flex align-items-center flex-wrap gap-1">
                 {{ desktop_row_head("Running") }}
                 {# Project-keyed metrics on the STANDARD row only (#779): a pty row would
@@ -667,7 +669,7 @@
                   {# Persistent live region — always mounted, empty when idle — so the
                      announcement fires on a content change, not a display toggle (#427 UX-02). #}
                   <span class="visually-hidden" aria-live="polite" x-text="connectStatusText(i.rk)"></span>
-                  <button type="button" class="btn btn-sm btn-ghost-secondary" @click="toggleLogs(i.rk)">
+                  <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="bridge-logs-toggle" @click="toggleLogs(i.rk)">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-logs"/></svg><span
                       x-text="logs[i.rk] && logs[i.rk].open ? 'Hide logs' : 'Logs'">Logs</span></button>
                   {% if pty_screen_enabled %}
@@ -712,7 +714,7 @@
                           :title="'View read-only session transcripts for ' + i.project"
                           :aria-label="'View transcripts for ' + i.project">
                     <svg class="ico me-1" aria-hidden="true"><use href="#ic-page"/></svg>Transcript</button>
-                  <button type="button" class="btn btn-sm btn-outline-danger" @click="stop(i.rk)"
+                  <button type="button" class="btn btn-sm btn-outline-danger" data-test="stop-session" @click="stop(i.rk)"
                           :disabled="isStopping(i.rk)">
                     <span class="spinner-border spinner-border-sm me-1" x-show="isStopping(i.rk)" x-cloak></span>
                     <span x-text="isStopping(i.rk) ? 'Stopping…' : 'Stop'">Stop</span></button>
@@ -867,7 +869,7 @@
 
       <!-- Recent / resumable: terminated sessions, collapsed so they don't pad Active. -->
       <div class="mt-2" x-show="hasRecent()" x-cloak x-data="{ recentOpen: false }">
-        <button type="button" class="btn btn-sm btn-ghost-secondary px-1" @click="recentOpen = !recentOpen"
+        <button type="button" class="btn btn-sm btn-ghost-secondary px-1" data-test="recent-toggle" @click="recentOpen = !recentOpen"
                 :aria-expanded="recentOpen"><svg class="ico me-1" aria-hidden="true" x-show="recentOpen"><use href="#ic-caret-down"/></svg><svg class="ico me-1" aria-hidden="true" x-show="!recentOpen"><use href="#ic-caret-right"/></svg><span
                 x-text="'Recent' + (hasResumable() ? ' / resumable' : '') + ' (' + recentCount() + ')'"></span></button>
         <div class="card mt-1" x-show="recentOpen" x-cloak>
@@ -883,7 +885,7 @@
                   {{ desktop_row_head("Stopped") }}
                   <span class="text-secondary small ms-1" x-show="statusNote(i.rk)" x-cloak x-text="statusNote(i.rk)"></span>
                   <span class="ms-auto d-flex gap-1">
-                    <button type="button" class="btn btn-sm btn-success" @click="resume(i.rk)"
+                    <button type="button" class="btn btn-sm btn-success" data-test="resume-session" @click="resume(i.rk)"
                             :title="'Resume — reconnects the prior session (keeps ' + (resumeModeOf(i.rk) || 'standard') + ' mode).'">
                       <svg class="ico me-1" aria-hidden="true"><use href="#ic-restart"/></svg>Resume</button>
                     {# `!!` coercion: a busy-map key absent on first paint renders this DISABLED
@@ -924,7 +926,7 @@
                   x-show="projectNames.length > 6 && !projectFilter.trim()"
                   @click="showAllProjects = !showAllProjects"
                   x-text="showAllProjects ? 'Show fewer' : ('Show all ' + projectNames.length)"></button>
-          <button type="button" class="btn btn-sm btn-primary" @click="toggleNewProject()">
+          <button type="button" class="btn btn-sm btn-primary" data-test="new-project-toggle" @click="toggleNewProject()">
             <span x-show="np.open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Cancel</span><span x-show="!np.open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-plus"/></svg>New project</span>
           </button>
         </div>
@@ -966,7 +968,7 @@
                 <code>clone.allow_private_hosts</code> in clauster.yml · cloning only fetches files (nothing runs).</p>
             </div>
             <div class="mt-3 d-flex gap-2">
-              <button class="btn btn-primary" @click="submitNew()"
+              <button class="btn btn-primary" data-test="new-project-submit" @click="submitNew()"
                       :disabled="np.busy || !np.name || (np.mode === 'clone' && !np.url.trim())">
                 <span class="spinner-border spinner-border-sm me-1" x-show="np.busy" x-cloak></span>
                 <span x-text="np.busy ? (np.mode === 'clone' ? 'Cloning…' : 'Creating…')
@@ -1095,8 +1097,8 @@
 
       {% if reaper_ui_enabled %}
       <!-- ===== Maintenance (collapsed; operator upkeep, not daily) ===== -->
-      <div class="mt-4" x-data="reaper()">
-        <button class="btn btn-sm btn-ghost-secondary" @click="toggle()">
+      <div class="mt-4" x-data="reaper()" data-test="reaper-panel">
+        <button class="btn btn-sm btn-ghost-secondary" data-test="reaper-toggle" @click="toggle()">
           <span x-show="open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-x"/></svg>Close maintenance</span><span x-show="!open" x-cloak><svg class="ico me-1" aria-hidden="true"><use href="#ic-tool"/></svg>Maintenance</span>
         </button>
         <div class="card mt-2" x-show="open" x-cloak>
@@ -1584,7 +1586,7 @@
                   <thead><tr><th style="width: 40%">Name</th><th>Value</th><th class="text-end">Remove</th></tr></thead>
                   <tbody>
                     <template x-for="(row, idx) in configMgmt.settings.envRows" :key="row.id">
-                      <tr>
+                      <tr :data-test="'cm-settings-env-row-' + idx">
                         <td>
                           <input type="text" class="form-control form-control-sm font-monospace"
                                  data-test="cm-settings-env-key" autocomplete="off" spellcheck="false"
@@ -1853,8 +1855,10 @@
                           <template x-if="a.editable">
                             <span class="d-inline-flex gap-1">
                               <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                      :data-test="'cm-agent-edit-' + a.name"
                                       @click="configMgmtOpenAgent(a.name)">Edit</button>
                               <button type="button" class="btn btn-sm btn-ghost-danger"
+                                      :data-test="'cm-agent-del-' + a.name"
                                       @click="configMgmtAskDeleteAgent(a.name)">Delete</button>
                             </span>
                           </template>
