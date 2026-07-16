@@ -12,6 +12,9 @@
 # version of each package, so a pinned build 404s once a newer -rN publishes,
 # until Renovate's (auto-merged) bump lands. Reseed a pin's value with:
 #   docker run --rm alpine:3.24.1 sh -c 'apk update >/dev/null && apk policy <pkg>'
+# On an Alpine MINOR bump (3.24 -> 3.25), also update every `depName=alpine_3_24/…`
+# suffix below to the new release, or Renovate resolves pins against the wrong
+# repology repo — this is one reason a minor base bump stays a manual, reviewed PR.
 
 # ----- builder: resolve the locked deps into a self-contained venv -----------
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS builder
