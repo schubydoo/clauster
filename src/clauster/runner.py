@@ -264,6 +264,24 @@ _PROC_START_TOLERANCE = 2.0
 _NOTIFY_DRAIN_GRACE = 2.0
 
 
+def _release_flock_if_acquired(cm) -> Callable[[asyncio.Task], None]:
+    """Build the done-callback that releases a flock a CANCELLED caller still acquired.
+
+    ``_bridge_flock`` acquires the blocking cross-process lock in a worker thread; if
+    the awaiting task is cancelled mid-acquire, the thread finishes anyway and would
+    otherwise hold the lock until GC reclaims the context manager. The callback exits
+    the manager (an ``os.close``, trivially fast on the loop) once the acquisition
+    task lands — and only when it actually succeeded (a failed/cancelled acquire
+    never entered the lock, so exiting it would raise).
+    """
+
+    def _release(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is None:
+            cm.__exit__(None, None, None)
+
+    return _release
+
+
 class SessionRunner:
     """Owns the lifecycle of managed bridges: spawn, resume, stop, and status polling."""
 
@@ -999,7 +1017,17 @@ class SessionRunner:
         writers; see :func:`atomicio.cross_process_lock`.
         """
         cm = atomicio.cross_process_lock((self._config.projects_root / name).expanduser())
-        await asyncio.to_thread(cm.__enter__)
+        acquire = asyncio.ensure_future(asyncio.to_thread(cm.__enter__))
+        try:
+            await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            # The worker thread may still complete the blocking flock AFTER this frame
+            # is torn down (a cancelled to_thread doesn't stop the thread). Release the
+            # lock the moment the acquisition lands instead of holding it until GC
+            # reclaims the context manager — a cancelled caller must never pin the
+            # cross-process lock.
+            acquire.add_done_callback(_release_flock_if_acquired(cm))
+            raise
         try:
             yield
         finally:
@@ -2512,6 +2540,10 @@ class SessionRunner:
             # A stale base here would resurrect rows another process already pruned, or
             # prune rows another process added since. Also makes the not-found check
             # below honest: a row another process already forgot raises UnknownProject.
+            # (If this refresh degrades on a transient DB read error — warn + keep the
+            # old base — the prune below operates on that older base: strictly better
+            # than {} would be, bounded to the error window, and the matching save
+            # almost certainly fails best-effort too.)
             await self._refresh_persisted()
             instance = self._instances.get(instance_id)
             if instance is None and instance_id not in self._persisted:
@@ -2945,8 +2977,10 @@ class SessionRunner:
         - already managed -> :class:`InstanceStillLive` (409);
         - no live *standard* bridge at its pointer (it ended, or it's a pty/flag-form
           bridge, which is unsafe to adopt — no recoverable keeper, terminal-coupled
-          Stop) -> :class:`AdoptionUnavailable` (409). pty external sessions stay
-          display-only.
+          Stop), or a live one that can't be positively attributed to THIS project
+          (its cwd isn't the project directory — a ``sanitize_cwd`` pointer collision,
+          or an unreadable cwd) -> :class:`AdoptionUnavailable` (409). pty external
+          sessions stay display-only.
 
         Caveat the UI must carry: a standard bridge's environment server dies with its
         host, so a later Resume of the adopted session is a *fresh* Start, not a
@@ -2983,7 +3017,10 @@ class SessionRunner:
         :func:`procutil.is_live_standard_bridge` — liveness AND the standard-subcommand
         cmdline shape, checked at call time: a stale pointer (the bridge died since it
         was written) or a pty/flag-form bridge (no recoverable keeper, terminal-coupled
-        Stop — unsafe to manage) both return ``None``. A hit is synthesized into a
+        Stop — unsafe to manage) both return ``None`` — as does a live bridge whose
+        actual cwd is NOT this project's directory (a ``sanitize_cwd`` pointer-dir
+        collision with another project; taking it over would misattribute a foreign
+        pid). A hit is synthesized into a
         managed RUNNING instance (fresh ``instance_id``, ``resume_mode`` pinned
         ``"standard"`` from the positive cmdline gate rather than a possibly-stale
         persisted value), registered, and persisted.
@@ -2996,6 +3033,17 @@ class SessionRunner:
         if ptr is None or not await asyncio.to_thread(
             procutil.is_live_standard_bridge, ptr.pid, ptr.proc_start
         ):
+            return None
+        # Positive attribution: the pointer directory is keyed by the SANITIZED cwd
+        # (non-alphanumerics → "-"), so two punctuation-differing project paths can
+        # share one pointer file — and a take-over that trusted the pointer alone
+        # would register ANOTHER project's bridge here, handing its Stop button a
+        # foreign pid. Only proceed when the live process's actual cwd is this
+        # project's directory; an unreadable cwd fails closed (never take over on a
+        # guess). Same fail-closed posture as the #948 fork gate for the same
+        # collision (#949 review).
+        cwd = await asyncio.to_thread(procutil.proc_cwd, ptr.pid)
+        if cwd is None or cwd.resolve() != proj.path.resolve():
             return None
         persisted_hit = self._persisted_for_project(proj.name)
         saved = persisted_hit[1] if persisted_hit is not None else {}

@@ -1406,6 +1406,10 @@ async def test_adopt_promotes_external_standard_session(runner_config, monkeypat
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
 
     inst = await runner.adopt("alpha")
     assert inst.status is InstanceStatus.RUNNING
@@ -1475,6 +1479,10 @@ async def test_adopt_pins_standard_over_stale_persisted_pty_mode(runner_config, 
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
 
     inst = await runner.adopt("alpha")
     assert inst.resume_mode == "standard"  # pinned, NOT the stale persisted "pty"
@@ -1527,6 +1535,10 @@ async def test_adopt_then_stop_uses_single_sigint(runner_config, monkeypatch):
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
     adopted = await runner.adopt("alpha")
 
     calls: list[tuple[int, bool]] = []
@@ -2271,6 +2283,10 @@ async def test_adopt_leaves_log_path_unset(runner_config, monkeypatch):
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
 
     inst = await runner.adopt("alpha")
     assert inst.bridge_debug_log_path is None

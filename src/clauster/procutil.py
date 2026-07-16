@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
+from pathlib import Path
 
 import psutil
 
@@ -165,6 +166,22 @@ def proc_create_time(pid: int) -> float | None:
             return None
         return proc.create_time()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return None
+
+
+def proc_cwd(pid: int) -> Path | None:
+    """Return ``pid``'s current working directory, or ``None`` when it can't be read.
+
+    The positive-attribution input for the adopt/reattach gate (#949 review): the
+    bridge-pointer directory is keyed by the *sanitized* cwd, so two punctuation-
+    differing project paths can share one pointer file — a live standard bridge is
+    only taken over when its ACTUAL cwd is the project's own directory. ``None``
+    (process gone, zombie, access denied, or an OS that can't report it) must be
+    treated as "not attributable": fail closed, never take over on a guess.
+    """
+    try:
+        return Path(psutil.Process(pid).cwd())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
         return None
 
 

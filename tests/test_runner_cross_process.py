@@ -69,6 +69,10 @@ async def test_spawn_reattaches_live_bridge_of_another_process(runner_config, mo
     runner = SessionRunner(config, claude_json=claude_json)
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr())
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (config.projects_root / "alpha").resolve(),
+    )
 
     def _no_launch(*_a, **_k):
         raise AssertionError("spawn must not launch a second bridge over a live pointer")
@@ -95,6 +99,37 @@ async def test_reattach_probe_ignores_dead_or_pty_pointer(runner_config, monkeyp
     proj = runner._resolve_project("alpha")
     monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr())
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: False)
+    assert await runner._reattach_external_standard(proj) is None
+    assert runner.get_instance_for_project("alpha") is None
+
+
+async def test_reattach_probe_refuses_sanitize_collided_foreign_bridge(runner_config, monkeypatch):
+    # The pointer dir is keyed by the SANITIZED cwd, so a punctuation-differing OTHER
+    # project's live bridge can sit behind alpha's pointer path. Its actual cwd is not
+    # alpha's directory -> refuse the take-over (a reattach would hand alpha's Stop
+    # button a foreign pid).
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    proj = runner._resolve_project("alpha")
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr())
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (config.projects_root / "beta").resolve(),  # someone else's project
+    )
+    assert await runner._reattach_external_standard(proj) is None
+    assert runner.get_instance_for_project("alpha") is None
+
+
+async def test_reattach_probe_refuses_unattributable_cwd(runner_config, monkeypatch):
+    # An unreadable cwd (gone/zombie/access denied) means the bridge can't be
+    # positively attributed to this project: fail closed, never take over on a guess.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    proj = runner._resolve_project("alpha")
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr())
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_cwd", lambda pid: None)
     assert await runner._reattach_external_standard(proj) is None
     assert runner.get_instance_for_project("alpha") is None
 
@@ -208,3 +243,89 @@ async def test_bridge_flock_excludes_a_second_process(runner_config):
     # Released on exit: a second runner over the same config can take it now.
     async with b._bridge_flock("alpha"):
         assert lock_file.exists()  # created O_CREAT, deliberately never unlinked
+
+
+@_POSIX_ONLY
+async def test_cancelled_contended_acquire_never_pins_the_lock(runner_config):
+    # Cancel a caller stuck behind a held flock: its worker thread still completes the
+    # acquisition later, and the done-callback must release it — the lock becomes
+    # takeable again, and the cancelled section body never ran.
+    import asyncio
+    import fcntl
+
+    from conftest import wait_until
+
+    config, claude_json = runner_config
+    a = SessionRunner(config, claude_json=claude_json)
+    b = SessionRunner(config, claude_json=claude_json)
+    entered_b = asyncio.Event()
+
+    async def _b_section():
+        async with b._bridge_flock("alpha"):
+            entered_b.set()
+
+    async with a._bridge_flock("alpha"):
+        task = asyncio.create_task(_b_section())
+        await asyncio.sleep(0.05)  # let B's worker thread block on the held flock
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert not entered_b.is_set()
+    lock_file = atomicio._cross_process_lock_file((config.projects_root / "alpha").expanduser())
+
+    def _acquirable():
+        fd = os.open(lock_file, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return True
+        except BlockingIOError:
+            return False
+        finally:
+            os.close(fd)
+
+    # B's landed-after-cancel acquisition is released by the callback (not GC).
+    await wait_until(_acquirable)
+
+
+async def test_cancelled_flock_acquire_is_released_when_the_thread_lands():
+    # A caller cancelled mid-acquire must not pin the cross-process lock until GC:
+    # the done-callback exits the manager as soon as the worker thread's acquisition
+    # lands — and only for a SUCCESSFUL acquisition.
+    import asyncio
+
+    from clauster.runner import _release_flock_if_acquired
+
+    class _Cm:
+        exited = 0
+
+        def __exit__(self, *exc):
+            self.exited += 1
+
+    cm = _Cm()
+    ok = asyncio.get_event_loop().create_future()
+    ok.set_result(None)
+    _release_flock_if_acquired(cm)(ok)
+    assert cm.exited == 1  # acquired after cancel -> released
+
+    failed = asyncio.get_event_loop().create_future()
+    failed.set_exception(FileNotFoundError("state dir gone"))
+    _release_flock_if_acquired(cm)(failed)
+    assert cm.exited == 1  # never entered -> never exited
+
+    cancelled = asyncio.get_event_loop().create_future()
+    cancelled.cancel()
+    _release_flock_if_acquired(cm)(cancelled)
+    assert cm.exited == 1  # cancelled before entering -> never exited
+
+
+def test_proc_cwd_reads_own_process_and_fails_closed():
+    import os as _os
+
+    from clauster import procutil
+
+    own = procutil.proc_cwd(_os.getpid())
+    assert own is not None
+    assert own.resolve() == type(own)(_os.getcwd()).resolve()
+    # A PID that can't exist reads as "not attributable", never a raise.
+    assert procutil.proc_cwd(2**22 + 12345) is None
