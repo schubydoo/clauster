@@ -171,6 +171,33 @@ async def test_persist_does_not_prune_row_another_process_added(runner_config):
     assert own.instance_id in records
 
 
+async def test_persist_drops_stopped_card_whose_row_another_process_forgot(runner_config):
+    # rediscover materializes a STOPPED card FROM a persisted row; if another process
+    # forgets that row afterwards, the card must not write it back through the live
+    # overlay on every later persist (Greptile #951 round 2) — the card is a view of
+    # the row, and the refreshed base's row-absence is the deletion signal.
+    config, claude_json = runner_config
+    with _other_process_store(config) as store:
+        store.save({"iid-b": {"project_name": "beta", "label": "forgotten-elsewhere"}})
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.rediscover(persist=False)
+    stopped = runner.get_instance_for_project("beta")
+    assert stopped is not None
+    assert stopped.status is InstanceStatus.STOPPED
+
+    with _other_process_store(config) as store:
+        store.save({})  # the other process forgets the row backing that card
+
+    own = _fake_instance("alpha")
+    runner._instances[own.instance_id] = own
+    await runner._persist()
+
+    with _other_process_store(config) as store:
+        records = store.load()
+    assert "iid-b" not in records  # the STOPPED card did not resurrect its row
+    assert own.instance_id in records  # while genuinely-new instances still persist
+
+
 async def test_forget_of_row_another_process_already_forgot_raises(runner_config):
     # forget refreshes its merge base at entry, so a record that only survives in this
     # process's construction-time snapshot is honestly reported as unknown.

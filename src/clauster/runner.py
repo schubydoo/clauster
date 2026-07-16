@@ -708,6 +708,18 @@ class SessionRunner:
                 "sandbox_mode": inst.sandbox_mode,
             }
             for inst in self._instances.values()
+            # #951 round 2: a STOPPED card is (at most) a VIEW of its persisted row —
+            # rediscover materializes one from the row, and nothing but the row backs
+            # it. If the freshly refreshed base no longer holds its id, another process
+            # forgot it since this card was built; writing it back through this overlay
+            # would undo that delete on every later persist. A NEW instance this
+            # process just spawned is never dropped here: it isn't in the base yet,
+            # but it isn't STOPPED either (STARTING/RUNNING/ERROR all persist). The
+            # one degenerate loss — a stop whose intent-persist ALSO failed — only
+            # occurs when the store is already failing its best-effort writes.
+            if not (
+                inst.status is InstanceStatus.STOPPED and inst.instance_id not in self._persisted
+            )
         }
         # Overlay live instances onto the previously-persisted map rather than
         # replacing it: an instance whose bridge isn't currently tracked — its bridge
