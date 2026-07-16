@@ -233,6 +233,22 @@ def test_state_load_degrades_to_empty_on_db_error(persistence):
         assert store.load() == {}
 
 
+def test_state_load_strict_raises_oserror_on_db_error(persistence):
+    store = persistence.state_store()
+    # The REFRESH read (#949) must raise, not degrade to {}: swapping a known-good
+    # merge base for an empty one would turn the next full-replace save into a mass
+    # prune. OSError mirrors save()'s translation so callers handle one type.
+    with mock.patch.object(store, "_sessions", side_effect=SQLAlchemyError("boom")):
+        with pytest.raises(OSError, match="state load failed"):
+            store.load_strict()
+
+
+def test_state_load_strict_round_trips_like_load(persistence):
+    store = persistence.state_store()
+    store.save({IID_A: {"project_name": "a", "label": "x"}})
+    assert store.load_strict() == store.load()
+
+
 def test_hosted_load_degrades_to_empty_on_db_error(persistence):
     store = persistence.hosted_state_store()
     with mock.patch.object(store, "_sessions", side_effect=SQLAlchemyError("boom")):

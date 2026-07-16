@@ -338,12 +338,15 @@ identical mode policy, singleton cap, and option validation to the dashboard. Bo
 take `--json`; `start` exits non-zero on failure (`2` = bad request — unknown
 project, untrusted directory, invalid option; `1` = clauster tried and could not —
 bridge cap or launch failure). They are meant for driving clauster with **no
-server running**. A concurrent live server is not corrupted — the command first
-re-detects live bridges (so an already-live bridge is handed back, never
-duplicated) and the state file is written atomically — but the two processes
-otherwise write `state.json` last-writer-wins; since that record is
-non-authoritative (the server re-derives live bridges from the OS on its next
-poll), a lost write self-heals rather than dropping a running bridge.
+server running**, but a concurrent live server is safe: the two processes
+serialize their per-project spawn/stop sections on a cross-process file lock in
+the deployment state dir, the spawn re-checks the on-disk bridge record under
+that lock (a bridge the server already started is handed back or reattached,
+never duplicated), and every state write merges onto the store's current
+contents — a record the other process added or removed in the meantime stays
+added or removed. (On Windows the file lock is unavailable, so two *processes*
+fall back to the atomic-write + re-detect behavior; a single process is always
+fully serialized.)
 
 ```text
 clauster start <project> [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \

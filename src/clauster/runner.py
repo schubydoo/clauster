@@ -13,6 +13,7 @@ iterate over a ``list(...)`` snapshot, never the live dict.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -25,13 +26,14 @@ import subprocess
 import sys
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
 from . import (
+    atomicio,
     auth,
     bridge_log,
     code_sessions,
@@ -262,6 +264,24 @@ _PROC_START_TOLERANCE = 2.0
 _NOTIFY_DRAIN_GRACE = 2.0
 
 
+def _release_flock_if_acquired(cm) -> Callable[[asyncio.Task], None]:
+    """Build the done-callback that releases a flock a CANCELLED caller still acquired.
+
+    ``_bridge_flock`` acquires the blocking cross-process lock in a worker thread; if
+    the awaiting task is cancelled mid-acquire, the thread finishes anyway and would
+    otherwise hold the lock until GC reclaims the context manager. The callback exits
+    the manager (an ``os.close``, trivially fast on the loop) once the acquisition
+    task lands — and only when it actually succeeded (a failed/cancelled acquire
+    never entered the lock, so exiting it would raise).
+    """
+
+    def _release(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is None:
+            cm.__exit__(None, None, None)
+
+    return _release
+
+
 class SessionRunner:
     """Owns the lifecycle of managed bridges: spawn, resume, stop, and status polling."""
 
@@ -283,6 +303,18 @@ class SessionRunner:
         self._binary = config.claude.binary
         self._claude_json = claude_json or Path("~/.claude.json").expanduser()
         self._log_dir = (config.state_dir / "logs").expanduser()
+        # Cross-process lock files live in the deployment state dir (#949). The web app
+        # already configures this in create_app; doing it here too means a HEADLESS
+        # runner (CLI `clauster start/stop`, the MCP write tools) built from the same
+        # config flocks in the same directory as the running service — without this, a
+        # headless writer's cross-process lock degrades to a warning and never excludes
+        # the web app. Idempotent (same value both times in the web app). The dir is
+        # ALSO pinned per-runner: every runner flock passes `lock_dir=self._lock_dir`
+        # explicitly, so a later configure_lock_dir for a DIFFERENT state dir in the
+        # same process (tests, exotic embedding) can't silently redirect this runner's
+        # lock files away from the ones external processes use (Greptile #951 P1).
+        self._lock_dir = (config.state_dir / "locks").expanduser()
+        atomicio.configure_lock_dir(self._lock_dir)
         # Monotonic spawn counter → unique log filenames even for two same-ms spawns.
         self._log_seq = 0
         # Registry keyed by instance_id (stable UUID, #777). Standard bridges keep
@@ -334,6 +366,13 @@ class SessionRunner:
         # never affects a bridge's lifecycle.
         self._history = self._persistence.session_history_store()
         self._persisted: dict[str, dict] = self._state.load()
+        # Instance ids whose row this process has OBSERVED in (or saved to) the store —
+        # grown on every base load/refresh and every successful save, never pruned by
+        # a refresh. The persist subset uses it as the ownership signal (#951): a dead
+        # card that is row-backed yet absent from the fresh base was forgotten by
+        # another process and must not be written back; a never-saved instance still
+        # gets its first save. Bounded by the instances this process ever sees.
+        self._row_backed: set[str] = set(self._persisted)
         self._last_saved: dict[str, dict] | None = None
         # Serialize concurrent persists (startup-watch / stop / poll loop can interleave
         # on the event loop). The DB store's per-row prune raises StaleDataError when a
@@ -676,6 +715,20 @@ class SessionRunner:
                 "sandbox_mode": inst.sandbox_mode,
             }
             for inst in self._instances.values()
+            # #951 rounds 2+3: a dead card (STOPPED/CRASHED/ERROR) whose row this
+            # process KNOWS reached the store (``_row_backed``) but is gone from the
+            # freshly refreshed base was forgotten by another process — the card is
+            # only a view of that row, and writing it back through this overlay would
+            # undo the delete on every later persist. Row-backedness (not status) is
+            # the ownership signal: a NEVER-saved instance (fresh spawn, or a spawn
+            # that failed straight to ERROR) is not in the base either, but it isn't
+            # row-backed, so it still gets its first save. A live STARTING/RUNNING
+            # bridge is ground truth regardless and always persists.
+            if (
+                inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+                or inst.instance_id not in self._row_backed
+                or inst.instance_id in self._persisted
+            )
         }
         # Overlay live instances onto the previously-persisted map rather than
         # replacing it: an instance whose bridge isn't currently tracked — its bridge
@@ -687,7 +740,45 @@ class SessionRunner:
         # until state.json is reset.
         return {**self._persisted, **live}
 
-    async def _persist(self) -> None:
+    async def _refresh_persisted(self) -> bool:
+        """Replace the persist merge-base with the CURRENT DB state (#949).
+
+        ``_persisted`` is otherwise a snapshot from construction time, advanced only
+        by this process's own saves — so a second clauster process (web app vs a
+        headless CLI/MCP writer) mutating the shared store leaves it stale, and the
+        next full-replace save here would resurrect rows the other process pruned
+        and prune rows it added. Refreshing before merging keeps every writer's
+        base current.
+
+        Read failures keep the OLD base (:meth:`StateStore.load_strict` raises
+        instead of degrading to ``{}``): replacing a known-good base with an empty
+        one on a transient DB error would turn the next save into a mass prune —
+        a stale cursor is the safe degrade, a data loss is not.
+        """
+        async with self._persist_lock:
+            return await self._refresh_persisted_locked()
+
+    async def _refresh_persisted_locked(self) -> bool:
+        """Body of :meth:`_refresh_persisted`; caller must hold ``_persist_lock``.
+
+        Returns whether the base was actually refreshed — ``False`` on a DB read
+        error (old base kept). :meth:`_persist` aborts its save on ``False``.
+        """
+        try:
+            loaded = await asyncio.to_thread(self._state.load_strict)
+        except OSError as exc:
+            _log.warning(
+                "could not refresh persisted bridge state (keeping the previous snapshot): %s",
+                exc,
+            )
+            return False
+        self._persisted = loaded
+        # UNION, never replace: an id we saved that is now missing from the store is
+        # exactly the cross-process-deletion signal the persist subset keys on.
+        self._row_backed |= set(loaded)
+        return True
+
+    async def _persist(self, *, drop: str | None = None) -> None:
         """Write the persisted subset off-loop, but only when it actually changed.
 
         Best-effort: the state store is non-authoritative, so a write failure (disk
@@ -697,21 +788,44 @@ class SessionRunner:
         the next persist retries (mirrors :meth:`HostedManager._persist`).
 
         Held under ``_persist_lock`` so interleaving callers can't race the store's
-        per-row prune into a :class:`StaleDataError` (#471).
+        per-row prune into a :class:`StaleDataError` (#471) — and, since #949, under
+        the STORE-WIDE cross-process lock (:meth:`_store_flock`) for the whole
+        refresh→merge→save: the save is a FULL-TABLE replace, and the per-project
+        flocks don't exclude a different project's writer in another process, so an
+        unserialized load→save could straddle its save and prune its fresh row.
+
+        The refresh re-loads the merge base from the store so this save can't
+        resurrect a row another clauster process pruned since our snapshot, or prune
+        a row it added. A FAILED refresh aborts the attempt — writing a full replace
+        from a known-stale base is exactly the prune hazard this exists to close; the
+        next persist retries. ``drop`` (:meth:`forget`, the one deletion path)
+        excludes that instance id from the freshly refreshed base so the delete is
+        atomic with the reload — and skips the no-change dedup, which was computed
+        against OUR last write and can't know whether the store still holds the row.
         """
         async with self._persist_lock:
-            subset = self._persist_subset()
-            if subset == self._last_saved:
-                return
-            try:
-                await asyncio.to_thread(self._state.save, subset)
-            except OSError as exc:
-                _log.warning("could not persist bridge state: %s", exc)
-                return
-            self._last_saved = subset
-            # Keep the merge base in sync with what's on disk so the next overlay builds
-            # on the latest saved state (live modes that changed this round are retained).
-            self._persisted = subset
+            async with self._store_flock():
+                await self._persist_locked(drop=drop)
+
+    async def _persist_locked(self, *, drop: str | None) -> None:
+        """Body of :meth:`_persist`; caller holds ``_persist_lock`` + the store flock."""
+        if not await self._refresh_persisted_locked():
+            return
+        if drop is not None:
+            self._persisted = {k: v for k, v in self._persisted.items() if k != drop}
+        subset = self._persist_subset()
+        if drop is None and subset == self._last_saved:
+            return
+        try:
+            await asyncio.to_thread(self._state.save, subset)
+        except OSError as exc:
+            _log.warning("could not persist bridge state: %s", exc)
+            return
+        self._last_saved = subset
+        # Keep the merge base in sync with what's on disk so the next overlay builds
+        # on the latest saved state (live modes that changed this round are retained).
+        self._persisted = subset
+        self._row_backed |= set(subset)  # everything just saved is now row-backed
 
     # ----- discovery helpers ---------------------------------------------
 
@@ -869,7 +983,13 @@ class SessionRunner:
         a double-click, retry, or second browser tab must not both pass the
         idempotency check and launch two bridges, because the second would clobber
         the first in ``self._instances``/``self._procs`` and orphan an untracked,
-        unreapable process. Different projects still spawn concurrently.
+        unreapable process. Different projects still spawn concurrently. Since #949
+        the same section also holds a per-project *cross-process* lock
+        (:meth:`_bridge_flock`) held through the readiness wait, so a SECOND clauster
+        process (headless CLI/MCP writer vs the live web app) serializes here too and
+        its own check-then-launch can't interleave with ours; its idempotency check
+        additionally probes the on-disk bridge pointer (see ``_spawn_locked``), which
+        our bridge has typically written by the time the lock is released.
 
         ``resume_target`` is the SPECIFIC instance a :meth:`resume` is reviving. It
         pins mode resolution and the pty idempotency check to that instance instead
@@ -898,7 +1018,7 @@ class SessionRunner:
         ``warnings`` carries non-blocking advisories (the pty no-worktree collision
         warning) so the API can surface them (#778).
         """
-        async with self._spawn_lock_for(name):
+        async with self._spawn_lock_for(name), self._bridge_flock(name):
             return await self._spawn_locked(
                 name,
                 spawn_mode=spawn_mode,
@@ -922,6 +1042,71 @@ class SessionRunner:
             lock = self._spawn_locks[name] = asyncio.Lock()
         return lock
 
+    @contextlib.asynccontextmanager
+    async def _bridge_flock(self, name: str) -> AsyncIterator[None]:
+        """Hold the cross-process per-project bridge-lifecycle lock (#949).
+
+        The per-project ``_spawn_lock_for`` is an in-process ``asyncio.Lock`` — it
+        never excludes a SECOND clauster process (the live web app vs a headless
+        CLI ``clauster start``/``stop`` or MCP writer sharing the same config).
+        This layers the deployment-wide ``flock`` (:func:`atomicio.cross_process_lock`,
+        the same primitive the config/CLAUDE.md writers use) under it, keyed by the
+        project directory so both processes derive the same lock file. Ordering is
+        ALWAYS inproc-first, cross-process-second (the atomicio convention), so the
+        two layers can't deadlock; the blocking ``flock`` is entered/exited in a
+        worker thread so a contended lock never stalls the event loop. ``name`` may
+        be a bare instance id on the :meth:`forget` fallback path (record with no
+        resolvable project) — the derived path need not exist, it is only a key.
+
+        On Windows (no ``fcntl``) the flock layer yields without locking — behavior
+        there is unchanged (in-process serialization only), exactly like the config
+        writers; see :func:`atomicio.cross_process_lock`.
+        """
+        async with self._flock((self._config.projects_root / name).expanduser()):
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _store_flock(self) -> AsyncIterator[None]:
+        """Hold the STORE-WIDE cross-process lock for a read-merge-replace save (#949).
+
+        The per-project flock only excludes SAME-project writers, but
+        :meth:`StateStore.save` is a full-table replace — without a store-wide lock,
+        this process's refresh→save could straddle another process's save of a
+        *different* project's row and prune it. Held only across :meth:`_persist`'s
+        refresh+merge+save (milliseconds; the store is small). Ordering: always
+        acquired AFTER any per-project flock (spawn/stop/forget/adopt persist inside
+        their sections) and no holder ever acquires a per-project flock afterwards,
+        so the two levels can't deadlock across processes.
+        """
+        async with self._flock((self._config.state_dir / "state-store").expanduser()):
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _flock(self, target: Path) -> AsyncIterator[None]:
+        """Hold :func:`atomicio.cross_process_lock` on ``target``, event-loop-safely.
+
+        The shared acquire behind :meth:`_bridge_flock` / :meth:`_store_flock`: the
+        blocking ``flock`` is entered/exited in a worker thread, and the lock dir is
+        pinned to THIS runner's deployment (``self._lock_dir``) so a later global
+        ``configure_lock_dir`` for a different state dir can't redirect it.
+        """
+        cm = atomicio.cross_process_lock(target, lock_dir=self._lock_dir)
+        acquire = asyncio.ensure_future(asyncio.to_thread(cm.__enter__))
+        try:
+            await asyncio.shield(acquire)
+        except asyncio.CancelledError:
+            # The worker thread may still complete the blocking flock AFTER this frame
+            # is torn down (a cancelled to_thread doesn't stop the thread). Release the
+            # lock the moment the acquisition lands instead of holding it until GC
+            # reclaims the context manager — a cancelled caller must never pin the
+            # cross-process lock.
+            acquire.add_done_callback(_release_flock_if_acquired(cm))
+            raise
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(cm.__exit__, None, None, None)
+
     async def _spawn_locked(
         self,
         name: str,
@@ -938,6 +1123,38 @@ class SessionRunner:
     ) -> SpawnOutcome:
         # Body of spawn_detailed(), always run under the per-project lock (see spawn()).
         proj = self._resolve_project(name)
+        # Refresh the persist merge-base under the locks (#949): the persisted-record
+        # reads below (the reattach probe's saved modes) and this spawn's trailing
+        # _persist must see the shared store as it is NOW, not as it was when this
+        # runner was constructed — a headless writer's construction-time snapshot can
+        # predate rows the web app has since added or forgotten.
+        refreshed = await self._refresh_persisted()
+        # Stale-resume gate (#951 round 4): resuming a DEAD card whose row-backed
+        # record is gone from the fresh base would relaunch — and re-persist — a
+        # session another clauster process explicitly forgot, silently undoing that
+        # delete. Fail closed with the truth instead, and drop the card (it was only
+        # a view of the deleted row). A LIVE resume target is untouched — it falls
+        # through to the idempotent already-running return below. When the refresh
+        # itself failed, the gate must not decide from the known-stale snapshot
+        # (#951 round 5): refuse the resume as retryable — WITHOUT dropping the card,
+        # since we couldn't learn whether its row is actually gone. A plain (non-
+        # resume) spawn proceeds on a failed refresh: the store is non-authoritative
+        # and launching bridges must not depend on it; _persist re-checks on its own.
+        if resume and resume_target is not None:
+            iid = resume_target.instance_id
+            dead = resume_target.status not in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+            if dead and iid in self._row_backed:
+                if not refreshed:
+                    raise SpawnError(
+                        f"could not verify session {iid} against the shared state store "
+                        "(transient read failure) — try the resume again"
+                    )
+                if iid not in self._persisted:
+                    self._instances.pop(iid, None)
+                    raise UnknownProject(
+                        f"session {iid} was forgotten by another clauster process — "
+                        "nothing left to resume"
+                    )
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode
@@ -1043,6 +1260,25 @@ class SessionRunner:
                         f"a standard bridge for {name!r} is already "
                         f"{live_standard.status.value} — standard bridges are capped at "
                         "one per project, so the existing bridge was returned"
+                    ),
+                )
+            # Cross-process half of the same idempotency check (#949): this process's
+            # registry can't see a standard bridge ANOTHER clauster process (the live
+            # web app vs a headless CLI/MCP writer) launched — but the bridge-pointer
+            # it left on disk can, and we hold the cross-process per-project lock the
+            # other writer's spawn held, so the pointer is past its fork-to-visible
+            # window. Reattach a live hit and return it idempotently — the same
+            # take-over :meth:`adopt` performs, with the same live-standard gate (a
+            # dead pointer or a pty/flag-form bridge fails it and we launch normally).
+            reattached = await self._reattach_external_standard(proj)
+            if reattached is not None:
+                return SpawnOutcome(
+                    instance=reattached,
+                    created=False,
+                    reason=(
+                        f"a standard bridge for {name!r} is already running (started "
+                        "by another clauster process or externally) — reattached it "
+                        "instead of launching a second one on the same environment"
                     ),
                 )
         else:  # pragma: skip-on-win — pty branch: pywinpty-gated, unreachable on Windows CI
@@ -2333,7 +2569,7 @@ class SessionRunner:
         # internal callers and nothing it awaits re-takes this lock. Look the instance up INSIDE
         # the lock (like forget()) so a concurrent forget() can't de-register it between the
         # lookup and the signalling.
-        async with self._spawn_lock_for(project_name):
+        async with self._spawn_lock_for(project_name), self._bridge_flock(project_name):
             instance = self._instances.get(instance_id)
             if instance is None:
                 raise UnknownProject(f"no managed instance: {instance_id!r}")
@@ -2397,10 +2633,28 @@ class SessionRunner:
         # repopulate _instances/_procs between the liveness check and the pop() —
         # forgetting must never remove tracking for a just-spawned live process.
         lock_name = project_name or instance_id  # fall back to instance_id if not in registry
-        async with self._spawn_lock_for(lock_name):
+        async with self._spawn_lock_for(lock_name), self._bridge_flock(lock_name):
+            # Refresh the merge base FIRST (#949): forget is the one path that DELETES a
+            # row, and it does so by re-saving a filtered map — so the map must start
+            # from the CURRENT DB state, not this process's construction-time snapshot.
+            # A stale base here would resurrect rows another process already pruned, or
+            # prune rows another process added since. Also makes the not-found check
+            # below honest: a row another process already forgot raises UnknownProject.
+            # (If this refresh degrades on a transient DB read error — warn + keep the
+            # old base — the prune below operates on that older base: strictly better
+            # than {} would be, bounded to the error window, and the matching save
+            # almost certainly fails best-effort too.)
+            await self._refresh_persisted()
             instance = self._instances.get(instance_id)
             if instance is None and instance_id not in self._persisted:
                 raise UnknownProject(f"no managed instance: {instance_id!r}")
+            if instance is None and project_name is None:
+                # Re-derive from the REFRESHED base: the pre-lock read above served only
+                # to pick the lock key and used the construction-time snapshot, which may
+                # predate this record (#949) — without this, the pointer clear below would
+                # be silently skipped for a record another process persisted since.
+                persisted = self._persisted.get(instance_id)
+                project_name = persisted.get("project_name") if persisted is not None else None
             if instance is not None:
                 if instance.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING):
                     raise InstanceStillLive(
@@ -2428,7 +2682,12 @@ class SessionRunner:
             # and _last_saved to the same object, so mutating _persisted would also mutate the
             # dedup baseline and _persist would skip the write (leaving the row on disk).
             self._persisted = {k: v for k, v in self._persisted.items() if k != instance_id}
-            await self._persist()
+            # drop=… — the deletion must ride INSIDE the persist's own store-locked
+            # refresh→save: _persist re-loads the base (which still holds the row), so
+            # a bare filtered save computed out here could race another process or be
+            # undone by the reload. The in-memory filter above keeps this process's
+            # view consistent even when the best-effort save doesn't land.
+            await self._persist(drop=instance_id)
             # #867 L1: a forgotten bridge's bridge-pointer.json would otherwise be
             # reattached on the next spawn — reviving an anchor that may have been
             # archived/deleted out from under its env (the #671 dead-end). Clear it so the
@@ -2674,6 +2933,10 @@ class SessionRunner:
         trailing state write — the read-only mode the headless CLI (#775) uses so a
         ``clauster status`` never clobbers the running service's shared ``state.json``.
         """
+        # Fresh merge base (#949): the reattach/resurrection reads below consume
+        # ``_persisted``, and a headless runner calls this as its hydrate step — its
+        # construction-time snapshot may already lag the live service's store.
+        await self._refresh_persisted()
         for proj in self._discovered().values():
             if self.get_instance_for_project(proj.name) is not None:
                 continue
@@ -2814,52 +3077,90 @@ class SessionRunner:
         - already managed -> :class:`InstanceStillLive` (409);
         - no live *standard* bridge at its pointer (it ended, or it's a pty/flag-form
           bridge, which is unsafe to adopt — no recoverable keeper, terminal-coupled
-          Stop) -> :class:`AdoptionUnavailable` (409). pty external sessions stay
-          display-only.
+          Stop), or a live one that can't be positively attributed to THIS project
+          (its cwd isn't the project directory — a ``sanitize_cwd`` pointer collision,
+          or an unreadable cwd) -> :class:`AdoptionUnavailable` (409). pty external
+          sessions stay display-only.
 
         Caveat the UI must carry: a standard bridge's environment server dies with its
         host, so a later Resume of the adopted session is a *fresh* Start, not a
         continuation of its prior conversation.
         """
         # Hold the per-project spawn lock so a concurrent spawn()/resume()/forget()
-        # can't race the registry between the liveness check and the insert.
-        async with self._spawn_lock_for(name):
+        # can't race the registry between the liveness check and the insert — and the
+        # cross-process lock (#949) so a second clauster process's spawn can't be
+        # mid-launch (pointer not yet visible) while we probe.
+        async with self._spawn_lock_for(name), self._bridge_flock(name):
             if self.get_instance_for_project(name) is not None:
                 raise InstanceStillLive(f"{name!r} is already managed — nothing to adopt")
             proj = self._discovered().get(name)
             if proj is None:
                 raise UnknownProject(f"no such project: {name!r}")
-            ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
-            # Re-check liveness AND the standard-subcommand cmdline at click time: a
-            # stale pointer (the bridge died since the poll) or a pty/flag-form bridge
-            # both fail the gate, so adoption can only ever take over a live standard
-            # bridge — the one shape it can safely Stop.
-            if ptr is None or not await asyncio.to_thread(
-                procutil.is_live_standard_bridge, ptr.pid, ptr.proc_start
-            ):
+            # Fresh merge base (#949) so the saved label/modes read by the reattach
+            # come from the store as it is now, and the trailing persist can't
+            # resurrect/prune rows another process changed since construction.
+            await self._refresh_persisted()
+            instance = await self._reattach_external_standard(proj)
+            if instance is None:
                 raise AdoptionUnavailable(
                     f"{name!r} has no live standard bridge to adopt — it may have ended, "
                     "or it's a pty (true-resume) bridge, which can't be adopted"
                 )
-            persisted_hit = self._persisted_for_project(name)
-            saved = persisted_hit[1] if persisted_hit is not None else {}
-            spawn_mode, permission_mode, _resume_mode = self._saved_modes(saved)
-            instance = self._instance_from_pointer(
-                name,
-                ptr,
-                label=saved.get("label") or name,
-                spawn_mode=spawn_mode,
-                permission_mode=permission_mode,
-                # The live process is positively confirmed standard above (cmdline
-                # gate), so pin "standard" rather than trusting a possibly-stale
-                # persisted resume_mode — keeper recovery / double-SIGINT stop stay off.
-                resume_mode="standard",
-                bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
-                keeper_pid=None,
-            )
-            self._instances[instance.instance_id] = instance
-            await self._persist()
             return instance
+
+    async def _reattach_external_standard(self, proj: Project) -> RemoteControlInstance | None:
+        """Reattach a live standard bridge this process didn't spawn; ``None`` if there is none.
+
+        The shared take-over step behind :meth:`adopt` (explicit operator action) and
+        :meth:`_spawn_locked`'s cross-process idempotency probe (#949). Reads the
+        project's ``bridge-pointer.json`` and gates on
+        :func:`procutil.is_live_standard_bridge` — liveness AND the standard-subcommand
+        cmdline shape, checked at call time: a stale pointer (the bridge died since it
+        was written) or a pty/flag-form bridge (no recoverable keeper, terminal-coupled
+        Stop — unsafe to manage) both return ``None`` — as does a live bridge whose
+        actual cwd is NOT this project's directory (a ``sanitize_cwd`` pointer-dir
+        collision with another project; taking it over would misattribute a foreign
+        pid). A hit is synthesized into a
+        managed RUNNING instance (fresh ``instance_id``, ``resume_mode`` pinned
+        ``"standard"`` from the positive cmdline gate rather than a possibly-stale
+        persisted value), registered, and persisted.
+
+        Caller must hold the per-project spawn lock and the cross-process bridge lock;
+        the persisted-record read wants a fresh merge base (see the callers' preceding
+        ``_refresh_persisted``).
+        """
+        ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
+        if ptr is None or not await asyncio.to_thread(
+            procutil.is_live_standard_bridge, ptr.pid, ptr.proc_start
+        ):
+            return None
+        # Positive attribution: the pointer directory is keyed by the SANITIZED cwd
+        # (non-alphanumerics → "-"), so two punctuation-differing project paths can
+        # share one pointer file — and a take-over that trusted the pointer alone
+        # would register ANOTHER project's bridge here, handing its Stop button a
+        # foreign pid. Only proceed when the live process's actual cwd is this
+        # project's directory; an unreadable cwd fails closed (never take over on a
+        # guess). Same fail-closed posture as the #948 fork gate for the same
+        # collision (#949 review).
+        cwd = await asyncio.to_thread(procutil.proc_cwd, ptr.pid)
+        if cwd is None or cwd.resolve() != proj.path.resolve():
+            return None
+        persisted_hit = self._persisted_for_project(proj.name)
+        saved = persisted_hit[1] if persisted_hit is not None else {}
+        spawn_mode, permission_mode, _resume_mode = self._saved_modes(saved)
+        instance = self._instance_from_pointer(
+            proj.name,
+            ptr,
+            label=saved.get("label") or proj.name,
+            spawn_mode=spawn_mode,
+            permission_mode=permission_mode,
+            resume_mode="standard",
+            bridge_proc_start=procutil._expected_epoch(ptr.proc_start),
+            keeper_pid=None,
+        )
+        self._instances[instance.instance_id] = instance
+        await self._persist()
+        return instance
 
     def adoptable_external_projects(self) -> set[str]:
         """Project names whose live EXTERNAL session is a *standard* bridge safe to adopt.
@@ -2867,10 +3168,10 @@ class SessionRunner:
         A standard external bridge writes an Anthropic pointer whose pid is a live
         ``claude remote-control`` subcommand process; a pty (flag-form) external bridge
         is excluded (unsafe to adopt — see :meth:`adopt`), as is one whose pointer has
-        gone stale. Computed from the same pointer + cmdline checks :meth:`adopt`
-        enforces, so the dashboard's Adopt affordance can never offer an adoption that
-        :meth:`adopt` would then refuse. Synchronous (filesystem + ``psutil``); call it
-        off-loop.
+        gone stale. Computed from the same pointer + cmdline + cwd-attribution checks
+        :meth:`adopt` enforces, so the dashboard's Adopt affordance can never offer an
+        adoption that :meth:`adopt` would then refuse. Synchronous (filesystem +
+        ``psutil``); call it off-loop.
         """
         discovered = self._discovered()
         adoptable: set[str] = set()
@@ -2879,7 +3180,13 @@ class SessionRunner:
             if proj is None:
                 continue
             ptr = pointers.pointer_for_project(proj.path)
-            if ptr is not None and procutil.is_live_standard_bridge(ptr.pid, ptr.proc_start):
+            if ptr is None or not procutil.is_live_standard_bridge(ptr.pid, ptr.proc_start):
+                continue
+            # Mirror adopt()'s positive-attribution gate (#951): a sanitize-collided
+            # foreign project's bridge must not be advertised as adoptable only for
+            # every resulting Adopt click to 409.
+            cwd = procutil.proc_cwd(ptr.pid)
+            if cwd is not None and cwd.resolve() == proj.path.resolve():
                 adoptable.add(name)
         return adoptable
 

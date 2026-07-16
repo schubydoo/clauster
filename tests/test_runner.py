@@ -217,7 +217,9 @@ async def test_forget_clears_pointer_with_relative_projects_root(runner_config, 
     monkeypatch.chdir(config.projects_root.parent)
     rel_config = config.model_copy(update={"projects_root": Path(config.projects_root.name)})
     runner = SessionRunner(rel_config, claude_json=claude_json)
-    runner._persisted = {"iid": {"instance_id": "iid", "project_name": "alpha"}}
+    # Seed through the store, not the in-memory cache: forget refreshes its merge
+    # base from the DB at entry (#949), so a record must exist there to be found.
+    runner._state.save({"iid": {"project_name": "alpha"}})
 
     proj_abs = (rel_config.projects_root / "alpha").resolve()
     pdir = runner._claude_projects_dir / pointers.sanitize_cwd(proj_abs)
@@ -238,12 +240,14 @@ async def test_forget_clears_pointer_with_relative_projects_root(runner_config, 
     assert not pointer.exists()
 
 
-async def test_forget_without_project_name_skips_pointer_clear(runner_config):
+async def test_forget_without_project_name_skips_pointer_clear(runner_config, monkeypatch):
     # A legacy/malformed persisted record with no "project_name" is still forgettable;
-    # the pointer clear is simply skipped (no project path to resolve).
+    # the pointer clear is simply skipped (no project path to resolve). The DB store's
+    # FK can't hold such a row, so stub the refresh source (#949: forget re-loads its
+    # merge base from the store at entry) to hand back the legacy shape directly.
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
-    runner._persisted = {"iid": {"instance_id": "iid"}}  # no project_name key
+    monkeypatch.setattr(runner._state, "load_strict", lambda: {"iid": {}})
     await runner.forget("iid")
     assert "iid" not in runner._persisted
 
@@ -1402,6 +1406,10 @@ async def test_adopt_promotes_external_standard_session(runner_config, monkeypat
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
 
     inst = await runner.adopt("alpha")
     assert inst.status is InstanceStatus.RUNNING
@@ -1471,6 +1479,10 @@ async def test_adopt_pins_standard_over_stale_persisted_pty_mode(runner_config, 
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
 
     inst = await runner.adopt("alpha")
     assert inst.resume_mode == "standard"  # pinned, NOT the stale persisted "pty"
@@ -1502,7 +1514,39 @@ def test_adoptable_external_projects(runner_config, monkeypatch):
     monkeypatch.setattr(
         "clauster.runner.procutil.is_live_standard_bridge", lambda pid, *a, **k: pid == 11
     )
+    # Positive attribution (#951): pid 11's cwd IS alpha's directory.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (root / "alpha").resolve() if pid == 11 else None,
+    )
     assert runner.adoptable_external_projects() == {"alpha"}
+
+
+def test_adoptable_excludes_sanitize_collided_foreign_bridge(runner_config, monkeypatch):
+    # The Adopt affordance must apply the same cwd-attribution gate adopt() enforces:
+    # a live standard bridge whose actual cwd is ANOTHER project's directory (a
+    # sanitize_cwd pointer collision) is not advertised, so an offered Adopt can
+    # never 409 on the attribution check.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    root = config.projects_root
+    runner._sessions = [
+        WorkingSession(
+            pid=11,
+            cwd=root / "alpha",
+            kind="interactive",
+            started_at=11,
+            local_uuid="u11",
+            attribution=Attribution.EXTERNAL,
+        )
+    ]
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr(11))
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_cwd", lambda pid: (root / "beta").resolve())
+    assert runner.adoptable_external_projects() == set()
+    # An unreadable cwd is equally unattributable -> not advertised either.
+    monkeypatch.setattr("clauster.runner.procutil.proc_cwd", lambda pid: None)
+    assert runner.adoptable_external_projects() == set()
 
 
 def test_adoptable_skips_undiscovered_project(runner_config, monkeypatch):
@@ -1523,6 +1567,10 @@ async def test_adopt_then_stop_uses_single_sigint(runner_config, monkeypatch):
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
     adopted = await runner.adopt("alpha")
 
     calls: list[tuple[int, bool]] = []
@@ -2267,6 +2315,10 @@ async def test_adopt_leaves_log_path_unset(runner_config, monkeypatch):
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (runner_config[0].projects_root / "alpha").resolve(),
+    )
 
     inst = await runner.adopt("alpha")
     assert inst.bridge_debug_log_path is None

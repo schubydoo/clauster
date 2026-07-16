@@ -390,6 +390,10 @@ def test_adopt_endpoint_success(runner_config, monkeypatch):
         lambda path: _FakePtr() if path.name == "alpha" else None,
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (config.projects_root / "alpha").resolve(),
+    )
     with TestClient(create_app(config, runner=runner)) as client:
         resp = client.post("/api/projects/alpha/adopt")
         assert resp.status_code == 200, resp.text

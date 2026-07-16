@@ -25,7 +25,11 @@ for config/CLAUDE.md writes: both the CLAUDE.md editor and the config-write path
 its ``flock`` on a lock file KEYED BY THE TARGET but living in the deployment state dir
 (:func:`configure_lock_dir`), not beside the target — so two clauster processes editing
 the same ``<project>/CLAUDE.md`` mutually exclude without littering the project dir with
-a visible ``CLAUDE.md.lock``.
+a visible ``CLAUDE.md.lock``. Since #949 the bridge lifecycle uses the same primitive:
+``SessionRunner`` holds a per-project ``cross_process_lock`` (keyed by the project
+directory) across its spawn/stop/forget/adopt sections, so a headless CLI/MCP writer
+and the running web app mutually exclude their read-modify-writes of the shared
+instance store and can't double-launch a standard bridge.
 """
 
 from __future__ import annotations
@@ -134,7 +138,7 @@ def configure_lock_dir(path: Path) -> None:
         _LOCK_DIR = resolved
 
 
-def _cross_process_lock_file(target: Path) -> Path | None:
+def _cross_process_lock_file(target: Path, lock_dir: Path | None = None) -> Path | None:
     """Return the state-dir lock-file path for ``target``, or ``None`` if unconfigured.
 
     Keyed by the SAME normalized realpath (:func:`_lock_key`) both write paths use, so
@@ -142,9 +146,15 @@ def _cross_process_lock_file(target: Path) -> Path | None:
     ``CLAUDE.md`` hash to ONE lock file and therefore mutually exclude. A truncated
     SHA-256 of the key names the file (a stable, filesystem-safe, collision-resistant
     handle) so nothing about the target's path leaks into the lock dir's listing.
+
+    ``lock_dir`` overrides the module-global directory: a caller bound to a specific
+    deployment (the bridge lifecycle, #949) passes its own state dir's ``locks/`` so a
+    LATER ``configure_lock_dir`` for a different state dir in the same process can't
+    silently redirect its lock files away from the ones external processes use.
     """
-    with _LOCK_DIR_LOCK:
-        lock_dir = _LOCK_DIR
+    if lock_dir is None:
+        with _LOCK_DIR_LOCK:
+            lock_dir = _LOCK_DIR
     if lock_dir is None:
         return None
     digest = hashlib.sha256(_lock_key(target).encode()).hexdigest()[:32]
@@ -152,14 +162,17 @@ def _cross_process_lock_file(target: Path) -> Path | None:
 
 
 @contextlib.contextmanager
-def cross_process_lock(target: Path):
+def cross_process_lock(target: Path, *, lock_dir: Path | None = None):
     """Hold an exclusive ``flock`` across processes for a write to ``target``.
 
     The lock file lives in the configured state dir (:func:`configure_lock_dir`), keyed
     by ``target``'s realpath, so two clauster PROCESSES writing the same file serialize
-    without a lock artifact appearing beside the target. Layered UNDER the caller's
-    :func:`inproc_path_lock` (always acquired inproc-first, cross-process-second, in that
-    order everywhere) so the two never deadlock; this manager acquires no inproc lock.
+    without a lock artifact appearing beside the target. ``lock_dir`` pins that
+    directory per-caller instead (see :func:`_cross_process_lock_file`) — deployment-
+    bound callers pass their own so a later global reconfigure can't redirect them.
+    Layered UNDER the caller's :func:`inproc_path_lock` (always acquired inproc-first,
+    cross-process-second, in that order everywhere) so the two never deadlock; this
+    manager acquires no inproc lock.
 
     Degrades — never silently:
 
@@ -178,7 +191,7 @@ def cross_process_lock(target: Path):
     if fcntl is None:
         yield
         return
-    lock_file = _cross_process_lock_file(target)  # pragma: skip-on-win
+    lock_file = _cross_process_lock_file(target, lock_dir)  # pragma: skip-on-win
     if lock_file is None:  # pragma: skip-on-win
         _warn_cross_process_unconfigured()
         yield
@@ -207,8 +220,8 @@ def _warn_cross_process_unconfigured() -> None:  # pragma: skip-on-win
             return
         _CROSS_PROCESS_UNCONFIGURED_WARNED = True
     logger.warning(
-        "cross-process file lock dir not configured; config/CLAUDE.md writes are "
-        "serialized in-process only"
+        "cross-process file lock dir not configured; config/CLAUDE.md writes and "
+        "bridge-lifecycle sections are serialized in-process only"
     )
 
 

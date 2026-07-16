@@ -130,9 +130,13 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         bridge mode (``"standard"``/``"pty"``) with **no hidden coercion**, exactly
         as the launch-mode picker does.
 
-        A headless caller must :meth:`hydrate` first: ``spawn_detailed``'s idempotency
-        check reads the in-memory registry, so without a reattach a fresh CLI runner
-        can't see a bridge the live service already started and would launch a second.
+        A headless caller must :meth:`hydrate` first so the registry reflects what is
+        already running. The duplicate-launch hazard hydrate used to be load-bearing
+        for is closed harder since #949: ``spawn_detailed`` re-checks the project's
+        on-disk bridge pointer under a *cross-process* per-project lock (the same
+        flock the running web app's spawn holds), so a live standard bridge another
+        clauster process started is reattached and returned idempotently instead of
+        a second one being launched onto the same environment.
 
         ``trust`` accepts the workspace-trust dialog for the project (the CLI's
         ``--trust``, the headless equivalent of the dashboard's explicit Trust
