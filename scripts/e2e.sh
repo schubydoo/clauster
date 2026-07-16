@@ -33,7 +33,13 @@ if ! command -v agent-browser >/dev/null 2>&1; then
   exit 1
 fi
 
-# Idempotent; downloads the matched Chromium into agent-browser's cache on first run.
-agent-browser install
+# Install a browser only when the caller hasn't pinned one. CI pins a Renovate-tracked
+# Chrome-for-Testing build and exports AGENT_BROWSER_EXECUTABLE_PATH (see
+# .github/workflows/e2e.yml, #947), so it skips this latest-Chromium download; a plain
+# local run still gets a browser. Idempotent — downloads into agent-browser's cache on
+# first run.
+if [ -z "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ]; then
+  agent-browser install
+fi
 
 exec uv run pytest tests/e2e -o addopts="" -m e2e "$@"
