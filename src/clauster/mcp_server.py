@@ -1,7 +1,9 @@
-"""Read-only ``clauster mcp`` stdio MCP server (#527, v1).
+"""``clauster mcp`` stdio MCP server (#527).
 
-Exposes Clauster's *observable* session state to an MCP client (Claude Desktop,
-Claude Code, or any stdio MCP host) through two read-only tools:
+Exposes Clauster's session lifecycle to an MCP client (Claude Desktop, Claude
+Code, or any stdio MCP host) so an assistant can drive Clauster directly.
+
+Read tools:
 
 ``list_sessions``
     Every session Clauster can see — managed bridges, hosted (Direct Session)
@@ -11,31 +13,81 @@ Claude Code, or any stdio MCP host) through two read-only tools:
 ``session_status``
     The detail of one session, looked up by its id.
 
-Scope (v1, deliberately tight): **read-only**. There is no ``spawn_session`` /
-``stop_session`` / ``resume_session`` and no token auth — both are explicitly
-deferred to a follow-up. The server only *reports* what the dashboard's
-``/api`` read routes already surface, reusing the very same read machinery
-(:class:`~clauster.runner.SessionRunner`, :mod:`clauster.supervisor`, and the
-persisted hosted-session store) rather than re-deriving any of it.
+Write tools (#527 write slice) — the **bridge** channel only, thin wrappers over
+the #775 :class:`~clauster.engine.ClausterEngine` facade (the same
+``spawn_detailed``/``stop``/``resume`` the dashboard ``/api`` routes call, so the
+per-mode policy, standard-singleton cap, option validation, and per-project spawn
+lock are identical headless or from the browser):
+
+``spawn_session``
+    Start a bridge for a project. ``resume_mode`` picks standard vs pty with no
+    hidden coercion, exactly like the launch picker.
+
+``stop_session`` / ``resume_session``
+    Stop, or resume into its prior conversation, the bridge named by an id (as
+    returned by ``list_sessions``) — resolved through the same
+    ``resolve_bridge_id`` the ``/api`` DELETE/resume routes use.
+
+Auth. **Local-privileged, no token auth** — the stdio transport is reachable only
+by a process the operator already launched on the host (the maintainer's
+2026-07-11 design pass); a future daemon-socket transport can add token auth.
+**Trust is NOT auto-granted:** ``spawn_session`` exposes an explicit ``trust``
+argument that defaults to *false*, so an untrusted directory raises rather than
+being silently trusted from an MCP client — the headless equivalent of the CLI's
+``--trust`` / the dashboard's explicit Trust action.
+
+Concurrency with a running web app. A headless write runs its own short-lived
+:class:`ClausterEngine` (a fresh ``SessionRunner``) — the **same pattern the CLI
+``clauster start``/``stop`` already use**, sequenced after the #775 facade for
+exactly this reason. Each tool call :meth:`~clauster.engine.ClausterEngine.hydrate`
+s first, so ``rediscover`` reconciles the shared persisted state with the **live
+processes** (the ground truth, via on-disk bridge pointers) before acting — the
+idempotency check then sees a bridge the web app already started and hands it back
+instead of double-spawning.
+
+Serialization is *not* cross-process, and this is deliberately no stronger than
+the shipped CLI: the per-project spawn lock is an in-process ``asyncio.Lock``, so
+it serializes only *this* process's own concurrent calls, never against a separate
+web-app process. Shared **state** is not byte-corrupted regardless — persistence is SQLite
+(WAL + busy-timeout), so a contended write waits then raises a real error (surfaced
+as ``isError``), never a torn write. Two residual races remain (both pre-existing
+for the shipped CLI headless-write path, both needing a cross-process lock around
+the shared runner spawn/persist path to close — tracked as a follow-up, not this
+slice):
+
+1. **Duplicate-bridge TOCTOU** — if an MCP ``spawn_session`` and a dashboard Start
+   of the *same* project race in the instant between "fork the bridge" and "its
+   pointer file is visible on disk", both idempotency checks pass and two standard
+   bridges launch (the one-per-project cap momentarily bypassed).
+2. **Stale-snapshot resurrection** — this short-lived engine loads its persisted
+   merge-base once at construction and ``hydrate``'s ``rediscover(persist=False)``
+   only repopulates the live registry, not that base. So if the dashboard *forgets*
+   another bridge (deletes its row) after this engine started, a subsequent
+   ``_persist`` here overlays the stale base and the store's upsert-and-prune
+   briefly restores the removed row (a live bridge is safe — ``rediscover`` reattaches
+   it via its on-disk pointer; only a just-forgotten, no-live-process row resurfaces,
+   until the next reconcile prunes it again). Not data corruption — a transient stale
+   row.
 
 Transport / protocol. A minimal, dependency-free stdio JSON-RPC 2.0 server
-implementing just the MCP messages a read-only tool host needs: ``initialize``,
-the ``notifications/initialized`` ack, ``tools/list``, ``tools/call`` and
-``ping``. We hand-roll this rather than pull in the official ``mcp`` SDK — for a
-stdio-only, two-tool, read-only surface the SDK's async/SSE/Starlette dependency
-tree is far more than is warranted, and a tiny in-tree server keeps the
-distributed binary's supply-chain footprint unchanged and the whole path unit
-testable without spawning a subprocess. Per the spec, messages are
+implementing just the MCP messages a stdio tool host needs: ``initialize``, the
+``notifications/initialized`` ack, ``tools/list``, ``tools/call`` and ``ping``.
+We hand-roll this rather than pull in the official ``mcp`` SDK — its
+async/SSE/Starlette dependency tree is far more than a stdio surface warrants,
+and a tiny in-tree server keeps the distributed binary's supply-chain footprint
+unchanged and the whole path unit testable without spawning a subprocess (so the
+write slice needs no new ``[mcp]`` extra). Per the spec, messages are
 newline-delimited single-line JSON on stdin/stdout and **all** human-readable
 logging goes to stderr so it never corrupts the protocol stream.
 
-Fail-closed posture. Mutation is structurally absent (no tool calls into a
-spawn/stop path). A tool that raises is reported back as an ``isError`` tool
-result — never a server crash and never a silent empty success. Session output
-reuses Clauster's existing redaction: background-job free-text is already
-redacted by :mod:`clauster.supervisor` before it reaches us, and the summaries
-here surface only structural/lifecycle fields (ids, status, project, pids),
-never raw transcript or log content.
+Fail-closed posture. A tool that raises — a bad option (``InvalidSpawnOption``),
+an untrusted directory (``NotTrusted``), an unknown project/id, a spawn failure
+(``SpawnError``) — is reported back as an ``isError`` tool result carrying the
+message, never a server crash and never a silent empty success. Read output
+reuses Clauster's existing redaction (background-job free-text is redacted by
+:mod:`clauster.supervisor` upstream); the write tools return only structural
+lifecycle fields (ids, status, project, modes), never raw transcript or log
+content.
 """
 
 from __future__ import annotations
@@ -260,6 +312,75 @@ _TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "spawn_session",
+        "title": "Start a Clauster bridge",
+        "description": (
+            "Start a claude bridge for a project (the bridge channel). resume_mode "
+            "picks 'standard' (multi-session server) or 'pty' (single interactive "
+            "session, true-resume). trust (default false) accepts the workspace-trust "
+            "dialog — an untrusted directory is refused unless trust is true, exactly "
+            "like the dashboard's Trust action. Returns the started (or already-live) "
+            "session summary; created is false when an existing bridge was handed back."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "The project name to start in."},
+                "spawn_mode": {"type": "string", "description": "same-dir | worktree | session."},
+                "permission_mode": {
+                    "type": "string",
+                    "description": "The claude permission mode.",
+                },
+                "resume_mode": {"type": "string", "description": "standard | pty."},
+                "custom_name": {"type": "string", "description": "Display name (standard only)."},
+                "sandbox": {
+                    "type": "string",
+                    "description": "default | on | off (standard only).",
+                },
+                "trust": {
+                    "type": "boolean",
+                    "description": "Accept workspace-trust for this project (default false).",
+                },
+            },
+            "required": ["project"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "stop_session",
+        "title": "Stop a Clauster bridge",
+        "description": (
+            "Stop the bridge named by an id (a project name / id / prefix, as returned "
+            "by list_sessions). Returns stopped: false when no managed bridge matches."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The bridge id to stop."},
+            },
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "resume_session",
+        "title": "Resume a Clauster bridge",
+        "description": (
+            "Resume a stopped/crashed bridge into its prior conversation, reusing its "
+            "stored spawn/permission/resume modes. id is a project name / id / prefix "
+            "(as returned by list_sessions). Returns resumed: false when none matches. "
+            "Bridge channel only — hosted-session resume is not exposed here."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "The bridge id to resume."},
+            },
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -286,9 +407,99 @@ async def _tool_session_status(config: ClausterConfig, args: dict[str, Any]) -> 
     return {"found": False, "id": wanted}
 
 
+def _require_id(tool: str, args: dict[str, Any]) -> str:
+    """Return a non-empty string ``id`` arg or raise (surfaced as an isError result)."""
+    raw = args.get("id")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{tool} requires a non-empty string 'id'")
+    return raw.strip()
+
+
+def _optional_str(tool: str, args: dict[str, Any], key: str) -> Any:
+    """Return ``args[key]`` if a non-blank string, ``None`` if absent, else raise.
+
+    This only guards the wire TYPE (so a JSON number/object can't reach the runner);
+    the engine/runner validates the VALUE (a bad spawn_mode etc. → InvalidSpawnOption
+    → isError). Return type is ``Any`` — same as ``dict.get`` in the ``/api`` spawn
+    route — because a checked-but-unvalidated string feeds the engine's ``Literal``
+    mode params (``SpawnMode`` etc.), which the runner narrows at runtime.
+    """
+    if key not in args or args[key] is None:
+        return None
+    val = args[key]
+    if not isinstance(val, str):
+        raise ValueError(f"{tool} '{key}' must be a string")
+    stripped = val.strip()
+    return stripped or None
+
+
+async def _tool_spawn_session(config: ClausterConfig, args: dict[str, Any]) -> dict[str, Any]:
+    """Run ``spawn_session``: start a bridge via the engine facade (fail-closed trust).
+
+    A thin wrapper over :meth:`ClausterEngine.start` — the same ``spawn_detailed``
+    the ``POST /api/instances`` route calls. ``trust`` defaults to False, so an
+    untrusted directory raises :class:`NotTrusted` (an isError result) instead of
+    being silently trusted from an MCP client.
+    """
+    from .engine import ClausterEngine
+
+    project = args.get("project")
+    if not isinstance(project, str) or not project.strip():
+        raise ValueError("spawn_session requires a non-empty string 'project'")
+    trust = args.get("trust", False)
+    if not isinstance(trust, bool):
+        raise ValueError("spawn_session 'trust' must be a boolean")
+    with ClausterEngine(config) as engine:
+        await engine.hydrate()
+        outcome = await engine.start(
+            project.strip(),
+            spawn_mode=_optional_str("spawn_session", args, "spawn_mode"),
+            permission_mode=_optional_str("spawn_session", args, "permission_mode"),
+            resume_mode=_optional_str("spawn_session", args, "resume_mode"),
+            custom_name=_optional_str("spawn_session", args, "custom_name"),
+            sandbox=_optional_str("spawn_session", args, "sandbox"),
+            trust=trust,
+        )
+    return {
+        "created": outcome.created,
+        "reason": outcome.reason,
+        "warnings": list(outcome.warnings),
+        "session": _summarize_instance(outcome.instance, kind="bridge"),
+    }
+
+
+async def _tool_stop_session(config: ClausterConfig, args: dict[str, Any]) -> dict[str, Any]:
+    """Run ``stop_session``: stop the bridge resolved from ``id`` (bridge channel)."""
+    from .engine import ClausterEngine
+
+    wanted = _require_id("stop_session", args)
+    with ClausterEngine(config) as engine:
+        await engine.hydrate()
+        inst = await engine.stop(wanted)
+    if inst is None:
+        return {"stopped": False, "id": wanted}
+    return {"stopped": True, "session": _summarize_instance(inst, kind="bridge")}
+
+
+async def _tool_resume_session(config: ClausterConfig, args: dict[str, Any]) -> dict[str, Any]:
+    """Run ``resume_session``: resume the bridge resolved from ``id`` into its prior context."""
+    from .engine import ClausterEngine
+
+    wanted = _require_id("resume_session", args)
+    with ClausterEngine(config) as engine:
+        await engine.hydrate()
+        inst = await engine.resume(wanted)
+    if inst is None:
+        return {"resumed": False, "id": wanted}
+    return {"resumed": True, "session": _summarize_instance(inst, kind="bridge")}
+
+
 _TOOL_HANDLERS = {
     "list_sessions": _tool_list_sessions,
     "session_status": _tool_session_status,
+    "spawn_session": _tool_spawn_session,
+    "stop_session": _tool_stop_session,
+    "resume_session": _tool_resume_session,
 }
 
 
