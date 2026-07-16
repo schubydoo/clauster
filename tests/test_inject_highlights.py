@@ -80,6 +80,16 @@ def test_idempotent_second_run_is_noop() -> None:
     assert twice == once
 
 
+def test_rerun_after_body_change_replaces_block() -> None:
+    # An edited HIGHLIGHTS.md must reconcile — replace the already-injected block, not skip.
+    once = mod.insert_highlights(_changelog("1.0.0"), "1.0.0", _hl("First highlights."))
+    assert "First highlights." in once
+    twice = mod.insert_highlights(once, "1.0.0", _hl("Revised highlights."))
+    assert "Revised highlights." in twice
+    assert "First highlights." not in twice
+    assert twice.count("### Highlights") == 1  # replaced in place, not duplicated
+
+
 def test_version_mismatch_fails_loud() -> None:
     # Marked for 0.13.0 but the changelog top is 1.0.0 → highlights apply, shape is wrong.
     with pytest.raises(ValueError, match="expected '0.13.0'"):

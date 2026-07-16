@@ -50,9 +50,10 @@ def insert_highlights(text: str, version: str, highlights: str) -> str:
     """Return ``text`` with a ``### Highlights`` block folded into the newest version section.
 
     Injects only when ``highlights`` has a body AND is marked ``<!-- for: <version> -->`` for
-    this exact release (the staleness guard); otherwise returns ``text`` unchanged. Also a
-    no-op when the block is already present (idempotent). Raises ``ValueError`` when the
-    highlights apply but the top heading is missing or doesn't match ``version`` -- an
+    this exact release (the staleness guard); otherwise returns ``text`` unchanged. An
+    already-present block is replaced from the current body (reconcile) -- byte-idempotent
+    when the body is unchanged, updated in place when it changed. Raises ``ValueError`` when
+    the highlights apply but the top heading is missing or doesn't match ``version`` -- an
     unexpected shape worth failing loudly on rather than silently mangling.
     """
     body = body_of(highlights)
@@ -73,8 +74,20 @@ def insert_highlights(text: str, version: str, highlights: str) -> str:
         )
 
     section_end = heads[1] if len(heads) > 1 else len(lines)
-    if any(START in ln for ln in lines[top:section_end]):
-        return text  # already injected -- idempotent no-op
+    # If a highlights block is already present in this section, remove it first, then
+    # re-insert from the current body. That makes a re-run RECONCILE — an edited
+    # HIGHLIGHTS.md replaces the stale block instead of being skipped — while staying
+    # byte-idempotent when the body is unchanged.
+    starts = [i for i in range(top, section_end) if START in lines[i]]
+    if starts:
+        s = starts[0]
+        ends = [i for i in range(s, section_end) if END in lines[i]]
+        e = ends[0] if ends else s
+        del_end = e + 1
+        if del_end < len(lines) and lines[del_end].strip() == "":
+            del_end += 1  # also drop the block's trailing blank line
+        del lines[s:del_end]
+        section_end -= del_end - s
 
     # Insert just above the first change subsection/bullet, i.e. after the heading and its
     # compare-link line, so Highlights lead the section's detailed changes.
