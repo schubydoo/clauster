@@ -194,5 +194,8 @@ def test_adopt_external_standard_bridge_becomes_managed(
     browser.expect_visible(
         'section.zone-active [data-test="stop-session"]', timeout_ms=_BANNER_TIMEOUT
     )
-    # And the Manage affordance retires for this project (no longer adoptable).
-    browser.expect_hidden(adopt_btn, timeout_ms=_BANNER_TIMEOUT)
+    # And the Manage affordance retires for this project (no longer adoptable). The
+    # retire path needs TWO polls to settle server-side (the 1s agents-json cross-check
+    # re-attributing the session managed, then the 4s adoptable refresh) — under CI
+    # load that chain can exceed the usual 20s, so give it double headroom.
+    browser.expect_hidden(adopt_btn, timeout_ms=2 * _BANNER_TIMEOUT)

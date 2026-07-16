@@ -19,6 +19,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
+from _helpers import STATUS_TIMEOUT
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,10 +70,11 @@ def test_transcript_modal_lists_session_and_renders_turns(
     browser.expect_visible('[data-test="transcript-modal"]')
 
     # Exactly the one seeded session is offered; picking it renders both turns with
-    # their content (x-text — the content is untrusted, never HTML).
-    browser.expect_count('[data-test="transcript-session"]', 1)
+    # their content (x-text — the content is untrusted, never HTML). Both steps fetch
+    # from the server — give them bridge-transition headroom on a loaded CI runner.
+    browser.expect_count('[data-test="transcript-session"]', 1, timeout_ms=STATUS_TIMEOUT)
     browser.click('[data-test="transcript-session"]')
-    browser.expect_count('[data-test="transcript-turn"]', 2)
+    browser.expect_count('[data-test="transcript-turn"]', 2, timeout_ms=STATUS_TIMEOUT)
     modal_text = browser.get_text('[data-test="transcript-modal"]')
     assert "hello from e2e" in modal_text
     assert "hi back from the fixture" in modal_text

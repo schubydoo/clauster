@@ -80,8 +80,9 @@ def test_overflow_menu_toggles_claude_md_editor(browser: AgentBrowser, open_serv
     browser.expect_hidden(editor)
 
     browser.click(item)
-    # The editor textarea appears and the menu closes itself (menu = false on click).
-    browser.expect_visible(editor)
+    # The editor textarea appears (after an on-open content fetch — slow-CI headroom)
+    # and the menu closes itself (menu = false on click).
+    browser.expect_visible(editor, timeout_ms=STATUS_TIMEOUT)
     browser.expect_hidden(item)
 
 

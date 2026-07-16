@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.e2e
 
 
+# A save round-trips through the server (some surfaces via a fake-claude subprocess);
+# on a loaded 2-core CI runner the 5s driver default is too tight — give every
+# cm-saved wait the same generous headroom as the bridge status transitions.
+_SAVE_TIMEOUT = 20_000
+
+
 def _open_modal(browser: AgentBrowser, server: Server) -> None:
     browser.goto(server.url)
     browser.expect_visible('[data-project="alpha"]')
@@ -49,7 +55,7 @@ def test_config_mgmt_claude_md_project_round_trip(
     browser.fill('[data-test="cm-claudemd-text"]', "# managed via clauster\n")
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.click('[data-test="cm-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     saved = projects_root / "alpha" / "CLAUDE.md"
     assert saved.exists(), "expected alpha/CLAUDE.md to be written"
@@ -101,7 +107,7 @@ def test_config_mgmt_permissions_project_round_trip(
     browser.fill('[data-test="cm-permissions-text"]', '{"allow": ["Bash(ls:*)"]}')
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.click('[data-test="cm-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     settings = projects_root / "alpha" / ".claude" / "settings.json"
     assert settings.exists(), "expected alpha/.claude/settings.json to be written"
@@ -133,7 +139,7 @@ def test_config_mgmt_settings_env_rows_round_trip(
     browser.fill('[data-test="cm-settings-env-value"]', "hello")
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.click('[data-test="cm-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     settings = projects_root / "alpha" / ".claude" / "settings.json"
     assert settings.exists(), "expected alpha/.claude/settings.json to be written"
@@ -239,7 +245,7 @@ def test_config_mgmt_new_subagent_round_trip(
     )
     browser.fill('[data-test="cm-agent-confirm"]', "alpha")
     browser.click('[data-test="cm-agent-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     saved = projects_root / "alpha" / ".claude" / "agents" / "my-agent.md"
     assert saved.exists(), "expected alpha/.claude/agents/my-agent.md to be written"
@@ -283,7 +289,7 @@ def test_config_mgmt_new_mcp_server_round_trip(
     )
     browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
     browser.click('[data-test="cm-mcp-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     saved = projects_root / "alpha" / ".mcp.json"
     assert saved.exists(), "expected alpha/.mcp.json to be written"
@@ -322,7 +328,7 @@ def test_config_mgmt_new_skill_round_trip(
     )
     browser.fill('[data-test="cm-skill-confirm"]', "alpha")
     browser.click('[data-test="cm-skill-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     saved = projects_root / "alpha" / ".claude" / "skills" / "my-skill" / "SKILL.md"
     assert saved.exists(), "expected alpha/.claude/skills/my-skill/SKILL.md to be written"
@@ -352,7 +358,7 @@ def test_config_mgmt_skill_edit_and_delete_round_trip(
     )
     browser.fill('[data-test="cm-skill-confirm"]', "alpha")
     browser.click('[data-test="cm-skill-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     assert "description: first" in skill_md.read_text(encoding="utf-8")
 
     # Edit it from the list: open, change the body, save.
@@ -365,7 +371,7 @@ def test_config_mgmt_skill_edit_and_delete_round_trip(
     )
     browser.fill('[data-test="cm-skill-confirm"]', "alpha")
     browser.click('[data-test="cm-skill-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     assert "description: second" in skill_md.read_text(encoding="utf-8")
 
     # Delete it: inline confirm, then verify the directory is gone.
@@ -374,7 +380,7 @@ def test_config_mgmt_skill_edit_and_delete_round_trip(
     browser.expect_visible('[data-test="cm-skill-delete-confirm"]')
     browser.fill('[data-test="cm-skill-delete-input"]', "alpha")
     browser.click('[data-test="cm-skill-delete-go"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     assert not skill_md.parent.exists(), "expected the deleted skill directory to be gone"
 
 
@@ -401,7 +407,7 @@ def test_config_mgmt_hooks_save_round_trip(
     browser.fill('[data-test="cm-hooks-text"]', json.dumps(hooks))
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.click('[data-test="cm-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     saved = projects_root / "alpha" / ".claude" / "settings.json"
     assert saved.exists(), "expected alpha/.claude/settings.json to be written"
@@ -436,7 +442,7 @@ def test_config_mgmt_subagent_delete_round_trip(
     )
     browser.fill('[data-test="cm-agent-confirm"]', "alpha")
     browser.click('[data-test="cm-agent-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     assert agent_md.exists(), "expected alpha/.claude/agents/deleteme.md to be written"
 
     # Delete it from the list: per-name Delete → typed confirm → gone from disk.
@@ -445,7 +451,7 @@ def test_config_mgmt_subagent_delete_round_trip(
     browser.expect_visible('[data-test="cm-agent-delete-confirm"]')
     browser.fill('[data-test="cm-agent-delete-input"]', "alpha")
     browser.click('[data-test="cm-agent-delete-go"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
     assert not agent_md.exists(), "expected the deleted subagent .md to be gone"
 
 
@@ -470,7 +476,7 @@ def test_config_mgmt_plugins_tab_lists_and_acts(
     browser.expect_visible('[data-test="cm-plugin-confirm"]')
     browser.fill('[data-test="cm-plugin-confirm"]', "alpha")
     browser.click('[data-test="cm-plugin-disable-hello@market"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
 
 def test_config_mgmt_mcp_approvals_round_trip(
@@ -499,7 +505,7 @@ def test_config_mgmt_mcp_approvals_round_trip(
     browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
     browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
     browser.click('[data-test="cm-mcp-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     # The approvals panel now lists the committed server — approve it and save.
     browser.expect_visible('[data-test="cm-mcp-approvals"]')
@@ -510,7 +516,7 @@ def test_config_mgmt_mcp_approvals_round_trip(
     browser.fill('[data-test="cm-mcp-approvals-confirm"]', "alpha")
     browser.expect_visible('[data-test="cm-mcp-approvals-save"]:not([disabled])')
     browser.click('[data-test="cm-mcp-approvals-save"]')
-    browser.expect_visible('[data-test="cm-saved"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
 
     alpha_key = str(projects_root / "alpha")
     stored = json.loads(claude_json.read_text(encoding="utf-8"))

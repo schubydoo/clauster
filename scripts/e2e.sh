@@ -18,7 +18,10 @@ cd "$(dirname "$0")/.."
 # preinstalls it the same way (e2e.yml: npm ci + node_modules/.bin on PATH); locally
 # this installs it on demand, falling back to a global agent-browser only when npm
 # itself is unavailable.
-if [ ! -x tests/e2e/node_modules/.bin/agent-browser ] && command -v npm >/dev/null 2>&1; then
+if command -v npm >/dev/null 2>&1; then
+  # Always npm ci (not just when the binary is missing): an executable left by an
+  # earlier checkout could be a DIFFERENT version than the lockfile now pins, which
+  # would silently reintroduce exactly the version-specific failures the pin prevents.
   (cd tests/e2e && npm ci --no-audit --no-fund)
 fi
 if [ -x tests/e2e/node_modules/.bin/agent-browser ]; then
