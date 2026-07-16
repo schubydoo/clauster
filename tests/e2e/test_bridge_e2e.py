@@ -20,6 +20,7 @@ group.
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,8 @@ from _helpers import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from _driver import AgentBrowser
 
     from .conftest import Server
@@ -151,6 +154,54 @@ def test_pty_mode_start_then_resume_adds_continue(
     assert "--remote-control" in resume_argv  # resume stays on the flag form...
     assert "remote-control" not in resume_argv  # ...never the subcommand form
     assert "--continue" in resume_argv  # true-resume restores the prior session
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pty mode is POSIX-only")
+def test_pty_resume_picker_forks_past_conversation(
+    browser: AgentBrowser, bridge_server_pty: Server, mutable_projects_tree: Path
+) -> None:
+    """#303: picking a past conversation forks it into the NEW session's argv.
+
+    Seeds one ended conversation transcript under the server's isolated HOME, picks
+    it in the launch popover's Conversation select (More options, pty-gated — this
+    server defaults to pty mode), and asserts the spawned bridge argv carries
+    ``--resume <uuid> --fork-session`` and NOT ``--continue`` (fork ≠ revive).
+    """
+    from clauster.pointers import sanitize_cwd  # pure cwd→dirname mapping
+
+    uuid = "12345678-1234-4321-8765-1234567890ab"
+    gamma = (mutable_projects_tree / "gamma").resolve()
+    tdir = (
+        bridge_server_pty.state_dir.parent / "home" / ".claude" / "projects" / sanitize_cwd(gamma)
+    )
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / f"{uuid}.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-16T00:00:00Z",
+                "message": {"role": "user", "content": "pick me for the fork"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    browser.goto(bridge_server_pty.url)
+    browser.expect_visible('[data-project="gamma"]')
+    open_desktop_launch(browser, "gamma")
+    browser.click('[data-project="gamma"] [data-test="launch-more-options"]')
+    picker = '[data-project="gamma"] [data-test="resume-session-picker"]'
+    browser.expect_visible(picker)
+    # "New conversation" + the seeded session (loaded on popover open).
+    browser.expect_count(f"{picker} option", 2, timeout_ms=STATUS_TIMEOUT)
+    browser.select(picker, uuid)
+    trust_and_start(browser, "gamma")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
+
+    argv = read_launch_argv(bridge_server_pty.state_dir, "gamma")
+    assert argv[argv.index("--resume") + 1] == uuid
+    assert "--fork-session" in argv
+    assert "--continue" not in argv  # a fork is not a revive
 
 
 def test_background_launch_option_labeled_and_reveals_subfields(

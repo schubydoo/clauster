@@ -293,6 +293,39 @@ def test_spawn_invalid_resume_mode_422(runner_config):
         assert resp.status_code == 422
 
 
+def test_spawn_non_string_resume_session_id_422(runner_config):
+    # Type gate at the API layer, like every sibling optional field (#303).
+    with _client(runner_config) as client:
+        resp = client.post("/api/instances", json={"project": "alpha", "resume_session_id": 7})
+        assert resp.status_code == 422
+
+
+def test_spawn_malformed_resume_session_id_422(runner_config):
+    # Format gate in the runner (InvalidSpawnOption -> 422), before any spawn side
+    # effect — the value would otherwise reach a subprocess argv (#303).
+    with _client(runner_config) as client:
+        resp = client.post(
+            "/api/instances",
+            json={"project": "alpha", "resume_mode": "pty", "resume_session_id": "not-a-uuid"},
+        )
+        assert resp.status_code == 422
+
+
+def test_spawn_resume_session_id_requires_pty_422(runner_config):
+    # pty-only: a standard launch with a picked conversation is rejected, never
+    # silently ignored (#303).
+    with _client(runner_config) as client:
+        resp = client.post(
+            "/api/instances",
+            json={
+                "project": "alpha",
+                "resume_mode": "standard",
+                "resume_session_id": "12345678-1234-1234-1234-123456789abc",
+            },
+        )
+        assert resp.status_code == 422
+
+
 def test_spawn_accepts_resume_mode(runner_config, monkeypatch):
     # The per-launch picker: an explicit resume_mode is recorded on the instance.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")

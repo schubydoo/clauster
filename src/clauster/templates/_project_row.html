@@ -218,6 +218,27 @@
                                x-text="spawnModeNote({{ p.is_git_repo | tojson }})"></p>
                           </div>
                           {% if pty_supported %}
+                          {# Resume picker (#303) — pty/Interactive Session only: fork a picked
+                             past conversation into the NEW session (`--resume <uuid>
+                             --fork-session`; the original conversation is never clobbered).
+                             Options come from the transcripts API (non-live, non-empty), loaded
+                             on popover open; labels are server-redacted first prompts rendered
+                             via x-text (never x-html). "" = fresh conversation (the default,
+                             re-coerced on every popover open). #}
+                          <div class="col-12"
+                               x-show="(resumeMode['{{ p.name }}'] || defaultResumeMode) === 'pty'" x-cloak>
+                            <label class="form-label small mb-1" for="resumesess-{{ p.name }}">Conversation</label>
+                            <select id="resumesess-{{ p.name }}" class="form-select form-select-sm"
+                                    data-test="resume-session-picker" x-model="resumeSessionId['{{ p.name }}']"
+                                    title="Start a fresh conversation, or fork a previous one from this project into the new session (the original conversation stays untouched).">
+                              <option value="">New conversation</option>
+                              <template x-for="s in (resumableSessions['{{ p.name }}'] || [])" :key="s.session">
+                                <option :value="s.session" x-text="resumeSessionLabel(s)"></option>
+                              </template>
+                            </select>
+                            <p class="form-hint text-secondary small mt-1 mb-0">Forking a previous
+                              conversation resumes it in a new session — the original stays untouched.</p>
+                          </div>
                           {# Keep d-flex OFF this x-show element — `.d-flex{display:flex!important}`
                              overrides x-show's inline display:none and would pin this hint visible
                              even in standard mode (same bug as the live-tail banners). Flex goes on
