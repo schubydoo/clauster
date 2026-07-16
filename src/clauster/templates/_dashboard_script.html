@@ -306,6 +306,13 @@
       // project name -> per-launch sandbox toggle (#780, standard/Server Mode only):
       // "default" (send nothing) | "on" (--sandbox) | "off" (--no-sandbox).
       sandboxMode: {},
+      // Resume picker (#303, pty/Interactive Session only): project name -> the picked
+      // past-conversation uuid ("" = fresh conversation; reset on every popover open
+      // and after each launch so a stale pick can never silently fork a later spawn),
+      // and project name -> the pickable past sessions (from /transcripts, non-live,
+      // with at least one turn).
+      resumeSessionId: {},
+      resumableSessions: {},
       confirmBypass: {},
       bypassTyped: {},
       confirmTrust: {},
@@ -2896,6 +2903,42 @@
           if (res.ok) this.usage[name] = await res.json();
         } catch (e) { /* badge stays hidden */ }
       },
+      // --- resume picker (#303): past conversations forkable into a new pty session ---
+      async loadResumableSessions(name) {
+        try {
+          const res = await fetch(ROOT + "/api/projects/" + encodeURIComponent(name) + "/transcripts");
+          if (this._authExpired(res)) return;
+          if (!res.ok) { delete this.resumableSessions[name]; return; }
+          const body = await res.json();
+          // Only ended conversations with content are forkable: a LIVE session is
+          // already running (resume it from its own row), and an empty transcript
+          // has nothing to restore.
+          this.resumableSessions[name] = (body.sessions || []).filter(
+            (s) => !s.live && s.turn_count > 0
+          );
+        } catch (e) { delete this.resumableSessions[name]; /* picker offers just "New conversation" */ }
+      },
+      // Option label: "first prompt · 2h ago · 12m" (each part best-effort — a
+      // transcript without timestamps still labels by its prompt alone).
+      resumeSessionLabel(s) {
+        const parts = [(s.first_prompt || "(no prompt)").slice(0, 80)];
+        const last = Date.parse(s.last_ts || "") || (s.mtime ? s.mtime * 1000 : NaN);
+        const ago = this._coarseSpan(last, Date.now());
+        if (ago) parts.push(ago + " ago");
+        const dur = this._coarseSpan(Date.parse(s.first_ts || ""), Date.parse(s.last_ts || ""));
+        if (dur) parts.push(dur);
+        return parts.join(" · ");
+      },
+      // Coarse closed-interval span (s/m/h/d buckets) — "" when either bound is
+      // missing/unparsable, so a malformed timestamp degrades to no chip, never NaN.
+      _coarseSpan(startMs, endMs) {
+        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return "";
+        const s = Math.round((endMs - startMs) / 1000);
+        if (s < 60) return s + "s";
+        if (s < 3600) return Math.round(s / 60) + "m";
+        if (s < 86400) return Math.round(s / 3600) + "h";
+        return Math.round(s / 86400) + "d";
+      },
       // --- per-project preflight readiness (FE-1b) ---
       async loadPreflight(name) {
         try {
@@ -3578,6 +3621,11 @@
           // ("default" means "let claude decide", so omit the field entirely).
           const sandbox = this.sandboxMode[name] || "default";
           if (effective === "standard" && sandbox !== "default") reqBody.sandbox = sandbox;
+          // Resume picker (#303) — pty/Interactive Session only, SAME `=== 'pty'` gate
+          // as the template's x-show so the two can't diverge; "" means a fresh
+          // conversation, so omit the field entirely.
+          const resumeSession = this.resumeSessionId[name] || "";
+          if (effective === "pty" && resumeSession) reqBody.resume_session_id = resumeSession;
           const res = await fetch(ROOT + "/api/instances", {
             method: "POST",
             headers: JSON_HEADERS,
@@ -3590,6 +3638,9 @@
             this.toast(name + ": start failed", "error");
           } else {
             delete this.ptyPending[name];
+            // A consumed pick never carries into the next launch (belt to the
+            // popover-open reset's suspenders) — the next spawn starts fresh.
+            this.resumeSessionId[name] = "";
             this._absorbRow(body);
             // Non-blocking spawn advisories (#778): e.g. an interactive session
             // launched without a worktree risks conflicting concurrent edits.
@@ -4322,6 +4373,11 @@
           // so a past "Launch anyway" never silently carries into a new launch attempt.
           this.confirmMcp[name] = false;
           this.mcpOverride[name] = false;
+          // Resume picker (#303): every fresh open starts on "New conversation" — a
+          // pick from a previous open must never silently fork into this launch —
+          // and the list refreshes in the background for the More-options panel.
+          this.resumeSessionId[name] = "";
+          this.loadResumableSessions(name);
         }
       },
       // Dismiss the popover (outside-click / Escape) AND clear any pending trust/bypass

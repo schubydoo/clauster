@@ -1426,18 +1426,30 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             for path in usage.transcript_paths_for(project_path):
                 try:
                     mtime = path.stat().st_mtime
-                    # turn_count needs the per-line scan; the reader streams the file
-                    # (never loaded whole) and is already redaction-safe.
-                    turn_count = len(usage.read_transcript_turns(path))
+                    # One per-line scan serves turn_count AND the resume-picker fields
+                    # (#303); the reader streams the file (never loaded whole) and every
+                    # turn is already redaction-safe (sanitize_line in _line_to_turn).
+                    turns = usage.read_transcript_turns(path)
                 except FileNotFoundError:
                     # A session removed mid-walk (racing cleanup) is skipped, not fatal.
                     continue
+                # First USER turn labels the conversation in the resume picker —
+                # truncated server-side so a pasted wall of text can't bloat the
+                # listing payload. Timestamps bound the conversation for the
+                # picker's "when · duration" display ("" when the record has none).
+                first_prompt = next(
+                    (t["content"] for t in turns if t.get("role") == "user" and t.get("content")),
+                    "",
+                )[:120]
                 out.append(
                     {
                         "session": path.stem,
                         "mtime": mtime,
-                        "turn_count": turn_count,
+                        "turn_count": len(turns),
                         "live": path.stem in live_uuids,
+                        "first_prompt": first_prompt,
+                        "first_ts": (turns[0].get("timestamp") or "") if turns else "",
+                        "last_ts": (turns[-1].get("timestamp") or "") if turns else "",
                     }
                 )
             # Live sessions first (a glance at what's running now), then newest-first
@@ -3892,6 +3904,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # for a standard bridge (--sandbox / --no-sandbox / neither). Enum-validated by
         # runner.spawn_detailed before any spawn side effect → 422 on a bad value.
         sandbox = body.get("sandbox")
+        # Optional past-conversation fork for a pty launch (#303) — the transcripts
+        # API's session uuid, spawned as `--resume <uuid> --fork-session`. Format,
+        # pty-only, and revive-exclusivity rules are enforced by runner.spawn_detailed
+        # BEFORE any spawn side effect (InvalidSpawnOption → 422 via _spawn_or_http);
+        # here we only type-gate like the sibling optional fields.
+        resume_session_id = body.get("resume_session_id")
         channel = body.get("channel", "remote-control")
         for field, value in (
             ("spawn_mode", spawn_mode),
@@ -3899,6 +3917,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             ("resume_mode", resume_mode),
             ("name", name),
             ("sandbox", sandbox),
+            ("resume_session_id", resume_session_id),
             ("channel", channel),
         ):
             if value is not None and not isinstance(value, str):
@@ -3915,6 +3934,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 resume_mode=resume_mode,
                 custom_name=name,
                 sandbox=sandbox,
+                resume_session_id=resume_session_id,
             )
         )
         if not outcome.created:

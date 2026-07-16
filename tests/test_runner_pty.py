@@ -116,6 +116,42 @@ def test_build_pty_bridge_argv_resume_adds_continue(runner_config) -> None:
     assert "--continue" in argv  # this is what restores prior context on restart
 
 
+def test_build_pty_bridge_argv_resume_session_adds_fork(runner_config) -> None:
+    """#303: an operator-picked past conversation forks into the NEW session.
+
+    ``--resume <uuid> --fork-session`` — fork mints a fresh session id, so the
+    picked conversation itself is never clobbered (spawn-alongside, #669).
+    """
+    runner, _ = _pty_runner(runner_config)
+    uuid = "12345678-1234-1234-1234-123456789abc"
+    argv = runner._build_pty_bridge_argv(
+        Path("/tmp/x.log"), "alpha", "default", resume=False, resume_session_id=uuid
+    )
+    assert argv[argv.index("--resume") + 1] == uuid
+    assert "--fork-session" in argv
+    assert "--continue" not in argv  # fork-a-past-conversation, not a revive
+
+
+def test_build_pty_bridge_argv_revive_wins_over_resume_session(runner_config) -> None:
+    """The internal revive path (resume=True) takes precedence — never both flags.
+
+    Upstream validation (:meth:`_spawn_locked`) already rejects the combination;
+    this pins the builder's own precedence so a future refactor can't emit an
+    ambiguous ``--continue --resume`` argv.
+    """
+    runner, _ = _pty_runner(runner_config)
+    argv = runner._build_pty_bridge_argv(
+        Path("/tmp/x.log"),
+        "alpha",
+        "default",
+        resume=True,
+        resume_session_id="12345678-1234-1234-1234-123456789abc",
+    )
+    assert "--continue" in argv
+    assert "--resume" not in argv
+    assert "--fork-session" not in argv
+
+
 def test_build_pty_bridge_argv_never_adds_verbose(runner_config) -> None:
     """The verbose toggle is standard-only — the pty flag-form keeper never gets --verbose."""
     runner, claude_json = _pty_runner(runner_config)
@@ -224,6 +260,148 @@ async def test_spawn_pty_ignores_custom_name(runner_config) -> None:
         assert inst.label == "alpha"
         argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
         assert argv[argv.index("--remote-control") + 1] == "alpha"
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+def _seed_transcript(runner_config, project: str, session_uuid: str) -> None:
+    """Plant a one-turn transcript for ``project`` so the uuid resolves as ITS conversation.
+
+    The project-scope gate (#303, Greptile P1) resolves resume_session_id against
+    the project's own transcript dir (the import-time CLAUDE_PROJECTS_DIR — already
+    HOME-isolated by the suite-wide conftest), so a spawn test with a picked
+    conversation must stage one, exactly like the picker's own listing source.
+    """
+    from clauster.pointers import CLAUDE_PROJECTS_DIR, sanitize_cwd
+
+    project_path = (runner_config[0].projects_root / project).resolve()
+    tdir = CLAUDE_PROJECTS_DIR / sanitize_cwd(project_path)
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / f"{session_uuid}.jsonl").write_text(
+        json.dumps({"message": {"role": "user", "content": "seeded for fork"}}) + "\n",
+        encoding="utf-8",
+    )
+
+
+async def test_spawn_rejects_resume_session_id_with_revive(runner_config) -> None:
+    """resume_session_id + the internal revive path is ambiguous — rejected up front (#303)."""
+    from clauster.runner import InvalidSpawnOption
+
+    runner, _ = _pty_runner(runner_config)
+    with pytest.raises(InvalidSpawnOption, match="cannot be combined"):
+        await runner.spawn(
+            "alpha", resume=True, resume_session_id="12345678-1234-1234-1234-123456789abc"
+        )
+
+
+async def test_spawn_rejects_resume_session_id_for_standard(runner_config) -> None:
+    """resume_session_id is pty-only — a standard launch rejects it, never ignores it (#303)."""
+    from clauster.runner import InvalidSpawnOption
+
+    runner = SessionRunner(runner_config[0], claude_json=runner_config[1])  # config=standard
+    with pytest.raises(InvalidSpawnOption, match="requires the pty"):
+        await runner.spawn(
+            "alpha",
+            resume_mode="standard",
+            resume_session_id="12345678-1234-1234-1234-123456789abc",
+        )
+
+
+async def test_spawn_rejects_resume_session_id_when_config_default_standard(runner_config) -> None:
+    """resume_mode OMITTED + config default standard → still pty-only-rejected (#303).
+
+    The pty-only gate keys off the RESOLVED effective mode, so the config-default
+    path (no per-launch picker choice) must reject exactly like an explicit
+    resume_mode="standard" request.
+    """
+    from clauster.runner import InvalidSpawnOption
+
+    runner = SessionRunner(runner_config[0], claude_json=runner_config[1])  # config=standard
+    with pytest.raises(InvalidSpawnOption, match="requires the pty"):
+        await runner.spawn("alpha", resume_session_id="12345678-1234-1234-1234-123456789abc")
+
+
+@_POSIX_ONLY
+async def test_spawn_resume_session_honored_when_config_default_pty(runner_config) -> None:
+    """resume_mode OMITTED + config default pty → the pick still reaches the argv (#303)."""
+    runner, _ = _pty_runner(runner_config)  # config launch_mode=pty
+    uuid = "0badcafe-0000-4000-8000-00000000c0de"
+    _seed_transcript(runner_config, "alpha", uuid)
+    inst = await runner.spawn("alpha", resume_session_id=uuid)
+    try:
+        assert inst.resume_mode == "pty"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--resume") + 1] == uuid
+        assert "--fork-session" in argv
+    finally:
+        await runner.stop(inst.instance_id)
+
+
+async def test_spawn_rejects_malformed_resume_session_id(runner_config) -> None:
+    """Anything but a strict UUID shape is rejected BEFORE it can reach a subprocess argv."""
+    from clauster.runner import InvalidSpawnOption
+
+    runner, _ = _pty_runner(runner_config)
+    for bad in ("../../etc/passwd", "$(rm -rf /)", "session_DEADBEEF", "1234", ""):
+        with pytest.raises(InvalidSpawnOption, match="session UUID"):
+            await runner.spawn("alpha", resume_mode="pty", resume_session_id=bad)
+
+
+@_POSIX_ONLY
+async def test_spawn_rejects_resume_session_id_of_other_project(runner_config) -> None:
+    """A well-formed uuid that is NOT this project's conversation is rejected (#303).
+
+    The cross-project boundary: beta's conversation uuid must never fork into an
+    alpha session (Greptile P1) — fail closed, before any spawn side effect.
+    POSIX-only: on Windows the pty-only check rejects earlier (no pty mode), so
+    the boundary check is unreachable there.
+    """
+    from clauster.runner import InvalidSpawnOption
+
+    runner, _ = _pty_runner(runner_config)
+    uuid = "aaaabbbb-cccc-4ddd-8eee-ffff00001111"
+    _seed_transcript(runner_config, "beta", uuid)  # belongs to beta, not alpha
+    with pytest.raises(InvalidSpawnOption, match="not a conversation of project"):
+        await runner.spawn("alpha", resume_mode="pty", resume_session_id=uuid)
+
+
+@_POSIX_ONLY
+async def test_spawn_rejects_resume_session_id_when_transcript_dir_ambiguous(
+    runner_config, monkeypatch
+) -> None:
+    """Two projects colliding onto one sanitized transcript dir → fork refused (#303).
+
+    Claude keys transcripts by sanitize_cwd (non-alphanumerics → "-"), so project
+    paths differing only in punctuation share a dir; membership can't then prove
+    ownership, so the fork fails closed (Greptile P1 follow-up)."""
+
+    from clauster.runner import InvalidSpawnOption
+
+    runner, _ = _pty_runner(runner_config)
+    uuid = "ccccdddd-eeee-4fff-8aaa-bbbbccccdddd"
+    _seed_transcript(runner_config, "alpha", uuid)
+    # Force a second discovered project whose path sanitizes to alpha's dir (a twin
+    # of the real alpha project with a different name but the SAME cwd).
+    real_alpha = runner._discovered()["alpha"]
+    twin = real_alpha.model_copy(update={"name": "alpha-twin"})
+    monkeypatch.setattr(runner, "_discovered", lambda: {"alpha": real_alpha, "alpha-twin": twin})
+    with pytest.raises(InvalidSpawnOption, match="ownership is ambiguous"):
+        await runner.spawn("alpha", resume_mode="pty", resume_session_id=uuid)
+
+
+@_POSIX_ONLY
+async def test_spawn_pty_resume_session_reaches_argv(runner_config) -> None:
+    """A valid picked uuid rides the spawn to the bridge argv as --resume + --fork-session."""
+    runner = SessionRunner(runner_config[0], claude_json=runner_config[1])  # config=standard
+    uuid = "abcdefab-1234-5678-9abc-def012345678"
+    _seed_transcript(runner_config, "alpha", uuid)
+    inst = await runner.spawn("alpha", resume_mode="pty", resume_session_id=uuid)
+    try:
+        assert inst.resume_mode == "pty"
+        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert argv[argv.index("--resume") + 1] == uuid
+        assert "--fork-session" in argv
+        assert "--continue" not in argv
     finally:
         await runner.stop(inst.instance_id)
 

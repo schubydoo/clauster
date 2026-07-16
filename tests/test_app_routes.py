@@ -8,6 +8,7 @@ claude-md resolver / read-error branches.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import UTC
 from pathlib import Path
@@ -712,8 +713,37 @@ def test_transcripts_list_newest_first_with_counts(write_config, tmp_path, monke
     sessions = body["sessions"]
     assert [s["session"] for s in sessions] == ["s-new", "s-old"]  # newest first
     assert all(s["turn_count"] == 4 for s in sessions)  # fixture has 4 renderable turns
-    assert all(set(s) == {"session", "mtime", "turn_count", "live"} for s in sessions)
+    assert all(
+        set(s) == {"session", "mtime", "turn_count", "live", "first_prompt", "first_ts", "last_ts"}
+        for s in sessions
+    )
     assert all(s["live"] is False for s in sessions)  # no running session → none live
+
+
+def test_transcripts_list_resume_picker_fields(write_config, tmp_path, monkeypatch):
+    """The listing carries the resume picker's label fields (#303): first USER
+    prompt + the conversation's first/last turn timestamps, from the same
+    redaction-safe per-line scan that already computes turn_count."""
+    tdir = _plant_transcripts(monkeypatch, tmp_path, sessions=["s-pick"])
+    # A second transcript whose first user prompt exceeds the 120-char cap and
+    # carries no timestamps — the truncation and ""-degradation paths.
+    (tdir / "s-long.jsonl").write_text(
+        json.dumps({"message": {"role": "user", "content": "x" * 500}}) + "\n",
+        encoding="utf-8",
+    )
+    sessions = {
+        s["session"]: s
+        for s in _client(write_config, tmp_path)
+        .get("/api/projects/gamma/transcripts")
+        .json()["sessions"]
+    }
+    picked = sessions["s-pick"]
+    assert picked["first_prompt"] == "Hi, can you read my config?"  # first USER turn
+    assert picked["first_ts"] == "2026-06-25T10:00:00Z"
+    assert picked["last_ts"] == "2026-06-25T10:00:15Z"
+    long = sessions["s-long"]
+    assert len(long["first_prompt"]) == 120  # server-side truncation
+    assert long["first_ts"] == "" and long["last_ts"] == ""  # no timestamps → ""
 
 
 def test_transcripts_list_badges_running_bridge_session_live(write_config, tmp_path, monkeypatch):

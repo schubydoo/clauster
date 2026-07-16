@@ -41,6 +41,7 @@ from . import (
     procutil,
     pty_screen,
     redact,
+    usage,
 )
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
@@ -160,6 +161,13 @@ class AdoptionUnavailable(RuntimeError):
 # enough for a real label, small enough to keep argv/log lines and the dashboard's
 # name chip sane; the bridge binary itself imposes no documented limit on --name.
 _CUSTOM_NAME_MAX_LEN = 128
+
+# The 8-4-4-4-12 hex shape of a claude conversation/session UUID (a transcript's
+# filename stem). resume_session_id (#303) must match this EXACTLY before it can
+# reach a subprocess argv — anything else is rejected as InvalidSpawnOption.
+_SESSION_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 
 
 def _is_display_unsafe(ch: str) -> bool:
@@ -791,6 +799,7 @@ class SessionRunner:
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
         sandbox: SandboxMode | None = None,
+        resume_session_id: str | None = None,
         trust: bool = False,
     ) -> RemoteControlInstance:
         """Spawn a bridge for ``name`` and return the instance (see :meth:`spawn_detailed`).
@@ -808,6 +817,7 @@ class SessionRunner:
             resume_target=resume_target,
             custom_name=custom_name,
             sandbox=sandbox,
+            resume_session_id=resume_session_id,
             trust=trust,
         )
         return outcome.instance
@@ -823,6 +833,7 @@ class SessionRunner:
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
         sandbox: SandboxMode | None = None,
+        resume_session_id: str | None = None,
         trust: bool = False,
     ) -> SpawnOutcome:
         """Spawn a new bridge for ``name`` (returning the existing one if already up).
@@ -866,6 +877,13 @@ class SessionRunner:
         while a standard bridge is concurrently live (both allowed per project since
         #777) would resolve against the standard bridge and hand it back instead.
 
+        ``resume_session_id`` (#303) is an operator-picked PAST conversation to fork
+        into this NEW session: pty-only, appended as ``--resume <uuid> --fork-session``
+        (fork = a fresh session id, so the original conversation is never clobbered —
+        the spawn-alongside model, #669). Strictly validated (UUID shape, pty mode,
+        never combined with the internal ``resume=True`` revive path) before any spawn
+        side effect; invalid values raise :class:`InvalidSpawnOption` (→ 422).
+
         ``trust`` (the headless CLI's ``--trust``, #775) accepts the workspace-trust
         dialog for the project as part of this spawn. It is applied *after* option
         validation and under the per-project spawn lock — so an invalid option (a bad
@@ -890,6 +908,7 @@ class SessionRunner:
                 resume_target=resume_target,
                 custom_name=custom_name,
                 sandbox=sandbox,
+                resume_session_id=resume_session_id,
                 trust=trust,
             )
 
@@ -914,6 +933,7 @@ class SessionRunner:
         resume_target: RemoteControlInstance | None = None,
         custom_name: str | None = None,
         sandbox: SandboxMode | None = None,
+        resume_session_id: str | None = None,
         trust: bool = False,
     ) -> SpawnOutcome:
         # Body of spawn_detailed(), always run under the per-project lock (see spawn()).
@@ -934,6 +954,66 @@ class SessionRunner:
             "pty" if self._is_pty_mode(prior_for_mode, requested=resume_mode) else "standard"
         )
         self._validate_spawn_options(proj, spawn_mode, permission_mode, resume_mode, sandbox_mode)
+        # Fork-a-past-conversation (#303): validate BEFORE any spawn side effect, and
+        # strictly — this string ends up on a subprocess argv, so nothing but a UUID
+        # shape may pass (fail closed; list-argv means no shell, but defense in depth).
+        if resume_session_id is not None:
+            # Format FIRST: garbage is rejected identically on every platform/mode
+            # (on Windows the effective mode is always standard — pty is POSIX-only —
+            # so a mode-first ordering would mask the format error there).
+            if not _SESSION_UUID_RE.fullmatch(resume_session_id):
+                raise InvalidSpawnOption(
+                    "resume_session_id must be a session UUID "
+                    "(8-4-4-4-12 hex, as listed by the transcripts API)"
+                )
+            if resume:
+                # The internal revive path (resume()) restores the instance's OWN
+                # conversation via --continue; combining it with an operator-picked
+                # conversation would be ambiguous — reject rather than pick a winner.
+                raise InvalidSpawnOption(
+                    "resume_session_id cannot be combined with resuming an existing session"
+                )
+            if effective_resume_mode != "pty":
+                raise InvalidSpawnOption(
+                    "resume_session_id requires the pty (Interactive Session) mode"
+                )
+            # Scope the pick to THIS project's own conversations (fail closed): a
+            # well-formed uuid belonging to another project's transcript must never
+            # fork foreign context into this session. resolve_session_transcript
+            # walks only the project's sanitized-cwd transcript dir — the same
+            # source the picker lists from — so anything it can't resolve is
+            # rejected before any spawn side effect.
+            #
+            # Ownership requires that dir to be UNAMBIGUOUS. Claude keys transcripts
+            # by sanitize_cwd (non-alphanumerics → "-"), so two configured project
+            # paths that differ only in punctuation (e.g. ".../foo-bar" vs
+            # ".../foo_bar") collide onto ONE transcript dir — membership alone can't
+            # then prove which project a conversation belongs to. If any OTHER
+            # discovered project shares this project's sanitized dir, ownership is
+            # unprovable → refuse the fork (fail closed) rather than risk forking a
+            # colliding project's conversation. This is a Claude-storage property the
+            # picker listing shares; refusing here keeps the spawn no less strict than
+            # the source it validates against.
+            proj_dir = pointers.sanitize_cwd(proj.path)
+            colliding = [
+                other.name
+                for other in self._discovered().values()
+                if other.name != proj.name and pointers.sanitize_cwd(other.path) == proj_dir
+            ]
+            if colliding:
+                raise InvalidSpawnOption(
+                    f"cannot fork a conversation for {name!r}: its transcript directory "
+                    f"is shared with project(s) {sorted(colliding)!r} (paths differing only "
+                    "in punctuation), so conversation ownership is ambiguous"
+                )
+            resolved_transcript = await asyncio.to_thread(
+                usage.resolve_session_transcript, proj.path, resume_session_id
+            )
+            if resolved_transcript is None:
+                raise InvalidSpawnOption(
+                    f"resume_session_id {resume_session_id!r} is not a conversation "
+                    f"of project {name!r}"
+                )
         # Validate before any spawn side effect (fail closed), same as spawn/permission
         # mode above. Blank/None falls back to the project name (today's behavior); a
         # non-blank value is only actually passed as --name for a *standard* bridge (see
@@ -1146,7 +1226,13 @@ class SessionRunner:
         if instance.resume_mode == "pty":  # pragma: skip-on-win
             return SpawnOutcome(
                 instance=await self._spawn_pty(
-                    instance, proj, name, log_path, permission_mode, resume
+                    instance,
+                    proj,
+                    name,
+                    log_path,
+                    permission_mode,
+                    resume,
+                    resume_session_id=resume_session_id,
                 ),
                 created=True,
                 warnings=spawn_warnings,
@@ -1659,6 +1745,7 @@ class SessionRunner:
         permission_mode: PermissionMode,
         *,
         resume: bool,
+        resume_session_id: str | None = None,
         worktree_name: str | None = None,
     ) -> list[str]:
         """Build the flag-form bridge argv (`claude --remote-control …`). Pure/testable.
@@ -1666,6 +1753,11 @@ class SessionRunner:
         Unlike the subcommand (`_build_cmd`), the flag form is a single interactive
         session — no `--spawn`/`--capacity`. ``--continue`` (on resume) is what makes
         the restarted session restore its prior conversation context.
+        ``resume_session_id`` (#303, fresh spawns only — the ``resume`` revive path
+        takes precedence and never carries one, enforced upstream) forks an
+        operator-picked PAST conversation into this NEW session:
+        ``--resume <uuid> --fork-session`` — fork mints a fresh session id, so the
+        picked conversation itself is never clobbered (probed on claude 2.1.211).
         ``worktree_name`` (spawn_mode="worktree", #779) adds ``--worktree <name>`` so
         claude runs the session in its own git worktree under
         ``<repo>/.claude/worktrees/<name>`` — a repeated name REUSES that worktree
@@ -1685,6 +1777,8 @@ class SessionRunner:
             argv += ["--worktree", worktree_name]
         if resume:
             argv.append("--continue")
+        elif resume_session_id is not None:
+            argv += ["--resume", resume_session_id, "--fork-session"]
         return argv
 
     @staticmethod
@@ -1876,6 +1970,7 @@ class SessionRunner:
         log_path: Path,
         permission_mode: PermissionMode,
         resume: bool,
+        resume_session_id: str | None = None,
     ) -> RemoteControlInstance:
         """Spawn path for `resume_mode == "pty"`: launch the keeper, discover via sidecar."""
         # The sidecar stays keyed off the public log_path; the bridge's --debug-file goes
@@ -1895,6 +1990,7 @@ class SessionRunner:
             name,
             permission_mode,
             resume=resume,
+            resume_session_id=resume_session_id,
             worktree_name=self._pty_worktree_name(instance),
         )
         try:
