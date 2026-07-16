@@ -130,6 +130,23 @@ class StateStore:
             _log.warning("state load failed, degrading to empty: %s", exc)
             return {}
 
+    def load_strict(self) -> dict[str, dict]:
+        """Like :meth:`load`, but raise :class:`OSError` on a DB error instead of ``{}``.
+
+        For callers that REFRESH an already-loaded map (#949): degrading a transient
+        read failure to ``{}`` there would replace a known-good merge base with an
+        empty one, and the next full-replace :meth:`save` would prune every row the
+        caller isn't currently tracking. Raising lets the caller keep its previous
+        base (a stale cursor, never a mass delete). ``OSError`` mirrors :meth:`save`'s
+        error translation so callers handle one exception type.
+        """
+        try:
+            with self._sessions() as session:
+                rows = session.execute(select(Instance)).scalars().all()
+                return {row.instance_id: _present(row, _INSTANCE_FIELDS) for row in rows}
+        except SQLAlchemyError as exc:
+            raise OSError(f"state load failed: {exc}") from exc
+
     def save(self, records: dict[str, dict]) -> None:
         """Replace the ``instances`` map with ``records`` (full upsert + prune).
 

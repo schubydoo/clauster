@@ -217,7 +217,9 @@ async def test_forget_clears_pointer_with_relative_projects_root(runner_config, 
     monkeypatch.chdir(config.projects_root.parent)
     rel_config = config.model_copy(update={"projects_root": Path(config.projects_root.name)})
     runner = SessionRunner(rel_config, claude_json=claude_json)
-    runner._persisted = {"iid": {"instance_id": "iid", "project_name": "alpha"}}
+    # Seed through the store, not the in-memory cache: forget refreshes its merge
+    # base from the DB at entry (#949), so a record must exist there to be found.
+    runner._state.save({"iid": {"project_name": "alpha"}})
 
     proj_abs = (rel_config.projects_root / "alpha").resolve()
     pdir = runner._claude_projects_dir / pointers.sanitize_cwd(proj_abs)
@@ -238,12 +240,14 @@ async def test_forget_clears_pointer_with_relative_projects_root(runner_config, 
     assert not pointer.exists()
 
 
-async def test_forget_without_project_name_skips_pointer_clear(runner_config):
+async def test_forget_without_project_name_skips_pointer_clear(runner_config, monkeypatch):
     # A legacy/malformed persisted record with no "project_name" is still forgettable;
-    # the pointer clear is simply skipped (no project path to resolve).
+    # the pointer clear is simply skipped (no project path to resolve). The DB store's
+    # FK can't hold such a row, so stub the refresh source (#949: forget re-loads its
+    # merge base from the store at entry) to hand back the legacy shape directly.
     config, claude_json = runner_config
     runner = SessionRunner(config, claude_json=claude_json)
-    runner._persisted = {"iid": {"instance_id": "iid"}}  # no project_name key
+    monkeypatch.setattr(runner._state, "load_strict", lambda: {"iid": {}})
     await runner.forget("iid")
     assert "iid" not in runner._persisted
 

@@ -25,7 +25,11 @@ for config/CLAUDE.md writes: both the CLAUDE.md editor and the config-write path
 its ``flock`` on a lock file KEYED BY THE TARGET but living in the deployment state dir
 (:func:`configure_lock_dir`), not beside the target — so two clauster processes editing
 the same ``<project>/CLAUDE.md`` mutually exclude without littering the project dir with
-a visible ``CLAUDE.md.lock``.
+a visible ``CLAUDE.md.lock``. Since #949 the bridge lifecycle uses the same primitive:
+``SessionRunner`` holds a per-project ``cross_process_lock`` (keyed by the project
+directory) across its spawn/stop/forget/adopt sections, so a headless CLI/MCP writer
+and the running web app mutually exclude their read-modify-writes of the shared
+instance store and can't double-launch a standard bridge.
 """
 
 from __future__ import annotations
@@ -207,8 +211,8 @@ def _warn_cross_process_unconfigured() -> None:  # pragma: skip-on-win
             return
         _CROSS_PROCESS_UNCONFIGURED_WARNED = True
     logger.warning(
-        "cross-process file lock dir not configured; config/CLAUDE.md writes are "
-        "serialized in-process only"
+        "cross-process file lock dir not configured; config/CLAUDE.md writes and "
+        "bridge-lifecycle sections are serialized in-process only"
     )
 
 

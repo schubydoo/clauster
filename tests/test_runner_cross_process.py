@@ -1,0 +1,210 @@
+"""Cross-process serialization of the bridge lifecycle (#949).
+
+Two clauster processes (the live web app vs a headless CLI/MCP writer) share the
+instance store and the per-project bridge pointers, but not an in-process lock or
+registry. These tests simulate the second process with a SECOND ``SessionRunner``
+(its own ``Persistence`` engine on the same SQLite file, its own empty registry)
+or with direct store writes, and pin the two #949 guarantees:
+
+* race 1 (duplicate-bridge TOCTOU): a spawn's idempotency check extends across
+  processes via the on-disk bridge pointer, probed under a per-project flock —
+  a live standard bridge another process launched is reattached, never doubled;
+* race 2 (stale-snapshot resurrection): every full-replace persist merges onto
+  the store's CURRENT state, so a row another process pruned stays pruned and a
+  row another process added survives this process's saves.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import sys
+
+import pytest
+
+from clauster import atomicio
+from clauster.db.persistence import Persistence
+from clauster.models import InstanceStatus, RemoteControlInstance
+from clauster.runner import SessionRunner, UnknownProject
+
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="fcntl flock is POSIX-only; Windows keeps in-process locking"
+)
+
+
+@contextlib.contextmanager
+def _other_process_store(config):
+    """A state store on its OWN engine over the same DB file — the 'other process'."""
+    persistence = Persistence(
+        config.state_dir, backup_before_migrate=config.db.backup_before_migrate
+    )
+    try:
+        yield persistence.state_store()
+    finally:
+        persistence.dispose()
+
+
+class _FakePtr:
+    """Stand-in for a live Anthropic bridge-pointer.json (sessionId/env/pid/procStart)."""
+
+    def __init__(self, pid=4242):
+        self.pid = pid
+        self.proc_start = "1000"
+        self.environment_id = "env_other"
+        self.session_id = "session_other"
+
+
+def _fake_instance(project: str) -> RemoteControlInstance:
+    return RemoteControlInstance(project=project, label=project, status=InstanceStatus.RUNNING)
+
+
+# -- race 1: cross-process spawn idempotency ----------------------------------
+
+
+async def test_spawn_reattaches_live_bridge_of_another_process(runner_config, monkeypatch):
+    # The registry can't see a standard bridge another process launched, but its
+    # pointer on disk can: spawn must reattach it idempotently, never fork a second
+    # bridge onto the same environment.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr())
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+
+    def _no_launch(*_a, **_k):
+        raise AssertionError("spawn must not launch a second bridge over a live pointer")
+
+    monkeypatch.setattr(runner, "_popen", _no_launch)
+
+    outcome = await runner.spawn_detailed("alpha")
+    assert outcome.created is False
+    assert "reattached" in (outcome.reason or "")
+    assert outcome.instance.status is InstanceStatus.RUNNING
+    assert outcome.instance.bridge_pid == 4242
+    assert outcome.instance.environment_id == "env_other"
+    assert runner.get_instance_for_project("alpha") is outcome.instance
+    # Persisted, so a restart of THIS process keeps managing the reattached bridge.
+    with _other_process_store(config) as store:
+        assert any(v.get("project_name") == "alpha" for v in store.load().values())
+
+
+async def test_reattach_probe_ignores_dead_or_pty_pointer(runner_config, monkeypatch):
+    # The probe uses adopt()'s gate: a stale pointer or a pty/flag-form bridge fails
+    # is_live_standard_bridge and the spawn proceeds to a normal launch.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    proj = runner._resolve_project("alpha")
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr())
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: False)
+    assert await runner._reattach_external_standard(proj) is None
+    assert runner.get_instance_for_project("alpha") is None
+
+
+# -- race 2: stale-snapshot resurrection / foreign-row prune ------------------
+
+
+async def test_persist_does_not_resurrect_row_another_process_forgot(runner_config):
+    config, claude_json = runner_config
+    with _other_process_store(config) as store:
+        store.save({"iid-x": {"project_name": "beta", "label": "doomed"}})
+    runner = SessionRunner(config, claude_json=claude_json)  # snapshot holds iid-x
+    with _other_process_store(config) as store:
+        store.save({})  # the other process forgets iid-x
+
+    own = _fake_instance("alpha")
+    runner._instances[own.instance_id] = own
+    await runner._persist()
+
+    with _other_process_store(config) as store:
+        records = store.load()
+    assert "iid-x" not in records  # stale base would have resurrected it
+    assert own.instance_id in records
+
+
+async def test_persist_does_not_prune_row_another_process_added(runner_config):
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)  # snapshot is empty
+    with _other_process_store(config) as store:
+        store.save({"iid-z": {"project_name": "beta", "label": "keep-me"}})
+
+    own = _fake_instance("alpha")
+    runner._instances[own.instance_id] = own
+    await runner._persist()
+
+    with _other_process_store(config) as store:
+        records = store.load()
+    assert records.get("iid-z", {}).get("label") == "keep-me"  # stale base would prune it
+    assert own.instance_id in records
+
+
+async def test_forget_of_row_another_process_already_forgot_raises(runner_config):
+    # forget refreshes its merge base at entry, so a record that only survives in this
+    # process's construction-time snapshot is honestly reported as unknown.
+    config, claude_json = runner_config
+    with _other_process_store(config) as store:
+        store.save({"iid-x": {"project_name": "beta"}})
+    runner = SessionRunner(config, claude_json=claude_json)
+    with _other_process_store(config) as store:
+        store.save({})
+    with pytest.raises(UnknownProject):
+        await runner.forget("iid-x")
+
+
+async def test_rediscover_resurrects_row_persisted_after_construction(runner_config):
+    # hydrate (#775) = rediscover(persist=False): its refresh must surface a STOPPED
+    # card for a record the live service saved after this headless runner was built.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    with _other_process_store(config) as store:
+        store.save({"iid-b": {"project_name": "beta", "label": "from-other-proc"}})
+
+    await runner.rediscover(persist=False)
+    inst = runner.get_instance_for_project("beta")
+    assert inst is not None
+    assert inst.status is InstanceStatus.STOPPED
+    assert inst.label == "from-other-proc"
+
+
+async def test_refresh_keeps_previous_base_on_db_read_error(runner_config, monkeypatch, caplog):
+    # A transient DB read failure must keep the known-good base (a stale cursor),
+    # never swap in {} — the next full-replace save would mass-prune the store.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    runner._persisted = {"iid-keep": {"project_name": "beta"}}
+
+    def _boom():
+        raise OSError("state load failed: locked")
+
+    monkeypatch.setattr(runner._state, "load_strict", _boom)
+    with caplog.at_level("WARNING", logger="clauster.runner"):
+        await runner._refresh_persisted()
+    assert runner._persisted == {"iid-keep": {"project_name": "beta"}}
+    assert "could not refresh persisted bridge state" in caplog.text
+
+
+# -- the flock itself ----------------------------------------------------------
+
+
+@_POSIX_ONLY
+async def test_bridge_flock_excludes_a_second_process(runner_config):
+    # While one runner holds the per-project section, the flock file derived from the
+    # same config is exclusively held — a second acquirer (any other process) blocks.
+    import fcntl
+
+    config, claude_json = runner_config
+    a = SessionRunner(config, claude_json=claude_json)
+    b = SessionRunner(config, claude_json=claude_json)
+    target = (config.projects_root / "alpha").expanduser()
+    async with a._bridge_flock("alpha"):
+        lock_file = atomicio._cross_process_lock_file(target)
+        assert lock_file is not None
+        assert lock_file.exists()
+        assert lock_file.is_relative_to(config.state_dir.expanduser())
+        fd = os.open(lock_file, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+    # Released on exit: a second runner over the same config can take it now.
+    async with b._bridge_flock("alpha"):
+        assert lock_file.exists()  # created O_CREAT, deliberately never unlinked
