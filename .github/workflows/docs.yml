@@ -47,7 +47,9 @@ jobs:
           python-version: "3.13"
           extras: docs
       - name: mkdocs build --strict
-        run: uv run mkdocs build --strict
+        # --no-sync: use the env the setup action already synced (extras: docs);
+        # don't let a `.python-version` drift rebuild it without the docs extra.
+        run: uv run --no-sync mkdocs build --strict
       # Only stage the artifact for deployment off main — PRs stop at the build
       # gate above, and a workflow_dispatch from a feature branch must NOT stage
       # that branch's docs (hence ref, not just != pull_request).

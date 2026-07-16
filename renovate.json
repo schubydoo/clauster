@@ -71,6 +71,11 @@
       "enabled": false
     },
     {
+      "description": "Do NOT float `.python-version`. It pins the CANONICAL dev interpreter (3.13 — the frozen binary + lint/build/coverage jobs all pin 3.13); it is not a dependency to bump. Renovate's `pyenv` manager (which tracks `.python-version`) bumping it to the newest CPython (#941: 3.13->3.14) silently overrode uv's interpreter — `uv run` in the lint job rebuilt the venv on 3.14 WITHOUT the dev extra, so ruff went missing and lint failed. Bump the canonical interpreter by hand, deliberately, like the CI matrix. (NB: the manager is `pyenv`, not `python-version` — the latter is a datasource, not a manager.)",
+      "matchManagers": ["pyenv"],
+      "enabled": false
+    },
+    {
       "description": "js-yaml is pinned to v4 via an npm `overrides` entry in package.json — it is a transitive dep of markdownlint-cli2 (the dev-only `lint:md` tool), which does a default `import yaml from \"js-yaml\"`. js-yaml v5 is ESM-only and dropped the default export, so forcing v5 through the override breaks the required `lint` check (see #516). Cap Renovate below v5 until markdownlint-cli2 ships js-yaml v5 support; revisit then.",
       "matchPackageNames": ["js-yaml"],
       "allowedVersions": "<5"

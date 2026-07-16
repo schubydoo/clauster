@@ -81,10 +81,12 @@ jobs:
         run: |
           uv python install 3.13
           uv sync --extra package --python 3.13
+      # --no-sync: the sync above already installed the `package` extra for the
+      # pinned 3.13; don't let a `.python-version` drift rebuild the venv without it.
       - name: Build one-file binary
-        run: uv run pyinstaller clauster.spec
+        run: uv run --no-sync pyinstaller clauster.spec
       - name: Smoke test (boot + /healthz)
-        run: uv run python scripts/smoke_binary.py "dist/${{ matrix.artifact }}"
+        run: uv run --no-sync python scripts/smoke_binary.py "dist/${{ matrix.artifact }}"
       # Rename to a per-target asset name and emit a sha256, mirroring how the signed
       # release assets will be named (PR2b). bash on all runners (git-bash on
       # Windows) keeps this single-shell.
