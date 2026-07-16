@@ -983,6 +983,29 @@ class SessionRunner:
             # walks only the project's sanitized-cwd transcript dir — the same
             # source the picker lists from — so anything it can't resolve is
             # rejected before any spawn side effect.
+            #
+            # Ownership requires that dir to be UNAMBIGUOUS. Claude keys transcripts
+            # by sanitize_cwd (non-alphanumerics → "-"), so two configured project
+            # paths that differ only in punctuation (e.g. ".../foo-bar" vs
+            # ".../foo_bar") collide onto ONE transcript dir — membership alone can't
+            # then prove which project a conversation belongs to. If any OTHER
+            # discovered project shares this project's sanitized dir, ownership is
+            # unprovable → refuse the fork (fail closed) rather than risk forking a
+            # colliding project's conversation. This is a Claude-storage property the
+            # picker listing shares; refusing here keeps the spawn no less strict than
+            # the source it validates against.
+            proj_dir = pointers.sanitize_cwd(proj.path)
+            colliding = [
+                other.name
+                for other in self._discovered().values()
+                if other.name != proj.name and pointers.sanitize_cwd(other.path) == proj_dir
+            ]
+            if colliding:
+                raise InvalidSpawnOption(
+                    f"cannot fork a conversation for {name!r}: its transcript directory "
+                    f"is shared with project(s) {sorted(colliding)!r} (paths differing only "
+                    "in punctuation), so conversation ownership is ambiguous"
+                )
             resolved_transcript = await asyncio.to_thread(
                 usage.resolve_session_transcript, proj.path, resume_session_id
             )

@@ -366,6 +366,30 @@ async def test_spawn_rejects_resume_session_id_of_other_project(runner_config) -
 
 
 @_POSIX_ONLY
+async def test_spawn_rejects_resume_session_id_when_transcript_dir_ambiguous(
+    runner_config, monkeypatch
+) -> None:
+    """Two projects colliding onto one sanitized transcript dir → fork refused (#303).
+
+    Claude keys transcripts by sanitize_cwd (non-alphanumerics → "-"), so project
+    paths differing only in punctuation share a dir; membership can't then prove
+    ownership, so the fork fails closed (Greptile P1 follow-up)."""
+
+    from clauster.runner import InvalidSpawnOption
+
+    runner, _ = _pty_runner(runner_config)
+    uuid = "ccccdddd-eeee-4fff-8aaa-bbbbccccdddd"
+    _seed_transcript(runner_config, "alpha", uuid)
+    # Force a second discovered project whose path sanitizes to alpha's dir (a twin
+    # of the real alpha project with a different name but the SAME cwd).
+    real_alpha = runner._discovered()["alpha"]
+    twin = real_alpha.model_copy(update={"name": "alpha-twin"})
+    monkeypatch.setattr(runner, "_discovered", lambda: {"alpha": real_alpha, "alpha-twin": twin})
+    with pytest.raises(InvalidSpawnOption, match="ownership is ambiguous"):
+        await runner.spawn("alpha", resume_mode="pty", resume_session_id=uuid)
+
+
+@_POSIX_ONLY
 async def test_spawn_pty_resume_session_reaches_argv(runner_config) -> None:
     """A valid picked uuid rides the spawn to the bridge argv as --resume + --fork-session."""
     runner = SessionRunner(runner_config[0], claude_json=runner_config[1])  # config=standard
