@@ -5,6 +5,7 @@
   "description": "Dev-only Node tooling for the Clauster E2E suite. Not published — pins the agent-browser CLI with an integrity-checked lockfile (npm ci) instead of an unpinned `npm i -g` global install (OpenSSF Scorecard Pinned-Dependencies). 0.27.3 regressed the trust-gate `check`; 0.27.1 is the verified-green version — bump deliberately + re-verify.",
   "license": "Apache-2.0",
   "dependencies": {
+    "@puppeteer/browsers": "3.0.6",
     "agent-browser": "0.27.1"
   }
 }

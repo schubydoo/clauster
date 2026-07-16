@@ -71,8 +71,22 @@ jobs:
         run: |
           npm ci
           echo "$PWD/node_modules/.bin" >> "$GITHUB_PATH"
-      - name: Install headless Chromium
-        run: agent-browser install
+      # Pin the Chrome-for-Testing build this leg runs against. `agent-browser install`
+      # fetches the LATEST Chrome, so a new Chrome-for-Testing release can silently
+      # destabilize the (non-required) 2-core leg — Chrome 151 did, see #947. Install an
+      # explicit, Renovate-tracked build via the pinned @puppeteer/browsers CLI and point
+      # agent-browser at it with AGENT_BROWSER_EXECUTABLE_PATH (scripts/e2e.sh then skips
+      # its own latest-Chromium download). A version bump is a Renovate PR that re-runs
+      # this e2e leg, so a new Chrome is verified green before it can land.
+      - name: Install pinned Chrome-for-Testing
+        working-directory: tests/e2e
+        env:
+          # renovate: datasource=custom.chrome-for-testing depName=chrome-for-testing
+          CHROME_VERSION: "150.0.7871.124"
+        run: |
+          exe=$(node_modules/.bin/browsers install "chrome@${CHROME_VERSION}" --path "$RUNNER_TEMP/cft" | awk '{print $NF}')
+          test -x "$exe"
+          echo "AGENT_BROWSER_EXECUTABLE_PATH=$exe" >> "$GITHUB_ENV"
       - name: Run E2E suite
         run: scripts/e2e.sh
       # The headless run has no display — a screenshot of the failing page (captured
