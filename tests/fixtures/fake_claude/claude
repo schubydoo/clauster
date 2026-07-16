@@ -10,6 +10,9 @@ Behaviour is selected via env vars so tests can drive each branch:
                   -> exercises clauster's stderr capture into error_detail
   FAKE_CLAUDE_SLOW = seconds to delay before writing markers (mode=slow)
   FAKE_CLAUDE_AGENTS = JSON string returned by `agents --json`        (default [])
+  FAKE_CLAUDE_AGENTS_FILE = path re-read on EVERY `agents --json` call (wins over
+                  FAKE_CLAUDE_AGENTS; missing/empty file -> []) — lets a test
+                  stage/replace the agents list after the server started
 
 `remote-control` writes the real bridge-log marker sequence to --debug-file,
 then (mode=ready) idles until SIGINT, on which it logs the shutdown marker and
@@ -417,6 +420,19 @@ def main():
         print("2.1.156 (Claude Code)")
         return 0
     if args and args[0] == "agents" and "--json" in args:
+        # FAKE_CLAUDE_AGENTS_FILE takes precedence: the file is re-read on EVERY call,
+        # so a test can change the agents list AFTER the server (and this env) started
+        # — e.g. staging an external session post-startup so rediscover() can't have
+        # auto-adopted it (the adopt-click E2E). Missing/empty file ⇒ [].
+        agents_file = os.environ.get("FAKE_CLAUDE_AGENTS_FILE")
+        if agents_file:
+            try:
+                with open(agents_file, encoding="utf-8") as fh:
+                    content = fh.read().strip()
+            except OSError:
+                content = ""
+            print(content or "[]")
+            return 0
         print(os.environ.get("FAKE_CLAUDE_AGENTS", "[]"))
         return 0
     if args[:2] == ["auth", "login"]:

@@ -20,58 +20,26 @@ group.
 
 from __future__ import annotations
 
-import json
 import sys
 from typing import TYPE_CHECKING
 
 import pytest
+from _helpers import (
+    RECENT_TOGGLE,
+    RESUME_BUTTON,
+    STATUS_TIMEOUT,
+    STOP_BUTTON,
+    open_desktop_launch,
+    read_launch_argv,
+    trust_and_start,
+)
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from _driver import AgentBrowser
 
     from .conftest import Server
 
 pytestmark = pytest.mark.e2e
-
-# A bridge spawn waits on the fake claude writing its readiness markers, then the
-# dashboard's 4s poll reconciles state — give status transitions generous headroom.
-_STATUS_TIMEOUT = 20_000
-
-# Stopped bridges live in the collapsed "Recent / resumable" group; this is its
-# expand toggle (the only button under the hasRecent() container).
-_RECENT_TOGGLE = 'section.zone-active div[x-show="hasRecent()"] > button'
-
-
-def _read_launch_argv(state_dir: Path, project: str) -> list[str]:
-    """Return the argv the fake ``claude`` was spawned with for ``project``.
-
-    The fake writes its argv to ``<debug-file>.argv.json`` beside the bridge log
-    (``state_dir/logs/<project>-<ms>.log``), so the test can assert the spawn /
-    permission flags the UI passed through.
-    """
-    argv_files = sorted((state_dir / "logs").glob(f"{project}-*.log.argv.json"))
-    assert argv_files, f"no launch argv recorded for {project} under {state_dir / 'logs'}"
-    return json.loads(argv_files[-1].read_text())
-
-
-def _open_desktop_launch(browser: AgentBrowser, project: str) -> None:
-    """Open the project's launch popover and select the desktop (bridge) mode."""
-    browser.click(f'[data-project="{project}"] .launch-anchor button')
-    browser.expect_visible(f'[data-project="{project}"] .launch-pop')
-    browser.check(f'[data-project="{project}"] input[name="lm-{project}"][value="desktop"]')
-
-
-def _trust_and_start(browser: AgentBrowser, project: str) -> None:
-    """Click Run, then satisfy the trust gate (checkbox enables Trust & start)."""
-    browser.click(f'[data-project="{project}"] .launch-pop button.btn-primary.w-100')
-    trust_start = f'[data-project="{project}"] .alert-warning button.btn-warning'
-    browser.expect_visible(trust_start)
-    browser.expect_disabled(trust_start)
-    browser.check(f'[data-project="{project}"] .alert-warning input[type="checkbox"]')
-    browser.expect_enabled(trust_start)
-    browser.click(trust_start)
 
 
 def test_trust_on_start_starts_then_stops_bridge(
@@ -88,13 +56,13 @@ def test_trust_on_start_starts_then_stops_bridge(
     trusted_shield = '[data-project="gamma"] svg[aria-label="Directory trusted"]'
     browser.expect_hidden(trusted_shield)
 
-    _open_desktop_launch(browser, "gamma")
-    _trust_and_start(browser, "gamma")
+    open_desktop_launch(browser, "gamma")
+    trust_and_start(browser, "gamma")
 
     # Trusted in place (green shield appears) and the bridge reaches RUNNING with a
     # session deep link in the Active zone — no full-page reload.
     browser.expect_visible(trusted_shield)
-    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
     # The "desktop" mode badge confirms this is the bridge row (not another session type).
     # .mode-badge uppercases its text via CSS, so get_text() reports "DESKTOP" — assert
     # case-insensitively (mirrors test_observability_e2e). The "Running" wait above already
@@ -102,36 +70,36 @@ def test_trust_on_start_starts_then_stops_bridge(
     # read is race-free — the prior timeout-bump "de-flake" never matched at all.
     assert "desktop" in browser.get_text("section.zone-active").lower()
     browser.expect_role_visible("link", "Open in Claude")
-    stop_btn = "section.zone-active .btn-outline-danger"
+    stop_btn = STOP_BUTTON
     browser.expect_visible(stop_btn)
 
     # Stop ends the bridge. A stopped standard bridge keeps its environment, so it
     # moves to "Recent / resumable" and offers Resume (not a fresh Start).
     browser.click(stop_btn)
-    browser.expect_hidden(stop_btn, timeout_ms=_STATUS_TIMEOUT)
+    browser.expect_hidden(stop_btn, timeout_ms=STATUS_TIMEOUT)
     # The Recent group is collapsed; expand it by its toggle (its text carries the count).
-    browser.expect_visible(_RECENT_TOGGLE, timeout_ms=_STATUS_TIMEOUT)
-    browser.click(_RECENT_TOGGLE)
-    browser.expect_text("section.zone-active", "Stopped", timeout_ms=_STATUS_TIMEOUT)
-    browser.expect_visible("section.zone-active .btn-success")
+    browser.expect_visible(RECENT_TOGGLE, timeout_ms=STATUS_TIMEOUT)
+    browser.click(RECENT_TOGGLE)
+    browser.expect_text("section.zone-active", "Stopped", timeout_ms=STATUS_TIMEOUT)
+    browser.expect_visible(RESUME_BUTTON)
     browser.expect_role_visible("button", "Resume")
 
 
 def test_spawn_options_pass_through_to_bridge_argv(
     browser: AgentBrowser, bridge_server: Server
 ) -> None:
-    """The Advanced panel exposes spawn-mode / Mode pickers (and Permissions), and the
-    chosen spawn + permission values reach the spawned bridge's argv."""
+    """The "More options" panel exposes spawn-mode / Mode pickers (and Permissions), and
+    the chosen spawn + permission values reach the spawned bridge's argv."""
     browser.goto(bridge_server.url)
     # alpha is a git repo, so the worktree spawn option and the (POSIX-only) Mode
     # picker both render.
     browser.expect_visible('[data-project="alpha"]')
 
-    _open_desktop_launch(browser, "alpha")
-    # Permissions live in the popover; the spawn + Mode pickers behind Advanced (the
-    # only ghost-secondary button in the popover).
+    open_desktop_launch(browser, "alpha")
+    # Permissions live in the popover; the spawn + Mode pickers sit behind the
+    # "More options" disclosure.
     browser.select("#perm-alpha", "plan")
-    browser.click('[data-project="alpha"] .launch-pop button.btn-ghost-secondary')
+    browser.click('[data-project="alpha"] [data-test="launch-more-options"]')
     browser.expect_visible("#spawn-alpha")
     browser.expect_visible("#resume-alpha")
     # Mode picker (standard / pty) is POSIX-only; the E2E host is Linux.
@@ -139,10 +107,10 @@ def test_spawn_options_pass_through_to_bridge_argv(
     browser.select("#spawn-alpha", "session")
 
     # Trust + start, then verify the picked options reached the bridge argv.
-    _trust_and_start(browser, "alpha")
-    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
+    trust_and_start(browser, "alpha")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
 
-    argv = _read_launch_argv(bridge_server.state_dir, "alpha")
+    argv = read_launch_argv(bridge_server.state_dir, "alpha")
     assert argv[argv.index("--spawn") + 1] == "session"
     assert argv[argv.index("--permission-mode") + 1] == "plan"
 
@@ -158,28 +126,28 @@ def test_pty_mode_start_then_resume_adds_continue(
     browser.expect_visible('[data-project="gamma"]')
 
     # Trust-on-start (same gate as standard mode), then the pty bridge reaches RUNNING.
-    _open_desktop_launch(browser, "gamma")
-    _trust_and_start(browser, "gamma")
-    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
+    open_desktop_launch(browser, "gamma")
+    trust_and_start(browser, "gamma")
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
 
     # The fresh start uses the flag form (not the subcommand) and no --continue.
-    start_argv = _read_launch_argv(bridge_server_pty.state_dir, "gamma")
+    start_argv = read_launch_argv(bridge_server_pty.state_dir, "gamma")
     assert "--remote-control" in start_argv  # the flag form...
     assert "remote-control" not in start_argv  # ...never the subcommand form
     assert "--continue" not in start_argv
 
     # Stop leaves a resumable pty bridge in Recent; Resume re-spawns the flag form with
     # --continue.
-    browser.click("section.zone-active .btn-outline-danger")
-    browser.expect_visible(_RECENT_TOGGLE, timeout_ms=_STATUS_TIMEOUT)
-    browser.click(_RECENT_TOGGLE)
-    browser.expect_text("section.zone-active", "Stopped", timeout_ms=_STATUS_TIMEOUT)
-    resume = "section.zone-active .btn-success"
+    browser.click(STOP_BUTTON)
+    browser.expect_visible(RECENT_TOGGLE, timeout_ms=STATUS_TIMEOUT)
+    browser.click(RECENT_TOGGLE)
+    browser.expect_text("section.zone-active", "Stopped", timeout_ms=STATUS_TIMEOUT)
+    resume = RESUME_BUTTON
     browser.expect_visible(resume)
     browser.click(resume)
-    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
 
-    resume_argv = _read_launch_argv(bridge_server_pty.state_dir, "gamma")
+    resume_argv = read_launch_argv(bridge_server_pty.state_dir, "gamma")
     assert "--remote-control" in resume_argv  # resume stays on the flag form...
     assert "remote-control" not in resume_argv  # ...never the subcommand form
     assert "--continue" in resume_argv  # true-resume restores the prior session
@@ -200,7 +168,7 @@ def test_background_launch_option_labeled_and_reveals_subfields(
     browser.expect_visible('[data-project="alpha"]')
 
     # Open the per-project launch popover.
-    browser.click('[data-project="alpha"] .launch-anchor button')
+    browser.click('[data-project="alpha"] [data-test="run-launch"]')
     browser.expect_visible('[data-project="alpha"] .launch-pop')
 
     # The picker offers the mode under the unchanged internal value "detached".
@@ -209,7 +177,7 @@ def test_background_launch_option_labeled_and_reveals_subfields(
 
     # Default mode is desktop, so the detached sub-fields start hidden.
     first_prompt = "#lprompt-alpha"
-    cloud_optin = '[data-project="alpha"] input[x-model="lcloud"]'
+    cloud_optin = '[data-project="alpha"] [data-test="launch-cloud-optin"]'
     browser.expect_hidden(first_prompt)
 
     # Selecting it marks its option (.is-sel) and reveals the sub-fields. Assert the

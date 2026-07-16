@@ -19,6 +19,7 @@ See ``tests/E2E_CHECKLIST.md`` for the full manual list.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -43,12 +44,12 @@ def test_cost_badge_shows_for_seeded_project_only(
 
     # alpha has a seeded transcript -> the lazy-loaded badge appears with a cost figure.
     # Cost mode always prefixes the amount with "≈" (currency-symbol-agnostic).
-    alpha_badge = '[data-project="alpha"] [x-text="usageLabel(\'alpha\')"]'
+    alpha_badge = '[data-project="alpha"] [data-test="usage-badge"]'
     browser.expect_visible(alpha_badge)
     assert "≈" in browser.get_text(alpha_badge)
 
     # beta has no transcripts -> usageLabel('beta') is null -> the badge stays hidden.
-    browser.expect_hidden('[data-project="beta"] [x-text="usageLabel(\'beta\')"]')
+    browser.expect_hidden('[data-project="beta"] [data-test="usage-badge"]')
 
 
 def test_preflight_pill_surfaces_for_unready_project(
@@ -64,8 +65,10 @@ def test_preflight_pill_surfaces_for_unready_project(
 
     pill = '[data-project="alpha"] [data-test="preflight-pill"]'
     browser.expect_visible(pill)
-    # The pill reads "⚠ N check(s)" since UX-07 (#560) replaced the "preflight" jargon with the
-    # scoped "readiness checks" vocabulary; the data-test hook + internal name stay "preflight".
+    # The pill reads "N check(s)" beside a Tabler alert icon — UX-07 (#560) replaced the
+    # "preflight" jargon with the scoped "readiness checks" vocabulary, and DES-03 (#704)
+    # swapped the old "⚠" text glyph for the aria-hidden SVG icon; the data-test hook +
+    # internal name stay "preflight".
     assert "check" in browser.get_text(pill).lower()
 
     # Collapsed until clicked, then the specific warning check(s) appear.
@@ -87,12 +90,12 @@ def test_external_session_indicator_shows_for_unmanaged_session(
 
     # The agents --json cross-check (polled every 1s) attributes the injected session to
     # alpha as EXTERNAL -> hasExternal('alpha') flips true and the indicator renders.
-    indicator = '[data-project="alpha"] [x-show="hasExternal(\'alpha\')"]'
+    indicator = '[data-project="alpha"] [data-test="external-indicator"]'
     browser.expect_visible(indicator, timeout_ms=_BANNER_TIMEOUT)
     assert "External session active" in browser.get_text(indicator)
 
     # beta has no external session -> its indicator stays hidden.
-    browser.expect_hidden('[data-project="beta"] [x-show="hasExternal(\'beta\')"]')
+    browser.expect_hidden('[data-project="beta"] [data-test="external-indicator"]')
 
 
 def test_external_session_rich_display_in_active_zone_and_project_detail(
@@ -158,3 +161,41 @@ def test_connection_lost_banner_appears_when_server_dies(
 
     browser.expect_visible(banner, timeout_ms=_BANNER_TIMEOUT)
     assert "Lost connection" in browser.get_text(banner)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc/<pid>/stat staging is Linux-only")
+def test_adopt_external_standard_bridge_becomes_managed(
+    browser: AgentBrowser, adoptable_external_server: Server
+) -> None:
+    """Adopting a live external *standard* bridge promotes it to a managed row (#330).
+
+    The fixture stages the real adoption gate — a live subcommand-form fake bridge
+    plus a matching ``bridge-pointer.json`` — so ``/api/sessions/adoptable`` offers
+    ``alpha`` and the Manage affordance renders. Clicking it (its ``window.confirm``
+    is auto-accepted by the suite's dialog shim) POSTs ``/adopt`` and the session
+    gains the first-class managed row: Running status + the Stop control.
+    """
+    browser.goto(adoptable_external_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+
+    # The agents-json cross-check attributes the session EXTERNAL, and the adoptable
+    # poll (pointer + live standard-cmdline checks) arms the Manage button.
+    browser.expect_visible(
+        '[data-project="alpha"] [data-test="external-indicator"]', timeout_ms=_BANNER_TIMEOUT
+    )
+    adopt_btn = '[data-project="alpha"] [data-test="adopt-btn"]'
+    browser.expect_visible(adopt_btn, timeout_ms=_BANNER_TIMEOUT)
+
+    browser.click(adopt_btn)
+
+    # The adopted session is now managed: a Running row with a Stop control appears in
+    # the Active zone (the whole point of adoption — lifecycle controls without restart).
+    browser.expect_text("section.zone-active", "Running", timeout_ms=_BANNER_TIMEOUT)
+    browser.expect_visible(
+        'section.zone-active [data-test="stop-session"]', timeout_ms=_BANNER_TIMEOUT
+    )
+    # And the Manage affordance retires for this project (no longer adoptable). The
+    # retire path needs TWO polls to settle server-side (the 1s agents-json cross-check
+    # re-attributing the session managed, then the 4s adoptable refresh) — under CI
+    # load that chain can exceed the usual 20s, so give it double headroom.
+    browser.expect_hidden(adopt_btn, timeout_ms=2 * _BANNER_TIMEOUT)

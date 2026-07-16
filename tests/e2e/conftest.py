@@ -496,3 +496,104 @@ def external_session_server(
         extra="  agents_json_poll_interval_seconds: 1\n",
         extra_env={"FAKE_CLAUDE_AGENTS": agents},
     )
+
+
+@pytest.fixture
+def adoptable_external_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A clauster seeing ONE live external *standard* bridge in ``alpha`` — adoptable (#330).
+
+    Adoption is gated on the real checks (``runner.adopt``): a live process whose
+    cmdline is the standard ``remote-control`` subcommand form AND an Anthropic
+    ``bridge-pointer.json`` whose pid + procStart match it. Stage both for real,
+    **after the server is up** — ``rediscover()`` auto-adopts a live pointer bridge
+    at startup, so pre-staging would make the session managed before the page ever
+    loads and no Adopt affordance would render:
+
+    1. start the server with ``FAKE_CLAUDE_AGENTS_FILE`` pointing at a not-yet-written
+       file (the fake re-reads it on every ``agents --json`` call → post-start mutable);
+    2. spawn the fake ``claude remote-control`` as a long-running subprocess with
+       cwd ``alpha`` (its cmdline passes ``is_standard_bridge_cmdline``);
+    3. read its start-jiffies from ``/proc/<pid>/stat`` (the pointer's ``procStart``
+       unit) and write the pointer under the isolated HOME;
+    4. write the agents file so the next 1s cross-check attributes EXTERNAL.
+
+    Teardown kills the spawned fake by its captured Popen handle (its own PID —
+    never a name match).
+    """
+    from clauster.pointers import sanitize_cwd  # pure cwd→dirname mapping
+
+    tmp = tmp_path_factory.mktemp("e2e-adopt")
+    alpha = (mutable_projects_tree / "alpha").resolve()
+    ext_dir = tmp / "external"
+    ext_dir.mkdir()
+    agents_file = ext_dir / "agents.json"
+
+    server_gen = _start_server(
+        tmp,
+        mutable_projects_tree,
+        extra="  agents_json_poll_interval_seconds: 1\n",
+        extra_env={"FAKE_CLAUDE_AGENTS_FILE": str(agents_file)},
+    )
+    server = next(server_gen)
+    proc: subprocess.Popen | None = None
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — fixed fixture argv, no user input
+            [
+                sys.executable,
+                str(FAKE_CLAUDE),
+                "remote-control",
+                "--debug-file",
+                str(ext_dir / "external-bridge.log"),
+            ],
+            cwd=alpha,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # procStart is Linux start-jiffies: field 22 of /proc/<pid>/stat. Split off
+        # "pid (comm" at the LAST ')' (comm may contain spaces/parens), leaving
+        # fields 3.. — so index 19 is field 22.
+        stat = Path(f"/proc/{proc.pid}/stat").read_text(encoding="utf-8")
+        jiffies = stat.rsplit(")", 1)[1].split()[19]
+        ptr_dir = tmp / "home" / ".claude" / "projects" / sanitize_cwd(alpha)
+        ptr_dir.mkdir(parents=True, exist_ok=True)
+        (ptr_dir / "bridge-pointer.json").write_text(
+            json.dumps(
+                {
+                    "sessionId": "e2e-adopt-0000",
+                    "environmentId": "env-e2e-adopt",
+                    "source": "e2e",
+                    "pid": proc.pid,
+                    "procStart": jiffies,
+                }
+            ),
+            encoding="utf-8",
+        )
+        agents_file.write_text(
+            json.dumps(
+                [
+                    {
+                        "pid": proc.pid,
+                        "cwd": str(alpha),
+                        "kind": "interactive",
+                        "state": "running",
+                        "startedAt": 1735689600000,
+                        "sessionId": "e2e-adopt-0000",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        yield server
+    finally:
+        # The server teardown must run even if the fake-bridge kill/wait raises
+        # (e.g. TimeoutExpired) — a leaked server holds its port and surfaces as
+        # confusing collision flakiness in later tests.
+        try:
+            if proc is not None:
+                proc.kill()
+                proc.wait(timeout=10)
+        finally:
+            # Drive the _start_server generator's own teardown (server shutdown).
+            server_gen.close()

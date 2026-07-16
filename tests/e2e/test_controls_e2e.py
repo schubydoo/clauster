@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from _helpers import STATUS_TIMEOUT, open_desktop_launch, trust_and_start
 
 if TYPE_CHECKING:
     from _driver import AgentBrowser
@@ -30,25 +31,16 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.e2e
 
-# A bridge spawn waits on the fake claude writing its readiness markers, then the
-# dashboard's poll reconciles state — give status transitions generous headroom
-# (matches test_bridge_e2e).
-_STATUS_TIMEOUT = 20_000
-
 # Per-project overflow (···) menu: the trigger button and its single dropdown item.
 _MENU_TRIGGER = '.card-menu button[aria-label="More actions"]'
 _MENU_ITEM = ".card-menu .dropdown-item"  # the Edit/Close CLAUDE.md toggle
 
 
 def _start_bridge(browser: AgentBrowser, project: str) -> None:
-    """Trust-on-start a fresh bridge and wait for RUNNING (mirrors test_bridge_e2e)."""
-    browser.click(f'[data-project="{project}"] .launch-anchor button')
-    browser.expect_visible(f'[data-project="{project}"] .launch-pop')
-    browser.check(f'[data-project="{project}"] input[name="lm-{project}"][value="desktop"]')
-    browser.click(f'[data-project="{project}"] .launch-pop button.btn-primary.w-100')
-    browser.check(f'[data-project="{project}"] .alert-warning input[type="checkbox"]')
-    browser.click(f'[data-project="{project}"] .alert-warning button.btn-warning')
-    browser.expect_text("section.zone-active", "Running", timeout_ms=_STATUS_TIMEOUT)
+    """Trust-on-start a fresh bridge and wait for RUNNING."""
+    open_desktop_launch(browser, project)
+    trust_and_start(browser, project)
+    browser.expect_text("section.zone-active", "Running", timeout_ms=STATUS_TIMEOUT)
 
 
 def test_overflow_menu_opens_and_closes(browser: AgentBrowser, open_server: str) -> None:
@@ -88,8 +80,9 @@ def test_overflow_menu_toggles_claude_md_editor(browser: AgentBrowser, open_serv
     browser.expect_hidden(editor)
 
     browser.click(item)
-    # The editor textarea appears and the menu closes itself (menu = false on click).
-    browser.expect_visible(editor)
+    # The editor textarea appears (after an on-open content fetch — slow-CI headroom)
+    # and the menu closes itself (menu = false on click).
+    browser.expect_visible(editor, timeout_ms=STATUS_TIMEOUT)
     browser.expect_hidden(item)
 
 
@@ -123,7 +116,7 @@ def test_running_bridge_logs_toggle(browser: AgentBrowser, bridge_server: Server
     browser.expect_visible('[data-project="gamma"]')
     _start_bridge(browser, "gamma")
 
-    logs_btn = 'section.zone-active button:has(use[href="#ic-logs"])'
+    logs_btn = 'section.zone-active [data-test="bridge-logs-toggle"]'
     log_view = "section.zone-active pre.log-view"
     browser.expect_text(logs_btn, "Logs")
     browser.expect_hidden(log_view)

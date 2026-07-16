@@ -32,6 +32,13 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
   above the **96%** coverage gate (enforced in CI on all three OSes; Windows
   measures through `.coveragerc-win`, which excludes the POSIX/ConPTY code it
   can't run so it holds the same floor).
+- **Browser E2E (opt-in)** — `scripts/e2e.sh` runs the real-Chromium suite in
+  `tests/e2e` (excluded from the default `pytest` run and from the required CI
+  gate). It needs Node/npm: the script `npm ci`-installs the version-pinned
+  [`agent-browser`](https://github.com/vercel-labs/agent-browser) CLI from
+  `tests/e2e/package-lock.json` and downloads a matched headless Chromium on
+  first run. Run it when you touch the dashboard UI or `tests/e2e/**`; the
+  manual-flow checklist lives in `tests/E2E_CHECKLIST.md`.
 - **Lint, format, types** —
   `uv run ruff check . && uv run ruff format --check . && uv run pyright src/clauster`
 - **Docs lint (Markdown + YAML)** — `bash scripts/lint-docs.sh` (markdownlint-cli2
