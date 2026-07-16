@@ -84,7 +84,7 @@ jobs:
           # renovate: datasource=custom.chrome-for-testing depName=chrome-for-testing
           CHROME_VERSION: "150.0.7871.124"
         run: |
-          exe=$(node_modules/.bin/browsers install "chrome@${CHROME_VERSION}" --path "$RUNNER_TEMP/cft" | awk '{print $NF}')
+          exe=$(node_modules/.bin/browsers install "chrome@${CHROME_VERSION}" --path "$RUNNER_TEMP/cft" | awk 'END{print $NF}')
           test -x "$exe"
           echo "AGENT_BROWSER_EXECUTABLE_PATH=$exe" >> "$GITHUB_ENV"
       - name: Run E2E suite
