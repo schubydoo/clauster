@@ -264,6 +264,25 @@ async def test_spawn_pty_ignores_custom_name(runner_config) -> None:
         await runner.stop(inst.instance_id)
 
 
+def _seed_transcript(runner_config, project: str, session_uuid: str) -> None:
+    """Plant a one-turn transcript for ``project`` so the uuid resolves as ITS conversation.
+
+    The project-scope gate (#303, Greptile P1) resolves resume_session_id against
+    the project's own transcript dir (the import-time CLAUDE_PROJECTS_DIR — already
+    HOME-isolated by the suite-wide conftest), so a spawn test with a picked
+    conversation must stage one, exactly like the picker's own listing source.
+    """
+    from clauster.pointers import CLAUDE_PROJECTS_DIR, sanitize_cwd
+
+    project_path = (runner_config[0].projects_root / project).resolve()
+    tdir = CLAUDE_PROJECTS_DIR / sanitize_cwd(project_path)
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / f"{session_uuid}.jsonl").write_text(
+        json.dumps({"message": {"role": "user", "content": "seeded for fork"}}) + "\n",
+        encoding="utf-8",
+    )
+
+
 async def test_spawn_rejects_resume_session_id_with_revive(runner_config) -> None:
     """resume_session_id + the internal revive path is ambiguous — rejected up front (#303)."""
     from clauster.runner import InvalidSpawnOption
@@ -307,6 +326,7 @@ async def test_spawn_resume_session_honored_when_config_default_pty(runner_confi
     """resume_mode OMITTED + config default pty → the pick still reaches the argv (#303)."""
     runner, _ = _pty_runner(runner_config)  # config launch_mode=pty
     uuid = "0badcafe-0000-4000-8000-00000000c0de"
+    _seed_transcript(runner_config, "alpha", uuid)
     inst = await runner.spawn("alpha", resume_session_id=uuid)
     try:
         assert inst.resume_mode == "pty"
@@ -328,10 +348,29 @@ async def test_spawn_rejects_malformed_resume_session_id(runner_config) -> None:
 
 
 @_POSIX_ONLY
+async def test_spawn_rejects_resume_session_id_of_other_project(runner_config) -> None:
+    """A well-formed uuid that is NOT this project's conversation is rejected (#303).
+
+    The cross-project boundary: beta's conversation uuid must never fork into an
+    alpha session (Greptile P1) — fail closed, before any spawn side effect.
+    POSIX-only: on Windows the pty-only check rejects earlier (no pty mode), so
+    the boundary check is unreachable there.
+    """
+    from clauster.runner import InvalidSpawnOption
+
+    runner, _ = _pty_runner(runner_config)
+    uuid = "aaaabbbb-cccc-4ddd-8eee-ffff00001111"
+    _seed_transcript(runner_config, "beta", uuid)  # belongs to beta, not alpha
+    with pytest.raises(InvalidSpawnOption, match="not a conversation of project"):
+        await runner.spawn("alpha", resume_mode="pty", resume_session_id=uuid)
+
+
+@_POSIX_ONLY
 async def test_spawn_pty_resume_session_reaches_argv(runner_config) -> None:
     """A valid picked uuid rides the spawn to the bridge argv as --resume + --fork-session."""
     runner = SessionRunner(runner_config[0], claude_json=runner_config[1])  # config=standard
     uuid = "abcdefab-1234-5678-9abc-def012345678"
+    _seed_transcript(runner_config, "alpha", uuid)
     inst = await runner.spawn("alpha", resume_mode="pty", resume_session_id=uuid)
     try:
         assert inst.resume_mode == "pty"

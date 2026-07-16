@@ -41,6 +41,7 @@ from . import (
     procutil,
     pty_screen,
     redact,
+    usage,
 )
 from .claude_cli import ClaudeNotFound, resolve_binary
 from .config import (
@@ -975,6 +976,20 @@ class SessionRunner:
             if effective_resume_mode != "pty":
                 raise InvalidSpawnOption(
                     "resume_session_id requires the pty (Interactive Session) mode"
+                )
+            # Scope the pick to THIS project's own conversations (fail closed): a
+            # well-formed uuid belonging to another project's transcript must never
+            # fork foreign context into this session. resolve_session_transcript
+            # walks only the project's sanitized-cwd transcript dir — the same
+            # source the picker lists from — so anything it can't resolve is
+            # rejected before any spawn side effect.
+            resolved_transcript = await asyncio.to_thread(
+                usage.resolve_session_transcript, proj.path, resume_session_id
+            )
+            if resolved_transcript is None:
+                raise InvalidSpawnOption(
+                    f"resume_session_id {resume_session_id!r} is not a conversation "
+                    f"of project {name!r}"
                 )
         # Validate before any spawn side effect (fail closed), same as spawn/permission
         # mode above. Blank/None falls back to the project name (today's behavior); a
