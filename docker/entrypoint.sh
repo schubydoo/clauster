@@ -17,4 +17,4 @@ fi
 # read-only); never fail startup on chown.
 chown clauster:clauster /config 2>/dev/null || true
 
-exec gosu clauster:clauster "$@"
+exec su-exec clauster:clauster "$@"

@@ -236,9 +236,9 @@ Then open <http://127.0.0.1:7621>. `claude` must be on your `PATH`.
 ## Docker
 
 A multi-arch (`linux/amd64`, `linux/arm64`) image is published to
-`ghcr.io/schubydoo/clauster`. It is built on a `python:3.14-slim-trixie` base,
-runs **non-root** with PUID/PGID remapping, and ships a `HEALTHCHECK` against
-`/healthz`.
+`ghcr.io/schubydoo/clauster`. It is built on an `alpine` (musl) base with
+explicitly pinned apk packages, runs **non-root** with PUID/PGID remapping, and
+ships a `HEALTHCHECK` against `/healthz`.
 
 !!! warning "The `claude` CLI is not baked into the image"
     Clauster spawns `claude remote-control`, so you must provide the CLI at
