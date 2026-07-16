@@ -308,8 +308,13 @@ class SessionRunner:
         # runner (CLI `clauster start/stop`, the MCP write tools) built from the same
         # config flocks in the same directory as the running service — without this, a
         # headless writer's cross-process lock degrades to a warning and never excludes
-        # the web app. Idempotent (same value both times in the web app).
-        atomicio.configure_lock_dir((config.state_dir / "locks").expanduser())
+        # the web app. Idempotent (same value both times in the web app). The dir is
+        # ALSO pinned per-runner: every runner flock passes `lock_dir=self._lock_dir`
+        # explicitly, so a later configure_lock_dir for a DIFFERENT state dir in the
+        # same process (tests, exotic embedding) can't silently redirect this runner's
+        # lock files away from the ones external processes use (Greptile #951 P1).
+        self._lock_dir = (config.state_dir / "locks").expanduser()
+        atomicio.configure_lock_dir(self._lock_dir)
         # Monotonic spawn counter → unique log filenames even for two same-ms spawns.
         self._log_seq = 0
         # Registry keyed by instance_id (stable UUID, #777). Standard bridges keep
@@ -714,7 +719,7 @@ class SessionRunner:
         # until state.json is reset.
         return {**self._persisted, **live}
 
-    async def _refresh_persisted(self) -> None:
+    async def _refresh_persisted(self) -> bool:
         """Replace the persist merge-base with the CURRENT DB state (#949).
 
         ``_persisted`` is otherwise a snapshot from construction time, advanced only
@@ -730,10 +735,14 @@ class SessionRunner:
         a stale cursor is the safe degrade, a data loss is not.
         """
         async with self._persist_lock:
-            await self._refresh_persisted_locked()
+            return await self._refresh_persisted_locked()
 
-    async def _refresh_persisted_locked(self) -> None:
-        """Body of :meth:`_refresh_persisted`; caller must hold ``_persist_lock``."""
+    async def _refresh_persisted_locked(self) -> bool:
+        """Body of :meth:`_refresh_persisted`; caller must hold ``_persist_lock``.
+
+        Returns whether the base was actually refreshed — ``False`` on a DB read
+        error (old base kept). :meth:`_persist` aborts its save on ``False``.
+        """
         try:
             loaded = await asyncio.to_thread(self._state.load_strict)
         except OSError as exc:
@@ -741,10 +750,11 @@ class SessionRunner:
                 "could not refresh persisted bridge state (keeping the previous snapshot): %s",
                 exc,
             )
-            return
+            return False
         self._persisted = loaded
+        return True
 
-    async def _persist(self, *, refresh_base: bool = True) -> None:
+    async def _persist(self, *, drop: str | None = None) -> None:
         """Write the persisted subset off-loop, but only when it actually changed.
 
         Best-effort: the state store is non-authoritative, so a write failure (disk
@@ -754,32 +764,43 @@ class SessionRunner:
         the next persist retries (mirrors :meth:`HostedManager._persist`).
 
         Held under ``_persist_lock`` so interleaving callers can't race the store's
-        per-row prune into a :class:`StaleDataError` (#471).
+        per-row prune into a :class:`StaleDataError` (#471) — and, since #949, under
+        the STORE-WIDE cross-process lock (:meth:`_store_flock`) for the whole
+        refresh→merge→save: the save is a FULL-TABLE replace, and the per-project
+        flocks don't exclude a different project's writer in another process, so an
+        unserialized load→save could straddle its save and prune its fresh row.
 
-        ``refresh_base`` (#949, default on): re-load the merge base from the store
-        before overlaying live instances, so this full-replace save can't resurrect a
-        row another clauster process pruned since our snapshot, or prune a row it
-        added (the poll loop's periodic persist would otherwise drop a headless CLI
-        spawn's freshly saved row). :meth:`forget` — the one caller that *deletes* a
-        row by re-saving a filtered map — passes ``False``: a refresh there would put
-        the just-filtered row straight back into the base (it refreshes at section
-        entry instead, under the cross-process lock).
+        The refresh re-loads the merge base from the store so this save can't
+        resurrect a row another clauster process pruned since our snapshot, or prune
+        a row it added. A FAILED refresh aborts the attempt — writing a full replace
+        from a known-stale base is exactly the prune hazard this exists to close; the
+        next persist retries. ``drop`` (:meth:`forget`, the one deletion path)
+        excludes that instance id from the freshly refreshed base so the delete is
+        atomic with the reload — and skips the no-change dedup, which was computed
+        against OUR last write and can't know whether the store still holds the row.
         """
         async with self._persist_lock:
-            if refresh_base:
-                await self._refresh_persisted_locked()
-            subset = self._persist_subset()
-            if subset == self._last_saved:
-                return
-            try:
-                await asyncio.to_thread(self._state.save, subset)
-            except OSError as exc:
-                _log.warning("could not persist bridge state: %s", exc)
-                return
-            self._last_saved = subset
-            # Keep the merge base in sync with what's on disk so the next overlay builds
-            # on the latest saved state (live modes that changed this round are retained).
-            self._persisted = subset
+            async with self._store_flock():
+                await self._persist_locked(drop=drop)
+
+    async def _persist_locked(self, *, drop: str | None) -> None:
+        """Body of :meth:`_persist`; caller holds ``_persist_lock`` + the store flock."""
+        if not await self._refresh_persisted_locked():
+            return
+        if drop is not None:
+            self._persisted = {k: v for k, v in self._persisted.items() if k != drop}
+        subset = self._persist_subset()
+        if drop is None and subset == self._last_saved:
+            return
+        try:
+            await asyncio.to_thread(self._state.save, subset)
+        except OSError as exc:
+            _log.warning("could not persist bridge state: %s", exc)
+            return
+        self._last_saved = subset
+        # Keep the merge base in sync with what's on disk so the next overlay builds
+        # on the latest saved state (live modes that changed this round are retained).
+        self._persisted = subset
 
     # ----- discovery helpers ---------------------------------------------
 
@@ -1016,7 +1037,35 @@ class SessionRunner:
         there is unchanged (in-process serialization only), exactly like the config
         writers; see :func:`atomicio.cross_process_lock`.
         """
-        cm = atomicio.cross_process_lock((self._config.projects_root / name).expanduser())
+        async with self._flock((self._config.projects_root / name).expanduser()):
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _store_flock(self) -> AsyncIterator[None]:
+        """Hold the STORE-WIDE cross-process lock for a read-merge-replace save (#949).
+
+        The per-project flock only excludes SAME-project writers, but
+        :meth:`StateStore.save` is a full-table replace — without a store-wide lock,
+        this process's refresh→save could straddle another process's save of a
+        *different* project's row and prune it. Held only across :meth:`_persist`'s
+        refresh+merge+save (milliseconds; the store is small). Ordering: always
+        acquired AFTER any per-project flock (spawn/stop/forget/adopt persist inside
+        their sections) and no holder ever acquires a per-project flock afterwards,
+        so the two levels can't deadlock across processes.
+        """
+        async with self._flock((self._config.state_dir / "state-store").expanduser()):
+            yield
+
+    @contextlib.asynccontextmanager
+    async def _flock(self, target: Path) -> AsyncIterator[None]:
+        """Hold :func:`atomicio.cross_process_lock` on ``target``, event-loop-safely.
+
+        The shared acquire behind :meth:`_bridge_flock` / :meth:`_store_flock`: the
+        blocking ``flock`` is entered/exited in a worker thread, and the lock dir is
+        pinned to THIS runner's deployment (``self._lock_dir``) so a later global
+        ``configure_lock_dir`` for a different state dir can't redirect it.
+        """
+        cm = atomicio.cross_process_lock(target, lock_dir=self._lock_dir)
         acquire = asyncio.ensure_future(asyncio.to_thread(cm.__enter__))
         try:
             await asyncio.shield(acquire)
@@ -2582,12 +2631,12 @@ class SessionRunner:
             # and _last_saved to the same object, so mutating _persisted would also mutate the
             # dedup baseline and _persist would skip the write (leaving the row on disk).
             self._persisted = {k: v for k, v in self._persisted.items() if k != instance_id}
-            # refresh_base=False — the ONE persist that must NOT merge onto the current
-            # DB state: the row being forgotten is still in the DB, so a refresh would
-            # put it straight back into the base and the save would never prune it.
-            # The base was refreshed at section entry (above), so it is otherwise
-            # current, and the whole read-filter-save runs under the cross-process lock.
-            await self._persist(refresh_base=False)
+            # drop=… — the deletion must ride INSIDE the persist's own store-locked
+            # refresh→save: _persist re-loads the base (which still holds the row), so
+            # a bare filtered save computed out here could race another process or be
+            # undone by the reload. The in-memory filter above keeps this process's
+            # view consistent even when the best-effort save doesn't land.
+            await self._persist(drop=instance_id)
             # #867 L1: a forgotten bridge's bridge-pointer.json would otherwise be
             # reattached on the next spawn — reviving an anchor that may have been
             # archived/deleted out from under its env (the #671 dead-end). Clear it so the
@@ -3068,10 +3117,10 @@ class SessionRunner:
         A standard external bridge writes an Anthropic pointer whose pid is a live
         ``claude remote-control`` subcommand process; a pty (flag-form) external bridge
         is excluded (unsafe to adopt — see :meth:`adopt`), as is one whose pointer has
-        gone stale. Computed from the same pointer + cmdline checks :meth:`adopt`
-        enforces, so the dashboard's Adopt affordance can never offer an adoption that
-        :meth:`adopt` would then refuse. Synchronous (filesystem + ``psutil``); call it
-        off-loop.
+        gone stale. Computed from the same pointer + cmdline + cwd-attribution checks
+        :meth:`adopt` enforces, so the dashboard's Adopt affordance can never offer an
+        adoption that :meth:`adopt` would then refuse. Synchronous (filesystem +
+        ``psutil``); call it off-loop.
         """
         discovered = self._discovered()
         adoptable: set[str] = set()
@@ -3080,7 +3129,13 @@ class SessionRunner:
             if proj is None:
                 continue
             ptr = pointers.pointer_for_project(proj.path)
-            if ptr is not None and procutil.is_live_standard_bridge(ptr.pid, ptr.proc_start):
+            if ptr is None or not procutil.is_live_standard_bridge(ptr.pid, ptr.proc_start):
+                continue
+            # Mirror adopt()'s positive-attribution gate (#951): a sanitize-collided
+            # foreign project's bridge must not be advertised as adoptable only for
+            # every resulting Adopt click to 409.
+            cwd = procutil.proc_cwd(ptr.pid)
+            if cwd is not None and cwd.resolve() == proj.path.resolve():
                 adoptable.add(name)
         return adoptable
 

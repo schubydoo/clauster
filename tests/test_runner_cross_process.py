@@ -199,6 +199,30 @@ async def test_rediscover_resurrects_row_persisted_after_construction(runner_con
     assert inst.label == "from-other-proc"
 
 
+async def test_persist_aborts_on_failed_refresh_instead_of_pruning(runner_config, monkeypatch):
+    # If the base can't be refreshed, writing the full-replace snapshot anyway could
+    # prune a row another process added since our snapshot (Greptile #951 P1): the
+    # persist attempt must abort — the store keeps the other process's row, and our
+    # own change simply waits for the next (retried) persist.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)  # snapshot is empty
+    with _other_process_store(config) as store:
+        store.save({"iid-z": {"project_name": "beta", "label": "added-later"}})
+
+    def _boom():
+        raise OSError("state load failed: locked")
+
+    monkeypatch.setattr(runner._state, "load_strict", _boom)
+    own = _fake_instance("alpha")
+    runner._instances[own.instance_id] = own
+    await runner._persist()
+
+    with _other_process_store(config) as store:
+        records = store.load()
+    assert records.get("iid-z", {}).get("label") == "added-later"  # never pruned
+    assert own.instance_id not in records  # save was aborted, not partially applied
+
+
 async def test_refresh_keeps_previous_base_on_db_read_error(runner_config, monkeypatch, caplog):
     # A transient DB read failure must keep the known-good base (a stale cursor),
     # never swap in {} — the next full-replace save would mass-prune the store.
@@ -214,6 +238,61 @@ async def test_refresh_keeps_previous_base_on_db_read_error(runner_config, monke
         await runner._refresh_persisted()
     assert runner._persisted == {"iid-keep": {"project_name": "beta"}}
     assert "could not refresh persisted bridge state" in caplog.text
+
+
+@_POSIX_ONLY
+async def test_persist_holds_the_store_wide_flock_across_the_save(runner_config, monkeypatch):
+    # StateStore.save is a full-table replace, so the refresh->save read-merge-write
+    # must be exclusive STORE-WIDE (per-project flocks don't exclude other projects'
+    # writers): probe the store lock from inside the save and expect it held.
+    import fcntl
+
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    real_save = runner._state.save
+    observed = {}
+
+    def _save_and_probe(records):
+        lock_file = atomicio._cross_process_lock_file(
+            (config.state_dir / "state-store").expanduser(),
+            (config.state_dir / "locks").expanduser(),
+        )
+        fd = os.open(lock_file, os.O_RDWR)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed["held"] = False
+            except BlockingIOError:
+                observed["held"] = True
+        finally:
+            os.close(fd)
+        real_save(records)
+
+    monkeypatch.setattr(runner._state, "save", _save_and_probe)
+    own = _fake_instance("alpha")
+    runner._instances[own.instance_id] = own
+    await runner._persist()
+    assert observed["held"] is True
+
+
+@_POSIX_ONLY
+async def test_runner_flock_dir_survives_later_global_reconfigure(runner_config, tmp_path):
+    # The runner pins its lock dir at construction: a LATER configure_lock_dir for a
+    # different deployment in the same process (a second runner's init) must not
+    # redirect this runner's lock files away from the ones external processes use.
+    config, claude_json = runner_config
+    a = SessionRunner(config, claude_json=claude_json)
+    atomicio.configure_lock_dir(tmp_path / "other-deployment-locks")
+    target = (config.projects_root / "alpha").expanduser()
+    async with a._bridge_flock("alpha"):
+        pinned = atomicio._cross_process_lock_file(
+            target, (config.state_dir / "locks").expanduser()
+        )
+        assert pinned is not None
+        assert pinned.exists()  # the flock landed in THIS runner's deployment dir
+        drifted = atomicio._cross_process_lock_file(target)  # global = other deployment
+        assert drifted is not None
+        assert not drifted.exists()
 
 
 # -- the flock itself ----------------------------------------------------------

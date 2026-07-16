@@ -1514,7 +1514,39 @@ def test_adoptable_external_projects(runner_config, monkeypatch):
     monkeypatch.setattr(
         "clauster.runner.procutil.is_live_standard_bridge", lambda pid, *a, **k: pid == 11
     )
+    # Positive attribution (#951): pid 11's cwd IS alpha's directory.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.proc_cwd",
+        lambda pid: (root / "alpha").resolve() if pid == 11 else None,
+    )
     assert runner.adoptable_external_projects() == {"alpha"}
+
+
+def test_adoptable_excludes_sanitize_collided_foreign_bridge(runner_config, monkeypatch):
+    # The Adopt affordance must apply the same cwd-attribution gate adopt() enforces:
+    # a live standard bridge whose actual cwd is ANOTHER project's directory (a
+    # sanitize_cwd pointer collision) is not advertised, so an offered Adopt can
+    # never 409 on the attribution check.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    root = config.projects_root
+    runner._sessions = [
+        WorkingSession(
+            pid=11,
+            cwd=root / "alpha",
+            kind="interactive",
+            started_at=11,
+            local_uuid="u11",
+            attribution=Attribution.EXTERNAL,
+        )
+    ]
+    monkeypatch.setattr("clauster.pointers.pointer_for_project", lambda path: _FakePtr(11))
+    monkeypatch.setattr("clauster.runner.procutil.is_live_standard_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.proc_cwd", lambda pid: (root / "beta").resolve())
+    assert runner.adoptable_external_projects() == set()
+    # An unreadable cwd is equally unattributable -> not advertised either.
+    monkeypatch.setattr("clauster.runner.procutil.proc_cwd", lambda pid: None)
+    assert runner.adoptable_external_projects() == set()
 
 
 def test_adoptable_skips_undiscovered_project(runner_config, monkeypatch):
