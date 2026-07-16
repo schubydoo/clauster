@@ -1129,6 +1129,24 @@ class SessionRunner:
         # runner was constructed — a headless writer's construction-time snapshot can
         # predate rows the web app has since added or forgotten.
         await self._refresh_persisted()
+        # Stale-resume gate (#951 round 4): resuming a DEAD card whose row-backed
+        # record is gone from the fresh base would relaunch — and re-persist — a
+        # session another clauster process explicitly forgot, silently undoing that
+        # delete. Fail closed with the truth instead, and drop the card (it was only
+        # a view of the deleted row). A LIVE resume target is untouched — it falls
+        # through to the idempotent already-running return below.
+        if resume and resume_target is not None:
+            iid = resume_target.instance_id
+            if (
+                resume_target.status not in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+                and iid in self._row_backed
+                and iid not in self._persisted
+            ):
+                self._instances.pop(iid, None)
+                raise UnknownProject(
+                    f"session {iid} was forgotten by another clauster process — "
+                    "nothing left to resume"
+                )
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode

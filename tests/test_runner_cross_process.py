@@ -219,6 +219,28 @@ async def test_persist_drops_crashed_card_whose_row_another_process_forgot(runne
         assert "iid-c" not in store.load()
 
 
+async def test_resume_of_card_another_process_forgot_is_refused(runner_config):
+    # Round 4: an explicit Resume must not silently undo another process's forget —
+    # the stale card is dropped and the resume fails closed with the truth, instead
+    # of relaunching a session whose record was deliberately deleted.
+    config, claude_json = runner_config
+    with _other_process_store(config) as store:
+        store.save({"iid-r": {"project_name": "beta", "label": "forgotten-elsewhere"}})
+    runner = SessionRunner(config, claude_json=claude_json)
+    await runner.rediscover(persist=False)
+    card = runner.get_instance_for_project("beta")
+    assert card is not None
+
+    with _other_process_store(config) as store:
+        store.save({})  # the other process forgets it
+
+    with pytest.raises(UnknownProject, match="forgotten by another clauster process"):
+        await runner.resume(card.instance_id)
+    assert runner.get_instance_for_project("beta") is None  # the stale card is gone
+    with _other_process_store(config) as store:
+        assert "iid-r" not in store.load()  # and nothing recreated the row
+
+
 async def test_persist_keeps_never_saved_error_instance(runner_config):
     # The flip side of the ownership signal: a spawn that failed straight to ERROR was
     # never saved (not row-backed), so its FIRST persist must still write it — the
