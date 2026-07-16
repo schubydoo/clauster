@@ -45,29 +45,25 @@ processes** (the ground truth, via on-disk bridge pointers) before acting — th
 idempotency check then sees a bridge the web app already started and hands it back
 instead of double-spawning.
 
-Serialization is *not* cross-process, and this is deliberately no stronger than
-the shipped CLI: the per-project spawn lock is an in-process ``asyncio.Lock``, so
-it serializes only *this* process's own concurrent calls, never against a separate
-web-app process. Shared **state** is not byte-corrupted regardless — persistence is SQLite
-(WAL + busy-timeout), so a contended write waits then raises a real error (surfaced
-as ``isError``), never a torn write. Two residual races remain (both pre-existing
-for the shipped CLI headless-write path, both needing a cross-process lock around
-the shared runner spawn/persist path to close — tracked as a follow-up, not this
-slice):
+Serialization is cross-process. The runner's per-project spawn/stop/forget/adopt
+sections hold a deployment-wide ``flock`` (``atomicio.cross_process_lock``) under
+their in-process ``asyncio.Lock``, so this headless writer mutually excludes the
+running web-app process, not just its own concurrent calls (#949, PR #951). That
+lock closed the two races this pattern used to carry (both pre-existing for the
+shipped CLI headless-write path; the MCP tools inherit the fix for free):
 
-1. **Duplicate-bridge TOCTOU** — if an MCP ``spawn_session`` and a dashboard Start
-   of the *same* project race in the instant between "fork the bridge" and "its
-   pointer file is visible on disk", both idempotency checks pass and two standard
-   bridges launch (the one-per-project cap momentarily bypassed).
-2. **Stale-snapshot resurrection** — this short-lived engine loads its persisted
-   merge-base once at construction and ``hydrate``'s ``rediscover(persist=False)``
-   only repopulates the live registry, not that base. So if the dashboard *forgets*
-   another bridge (deletes its row) after this engine started, a subsequent
-   ``_persist`` here overlays the stale base and the store's upsert-and-prune
-   briefly restores the removed row (a live bridge is safe — ``rediscover`` reattaches
-   it via its on-disk pointer; only a just-forgotten, no-live-process row resurfaces,
-   until the next reconcile prunes it again). Not data corruption — a transient stale
-   row.
+1. **Duplicate-bridge TOCTOU** — the spawn idempotency check now also probes the
+   on-disk bridge pointer under the cross-process lock, positively cwd-attributed,
+   so a bridge the web app already started is reattached and handed back rather than
+   double-launched.
+2. **Stale-snapshot resurrection** — ``_persist`` refreshes its merge-base from the
+   store under a store-wide lock before its full-replace save, tracks row-backedness
+   as the ownership signal, and aborts on a failed refresh — so a row another process
+   forgot can no longer be written back.
+
+Shared **state** is not byte-corrupted regardless — persistence is SQLite (WAL +
+busy-timeout), so even a contended write waits then raises a real error (surfaced as
+``isError``), never a torn write.
 
 Transport / protocol. A minimal, dependency-free stdio JSON-RPC 2.0 server
 implementing just the MCP messages a stdio tool host needs: ``initialize``, the
