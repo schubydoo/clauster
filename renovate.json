@@ -52,6 +52,16 @@
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+OSV_VERSION:\\s*\"(?<currentValue>v[0-9][^\"]*)\""
       ],
       "versioningTemplate": "semver"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the explicitly pinned Alpine apk packages in the Dockerfile (each `ARG <PKG>_VERSION=x.y.z-rN` preceded by a `# renovate:` line) via repology, so every OS-package bump is a Renovate PR instead of silent drift.",
+      "managerFilePatterns": [
+        "^Dockerfile$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+ARG \\w+=(?<currentValue>\\S+)"
+      ]
     }
   ],
   "packageRules": [
@@ -101,17 +111,24 @@
       "automerge": true
     },
     {
-      "description": "Auto-merge base-image digest re-pins (same tag, new SHA) once CI passes. Keeps OS security patches flowing without waiting on a weekly manual merge: the runtime apt-upgrade layer is keyed on the FROM digest, so a digest bump is what busts the gha build cache and re-pulls Debian fixes (see PR #216, where a lagging bump let 15 OpenSSL CVEs accumulate). Digest-only — a uv/base version bump is a different updateType and is NOT auto-merged.",
+      "description": "Auto-merge Alpine base-image digest re-pins (same tag, new SHA) once CI passes — refreshes the base OS layer between point releases without waiting on a weekly manual merge. The explicitly pinned apk packages are tracked and auto-merged separately (repology, below). Digest-only — a base tag version bump is a different updateType and is NOT auto-merged.",
       "matchManagers": ["dockerfile"],
       "matchUpdateTypes": ["digest"],
       "groupName": "docker base-image digests",
       "automerge": true
     },
     {
-      "description": "Auto-merge the python base-image PATCH bumps (e.g. 3.14.6 -> 3.14.7) once CI passes. The Dockerfile pins the explicit patch tag (`3.14.X-slim-trixie`) rather than the floating `3.14` tag, so a CPython bugfix release is a named, reviewable-in-history version PR instead of the opaque digest-only bump the floating tag produced — while still auto-flowing so CVE/bugfix patches don't accumulate (same intent as the digest rule above). A MINOR bump (3.15) is a real interpreter upgrade that the CI support matrix must move with, so it is left as a manual, reviewed PR.",
+      "description": "Auto-merge Alpine base-image PATCH bumps (e.g. 3.24.1 -> 3.24.2) once CI passes — a point release carries OS/CPython bugfixes at the same Python minor. A MINOR bump (3.25) can move the system python3 to a new interpreter minor the CI support matrix must move with, so it stays a manual, reviewed PR.",
       "matchManagers": ["dockerfile"],
-      "matchPackageNames": ["python"],
+      "matchPackageNames": ["alpine"],
       "matchUpdateTypes": ["patch"],
+      "automerge": true
+    },
+    {
+      "description": "Auto-merge the Dockerfile's pinned Alpine apk packages (repology). The pinned-apk model 404s a build the moment Alpine publishes a newer -rN, so bumps must flow promptly rather than wait on a manual merge; the docker smoke-test + musl smoke-test in CI gate them, and a failing check blocks the merge. Grouped into one PR to keep the noise down. Scoped to the Dockerfile so a future repology-sourced dep elsewhere doesn't inherit blanket auto-merge.",
+      "matchDatasources": ["repology"],
+      "matchFileNames": ["Dockerfile"],
+      "groupName": "alpine apk packages",
       "automerge": true
     },
     {

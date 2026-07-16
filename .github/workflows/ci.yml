@@ -410,6 +410,42 @@ jobs:
           docker rm -f clauster-smoke || true
 
   # --------------------------------------------------------------------
+  # musl portability canary. The `tests` matrix is all glibc/native; the
+  # published Docker image runs on Alpine/musl, so run the unit suite once on
+  # musl + CPython 3.14 (the image's exact libc + interpreter) to catch a
+  # musl-only regression before it ships. Driven via `docker run` from the ubuntu
+  # host rather than a `container:` job — GitHub injects a glibc node that can't
+  # execute on musl, so actions/checkout inside an Alpine container fails. No
+  # coverage gate (this is a portability canary, not the coverage cell); atheris
+  # has no musl wheel, so the dev extra is skipped and the fuzz smoke test
+  # importorskips (1 skip), exactly as it does elsewhere.
+  # --------------------------------------------------------------------
+  musl-tests:
+    name: musl smoke-test (alpine / py3.14)
+    needs: setup
+    if: needs.setup.outputs.code == 'true' && github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: pytest on alpine musl
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD":/src:ro \
+            alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b \
+            sh -euc '
+            apk add --no-cache uv python3 git >/dev/null
+            cp -a /src /work && cd /work
+            uv sync --frozen --no-dev --python python3
+            uv pip install --python .venv/bin/python \
+              pytest pytest-asyncio pytest-xdist pytest-timeout hypothesis pyte
+            .venv/bin/python -m pytest --ignore=tests/e2e -o addopts="" \
+              -n auto --timeout=120 --timeout-method=thread -q -p no:cacheprovider
+          '
+
+  # --------------------------------------------------------------------
   # Required-checks aggregator. ONE check for the `main` ruleset to gate
   # on (context: "ci required checks passed"), regardless of how many
   # underlying jobs exist. `if: always()` so it runs even when a need
@@ -424,6 +460,7 @@ jobs:
       - tests
       - build
       - docker
+      - musl-tests
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

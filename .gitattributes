@@ -1,0 +1,17 @@
+# Normalize line endings to LF in the repo and on checkout. A CRLF checkout
+# (Git for Windows' core.autocrlf=true default) breaks the Docker entrypoint —
+# `exec /usr/local/bin/entrypoint.sh: no such file or directory`, because the
+# shebang gains a trailing \r and the kernel looks for an interpreter that ends
+# in one. Shell scripts stay LF regardless of platform.
+* text=auto eol=lf
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Binary assets — never normalize.
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.gz    binary
+*.zip   binary
