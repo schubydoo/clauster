@@ -125,15 +125,23 @@ only extends that same requirement to deployments running *without* a password, 
 previously skipped the check entirely. (And if you're reachable beyond your own machine,
 setting a password is worth doing regardless.)
 
-## 0.12 → 0.13: SQLite-only; `database_url` removed
+## 0.12 → 1.0: SQLite-only; `database_url` removed
 
-0.13 commits to SQLite as the only persistence substrate (#796) — the
+1.0 commits to SQLite as the only persistence substrate (#796) — the
 never-really-supported `database_url` config key (a Postgres DSN escape hatch)
 is gone. A leftover `database_url` (the YAML key **or** the
 `CLAUSTER_DATABASE_URL[_FILE]` env override) is **ignored with a logged
 warning**, not rejected — your data goes to SQLite regardless. Remove the
 key/env to silence the warning. `clauster.db` under `state_dir` remains the only database;
 nothing about the schema, migrations, or `state_dir` layout changes.
+
+## 0.12 → 1.0: Docker image is now Alpine-based
+
+The published container image moved from Debian-slim to an **Alpine (musl)** base — it's
+smaller and installs explicitly pinned, Renovate-tracked packages instead of an unpinned
+`apt upgrade`. This only affects you if you **build a derived image `FROM` the clauster
+image**: use `apk` (not `apt`) to add packages, and note that **`su-exec` replaces `gosu`**
+as the privilege-drop helper. Running the stock image (`docker run …`) is unchanged.
 
 ## 0.11 → 0.12: the state store moves to SQLite
 

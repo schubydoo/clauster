@@ -12,8 +12,8 @@ coordinate disclosure and credit you, if you'd like.
 
 ## Supported versions
 
-Clauster is pre-1.0 and under active development; only the latest release on
-`main` receives security fixes.
+Clauster is actively developed; only the latest release receives security
+fixes.
 
 ## Scope & threat model
 

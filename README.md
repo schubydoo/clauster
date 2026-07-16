@@ -33,7 +33,7 @@ bridge in a given project directory. Clauster fills that gap: a browser-based di
 `claude remote-control` instances on a remote machine (NAS, homelab box). You pick
 a project, start a bridge, and attach to it from `claude.ai/code` or the mobile app.
 
-> **Status: pre-1.0, in active development.** Loopback-only by default; password and
+> **Status: 1.0 — stable and actively developed.** Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
 > [Auth & networking](#auth--networking)). **No telemetry, ever** — see
 > [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/) for what Clauster keeps locally.
@@ -322,8 +322,9 @@ Full per-command reference:
 Planned work, roughly in priority order — the public-facing companion to the in-repo
 `scratch/TODO.md`.
 
-- **Session naming** — predictable/branded session display names instead of the
-  random adjective-noun defaults; list active/resumable sessions in the UI.
+- **Friendlier default session names** — the launch dialog already accepts a custom
+  session name and the dashboard lists active/resumable sessions per project; the
+  remaining nice-to-have is a more predictable *default* than the random adjective-noun one.
 
 Not planned: clauster is a **single-operator** tool — multi-user accounts, OIDC login,
 and per-user GDPR tooling were considered and declined (one deployment serves one
