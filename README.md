@@ -322,9 +322,10 @@ Full per-command reference:
 Planned work, roughly in priority order — the public-facing companion to the in-repo
 `scratch/TODO.md`.
 
-- **Friendlier default session names** — the launch dialog already accepts a custom
-  session name and the dashboard lists active/resumable sessions per project; the
-  remaining nice-to-have is a more predictable *default* than the random adjective-noun one.
+- **Friendlier default session names** — Server-Mode bridges already accept a custom launch
+  name (#780) and the dashboard lists active/resumable sessions per project; the remaining
+  work is a more predictable *default* than the random adjective-noun one, and extending
+  custom names to Interactive Sessions.
 
 Not planned: clauster is a **single-operator** tool — multi-user accounts, OIDC login,
 and per-user GDPR tooling were considered and declined (one deployment serves one
