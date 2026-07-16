@@ -62,8 +62,27 @@
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+ARG \\w+=(?<currentValue>\\S+)"
       ]
+    },
+    {
+      "customType": "regex",
+      "description": "Track the Chrome-for-Testing build the e2e leg pins (agent-browser fetches latest by default, which let Chrome 151 destabilize the 2-core leg — see #947). A bump is a Renovate PR that re-runs the e2e leg, so a new Chrome is verified green before it lands.",
+      "managerFilePatterns": [
+        "^\\.github/workflows/e2e\\.yml$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+CHROME_VERSION:\\s*\"(?<currentValue>[0-9][^\"]*)\""
+      ],
+      "versioningTemplate": "loose"
     }
   ],
+  "customDatasources": {
+    "chrome-for-testing": {
+      "defaultRegistryUrlTemplate": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json",
+      "transformTemplates": [
+        "{ \"releases\": [ { \"version\": channels.Stable.version } ] }"
+      ]
+    }
+  },
   "packageRules": [
     {
       "description": "atheris is pinned per-interpreter by hand in pyproject.toml — its wheel coverage shifts per release (3.1.0 dropped the cp311 wheel), so an auto-bump re-breaks the Python 3.11 CI leg (see #464 / #466). Renovate must not touch it. Remove this rule once Python 3.11 is dropped from the support matrix.",
