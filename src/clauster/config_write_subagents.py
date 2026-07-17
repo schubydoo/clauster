@@ -114,30 +114,6 @@ _PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
 #: Frontmatter keys required on every subagent (Claude Code's own requirement).
 _REQUIRED_FRONTMATTER_KEYS = frozenset({"name", "description"})
 
-#: Every frontmatter key this surface recognizes (Claude Code's documented subagent
-#: frontmatter schema). An unknown key rejects the whole write, the same fail-closed
-#: shape discipline the hooks/permissions validators use.
-_KNOWN_FRONTMATTER_KEYS = frozenset(
-    {
-        "name",
-        "description",
-        "tools",
-        "disallowedTools",
-        "model",
-        "permissionMode",
-        "mcpServers",
-        "hooks",
-        "maxTurns",
-        "skills",
-        "initialPrompt",
-        "memory",
-        "effort",
-        "background",
-        "isolation",
-        "color",
-    }
-)
-
 #: Frontmatter keys whose value is a non-empty string OR a non-empty list of
 #: non-empty strings (Claude Code accepts either a comma-separated string or an
 #: array for these — this repo's own shipped subagents use the string form).
@@ -299,11 +275,16 @@ def _validate_string_or_string_list(value: Any, label: str) -> None:
 def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) -> None:
     """Structural validator for a subagent's parsed frontmatter mapping.
 
-    Checks shape and the recognized key vocabulary only (Claude Code's documented
-    subagent frontmatter fields) — never resolves a tool name, spawns/parses a
-    ``hooks`` command, or connects to an ``mcpServers`` entry. Unknown keys or a
-    missing required key (``name``/``description``) reject the whole write (→ 422),
-    so a partial/garbled frontmatter block never lands.
+    Type-checks the recognized keys only (Claude Code's documented subagent
+    frontmatter fields) — never resolves a tool name, spawns/parses a ``hooks``
+    command, or connects to an ``mcpServers`` entry. A missing required key
+    (``name``/``description``) rejects the whole write (→ 422). An UNRECOGNIZED key
+    is passed through untouched rather than rejected: Claude Code tolerates
+    forward-compatible frontmatter, so a hardcoded allowlist produced false "unknown
+    key" errors on valid subagents (#958/DF-3). The security-relevant keys it DOES
+    know (``hooks`` / ``mcpServers`` / ``permissionMode``) are still fully validated
+    below when present, and no key is ever executed — this only stops rejecting keys
+    the surface has no opinion about.
 
     When ``expected_name`` is given (the write path always supplies it — the target
     filename, ``<name>.md``), the frontmatter's own ``name`` must match it exactly:
@@ -312,9 +293,6 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
     """
     if not isinstance(candidate, dict):
         raise cw.InvalidCandidateError("frontmatter must be an object")
-    unknown = set(candidate) - _KNOWN_FRONTMATTER_KEYS
-    if unknown:
-        raise cw.InvalidCandidateError(f"frontmatter has unknown keys: {sorted(unknown)}")
     missing = _REQUIRED_FRONTMATTER_KEYS - set(candidate)
     if missing:
         raise cw.InvalidCandidateError(f"frontmatter is missing required keys: {sorted(missing)}")
