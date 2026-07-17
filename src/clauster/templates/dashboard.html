@@ -1755,20 +1755,32 @@
                     <tbody>
                       <template x-for="srv in configMgmt.mcp.list" :key="'ap-' + srv.name">
                         <tr>
-                          <td class="font-monospace" x-text="srv.name"></td>
+                          <td class="font-monospace">
+                            <span x-text="srv.name"></span>
+                            <!-- Settings-owned decision: read-only here, changed on the settings
+                                 surface / `claude mcp` (the ~/.claude.json write path can't move it). -->
+                            <span x-show="configMgmtMcpApprovalLocked(srv.name)" x-cloak
+                                  :data-test="'cm-mcp-locked-' + srv.name"
+                                  class="badge bg-secondary-lt text-secondary ms-2 fw-normal"
+                                  aria-label="approval set in a project settings file, read-only here"
+                                  title="Set in a project settings file — change it there or via `claude mcp`.">settings</span>
+                          </td>
                           <td class="text-end">
                             <div class="btn-group btn-group-sm" role="group" :aria-label="'Approval for ' + srv.name">
                               <button type="button" class="btn" :data-test="'cm-mcp-approve-' + srv.name"
                                       :class="configMgmtMcpApprovalState(srv.name) === 'enabled' ? 'btn-success' : 'btn-ghost-secondary'"
                                       :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'enabled'"
+                                      :disabled="configMgmtMcpApprovalLocked(srv.name)"
                                       @click="configMgmtMcpSetApproval(srv.name, 'enabled')">Approve</button>
                               <button type="button" class="btn" :data-test="'cm-mcp-reject-' + srv.name"
                                       :class="configMgmtMcpApprovalState(srv.name) === 'disabled' ? 'btn-danger' : 'btn-ghost-secondary'"
                                       :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'disabled'"
+                                      :disabled="configMgmtMcpApprovalLocked(srv.name)"
                                       @click="configMgmtMcpSetApproval(srv.name, 'disabled')">Reject</button>
                               <button type="button" class="btn" :data-test="'cm-mcp-unset-' + srv.name"
                                       :class="configMgmtMcpApprovalState(srv.name) === 'unset' ? 'btn-secondary' : 'btn-ghost-secondary'"
                                       :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'unset'"
+                                      :disabled="configMgmtMcpApprovalLocked(srv.name)"
                                       @click="configMgmtMcpSetApproval(srv.name, 'unset')">Unset</button>
                             </div>
                           </td>

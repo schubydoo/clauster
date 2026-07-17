@@ -529,19 +529,31 @@ def test_read_approvals_settings_local_enable_shows_enabled(tmp_path: Path) -> N
     # settings.local.json and clears ~/.claude.json — the panel must still show it enabled.
     cj, project_dir = _approvals_project(tmp_path)
     _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": ["fs"], "disabled": []}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["fs"],
+        "disabled": [],
+        "locked": ["fs"],
+    }
 
 
 def test_read_approvals_project_settings_disable_shows_disabled(tmp_path: Path) -> None:
     cj, project_dir = _approvals_project(tmp_path)
     _write_settings(project_dir / ".claude" / "settings.json", disabledMcpjsonServers=["http"])
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": [], "disabled": ["http"]}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": [],
+        "disabled": ["http"],
+        "locked": ["http"],
+    }
 
 
 def test_read_approvals_user_settings_folded(tmp_path: Path) -> None:
     cj, project_dir = _approvals_project(tmp_path)
     _write_settings(cj.parent / ".claude" / "settings.json", enabledMcpjsonServers=["u"])
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": ["u"], "disabled": []}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["u"],
+        "disabled": [],
+        "locked": ["u"],
+    }
 
 
 def test_read_approvals_settings_local_overrides_claude_json(tmp_path: Path) -> None:
@@ -550,7 +562,11 @@ def test_read_approvals_settings_local_overrides_claude_json(tmp_path: Path) -> 
     cj, project_dir = _approvals_project(tmp_path)
     mcp.write_project_approvals(cj, project_dir, ["z"], [])
     _write_settings(project_dir / ".claude" / "settings.local.json", disabledMcpjsonServers=["z"])
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": [], "disabled": ["z"]}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": [],
+        "disabled": ["z"],
+        "locked": ["z"],
+    }
 
 
 def test_read_approvals_project_settings_overrides_user_settings(tmp_path: Path) -> None:
@@ -561,7 +577,11 @@ def test_read_approvals_project_settings_overrides_user_settings(tmp_path: Path)
     cj, project_dir = _approvals_project(tmp_path)
     _write_settings(cj.parent / ".claude" / "settings.json", disabledMcpjsonServers=["x"])
     _write_settings(project_dir / ".claude" / "settings.json", enabledMcpjsonServers=["x"])
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": ["x"], "disabled": []}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["x"],
+        "disabled": [],
+        "locked": ["x"],
+    }
 
 
 def test_read_approvals_local_settings_overrides_project_settings(tmp_path: Path) -> None:
@@ -570,14 +590,22 @@ def test_read_approvals_local_settings_overrides_project_settings(tmp_path: Path
     cj, project_dir = _approvals_project(tmp_path)
     _write_settings(project_dir / ".claude" / "settings.json", enabledMcpjsonServers=["x"])
     _write_settings(project_dir / ".claude" / "settings.local.json", disabledMcpjsonServers=["x"])
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": [], "disabled": ["x"]}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": [],
+        "disabled": ["x"],
+        "locked": ["x"],
+    }
 
 
 def test_read_approvals_claude_json_only_unchanged(tmp_path: Path) -> None:
     # No settings files -> behaves exactly as the legacy ~/.claude.json-only read.
     cj, project_dir = _approvals_project(tmp_path)
     mcp.write_project_approvals(cj, project_dir, ["a"], ["b"])
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": ["a"], "disabled": ["b"]}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["a"],
+        "disabled": ["b"],
+        "locked": [],
+    }
 
 
 def test_read_approvals_malformed_settings_ignored(tmp_path: Path) -> None:
@@ -586,7 +614,26 @@ def test_read_approvals_malformed_settings_ignored(tmp_path: Path) -> None:
     mcp.write_project_approvals(cj, project_dir, ["a"], [])
     (project_dir / ".claude" / "settings.local.json").parent.mkdir(parents=True, exist_ok=True)
     (project_dir / ".claude" / "settings.local.json").write_text("{bad", encoding="utf-8")
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": ["a"], "disabled": []}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["a"],
+        "disabled": [],
+        "locked": [],
+    }
+
+
+def test_read_approvals_locked_even_when_claude_json_agrees(tmp_path: Path) -> None:
+    # A server enabled in BOTH ~/.claude.json AND settings.local.json is still `locked`:
+    # the settings entry owns the effective decision, so a panel Unset (which only rewrites
+    # ~/.claude.json) would be reverted on reload. The panel renders such a row read-only
+    # rather than offer an action that silently won't take (#958 P2 write-asymmetry guard).
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["fs"], [])
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["fs"],
+        "disabled": [],
+        "locked": ["fs"],
+    }
 
 
 # --- gated routes (full FastAPI lifespan) ------------------------------------------

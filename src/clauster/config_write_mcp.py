@@ -515,6 +515,14 @@ def read_project_approvals(claude_json: Path, project_dir: Path) -> dict[str, li
     ``~/.claude.json``, so an approval that lives *solely* in a settings file can be
     re-approved here but not *unset* from here — clearing it stays a settings-surface /
     ``claude mcp`` action. This closes the read-consistency gap, not the write asymmetry.
+
+    To keep the panel from offering a change that silently won't take, the result also
+    carries a ``"locked"`` list: every server whose effective decision is owned by a
+    settings file (it appears in some ``settings*.json`` top-level list). A settings
+    decision overrides the ``~/.claude.json`` the writer targets, so any panel toggle of
+    a locked server would be reverted on reload; the panel renders those rows read-only
+    and points the operator at the settings surface / ``claude mcp`` instead (#958 P2 /
+    DF-9 write-asymmetry guard).
     """
     enabled = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), ENABLED_KEY)
     disabled = cw.read_nested_subtree(claude_json, PROJECTS_KEY, str(project_dir), DISABLED_KEY)
@@ -528,7 +536,9 @@ def read_project_approvals(claude_json: Path, project_dir: Path) -> dict[str, li
         state[name] = "disabled"
     # Overlay the settings files, lowest → highest precedence (local wins). A later
     # source's decision for a given name overrides an earlier one; the DF-9 relocation
-    # target (settings.local.json) is therefore authoritative.
+    # target (settings.local.json) is therefore authoritative. Every name a settings file
+    # decides is `locked`: the writer can't change it via ~/.claude.json (settings wins).
+    locked: set[str] = set()
     for settings_path in (
         claude_json.parent / ".claude" / "settings.json",
         cw.project_settings_path(project_dir),
@@ -537,11 +547,14 @@ def read_project_approvals(claude_json: Path, project_dir: Path) -> dict[str, li
         s_enabled, s_disabled = _settings_mcp_lists(settings_path)
         for name in s_enabled:
             state[name] = "enabled"
+            locked.add(name)
         for name in s_disabled:
             state[name] = "disabled"
+            locked.add(name)
     return {
         "enabled": [name for name, decision in state.items() if decision == "enabled"],
         "disabled": [name for name, decision in state.items() if decision == "disabled"],
+        "locked": sorted(locked),
     }
 
 
