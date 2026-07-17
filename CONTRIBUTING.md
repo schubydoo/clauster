@@ -82,11 +82,12 @@ the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
   `CHANGELOG.md` or bump the version in `pyproject.toml` / `src/clauster/__init__.py`**
   — knope owns those, regenerating them in the release PR.
 
-  Any PR that touches `src/` without a changeset trips the advisory
+  Any same-repository PR that touches `src/` without a changeset trips the advisory
   `Changeset check`, which nags until you add a `.changeset/*.md` fragment by hand
-  (or apply the `no-changelog` label for an internal-only change). Confirm the bump
-  type (`patch` / `minor` / `major` / `perf` / `security` / `build`) and the summary
-  sentence match what your change actually does before you commit it.
+  (or apply the `no-changelog` label for an internal-only change). Fork contributors
+  must add the fragment manually — this check does not run on fork PRs. Confirm the
+  bump type (`patch` / `minor` / `major` / `perf` / `security` / `build`) and the
+  summary sentence match what your change actually does before you commit it.
 
 CI runs the test suite on **Linux, macOS, and Windows** across Python 3.11–3.14
 (all merge-blocking; each OS enforces a consistent 96% coverage gate — Windows
