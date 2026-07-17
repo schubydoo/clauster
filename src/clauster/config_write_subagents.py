@@ -114,30 +114,6 @@ _PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
 #: Frontmatter keys required on every subagent (Claude Code's own requirement).
 _REQUIRED_FRONTMATTER_KEYS = frozenset({"name", "description"})
 
-#: Every frontmatter key this surface recognizes (Claude Code's documented subagent
-#: frontmatter schema). An unknown key rejects the whole write, the same fail-closed
-#: shape discipline the hooks/permissions validators use.
-_KNOWN_FRONTMATTER_KEYS = frozenset(
-    {
-        "name",
-        "description",
-        "tools",
-        "disallowedTools",
-        "model",
-        "permissionMode",
-        "mcpServers",
-        "hooks",
-        "maxTurns",
-        "skills",
-        "initialPrompt",
-        "memory",
-        "effort",
-        "background",
-        "isolation",
-        "color",
-    }
-)
-
 #: Frontmatter keys whose value is a non-empty string OR a non-empty list of
 #: non-empty strings (Claude Code accepts either a comma-separated string or an
 #: array for these — this repo's own shipped subagents use the string form).
@@ -299,11 +275,16 @@ def _validate_string_or_string_list(value: Any, label: str) -> None:
 def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) -> None:
     """Structural validator for a subagent's parsed frontmatter mapping.
 
-    Checks shape and the recognized key vocabulary only (Claude Code's documented
-    subagent frontmatter fields) — never resolves a tool name, spawns/parses a
-    ``hooks`` command, or connects to an ``mcpServers`` entry. Unknown keys or a
-    missing required key (``name``/``description``) reject the whole write (→ 422),
-    so a partial/garbled frontmatter block never lands.
+    Type-checks the recognized keys only (Claude Code's documented subagent
+    frontmatter fields) — never resolves a tool name, spawns/parses a ``hooks``
+    command, or connects to an ``mcpServers`` entry. A missing required key
+    (``name``/``description``) rejects the whole write (→ 422). An UNRECOGNIZED key
+    is passed through untouched rather than rejected: Claude Code tolerates
+    forward-compatible frontmatter, so a hardcoded allowlist produced false "unknown
+    key" errors on valid subagents (#958/DF-3). The security-relevant keys it DOES
+    know (``hooks`` / ``mcpServers`` / ``permissionMode``) are still fully validated
+    below when present, and no key is ever executed — this only stops rejecting keys
+    the surface has no opinion about.
 
     When ``expected_name`` is given (the write path always supplies it — the target
     filename, ``<name>.md``), the frontmatter's own ``name`` must match it exactly:
@@ -312,9 +293,6 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
     """
     if not isinstance(candidate, dict):
         raise cw.InvalidCandidateError("frontmatter must be an object")
-    unknown = set(candidate) - _KNOWN_FRONTMATTER_KEYS
-    if unknown:
-        raise cw.InvalidCandidateError(f"frontmatter has unknown keys: {sorted(unknown)}")
     missing = _REQUIRED_FRONTMATTER_KEYS - set(candidate)
     if missing:
         raise cw.InvalidCandidateError(f"frontmatter is missing required keys: {sorted(missing)}")
@@ -413,6 +391,27 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
         color = candidate["color"]
         if not isinstance(color, str) or not color.strip():
             raise cw.InvalidCandidateError("frontmatter 'color' must be a non-empty string")
+
+    if "env" in candidate:
+        # Dropping the unknown-key allowlist makes ``env`` reachable for the first time
+        # (it was never in the old recognized-key set). Claude Code loads ``env`` as a
+        # name→value environment map, so a non-mapping payload (``env: 42``) or a
+        # non-scalar value would land on disk here and only fail later when Claude Code
+        # tries to load the subagent — validate the shape at write time instead. STRUCTURE
+        # ONLY: names/values are never resolved or exported here.
+        env = candidate["env"]
+        if not isinstance(env, dict):
+            raise cw.InvalidCandidateError(
+                "frontmatter 'env' must be an object mapping variable names to scalar values"
+            )
+        for var_name, var_value in env.items():
+            if not isinstance(var_name, str) or not var_name.strip():
+                raise cw.InvalidCandidateError("frontmatter 'env' keys must be non-empty strings")
+            if not isinstance(var_value, str | int | float | bool):
+                raise cw.InvalidCandidateError(
+                    f"frontmatter 'env' value for {var_name!r} must be a scalar "
+                    "(string, number, or boolean)"
+                )
 
 
 def validate_agent_content(candidate: Any, *, expected_name: str | None = None) -> None:
