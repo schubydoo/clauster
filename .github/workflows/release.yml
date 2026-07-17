@@ -1,4 +1,4 @@
-name: Release
+name: "Release: distribute (PyPI + GHCR)"
 
 # Fires when knope publishes a release tag (e.g. `v0.2.0`). knope itself creates
 # the GitHub Release + signed assets (the CHANGELOG was written earlier by the
