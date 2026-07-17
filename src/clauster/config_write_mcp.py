@@ -585,8 +585,10 @@ def write_project_approvals(
     cw.validate_candidate(candidate, validate_approvals)
     key = str(project_dir)
     # Read outside the transaction: the settings files are a separate, authoritative
-    # source we merely defer to (not part of the ~/.claude.json we lock + rewrite).
-    owned = _settings_owned_names(claude_json, project_dir)
+    # source we merely defer to (not part of the ~/.claude.json we lock + rewrite). Strict:
+    # a present-but-unreadable settings file fails the write closed rather than let a
+    # settings-owned decision leak into the base layer if it was corrupted since the read.
+    owned = _settings_owned_names(claude_json, project_dir, strict=True)
 
     def _persisted(incoming: list[str], prev: list[str]) -> list[str]:
         # Panel-owned decisions from the caller, then each settings-owned name's original
@@ -636,24 +638,43 @@ def write_project_approvals(
 # ---------------------------------------------------------------------------
 
 
-def _settings_mcp_lists(settings_path: Path) -> tuple[list[str], list[str]]:
+def _settings_mcp_lists(
+    settings_path: Path, *, strict: bool = False
+) -> tuple[list[str], list[str]]:
     """Return ``(enabled, disabled)`` top-level MCP name lists from a settings FILE.
 
     claude honors top-level ``enabledMcpjsonServers`` / ``disabledMcpjsonServers`` in the
     ``.claude/settings.json`` / ``settings.local.json`` / ``~/.claude/settings.json`` files
     (#850), in addition to the ``~/.claude.json`` ``projects[]`` lists that
     :func:`read_project_approvals` reads. Unlike ``~/.claude.json`` these keys sit at the
-    file's TOP LEVEL, not under a per-project subtree. Fail-safe: a missing / unreadable /
-    malformed file contributes nothing (two empty lists) rather than raising — every reader
-    of these (the launch preflight AND the approvals panel) must never block or crash on it.
+    file's TOP LEVEL, not under a per-project subtree. Fail-safe: an ABSENT file contributes
+    nothing (two empty lists); a missing / unreadable / malformed file likewise contributes
+    nothing in the default (read/display) mode — every reader of these (the launch preflight
+    AND the approvals panel) must never block or crash on it.
+
+    With ``strict=True`` (the approvals WRITE path), a file that EXISTS but is unreadable or
+    malformed instead raises :class:`~clauster.config_write.ConfigWriteError`: ownership that
+    can't be verified must fail the write closed, not silently read as "owns nothing" and let
+    a settings-owned decision leak into ``~/.claude.json``. The bytes are read exactly once,
+    so there is no absent-vs-broken re-read race (#958 P2 fail-closed).
     """
     try:
         raw = settings_path.read_bytes()
+    except FileNotFoundError:
+        return [], []  # absent (incl. no parent dir) owns nothing, in both modes
     except OSError:
+        if strict:
+            raise cw.ConfigWriteError(
+                f"cannot verify MCP approval ownership: {settings_path.name} is unreadable"
+            ) from None
         return [], []
     try:
         data = cw.load_settings_json_obj(raw)
     except cw.ConfigWriteError:
+        if strict:
+            raise cw.ConfigWriteError(
+                f"cannot verify MCP approval ownership: {settings_path.name} is malformed"
+            ) from None
         # Malformed / non-object settings file — the config-write panel surfaces its own
         # error; here we simply contribute nothing rather than fail the caller.
         return [], []
@@ -665,7 +686,9 @@ def _settings_mcp_lists(settings_path: Path) -> tuple[list[str], list[str]]:
     return _names(ENABLED_KEY), _names(DISABLED_KEY)
 
 
-def _settings_owned_names(claude_json: Path, project_dir: Path) -> set[str]:
+def _settings_owned_names(
+    claude_json: Path, project_dir: Path, *, strict: bool = False
+) -> set[str]:
     """Return every server name whose approval a settings file decides (the ``locked`` set).
 
     Union of the top-level ``enabledMcpjsonServers`` / ``disabledMcpjsonServers`` names
@@ -675,6 +698,12 @@ def _settings_owned_names(claude_json: Path, project_dir: Path) -> set[str]:
     write path — the panel shows them read-only (via :func:`read_project_approvals`'s
     ``locked`` list) and the writer preserves their base value rather than persisting the
     settings-derived one. Fail-safe: unreadable/malformed files contribute nothing.
+
+    With ``strict=True`` (the write path), a settings file that EXISTS but can't be parsed
+    makes :func:`_settings_mcp_lists` raise instead of silently contributing nothing:
+    ownership that can't be verified must fail the write closed rather than let a
+    settings-owned decision leak into ``~/.claude.json`` if the file was corrupted between
+    the panel's read and this write (#958 P2 fail-closed).
     """
     owned: set[str] = set()
     for settings_path in (
@@ -682,7 +711,7 @@ def _settings_owned_names(claude_json: Path, project_dir: Path) -> set[str]:
         cw.project_settings_path(project_dir),
         cw.project_local_settings_path(project_dir),
     ):
-        s_enabled, s_disabled = _settings_mcp_lists(settings_path)
+        s_enabled, s_disabled = _settings_mcp_lists(settings_path, strict=strict)
         owned.update(s_enabled)
         owned.update(s_disabled)
     return owned

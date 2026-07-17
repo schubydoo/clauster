@@ -694,6 +694,43 @@ def test_write_approvals_drops_contradictory_base_pair_for_settings_owned(tmp_pa
     assert _base_lists(cj, project_dir) == {"enabled": ["other"], "disabled": []}
 
 
+def test_write_approvals_fails_closed_on_unreadable_settings(tmp_path: Path) -> None:
+    # Fail closed: if a settings file is present but unreadable/malformed at WRITE time (e.g.
+    # corrupted between the panel's read and this PUT), ownership can't be verified — the
+    # write must abort rather than treat a settings-owned decision as panel-owned and copy it
+    # into ~/.claude.json. The READ path stays lenient (that case is covered separately).
+    cj, project_dir = _approvals_project(tmp_path)
+    broken = project_dir / ".claude" / "settings.local.json"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("{bad json", encoding="utf-8")
+    with pytest.raises(cw.ConfigWriteError):
+        mcp.write_project_approvals(cj, project_dir, ["other"], [])
+    # Nothing was written — no partial ~/.claude.json project entry.
+    assert not cj.exists() or "projects" not in json.loads(cj.read_text(encoding="utf-8"))
+
+
+def test_write_approvals_fails_closed_on_unreadable_settings_dir(tmp_path: Path) -> None:
+    # A settings PATH that is a directory (read_bytes -> OSError, not a malformed JSON body)
+    # also fails the strict write closed: ownership still can't be verified.
+    cj, project_dir = _approvals_project(tmp_path)
+    (project_dir / ".claude" / "settings.local.json").mkdir(parents=True)
+    with pytest.raises(cw.ConfigWriteError):
+        mcp.write_project_approvals(cj, project_dir, ["other"], [])
+
+
+def test_read_approvals_unreadable_settings_dir_ignored(tmp_path: Path) -> None:
+    # The lenient read path tolerates the same OSError (a directory at the settings path):
+    # it contributes nothing rather than crashing the panel, so the base approval still reads.
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["a"], [])
+    (project_dir / ".claude" / "settings.local.json").mkdir(parents=True)
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["a"],
+        "disabled": [],
+        "locked": [],
+    }
+
+
 def test_write_approvals_dedupes_preserved_base_duplicates(tmp_path: Path) -> None:
     # Defensive: a hand-edited ~/.claude.json with a duplicate owned name must not survive as
     # a duplicate when its base value is preserved across a save (the incoming lists are
