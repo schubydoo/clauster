@@ -562,7 +562,11 @@
     </div>
   </header>
 
-  <div class="page-body">
+  <main class="page-body">
+    <!-- The sole <main> landmark: wraps all primary content between the <header> banner
+         and the <footer> contentinfo, so every content node sits inside a landmark and the
+         page exposes exactly one main region (#958 P4 / axe landmark-one-main + region). -->
+    <h1 class="visually-hidden">Clauster dashboard</h1>
     <div class="container-xl">
 
       <!-- ===== Connection-lost banner ===== -->
@@ -1319,7 +1323,7 @@
       </div>
 
     </div>
-  </div>
+  </main>
 
   <footer class="footer footer-transparent d-print-none">
     <div class="container-xl">
