@@ -177,6 +177,14 @@ def test_validate_frontmatter_passes_unknown_keys_through() -> None:
     )  # no raise
 
 
+def test_validate_frontmatter_accepts_well_formed_env() -> None:
+    # #959 (Greptile P1): ``env`` became reachable when the allowlist was dropped; a
+    # well-formed name→scalar map is accepted (scalars cover YAML str/int/float/bool).
+    sub.validate_frontmatter(
+        {"name": "x", "description": "d", "env": {"API_HOST": "example.com", "PORT": 8080}}
+    )  # no raise
+
+
 @pytest.mark.parametrize(
     "candidate",
     [
@@ -210,6 +218,9 @@ def test_validate_frontmatter_passes_unknown_keys_through() -> None:
         {"name": "x", "description": "d", "background": "yes"},
         {"name": "x", "description": "d", "isolation": ""},
         {"name": "x", "description": "d", "color": ""},
+        {"name": "x", "description": "d", "env": 42},  # not a mapping
+        {"name": "x", "description": "d", "env": {"": "v"}},  # empty var name
+        {"name": "x", "description": "d", "env": {"K": ["a"]}},  # non-scalar value
     ],
 )
 def test_validate_frontmatter_rejects_bad_shape(candidate: object) -> None:

@@ -392,6 +392,27 @@ def validate_frontmatter(candidate: Any, *, expected_name: str | None = None) ->
         if not isinstance(color, str) or not color.strip():
             raise cw.InvalidCandidateError("frontmatter 'color' must be a non-empty string")
 
+    if "env" in candidate:
+        # Dropping the unknown-key allowlist makes ``env`` reachable for the first time
+        # (it was never in the old recognized-key set). Claude Code loads ``env`` as a
+        # name→value environment map, so a non-mapping payload (``env: 42``) or a
+        # non-scalar value would land on disk here and only fail later when Claude Code
+        # tries to load the subagent — validate the shape at write time instead. STRUCTURE
+        # ONLY: names/values are never resolved or exported here.
+        env = candidate["env"]
+        if not isinstance(env, dict):
+            raise cw.InvalidCandidateError(
+                "frontmatter 'env' must be an object mapping variable names to scalar values"
+            )
+        for var_name, var_value in env.items():
+            if not isinstance(var_name, str) or not var_name.strip():
+                raise cw.InvalidCandidateError("frontmatter 'env' keys must be non-empty strings")
+            if not isinstance(var_value, str | int | float | bool):
+                raise cw.InvalidCandidateError(
+                    f"frontmatter 'env' value for {var_name!r} must be a scalar "
+                    "(string, number, or boolean)"
+                )
+
 
 def validate_agent_content(candidate: Any, *, expected_name: str | None = None) -> None:
     """Structural validator for a whole subagent file (the Foundation hook).
