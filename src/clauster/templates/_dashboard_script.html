@@ -1245,13 +1245,16 @@
       configMgmtSetSurface(key) {
         const c = this.configMgmt;
         if (c.surface === key) return;  // clicking the active tab must not wipe edits
-        c.surface = key; c.error = ""; c.saved = false;
+        // Clear the scope confirm-token too: it is a per-write, scope-specific token, so
+        // a token typed on one surface must not linger (and appear pre-satisfied) after a
+        // tab switch — Save is already disabled, but the stale token is confusing (#958 P3).
+        c.surface = key; c.error = ""; c.saved = false; c.confirm = "";
         c.subagents.editing = false; c.subagents.deletingName = "";  // leave any list-editor
         c.mcp.editing = false; c.mcp.deletingName = "";
         c.skills.editing = false; c.skills.deletingName = "";
         // Some surfaces have no local scope; drop out of local before loading one.
         if (c.scope === "local" && this.configMgmtNoLocalSurfaces.includes(key)) {
-          c.scope = "project"; c.confirm = "";
+          c.scope = "project";
         }
         this.configMgmtReload();
       },
@@ -1597,7 +1600,11 @@
         // write rather than send a body that would drop the non-env keys.
         if (raw === null) { c.error = "settings.json is not valid — switch to Raw JSON to fix it."; return; }
         let payload;
-        try { payload = JSON.parse(raw); }
+        // A blank/whitespace-only box means "clear this surface": treat it as the empty
+        // object rather than letting JSON.parse("") throw a spurious "must be valid JSON"
+        // (#958 P3). The object check below still applies to the resulting {}.
+        const trimmed = (raw || "").trim();
+        try { payload = JSON.parse(trimmed === "" ? "{}" : trimmed); }
         catch (e) { c.error = surface + " must be valid JSON."; return; }
         if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
           c.error = surface + " must be a JSON object."; return;
