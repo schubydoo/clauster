@@ -571,10 +571,34 @@ def write_project_approvals(
     never be observed (or crash-interrupted) half-written. Every sibling key at
     every level (this project's ``mcpServers``/trust flags, every other project,
     every other top-level key) is preserved verbatim.
+
+    **Settings-owned names keep their ~/.claude.json value, never the merged one.**
+    :func:`read_project_approvals` returns display state that folds in the settings
+    files, so the panel echoes settings-owned names back in ``enabled``/``disabled``.
+    Persisting those verbatim would copy a settings decision into the ``~/.claude.json``
+    base layer — a phantom approval that would linger (and become effective) if the
+    settings entry is later removed. So a name a settings file owns is excluded from the
+    incoming lists and its EXISTING ``~/.claude.json`` value is preserved instead; only
+    the caller's decisions for names this write path actually owns are applied (#958 P2).
     """
     candidate = {"enabled": enabled, "disabled": disabled}
     cw.validate_candidate(candidate, validate_approvals)
     key = str(project_dir)
+    # Read outside the transaction: the settings files are a separate, authoritative
+    # source we merely defer to (not part of the ~/.claude.json we lock + rewrite).
+    owned = _settings_owned_names(claude_json, project_dir)
+
+    def _persisted(incoming: list[str], prev: list[str]) -> list[str]:
+        # Panel-owned decisions from the caller, then each settings-owned name's original
+        # base-layer value — dedup, order-preserving. For a NON-owned name this is the
+        # caller's (validated, disjoint) decision; an owned name comes only from `prev`.
+        seen: set[str] = set()
+        out: list[str] = []
+        for name in [n for n in incoming if n not in owned] + [n for n in prev if n in owned]:
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out
 
     def _apply(data: dict) -> None:
         outer = data.get(PROJECTS_KEY)
@@ -584,8 +608,24 @@ def write_project_approvals(
         inner = outer.get(key)
         if not isinstance(inner, dict):
             inner = {}
-        inner[ENABLED_KEY] = list(enabled)
-        inner[DISABLED_KEY] = list(disabled)
+        prev_en = inner.get(ENABLED_KEY)
+        prev_dis = inner.get(DISABLED_KEY)
+        prev_en = [n for n in prev_en if isinstance(n, str)] if isinstance(prev_en, list) else []
+        prev_dis = (
+            [n for n in prev_dis if isinstance(n, str)] if isinstance(prev_dis, list) else []
+        )
+        out_en = _persisted(enabled, prev_en)
+        out_dis = _persisted(disabled, prev_dis)
+        # Never persist a self-contradicting pair. The caller's lists are validated disjoint,
+        # but a preserved owned name could sit in BOTH base lists if ~/.claude.json was
+        # hand-corrupted — drop such names from both (a settings file owns them anyway, so the
+        # inert base entry is meaningless) so the writer's own output stays a clean set.
+        overlap = set(out_en) & set(out_dis)
+        if overlap:
+            out_en = [n for n in out_en if n not in overlap]
+            out_dis = [n for n in out_dis if n not in overlap]
+        inner[ENABLED_KEY] = out_en
+        inner[DISABLED_KEY] = out_dis
         outer[key] = inner
 
     cw.update_claude_json(claude_json, _apply)
@@ -623,6 +663,29 @@ def _settings_mcp_lists(settings_path: Path) -> tuple[list[str], list[str]]:
         return [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
 
     return _names(ENABLED_KEY), _names(DISABLED_KEY)
+
+
+def _settings_owned_names(claude_json: Path, project_dir: Path) -> set[str]:
+    """Return every server name whose approval a settings file decides (the ``locked`` set).
+
+    Union of the top-level ``enabledMcpjsonServers`` / ``disabledMcpjsonServers`` names
+    across the user / project / project-local settings files. A settings decision
+    overrides the ``~/.claude.json`` ``projects[]`` list that
+    :func:`write_project_approvals` targets, so these names can't be changed through that
+    write path — the panel shows them read-only (via :func:`read_project_approvals`'s
+    ``locked`` list) and the writer preserves their base value rather than persisting the
+    settings-derived one. Fail-safe: unreadable/malformed files contribute nothing.
+    """
+    owned: set[str] = set()
+    for settings_path in (
+        claude_json.parent / ".claude" / "settings.json",
+        cw.project_settings_path(project_dir),
+        cw.project_local_settings_path(project_dir),
+    ):
+        s_enabled, s_disabled = _settings_mcp_lists(settings_path)
+        owned.update(s_enabled)
+        owned.update(s_disabled)
+    return owned
 
 
 def unapproved_mcp_servers(claude_json: Path, project_dir: Path) -> list[str]:

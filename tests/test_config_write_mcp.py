@@ -636,6 +636,78 @@ def test_read_approvals_locked_even_when_claude_json_agrees(tmp_path: Path) -> N
     }
 
 
+def _base_lists(cj: Path, project_dir: Path) -> dict[str, list[str]]:
+    """Return the raw ~/.claude.json projects[] approval lists (no settings overlay)."""
+    proj = json.loads(cj.read_text(encoding="utf-8"))["projects"][str(project_dir)]
+    return {
+        "enabled": proj.get("enabledMcpjsonServers", []),
+        "disabled": proj.get("disabledMcpjsonServers", []),
+    }
+
+
+def test_write_approvals_does_not_copy_settings_owned_into_claude_json(tmp_path: Path) -> None:
+    # Greptile P1: the panel echoes the merged (settings-folded) lists back on any save.
+    # Persisting `fs` (owned only by settings.local.json) into ~/.claude.json would create a
+    # phantom base approval that lingers if the settings entry is later removed. The writer
+    # must drop settings-owned names and persist ONLY the decisions this path owns.
+    cj, project_dir = _approvals_project(tmp_path)
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    mcp.write_project_approvals(cj, project_dir, ["fs", "other"], [])
+    assert _base_lists(cj, project_dir) == {"enabled": ["other"], "disabled": []}
+    # The display read still reflects fs (from settings) + the new `other`.
+    got = mcp.read_project_approvals(cj, project_dir)
+    assert set(got["enabled"]) == {"fs", "other"} and got["locked"] == ["fs"]
+
+
+def test_write_approvals_preserves_original_base_value_for_settings_owned(tmp_path: Path) -> None:
+    # A name that is a GENUINE ~/.claude.json approval AND is later also settings-owned keeps
+    # its original base value on a subsequent save — the writer neither drops the real base
+    # decision nor overwrites it with the settings-derived one.
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["fs"], [])  # genuine base approval first
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    mcp.write_project_approvals(cj, project_dir, ["fs", "other"], [])  # merged echo + a new one
+    assert _base_lists(cj, project_dir) == {"enabled": ["other", "fs"], "disabled": []}
+
+
+def test_write_approvals_drops_contradictory_base_pair_for_settings_owned(tmp_path: Path) -> None:
+    # Defensive: a hand-corrupted base listing a settings-owned name in BOTH enabled and
+    # disabled must not be persisted as a self-contradicting pair. The name is dropped from
+    # both (a settings file owns it, so the inert base entry is meaningless) — the writer's
+    # own output stays a clean set even from a corrupt base.
+    cj, project_dir = _approvals_project(tmp_path)
+    cj.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(project_dir): {
+                        "enabledMcpjsonServers": ["fs"],
+                        "disabledMcpjsonServers": ["fs"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    mcp.write_project_approvals(cj, project_dir, ["fs", "other"], [])
+    assert _base_lists(cj, project_dir) == {"enabled": ["other"], "disabled": []}
+
+
+def test_write_approvals_dedupes_preserved_base_duplicates(tmp_path: Path) -> None:
+    # Defensive: a hand-edited ~/.claude.json with a duplicate owned name must not survive as
+    # a duplicate when its base value is preserved across a save (the incoming lists are
+    # already validated dup-free, so only a tampered base can reach the dedup path).
+    cj, project_dir = _approvals_project(tmp_path)
+    cj.write_text(
+        json.dumps({"projects": {str(project_dir): {"enabledMcpjsonServers": ["fs", "fs"]}}}),
+        encoding="utf-8",
+    )
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    mcp.write_project_approvals(cj, project_dir, ["fs", "other"], [])
+    assert _base_lists(cj, project_dir) == {"enabled": ["other", "fs"], "disabled": []}
+
+
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"
