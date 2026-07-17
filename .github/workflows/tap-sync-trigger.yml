@@ -1,4 +1,4 @@
-name: tap-sync-trigger
+name: Homebrew tap sync trigger
 
 # When a packaging-bump PR merges (the Homebrew formula source on `main` has just
 # changed), trigger the tap's formula sync IMMEDIATELY instead of waiting for its daily
