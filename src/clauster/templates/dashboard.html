@@ -1749,7 +1749,14 @@
                     Whether Claude Code may use each committed <code>.mcp.json</code> server in this project.
                   </div>
                   <div class="text-secondary small" x-show="configMgmt.mcp.approvals.loading" x-cloak>Loading…</div>
-                  <div x-show="!configMgmt.mcp.approvals.loading" x-cloak>
+                  <!-- Fail closed: if the approval decisions + ownership didn't load, show an
+                       unavailable notice, never editable toggles whose empty state would hide the
+                       settings-owned badge and let a save clobber real ~/.claude.json choices. -->
+                  <div class="text-secondary small" data-test="cm-mcp-approvals-unavailable"
+                       x-show="!configMgmt.mcp.approvals.loading && !configMgmt.mcp.approvals.ready" x-cloak>
+                    Couldn’t load approval state. Reload to try again.
+                  </div>
+                  <div x-show="!configMgmt.mcp.approvals.loading && configMgmt.mcp.approvals.ready" x-cloak>
                   <table class="table table-sm mb-2">
                     <caption class="visually-hidden">Per-server approval state</caption>
                     <tbody>
