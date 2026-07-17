@@ -36,8 +36,17 @@ from clauster.state import StateStore
 # A function-scoped fixture (tmp_path / monkeypatch) applies once across every
 # generated example, which is intentional here — suppress the health check that
 # warns about it, mirroring tests/test_property_validation.py.
+#
+# deadline=None: every test in this group writes to and reads back a real file under
+# tmp_path, so per-example wall-clock is dominated by filesystem latency — unbounded
+# and nondeterministic on a loaded xdist runner or the emulated musl/alpine leg.
+# Hypothesis's default 200ms per-example deadline turns that jitter into a
+# DeadlineExceeded FlakyFailure (a slow first example that replays fast); these are
+# correctness properties, not timing benchmarks, so the deadline earns nothing here.
 _FIXTURE_PROP = settings(
-    max_examples=200, suppress_health_check=[HealthCheck.function_scoped_fixture]
+    max_examples=200,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 
 
