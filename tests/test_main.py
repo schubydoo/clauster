@@ -366,6 +366,49 @@ def test_api_token_revoke_unknown_label_exits_2(write_config, tmp_path, capsys):
     assert "no token labeled 'ghost'" in capsys.readouterr().err
 
 
+def test_api_token_issue_accepts_positional_label(write_config, tmp_path, capsys):
+    # #958 P7: the label works as a positional too, matching rotate/revoke.
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "ci", "-c", cfg]) == 0
+    assert "issued 'ci'" in capsys.readouterr().err
+
+
+def test_api_token_revoke_accepts_label_flag(write_config, tmp_path, capsys):
+    # #958 P7 / DF-14: `revoke --label X` used to error; now it works, matching issue.
+    cfg = _cfg(write_config, tmp_path)
+    cli.main(["api-token", "issue", "ci", "-c", cfg])
+    capsys.readouterr()
+    assert cli.main(["api-token", "revoke", "--label", "ci", "-c", cfg]) == 0
+    assert "revoked 'ci'" in capsys.readouterr().err
+
+
+def test_api_token_rotate_accepts_label_flag(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    cli.main(["api-token", "issue", "ci", "-c", cfg])
+    capsys.readouterr()
+    assert cli.main(["api-token", "rotate", "--label", "ci", "-c", cfg]) == 0
+    assert "rotated 'ci'" in capsys.readouterr().err
+
+
+def test_api_token_issue_missing_label_exits_2(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "-c", cfg]) == 2
+    assert "a label is required" in capsys.readouterr().err
+
+
+def test_api_token_conflicting_label_forms_exits_2(write_config, tmp_path, capsys):
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "foo", "--label", "bar", "-c", cfg]) == 2
+    assert "not both" in capsys.readouterr().err
+
+
+def test_api_token_matching_label_forms_ok(write_config, tmp_path, capsys):
+    # Giving both forms with the SAME value is harmless (not a conflict).
+    cfg = _cfg(write_config, tmp_path)
+    assert cli.main(["api-token", "issue", "ci", "--label", "ci", "-c", cfg]) == 0
+    assert "issued 'ci'" in capsys.readouterr().err
+
+
 def test_api_token_no_verb_prints_help_exits_2(capsys):
     assert cli.main(["api-token"]) == 2
 
