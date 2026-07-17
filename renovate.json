@@ -73,6 +73,17 @@
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+CHROME_VERSION:\\s*\"(?<currentValue>[0-9][^\"]*)\""
       ],
       "versioningTemplate": "loose"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the pinned Shawl (Windows service wrapper) release in deps.py via github-releases (#934). Renovate bumps the `_*_VERSION` constant; the download URL derives from it in code, so version and URL can't drift. The `sha256` is NOT auto-updated (the hosted App reads github-releases' git-tag digest, not the release ASSET's file checksum), so refresh it from GitHub's published asset digest — `scripts/check_binary_dep_pins.py` verifies each pin against that digest and prints the correct value, and `deps install` fail-closes on a mismatch.",
+      "managerFilePatterns": [
+        "^src/clauster/deps\\.py$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+_\\w+ = \"(?<currentValue>[^\"]+)\""
+      ],
+      "versioningTemplate": "semver"
     }
   ],
   "customDatasources": {

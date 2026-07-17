@@ -476,15 +476,28 @@ class BinaryDep:
     dest: str
 
 
+# The Shawl release the Windows service wrapper is pinned to. Renovate watches
+# mtkennerly/shawl (github-releases) via the customManager keyed on this `# renovate:`
+# line (renovate.json, #934) and bumps ONLY this constant — the download URL derives
+# from it, so version + URL can never drift out of sync. The `sha256` below is NOT
+# auto-updated (the hosted Renovate App reads github-releases' git-tag digest, not the
+# release ASSET's file checksum), so a version-bump PR carries a stale hash until it is
+# refreshed from GitHub's own published asset digest (`scripts/check_binary_dep_pins.py`
+# verifies each pin against that digest and prints the correct value; and `deps install`
+# fail-closes on a mismatch, so a stale hash can never silently ship — it just refuses).
+# renovate: datasource=github-releases depName=mtkennerly/shawl
+_SHAWL_VERSION = "v1.9.0"
+
 BINARY_DEPS: tuple[BinaryDep, ...] = (
-    # Bump version + url + sha256 together; Renovate can't track a source-pinned checksum, so
-    # this is a periodic manual refresh — tracked post-1.0 by #934.
     BinaryDep(
         key="shawl",
         label="Windows service wrapper (Shawl)",
         platform_marker="win32",
-        version="v1.9.0",
-        url="https://github.com/mtkennerly/shawl/releases/download/v1.9.0/shawl-v1.9.0-win64.zip",
+        version=_SHAWL_VERSION,
+        url=(
+            f"https://github.com/mtkennerly/shawl/releases/download/"
+            f"{_SHAWL_VERSION}/shawl-{_SHAWL_VERSION}-win64.zip"
+        ),
         sha256="f883c5d09c9beae2efaeabd8513e7d3f57cd1d0864cec3df4f4a7b6ee904351c",
         member="shawl.exe",
         dest="shawl.exe",
