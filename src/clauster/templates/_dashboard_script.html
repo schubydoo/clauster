@@ -1245,13 +1245,21 @@
       configMgmtSetSurface(key) {
         const c = this.configMgmt;
         if (c.surface === key) return;  // clicking the active tab must not wipe edits
-        // Clear the scope confirm-token too: it is a per-write, scope-specific token, so
-        // a token typed on one surface must not linger (and appear pre-satisfied) after a
-        // tab switch — Save is already disabled, but the stale token is confusing (#958 P3).
+        // Clear EVERY per-write confirm-token on a surface switch: each is a
+        // scope-specific type-the-name token, so one typed on one surface must not linger
+        // (and appear pre-satisfied) after a tab switch — the shared footer token
+        // (#958 P3) plus each list-editor's own token, the MCP-approvals save/reset
+        // tokens, and the plugins action/install tokens. Those nested tokens are
+        // otherwise only reset by their loaders, which run AFTER an `await fetch`;
+        // clearing them here closes that window so an armed action (esp. the approvals
+        // *reset* and the plugins actions, whose gates check neither loading flag) can
+        // never carry across a switch.
         c.surface = key; c.error = ""; c.saved = false; c.confirm = "";
-        c.subagents.editing = false; c.subagents.deletingName = "";  // leave any list-editor
-        c.mcp.editing = false; c.mcp.deletingName = "";
-        c.skills.editing = false; c.skills.deletingName = "";
+        c.subagents.editing = false; c.subagents.deletingName = ""; c.subagents.confirm = "";
+        c.mcp.editing = false; c.mcp.deletingName = ""; c.mcp.confirm = "";
+        c.mcp.approvals.confirm = ""; c.mcp.approvals.resetConfirm = "";
+        c.skills.editing = false; c.skills.deletingName = ""; c.skills.confirm = "";
+        c.plugins.confirm = ""; c.plugins.installConfirm = "";
         // Some surfaces have no local scope; drop out of local before loading one.
         if (c.scope === "local" && this.configMgmtNoLocalSurfaces.includes(key)) {
           c.scope = "project";

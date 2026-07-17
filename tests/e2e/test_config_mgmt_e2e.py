@@ -553,3 +553,46 @@ def test_config_mgmt_mcp_approvals_round_trip(
     alpha_key = str(projects_root / "alpha")
     stored = json.loads(claude_json.read_text(encoding="utf-8"))
     assert "gizmo" in stored["projects"][alpha_key]["enabledMcpjsonServers"]
+
+
+def test_config_mgmt_mcp_approvals_confirm_clears_on_surface_switch(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The MCP-approvals confirm surface stays blank after a surface round-trip (#960).
+
+    Smoke coverage for the nested-token path Greptile flagged: the approvals confirm
+    is not pre-satisfied after navigating away and back. NOTE this asserts the
+    *steady* end state only — the reload's `_loadMcpApprovals` also zeros the token
+    synchronously on return, so it cannot discriminate the in-window race the handler
+    fix closes (there is no JS unit harness to test the handler in isolation). It
+    guards the observable invariant and documents the nested path, not the race.
+    """
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+    # Commit a server so the per-server approvals panel renders.
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')
+    browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    # Arm the approvals save: approve makes the panel dirty, then type the token.
+    browser.expect_visible('[data-test="cm-mcp-approvals"]')
+    browser.click('[data-test="cm-mcp-approve-gizmo"]')
+    browser.expect_visible('[data-test="cm-mcp-approvals-confirm"]')
+    browser.fill('[data-test="cm-mcp-approvals-confirm"]', "alpha")
+    browser.expect_value('[data-test="cm-mcp-approvals-confirm"]', "alpha")
+
+    # Navigate away and back WITHOUT saving; the nested token must not linger.
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-approvals"]')
+    # Re-approve to reveal the confirm input again: it must be blank, not pre-satisfied.
+    browser.click('[data-test="cm-mcp-approve-gizmo"]')
+    browser.expect_visible('[data-test="cm-mcp-approvals-confirm"]')
+    browser.expect_value('[data-test="cm-mcp-approvals-confirm"]', "")
