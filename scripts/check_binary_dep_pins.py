@@ -54,14 +54,11 @@ def _fetch_release(owner: str, repo: str, tag: str) -> dict:
         return json.load(resp)
 
 
-def _published_digest(release: dict, asset_name: str) -> str | None:
-    """Return the ``sha256:`` digest GitHub publishes for ``asset_name``, or None if absent."""
+def _find_asset(release: dict, asset_name: str) -> dict | None:
+    """Return the release asset object named ``asset_name``, or None if the release has none."""
     for asset in release.get("assets", []):
         if isinstance(asset, dict) and asset.get("name") == asset_name:
-            digest = asset.get("digest")
-            if isinstance(digest, str) and digest.startswith("sha256:"):
-                return digest.removeprefix("sha256:")
-            return None
+            return asset
     return None
 
 
@@ -84,13 +81,23 @@ def main() -> int:
             print(f"FAIL {dep.key}: could not fetch {owner}/{repo}@{tag} to verify: {exc}")
             failures += 1
             continue
-        published = _published_digest(release, asset)
-        if published is None:
-            print(
-                f"WARN {dep.key}: GitHub publishes no sha256 digest for {asset} "
-                f"(nothing to verify against) — pinned {dep.sha256}"
+        asset_obj = _find_asset(release, asset)
+        if asset_obj is None:
+            # The derived URL points at an asset this release does NOT contain (e.g. Shawl
+            # renamed the archive on a bump) — a genuinely broken pin, not "unverifiable".
+            names = ", ".join(
+                a.get("name", "?") for a in release.get("assets", []) if isinstance(a, dict)
             )
+            print(f"FAIL {dep.key}: release {tag} has no asset named {asset} (has: {names})")
+            failures += 1
             continue
+        digest = asset_obj.get("digest")
+        if not (isinstance(digest, str) and digest.startswith("sha256:")):
+            # The asset EXISTS but GitHub publishes no sha256 for it (e.g. an old release
+            # from before GitHub added asset digests) — nothing to retry into existence.
+            print(f"WARN {dep.key}: GitHub publishes no sha256 for {asset} — pinned {dep.sha256}")
+            continue
+        published = digest.removeprefix("sha256:")
         if published == dep.sha256:
             print(f"OK   {dep.key}: {tag} {asset} sha256 matches GitHub's published digest")
         else:

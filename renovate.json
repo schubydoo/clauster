@@ -117,6 +117,13 @@
       "labels": ["vendored-assets"]
     },
     {
+      "description": "Never auto-merge a Shawl (Windows service wrapper) bump (#934). Renovate updates the version + derived URL but CANNOT recompute the source-pinned sha256, so a human must refresh it from GitHub's published asset digest (the binary-dep-pins check prints the correct value) before merging. That check is intentionally NOT a required status check (required + path-filtered would strand unrelated PRs), so forcing a manual merge here is what guarantees the failed verification is actually seen and acted on.",
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["mtkennerly/shawl"],
+      "automerge": false,
+      "labels": ["binary-dep"]
+    },
+    {
       "description": "Auto-merge patch + minor updates of dev/test tooling once CI passes (a failing check blocks the merge).",
       "matchPackageNames": ["ruff", "pyright", "pytest", "pytest-cov", "pytest-asyncio"],
       "matchUpdateTypes": ["patch", "minor"],
