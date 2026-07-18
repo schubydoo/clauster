@@ -327,6 +327,26 @@ def config_mgmt_server(
 
 
 @pytest.fixture
+def advanced_config_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """A loopback clauster with password auth + config-write on, for the Advanced E2E (#978).
+
+    Auth is required so the step-up re-auth is exercisable, config-write is on so the
+    Tier-B surface is reachable, and ``clone.timeout_seconds`` is seeded so a Tier-B save
+    has a known before-value. Function-scoped so the on-disk config write never leaks.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-advanced")
+    password_hash = hash_password(make_hasher(), E2E_PASSWORD)
+    extra = (
+        f'auth:\n  enabled: true\n  password_required: true\n  password_hash: "{password_hash}"\n'
+        "config_write:\n  enabled: true\n"
+        "clone:\n  timeout_seconds: 300\n"
+    )
+    yield from _start_server(tmp, mutable_projects_tree, extra)
+
+
+@pytest.fixture
 def config_mgmt_plugins_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:

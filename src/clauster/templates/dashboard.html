@@ -1469,6 +1469,94 @@
                  x-show="!configEditor.loading && !configHasVisibleFields()" x-cloak>
               No settings match “<span x-text="configQuery"></span>”.
             </div>
+
+            {# Advanced (Tier-B) settings (#978): clone.*/webhooks.* scalars behind the
+               config_write capability + a step-up re-auth. Shown only when config-write is
+               enabled; locked until the operator re-confirms the password. Bind address,
+               auth switches, and TLS deliberately stay file/CLI-managed (never here). #}
+            <section class="cfg-section" data-test="adv-panel" x-show="configAdvanced.supported" x-cloak>
+              <hr class="my-3">
+              <h4 class="cfg-section-head">Advanced settings</h4>
+              <p class="text-secondary small mb-2">
+                Sensitive operational settings (repository cloning, outbound webhooks). Editing
+                these re-confirms your password. Network bind, authentication, and TLS stay
+                file/CLI-managed.
+              </p>
+
+              <div x-show="!configAdvanced.unlocked && !configAdvanced.loading" x-cloak>
+                <div class="alert alert-danger py-2" role="alert" data-test="adv-reauth-error"
+                     x-show="configAdvanced.reauthError" x-cloak x-text="configAdvanced.reauthError"></div>
+                <form class="row g-2 align-items-end" @submit.prevent="advancedUnlock()">
+                  <div class="col-auto">
+                    <label class="form-label mb-0 small" for="adv-password">Confirm your password</label>
+                    <input class="form-control form-control-sm" type="password" id="adv-password"
+                           data-test="adv-password" autocomplete="current-password"
+                           x-model="configAdvanced.reauthPassword">
+                  </div>
+                  <div class="col-auto">
+                    <button type="submit" class="btn btn-sm btn-primary" data-test="adv-unlock"
+                            :disabled="configAdvanced.reauthing || !configAdvanced.reauthPassword">
+                      <span x-text="configAdvanced.reauthing ? 'Unlocking…' : 'Unlock'">Unlock</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <div class="text-secondary" x-show="configAdvanced.loading" x-cloak>Loading…</div>
+
+              <div x-show="configAdvanced.unlocked" x-cloak>
+                <div class="alert alert-danger py-2" role="alert" data-test="adv-error"
+                     x-show="configAdvanced.error" x-cloak x-text="configAdvanced.error"></div>
+                <div class="alert alert-success py-2" role="alert" data-test="adv-saved" x-show="configAdvanced.saved" x-cloak>
+                  Saved — restart Clauster to apply (use the Restart button below).
+                </div>
+                <template x-for="group in advancedGroups()" :key="group.section">
+                  <div class="mb-2">
+                    <div class="cfg-key mb-1 fw-medium" x-text="group.label"></div>
+                    <template x-for="path in group.paths" :key="path">
+                      <div class="cfg-row row align-items-start g-2">
+                        <div class="col-5">
+                          <label class="form-label mb-0 small fw-medium" :for="'adv-' + path"
+                                 x-text="configAdvanced.specs[path].label"></label>
+                          <div class="cfg-key" x-text="configAdvanced.specs[path].key"></div>
+                        </div>
+                        <div class="col-7">
+                          <template x-if="configAdvanced.specs[path].type === 'bool'">
+                            <label class="form-check form-switch mb-0 d-inline-flex align-items-center">
+                              <input class="form-check-input" type="checkbox" :id="'adv-' + path"
+                                     x-model="configAdvanced.edits[path]">
+                              <span class="ms-2 small text-secondary" x-text="configAdvanced.edits[path] ? 'On' : 'Off'"></span>
+                            </label>
+                          </template>
+                          <template x-if="['int', 'float'].includes(configAdvanced.specs[path].type)">
+                            <div class="input-group input-group-sm">
+                              <input class="form-control form-control-sm" type="number" :id="'adv-' + path"
+                                     :min="configAdvanced.specs[path].min" :max="configAdvanced.specs[path].max"
+                                     :step="configAdvanced.specs[path].step"
+                                     :placeholder="configAdvanced.specs[path].default != null ? 'default ' + configAdvanced.specs[path].default : ''"
+                                     x-model.number="configAdvanced.edits[path]">
+                              <span class="input-group-text" x-show="configAdvanced.specs[path].unit"
+                                    x-text="configAdvanced.specs[path].unit"></span>
+                            </div>
+                          </template>
+                          <template x-if="configAdvanced.specs[path].type === 'str'">
+                            <input class="form-control form-control-sm" type="text" :id="'adv-' + path"
+                                   x-model="configAdvanced.edits[path]">
+                          </template>
+                          <div class="cfg-help text-secondary" x-show="configAdvanced.specs[path].description" x-cloak
+                               x-text="configAdvanced.specs[path].description"></div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <button type="button" class="btn btn-sm btn-primary mt-2" data-test="adv-save"
+                        :disabled="configAdvanced.saving || !advancedDirty()"
+                        @click="advancedSave()">
+                  <span x-text="configAdvanced.saving ? 'Saving…' : 'Save advanced settings'">Save advanced settings</span>
+                </button>
+              </div>
+            </section>
           </div>
           <div class="modal-footer justify-content-between">
             {# In-app restart (#483): re-exec in place (os.execv) to apply saved changes

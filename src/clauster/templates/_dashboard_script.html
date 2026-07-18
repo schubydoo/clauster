@@ -169,6 +169,19 @@
         error: "", saved: false, trigger: null, gen: 0,
       },
       configQuery: "",
+      // --- Advanced (Tier-B) config: clone.*/webhooks.* scalars behind the config_write ---
+      // --- capability + a step-up re-auth (#978). Distinct from configEditor's Tier-A ---
+      // --- allowlist; a separate PUT /api/config/advanced with its own unlock + hash. ---
+      // `supported` gates the whole affordance (config-write off => the surface 404s, so
+      // don't even show the unlock). `unlocked` flips true once POST /api/reauth succeeds;
+      // a later 403 reauth_required (window lapsed) re-locks and re-prompts.
+      configAdvanced: {
+        supported: {{ config_write_enabled | tojson }},
+        unlocked: false, loading: false, saving: false, gen: 0,
+        reauthPassword: "", reauthing: false, reauthError: "",
+        error: "", saved: false,
+        fields: {}, specs: {}, edits: {}, editable: [], hash: null,
+      },
       // --- Claude Code config management (#773) — the first UI over the gated ---
       // --- /api/config-write/* surfaces. Distinct from configEditor above, which ---
       // --- edits clauster.yml; this manages the host's Claude Code config. ---
@@ -1079,6 +1092,15 @@
           c.edits = { ...c.fields };  // seed the form from current values
         } catch (e) { c.error = "Failed to load configuration."; }
         finally { c.loading = false; }
+        // Advanced (Tier-B) init (#978): re-lock the UI, then try a step-up-gated load.
+        // A live elevation cookie (within the 10-min window) reloads straight into the
+        // unlocked view; otherwise the panel shows the unlock prompt. Fire-and-forget so
+        // it never blocks the Tier-A editor from opening.
+        const a = this.configAdvanced;
+        a.gen = (a.gen || 0) + 1;  // bump so a stale in-flight advanced load/save is dropped on reopen
+        a.unlocked = false; a.error = ""; a.saved = false; a.reauthError = ""; a.reauthPassword = "";
+        a.fields = {}; a.specs = {}; a.edits = {}; a.editable = []; a.hash = null;
+        if (a.supported) this.advancedLoad();
       },
       async saveConfig() {
         const c = this.configEditor;
@@ -1192,6 +1214,107 @@
             "doesn't reconnect.",
           "warning",
         );
+      },
+      // --- Advanced (Tier-B) config panel (#978) -----------------------------
+      // GET the Tier-B values behind the config_write capability + step-up gate. A 403 keeps
+      // the panel locked (needs a fresh password proof); a 404 means config-write was turned
+      // off. Shared by the modal-open init and the post-unlock reload.
+      async advancedLoad() {
+        const a = this.configAdvanced;
+        const myGen = a.gen;  // a modal close+reopen bumps gen and voids this in-flight load
+        a.loading = true; a.error = "";
+        try {
+          const res = await fetch(ROOT + "/api/config/advanced");
+          if (a.gen !== myGen) return false;  // stale: a newer open owns the state now
+          if (this._authExpired(res)) return false;
+          if (res.status === 403) { a.unlocked = false; return false; }  // step-up required
+          if (res.status === 404) { a.supported = false; return false; }  // config-write off
+          if (!res.ok) { a.error = "Failed to load advanced settings."; return false; }
+          const d = await res.json();
+          a.fields = d.fields || {}; a.specs = d.specs || {};
+          a.editable = d.editable || []; a.hash = d.hash;
+          a.edits = { ...a.fields };  // seed the form from current values
+          a.unlocked = true;
+          return true;
+        } catch (e) { a.error = "Failed to load advanced settings."; return false; }
+        finally { if (a.gen === myGen) a.loading = false; }
+      },
+      // Step up: re-prove the operator password for a short unlock window, then load.
+      async advancedUnlock() {
+        const a = this.configAdvanced;
+        if (a.reauthing) return;  // single-flight (the button is also :disabled while in flight)
+        a.reauthing = true; a.reauthError = "";
+        try {
+          const res = await fetch(ROOT + "/api/reauth", {
+            method: "POST", headers: JSON_HEADERS,
+            body: JSON.stringify({ password: a.reauthPassword }),
+          });
+          if (res.ok) { a.reauthPassword = ""; await this.advancedLoad(); return; }
+          if (res.status === 429) { a.reauthError = "Too many attempts — wait a moment and retry."; return; }
+          if (res.status === 401) {
+            // reauth's own 401 means a bad password; the guard's 401 (a dead SESSION, detail
+            // "authentication required") should bounce to /login rather than read as a typo.
+            const d = await res.json().catch(() => ({}));
+            if (d.detail === "authentication required") { window.location.assign(ROOT + "/login"); return; }
+            a.reauthError = "Incorrect password."; return;
+          }
+          a.reauthError = "Could not verify — try again.";
+        } catch (e) { a.reauthError = "Could not verify — try again."; }
+        finally { a.reauthing = false; }
+      },
+      // Group the Tier-B editable paths by section (order-preserving) for the render.
+      advancedGroups() {
+        const a = this.configAdvanced;
+        const groups = [], byKey = {};
+        for (const p of a.editable) {
+          const spec = a.specs[p] || {};
+          const sec = spec.section || "";
+          if (!byKey[sec]) { byKey[sec] = { section: sec, label: spec.section_label || sec, paths: [] }; groups.push(byKey[sec]); }
+          byKey[sec].paths.push(p);
+        }
+        return groups;
+      },
+      advancedDirty() {
+        const a = this.configAdvanced;
+        return a.editable.some((p) => a.edits[p] !== a.fields[p]);
+      },
+      // Persist changed Tier-B fields via PUT /api/config/advanced. A 403 mid-edit means the
+      // unlock window lapsed — re-lock and re-prompt rather than silently failing.
+      async advancedSave() {
+        const a = this.configAdvanced;
+        if (a.saving) return;
+        const myGen = a.gen;  // capture: a modal close+reopen voids this save's response
+        const edits = {};
+        for (const p of a.editable) {
+          const v = a.edits[p];
+          const t = (a.specs[p] || {}).type;
+          if ((t === "int" || t === "float") && (v === "" || v === null)) continue;  // blanked -> no change
+          if (v !== a.fields[p]) edits[p] = v;
+        }
+        if (Object.keys(edits).length === 0) { a.error = "No changes to save."; a.saved = false; return; }
+        a.saving = true; a.error = ""; a.saved = false;
+        try {
+          const res = await fetch(ROOT + "/api/config/advanced", {
+            method: "PUT", headers: JSON_HEADERS,
+            body: JSON.stringify({ edits, hash: a.hash }),
+          });
+          if (a.gen !== myGen) return;  // closed+reopened mid-save — drop this stale response
+          if (this._authExpired(res)) return;
+          if (res.ok) {
+            const d = await res.json();
+            a.hash = d.hash; a.saved = true;
+            a.fields = { ...a.fields, ...edits };  // advance the baseline by the fields actually sent
+            a.edits = { ...a.fields };
+          } else if (res.status === 403) {
+            a.unlocked = false; a.reauthError = "Session expired — re-enter your password.";
+          } else if (res.status === 409) {
+            a.error = "The config file changed on disk — close and reopen to reload.";
+          } else {
+            const d = await res.json().catch(() => ({}));
+            a.error = d.detail || ("Save failed (" + res.status + ").");
+          }
+        } catch (e) { a.error = "Save failed."; }
+        finally { if (a.gen === myGen) a.saving = false; }
       },
       // --- Claude Code config management (#773) ------------------------------
       // Open/close mirror the configEditor modal: remember the opener for focus
