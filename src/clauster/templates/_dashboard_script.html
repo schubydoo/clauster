@@ -203,7 +203,7 @@
           name: "", entryText: "", orig: "",
           confirm: "", busy: false, ops: 0, deletingName: "",
           approvals: {
-            enabled: [], disabled: [], orig: "", loading: false,
+            enabled: [], disabled: [], locked: [], orig: "", loading: false, ready: false,
             confirm: "", busy: false, ops: 0, resetConfirm: "", resetBusy: false,
           },
         },
@@ -1772,9 +1772,10 @@
           // scopes have none. Load them under the same gen so a switch drops both.
           if (c.scope === "project") await this._loadMcpApprovals(myGen);
           else {
-            m.approvals.enabled = []; m.approvals.disabled = [];
+            m.approvals.enabled = []; m.approvals.disabled = []; m.approvals.locked = [];
             m.approvals.orig = this._mcpApprovalsSig([], []);
             m.approvals.loading = false;  // non-project has no approvals fetch to gate
+            m.approvals.ready = true;     // nothing to load = resolved (panel is hidden anyway)
           }
         } catch (e) { if (c.gen === myGen) c.error = "Failed to load MCP servers."; }
       },
@@ -1884,8 +1885,12 @@
         // than at its "" init. A stale "" would read as false-dirty ('[]|[]' !== '')
         // and let a Save PUT an empty enabled/disabled that clobbers real stored
         // choices to unset — a silent data-loss the "fail closed" rule forbids. On
-        // success both are overwritten below.
-        ap.enabled = []; ap.disabled = []; ap.orig = this._mcpApprovalsSig([], []);
+        // success both are overwritten below. `ready` stays false until BOTH the decisions
+        // AND the ownership (`locked`) metadata land, so a failed/partial load fails closed:
+        // the panel shows an unavailable notice instead of editable toggles whose empty state
+        // would hide the `settings` badge and let a save clobber real ~/.claude.json choices.
+        ap.enabled = []; ap.disabled = []; ap.locked = []; ap.orig = this._mcpApprovalsSig([], []);
+        ap.ready = false;
         // `loading` hides the toggles until the real state lands. A post-action reload
         // (save/delete/approvals-save/reset) calls _loadMcp directly WITHOUT c.loading,
         // so the surface stays visible; without this flag the panel would show the
@@ -1902,7 +1907,11 @@
           if (c.gen !== myGen) return;
           ap.enabled = Array.isArray(d.enabled) ? d.enabled.slice() : [];
           ap.disabled = Array.isArray(d.disabled) ? d.disabled.slice() : [];
+          // Servers whose effective decision is owned by a settings file: the ~/.claude.json
+          // write path can't change them, so the panel renders these rows read-only (#958 P2).
+          ap.locked = Array.isArray(d.locked) ? d.locked.slice() : [];
           ap.orig = this._mcpApprovalsSig(ap.enabled, ap.disabled);
+          ap.ready = true;  // decisions + ownership both landed: controls may go live
         } catch (e) { /* approvals are secondary — the baseline above keeps the panel non-dirty */ }
         finally { if (c.gen === myGen) ap.loading = false; }
       },
@@ -1912,8 +1921,14 @@
         if (ap.disabled.indexOf(name) !== -1) return "disabled";
         return "unset";
       },
+      configMgmtMcpApprovalLocked(name) {
+        // A settings file owns this server's decision, so the ~/.claude.json write path
+        // can't change it (settings wins on reload). The row is shown read-only (#958 P2).
+        return this.configMgmt.mcp.approvals.locked.indexOf(name) !== -1;
+      },
       configMgmtMcpSetApproval(name, state) {
         const ap = this.configMgmt.mcp.approvals;
+        if (this.configMgmtMcpApprovalLocked(name)) return;  // settings-owned: not ours to change
         ap.enabled = ap.enabled.filter(n => n !== name);
         ap.disabled = ap.disabled.filter(n => n !== name);
         if (state === "enabled") ap.enabled.push(name);
@@ -1926,7 +1941,7 @@
       },
       configMgmtCanSaveMcpApprovals() {
         const c = this.configMgmt, ap = c.mcp.approvals;
-        if (ap.busy || this.configMgmtNeedsProject()) return false;
+        if (ap.busy || !ap.ready || this.configMgmtNeedsProject()) return false;  // fail closed if unloaded
         if (ap.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
         return this.configMgmtMcpApprovalsDirty();
       },
@@ -1950,7 +1965,7 @@
       },
       configMgmtCanResetMcp() {
         const c = this.configMgmt, ap = c.mcp.approvals;
-        if (ap.resetBusy || this.configMgmtNeedsProject()) return false;
+        if (ap.resetBusy || !ap.ready || this.configMgmtNeedsProject()) return false;  // fail closed if unloaded
         return ap.resetConfirm === this.configMgmtConfirmToken();  // type-the-name gate
       },
       async configMgmtResetMcpChoices() {

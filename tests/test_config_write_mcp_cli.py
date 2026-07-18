@@ -496,9 +496,17 @@ def test_project_approvals_round_trip(tmp_path: Path) -> None:
     cj = tmp_path / "claude.json"
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": [], "disabled": []}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": [],
+        "disabled": [],
+        "locked": [],
+    }
     mcp.write_project_approvals(cj, project_dir, ["a"], ["b"])
-    assert mcp.read_project_approvals(cj, project_dir) == {"enabled": ["a"], "disabled": ["b"]}
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["a"],
+        "disabled": ["b"],
+        "locked": [],
+    }
 
 
 def test_project_approvals_write_preserves_siblings(tmp_path: Path) -> None:
@@ -1216,14 +1224,19 @@ def test_route_approvals_read_write_round_trip(write_config, tmp_path, projects_
     with _client(write_config, tmp_path, _PROJECT_ONLY) as c:
         read0 = c.get("/api/config-write/mcp/approvals?project=alpha")
         assert read0.status_code == 200
-        assert read0.json() == {"project": "alpha", "enabled": [], "disabled": []}
+        assert read0.json() == {"project": "alpha", "enabled": [], "disabled": [], "locked": []}
         wr = c.put(
             "/api/config-write/mcp/approvals",
             json={"project": "alpha", "confirm": "alpha", "enabled": ["a"], "disabled": ["b"]},
         )
         assert wr.status_code == 200
         read1 = c.get("/api/config-write/mcp/approvals?project=alpha")
-        assert read1.json() == {"project": "alpha", "enabled": ["a"], "disabled": ["b"]}
+        assert read1.json() == {
+            "project": "alpha",
+            "enabled": ["a"],
+            "disabled": ["b"],
+            "locked": [],
+        }
 
 
 def test_route_approvals_404_when_disabled(write_config, tmp_path) -> None:

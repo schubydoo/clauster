@@ -555,6 +555,49 @@ def test_config_mgmt_mcp_approvals_round_trip(
     assert "gizmo" in stored["projects"][alpha_key]["enabledMcpjsonServers"]
 
 
+def test_config_mgmt_mcp_settings_owned_approval_is_read_only(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A settings-file-owned approval renders read-only, not as a revertible toggle (#961).
+
+    ``claude mcp add-json --scope local`` relocates an approval into
+    ``settings.local.json``; the ~/.claude.json write path can't change it, so the
+    panel must show that server's row read-only (a ``settings`` badge + disabled
+    approve/reject/unset) rather than offer an action that silently reverts on reload.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-new"]')
+    # Commit a server so it appears in the approvals panel.
+    browser.click('[data-test="cm-mcp-new"]')
+    browser.expect_visible('[data-test="cm-mcp-editor"]')
+    browser.fill('[data-test="cm-mcp-name"]', "gizmo")
+    browser.fill('[data-test="cm-mcp-entry"]', '{"command": "echo", "env": {"K": "v"}}')
+    browser.fill('[data-test="cm-mcp-confirm"]', "alpha")
+    browser.click('[data-test="cm-mcp-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    # Approve gizmo via settings.local.json (what `claude mcp add-json --scope local` does),
+    # then re-enter the surface so the approvals reload folds the settings decision in.
+    settings_local = projects_root / "alpha" / ".claude" / "settings.local.json"
+    settings_local.parent.mkdir(parents=True, exist_ok=True)
+    settings_local.write_text(json.dumps({"enabledMcpjsonServers": ["gizmo"]}), encoding="utf-8")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    browser.click('[data-test="cm-surface-mcp"]')
+    browser.expect_visible('[data-test="cm-mcp-approvals"]')
+
+    # The row is now settings-owned: badge shown, and every approval control disabled.
+    browser.expect_visible('[data-test="cm-mcp-locked-gizmo"]')
+    browser.expect_disabled('[data-test="cm-mcp-approve-gizmo"]')
+    browser.expect_disabled('[data-test="cm-mcp-reject-gizmo"]')
+    browser.expect_disabled('[data-test="cm-mcp-unset-gizmo"]')
+
+
 def test_config_mgmt_mcp_approvals_confirm_clears_on_surface_switch(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
