@@ -132,11 +132,18 @@ def test_advanced_put_applies_edit_and_audits(write_config, tmp_path):
     assert res.json()["restart_required"] is True
     # The file changed; a fresh GET reflects it (read from disk, no live-reload).
     assert client.get("/api/config/advanced").json()["fields"]["clone.timeout_seconds"] == 137
-    # Audit line records the key NAME only — never the value (137 must not appear).
-    audit = (tmp_path / ".s" / "config_audit.log").read_text()
-    assert '"surface":"config-advanced"' in audit
-    assert "clone.timeout_seconds" in audit
-    assert "137" not in audit
+    # Audit line records the key NAME only — never the value. Parse the record and check the
+    # value can't appear in any meaningful field; a raw-substring check over the whole line is
+    # flaky (a 3-digit value like 137 can coincide with the microsecond ts or the tmp path).
+    import json
+
+    lines = (tmp_path / ".s" / "config_audit.log").read_text().splitlines()
+    record = json.loads(lines[-1])
+    assert record["surface"] == "config-advanced"
+    assert record["keys"] == ["clone.timeout_seconds"]
+    assert "value" not in record  # the shape is key-names-only, never the value
+    for field in ("keys", "action", "scope", "surface", "actor"):
+        assert "137" not in json.dumps(record[field])
 
 
 def test_advanced_put_rejects_non_tier_b_keys(write_config, tmp_path):
@@ -234,6 +241,98 @@ def test_advanced_put_invalid_value_rejected(write_config, tmp_path):
     res = client.put(
         "/api/config/advanced",
         json={"edits": {"clone.timeout_seconds": "not-an-int"}, "hash": h},
+        headers={"origin": ORIGIN},
+    )
+    assert res.status_code == 422
+
+
+# ----- Slice 4: list / map (rows editor) Tier-B fields ----------------------
+
+
+def test_advanced_get_exposes_list_and_map_specs(write_config, tmp_path):
+    client, _ = _advanced_client(write_config, tmp_path)
+    _elevate(client)
+    body = client.get("/api/config/advanced").json()
+    specs = body["specs"]
+    # The two clone list fields classify as `list` (string rows); webhooks.events is a `map`.
+    assert specs["clone.allowed_schemes"]["type"] == "list"
+    assert specs["clone.allowed_schemes"]["item_type"] == "str"
+    assert specs["clone.allowed_private_cidrs"]["type"] == "list"
+    events = specs["webhooks.events"]
+    assert events["type"] == "map"
+    keys = [mk["key"] for mk in events["map_keys"]]
+    assert keys == [
+        "spawn",
+        "ready",
+        "stop",
+        "crash",
+        "bg-settled",
+        "permission-needed",
+        "clone-done",
+    ]
+    # The extended #432 events default OFF; the bridge four default ON.
+    defaults = {mk["key"]: mk["default"] for mk in events["map_keys"]}
+    assert defaults["crash"] is True and defaults["permission-needed"] is False
+    # The default (default_factory) clone schemes surface as an actual list value.
+    assert body["fields"]["clone.allowed_schemes"] == ["https", "ssh"]
+
+
+def test_advanced_put_list_field_round_trips(write_config, tmp_path):
+    client, _ = _advanced_client(write_config, tmp_path)
+    _elevate(client)
+    h = client.get("/api/config/advanced").json()["hash"]
+    res = client.put(
+        "/api/config/advanced",
+        json={"edits": {"clone.allowed_schemes": ["https"]}, "hash": h},
+        headers={"origin": ORIGIN},
+    )
+    assert res.status_code == 200, res.text
+    reread = client.get("/api/config/advanced").json()["fields"]
+    assert reread["clone.allowed_schemes"] == ["https"]
+    # A load of the on-disk file agrees (the write really landed, not just an echo).
+    assert load_config(client.app.state.config.source_path).clone.allowed_schemes == ["https"]
+
+
+def test_advanced_put_events_map_round_trips(write_config, tmp_path):
+    client, _ = _advanced_client(write_config, tmp_path)
+    _elevate(client)
+    h = client.get("/api/config/advanced").json()["hash"]
+    # The frontend sends a MINIMAL map (only non-default keys); a bare {crash:false} is valid.
+    res = client.put(
+        "/api/config/advanced",
+        json={
+            "edits": {"webhooks.events": {"crash": False, "permission-needed": True}},
+            "hash": h,
+        },
+        headers={"origin": ORIGIN},
+    )
+    assert res.status_code == 200, res.text
+    events = load_config(client.app.state.config.source_path).webhooks.events
+    assert events == {"crash": False, "permission-needed": True}
+
+
+def test_advanced_put_bad_cidr_rejected(write_config, tmp_path):
+    client, _ = _advanced_client(write_config, tmp_path)
+    _elevate(client)
+    h = client.get("/api/config/advanced").json()["hash"]
+    # The clone.allowed_private_cidrs validator fails-fast on a malformed CIDR -> 422, no write.
+    res = client.put(
+        "/api/config/advanced",
+        json={"edits": {"clone.allowed_private_cidrs": ["not-a-cidr"]}, "hash": h},
+        headers={"origin": ORIGIN},
+    )
+    assert res.status_code == 422
+    assert load_config(client.app.state.config.source_path).clone.allowed_private_cidrs == []
+
+
+def test_advanced_put_unknown_event_key_rejected(write_config, tmp_path):
+    client, _ = _advanced_client(write_config, tmp_path)
+    _elevate(client)
+    h = client.get("/api/config/advanced").json()["hash"]
+    # An event key outside the known taxonomy is a typo the model rejects -> 422.
+    res = client.put(
+        "/api/config/advanced",
+        json={"edits": {"webhooks.events": {"not-an-event": True}}, "hash": h},
         headers={"origin": ORIGIN},
     )
     assert res.status_code == 422

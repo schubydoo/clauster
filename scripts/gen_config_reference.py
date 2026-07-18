@@ -47,7 +47,7 @@ from clauster.config import (
     UsageConfig,
     WebhooksConfig,
 )
-from clauster.config_editor import EDITABLE_FIELDS
+from clauster.config_editor import EDITABLE_FIELDS, TIER_B_FIELDS
 
 DOCS_PAGE = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
 
@@ -173,6 +173,29 @@ def render_editable_table() -> str:
     return "\n".join(rows)
 
 
+def render_tier_b_table() -> str:
+    """Render the Tier-B "Advanced" allowlist, grouped by section, from ``TIER_B_FIELDS``.
+
+    Same single-source pattern as :func:`render_editable_table`: the tuple in
+    ``config_editor.TIER_B_FIELDS`` (which ``GET/PUT /api/config/advanced`` and the
+    coverage-guard test read) drives the table, so it can never drift from the code.
+    """
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for path in TIER_B_FIELDS:
+        section, _, leaf = path.rpartition(".")
+        key = section or "(top-level)"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(leaf)
+    rows = ["| Section | Advanced fields |", "| --- | --- |"]
+    for key in order:
+        fields = ", ".join(f"`{leaf}`" for leaf in groups[key])
+        rows.append(f"| `{key}` | {fields} |")
+    return "\n".join(rows)
+
+
 def _splice(text: str, key: str, content: str) -> str:
     """Replace the body between a block's BEGIN/END GEN markers with ``content``."""
     begin, end = f"<!-- BEGIN GEN: {key} -->", f"<!-- END GEN: {key} -->"
@@ -188,6 +211,7 @@ def apply_blocks(text: str) -> str:
     for key, model in SECTIONS:
         text = _splice(text, key, render_table(model))
     text = _splice(text, "editable_fields", render_editable_table())
+    text = _splice(text, "tier_b_fields", render_tier_b_table())
     return text
 
 

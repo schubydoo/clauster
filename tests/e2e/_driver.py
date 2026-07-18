@@ -200,6 +200,15 @@ class AgentBrowser:
         """Check the checkbox matching ``selector``."""
         self._run("check", selector, check=True)
 
+    def scroll_into_view(self, selector: str) -> None:
+        """Scroll ``selector`` into view before interacting with it.
+
+        In a tall scrollable modal a target below the fold can sit under a sticky
+        footer; a click then lands on the overlay instead of the element. Scrolling
+        it into view first makes the subsequent click/fill land on the real target.
+        """
+        self._run("scrollintoview", selector, check=True)
+
     def select(self, selector: str, value: str) -> None:
         """Select option ``value`` in the ``<select>`` matching ``selector``."""
         self._run("select", selector, value, check=True)

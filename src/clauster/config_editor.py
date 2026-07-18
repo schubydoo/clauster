@@ -22,7 +22,12 @@ import yaml
 from pydantic import ValidationError
 from yaml import YAMLError
 
-from .config import PERMISSION_LABELS, ClausterConfig, load_config
+from .config import (
+    _WEBHOOK_DEFAULT_ON_EVENTS,
+    PERMISSION_LABELS,
+    ClausterConfig,
+    load_config,
+)
 from .config_write import hash_bytes
 
 # Tier-A allowlist: dotted paths editable from the web UI. Operational only — no
@@ -84,19 +89,24 @@ _EDITABLE = frozenset(EDITABLE_FIELDS)
 # Tier-B "Advanced" allowlist (#978): operational-but-sensitive scalars editable ONLY
 # behind the config_write capability AND a step-up re-auth (see app.require_elevated).
 # These are the fields the EXCLUDED registry earmarked "GAP-SENSITIVE: defer behind the
-# #347 trust tier" — the clone/webhooks SSRF-adjacent scalars. Deliberately NARROW:
-# config_write.* and login_shepherd.* stay EXCLUDED forever (their reasons say "never
-# web-editable" — RCE / account-auth-state surface), and the list/dict Tier-B fields
-# (notifications.urls, webhooks.urls, allowed_origins, trusted_ips, clone allow-lists,
-# webhooks.events) land in a later slice with a rows editor. When unsure → EXCLUDED.
+# #347 trust tier" — the clone/webhooks SSRF-adjacent scalars, plus (Slice 4) the three
+# NON-SECRET list/map fields: clone.allowed_schemes / clone.allowed_private_cidrs (rows
+# editors) and webhooks.events (checkbox-per-event map). Deliberately NARROW: config_write.*
+# and login_shepherd.* stay EXCLUDED forever (their reasons say "never web-editable" — RCE /
+# account-auth-state surface), and the SECRET url lists (notifications.urls, webhooks.urls)
+# plus the auth trust lists (allowed_origins, trusted_ips) stay EXCLUDED (unsafe mask
+# round-trip / trust surface). When unsure → EXCLUDED.
 TIER_B_FIELDS: tuple[str, ...] = (
     "clone.enabled",
     "clone.allow_private_hosts",
+    "clone.allowed_schemes",
+    "clone.allowed_private_cidrs",
     "clone.timeout_seconds",
     "clone.max_mb",
     "webhooks.enabled",
     "webhooks.timeout_seconds",
     "webhooks.block_private_targets",
+    "webhooks.events",
 )
 _TIER_B = frozenset(TIER_B_FIELDS)
 
@@ -138,10 +148,7 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "projects": "list-or-dict: per-project map; not addressable as a single editor field",
     "auth.reverse_proxy.trusted_ips": "list-or-dict + auth: IP/CIDR allowlist (list); trust",
     "auth.allowed_origins": "list-or-dict + auth: CSRF/WS origin allowlist (list); security",
-    "clone.allowed_schemes": "list-or-dict + clone: scheme allowlist (list); clone-security",
-    "clone.allowed_private_cidrs": "list-or-dict + clone: SSRF allowlist (list); security",
     "webhooks.urls": "list-or-dict + secret: egress targets (list); may embed secrets",
-    "webhooks.events": "list-or-dict: per-event map; not a single editor field",
     "notifications.urls": "list-or-dict + secret: Apprise URLs embed tokens (list+secret)",
     # secret — credential material; never round-trips to the browser.
     "auth.password_hash": "secret: credential; never round-trips to the browser",
@@ -160,9 +167,13 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "auth.reverse_proxy.hmac_window_seconds": "auth: replay window; loosening it weakens auth",
     "auth.reverse_proxy.require_hmac": "auth: turning off drops HMAC → header-only trust",
     # NOTE: clone.* and webhooks.* scalars moved to TIER_B_FIELDS (#978) — editable behind
-    # the config_write capability + step-up re-auth. The clone/webhooks *list* fields
-    # (allowed_schemes, allowed_private_cidrs, urls, events) stay excluded here until the
-    # Tier-B rows editor lands. See the list-or-dict entries below.
+    # the config_write capability + step-up re-auth. The NON-SECRET clone/webhooks list/map
+    # fields (clone.allowed_schemes, clone.allowed_private_cidrs, webhooks.events) also moved
+    # to TIER_B (Slice 4, rows/checkbox editors). The SECRET URL lists (webhooks.urls,
+    # notifications.urls) and the auth trust lists (allowed_origins, trusted_ips) STAY excluded:
+    # the mask-sentinel round-trip is index-anchored (safe for the key-stable env map, unsafe for
+    # a reorderable secret list) and token-in-path URLs aren't fully masked. See the list-or-dict
+    # entries above.
     # structural + binary-path — TLS material paths; load-validated, mis-set aborts HTTPS boot.
     "tls.cert_file": "structural + binary-path: TLS material path; mis-set aborts HTTPS boot",
     "tls.key_file": "structural + binary-path: TLS key path; security-material path",
@@ -346,6 +357,10 @@ def _classify(annotation: Any) -> tuple[str, list[str] | None]:
             return _classify(non_none[0])
     if origin is Literal:
         return "enum", [str(a) for a in get_args(annotation)]
+    if origin is list:  # list[str] -> a rows editor (Slice 4)
+        return "list", None
+    if origin is dict:  # dict[str, bool] -> a fixed-key checkbox map (Slice 4)
+        return "map", None
     if annotation is bool:  # bool before int (bool is an int subclass)
         return "bool", None
     if annotation is int:
@@ -353,6 +368,21 @@ def _classify(annotation: Any) -> tuple[str, list[str] | None]:
     if annotation is float:
         return "float", None
     return "str", None
+
+
+def _list_item_kind(annotation: Any) -> str:
+    """Return the UI control type for a list field's ELEMENTS (e.g. ``list[str]`` -> "str").
+
+    Unwraps a single-member ``Optional`` first (mirrors :func:`_classify`), so a future
+    ``list[str] | None`` field reports "str" rather than the outer "list".
+    """
+    if get_origin(annotation) in (Union, types.UnionType):
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            annotation = non_none[0]
+    item_args = get_args(annotation)
+    kind, _ = _classify(item_args[0]) if item_args else ("str", None)
+    return kind
 
 
 # Human section names (raw key -> heading), in display order.
@@ -423,6 +453,9 @@ FIELD_LABELS: dict[str, str] = {
     "notifications.notify_on_permission": "Notify when permission is needed",
     "notifications.notify_on_session_end": "Notify when a session ends",
     "notifications.notify_on_reconnect_failed": "Notify when reconnect fails",
+    "clone.allowed_schemes": "Allowed clone URL schemes",
+    "clone.allowed_private_cidrs": "Allowed private CIDRs",
+    "webhooks.events": "Lifecycle events emitted",
 }
 
 # Unit affix shown beside numeric controls.
@@ -445,6 +478,29 @@ FIELD_PLACEHOLDERS: dict[str, str] = {
     "instance_defaults.max_bridges": "Unset — no limit",
     "claustrum.socket_path": "Unset — defaults to <state_dir>/claustrum/daemon.sock",
     "usage.currency_symbol": "Unset — defaults to $",
+    "clone.allowed_schemes": "e.g. https",
+    "clone.allowed_private_cidrs": "e.g. 192.168.1.0/24",
+}
+
+# Fixed-key boolean maps rendered as a checkbox-per-key editor (Slice 4). Maps a dotted path
+# to the ordered event keys the editor offers; a key ABSENT from the stored map takes its
+# per-key default (mirrors WebhooksConfig.event_enabled's absent-key policy — the original
+# bridge four default ON, the #432 extended three default OFF). Order is the documented
+# taxonomy, not the (unordered) frozenset; the default is DERIVED from the config on-set so
+# this stays single-source with config.py. Only paths listed here render as a checkbox map.
+_WEBHOOK_EVENT_ORDER: tuple[str, ...] = (
+    "spawn",
+    "ready",
+    "stop",
+    "crash",
+    "bg-settled",
+    "permission-needed",
+    "clone-done",
+)
+FIELD_MAP_KEYS: dict[str, tuple[tuple[str, bool], ...]] = {
+    "webhooks.events": tuple(
+        (event, event in _WEBHOOK_DEFAULT_ON_EVENTS) for event in _WEBHOOK_EVENT_ORDER
+    ),
 }
 
 # Child field -> master switch: the child is disabled in the UI when the master is off.
@@ -619,9 +675,21 @@ def field_specs(
             "deprecated": path in DEPRECATED_FIELDS,
             "hidden": (path in DEPRECATED_FIELDS and present is not None and path not in present),
             "default": default if isinstance(default, (str, int, float, bool)) else None,
+            # A list/map renders a multi-control GROUP with no single `for=` target, so the UI
+            # captions it with a plain element (not an orphan <label for>). Scalars stay labelled.
+            "is_group": kind in ("list", "map"),
         }
         if kind in ("int", "float"):
             spec.update(_constraints(info))
             spec["step"] = 1 if kind == "int" else "any"
+        elif kind == "list":
+            # The element control type (str today) so the rows editor knows what to render.
+            spec["item_type"] = _list_item_kind(info.annotation)
+        elif kind == "map":
+            # Fixed-key boolean maps expose their ordered keys + per-key defaults; a map with
+            # no registered key set has no safe checkbox rendering, so leave map_keys absent.
+            registered = FIELD_MAP_KEYS.get(path)
+            if registered is not None:
+                spec["map_keys"] = [{"key": k, "default": d} for k, d in registered]
         specs[path] = spec
     return specs
