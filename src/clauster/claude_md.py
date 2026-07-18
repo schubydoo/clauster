@@ -41,14 +41,12 @@ UTF-8 requirement are shared with the legacy editor.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import atomicio
+from . import atomicio, config_audit
 from . import config_file_writer as fw
 from . import config_write as cw
 from .models import ClaudeMdDoc
@@ -59,7 +57,6 @@ FILENAME = "CLAUDE.md"
 #: Claude Code's own ``CLAUDE.local.md`` convention.
 LOCAL_FILENAME = "CLAUDE.local.md"
 MAX_BYTES = 64 * 1024  # 64 KB cap (spec §5); shared by the config-write surface below
-_AUDIT_FILE = "claude_md_audit.log"
 _log = logging.getLogger("clauster.claude_md")
 
 
@@ -189,51 +186,20 @@ def write_claude_md(
             raise
 
     new_sha = _sha256(content)
-    if state_dir is not None:
-        # Audit is best-effort: the content write already committed via os.replace,
-        # so a failed audit append must NOT be reported as a failed save — but it is
-        # logged loudly so the gap is never silent.
-        try:
-            _append_audit(
-                state_dir,
-                project=project_path.name,
-                user=user,
-                action="create" if not current.exists else "update",
-                size=len(encoded),
-                sha256=new_sha,
-            )
-        except OSError as exc:
-            _log.error(
-                "%s write for %s succeeded but audit append failed: %s",
-                FILENAME,
-                project_path.name,
-                exc,
-            )
+    # Audit is best-effort (see config_audit.record): the content write already committed
+    # via os.replace, so a failed audit append must NOT fail the save — it is swallowed +
+    # logged there. Unified into the shared config_audit.log (#958 P6); this editor path is
+    # project-scope (the config-write CLAUDE.md surface audits its own scope at its handler).
+    config_audit.record(
+        state_dir,
+        surface="claude-md",
+        scope="project",
+        target=str(target),
+        action="create" if not current.exists else "update",
+        actor=user,
+        extra={"size": len(encoded), "sha256": new_sha},
+    )
     return ClaudeMdDoc(exists=True, content=content, sha256=new_sha, size=len(encoded))
-
-
-def _append_audit(
-    state_dir: Path, *, project: str, user: str, action: str, size: int, sha256: str
-) -> None:
-    """Append one JSON line recording the edit.
-
-    Best-effort: a failure here must not undo a write that already succeeded, but
-    it is never silently dropped on a healthy disk (the state_dir is the same local
-    volume as the rest of the app).
-    """
-    entry = {
-        "ts": datetime.now(UTC).isoformat(),
-        "user": user,
-        "project": project,
-        "action": action,
-        "file": FILENAME,
-        "size": size,
-        "sha256": sha256,
-    }
-    state_dir = state_dir.expanduser()
-    state_dir.mkdir(parents=True, exist_ok=True)
-    with open(state_dir / _AUDIT_FILE, "a", encoding="utf-8", newline="") as fh:
-        fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
 # ---------------------------------------------------------------------------
