@@ -277,6 +277,8 @@ def test_config_mgmt_hooks_tab_loads(browser: AgentBrowser, config_mgmt_server: 
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-hooks"]')
     browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Hooks defaults to the rows editor (#958 Part 5); drop to raw JSON to see the loaded {}.
+    browser.click('[data-test="cm-hooks-mode-raw"]')
     browser.expect_value('[data-test="cm-hooks-text"]', "{}")
 
 
@@ -471,6 +473,9 @@ def test_config_mgmt_hooks_save_round_trip(
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-hooks"]')
     browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Rows is the default; drop to raw JSON to save a literal hooks block (the rows path
+    # is covered by test_config_mgmt_hooks_rows_round_trip below).
+    browser.click('[data-test="cm-hooks-mode-raw"]')
     browser.expect_value('[data-test="cm-hooks-text"]', "{}")
 
     hooks = {"SessionStart": [{"hooks": [{"type": "command", "command": "echo e2e-hook"}]}]}
@@ -483,6 +488,34 @@ def test_config_mgmt_hooks_save_round_trip(
     assert saved.exists(), "expected alpha/.claude/settings.json to be written"
     on_disk = json.loads(saved.read_text(encoding="utf-8"))
     assert on_disk.get("hooks") == hooks
+
+
+def test_config_mgmt_hooks_rows_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Adding a hook via the rows editor writes the nested command group to settings.json."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Rows mode default: add a hook, pick the event, type the command, save.
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')  # let the x-for row hydrate
+    browser.select('[data-test="cm-hook-event"]', "SessionStart")
+    browser.fill('[data-test="cm-hook-command"]', "echo rows-hook")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "SessionStart": [{"hooks": [{"type": "command", "command": "echo rows-hook"}]}]
+    }
 
 
 def test_config_mgmt_subagent_delete_round_trip(

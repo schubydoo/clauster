@@ -4652,6 +4652,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # JS permLabel()/permissionEffect() helpers, and the config editor.
             "permission_labels": PERMISSION_LABELS,
             "bypass_desktop_hint": BYPASS_DESKTOP_HINT,
+            # Recognized hook lifecycle events (#958 Part 5): the single server-injected
+            # source of truth for the config editor's Hooks rows <select>, sorted for a
+            # stable order and derived from the backend validator so the two never drift.
+            "hook_events": sorted(config_write_hooks.RECOGNIZED_EVENTS),
             # Interactive Session (true-resume pty) works on POSIX always and on Windows
             # via the ConPTY keeper when the `pty` extra (pywinpty) is installed (#914).
             "pty_supported": _pty_supported(),

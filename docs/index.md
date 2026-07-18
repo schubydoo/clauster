@@ -53,7 +53,8 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 - Live bridge debug-log tail over a WebSocket — ANSI-stripped and ID-redacted.
 - In-dashboard editor for a project's Claude Code config surfaces — `CLAUDE.md`,
   `settings.json` (env as friendly key/value rows or raw JSON), permissions (allow /
-  deny / ask rules and default mode as rows, or raw JSON), hooks,
+  deny / ask rules and default mode as rows, or raw JSON), hooks (one command hook
+  per row — event / matcher / command / timeout — or raw JSON),
   MCP servers, subagents, skills, and plugins — at user / project scope (plus local
   for all but subagents and skills), with secret-shaped values masked on the surfaces
   that carry them (settings `env`, MCP). Every write is lost-update-guarded and
