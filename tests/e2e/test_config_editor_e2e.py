@@ -70,3 +70,88 @@ def test_config_editor_enum_selects_reflect_saved_value(
     # And since the displayed value matches the model, there are no pending edits —
     # Save stays disabled until a real change (the symptom the bug masked).
     browser.expect_disabled('[data-test="cfg-save"]')
+
+
+def _login(browser: AgentBrowser, url: str, password: str) -> None:
+    """Authenticate against an auth-enabled server and land on the dashboard."""
+    browser.goto(f"{url}/login")
+    browser.fill("#password", password)
+    browser.click('button[type="submit"]')
+    browser.expect_url(f"{url}/")
+    browser.expect_visible("#project-grid")
+
+
+def test_advanced_panel_unlock_and_save(
+    browser: AgentBrowser, advanced_config_server: Server, e2e_password: str
+) -> None:
+    """Step-up unlock reveals the Tier-B fields; a save persists to disk with a backup (#978)."""
+    cfg_path = Path(advanced_config_server.state_dir).parent / "clauster.yml"
+    _login(browser, advanced_config_server.url, e2e_password)
+
+    browser.click('[aria-label="Edit configuration"]')
+    # The Advanced panel renders (config-write on) but starts locked behind the password.
+    browser.expect_visible('[data-test="adv-panel"]')
+    browser.expect_visible('[data-test="adv-password"]')
+
+    # Step up with the correct password -> the Tier-B fields load.
+    browser.fill('[data-test="adv-password"]', e2e_password)
+    browser.click('[data-test="adv-unlock"]')
+    field = '[id="adv-clone.timeout_seconds"]'
+    browser.expect_visible(field)
+
+    # Change the seeded value (300 -> 137) and save through PUT /api/config/advanced.
+    browser.fill(field, "137")
+    browser.click('[data-test="adv-save"]')
+    browser.expect_visible('[data-test="adv-saved"]')
+
+    # Persisted to the real config file, with a timestamped backup of the prior content.
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert data["clone"]["timeout_seconds"] == 137
+    assert list(cfg_path.parent.glob("clauster.yml.bak-*")), "expected a config backup"
+
+
+def test_advanced_panel_rejects_wrong_password(
+    browser: AgentBrowser, advanced_config_server: Server, e2e_password: str
+) -> None:
+    """A wrong step-up password shows an error and never reveals the Tier-B fields (#978)."""
+    _login(browser, advanced_config_server.url, e2e_password)
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[data-test="adv-password"]')
+
+    browser.fill('[data-test="adv-password"]', "definitely-not-the-password")
+    browser.click('[data-test="adv-unlock"]')
+    browser.expect_text('[data-test="adv-reauth-error"]', "Incorrect password.")
+    # Still locked: the save button (unlocked-only) is absent.
+    browser.expect_hidden('[data-test="adv-save"]')
+
+
+def test_advanced_panel_needs_auth_when_auth_disabled(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Config-write on but auth off: Advanced shows a needs-auth note, not an unlock form (#978).
+
+    Step-up has no password to prove when auth is disabled, so the unlock form could never
+    succeed — the panel points the operator at enabling authentication instead.
+    """
+    browser.goto(config_mgmt_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[data-test="adv-panel"]')
+    browser.expect_visible('[data-test="adv-needs-auth"]')
+    browser.expect_hidden('[data-test="adv-password"]')
+
+
+def test_advanced_panel_absent_when_config_write_disabled(
+    browser: AgentBrowser, config_server: Server
+) -> None:
+    """The Advanced panel is invisible when config-write is off (#978).
+
+    Invisible-surface invariant at the UI layer: the panel's ``x-show`` is the
+    config-write capability, mirroring the /api/config/advanced 404 gate. The Tier-A
+    editor still opens normally.
+    """
+    browser.goto(config_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[id="cfg-usage.fx_rate"]')  # Tier-A editor open
+    browser.expect_hidden('[data-test="adv-panel"]')  # but no Advanced surface

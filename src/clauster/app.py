@@ -4854,6 +4854,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             "version": __version__,
             "projects_root": str(config.projects_root),
             "auth_enabled": config.auth.enabled,
+            # Whether a PASSWORD is configured — the real prerequisite for the Advanced
+            # step-up (#978). auth.enabled can be true with no password (reverse-proxy /
+            # API-token-only auth), where /api/reauth can never accept a password; gate the
+            # unlock form on this, not on auth_enabled.
+            "auth_password_set": config.auth.password_hash is not None,
             "reaper_ui_enabled": config.reaper.ui_enabled,
             "default_spawn_mode": config.instance_defaults.spawn_mode,
             "default_permission_mode": config.instance_defaults.permission_mode,
