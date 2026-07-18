@@ -73,6 +73,17 @@
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+CHROME_VERSION:\\s*\"(?<currentValue>[0-9][^\"]*)\""
       ],
       "versioningTemplate": "loose"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the pinned Shawl (Windows service wrapper) release in deps.py via github-releases (#934). Renovate bumps the `_*_VERSION` constant; the download URL derives from it in code, so version and URL can't drift. The `sha256` is NOT auto-updated (the hosted App reads github-releases' git-tag digest, not the release ASSET's file checksum), so refresh it from GitHub's published asset digest — `scripts/check_binary_dep_pins.py` verifies each pin against that digest and prints the correct value, and `deps install` fail-closes on a mismatch.",
+      "managerFilePatterns": [
+        "^src/clauster/deps\\.py$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+_\\w+ = \"(?<currentValue>[^\"]+)\""
+      ],
+      "versioningTemplate": "semver"
     }
   ],
   "customDatasources": {
@@ -104,6 +115,13 @@
       "matchFileNames": ["src/clauster/static/vendor/versions.txt"],
       "automerge": false,
       "labels": ["vendored-assets"]
+    },
+    {
+      "description": "Never auto-merge a Shawl (Windows service wrapper) bump (#934). Renovate updates the version + derived URL but CANNOT recompute the source-pinned sha256, so a human must refresh it from GitHub's published asset digest (the binary-dep-pins check prints the correct value) before merging. That check is intentionally NOT a required status check (required + path-filtered would strand unrelated PRs), so forcing a manual merge here is what guarantees the failed verification is actually seen and acted on.",
+      "matchDatasources": ["github-releases"],
+      "matchPackageNames": ["mtkennerly/shawl"],
+      "automerge": false,
+      "labels": ["binary-dep"]
     },
     {
       "description": "Auto-merge patch + minor updates of dev/test tooling once CI passes (a failing check blocks the merge).",
