@@ -164,8 +164,9 @@ def create_setup_app(write_path: Path, *, port: int = DEFAULT_PORT) -> FastAPI:
         pr_raw = str(body.get("projects_root", "")).strip()
         if not pr_raw:
             errors["projects_root"] = "Required."
-        elif not Path(pr_raw).expanduser().is_dir():
-            errors["projects_root"] = "Must be a directory that already exists and is readable."
+        # Existence/readability is validated by ClausterConfig below (its field validator does
+        # the is_dir check) rather than with a direct path operation on request data; a bad
+        # path is mapped back to a friendly field error there.
 
         host = str(body.get("host", "")).strip() or SETUP_HOST
         try:
@@ -196,16 +197,27 @@ def create_setup_app(write_path: Path, *, port: int = DEFAULT_PORT) -> FastAPI:
                     {"detail": "setup has already been completed"}, status_code=409
                 )
             password_hash = auth.hash_password(hasher, password)
-            data = _build_config_data(
-                str(Path(pr_raw).expanduser()), host, port_val, password_hash
-            )
-            # Final fail-closed gate: never write a config that would not boot. The friendly
-            # per-field checks above cover the common cases; this catches the rest. The raw
-            # exception is NOT surfaced (it can carry internal paths) — the field errors
-            # already told the operator what to fix.
+            # Store projects_root as typed (the model expands `~` on load); passing the raw
+            # string — instead of constructing a Path from request data — keeps path handling
+            # inside the model.
+            data = _build_config_data(pr_raw, host, port_val, password_hash)
+            # Final fail-closed gate: the model validates projects_root existence/readability
+            # and every other field. A projects_root failure maps to a friendly field error;
+            # anything else is generic — the raw exception (which can carry internal paths) is
+            # never surfaced.
             try:
                 ClausterConfig.model_validate(data)
-            except ValidationError:
+            except ValidationError as exc:
+                if any(e.get("loc") == ("projects_root",) for e in exc.errors()):
+                    return JSONResponse(
+                        {
+                            "errors": {
+                                "projects_root": "Must be a directory that already exists "
+                                "and is readable."
+                            }
+                        },
+                        status_code=400,
+                    )
                 return JSONResponse(
                     {"detail": "the settings could not be validated"}, status_code=400
                 )

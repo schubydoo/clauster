@@ -221,7 +221,9 @@ def test_model_validate_gate_rejects(tmp_path, monkeypatch):
     orig = setup_wizard.ClausterConfig.model_validate
 
     def _reject(data):
-        return orig({})  # missing projects_root -> a real ValidationError
+        # A NON-projects_root ValidationError (bad port) -> the generic branch, not the
+        # projects_root field-error mapping (which test_nonexistent_projects_root covers).
+        return orig({"projects_root": str(projects), "port": "not-an-int"})
 
     monkeypatch.setattr(setup_wizard.ClausterConfig, "model_validate", staticmethod(_reject))
     res = client.post("/setup", json=_valid_payload(projects))
