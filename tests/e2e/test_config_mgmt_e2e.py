@@ -100,6 +100,10 @@ def test_config_mgmt_blank_json_saves_as_empty(
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-permissions"]')
     browser.expect_visible('[data-test="cm-view-permissions"]')
+    # Permissions defaults to the rows editor (#958 Part 5); drop to the raw-JSON
+    # escape hatch to exercise the blank-box path.
+    browser.click('[data-test="cm-permissions-mode-raw"]')
+    browser.expect_visible('[data-test="cm-permissions-text"]')
     # Clear the JSON box entirely, then save. A blank box must be accepted as the
     # empty-object default rather than rejected with "must be valid JSON".
     browser.fill('[data-test="cm-permissions-text"]', "")
@@ -133,6 +137,10 @@ def test_config_mgmt_permissions_project_round_trip(
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-permissions"]')
     browser.expect_visible('[data-test="cm-view-permissions"]')
+    # Permissions defaults to the rows editor (#958 Part 5); drop to raw JSON to save
+    # the block as literal JSON (the rows path is covered separately below).
+    browser.click('[data-test="cm-permissions-mode-raw"]')
+    browser.expect_visible('[data-test="cm-permissions-text"]')
     # alpha has no settings.json yet -> the permissions view is {} (fetch bound).
     browser.expect_value('[data-test="cm-permissions-text"]', "{}")
 
@@ -140,6 +148,36 @@ def test_config_mgmt_permissions_project_round_trip(
     browser.fill('[data-test="cm-confirm"]', "alpha")
     browser.click('[data-test="cm-save"]')
     browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    stored = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert stored["permissions"]["allow"] == ["Bash(ls:*)"]
+
+
+def test_config_mgmt_permissions_rows_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Adding an allow rule via the rows editor writes it into the project's settings.json."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-permissions"]')
+    browser.expect_visible('[data-test="cm-view-permissions"]')
+    # Rows mode is the default. Add an allow rule, type it, and save.
+    browser.click('[data-test="cm-perm-add-allow"]')
+    browser.expect_visible('[data-test="cm-perm-rule-allow"]')  # let the x-for row hydrate
+    browser.fill('[data-test="cm-perm-rule-allow"]', "Bash(ls:*)")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    stored = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert stored["permissions"]["allow"] == ["Bash(ls:*)"]
 
     settings = projects_root / "alpha" / ".claude" / "settings.json"
     assert settings.exists(), "expected alpha/.claude/settings.json to be written"

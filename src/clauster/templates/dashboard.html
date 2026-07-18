@@ -1679,15 +1679,77 @@
               </div>
             </div>
 
-            <!-- Permissions surface (#773 slice B) -->
+            <!-- Permissions surface (#773 slice B; #958 Part 5 rows editor) -->
             <div data-test="cm-view-permissions"
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'permissions'" x-cloak>
-              <label class="form-label small" for="cm-permissions">permissions — allow / deny / ask</label>
-              <textarea id="cm-permissions" class="form-control form-control-sm font-monospace" rows="12"
-                        data-test="cm-permissions-text" spellcheck="false"
-                        x-model="configMgmt.permissions.text"></textarea>
-              <div class="form-hint small mt-1">
-                The tool-permission rules Claude Code enforces (<code>allow</code> / <code>deny</code> / <code>ask</code>). Edited as JSON.
+              <div class="d-flex justify-content-between align-items-center mb-1">
+                <!-- A section heading, not a control label: in rows mode this surface has
+                     several controls (the mode select + rule rows), and the raw textarea
+                     gets its programmatic name from the visually-hidden label below. -->
+                <div class="form-label small mb-0">permissions — allow / deny / ask</div>
+                <!-- #958 Part 5: friendly rows vs the raw-JSON escape hatch -->
+                <div class="btn-group btn-group-sm" role="group" aria-label="Permissions editor mode">
+                  <button type="button" class="btn" data-test="cm-permissions-mode-rows"
+                          :class="configMgmt.permissions.mode === 'rows' ? 'btn-primary' : 'btn-outline-primary'"
+                          :aria-pressed="configMgmt.permissions.mode === 'rows'"
+                          @click="configMgmtPermissionsMode('rows')">Rows</button>
+                  <button type="button" class="btn" data-test="cm-permissions-mode-raw"
+                          :class="configMgmt.permissions.mode === 'raw' ? 'btn-primary' : 'btn-outline-primary'"
+                          :aria-pressed="configMgmt.permissions.mode === 'raw'"
+                          @click="configMgmtPermissionsMode('raw')">Raw JSON</button>
+                </div>
+              </div>
+
+              <!-- Shape error shows in either mode so a rejected 'Rows' click explains itself. -->
+              <div class="alert alert-warning py-1 small" data-test="cm-permissions-rows-error" role="alert"
+                   x-show="configMgmt.permissions.rowsError" x-cloak x-text="configMgmt.permissions.rowsError"></div>
+
+              <!-- ROWS: allow / deny / ask rule lists + defaultMode -->
+              <div x-show="configMgmt.permissions.mode === 'rows'" data-test="cm-permissions-rows" x-cloak>
+                <div class="mb-3">
+                  <label class="form-label small mb-1" for="cm-perm-defaultmode">Default mode</label>
+                  <select class="form-select form-select-sm cm-input-cap" id="cm-perm-defaultmode"
+                          data-test="cm-perm-defaultmode" x-model="configMgmt.permissions.defaultMode">
+                    <option value="">— inherit (unset) —</option>
+                    <template x-for="opt in configMgmtPermissionModeOptions()" :key="opt.value">
+                      <option :value="opt.value" x-text="opt.label"></option>
+                    </template>
+                  </select>
+                </div>
+                <template x-for="bucket in configMgmt.permissions.buckets" :key="bucket.key">
+                  <div class="mb-3" :data-test="'cm-perm-bucket-' + bucket.key">
+                    <div class="form-label small mb-1 fw-bold" x-text="bucket.label"></div>
+                    <template x-for="(row, idx) in bucket.rows" :key="row.id">
+                      <div class="input-group input-group-sm mb-1">
+                        <input type="text" class="form-control font-monospace"
+                               :data-test="'cm-perm-rule-' + bucket.key" autocomplete="off" spellcheck="false"
+                               :aria-label="bucket.label + ' rule ' + (idx + 1)"
+                               x-model="row.value">
+                        <button type="button" class="btn btn-outline-danger" :data-test="'cm-perm-remove-' + bucket.key"
+                                :aria-label="'Remove ' + bucket.label + ' rule ' + (idx + 1)"
+                                @click="configMgmtRemovePermRow(bucket.key, idx)">Remove</button>
+                      </div>
+                    </template>
+                    <button type="button" class="btn btn-sm btn-outline-primary" :data-test="'cm-perm-add-' + bucket.key"
+                            @click="configMgmtAddPermRow(bucket.key)"
+                            x-text="'Add ' + bucket.label + ' rule'"></button>
+                  </div>
+                </template>
+                <div class="form-hint small mt-1">
+                  Rules are stored verbatim and never run. <code>allow</code> auto-approves,
+                  <code>deny</code> blocks, <code>ask</code> prompts. Switch to Raw JSON for shapes the rows can't show.
+                </div>
+              </div>
+
+              <!-- RAW: the full permissions escape hatch -->
+              <div x-show="configMgmt.permissions.mode === 'raw'" x-cloak>
+                <label class="visually-hidden" for="cm-permissions">permissions (raw)</label>
+                <textarea id="cm-permissions" class="form-control form-control-sm font-monospace" rows="12"
+                          data-test="cm-permissions-text" spellcheck="false"
+                          x-model="configMgmt.permissions.text"></textarea>
+                <div class="form-hint small mt-1">
+                  The tool-permission rules Claude Code enforces (<code>allow</code> / <code>deny</code> / <code>ask</code>). Edited as JSON.
+                </div>
               </div>
             </div>
 

@@ -78,6 +78,29 @@ def test_permissions_and_hooks_surfaces_present_when_enabled(write_config):
     assert 'data-test="cm-hooks-text"' in html
 
 
+def test_permissions_rows_editor_present_when_enabled(write_config):
+    # #958 Part 5: the permissions surface gains a friendly allow/deny/ask rows editor
+    # + a defaultMode select, layered over the raw-JSON escape hatch. Assert the mode
+    # toggle, the rows scaffold, the mode select, and the raw textarea are all wired.
+    html = _html(write_config, _ON)
+    assert 'data-test="cm-permissions-mode-rows"' in html
+    assert 'data-test="cm-permissions-mode-raw"' in html
+    assert 'data-test="cm-permissions-rows"' in html
+    assert 'data-test="cm-perm-defaultmode"' in html
+    assert 'data-test="cm-permissions-rows-error"' in html
+    # The per-bucket row/add/remove data-tests are Alpine-bound (x-for), so their
+    # binding expressions appear in the markup even before the rows hydrate.
+    assert "'cm-perm-rule-' + bucket.key" in html
+    assert "'cm-perm-add-' + bucket.key" in html
+    # The raw JSON textarea stays as the escape hatch for unrepresentable shapes.
+    assert 'data-test="cm-permissions-text"' in html
+    # The rows editor + its projection/vocabulary helpers are wired in the Alpine script.
+    assert "configMgmtPermissionsMode(" in html
+    assert "_permissionsSerialized(" in html
+    assert "configMgmtPermissionModeOptions(" in html
+    assert "configMgmtAddPermRow(" in html
+
+
 def test_settings_env_rows_editor_present_when_enabled(write_config):
     # #765: the settings surface gains a friendly env key/value rows editor layered
     # over the raw-JSON escape hatch. Assert the mode toggle, the row editor, and the

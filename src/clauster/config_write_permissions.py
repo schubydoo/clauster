@@ -46,10 +46,13 @@ from .config import PERMISSION_LABELS
 PERMISSIONS_KEY = "permissions"
 
 #: The list-valued rule buckets (each a list of opaque, never-parsed rule strings).
-_RULE_LIST_KEYS = frozenset({"allow", "deny"})
+#: ``ask`` is the third canonical Claude Code decision bucket (prompt before use) —
+#: same opaque-string shape as ``allow``/``deny``, validated identically and never
+#: parsed or executed.
+_RULE_LIST_KEYS = frozenset({"allow", "deny", "ask"})
 
 #: Allowed top-level keys inside the ``permissions`` object.
-_PERMISSION_KEYS = frozenset({"allow", "deny", "defaultMode"})
+_PERMISSION_KEYS = frozenset({"allow", "deny", "ask", "defaultMode"})
 
 #: The mode this surface refuses to set — it stays behind the footgun gate (#347/#685).
 BYPASS_MODE = "bypassPermissions"
@@ -77,8 +80,8 @@ def validate_permissions(candidate: Any) -> None:
     """Structural validator for the whole ``permissions`` object (the Foundation hook).
 
     ``candidate`` is the desired ``permissions`` object: a ``dict`` whose only
-    recognized keys are ``allow``/``deny`` (lists of non-empty rule strings) and
-    ``defaultMode`` (one of :data:`RECOGNIZED_MODES`). Unknown keys, wrong types, or an
+    recognized keys are ``allow``/``deny``/``ask`` (lists of non-empty rule strings)
+    and ``defaultMode`` (one of :data:`RECOGNIZED_MODES`). Unknown keys, wrong types, or an
     unrecognized mode reject the whole write (→ 422 via
     :func:`config_write.validate_candidate`), so a partial/garbled block never lands.
 

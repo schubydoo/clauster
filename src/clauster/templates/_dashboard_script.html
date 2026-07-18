@@ -182,7 +182,22 @@
           mode: "rows", envRows: [], envError: "", envSeq: 0,
         },
         // JSON surfaces sharing _loadJsonSurface/_saveJsonSurface (#773 slice B).
-        permissions: { text: "", orig: "", hash: null },
+        // Permissions (#958 Part 5): a friendly rows editor over allow/deny/ask +
+        // defaultMode, layered on the raw JSON like #765's env rows. In rows mode the
+        // buckets + defaultMode are the source of truth for the WHOLE permissions
+        // object (it has no other keys); a shape the rows can't show (unknown key,
+        // non-string rule, unlisted mode) falls back to raw. `rowSeq` mints stable
+        // per-row ids so x-for keys on identity, not array index.
+        permissions: {
+          text: "", orig: "", hash: null,
+          mode: "rows",
+          buckets: [
+            { key: "allow", label: "Allow", rows: [] },
+            { key: "deny", label: "Deny", rows: [] },
+            { key: "ask", label: "Ask", rows: [] },
+          ],
+          defaultMode: "", rowsError: "", rowSeq: 0,
+        },
         hooks: { text: "", orig: "", hash: null },
         // Subagents (#773 slice C): a list surface (list + per-agent markdown editor),
         // user/project only, with read-only built-ins/plugins.
@@ -1309,6 +1324,7 @@
       _reloadSurface(surface, myGen) {
         if (surface === "claude-md") return this._loadClaudeMd(myGen);
         if (surface === "settings") return this._loadSettings(myGen);
+        if (surface === "permissions") return this._loadPermissions(myGen);
         if (surface === "subagents") return this._loadSubagents(myGen);
         if (surface === "mcp") return this._loadMcp(myGen);
         if (surface === "skills") return this._loadSkills(myGen);
@@ -1534,6 +1550,151 @@
         return "Duplicate key" + (dupes.size > 1 ? "s" : "") + " — rename or remove to save: " +
           [...dupes].join(", ");
       },
+      // --- #958 Part 5: friendly permissions rows over allow/deny/ask + defaultMode --
+      // The permissions object has ONLY these keys, so the rows are the source of truth
+      // for the WHOLE object (no non-row keys to preserve, unlike settings' env). Rules
+      // are opaque, never-secret strings (no mask round-trip). Anything the rows can't
+      // represent falls back to raw, so nothing is ever hidden or silently dropped.
+      async _loadPermissions(myGen) {
+        const c = this.configMgmt;
+        await this._loadJsonSurface("permissions", myGen);
+        if (c.gen !== myGen) return;  // superseded — skip the row rebuild
+        // Rebuild the rows from the freshly loaded JSON; an unrepresentable shape
+        // (unknown key, non-string rule, unlisted mode) drops to raw rather than
+        // silently showing an empty/partial editor.
+        if (!c.error && !this._permissionsRowsFromText()) c.permissions.mode = "raw";
+      },
+      // The recognized defaultMode options = the canonical labels minus the footgun-
+      // gated bypassPermissions (mirrors the backend's RECOGNIZED_MODES) — never a
+      // hand-listed copy. {value, label} so the <select> renders friendly text.
+      configMgmtPermissionModeOptions() {
+        return Object.keys(PERMISSION_LABELS)
+          .filter((m) => m !== "bypassPermissions")
+          .map((m) => ({ value: m, label: (PERMISSION_LABELS[m] && PERMISSION_LABELS[m].long) || m }));
+      },
+      // Canonicalize a permissions-shaped object into the saved JSON: non-empty rules
+      // per bucket kept VERBATIM (opaque data — never trimmed/rewritten), buckets dropped
+      // when empty, defaultMode only when set. Both rows-dirty sides run through this so a
+      // freshly loaded doc never reads dirty.
+      _permissionsCanonicalize(obj) {
+        const out = {};
+        for (const key of ["allow", "deny", "ask"]) {
+          const src = obj[key];
+          if (!Array.isArray(src)) continue;
+          const vals = [];
+          for (const r of src) {
+            // Rules are OPAQUE data the backend stores verbatim — never trim/rewrite
+            // them (that could silently change the matched policy). Drop only a truly
+            // empty "" row (an untouched blank the user added / cleared); a whitespace
+            // rule is a real, non-empty rule the backend accepts, so it's preserved.
+            const v = typeof r === "string" ? r : "";
+            if (v !== "") vals.push(v);
+          }
+          if (vals.length) out[key] = vals;
+        }
+        if (typeof obj.defaultMode === "string" && obj.defaultMode) out.defaultMode = obj.defaultMode;
+        return JSON.stringify(out, null, 2);
+      },
+      // Serialize the current buckets + defaultMode into the saved permissions JSON.
+      // Pure (no state mutation) so it's safe to call from configMgmtDirty every render.
+      _permissionsSerialized() {
+        const p = this.configMgmt.permissions;
+        const obj = {};
+        for (const b of p.buckets) obj[b.key] = b.rows.map((r) => r.value);
+        obj.defaultMode = p.defaultMode;
+        return this._permissionsCanonicalize(obj);
+      },
+      // Normalize a permissions JSON string through the SAME canonicalization the rows
+      // apply, so an on-disk empty bucket / unset mode doesn't read as a phantom change.
+      // Falls back to the input verbatim for a non-object / unparseable text.
+      _permissionsNormalize(text) {
+        let obj;
+        try { obj = JSON.parse(text || "{}"); } catch (e) { return text; }
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return text;
+        return this._permissionsCanonicalize(obj);
+      },
+      // Rebuild the buckets + defaultMode from permissions.text. Returns false (and sets
+      // rowsError) for any shape the rows can't represent without lying — the caller then
+      // stays in raw. Never coerces: an unknown key, a non-string rule, or a defaultMode
+      // the editor doesn't offer (incl. the footgun bypassPermissions) sends you to raw.
+      _permissionsRowsFromText() {
+        const p = this.configMgmt.permissions;
+        let obj;
+        try { obj = JSON.parse(p.text || "{}"); }
+        catch (e) { p.rowsError = "Fix the JSON in Raw view before using rows."; return false; }
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+          p.rowsError = "permissions must be a JSON object to use rows."; return false;
+        }
+        const known = new Set(["allow", "deny", "ask", "defaultMode"]);
+        const unknown = Object.keys(obj).filter((k) => !known.has(k));
+        if (unknown.length) {
+          p.rowsError = "permissions has keys the rows can't show (" + unknown.join(", ") +
+            ") — edit in Raw JSON."; return false;
+        }
+        const buckets = [];
+        for (const [key, label] of [["allow", "Allow"], ["deny", "Deny"], ["ask", "Ask"]]) {
+          const src = obj[key];
+          const rows = [];
+          if (src !== undefined) {
+            if (!Array.isArray(src)) {
+              p.rowsError = key + " must be a list of rule strings — edit in Raw JSON."; return false;
+            }
+            for (const v of src) {
+              if (typeof v !== "string") {
+                p.rowsError = key + " has a non-text rule — edit in Raw JSON."; return false;
+              }
+              rows.push({ id: ++p.rowSeq, value: v });
+            }
+          }
+          buckets.push({ key, label, rows });
+        }
+        let dm = "";
+        if (obj.defaultMode !== undefined) {
+          const ok = typeof obj.defaultMode === "string" &&
+            this.configMgmtPermissionModeOptions().some((o) => o.value === obj.defaultMode);
+          if (!ok) {
+            p.rowsError = "defaultMode isn't one the rows offer — edit in Raw JSON."; return false;
+          }
+          dm = obj.defaultMode;
+        }
+        p.buckets = buckets; p.defaultMode = dm; p.rowsError = ""; return true;
+      },
+      configMgmtPermissionsMode(mode) {
+        const p = this.configMgmt.permissions;
+        if (p.mode === mode) return;
+        if (mode === "raw") {
+          // Materialize the rows into raw. Keep the loaded text VERBATIM when the rows
+          // carry no semantic change (the stored doc may not be canonical — key order,
+          // an empty bucket, whitespace), so a no-edit Rows→Raw toggle doesn't read as
+          // unsaved under raw's literal dirty-check; otherwise show the canonical edits.
+          const ser = this._permissionsSerialized();
+          p.text = ser === this._permissionsNormalize(p.orig) ? p.orig : ser;
+          p.mode = "raw"; p.rowsError = ""; return;
+        }
+        // Entering rows: rebuild from the (possibly raw-edited) text; an unrepresentable
+        // shape can't be shown as rows, so stay in raw with the hint.
+        if (this._permissionsRowsFromText()) p.mode = "rows";
+      },
+      _permBucket(key) {
+        return this.configMgmt.permissions.buckets.find((b) => b.key === key);
+      },
+      configMgmtAddPermRow(key) {
+        const p = this.configMgmt.permissions;
+        const b = this._permBucket(key);
+        if (!b) return;
+        b.rows.push({ id: ++p.rowSeq, value: "" });
+        // A blank row is dropped on serialize, so it can't dirty the doc until typed.
+        // Move focus to the new field for keyboard flow.
+        this.$nextTick(() => {
+          const inputs = document.querySelectorAll('[data-test="cm-perm-rule-' + key + '"]');
+          const last = inputs[inputs.length - 1];
+          if (last && last.focus) last.focus();
+        });
+      },
+      configMgmtRemovePermRow(key, idx) {
+        const b = this._permBucket(key);
+        if (b) b.rows.splice(idx, 1);
+      },
       configMgmtDirty() {
         const c = this.configMgmt;
         if (c.surface === "claude-md") return c.claudeMd.content !== c.claudeMd.orig;
@@ -1547,7 +1708,18 @@
           const ser = this._settingsEnvSerialized();
           return ser !== null && ser !== this._settingsNormalize(c.settings.orig);
         }
-        const st = c[c.surface];  // settings(raw) | permissions | hooks — JSON surfaces
+        // Permissions ROWS mode: the buckets + defaultMode are the canonical source of
+        // truth, so compare their serialized form against the canonicalized original
+        // (the stored doc may not be canonical — key order, an empty `"deny": []`).
+        // RAW mode falls through to the literal text compare below (like settings/hooks),
+        // so clearing the box or editing any key — even one the rows can't show — reads
+        // as dirty. The no-edit Rows→Raw toggle is kept clean by preserving the original
+        // text verbatim on switch (see configMgmtPermissionsMode), not by canonicalizing
+        // here — canonicalizing raw would wrongly hide an edit to an unrepresentable key.
+        if (c.surface === "permissions" && c.permissions.mode === "rows") {
+          return this._permissionsSerialized() !== this._permissionsNormalize(c.permissions.orig);
+        }
+        const st = c[c.surface];  // settings(raw) | permissions(raw) | hooks — literal dirty
         return st ? st.text !== st.orig : false;
       },
       configMgmtCanSave() {
@@ -1600,10 +1772,13 @@
       async _saveJsonSurface(surface, myGen) {
         const c = this.configMgmt;
         const st = c[surface];
-        // Settings in rows mode saves the rows' serialized form (the raw text is only
-        // materialized on a mode switch); every other JSON surface saves its textarea.
-        const raw = (surface === "settings" && c.settings.mode === "rows")
-          ? this._settingsEnvSerialized() : st.text;
+        // Settings/permissions in rows mode save the rows' serialized form (the raw
+        // text is only materialized on a mode switch); every other JSON surface (and
+        // raw mode) saves its textarea.
+        let raw;
+        if (surface === "settings" && c.settings.mode === "rows") raw = this._settingsEnvSerialized();
+        else if (surface === "permissions" && c.permissions.mode === "rows") raw = this._permissionsSerialized();
+        else raw = st.text;
         // Fail closed: a null serialization means the base JSON is unusable — refuse to
         // write rather than send a body that would drop the non-env keys.
         if (raw === null) { c.error = "settings.json is not valid — switch to Raw JSON to fix it."; return; }
