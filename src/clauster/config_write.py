@@ -47,6 +47,7 @@ The gate ordering the children must follow (each step aborts before the write)::
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
@@ -311,6 +312,31 @@ def redact_secret_lines(text: str) -> str:
             masked = f"{kv.group('prefix')}{REDACTION_SENTINEL}{kv.group('trail')}"
         out.append(masked + eol)
     return "".join(out)
+
+
+#: Request-scoped sink for the redacted argv of the ``claude …`` commands a config-write
+#: spawns (#958 Part 6). A route sets this to a fresh list around the write; each CLI
+#: ``_run`` appends its ``[verb, *redacted-args]`` via :func:`record_cli_argv`, so the audit
+#: line can record exactly what ran without threading an accumulator through every writer.
+#: Default ``None`` = "not capturing" (the CLI runs normally, nothing is recorded).
+cli_argv_sink: contextvars.ContextVar[list[list[str]] | None] = contextvars.ContextVar(
+    "cli_argv_sink", default=None
+)
+
+
+def record_cli_argv(verb: str, args: list[str]) -> None:
+    """Append ``[verb, *args]`` (each arg redacted) to the active :data:`cli_argv_sink`, if any.
+
+    A no-op when no route is capturing (``cli_argv_sink`` is ``None``). Each arg is run
+    through :func:`redact_secret_lines` as defense-in-depth — the CLI paths already keep
+    secrets off argv by construction, but the audit trail must never persist one even so.
+    The binary path itself is intentionally not recorded (host-specific noise, not a side
+    effect). Propagates across ``asyncio.to_thread`` because the sink is a mutable list the
+    worker thread shares with the setting context.
+    """
+    sink = cli_argv_sink.get()
+    if sink is not None:
+        sink.append([verb, *(redact_secret_lines(a) for a in args)])
 
 
 def merge_redacted(incoming: Any, stored: Any) -> Any:

@@ -2,15 +2,18 @@
 
 Every committed config-write records ONE compact JSON line to ``config_audit.log``
 under the deployment state dir — surface, scope, target file, and the keys touched.
-For MCP-server writes it additionally records a **before/after fingerprint** of each
-affected file (:func:`file_fingerprints` / :func:`diff_fingerprints`) — for BOTH the
-direct writer and the CLI path, since either can touch several files. The CLI case is
-the motivator: the subprocess (`claude mcp …`) does Claude Code's own bookkeeping
-across files, so recording which files changed — by path + sha256, never their
-contents — makes that side effect visible. It answers the
-forensic question "where did this config change land?" without trawling the app log.
-(Recording the redacted ``claude …`` argv itself, and extending the fingerprint to
-the plugins/reset/approvals handlers, is a further slice of #958 Part 6.)
+For the MCP + plugins surfaces it additionally records, in ``extra``:
+
+* a **before/after fingerprint** of each affected file (:func:`file_fingerprints` /
+  :func:`diff_fingerprints`) — by path + sha256 + byte size, never the file contents —
+  so the several files a write touches (``~/.claude.json``, ``settings.json`` /
+  ``settings.local.json``, ``.mcp.json``, ``known_marketplaces.json``) are all visible; and
+* the **redacted ``claude mcp``/``claude plugin`` argv** the CLI actually ran, captured via
+  :data:`~clauster.config_write.cli_argv_sink` (empty for the non-spawning direct writers).
+
+The subprocess (`claude mcp/plugin …`) does Claude Code's own bookkeeping across files, so
+this answers the forensic question "where did this change land, and what ran?" without
+trawling the app log.
 
 Generalises #818's CLAUDE.md-only audit into one trail for every surface. The append
 is **best-effort**: the config write already committed before we get here, so a failed

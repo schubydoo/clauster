@@ -54,6 +54,26 @@ def _fake_run(rc: int = 0, stdout: str = "", stderr: str = ""):
     return run, calls
 
 
+# --- record_cli_argv (#958 P6 argv capture) ----------------------------------------
+
+
+def test_record_cli_argv_noop_without_sink() -> None:
+    # No active sink -> no-op, never raises (the CLI runs normally, uncaptured).
+    cw.record_cli_argv("mcp", ["add-json", "srv"])
+
+
+def test_record_cli_argv_captures_and_redacts() -> None:
+    sink: list = []
+    token = cw.cli_argv_sink.set(sink)
+    try:
+        cw.record_cli_argv("plugin", ["marketplace", "add", "${MARKET_TOKEN}"])
+    finally:
+        cw.cli_argv_sink.reset(token)
+    assert sink[0][:3] == ["plugin", "marketplace", "add"]
+    # A ${…} interpolation is masked in place (defense-in-depth) — never the raw value.
+    assert "${MARKET_TOKEN}" not in sink[0][3] and cw.REDACTION_SENTINEL in sink[0][3]
+
+
 # --- entry_needs_direct_write (routing predicate) -----------------------------------
 
 
@@ -715,6 +735,34 @@ def test_route_server_add_project_scope_via_cli(
     ]
     assert record["cwd"] == str((projects_root / "alpha").resolve())
     assert record["has_client_secret_env"] is False
+
+
+def test_route_server_add_audits_redacted_argv(
+    write_config, tmp_path, projects_root, monkeypatch
+) -> None:
+    # #958 P6: a CLI-driven add records the redacted `claude mcp add-json …` argv it ran in
+    # the shared config_audit.log. Proves the argv sink set by the route propagates into the
+    # worker-thread `_run` across asyncio.to_thread (the reason it's a contextvar).
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_STDOUT", "Added stdio MCP server srv to project config")
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "add",
+                "name": "srv",
+                "entry": {"command": "node"},
+            },
+        )
+        assert resp.status_code == 200
+    lines = (tmp_path / ".s" / "config_audit.log").read_text(encoding="utf-8").splitlines()
+    entry = next(e for e in map(json.loads, lines) if e["surface"] == "mcp")
+    assert entry["argv"] == [
+        ["mcp", "add-json", "srv", json.dumps({"command": "node"}), "--scope", "project"]
+    ]
+    assert "files" in entry  # the changed-file fingerprints ride alongside (see test_config_audit)
 
 
 def test_route_server_add_conflict_is_409(
