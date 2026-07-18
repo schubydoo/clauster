@@ -93,6 +93,10 @@ def _atomic_write_config(target: Path, text: str) -> None:
     disturbing the directory it lives in.
     """
     directory = target.parent
+    # Create missing parents (e.g. a fresh `-c /opt/clauster/prod/clauster.yml`) with default
+    # permissions. exist_ok=True never re-chmods an EXISTING directory, so a shared cwd is
+    # left as-is — satisfying both "create the parent" and "don't tighten it to 0700".
+    directory.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=target.name + ".", suffix=".tmp")
     tmp = Path(tmp_name)
     try:

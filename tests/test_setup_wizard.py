@@ -93,6 +93,17 @@ def test_atomic_write_config_cleans_up_temp_on_failure(tmp_path, monkeypatch):
     assert not list(tmp_path.glob("clauster.yml.*.tmp"))  # the temp file was removed
 
 
+def test_write_creates_missing_parent_dirs(tmp_path):
+    # A fresh `-c /opt/clauster/prod/clauster.yml` whose parents don't exist yet must still
+    # complete setup (the wizard creates them) rather than 500 (#978 review).
+    projects = tmp_path / "code"
+    projects.mkdir()
+    write_path = tmp_path / "new" / "nested" / "clauster.yml"
+    client = TestClient(setup_wizard.create_setup_app(write_path, port=7621))
+    assert client.post("/setup", json=_valid_payload(projects)).status_code == 200
+    assert write_path.exists()
+
+
 def test_second_submit_after_completion_conflicts(tmp_path):
     app, client, projects, _ = _app_and_paths(tmp_path)
     assert client.post("/setup", json=_valid_payload(projects)).status_code == 200
