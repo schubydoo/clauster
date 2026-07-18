@@ -1572,9 +1572,10 @@
           .filter((m) => m !== "bypassPermissions")
           .map((m) => ({ value: m, label: (PERMISSION_LABELS[m] && PERMISSION_LABELS[m].long) || m }));
       },
-      // Canonicalize a permissions-shaped object into the saved JSON: trimmed non-empty
-      // rules per bucket, buckets dropped when empty, defaultMode only when set. BOTH
-      // dirty-check sides run through this so a freshly loaded doc never reads dirty.
+      // Canonicalize a permissions-shaped object into the saved JSON: non-empty rules
+      // per bucket kept VERBATIM (opaque data — never trimmed/rewritten), buckets dropped
+      // when empty, defaultMode only when set. Both rows-dirty sides run through this so a
+      // freshly loaded doc never reads dirty.
       _permissionsCanonicalize(obj) {
         const out = {};
         for (const key of ["allow", "deny", "ask"]) {
@@ -1662,8 +1663,12 @@
         const p = this.configMgmt.permissions;
         if (p.mode === mode) return;
         if (mode === "raw") {
-          // Materialize the rows into raw so the escape hatch shows current edits.
-          p.text = this._permissionsSerialized();
+          // Materialize the rows into raw. Keep the loaded text VERBATIM when the rows
+          // carry no semantic change (the stored doc may not be canonical — key order,
+          // an empty bucket, whitespace), so a no-edit Rows→Raw toggle doesn't read as
+          // unsaved under raw's literal dirty-check; otherwise show the canonical edits.
+          const ser = this._permissionsSerialized();
+          p.text = ser === this._permissionsNormalize(p.orig) ? p.orig : ser;
           p.mode = "raw"; p.rowsError = ""; return;
         }
         // Entering rows: rebuild from the (possibly raw-edited) text; an unrepresentable
@@ -1703,19 +1708,18 @@
           const ser = this._settingsEnvSerialized();
           return ser !== null && ser !== this._settingsNormalize(c.settings.orig);
         }
-        // Permissions is fully canonicalizable (the rows own the WHOLE object — it has
-        // no free-form keys like settings' model/misc), so dirty compares the canonical
-        // CURRENT form (serialized rows, or the normalized raw text) against the
-        // normalized original in BOTH modes. Comparing canonical forms keeps a no-edit
-        // Rows→Raw toggle from reading dirty when the stored doc wasn't already in
-        // canonical shape (key order, an empty `"deny": []` bucket, stray whitespace).
-        if (c.surface === "permissions") {
-          const cur = c.permissions.mode === "rows"
-            ? this._permissionsSerialized()
-            : this._permissionsNormalize(c.permissions.text);
-          return cur !== this._permissionsNormalize(c.permissions.orig);
+        // Permissions ROWS mode: the buckets + defaultMode are the canonical source of
+        // truth, so compare their serialized form against the canonicalized original
+        // (the stored doc may not be canonical — key order, an empty `"deny": []`).
+        // RAW mode falls through to the literal text compare below (like settings/hooks),
+        // so clearing the box or editing any key — even one the rows can't show — reads
+        // as dirty. The no-edit Rows→Raw toggle is kept clean by preserving the original
+        // text verbatim on switch (see configMgmtPermissionsMode), not by canonicalizing
+        // here — canonicalizing raw would wrongly hide an edit to an unrepresentable key.
+        if (c.surface === "permissions" && c.permissions.mode === "rows") {
+          return this._permissionsSerialized() !== this._permissionsNormalize(c.permissions.orig);
         }
-        const st = c[c.surface];  // settings(raw) | hooks — JSON surfaces
+        const st = c[c.surface];  // settings(raw) | permissions(raw) | hooks — literal dirty
         return st ? st.text !== st.orig : false;
       },
       configMgmtCanSave() {
