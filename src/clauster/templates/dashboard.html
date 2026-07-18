@@ -1656,9 +1656,15 @@
               </div>
               <!-- Effective (scope-merge provenance), project/local scope only -->
               <div class="mt-2" x-show="configMgmt.scope !== 'user'" x-cloak>
+                <!-- #958 Part 4: the disclosure read as plain, missable text — it lacked the
+                     caret + aria-expanded every other panel toggle (e.g. recent-toggle) carries.
+                     Match that pattern so it clearly reads AND announces as an expand/collapse. -->
                 <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="cm-effective-toggle"
-                        @click="configMgmtToggleEffective()"
-                        x-text="configMgmt.settings.showEffective ? 'Hide merged view' : 'Show merged (effective) view'"></button>
+                        @click="configMgmtToggleEffective()" :aria-expanded="configMgmt.settings.showEffective">
+                  <svg class="ico me-1" aria-hidden="true" x-show="configMgmt.settings.showEffective"><use href="#ic-caret-down"/></svg>
+                  <svg class="ico me-1" aria-hidden="true" x-show="!configMgmt.settings.showEffective"><use href="#ic-caret-right"/></svg>
+                  <span x-text="configMgmt.settings.showEffective ? 'Hide merged view' : 'Show merged (effective) view'"></span>
+                </button>
                 <div class="mt-2" x-show="configMgmt.settings.showEffective" x-cloak>
                   <div class="alert alert-danger py-1 small" x-show="configMgmt.settings.effectiveError" x-cloak
                        x-text="configMgmt.settings.effectiveError"></div>
