@@ -101,6 +101,10 @@
   const CLAUSTRUM_ENABLED = {{ claustrum_enabled | tojson }};  // claustrum.enabled — hosted live-view channel
   const JSON_HEADERS = Object.freeze({ "Content-Type": "application/json" });
   const CONFIG_MASK = "********";  // config-write redaction sentinel; leave in place to keep the stored value
+  // New-subagent frontmatter scaffold (#958 Part 5). Deliberately omits `name:` — the
+  // Name box is the single source and _syncAgentName injects it into the frontmatter on
+  // save. `description` is required (non-empty), so the operator fills it in.
+  const AGENT_TEMPLATE = "---\ndescription:\n---\n\n";
   // Browser (Web Notifications) channel (#541): the master switch + the per-event
   // toggles the client honours on a polled bridge status transition. crash/ready/stop
   // are the transitions the client can observe from /api/instances without a server push.
@@ -2037,7 +2041,32 @@
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenAgent fetch
         c.error = ""; c.saved = false; s.deletingName = "";
         s.editing = true; s.isNew = true;
-        s.name = ""; s.content = ""; s.orig = ""; s.hash = null; s.confirm = "";
+        s.name = ""; s.content = AGENT_TEMPLATE; s.orig = ""; s.hash = null; s.confirm = "";
+      },
+      // #958 Part 5: the Name box is the single source of a subagent's name. The backend
+      // requires the frontmatter `name:` to equal the filename, so rather than making the
+      // operator type it twice and keep them in sync, inject/replace the top-level `name:`
+      // in the content's YAML frontmatter from the Name box at save time. Creates a
+      // frontmatter block if the doc has none. `name` is a validated identifier (lowercase
+      // letters, digits, hyphens), so it never needs YAML quoting. Only the top-level
+      // `name:` line is touched (the `m` flag anchors to line-start — nested keys are safe).
+      _syncAgentName(content, name) {
+        const nm = (name || "").trim();
+        if (!nm) return content;  // canSave blocks a blank name; nothing to inject
+        const text = content || "";
+        const m = text.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n[\s\S]*|)$/);
+        if (!m) {
+          // No frontmatter block → wrap the doc in one carrying the name.
+          return "---\nname: " + nm + "\n---\n" + text;
+        }
+        let yaml = m[1];
+        const rest = m[2] || "";  // "" or "\n<body…>"
+        if (/^name[ \t]*:.*$/m.test(yaml)) {
+          yaml = yaml.replace(/^name[ \t]*:.*$/m, "name: " + nm);
+        } else {
+          yaml = "name: " + nm + (yaml ? "\n" + yaml : "");
+        }
+        return "---\n" + yaml + "\n---" + rest;
       },
       async configMgmtOpenAgent(name) {
         const c = this.configMgmt, s = c.subagents;
@@ -2079,7 +2108,9 @@
         const gen = c.gen; s.ops += 1; s.busy = true; c.error = ""; c.saved = false;
         try {
           const body = Object.assign(this._configMgmtTarget(), {
-            content: s.content, confirm: s.confirm, hash: s.hash,
+            // The Name box is authoritative — sync it into the frontmatter so the operator
+            // never types the name twice (the backend requires the two to match).
+            content: this._syncAgentName(s.content, s.name), confirm: s.confirm, hash: s.hash,
           });
           const res = await fetch(ROOT + "/api/config-write/subagents/" + encodeURIComponent(s.name), {
             method: "PUT", headers: JSON_HEADERS, body: JSON.stringify(body),
