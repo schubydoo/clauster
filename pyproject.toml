@@ -72,7 +72,10 @@ dev = [
     # silences the StarletteDeprecationWarning and moves the test client to the intended
     # backend. Dev-only — the shipped package's outbound-webhook client stays on httpx>=0.27
     # (unifying the production client on httpx2 is a separate follow-up per #888).
-    "httpx2>=2.5",
+    # Floor is >=2.7: 2.5.x signalled TestClient WebSocket disconnect differently, which
+    # stopped exercising the pty-screen WS-disconnect handler (a coverage regression #888
+    # deferred on); 2.7.0 restores the plain-httpx WebSocketDisconnect behaviour.
+    "httpx2>=2.7",
     "ruff>=0.8",
     "pyright>=1.1.390",
     "yamllint>=1.38",
