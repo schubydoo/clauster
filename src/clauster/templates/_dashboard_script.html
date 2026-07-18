@@ -1582,8 +1582,12 @@
           if (!Array.isArray(src)) continue;
           const vals = [];
           for (const r of src) {
-            const v = (typeof r === "string" ? r : "").trim();
-            if (v) vals.push(v);
+            // Rules are OPAQUE data the backend stores verbatim — never trim/rewrite
+            // them (that could silently change the matched policy). Drop only a truly
+            // empty "" row (an untouched blank the user added / cleared); a whitespace
+            // rule is a real, non-empty rule the backend accepts, so it's preserved.
+            const v = typeof r === "string" ? r : "";
+            if (v !== "") vals.push(v);
           }
           if (vals.length) out[key] = vals;
         }
