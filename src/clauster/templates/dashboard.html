@@ -2086,8 +2086,12 @@
                        :readonly="!configMgmt.subagents.isNew" placeholder="my-agent">
                 <label class="form-label small" for="cm-agent-content">Definition (Markdown + frontmatter)</label>
                 <textarea id="cm-agent-content" class="form-control form-control-sm font-monospace" rows="11"
-                          data-test="cm-agent-content" spellcheck="false"
+                          data-test="cm-agent-content" spellcheck="false" aria-describedby="cm-agent-name-hint"
                           x-model="configMgmt.subagents.content"></textarea>
+                <div class="form-hint small mt-1" id="cm-agent-name-hint" data-test="cm-agent-name-hint">
+                  The <strong>Name</strong> above is the single source — it's written into the frontmatter
+                  <code>name:</code> automatically on save, so you don't need to repeat it here.
+                </div>
                 <div class="mt-2">
                   <label class="form-label small mb-1" for="cm-agent-confirm">
                     Type <code x-text="configMgmtConfirmToken()"></code> to confirm

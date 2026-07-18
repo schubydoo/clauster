@@ -324,6 +324,42 @@ def test_config_mgmt_new_subagent_round_trip(
     assert "an e2e agent" in saved.read_text(encoding="utf-8")
 
 
+def test_config_mgmt_new_subagent_name_single_source(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """The Name box alone drives both the filename and the frontmatter name (#958 Part 5).
+
+    The content carries NO `name:` line — the editor injects it from the Name box on save,
+    so the backend's "frontmatter name must match the filename" check passes without the
+    operator typing the name twice.
+    """
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')
+
+    browser.fill('[data-test="cm-agent-name"]', "solo-agent")
+    # No `name:` in the frontmatter — just description + body.
+    browser.fill(
+        '[data-test="cm-agent-content"]',
+        "---\ndescription: single-source agent\n---\nDo it.\n",
+    )
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    browser.click('[data-test="cm-agent-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    saved = projects_root / "alpha" / ".claude" / "agents" / "solo-agent.md"
+    assert saved.exists(), "expected alpha/.claude/agents/solo-agent.md to be written"
+    text = saved.read_text(encoding="utf-8")
+    assert "name: solo-agent" in text  # injected from the Name box
+    assert "single-source agent" in text
+
+
 def test_config_mgmt_mcp_tab_loads(browser: AgentBrowser, config_mgmt_server: Server) -> None:
     """The MCP surface renders its list controls once the servers load."""
     _open_modal(browser, config_mgmt_server)

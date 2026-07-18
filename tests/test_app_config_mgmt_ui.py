@@ -173,6 +173,11 @@ def test_subagents_surface_present_when_enabled(write_config):
     assert 'data-test="cm-agent-editor"' in html
     # The Local scope tab is conditionally hidden for user/project-only surfaces.
     assert "configMgmtSurfaceHasLocal()" in html
+    # #958 Part 5: the Name box is the single source — auto-synced into the frontmatter
+    # on save (no double entry), with a hint and a seeded new-agent template.
+    assert 'data-test="cm-agent-name-hint"' in html
+    assert "_syncAgentName(" in html
+    assert "const AGENT_TEMPLATE =" in html
 
 
 def test_mcp_surface_present_when_enabled(write_config):
