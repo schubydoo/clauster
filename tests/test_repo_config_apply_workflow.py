@@ -1,7 +1,7 @@
 # Guard for the repo-config APPLY workflow (#307) — the write half of the advisory
 # drift check. This workflow holds a privileged token and mutates repo labels/settings,
 # so its safety rests entirely on in-workflow invariants; these tests fail CI if any is
-# silently dropped (the same posture as test_workflow_guards for the Claude workflows).
+# silently dropped (a parse-and-assert guard over the workflow's security posture).
 
 import json
 import re
