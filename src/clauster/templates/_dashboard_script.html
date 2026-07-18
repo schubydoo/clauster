@@ -1734,6 +1734,11 @@
           if (!events.has(event)) return null;
           const groups = obj[event];
           if (!Array.isArray(groups)) return null;
+          // Two groups sharing a matcher would MERGE into one on re-serialize (rows
+          // regroup by (event, matcher)), which can reorder firing across an intervening
+          // different-matcher group — a semantic change. Fall back to raw instead of
+          // silently rewriting: a doc that can't round-trip losslessly isn't rows-shaped.
+          const seenMatchers = new Set();
           for (const g of groups) {
             if (g === null || typeof g !== "object" || Array.isArray(g)) return null;
             for (const k of Object.keys(g)) { if (k !== "matcher" && k !== "hooks") return null; }
@@ -1742,6 +1747,8 @@
               if (typeof g.matcher !== "string") return null;
               matcher = g.matcher;
             }
+            if (seenMatchers.has(matcher)) return null;  // duplicate group → raw
+            seenMatchers.add(matcher);
             const hooks = g.hooks;
             if (!Array.isArray(hooks) || !hooks.length) return null;
             for (const hk of hooks) {
@@ -1751,6 +1758,11 @@
               }
               if (hk.type !== "command") return null;
               if (typeof hk.command !== "string" || !hk.command) return null;
+              // Mirror the backend's #770 plugin-owned guard: a command referencing the
+              // plugin-root interpolation is plugin-owned (this surface can't write it —
+              // the backend 422s the whole write). Keep it in raw where it's visible,
+              // never as an invisible editable row that poisons every save.
+              if (hk.command.indexOf("CLAUDE_PLUGIN_ROOT") !== -1) return null;
               let timeout = "";
               if (hk.timeout !== undefined) {
                 if (typeof hk.timeout !== "number" || !Number.isInteger(hk.timeout)) return null;

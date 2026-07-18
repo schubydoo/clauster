@@ -518,6 +518,79 @@ def test_config_mgmt_hooks_rows_round_trip(
     }
 
 
+def _seed_alpha_settings(config_mgmt_server: Server, settings: dict) -> None:
+    """Write alpha's .claude/settings.json directly (bypassing the write API) for a test."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    path = projects_root / "alpha" / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+
+def test_config_mgmt_hooks_duplicate_matcher_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Duplicate (event, matcher) groups can't round-trip as rows → open in Raw with a hint."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo a"}]},
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo b"}]},
+                ]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Non-representable → raw fallback (verbatim) with the explanatory error, never a
+    # silent regroup that would reorder firing.
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
+
+
+def test_config_mgmt_hooks_plugin_owned_command_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A hook command referencing CLAUDE_PLUGIN_ROOT stays in Raw (visible), never a row."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/run.sh"}]}
+                ]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
+
+
+def test_config_mgmt_hooks_invalid_timeout_blocks_save(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A non-integer timeout warns and disables Save rather than being silently dropped."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')
+    browser.fill('[data-test="cm-hook-command"]', "echo x")
+    browser.fill('[data-test="cm-hook-timeout"]', "1.5")  # not a whole number
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.expect_visible('[data-test="cm-hooks-timeout-warn"]')
+    browser.expect_disabled('[data-test="cm-save"]')
+
+
 def test_config_mgmt_subagent_delete_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:
