@@ -591,6 +591,56 @@ def test_config_mgmt_hooks_invalid_timeout_blocks_save(
     browser.expect_disabled('[data-test="cm-save"]')
 
 
+def test_config_mgmt_hooks_prototype_matcher_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A matcher named __proto__ (a backend-valid opaque string) groups correctly via rows."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-matcher"]')
+    browser.select('[data-test="cm-hook-event"]', "PreToolUse")
+    browser.fill('[data-test="cm-hook-matcher"]', "__proto__")
+    browser.fill('[data-test="cm-hook-command"]', "echo proto")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "PreToolUse": [
+            {"matcher": "__proto__", "hooks": [{"type": "command", "command": "echo proto"}]}
+        ]
+    }
+
+
+def test_config_mgmt_hooks_negative_timeout_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A hook with a negative timeout (backend-lax) opens in Raw, not an unsavable row."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "echo x", "timeout": -1}]}]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
+
+
 def test_config_mgmt_subagent_delete_round_trip(
     browser: AgentBrowser, config_mgmt_server: Server
 ) -> None:

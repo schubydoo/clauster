@@ -1765,7 +1765,12 @@
               if (hk.command.indexOf("CLAUDE_PLUGIN_ROOT") !== -1) return null;
               let timeout = "";
               if (hk.timeout !== undefined) {
-                if (typeof hk.timeout !== "number" || !Number.isInteger(hk.timeout)) return null;
+                // The rows editor treats timeout as a whole number ≥ 0; the backend is
+                // laxer (any int), so a negative timeout is representable on disk but not
+                // in rows. Fall back to raw rather than opening it as an unsavable row.
+                if (typeof hk.timeout !== "number" || !Number.isInteger(hk.timeout) || hk.timeout < 0) {
+                  return null;
+                }
                 timeout = String(hk.timeout);
               }
               rows.push({ event, matcher, command: hk.command, timeout });
@@ -1804,18 +1809,21 @@
       // Blank-command rows are dropped; commands + matchers are kept verbatim (opaque).
       _serializeHookRows(rows) {
         const out = {};
-        const idx = {};  // event -> { matcher -> group }
+        // event -> Map(matcher -> group). A Map (not a plain object) so a matcher named
+        // `__proto__`/`constructor`/`toString` — all backend-valid opaque strings — keys
+        // by value instead of hitting Object.prototype and corrupting the grouping.
+        const idx = {};
         for (const r of rows) {
           const command = r.command;
           if (!command) continue;  // an untouched/cleared row isn't a hook
           const event = r.event;
           if (!event || !HOOK_EVENTS.includes(event)) continue;
           const matcher = r.matcher || "";
-          if (!out[event]) { out[event] = []; idx[event] = {}; }
-          let group = idx[event][matcher];
+          if (!out[event]) { out[event] = []; idx[event] = new Map(); }
+          let group = idx[event].get(matcher);
           if (!group) {
             group = matcher ? { matcher: matcher, hooks: [] } : { hooks: [] };
-            idx[event][matcher] = group;
+            idx[event].set(matcher, group);
             out[event].push(group);
           }
           const hook = { type: "command", command: command };
