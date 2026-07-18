@@ -101,6 +101,17 @@ def test_record_appends_one_line_per_call(tmp_path: Path) -> None:
     assert len(lines) == 2 and json.loads(lines[1])["action"] == "delete"
 
 
+async def test_arecord_offloads_and_appends(tmp_path: Path) -> None:
+    # The async entry point offloads to a thread (so a slow state dir can't stall the loop)
+    # and forwards the same keyword fields to record().
+    state = tmp_path / "state"
+    await config_audit.arecord(
+        state, surface="hooks", scope="project", target="/p", action="update", keys=["a"]
+    )
+    entry = json.loads((state / "config_audit.log").read_text().strip())
+    assert entry["surface"] == "hooks" and entry["keys"] == ["a"]
+
+
 # --- route wiring: representative surfaces ----------------------------------
 
 

@@ -19,6 +19,7 @@ does not re-derive secrets.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -82,3 +83,16 @@ def record(
             scope,
             exc,
         )
+
+
+async def arecord(state_dir: Path | None, **fields: Any) -> None:
+    """Offload :func:`record` to a worker thread — the async-handler entry point.
+
+    The config writers already run their filesystem work via ``asyncio.to_thread``; the
+    audit append is filesystem work too, so it is offloaded the same way rather than run
+    on the event-loop thread, where a slow state dir would stall unrelated requests. Same
+    best-effort contract: never raises. ``fields`` are the keyword-only args of
+    :func:`record` (``surface`` / ``scope`` / ``target`` / ``action`` / ``actor`` / ``keys``
+    / ``extra``).
+    """
+    await asyncio.to_thread(lambda: record(state_dir, **fields))

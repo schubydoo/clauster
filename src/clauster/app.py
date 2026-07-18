@@ -1967,7 +1967,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     await asyncio.to_thread(write_user_fn, user_path, payload)
                 except config_write.ConfigWriteError as exc:
                     raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface=surface,
                 scope="user",
@@ -2008,7 +2008,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     raise _map_config_write_error(exc) from exc
             # The written file is the project dir's settings file (hash-guarded surfaces) or
             # the ~/.claude.json the MCP local writer nests into; `surface` disambiguates.
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface=surface,
                 scope="local",
@@ -2033,7 +2033,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(write_project_fn, project_dir, payload, expected)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface=surface,
             scope="project",
@@ -2198,7 +2198,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
         # Base audit line for the mutation (direct OR CLI-driven). The redacted `claude mcp`
         # argv + before/after file diff for the CLI path is the follow-up slice of #958 P6.
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="mcp",
             scope=scope,  # type: ignore[arg-type]
@@ -2246,7 +2246,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="mcp-approvals",
             scope="project",
@@ -2273,7 +2273,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
         # CLI-driven; the redacted-argv + before/after diff is the follow-up slice of #958 P6.
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="mcp-approvals",
             scope="project",
@@ -2512,7 +2512,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface="claude-md",
                 scope="user",
@@ -2531,7 +2531,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(write_fn, project_dir, content, expected)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="claude-md",
             scope=scope,
@@ -2624,7 +2624,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface="subagents",
                 scope="user",
@@ -2640,7 +2640,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="subagents",
             scope="project",
@@ -2670,7 +2670,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface="subagents",
                 scope="user",
@@ -2687,7 +2687,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="subagents",
             scope="project",
@@ -2825,7 +2825,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface="skills",
                 scope="user",
@@ -2847,7 +2847,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="skills",
             scope="project",
@@ -2880,7 +2880,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface="skills",
                 scope="user",
@@ -2897,7 +2897,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="skills",
             scope="project",
@@ -2983,7 +2983,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface="skill-overrides",
                 scope="user",
@@ -3004,7 +3004,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface="skill-overrides",
                 scope="local",
@@ -3021,7 +3021,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="skill-overrides",
             scope="project",
@@ -3119,7 +3119,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 )
             except config_write.ConfigWriteError as exc:
                 raise _map_config_write_error(exc) from exc
-            config_audit.record(
+            await config_audit.arecord(
                 config.state_dir,
                 surface="settings",
                 scope="user",
@@ -3139,7 +3139,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(write_fn, project_dir, payload, expected)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        config_audit.record(
+        await config_audit.arecord(
             config.state_dir,
             surface="settings",
             scope=scope,
@@ -3346,6 +3346,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(_work)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        # Audit right after the mutation commits, BEFORE the gitignore housekeeping — a
+        # failure of that step must not drop the committed change from the trail (#958 P6).
+        # CLI-driven; redacted argv + before/after diff is the follow-up slice of #958 P6.
+        await config_audit.arecord(
+            config.state_dir,
+            surface="plugins",
+            scope=scope,  # type: ignore[arg-type]
+            target=plugin_id,
+            action=op,  # type: ignore[arg-type]
+            actor=_SESSION_USER,
+        )
         if scope == "local":
             # The CLI writes settings.local.json directly (never through clauster's
             # own writer), so clauster must gitignore it itself here -- the
@@ -3354,16 +3365,6 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(
                 config_write.ensure_gitignored, cwd, ".claude/settings.local.json"
             )
-
-        # CLI-driven; redacted argv + before/after diff is the follow-up slice of #958 P6.
-        config_audit.record(
-            config.state_dir,
-            surface="plugins",
-            scope=scope,  # type: ignore[arg-type]
-            target=plugin_id,
-            action=op,  # type: ignore[arg-type]
-            actor=_SESSION_USER,
-        )
         result = {"scope": scope, "plugin": plugin_id, "op": op, "ok": True}
         if scope != "user":
             result["project"] = project
@@ -3497,6 +3498,17 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(_work)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
+        # Audit right after the mutation commits, BEFORE the gitignore housekeeping — a
+        # failure of that step must not drop the committed change from the trail (#958 P6).
+        # CLI-driven; redacted argv + before/after diff is the follow-up slice of #958 P6.
+        await config_audit.arecord(
+            config.state_dir,
+            surface="marketplaces",
+            scope=scope,  # type: ignore[arg-type]
+            target=(name or source or ""),
+            action=op,  # type: ignore[arg-type]
+            actor=_SESSION_USER,
+        )
         if scope == "local" and op in ("add", "remove"):
             # Only add/remove actually touch the scope's settings file (`update`
             # merely refreshes a git checkout, writing no settings key) -- see the
@@ -3506,16 +3518,6 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             await asyncio.to_thread(
                 config_write.ensure_gitignored, cwd, ".claude/settings.local.json"
             )
-
-        # CLI-driven; redacted argv + before/after diff is the follow-up slice of #958 P6.
-        config_audit.record(
-            config.state_dir,
-            surface="marketplaces",
-            scope=scope,  # type: ignore[arg-type]
-            target=(name or source or ""),
-            action=op,  # type: ignore[arg-type]
-            actor=_SESSION_USER,
-        )
         result: dict[str, Any] = {"scope": scope, "op": op, "ok": True}
         if name is not None:
             result["name"] = name
