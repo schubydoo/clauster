@@ -255,6 +255,47 @@ def test_session_malformed_epoch_reads_as_zero():
     assert auth.read_session(s, tok, 3600, current_epoch=1) is None
 
 
+# ----- step-up elevation (#978) --------------------------------------------
+
+
+def test_elevation_roundtrip():
+    e = auth.make_elevation_serializer(b"secret-key-0001")
+    assert auth.read_elevation(e, auth.issue_elevation(e, "admin"), 600) == "admin"
+
+
+def test_elevation_expired(monkeypatch):
+    # Deterministic expiry: drive itsdangerous' clock (same idiom as test_session_expired).
+    from itsdangerous.timed import TimestampSigner
+
+    clock = {"now": 1_000_000}
+    monkeypatch.setattr(TimestampSigner, "get_timestamp", lambda self: clock["now"])
+    e = auth.make_elevation_serializer(b"secret-key-0001")
+    tok = auth.issue_elevation(e, "admin")
+    clock["now"] += 1  # advance past the signing instant
+    assert auth.read_elevation(e, tok, max_age=0) is None  # older than the unlock window
+
+
+def test_elevation_epoch_revocation():
+    # A logout epoch bump revokes outstanding elevation tokens too (same embed as sessions).
+    e = auth.make_elevation_serializer(b"secret-key-0001")
+    tok = auth.issue_elevation(e, "admin", epoch=3)
+    assert auth.read_elevation(e, tok, 600, current_epoch=3) == "admin"
+    assert auth.read_elevation(e, tok, 600, current_epoch=4) is None
+
+
+def test_session_and_elevation_tokens_are_not_interchangeable():
+    # The distinct salt is the whole point: a session cookie must not verify as an
+    # elevation token (which would grant Tier-B without a fresh password proof), and an
+    # elevation token must not double as a session cookie.
+    secret = b"secret-key-0001"
+    s = auth.make_serializer(secret)
+    e = auth.make_elevation_serializer(secret)
+    session_tok = auth.issue_session(s, "admin")
+    elevation_tok = auth.issue_elevation(e, "admin")
+    assert auth.read_elevation(e, session_tok, 600) is None  # session ≠ elevation
+    assert auth.read_session(s, elevation_tok, 3600) is None  # elevation ≠ session
+
+
 # ----- reverse-proxy HMAC --------------------------------------------------
 
 

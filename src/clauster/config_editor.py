@@ -81,6 +81,25 @@ EDITABLE_FIELDS: tuple[str, ...] = (
 )
 _EDITABLE = frozenset(EDITABLE_FIELDS)
 
+# Tier-B "Advanced" allowlist (#978): operational-but-sensitive scalars editable ONLY
+# behind the config_write capability AND a step-up re-auth (see app.require_elevated).
+# These are the fields the EXCLUDED registry earmarked "GAP-SENSITIVE: defer behind the
+# #347 trust tier" — the clone/webhooks SSRF-adjacent scalars. Deliberately NARROW:
+# config_write.* and login_shepherd.* stay EXCLUDED forever (their reasons say "never
+# web-editable" — RCE / account-auth-state surface), and the list/dict Tier-B fields
+# (notifications.urls, webhooks.urls, allowed_origins, trusted_ips, clone allow-lists,
+# webhooks.events) land in a later slice with a rows editor. When unsure → EXCLUDED.
+TIER_B_FIELDS: tuple[str, ...] = (
+    "clone.enabled",
+    "clone.allow_private_hosts",
+    "clone.timeout_seconds",
+    "clone.max_mb",
+    "webhooks.enabled",
+    "webhooks.timeout_seconds",
+    "webhooks.block_private_targets",
+)
+_TIER_B = frozenset(TIER_B_FIELDS)
+
 # Intentionally-excluded registry (#660). Every config leaf NOT in EDITABLE_FIELDS is named
 # here with a one-line reason, so {EDITABLE_FIELDS} ∪ {EXCLUDED_FIELDS} covers EVERY leaf in
 # ClausterConfig — a newly-added config.py field with no editor decision then trips the
@@ -140,15 +159,10 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "auth.reverse_proxy.shared_secret_header": "auth: HMAC header name; auth surface",
     "auth.reverse_proxy.hmac_window_seconds": "auth: replay window; loosening it weakens auth",
     "auth.reverse_proxy.require_hmac": "auth: turning off drops HMAC → header-only trust",
-    # clone — user-supplied-URL / SSRF surface (GAP-SENSITIVE: defer behind #347 trust tier).
-    "clone.enabled": "clone (GAP-SENSITIVE): gates the clone/SSRF surface; defer behind #347",
-    "clone.allow_private_hosts": "clone (GAP-SENSITIVE): loosens the SSRF guard; defer (#347)",
-    "clone.timeout_seconds": "clone (GAP-SENSITIVE): clone.* kept whole in Tier-B; defer (#347)",
-    "clone.max_mb": "clone (GAP-SENSITIVE): clone.* kept whole in Tier-B; defer behind #347",
-    # webhook — outbound HTTP egress / SSRF surface (GAP-SENSITIVE: defer behind #347).
-    "webhooks.enabled": "webhook (GAP-SENSITIVE): enables outbound HTTP egress; defer behind #347",
-    "webhooks.timeout_seconds": "webhook (GAP-SENSITIVE): meaningful only with egress on; defer",
-    "webhooks.block_private_targets": "webhook (GAP-SENSITIVE): the webhook SSRF guard; defer",
+    # NOTE: clone.* and webhooks.* scalars moved to TIER_B_FIELDS (#978) — editable behind
+    # the config_write capability + step-up re-auth. The clone/webhooks *list* fields
+    # (allowed_schemes, allowed_private_cidrs, urls, events) stay excluded here until the
+    # Tier-B rows editor lands. See the list-or-dict entries below.
     # structural + binary-path — TLS material paths; load-validated, mis-set aborts HTTPS boot.
     "tls.cert_file": "structural + binary-path: TLS material path; mis-set aborts HTTPS boot",
     "tls.key_file": "structural + binary-path: TLS key path; security-material path",
@@ -227,16 +241,21 @@ def _set_by_path(mapping: dict[str, Any], dotted: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
-def editable_values(config: ClausterConfig) -> dict[str, Any]:
-    """Extract the current Tier-A field values, keyed by dotted path.
+def editable_values(
+    config: ClausterConfig, *, fields: tuple[str, ...] = EDITABLE_FIELDS
+) -> dict[str, Any]:
+    """Extract the current values for ``fields``, keyed by dotted path.
 
-    Only allowlisted fields are read, so no secret/auth/bind value is ever
-    surfaced — redaction is structural, not a post-filter.
+    Defaults to the Tier-A allowlist; the Tier-B "Advanced" surface passes
+    :data:`TIER_B_FIELDS`. Only allowlisted fields are read, so no secret/auth/
+    bind value is ever surfaced — redaction is structural, not a post-filter.
     """
-    return {path: _get_by_path(config, path) for path in EDITABLE_FIELDS}
+    return {path: _get_by_path(config, path) for path in fields}
 
 
-def editable_values_on_disk(path: str | Path) -> dict[str, Any] | None:
+def editable_values_on_disk(
+    path: str | Path, *, fields: tuple[str, ...] = EDITABLE_FIELDS
+) -> dict[str, Any] | None:
     """Re-read the Tier-A field values from the on-disk config, or ``None`` if unreadable.
 
     The editor edits the FILE, but a save deliberately does not live-reload the
@@ -249,12 +268,14 @@ def editable_values_on_disk(path: str | Path) -> dict[str, Any] | None:
     the caller can fall back to the in-memory config instead of failing the request.
     """
     try:
-        return editable_values(load_config(path))
+        return editable_values(load_config(path), fields=fields)
     except (OSError, ValueError, ValidationError, YAMLError):
         return None
 
 
-def disk_state(path: str | Path) -> tuple[str | None, set[str] | None]:
+def disk_state(
+    path: str | Path, *, fields: tuple[str, ...] = EDITABLE_FIELDS
+) -> tuple[str | None, set[str] | None]:
     """Read the on-disk config file ONCE; return ``(content hash, present Tier-A keys)``.
 
     The editor GET needs both the file's SHA-256 — the optimistic-concurrency token that
@@ -280,18 +301,21 @@ def disk_state(path: str | Path) -> tuple[str | None, set[str] | None]:
         return content_hash, None
     if not isinstance(raw, dict):
         return content_hash, None
-    return content_hash, {field for field in EDITABLE_FIELDS if _dotted_present(raw, field)}
+    return content_hash, {field for field in fields if _dotted_present(raw, field)}
 
 
-def validate_edits(raw: dict[str, Any], edits: dict[str, Any]) -> dict[str, Any]:
+def validate_edits(
+    raw: dict[str, Any], edits: dict[str, Any], *, allowed: frozenset[str] = _EDITABLE
+) -> dict[str, Any]:
     """Merge allowlisted edits onto ``raw`` and re-validate; return the candidate mapping.
 
-    Rejects any non-Tier-A key (:class:`DisallowedFieldError`) before merging, then
-    constructs :class:`ClausterConfig` so every field + model validator runs (incl.
+    Rejects any key outside ``allowed`` (:class:`DisallowedFieldError`) before merging,
+    then constructs :class:`ClausterConfig` so every field + model validator runs (incl.
     the auth fail-closed check). Raises :class:`ConfigValidationError` on failure —
-    nothing is written here.
+    nothing is written here. ``allowed`` defaults to the Tier-A set; the Tier-B
+    "Advanced" write path passes :data:`_TIER_B` so the two allowlists never mix.
     """
-    disallowed = [k for k in edits if k not in _EDITABLE]
+    disallowed = [k for k in edits if k not in allowed]
     if disallowed:
         raise DisallowedFieldError(", ".join(sorted(disallowed)))
     candidate = copy.deepcopy(raw)
@@ -558,18 +582,21 @@ def _constraints(info: Any) -> dict[str, Any]:
     return out
 
 
-def field_specs(present: set[str] | None = None) -> dict[str, dict[str, Any]]:
+def field_specs(
+    present: set[str] | None = None, *, fields: tuple[str, ...] = EDITABLE_FIELDS
+) -> dict[str, dict[str, Any]]:
     """Return rich per-field UI metadata for the editor (label, help, control, bounds).
 
-    ``present`` is the set of dotted keys literally on disk (from :func:`disk_state`).
-    A deprecated field whose key is ABSENT from ``present`` is flagged ``hidden`` so the
-    editor can drop its row — a key the user already removed (e.g. via ``config reconcile``)
-    no longer renders as a flagged-deprecated field. When ``present`` is ``None`` (the file
-    could not be read) nothing is hidden: fail-open on display, never drop a field we cannot
-    prove is absent.
+    Defaults to the Tier-A allowlist; the Tier-B "Advanced" surface passes
+    :data:`TIER_B_FIELDS`. ``present`` is the set of dotted keys literally on disk (from
+    :func:`disk_state`). A deprecated field whose key is ABSENT from ``present`` is flagged
+    ``hidden`` so the editor can drop its row — a key the user already removed (e.g. via
+    ``config reconcile``) no longer renders as a flagged-deprecated field. When ``present``
+    is ``None`` (the file could not be read) nothing is hidden: fail-open on display, never
+    drop a field we cannot prove is absent.
     """
     specs: dict[str, dict[str, Any]] = {}
-    for path in EDITABLE_FIELDS:
+    for path in fields:
         section, key = path.split(".", 1) if "." in path else ("", path)
         info = _resolve_field_info(path)
         kind, choices = _classify(info.annotation)
