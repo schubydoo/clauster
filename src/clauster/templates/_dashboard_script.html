@@ -86,6 +86,10 @@
   // ({mode: {short, long, effect}}) shared with the launch <select> and the config editor.
   // permLabel()/permissionEffect() read from THIS map — no second hand-maintained copy.
   const PERMISSION_LABELS = {{ permission_labels | tojson }};
+  // Recognized hook lifecycle events (#958 Part 5): server-injected from the backend
+  // validator (config_write_hooks.RECOGNIZED_EVENTS), sorted, so the Hooks rows editor's
+  // event <select> never drifts from what the write surface accepts.
+  const HOOK_EVENTS = {{ hook_events | tojson }};
   const USAGE_MODE = {{ usage_mode | tojson }};  // usage.mode — "cost" | "tokens" | "off"
   const CURRENCY = {{ currency | tojson }};  // usage.currency — code, shown in the tooltip
   const CURRENCY_SYMBOL = {{ currency_symbol | tojson }};  // resolved symbol for cost mode
@@ -198,7 +202,17 @@
           ],
           defaultMode: "", rowsError: "", rowSeq: 0,
         },
-        hooks: { text: "", orig: "", hash: null },
+        // Hooks (#958 Part 5): a flat rows editor over the nested
+        // `event → [{matcher?, hooks:[{type:"command", command, timeout?}]}]` shape.
+        // Each row is one command hook (event, matcher, command, timeout); on save the
+        // rows regroup by (event, matcher). Commands are opaque, never-run text — stored
+        // verbatim (validate-never-execute). A shape the flat rows can't represent (a
+        // non-command hook type, an unknown key, a bad type) falls back to raw JSON.
+        hooks: {
+          text: "", orig: "", hash: null,
+          mode: "rows",
+          rows: [], rowsError: "", rowSeq: 0,
+        },
         // Subagents (#773 slice C): a list surface (list + per-agent markdown editor),
         // user/project only, with read-only built-ins/plugins.
         subagents: {
@@ -1325,11 +1339,12 @@
         if (surface === "claude-md") return this._loadClaudeMd(myGen);
         if (surface === "settings") return this._loadSettings(myGen);
         if (surface === "permissions") return this._loadPermissions(myGen);
+        if (surface === "hooks") return this._loadHooks(myGen);
         if (surface === "subagents") return this._loadSubagents(myGen);
         if (surface === "mcp") return this._loadMcp(myGen);
         if (surface === "skills") return this._loadSkills(myGen);
         if (surface === "plugins") return this._loadPlugins(myGen);
-        return this._loadJsonSurface(surface, myGen);  // permissions | hooks
+        return this._loadJsonSurface(surface, myGen);  // defensive default (all surfaces routed above)
       },
       // Shared JSON-surface loader: GET /api/config-write/<surface> and pretty-print
       // the (server-redacted) object into that surface's editor. settings/permissions/
@@ -1695,6 +1710,187 @@
         const b = this._permBucket(key);
         if (b) b.rows.splice(idx, 1);
       },
+      // --- #958 Part 5: flat hooks rows over the nested event→matcher→command shape ---
+      // A row is one command hook (event, matcher, command, timeout). On save the rows
+      // regroup by (event, matcher) into `{matcher?, hooks:[…]}` groups — so two rows
+      // sharing an (event, matcher) become one group with two commands (the canonical
+      // form). Commands are OPAQUE, never-run text stored verbatim. Any shape the flat
+      // rows can't faithfully represent falls back to raw.
+      async _loadHooks(myGen) {
+        const c = this.configMgmt;
+        await this._loadJsonSurface("hooks", myGen);
+        if (c.gen !== myGen) return;  // superseded — skip the row rebuild
+        if (!c.error && !this._hooksRowsFromText()) c.hooks.mode = "raw";
+      },
+      // Flatten a hooks object to [{event, matcher, command, timeout}] rows, or return
+      // null if ANY part isn't representable as flat command-hook rows (unknown event,
+      // non-list groups, unknown group/entry keys, a non-"command" hook type, an empty
+      // command, or a non-integer timeout). Never coerces — an odd shape goes to raw.
+      _flattenHooks(obj) {
+        if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return null;
+        const events = new Set(HOOK_EVENTS);
+        const rows = [];
+        for (const event of Object.keys(obj)) {
+          if (!events.has(event)) return null;
+          const groups = obj[event];
+          if (!Array.isArray(groups)) return null;
+          // Two groups sharing a matcher would MERGE into one on re-serialize (rows
+          // regroup by (event, matcher)), which can reorder firing across an intervening
+          // different-matcher group — a semantic change. Fall back to raw instead of
+          // silently rewriting: a doc that can't round-trip losslessly isn't rows-shaped.
+          const seenMatchers = new Set();
+          for (const g of groups) {
+            if (g === null || typeof g !== "object" || Array.isArray(g)) return null;
+            for (const k of Object.keys(g)) { if (k !== "matcher" && k !== "hooks") return null; }
+            let matcher = "";
+            if (g.matcher !== undefined) {
+              if (typeof g.matcher !== "string") return null;
+              matcher = g.matcher;
+            }
+            if (seenMatchers.has(matcher)) return null;  // duplicate group → raw
+            seenMatchers.add(matcher);
+            const hooks = g.hooks;
+            if (!Array.isArray(hooks) || !hooks.length) return null;
+            for (const hk of hooks) {
+              if (hk === null || typeof hk !== "object" || Array.isArray(hk)) return null;
+              for (const k of Object.keys(hk)) {
+                if (k !== "type" && k !== "command" && k !== "timeout") return null;
+              }
+              if (hk.type !== "command") return null;
+              if (typeof hk.command !== "string" || !hk.command) return null;
+              // Mirror the backend's #770 plugin-owned guard: a command referencing the
+              // plugin-root interpolation is plugin-owned (this surface can't write it —
+              // the backend 422s the whole write). Keep it in raw where it's visible,
+              // never as an invisible editable row that poisons every save.
+              if (hk.command.indexOf("CLAUDE_PLUGIN_ROOT") !== -1) return null;
+              let timeout = "";
+              if (hk.timeout !== undefined) {
+                // The rows editor treats timeout as a whole number ≥ 0; the backend is
+                // laxer (any int), so a negative timeout is representable on disk but not
+                // in rows. Fall back to raw rather than opening it as an unsavable row.
+                if (typeof hk.timeout !== "number" || !Number.isInteger(hk.timeout) || hk.timeout < 0) {
+                  return null;
+                }
+                timeout = String(hk.timeout);
+              }
+              rows.push({ event, matcher, command: hk.command, timeout });
+            }
+          }
+        }
+        return rows;
+      },
+      // Rebuild the hook rows from hooks.text. Returns false (+ rowsError) for a shape
+      // the flat rows can't represent, so the caller stays in raw.
+      _hooksRowsFromText() {
+        const h = this.configMgmt.hooks;
+        let obj;
+        try { obj = JSON.parse(h.text || "{}"); }
+        catch (e) { h.rowsError = "Fix the JSON in Raw view before using rows."; return false; }
+        const flat = this._flattenHooks(obj);
+        if (flat === null) {
+          h.rowsError = "These hooks can't be shown as rows (a non-command hook, an " +
+            "unknown key, or a bad type) — edit in Raw JSON.";
+          return false;
+        }
+        h.rows = flat.map((r) => ({
+          id: ++h.rowSeq, event: r.event, matcher: r.matcher, command: r.command, timeout: r.timeout,
+        }));
+        h.rowsError = "";
+        return true;
+      },
+      // Parse a row's timeout box to a non-negative integer, or null (unset/invalid).
+      _hookTimeoutInt(s) {
+        const t = (s === undefined || s === null ? "" : String(s)).trim();
+        if (t === "") return null;
+        const n = Number(t);
+        return Number.isInteger(n) && n >= 0 ? n : null;
+      },
+      // Group rows by event then matcher (first-seen order) into the hooks object JSON.
+      // Blank-command rows are dropped; commands + matchers are kept verbatim (opaque).
+      _serializeHookRows(rows) {
+        const out = {};
+        // event -> Map(matcher -> group). A Map (not a plain object) so a matcher named
+        // `__proto__`/`constructor`/`toString` — all backend-valid opaque strings — keys
+        // by value instead of hitting Object.prototype and corrupting the grouping.
+        const idx = {};
+        for (const r of rows) {
+          const command = r.command;
+          if (!command) continue;  // an untouched/cleared row isn't a hook
+          const event = r.event;
+          if (!event || !HOOK_EVENTS.includes(event)) continue;
+          const matcher = r.matcher || "";
+          if (!out[event]) { out[event] = []; idx[event] = new Map(); }
+          let group = idx[event].get(matcher);
+          if (!group) {
+            group = matcher ? { matcher: matcher, hooks: [] } : { hooks: [] };
+            idx[event].set(matcher, group);
+            out[event].push(group);
+          }
+          const hook = { type: "command", command: command };
+          const t = this._hookTimeoutInt(r.timeout);
+          if (t !== null) hook.timeout = t;
+          group.hooks.push(hook);
+        }
+        return JSON.stringify(out, null, 2);
+      },
+      _hooksSerialized() {
+        return this._serializeHookRows(this.configMgmt.hooks.rows);
+      },
+      // Normalize a hooks JSON string through the SAME flatten→regroup the rows apply, so
+      // a freshly loaded doc never reads dirty. Non-representable / unparseable text is
+      // returned verbatim (compared literally in raw mode).
+      _hooksNormalize(text) {
+        let obj;
+        try { obj = JSON.parse(text || "{}"); } catch (e) { return text; }
+        const flat = this._flattenHooks(obj);
+        if (flat === null) return text;
+        return this._serializeHookRows(flat);
+      },
+      configMgmtHooksMode(mode) {
+        const h = this.configMgmt.hooks;
+        if (h.mode === mode) return;
+        if (mode === "raw") {
+          // Keep the loaded text verbatim on a no-edit toggle (see the permissions
+          // editor for why), else show the canonical regrouped serialization.
+          const ser = this._hooksSerialized();
+          h.text = ser === this._hooksNormalize(h.orig) ? h.orig : ser;
+          h.mode = "raw"; h.rowsError = ""; return;
+        }
+        if (this._hooksRowsFromText()) h.mode = "rows";
+      },
+      configMgmtAddHookRow() {
+        const h = this.configMgmt.hooks;
+        h.rows.push({ id: ++h.rowSeq, event: HOOK_EVENTS[0] || "", matcher: "", command: "", timeout: "" });
+        this.$nextTick(() => {
+          const inputs = document.querySelectorAll('[data-test="cm-hook-command"]');
+          const last = inputs[inputs.length - 1];
+          if (last && last.focus) last.focus();
+        });
+      },
+      configMgmtRemoveHookRow(idx) {
+        this.configMgmt.hooks.rows.splice(idx, 1);
+      },
+      // The recognized lifecycle events for the row event <select> (server-injected,
+      // never a hand-listed copy). A method so the CSP-build x-for can iterate it.
+      configMgmtHookEvents() {
+        return HOOK_EVENTS;
+      },
+      // A non-empty timeout that isn't a whole number ≥ 0 would be silently dropped on
+      // save, so warn AND block Save (see configMgmtCanSave) until it's fixed. Only rows
+      // that would actually be written (a non-empty command) are checked.
+      configMgmtHooksRowsWarning() {
+        const rows = this.configMgmt.hooks.rows;
+        const bad = [];
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
+          if (!r.command) continue;  // dropped on save anyway
+          const t = (r.timeout || "").trim();
+          if (t !== "" && this._hookTimeoutInt(t) === null) bad.push(i + 1);
+        }
+        if (!bad.length) return "";
+        return "Timeout must be a whole number ≥ 0 — fix row" +
+          (bad.length > 1 ? "s " : " ") + bad.join(", ");
+      },
       configMgmtDirty() {
         const c = this.configMgmt;
         if (c.surface === "claude-md") return c.claudeMd.content !== c.claudeMd.orig;
@@ -1719,7 +1915,13 @@
         if (c.surface === "permissions" && c.permissions.mode === "rows") {
           return this._permissionsSerialized() !== this._permissionsNormalize(c.permissions.orig);
         }
-        const st = c[c.surface];  // settings(raw) | permissions(raw) | hooks — literal dirty
+        // Hooks rows mode: the flat rows are the source of truth; compare their regrouped
+        // serialization against the canonicalized original. Raw mode falls through to the
+        // literal compare below.
+        if (c.surface === "hooks" && c.hooks.mode === "rows") {
+          return this._hooksSerialized() !== this._hooksNormalize(c.hooks.orig);
+        }
+        const st = c[c.surface];  // settings(raw) | permissions(raw) | hooks(raw) — literal dirty
         return st ? st.text !== st.orig : false;
       },
       configMgmtCanSave() {
@@ -1729,6 +1931,10 @@
         if (c.confirm !== this.configMgmtConfirmToken()) return false;  // type-the-name gate
         // Rows mode: block a save that would silently collapse duplicate env keys.
         if (c.surface === "settings" && c.settings.mode === "rows" && this.configMgmtEnvRowsWarning()) {
+          return false;
+        }
+        // Hooks rows mode: block a save that would silently drop an invalid timeout.
+        if (c.surface === "hooks" && c.hooks.mode === "rows" && this.configMgmtHooksRowsWarning()) {
           return false;
         }
         return this.configMgmtDirty();
@@ -1778,6 +1984,7 @@
         let raw;
         if (surface === "settings" && c.settings.mode === "rows") raw = this._settingsEnvSerialized();
         else if (surface === "permissions" && c.permissions.mode === "rows") raw = this._permissionsSerialized();
+        else if (surface === "hooks" && c.hooks.mode === "rows") raw = this._hooksSerialized();
         else raw = st.text;
         // Fail closed: a null serialization means the base JSON is unusable — refuse to
         // write rather than send a body that would drop the non-env keys.

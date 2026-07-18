@@ -213,6 +213,7 @@
        classes so style-src-attr no longer trips (completes the #533 conversion and
        restores the intended max-widths the CSP was blocking). */
     .cm-name-col { width: 40%; }
+    .cm-hook-timeout-col { width: 6.5rem; }
     .cm-value-cap { max-width: 12rem; }
     .cm-input-cap { max-width: 16rem; }
     .cm-value-cap-wide { max-width: 20rem; }
@@ -1753,15 +1754,102 @@
               </div>
             </div>
 
-            <!-- Hooks surface (#773 slice B) -->
+            <!-- Hooks surface (#773 slice B; #958 Part 5 rows editor) -->
             <div data-test="cm-view-hooks"
                  x-show="!configMgmt.loading && !configMgmtNeedsProject() && configMgmt.surface === 'hooks'" x-cloak>
-              <label class="form-label small" for="cm-hooks">hooks</label>
-              <textarea id="cm-hooks" class="form-control form-control-sm font-monospace" rows="12"
-                        data-test="cm-hooks-text" spellcheck="false"
-                        x-model="configMgmt.hooks.text"></textarea>
-              <div class="form-hint small mt-1">
-                Shell commands Claude Code runs on lifecycle events — review carefully before saving. Edited as JSON.
+              <div class="d-flex justify-content-between align-items-center mb-1">
+                <!-- A section heading, not a control label (rows mode has many controls;
+                     the raw textarea is named by the visually-hidden label below). -->
+                <div class="form-label small mb-0">hooks</div>
+                <div class="btn-group btn-group-sm" role="group" aria-label="Hooks editor mode">
+                  <button type="button" class="btn" data-test="cm-hooks-mode-rows"
+                          :class="configMgmt.hooks.mode === 'rows' ? 'btn-primary' : 'btn-outline-primary'"
+                          :aria-pressed="configMgmt.hooks.mode === 'rows'"
+                          @click="configMgmtHooksMode('rows')">Rows</button>
+                  <button type="button" class="btn" data-test="cm-hooks-mode-raw"
+                          :class="configMgmt.hooks.mode === 'raw' ? 'btn-primary' : 'btn-outline-primary'"
+                          :aria-pressed="configMgmt.hooks.mode === 'raw'"
+                          @click="configMgmtHooksMode('raw')">Raw JSON</button>
+                </div>
+              </div>
+
+              <div class="alert alert-warning py-2 small mb-2" role="alert">
+                <strong>Hooks run shell commands</strong> Claude Code executes on lifecycle events —
+                review every command carefully before saving. Commands are stored verbatim and never run by Clauster.
+              </div>
+
+              <!-- Shape error shows in either mode so a rejected 'Rows' click explains itself. -->
+              <div class="alert alert-warning py-1 small" data-test="cm-hooks-rows-error" role="alert"
+                   x-show="configMgmt.hooks.rowsError" x-cloak x-text="configMgmt.hooks.rowsError"></div>
+
+              <!-- ROWS: one command hook per row (event / matcher / command / timeout) -->
+              <div x-show="configMgmt.hooks.mode === 'rows'" data-test="cm-hooks-rows" x-cloak>
+                <div class="text-secondary small mb-2" data-test="cm-hooks-empty"
+                     x-show="!configMgmt.hooks.rows.length && !configMgmt.hooks.rowsError" x-cloak>
+                  No hooks at this scope. Add one below, or switch to Raw JSON.
+                </div>
+                <table class="table table-sm mb-1" data-test="cm-hooks-table"
+                       x-show="configMgmt.hooks.rows.length" x-cloak>
+                  <caption class="visually-hidden">Hooks: event, matcher, command, timeout, and remove action</caption>
+                  <thead><tr>
+                    <th>Event</th><th>Matcher</th><th>Command</th>
+                    <th class="cm-hook-timeout-col">Timeout&nbsp;(s)</th><th class="text-end">Remove</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="(row, idx) in configMgmt.hooks.rows" :key="row.id">
+                      <tr :data-test="'cm-hook-row-' + idx">
+                        <td>
+                          <select class="form-select form-select-sm" data-test="cm-hook-event"
+                                  :aria-label="'Event for hook ' + (idx + 1)" x-model="row.event">
+                            <template x-for="ev in configMgmtHookEvents()" :key="ev">
+                              <option :value="ev" x-text="ev"></option>
+                            </template>
+                          </select>
+                        </td>
+                        <td>
+                          <input type="text" class="form-control form-control-sm font-monospace"
+                                 data-test="cm-hook-matcher" autocomplete="off" spellcheck="false"
+                                 placeholder="(any)" :aria-label="'Matcher for hook ' + (idx + 1)"
+                                 x-model="row.matcher">
+                        </td>
+                        <td>
+                          <input type="text" class="form-control form-control-sm font-monospace"
+                                 data-test="cm-hook-command" autocomplete="off" spellcheck="false"
+                                 :aria-label="'Command for hook ' + (idx + 1)" x-model="row.command">
+                        </td>
+                        <td>
+                          <input type="number" min="0" step="1" class="form-control form-control-sm"
+                                 data-test="cm-hook-timeout" :aria-label="'Timeout (seconds) for hook ' + (idx + 1)"
+                                 x-model="row.timeout">
+                        </td>
+                        <td class="text-end">
+                          <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-hook-remove"
+                                  :aria-label="'Remove hook ' + (idx + 1)"
+                                  @click="configMgmtRemoveHookRow(idx)">Remove</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <div class="alert alert-warning py-1 small" data-test="cm-hooks-timeout-warn" role="alert"
+                     x-show="configMgmtHooksRowsWarning()" x-cloak x-text="configMgmtHooksRowsWarning()"></div>
+                <button type="button" class="btn btn-sm btn-outline-primary" data-test="cm-hooks-add"
+                        @click="configMgmtAddHookRow()">Add hook</button>
+                <div class="form-hint small mt-2">
+                  Each row is one command hook. Rows sharing an event + matcher are saved as one group.
+                  Leave the matcher blank to match all. Switch to Raw JSON for shapes the rows can't show.
+                </div>
+              </div>
+
+              <!-- RAW: the full hooks escape hatch -->
+              <div x-show="configMgmt.hooks.mode === 'raw'" x-cloak>
+                <label class="visually-hidden" for="cm-hooks">hooks (raw)</label>
+                <textarea id="cm-hooks" class="form-control form-control-sm font-monospace" rows="12"
+                          data-test="cm-hooks-text" spellcheck="false"
+                          x-model="configMgmt.hooks.text"></textarea>
+                <div class="form-hint small mt-1">
+                  Shell commands Claude Code runs on lifecycle events — review carefully before saving. Edited as JSON.
+                </div>
               </div>
             </div>
 

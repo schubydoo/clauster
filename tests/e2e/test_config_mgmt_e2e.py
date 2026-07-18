@@ -277,6 +277,8 @@ def test_config_mgmt_hooks_tab_loads(browser: AgentBrowser, config_mgmt_server: 
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-hooks"]')
     browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Hooks defaults to the rows editor (#958 Part 5); drop to raw JSON to see the loaded {}.
+    browser.click('[data-test="cm-hooks-mode-raw"]')
     browser.expect_value('[data-test="cm-hooks-text"]', "{}")
 
 
@@ -471,6 +473,9 @@ def test_config_mgmt_hooks_save_round_trip(
     browser.select('[data-test="cm-project"]', "alpha")
     browser.click('[data-test="cm-surface-hooks"]')
     browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Rows is the default; drop to raw JSON to save a literal hooks block (the rows path
+    # is covered by test_config_mgmt_hooks_rows_round_trip below).
+    browser.click('[data-test="cm-hooks-mode-raw"]')
     browser.expect_value('[data-test="cm-hooks-text"]', "{}")
 
     hooks = {"SessionStart": [{"hooks": [{"type": "command", "command": "echo e2e-hook"}]}]}
@@ -483,6 +488,157 @@ def test_config_mgmt_hooks_save_round_trip(
     assert saved.exists(), "expected alpha/.claude/settings.json to be written"
     on_disk = json.loads(saved.read_text(encoding="utf-8"))
     assert on_disk.get("hooks") == hooks
+
+
+def test_config_mgmt_hooks_rows_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Adding a hook via the rows editor writes the nested command group to settings.json."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Rows mode default: add a hook, pick the event, type the command, save.
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')  # let the x-for row hydrate
+    browser.select('[data-test="cm-hook-event"]', "SessionStart")
+    browser.fill('[data-test="cm-hook-command"]', "echo rows-hook")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "SessionStart": [{"hooks": [{"type": "command", "command": "echo rows-hook"}]}]
+    }
+
+
+def _seed_alpha_settings(config_mgmt_server: Server, settings: dict) -> None:
+    """Write alpha's .claude/settings.json directly (bypassing the write API) for a test."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+    path = projects_root / "alpha" / ".claude" / "settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+
+def test_config_mgmt_hooks_duplicate_matcher_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Duplicate (event, matcher) groups can't round-trip as rows → open in Raw with a hint."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo a"}]},
+                    {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo b"}]},
+                ]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    # Non-representable → raw fallback (verbatim) with the explanatory error, never a
+    # silent regroup that would reorder firing.
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
+
+
+def test_config_mgmt_hooks_plugin_owned_command_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A hook command referencing CLAUDE_PLUGIN_ROOT stays in Raw (visible), never a row."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/run.sh"}]}
+                ]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
+
+
+def test_config_mgmt_hooks_invalid_timeout_blocks_save(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A non-integer timeout warns and disables Save rather than being silently dropped."""
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-command"]')
+    browser.fill('[data-test="cm-hook-command"]', "echo x")
+    browser.fill('[data-test="cm-hook-timeout"]', "1.5")  # not a whole number
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.expect_visible('[data-test="cm-hooks-timeout-warn"]')
+    browser.expect_disabled('[data-test="cm-save"]')
+
+
+def test_config_mgmt_hooks_prototype_matcher_round_trip(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A matcher named __proto__ (a backend-valid opaque string) groups correctly via rows."""
+    cfg_path = Path(config_mgmt_server.state_dir).parent / "clauster.yml"
+    projects_root = Path(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["projects_root"])
+
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.click('[data-test="cm-hooks-add"]')
+    browser.expect_visible('[data-test="cm-hook-matcher"]')
+    browser.select('[data-test="cm-hook-event"]', "PreToolUse")
+    browser.fill('[data-test="cm-hook-matcher"]', "__proto__")
+    browser.fill('[data-test="cm-hook-command"]', "echo proto")
+    browser.fill('[data-test="cm-confirm"]', "alpha")
+    browser.click('[data-test="cm-save"]')
+    browser.expect_visible('[data-test="cm-saved"]', timeout_ms=_SAVE_TIMEOUT)
+
+    on_disk = json.loads(
+        (projects_root / "alpha" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert on_disk["hooks"] == {
+        "PreToolUse": [
+            {"matcher": "__proto__", "hooks": [{"type": "command", "command": "echo proto"}]}
+        ]
+    }
+
+
+def test_config_mgmt_hooks_negative_timeout_falls_back_to_raw(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """A hook with a negative timeout (backend-lax) opens in Raw, not an unsavable row."""
+    _seed_alpha_settings(
+        config_mgmt_server,
+        {
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "echo x", "timeout": -1}]}]
+            }
+        },
+    )
+    _open_modal(browser, config_mgmt_server)
+    browser.select('[data-test="cm-project"]', "alpha")
+    browser.click('[data-test="cm-surface-hooks"]')
+    browser.expect_visible('[data-test="cm-view-hooks"]')
+    browser.expect_visible('[data-test="cm-hooks-rows-error"]')
+    browser.expect_visible('[data-test="cm-hooks-text"]')
 
 
 def test_config_mgmt_subagent_delete_round_trip(
