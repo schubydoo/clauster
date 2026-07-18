@@ -137,6 +137,7 @@ component_management:
         - src/clauster/mcp_server.py # #527 — read-only clauster MCP stdio server
         - src/clauster/login_shepherd.py # #846 — dashboard `claude` login flow
         - src/clauster/login_status.py # #838 — `claude auth status` probe behind /healthz
+        - src/clauster/setup_wizard.py # #978 — first-run pre-boot setup app
     - component_id: provisioning
       name: provisioning
       paths:

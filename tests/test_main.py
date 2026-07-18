@@ -223,9 +223,24 @@ def test_bare_args_default_to_run(write_config, tmp_path, monkeypatch):
     assert ran == {"yes": True}
 
 
-def test_run_missing_config_exits_2(monkeypatch):
+def test_run_missing_config_launches_setup_wizard(monkeypatch):
+    # #978: a missing config is no longer a fatal error — it's first-run, so `run` serves the
+    # loopback setup wizard (which writes a config) instead of exiting 2.
+    captured = _stub_server(monkeypatch)
+    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 0
+    # The served app is the setup wizard (its state carries the setup-completion flag), bound
+    # to loopback — not the main dashboard app.
+    assert hasattr(captured["app"].state, "setup_complete")
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_run_invalid_existing_config_exits_2(write_config, monkeypatch):
+    # #978: only a MISSING config triggers first-run. A config file that EXISTS but is invalid
+    # must ERROR (exit 2), never wizard-over-and-overwrite it. A nonexistent projects_root
+    # fails ClausterConfig validation (a ValueError) — the branch distinct from FileNotFoundError.
     _stub_server(monkeypatch)
-    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 2
+    bad = str(write_config("projects_root: /no/such/clauster-projects-dir\n"))
+    assert cli.main(["run", "-c", bad]) == 2
 
 
 def test_run_claude_not_found_exits_2(write_config, tmp_path, monkeypatch):

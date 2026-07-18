@@ -326,6 +326,57 @@ def config_mgmt_server(
     )
 
 
+class SetupServer(NamedTuple):
+    """A running first-run setup wizard under test (#978).
+
+    ``url`` is the loopback wizard URL; ``projects_root`` is a valid folder to type into
+    the form; ``write_path`` is where a successful submit writes ``clauster.yml``.
+    """
+
+    url: str
+    projects_root: Path
+    write_path: Path
+    proc: subprocess.Popen
+
+
+@pytest.fixture
+def setup_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[SetupServer]:
+    """A ``clauster run`` with NO config — serves the first-run setup wizard (#978).
+
+    Runs in an isolated empty cwd (so no ``./clauster.yml`` is found) with
+    ``CLAUSTER_SETUP_PORT`` pinned to a free port; the wizard writes ``<cwd>/clauster.yml``.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-setup")
+    empty = tmp / "run"
+    empty.mkdir()  # empty cwd -> load_config finds nothing -> first-run wizard
+    projects = tmp / "code"
+    projects.mkdir()  # a valid projects_root to type into the form
+    home = tmp / "home"
+    home.mkdir()
+    port = _free_port()
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUSTER_CONFIG", "CLAUSTER_HOME")}
+    env.update({"HOME": str(home), "CLAUSTER_SETUP_PORT": str(port)})
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "clauster", "run"],
+        cwd=str(empty),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+        env=env,
+    )
+    try:
+        _wait_ready(port, proc)
+        yield SetupServer(f"http://127.0.0.1:{port}", projects, empty / "clauster.yml", proc)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
 @pytest.fixture
 def advanced_config_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path

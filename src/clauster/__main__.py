@@ -37,6 +37,7 @@ from .config import (
     SANDBOX_MODES,
     SPAWN_MODES,
     ClausterConfig,
+    first_config_path,
     load_config,
     resolve_cert_path,
 )
@@ -1345,10 +1346,56 @@ def _reexec() -> None:  # pragma: no cover - replaces the process image; tested 
     os.execv(sys.executable, [sys.executable, *sys.argv])  # noqa: S606
 
 
+def _run_setup_wizard(config_path: str | None) -> int:
+    """Serve the loopback first-run setup wizard, then re-exec onto the new config (#978).
+
+    Reached only when no ``clauster.yml`` exists. The wizard writes one (auth enabled) and
+    asks its server to shut down; we then re-exec so ``load_config`` succeeds on the restart.
+    """
+    from . import setup_wizard
+
+    write_path = first_config_path(config_path)
+    # The wizard binds a fixed loopback port (nothing else is running on first run). Allow an
+    # override for the rare case that port is already taken, and so tests can isolate it.
+    try:
+        port = int(os.environ.get("CLAUSTER_SETUP_PORT", setup_wizard.DEFAULT_PORT))
+        if not 1 <= port <= 65535:
+            raise ValueError  # out of range would just fail the bind — fall back to default
+    except ValueError:
+        port = setup_wizard.DEFAULT_PORT
+    setup_logging("text")
+    app = setup_wizard.create_setup_app(write_path, port=port)
+    print(
+        f"clauster {__version__}: no configuration found — starting first-run setup at "
+        f"http://{setup_wizard.SETUP_HOST}:{port}/  (will write {write_path})",
+        file=sys.stderr,
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=setup_wizard.SETUP_HOST,
+            port=port,
+            log_level="info",
+            log_config=None,
+            proxy_headers=False,
+        )
+    )
+    app.state.uvicorn_server = server
+    server.run()  # blocks until the wizard submits (should_exit) or the operator quits
+    if getattr(app.state, "setup_complete", False):
+        print("clauster: setup complete — restarting on the new configuration.", file=sys.stderr)
+        _reexec()
+    return 0
+
+
 def _run(config_path: str | None) -> int:
     try:
         config = load_config(config_path)
-    except (FileNotFoundError, ValueError) as exc:
+    except FileNotFoundError:
+        # First run: no clauster.yml exists yet. Serve the loopback setup wizard to write one,
+        # then re-exec onto it (#978). A malformed EXISTING config still errors below.
+        return _run_setup_wizard(config_path)
+    except ValueError as exc:
         print(f"clauster: config error: {exc}", file=sys.stderr)
         return 2
 
