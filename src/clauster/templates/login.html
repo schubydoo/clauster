@@ -26,6 +26,10 @@
     .sprite-defs { display: none; }
     .fixed-controls { z-index: 1080; gap: .5rem; }
     .help-trigger-z { z-index: 1080; }
+    /* Dark-theme text selection (#958 Part 4) — cross-page rule duplicated from
+       the dashboard brand block; see there for why it's dark-scoped + WCAG-AA. */
+    [data-bs-theme="dark"] ::selection { background-color: var(--tblr-primary); color: #fff; }
+    [data-bs-theme="dark"] ::-moz-selection { background-color: var(--tblr-primary); color: #fff; }
   </style>
 </head>
 <body class="d-flex flex-column">

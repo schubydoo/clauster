@@ -38,6 +38,17 @@
     .fixed-controls { z-index: 1080; gap: .5rem; }
     .help-trigger-z { z-index: 1080; }
     .brand-logo { height: 40px; width: auto; }
+    /* Dark-theme text selection (#958 Part 4). Tabler's default ::selection is a
+       90%-transparent primary tint with NO explicit foreground; over the dark
+       editor/body surfaces it barely registers and selected light text washes
+       out (WCAG-AA fail — the reported "highlighted text unreadable" in the
+       config editors). Light theme's default (dark text on a pale tint) already
+       passes, so scope the override to dark: a solid Signal-Blue field with
+       white text gives selected text a 5:1 contrast ratio. Split ::-moz-selection
+       into its own rule so an engine that rejects the prefix keeps ::selection.
+       A cross-page rule, so it's duplicated into the login/404 brand blocks. */
+    [data-bs-theme="dark"] ::selection { background-color: var(--tblr-primary); color: #fff; }
+    [data-bs-theme="dark"] ::-moz-selection { background-color: var(--tblr-primary); color: #fff; }
   </style>
   <script defer src="{{ request.scope.root_path }}/static/alpine.csp.min.js?v={{ asset_version }}"></script>
   <style nonce="{{ csp_nonce }}">
