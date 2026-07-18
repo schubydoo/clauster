@@ -67,6 +67,15 @@ dev = [
     # offending test with an all-thread traceback instead, so a hang fails fast and
     # points at itself.
     "pytest-timeout>=2.3",
+    # httpx2 (pydantic's httpx 2.x line, #888): Starlette 1.3+ deprecates plain httpx with
+    # its TestClient and auto-uses httpx2 when installed (`import httpx2 as httpx`), so this
+    # silences the StarletteDeprecationWarning and moves the test client to the intended
+    # backend. Dev-only — the shipped package's outbound-webhook client stays on httpx>=0.27
+    # (unifying the production client on httpx2 is a separate follow-up per #888).
+    # Floor is >=2.7: 2.5.x signalled TestClient WebSocket disconnect differently, which
+    # stopped exercising the pty-screen WS-disconnect handler (a coverage regression #888
+    # deferred on); 2.7.0 restores the plain-httpx WebSocketDisconnect behaviour.
+    "httpx2>=2.7",
     "ruff>=0.8",
     "pyright>=1.1.390",
     "yamllint>=1.38",
