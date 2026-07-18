@@ -44,6 +44,14 @@ The only required key is `projects_root`. On loopback, no auth is needed.
 projects_root: ~/code
 ```
 
+!!! tip "Prefer a guided setup?"
+    You can skip writing this by hand. Run `clauster run` with **no** config and
+    Clauster serves a one-page, loopback-only **first-run setup** at
+    <http://127.0.0.1:7621> (override the port with `CLAUSTER_SETUP_PORT`). Enter
+    your projects folder, bind address, and a dashboard password; it writes a
+    `clauster.yml` with authentication enabled and starts up on it. Because it sets
+    a password, it's the quickest way to a non-loopback (LAN) deployment.
+
 ## 4. Check your environment
 
 ```sh

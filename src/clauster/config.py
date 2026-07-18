@@ -1413,6 +1413,17 @@ def _candidate_paths(explicit: Path | None) -> list[Path]:
     return paths
 
 
+def first_config_path(path: str | os.PathLike | None = None) -> Path:
+    """Return the path :func:`load_config` reads (and writes) first (#978).
+
+    The first-run setup wizard writes here so the re-exec'd ``load_config`` finds it: an
+    explicit ``-c`` path when given, else the highest-priority default in the search order
+    (``$CLAUSTER_CONFIG`` → ``./clauster.yml`` → ``$CLAUSTER_HOME/clauster.yml``).
+    """
+    explicit = Path(path).expanduser() if path is not None else None
+    return _candidate_paths(explicit)[0]
+
+
 def _nested_model(ann: object) -> type[BaseModel] | None:
     """Return the nested ``BaseModel`` an annotation wraps for env-var recursion, or ``None``.
 

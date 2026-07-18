@@ -223,9 +223,15 @@ def test_bare_args_default_to_run(write_config, tmp_path, monkeypatch):
     assert ran == {"yes": True}
 
 
-def test_run_missing_config_exits_2(monkeypatch):
-    _stub_server(monkeypatch)
-    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 2
+def test_run_missing_config_launches_setup_wizard(monkeypatch):
+    # #978: a missing config is no longer a fatal error — it's first-run, so `run` serves the
+    # loopback setup wizard (which writes a config) instead of exiting 2.
+    captured = _stub_server(monkeypatch)
+    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 0
+    # The served app is the setup wizard (its state carries the setup-completion flag), bound
+    # to loopback — not the main dashboard app.
+    assert hasattr(captured["app"].state, "setup_complete")
+    assert captured["host"] == "127.0.0.1"
 
 
 def test_run_claude_not_found_exits_2(write_config, tmp_path, monkeypatch):
