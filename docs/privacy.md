@@ -31,7 +31,7 @@ configured value if you changed it.
 | Legacy hosted state (import source) | `~/.clauster/hosted_state.json` → `hosted_state.json.imported` | The pre-database hosted-session store. Imported into `clauster.db` on the first database boot and renamed `hosted_state.json.imported`. No longer written after the import. | Present only on installs that predate the database; renamed `*.imported` once imported. |
 | Session secret | `~/.clauster/session.secret` | The HMAC key that signs login-session cookies (`0600`). Not personal data, but a credential. | Created on first run; stable across restarts unless deleted (deleting it logs everyone out). |
 | Session epoch | `~/.clauster/session.epoch` | A monotonic counter used to invalidate all sessions at once. | Persists; bumped on a global logout. |
-| `CLAUDE.md` edit audit | `~/.clauster/claude_md_audit.log` | One JSON line per in-dashboard `CLAUDE.md` edit: project, user, action, byte size, and a SHA-256 of the content (not the content itself). | Append-only; never rotated or truncated by Clauster. |
+| Config-change audit | `~/.clauster/config_audit.log` | One JSON line per in-dashboard config-write (every surface — `CLAUDE.md`, settings, permissions, hooks, MCP servers + approvals, subagents, skills, plugins, marketplaces): the surface, scope, target file, action, actor, and the top-level **key names** touched (never the values). The `CLAUDE.md` editor additionally records the byte size and a SHA-256 of the content (not the content itself). | Append-only; never rotated or truncated by Clauster. |
 | Bridge debug logs | `~/.clauster/logs/<name>-<ts>-<seq>.log` | The `claude` bridge's `--debug-file` output. May contain the session deep-link URL (which embeds session / environment ids). | Rotated at `logs.bridge_log_max_size_mb` (default 10 MB); `logs.keep_rotated` rotated files kept (default 5). Whole log **sets** are also auto-pruned by `logs.retention_max_age_days` (default 30 — a spawn's set is deleted on the next spawn once its newest file is older than this), `logs.retention_max_files`, and `logs.retention_max_total_mb`. |
 | Bridge stderr | `~/.clauster/logs/<name>-<ts>-<seq>.stderr.log` | The bridge's stdout/stderr (startup and controller-auth errors the `--debug-file` does not capture). | Same `logs/` directory; cleaned up alongside the bridge logs. |
 | Private raw log | `~/.clauster/logs/<name>-<ts>-<seq>.raw.log` | Only written when `logs.redact_session_url: true`. The verbatim (unredacted) parse-source kept `0600`; the public `.log` becomes a redacted mirror. | Same lifetime as the bridge log it shadows. |
@@ -72,8 +72,8 @@ remove that directory while the app is **stopped**.
 - **Reset all login sessions** — delete `~/.clauster/session.secret` and
   `~/.clauster/session.epoch`; everyone is logged out and a fresh secret is
   minted on the next start.
-- **Clear the `CLAUDE.md` edit history** — delete
-  `~/.clauster/claude_md_audit.log`.
+- **Clear the config-change audit history** — delete
+  `~/.clauster/config_audit.log`.
 - **Full Clauster reset** — remove the whole `~/.clauster/` directory. Your
   projects under `projects_root` and the `claude`-owned transcripts are not
   touched.
