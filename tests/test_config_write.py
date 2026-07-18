@@ -253,6 +253,33 @@ def test_redact_top_level_scalar_masked_by_key_hint() -> None:
     assert cw.redact_secrets("plain", "name") == "plain"
 
 
+def test_redact_author_key_not_masked_but_auth_variants_are() -> None:
+    # #958/DF-4: a bare ``auth`` substring over-matched ``author`` and masked a real
+    # name/email. ``author`` is benign; ``auth`` and its credential-shaped relatives
+    # must still mask — including COMPOUND keys joined by ``_``/camelCase (``auth_key``,
+    # ``authHeader``, ``auth_cookie``), which an enumerated-suffix regex would silently
+    # under-mask, so they are covered explicitly.
+    assert (
+        cw.redact_secrets("Jane Doe <jane@example.com>", "author") == "Jane Doe <jane@example.com>"
+    )
+    assert cw.redact_secrets("Jane Doe", "authors") == "Jane Doe"
+    secret_keys = (
+        "auth",
+        "authn",
+        "authentication",
+        "authorization",
+        "auth_token",
+        "auth_key",
+        "authKey",
+        "AUTH_KEY",
+        "authHeader",
+        "auth_cookie",
+        "unauthorized",
+    )
+    for secret_key in secret_keys:
+        assert cw.redact_secrets("s3cr3t", secret_key) == cw.REDACTION_SENTINEL, secret_key
+
+
 def test_merge_redacted_keep_stored_on_unchanged_sentinel() -> None:
     stored = {"API_TOKEN": "sk-live-real", "HOST": "old"}
     incoming = {"API_TOKEN": cw.REDACTION_SENTINEL, "HOST": "new"}
@@ -470,6 +497,16 @@ def test_redact_secret_lines_masks_colon_form() -> None:
     assert "hunter2" not in red
     assert f"password: {cw.REDACTION_SENTINEL}\n" in red
     assert "name: alice\n" in red
+
+
+def test_redact_secret_lines_leaves_author_frontmatter_line() -> None:
+    # #958/DF-4: an ``author:`` frontmatter line (e.g. a SKILL.md) is not a secret and
+    # must survive the line-based redaction, while ``auth_token:`` is still masked.
+    text = "author: Jane Doe\nauth_token: sk-live-deadbeef\n"
+    red = cw.redact_secret_lines(text)
+    assert "author: Jane Doe\n" in red
+    assert "sk-live-deadbeef" not in red
+    assert f"auth_token: {cw.REDACTION_SENTINEL}\n" in red
 
 
 def test_redact_secret_lines_masks_interpolation_anywhere_in_line() -> None:

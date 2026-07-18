@@ -1,4 +1,4 @@
-name: Prepare Release
+name: "Release: prepare (version PR)"
 
 # knope's "release PR" half. On every push to main, if there are pending
 # `.changeset/` fragments, knope computes the next version, bumps pyproject.toml +

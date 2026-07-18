@@ -513,6 +513,238 @@ def test_unapproved_malformed_settings_file_is_ignored(tmp_path: Path) -> None:
     assert mcp.unapproved_mcp_servers(cj, project_dir) == ["a"]
 
 
+# --- #958 P2: read_project_approvals folds in settings-file top-level approvals -----
+
+
+def _approvals_project(tmp_path: Path) -> tuple[Path, Path]:
+    """Return (claude_json, project_dir) for a read_project_approvals fixture."""
+    cj = tmp_path / "claude.json"
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    return cj, project_dir
+
+
+def test_read_approvals_settings_local_enable_shows_enabled(tmp_path: Path) -> None:
+    # DF-9: `claude mcp add-json --scope local` relocates the approval into
+    # settings.local.json and clears ~/.claude.json — the panel must still show it enabled.
+    cj, project_dir = _approvals_project(tmp_path)
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["fs"],
+        "disabled": [],
+        "locked": ["fs"],
+    }
+
+
+def test_read_approvals_project_settings_disable_shows_disabled(tmp_path: Path) -> None:
+    cj, project_dir = _approvals_project(tmp_path)
+    _write_settings(project_dir / ".claude" / "settings.json", disabledMcpjsonServers=["http"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": [],
+        "disabled": ["http"],
+        "locked": ["http"],
+    }
+
+
+def test_read_approvals_user_settings_folded(tmp_path: Path) -> None:
+    cj, project_dir = _approvals_project(tmp_path)
+    _write_settings(cj.parent / ".claude" / "settings.json", enabledMcpjsonServers=["u"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["u"],
+        "disabled": [],
+        "locked": ["u"],
+    }
+
+
+def test_read_approvals_settings_local_overrides_claude_json(tmp_path: Path) -> None:
+    # Conflict across sources: enabled in ~/.claude.json but disabled in settings.local.json
+    # — the more-specific (local) source wins, matching what claude loads.
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["z"], [])
+    _write_settings(project_dir / ".claude" / "settings.local.json", disabledMcpjsonServers=["z"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": [],
+        "disabled": ["z"],
+        "locked": ["z"],
+    }
+
+
+def test_read_approvals_project_settings_overrides_user_settings(tmp_path: Path) -> None:
+    # Settings-vs-settings precedence (not just claude.json-vs-local): user settings.json
+    # disables X, project settings.json enables X — project is more specific, so X reads
+    # as enabled. Pins the ~/.claude.json < user < project < local ordering across the
+    # settings files themselves.
+    cj, project_dir = _approvals_project(tmp_path)
+    _write_settings(cj.parent / ".claude" / "settings.json", disabledMcpjsonServers=["x"])
+    _write_settings(project_dir / ".claude" / "settings.json", enabledMcpjsonServers=["x"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["x"],
+        "disabled": [],
+        "locked": ["x"],
+    }
+
+
+def test_read_approvals_local_settings_overrides_project_settings(tmp_path: Path) -> None:
+    # Local is the most specific settings file: project settings.json enables X, local
+    # settings.local.json disables X — local wins, X reads as disabled.
+    cj, project_dir = _approvals_project(tmp_path)
+    _write_settings(project_dir / ".claude" / "settings.json", enabledMcpjsonServers=["x"])
+    _write_settings(project_dir / ".claude" / "settings.local.json", disabledMcpjsonServers=["x"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": [],
+        "disabled": ["x"],
+        "locked": ["x"],
+    }
+
+
+def test_read_approvals_claude_json_only_unchanged(tmp_path: Path) -> None:
+    # No settings files -> behaves exactly as the legacy ~/.claude.json-only read.
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["a"], ["b"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["a"],
+        "disabled": ["b"],
+        "locked": [],
+    }
+
+
+def test_read_approvals_malformed_settings_ignored(tmp_path: Path) -> None:
+    # A corrupt settings file contributes nothing — the ~/.claude.json state still reads.
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["a"], [])
+    (project_dir / ".claude" / "settings.local.json").parent.mkdir(parents=True, exist_ok=True)
+    (project_dir / ".claude" / "settings.local.json").write_text("{bad", encoding="utf-8")
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["a"],
+        "disabled": [],
+        "locked": [],
+    }
+
+
+def test_read_approvals_locked_even_when_claude_json_agrees(tmp_path: Path) -> None:
+    # A server enabled in BOTH ~/.claude.json AND settings.local.json is still `locked`:
+    # the settings entry owns the effective decision, so a panel Unset (which only rewrites
+    # ~/.claude.json) would be reverted on reload. The panel renders such a row read-only
+    # rather than offer an action that silently won't take (#958 P2 write-asymmetry guard).
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["fs"], [])
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["fs"],
+        "disabled": [],
+        "locked": ["fs"],
+    }
+
+
+def _base_lists(cj: Path, project_dir: Path) -> dict[str, list[str]]:
+    """Return the raw ~/.claude.json projects[] approval lists (no settings overlay)."""
+    proj = json.loads(cj.read_text(encoding="utf-8"))["projects"][str(project_dir)]
+    return {
+        "enabled": proj.get("enabledMcpjsonServers", []),
+        "disabled": proj.get("disabledMcpjsonServers", []),
+    }
+
+
+def test_write_approvals_does_not_copy_settings_owned_into_claude_json(tmp_path: Path) -> None:
+    # Greptile P1: the panel echoes the merged (settings-folded) lists back on any save.
+    # Persisting `fs` (owned only by settings.local.json) into ~/.claude.json would create a
+    # phantom base approval that lingers if the settings entry is later removed. The writer
+    # must drop settings-owned names and persist ONLY the decisions this path owns.
+    cj, project_dir = _approvals_project(tmp_path)
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    mcp.write_project_approvals(cj, project_dir, ["fs", "other"], [])
+    assert _base_lists(cj, project_dir) == {"enabled": ["other"], "disabled": []}
+    # The display read still reflects fs (from settings) + the new `other`.
+    got = mcp.read_project_approvals(cj, project_dir)
+    assert set(got["enabled"]) == {"fs", "other"} and got["locked"] == ["fs"]
+
+
+def test_write_approvals_preserves_original_base_value_for_settings_owned(tmp_path: Path) -> None:
+    # A name that is a GENUINE ~/.claude.json approval AND is later also settings-owned keeps
+    # its original base value on a subsequent save — the writer neither drops the real base
+    # decision nor overwrites it with the settings-derived one.
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["fs"], [])  # genuine base approval first
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    mcp.write_project_approvals(cj, project_dir, ["fs", "other"], [])  # merged echo + a new one
+    assert _base_lists(cj, project_dir) == {"enabled": ["other", "fs"], "disabled": []}
+
+
+def test_write_approvals_drops_contradictory_base_pair_for_settings_owned(tmp_path: Path) -> None:
+    # Defensive: a hand-corrupted base listing a settings-owned name in BOTH enabled and
+    # disabled must not be persisted as a self-contradicting pair. The name is dropped from
+    # both (a settings file owns it, so the inert base entry is meaningless) — the writer's
+    # own output stays a clean set even from a corrupt base.
+    cj, project_dir = _approvals_project(tmp_path)
+    cj.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(project_dir): {
+                        "enabledMcpjsonServers": ["fs"],
+                        "disabledMcpjsonServers": ["fs"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    mcp.write_project_approvals(cj, project_dir, ["fs", "other"], [])
+    assert _base_lists(cj, project_dir) == {"enabled": ["other"], "disabled": []}
+
+
+def test_write_approvals_fails_closed_on_unreadable_settings(tmp_path: Path) -> None:
+    # Fail closed: if a settings file is present but unreadable/malformed at WRITE time (e.g.
+    # corrupted between the panel's read and this PUT), ownership can't be verified — the
+    # write must abort rather than treat a settings-owned decision as panel-owned and copy it
+    # into ~/.claude.json. The READ path stays lenient (that case is covered separately).
+    cj, project_dir = _approvals_project(tmp_path)
+    broken = project_dir / ".claude" / "settings.local.json"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("{bad json", encoding="utf-8")
+    with pytest.raises(cw.ConfigWriteError):
+        mcp.write_project_approvals(cj, project_dir, ["other"], [])
+    # Nothing was written — no partial ~/.claude.json project entry.
+    assert not cj.exists() or "projects" not in json.loads(cj.read_text(encoding="utf-8"))
+
+
+def test_write_approvals_fails_closed_on_unreadable_settings_dir(tmp_path: Path) -> None:
+    # A settings PATH that is a directory (read_bytes -> OSError, not a malformed JSON body)
+    # also fails the strict write closed: ownership still can't be verified.
+    cj, project_dir = _approvals_project(tmp_path)
+    (project_dir / ".claude" / "settings.local.json").mkdir(parents=True)
+    with pytest.raises(cw.ConfigWriteError):
+        mcp.write_project_approvals(cj, project_dir, ["other"], [])
+
+
+def test_read_approvals_unreadable_settings_dir_ignored(tmp_path: Path) -> None:
+    # The lenient read path tolerates the same OSError (a directory at the settings path):
+    # it contributes nothing rather than crashing the panel, so the base approval still reads.
+    cj, project_dir = _approvals_project(tmp_path)
+    mcp.write_project_approvals(cj, project_dir, ["a"], [])
+    (project_dir / ".claude" / "settings.local.json").mkdir(parents=True)
+    assert mcp.read_project_approvals(cj, project_dir) == {
+        "enabled": ["a"],
+        "disabled": [],
+        "locked": [],
+    }
+
+
+def test_write_approvals_dedupes_preserved_base_duplicates(tmp_path: Path) -> None:
+    # Defensive: a hand-edited ~/.claude.json with a duplicate owned name must not survive as
+    # a duplicate when its base value is preserved across a save (the incoming lists are
+    # already validated dup-free, so only a tampered base can reach the dedup path).
+    cj, project_dir = _approvals_project(tmp_path)
+    cj.write_text(
+        json.dumps({"projects": {str(project_dir): {"enabledMcpjsonServers": ["fs", "fs"]}}}),
+        encoding="utf-8",
+    )
+    _write_settings(project_dir / ".claude" / "settings.local.json", enabledMcpjsonServers=["fs"])
+    mcp.write_project_approvals(cj, project_dir, ["fs", "other"], [])
+    assert _base_lists(cj, project_dir) == {"enabled": ["other", "fs"], "disabled": []}
+
+
 # --- gated routes (full FastAPI lifespan) ------------------------------------------
 
 FAKE_CLAUDE = Path(__file__).resolve().parent / "fixtures" / "fake_claude" / "claude"

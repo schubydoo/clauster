@@ -58,14 +58,16 @@ curl -H "Authorization: Bearer clauster_pat_…" https://clauster.example/api/v1
 
 Tokens are managed **CLI-first** — there is no dashboard surface for token
 management yet (planned for a later release). Each token has a unique,
-operator-chosen `--label`; only its SHA-256 hash is ever stored, and a raw
-token is shown to you exactly once, at issue/rotate time.
+operator-chosen label; only its SHA-256 hash is ever stored, and a raw
+token is shown to you exactly once, at issue/rotate time. On `issue`, `rotate`,
+and `revoke` the label can be given either as a positional argument or with
+`--label` — the two forms are equivalent.
 
 ```sh
-clauster api-token issue --label ci-runner    # mint + print a new token (once)
+clauster api-token issue ci-runner            # mint + print a new token (once)
 clauster api-token list                       # label, created, last-used — never the token
 clauster api-token rotate ci-runner           # mint a fresh secret for an existing label
-clauster api-token revoke ci-runner           # delete a token; it stops authenticating immediately
+clauster api-token revoke --label ci-runner   # delete a token; it stops authenticating immediately
 ```
 
 Tokens never expire by default and are revocable at any time. The legacy
