@@ -2053,11 +2053,17 @@
       _syncAgentName(content, name) {
         const nm = (name || "").trim();
         if (!nm) return content;  // canSave blocks a blank name; nothing to inject
-        const text = content || "";
+        // Strip a leading BOM so frontmatter starting at byte 1 is recognized — the
+        // backend requires the opening `---` at the very start (\A), so a BOM'd file
+        // would otherwise fail to validate; stripping it makes it savable.
+        const text = (content || "").replace(/^\uFEFF/, "");
+        // Match a frontmatter block anchored at the start (mirrors the backend's \A---).
         const m = text.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n[\s\S]*|)$/);
         if (!m) {
-          // No frontmatter block → wrap the doc in one carrying the name.
-          return "---\nname: " + nm + "\n---\n" + text;
+          // No cleanly-delimited leading frontmatter. Do NOT restructure the doc — that
+          // could bury real (but malformed / leading-whitespace) frontmatter as body.
+          // Leave it for the backend to validate and explain (missing name/frontmatter).
+          return text;
         }
         let yaml = m[1];
         const rest = m[2] || "";  // "" or "\n<body…>"
