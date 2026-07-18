@@ -12,6 +12,7 @@ from clauster.config import ClausterConfig, load_config
 from clauster.config_editor import (
     EDITABLE_FIELDS,
     EXCLUDED_FIELDS,
+    TIER_B_FIELDS,
     ConfigValidationError,
     DisallowedFieldError,
     disk_state,
@@ -499,23 +500,34 @@ def test_every_config_leaf_is_classified_editable_or_excluded() -> None:
     # durable record that keeps the editor's surface and the config schema from drifting apart.
     leaves = set(_config_leaf_paths())
     editable = set(EDITABLE_FIELDS)
+    tier_b = set(TIER_B_FIELDS)
     excluded = set(EXCLUDED_FIELDS)
-    unclassified = leaves - editable - excluded
+    unclassified = leaves - editable - tier_b - excluded
     assert not unclassified, (
-        f"Config leaf field(s) {sorted(unclassified)} are in neither EDITABLE_FIELDS nor "
-        "EXCLUDED_FIELDS in config_editor.py. Classify each: add it to EDITABLE_FIELDS (Tier-A "
-        "operational scalar — never a secret/bind/auth/binary/structural/clone/webhook field) "
-        "with its label/help/widget metadata, OR add it to EXCLUDED_FIELDS with a one-line "
-        "reason. When unsure, EXCLUDE it (fail closed)."
+        f"Config leaf field(s) {sorted(unclassified)} are in none of EDITABLE_FIELDS, "
+        "TIER_B_FIELDS, or EXCLUDED_FIELDS in config_editor.py. Classify each: add it to "
+        "EDITABLE_FIELDS (Tier-A operational scalar), TIER_B_FIELDS (Advanced — behind the "
+        "config_write capability + step-up re-auth; only GAP-SENSITIVE clone/webhook-class "
+        "scalars, never config_write.*/login_shepherd.* or a secret/bind/auth/binary/"
+        "structural field), OR EXCLUDED_FIELDS with a one-line reason. When unsure, EXCLUDE "
+        "it (fail closed)."
     )
 
 
 def test_editable_and_excluded_are_disjoint() -> None:
-    # #660: a field cannot be both editable and intentionally-excluded — a path in both is a
+    # #660: a field cannot be in two classifications — a path in more than one is a
     # contradiction (the guard above would count it as covered while the editor surfaces it,
-    # masking a stale entry). Pin disjointness so a copy/paste slip fails loudly.
-    overlap = set(EDITABLE_FIELDS) & set(EXCLUDED_FIELDS)
-    assert not overlap, f"field(s) in BOTH EDITABLE_FIELDS and EXCLUDED_FIELDS: {sorted(overlap)}"
+    # masking a stale entry). Pin pairwise disjointness so a copy/paste slip fails loudly.
+    editable, tier_b, excluded = set(EDITABLE_FIELDS), set(TIER_B_FIELDS), set(EXCLUDED_FIELDS)
+    assert not (editable & excluded), (
+        f"field(s) in BOTH EDITABLE_FIELDS and EXCLUDED_FIELDS: {sorted(editable & excluded)}"
+    )
+    assert not (editable & tier_b), (
+        f"field(s) in BOTH EDITABLE_FIELDS and TIER_B_FIELDS: {sorted(editable & tier_b)}"
+    )
+    assert not (tier_b & excluded), (
+        f"field(s) in BOTH TIER_B_FIELDS and EXCLUDED_FIELDS: {sorted(tier_b & excluded)}"
+    )
 
 
 def test_editable_and_excluded_reference_only_real_leaves() -> None:
@@ -524,10 +536,12 @@ def test_editable_and_excluded_reference_only_real_leaves() -> None:
     # a config.py rename that orphans an entry fails here instead of silently mis-classifying.
     leaves = set(_config_leaf_paths())
     stale_editable = set(EDITABLE_FIELDS) - leaves
+    stale_tier_b = set(TIER_B_FIELDS) - leaves
     stale_excluded = set(EXCLUDED_FIELDS) - leaves
     assert not stale_editable, (
         f"EDITABLE_FIELDS names non-existent leaf(s): {sorted(stale_editable)}"
     )
+    assert not stale_tier_b, f"TIER_B_FIELDS names non-existent leaf(s): {sorted(stale_tier_b)}"
     assert not stale_excluded, (
         f"EXCLUDED_FIELDS names non-existent leaf(s): {sorted(stale_excluded)}"
     )

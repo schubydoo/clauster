@@ -120,6 +120,11 @@ def _pty_supported() -> bool:
 
 
 _SESSION_COOKIE = "clauster_session"
+# Step-up re-auth cookie for the privileged Tier-B "Advanced" config surface (#978):
+# short-lived, distinct from the session cookie, and only ever consulted by the
+# Tier-B config-write routes — never a general access credential.
+_ELEVATION_COOKIE = "clauster_elevation"
+_ELEVATION_MAX_AGE_SECONDS = 600  # 10-minute unlock window; re-prove the password after
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SESSION_USER = "admin"  # single-user in v0.2; multi-user is v0.3
 
@@ -751,7 +756,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
     # ----- auth context (v0.2 foundation, D12/D13) ------------------------
     _root = config.root_path
-    _serializer = auth.make_serializer(auth.load_or_create_secret(config.state_dir))
+    _signing_secret = auth.load_or_create_secret(config.state_dir)
+    _serializer = auth.make_serializer(_signing_secret)
+    # Step-up elevation (#978): same secret, distinct salt — an elevation token can
+    # never be presented as a session cookie or vice versa (see make_elevation_serializer).
+    _elevation_serializer = auth.make_elevation_serializer(_signing_secret)
     _hasher = auth.make_hasher()
     _allowed_origins = auth.build_allowed_origins(config)
     _throttle = LoginThrottle()
@@ -1057,7 +1066,69 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         )
         resp = RedirectResponse(f"{_root}/login", status_code=303)
         resp.delete_cookie(_SESSION_COOKIE, path=_root or "/")
+        # The epoch bump above already revokes any outstanding elevation token (#978);
+        # clear its cookie too so a stale value doesn't linger in the browser.
+        resp.delete_cookie(_ELEVATION_COOKIE, path=_root or "/")
         return resp
+
+    def require_elevated(request: Request) -> None:
+        """Fail-closed step-up gate for the privileged Tier-B config surface (#978).
+
+        Raises ``403 {"detail": "reauth_required"}`` unless the request carries a
+        valid, unexpired, non-revoked elevation cookie — the caller must have
+        re-proved the operator password via ``POST /api/reauth`` within the unlock
+        window. Consulted only by Tier-B config-write routes, and always *after*
+        the capability/scope gate, so a disabled surface stays a 404 (invisible)
+        rather than advertising itself with a 403.
+        """
+        elevated = auth.read_elevation(
+            _elevation_serializer,
+            request.cookies.get(_ELEVATION_COOKIE),
+            _ELEVATION_MAX_AGE_SECONDS,
+            current_epoch=app.state.session_epoch,
+        )
+        if elevated is None:
+            raise HTTPException(status_code=403, detail="reauth_required")
+
+    @app.post("/api/reauth")
+    async def reauth(request: Request) -> Response:
+        """Re-prove the operator password to unlock the Tier-B "Advanced" surface (#978).
+
+        Step-up authentication: the caller is already logged in, but privileged
+        config writes require a fresh password proof. On success, set a short-lived
+        elevation cookie (``_ELEVATION_MAX_AGE_SECONDS``). Shares the login throttle
+        so it can't be brute-forced, and — like login — verifies against a dummy
+        hash when no password is set, so "no password configured" isn't a timing
+        oracle and reauth simply never succeeds (Tier-B stays locked).
+        """
+        throttle_key, throttle_shared = _throttle_key(request)
+        allowed, retry_after = _throttle.allowed(throttle_key, shared=throttle_shared)
+        if not allowed:
+            resp = JSONResponse({"detail": "too many attempts"}, status_code=429)
+            resp.headers["Retry-After"] = str(max(1, int(retry_after) + 1))
+            return resp
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        password = str(body.get("password", "")) if isinstance(body, dict) else ""
+        if auth.verify_password(_hasher, config.auth.password_hash, password):
+            _throttle.reset(throttle_key)
+            resp = JSONResponse({"elevated": True, "expires_in": _ELEVATION_MAX_AGE_SECONDS})
+            resp.set_cookie(
+                _ELEVATION_COOKIE,
+                auth.issue_elevation(
+                    _elevation_serializer, _SESSION_USER, app.state.session_epoch
+                ),
+                max_age=_ELEVATION_MAX_AGE_SECONDS,
+                httponly=True,
+                samesite="lax",
+                secure=_cookie_secure(request),
+                path=_root or "/",
+            )
+            return resp
+        _throttle.record_failure(throttle_key, shared=throttle_shared)
+        return JSONResponse({"detail": "incorrect password"}, status_code=401)
 
     async def list_projects() -> list[Project]:
         # Shared facade (#775): the CLI and this route go through the same
@@ -3883,6 +3954,103 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except config_editor.ConfigValidationError as exc:
             raise HTTPException(status_code=422, detail=f"invalid config: {exc}") from exc
+        return {"hash": new_hash, "restart_required": True}
+
+    def _require_advanced(request: Request) -> None:
+        """Fail-closed gate for the Tier-B "Advanced" config surface (#978).
+
+        404 when config-write is disabled (invisible surface, like the reaper), then
+        403 ``reauth_required`` until the caller has re-proved the password via
+        ``POST /api/reauth``. Ordered so a disabled surface never advertises itself
+        with a 403.
+        """
+        if not config.config_write.enabled:
+            raise HTTPException(status_code=404, detail="config-write is disabled")
+        require_elevated(request)
+
+    @app.get("/api/config/advanced")
+    async def api_config_advanced_get(request: Request) -> dict:
+        """Tier-B config values + a content hash, behind config-write + step-up (#978).
+
+        Mirrors ``GET /api/config`` but over :data:`~clauster.config_editor.TIER_B_FIELDS`
+        only — the operational-but-sensitive ``clone.*`` / ``webhooks.*`` scalars. No
+        Tier-C secret/bind/auth value is ever surfaced (structural redaction, same as
+        Tier-A). Values are read from disk so they stay consistent with the hash and
+        reflect what the next restart will load.
+        """
+        _require_advanced(request)
+        cfg = app.state.config
+        path = cfg.source_path
+        fields = None
+        content_hash = None
+        present = None
+        if path is not None:
+            fields = config_editor.editable_values_on_disk(
+                path, fields=config_editor.TIER_B_FIELDS
+            )
+            content_hash, present = config_editor.disk_state(
+                path, fields=config_editor.TIER_B_FIELDS
+            )
+        if fields is None:
+            fields = config_editor.editable_values(cfg, fields=config_editor.TIER_B_FIELDS)
+        specs = config_editor.field_specs(present, fields=config_editor.TIER_B_FIELDS)
+        editable = [p for p in config_editor.TIER_B_FIELDS if not specs[p]["hidden"]]
+        return {
+            "fields": fields,
+            "editable": editable,
+            "specs": specs,
+            "hash": content_hash,
+        }
+
+    @app.put("/api/config/advanced")
+    async def api_config_advanced_put(request: Request, body: dict) -> dict:
+        """Apply Tier-B config edits: capability + step-up gated, backup + atomic write (#978).
+
+        Fail-closed order: capability (404 when off) → step-up (403 ``reauth_required``)
+        → external-edit hash guard (409) → re-validate against TIER_B **only** (a Tier-A
+        or Tier-C key is a 400, never a silent drop) → backup + atomic write. Does not
+        live-reload; the response flags a restart is needed. Records an audit line with
+        the touched key NAMES only (never values).
+        """
+        _require_advanced(request)
+        cfg = app.state.config
+        path = cfg.source_path
+        if path is None:
+            raise HTTPException(status_code=409, detail="config has no on-disk source to edit")
+        edits = body.get("edits")
+        if not isinstance(edits, dict) or not edits:
+            raise HTTPException(
+                status_code=422, detail="body must include a non-empty 'edits' map"
+            )
+        expected = body.get("hash")
+        if not isinstance(expected, str) or not expected:
+            raise HTTPException(
+                status_code=422,
+                detail="body must include the 'hash' from GET /api/config/advanced",
+            )
+        try:
+            new_hash = await asyncio.to_thread(
+                config_writer.write_edits,
+                path,
+                edits,
+                expected_hash=expected,
+                allowed=frozenset(config_editor.TIER_B_FIELDS),
+            )
+        except config_editor.DisallowedFieldError as exc:
+            raise HTTPException(status_code=400, detail=f"not editable: {exc}") from exc
+        except config_editor.StaleConfigError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except config_editor.ConfigValidationError as exc:
+            raise HTTPException(status_code=422, detail=f"invalid config: {exc}") from exc
+        await config_audit.arecord(
+            cfg.state_dir,
+            surface="config-advanced",
+            scope="global",
+            target=str(path),
+            action="edit",
+            actor=_SESSION_USER,
+            keys=sorted(edits),
+        )
         return {"hash": new_hash, "restart_required": True}
 
     @app.post("/api/restart", status_code=202)
