@@ -2191,13 +2191,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     restore=_restore,
                 )
 
+        # #958 Part 6: fingerprint the files this mutation might touch, before + after, so
+        # the audit line shows which ones the write actually changed. The `claude mcp` CLI
+        # does Claude Code's own bookkeeping across several files (relocating an approval,
+        # rewriting ~/.claude.json), so a base line alone can't say where the change landed.
+        _watch = [
+            runner.claude_json,
+            cli_cwd / ".claude" / "settings.local.json",
+            cli_cwd / ".mcp.json",
+        ]
+        before_fp = await asyncio.to_thread(config_audit.file_fingerprints, _watch)
         try:
             await asyncio.to_thread(_work)
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
 
-        # Base audit line for the mutation (direct OR CLI-driven). The redacted `claude mcp`
-        # argv + before/after file diff for the CLI path is the follow-up slice of #958 P6.
+        after_fp = await asyncio.to_thread(config_audit.file_fingerprints, _watch)
+        # Base audit line for the mutation (direct OR CLI-driven), enriched with the
+        # changed-file fingerprints (path + sha256 + size, never contents). Recording the
+        # redacted `claude mcp` argv itself is a further #958 P6 slice.
         await config_audit.arecord(
             config.state_dir,
             surface="mcp",
@@ -2205,6 +2217,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             target=name,
             action=op,
             actor=_SESSION_USER,
+            extra={"files": config_audit.diff_fingerprints(before_fp, after_fp)},
         )
         result = {"scope": scope, "name": name, "op": op, "ok": True}
         if scope != "user":

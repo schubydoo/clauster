@@ -1,10 +1,16 @@
 """Structured audit trail for config-write mutations (#958 Part 6 / #818).
 
 Every committed config-write records ONE compact JSON line to ``config_audit.log``
-under the deployment state dir — surface, scope, target file, the keys touched, and
-(for the CLI-driven MCP/plugins mutations) the redacted ``claude …`` argv plus a
-before/after fingerprint of the affected file. It answers the forensic question
-"where did this config change land, and what ran?" without trawling the app log.
+under the deployment state dir — surface, scope, target file, and the keys touched.
+For MCP-server writes it additionally records a **before/after fingerprint** of each
+affected file (:func:`file_fingerprints` / :func:`diff_fingerprints`) — for BOTH the
+direct writer and the CLI path, since either can touch several files. The CLI case is
+the motivator: the subprocess (`claude mcp …`) does Claude Code's own bookkeeping
+across files, so recording which files changed — by path + sha256, never their
+contents — makes that side effect visible. It answers the
+forensic question "where did this config change land?" without trawling the app log.
+(Recording the redacted ``claude …`` argv itself, and extending the fingerprint to
+the plugins/reset/approvals handlers, is a further slice of #958 Part 6.)
 
 Generalises #818's CLAUDE.md-only audit into one trail for every surface. The append
 is **best-effort**: the config write already committed before we get here, so a failed
@@ -20,8 +26,10 @@ does not re-derive secrets.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -83,6 +91,62 @@ def record(
             scope,
             exc,
         )
+
+
+def file_fingerprints(paths: Iterable[Path]) -> dict[str, dict[str, str | int] | None]:
+    """Snapshot each path's ``{sha256, bytes}`` fingerprint, or ``None`` if absent.
+
+    Used to take a before/after picture of the files a CLI-driven config mutation might
+    touch, so :func:`diff_fingerprints` can report which ones actually changed. Records
+    only a content HASH + byte size, never the bytes — the audit trail's key-names-never-
+    values invariant extends to file contents (``~/.claude.json`` holds real tokens). A
+    missing/unreadable file fingerprints as ``None`` (so a create/remove is detectable);
+    keyed by the absolute path (this is the operator's own local audit log — the path is
+    exactly the "where did it land?" answer the trail exists to give).
+    """
+    out: dict[str, dict[str, str | int] | None] = {}
+    for path in paths:
+        try:
+            raw = path.read_bytes()
+        except Exception:  # noqa: BLE001 - a snapshot on a committed write's critical path
+            # must NEVER raise (audit is best-effort): an unreadable file — OSError, or an
+            # exotic MemoryError on a huge file — fingerprints as None (a degraded line),
+            # never a 500 for a write that already landed.
+            out[str(path)] = None
+            continue
+        out[str(path)] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+    return out
+
+
+def diff_fingerprints(
+    before: dict[str, dict[str, str | int] | None], after: dict[str, dict[str, str | int] | None]
+) -> list[dict[str, Any]]:
+    """List the files whose fingerprint changed between two :func:`file_fingerprints` snapshots.
+
+    Each entry is ``{"file", "change", "before_sha256"?, "after_sha256"?, "after_bytes"?}``
+    where ``change`` is ``created`` / ``modified`` / ``removed``. Unchanged files are
+    omitted. Iterates ``before``'s keys (both snapshots watch the same path set), so a
+    path present only in ``after`` still needs to be in ``before`` (as ``None``) to be seen.
+    """
+    changes: list[dict[str, Any]] = []
+    for path, b in before.items():
+        a = after.get(path)
+        if b == a:
+            continue
+        if b is None:
+            change = "created"
+        elif a is None:
+            change = "removed"
+        else:
+            change = "modified"
+        entry: dict[str, Any] = {"file": path, "change": change}
+        if b is not None:
+            entry["before_sha256"] = b["sha256"]
+        if a is not None:
+            entry["after_sha256"] = a["sha256"]
+            entry["after_bytes"] = a["bytes"]
+        changes.append(entry)
+    return changes
 
 
 async def arecord(state_dir: Path | None, **fields: Any) -> None:
