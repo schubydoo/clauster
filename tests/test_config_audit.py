@@ -112,7 +112,89 @@ async def test_arecord_offloads_and_appends(tmp_path: Path) -> None:
     assert entry["surface"] == "hooks" and entry["keys"] == ["a"]
 
 
+# --- unit: file fingerprints (#958 Part 6 CLI side-effect visibility) --------
+
+
+def test_file_fingerprints_hashes_present_and_none_for_absent(tmp_path: Path) -> None:
+    present = tmp_path / "a.json"
+    present.write_bytes(b'{"x": 1}')
+    fp = config_audit.file_fingerprints([present, tmp_path / "gone.json"])
+    assert fp[str(present)] == {"sha256": fp[str(present)]["sha256"], "bytes": 8}
+    assert len(fp[str(present)]["sha256"]) == 64
+    assert fp[str(tmp_path / "gone.json")] is None  # absent -> None (a create is detectable)
+
+
+def test_diff_fingerprints_created_and_omits_unchanged(tmp_path: Path) -> None:
+    p = tmp_path / "f.json"
+    before = {str(p): None, "/stable": {"sha256": "s", "bytes": 1}}
+    p.write_bytes(b"hi")
+    after = config_audit.file_fingerprints([p])
+    after["/stable"] = {"sha256": "s", "bytes": 1}  # unchanged -> must be omitted
+    changes = config_audit.diff_fingerprints(before, after)
+    assert len(changes) == 1
+    c = changes[0]
+    assert c["file"] == str(p) and c["change"] == "created"
+    assert "before_sha256" not in c and c["after_bytes"] == 2 and len(c["after_sha256"]) == 64
+
+
+def test_diff_fingerprints_modified_and_removed() -> None:
+    before = {"/m": {"sha256": "old", "bytes": 3}, "/r": {"sha256": "x", "bytes": 1}}
+    after = {"/m": {"sha256": "new", "bytes": 5}, "/r": None}
+    changes = {c["file"]: c for c in config_audit.diff_fingerprints(before, after)}
+    assert changes["/m"]["change"] == "modified"
+    assert changes["/m"]["before_sha256"] == "old" and changes["/m"]["after_sha256"] == "new"
+    assert changes["/r"]["change"] == "removed"
+    assert changes["/r"]["before_sha256"] == "x" and "after_sha256" not in changes["/r"]
+
+
+def test_file_fingerprints_unreadable_is_indeterminate(tmp_path: Path, monkeypatch) -> None:
+    # A file that EXISTS but can't be read must be distinct from absent (None), so a diff
+    # never miscalls it a create/remove — and file_fingerprints must not raise on the
+    # critical path of a committed write.
+    p = tmp_path / "locked.json"
+    p.write_bytes(b"x")
+    real = Path.read_bytes
+
+    def boom(self):
+        if self == p:
+            raise PermissionError("nope")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    fp = config_audit.file_fingerprints([p])
+    assert fp[str(p)] == {"unreadable": True}
+    changes = config_audit.diff_fingerprints({str(p): {"sha256": "old", "bytes": 1}}, fp)
+    assert changes == [{"file": str(p), "change": "indeterminate"}]
+
+
 # --- route wiring: representative surfaces ----------------------------------
+
+
+def test_route_mcp_write_audits_changed_file_fingerprint(
+    write_config, tmp_path, projects_root
+) -> None:
+    # An entry with an env value routes to the DIRECT writer (no subprocess) and writes
+    # <project>/.mcp.json; the audit records WHICH file changed (path + sha256 + size),
+    # never its contents — the env value below must not appear anywhere in the record.
+    with _client(write_config, tmp_path) as c:
+        r = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "add",
+                "name": "srv",
+                "entry": {"command": "x", "env": {"K": "SECRET-marker-9f3"}},
+            },
+        )
+        assert r.status_code == 200
+    entry = next(e for e in _audit(tmp_path) if e["surface"] == "mcp")
+    changed = [f for f in entry["files"] if f["file"].endswith(".mcp.json")]
+    assert changed, f"expected .mcp.json in audited files, got {entry['files']}"
+    assert changed[0]["change"] in ("created", "modified")
+    assert len(changed[0]["after_sha256"]) == 64 and changed[0]["after_bytes"] > 0
+    assert "SECRET-marker-9f3" not in json.dumps(entry)  # fingerprint only, never contents
 
 
 def test_route_permissions_write_audits(write_config, tmp_path, projects_root) -> None:
