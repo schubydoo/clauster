@@ -104,34 +104,49 @@ def file_fingerprints(paths: Iterable[Path]) -> dict[str, dict[str, str | int] |
     keyed by the absolute path (this is the operator's own local audit log — the path is
     exactly the "where did it land?" answer the trail exists to give).
     """
-    out: dict[str, dict[str, str | int] | None] = {}
+    out: dict[str, dict[str, Any] | None] = {}
     for path in paths:
         try:
             raw = path.read_bytes()
+        except FileNotFoundError:
+            out[str(path)] = None  # genuinely ABSENT (distinct from unreadable below)
+            continue
         except Exception:  # noqa: BLE001 - a snapshot on a committed write's critical path
-            # must NEVER raise (audit is best-effort): an unreadable file — OSError, or an
-            # exotic MemoryError on a huge file — fingerprints as None (a degraded line),
-            # never a 500 for a write that already landed.
-            out[str(path)] = None
+            # must NEVER raise (audit is best-effort). A file that EXISTS but can't be read
+            # (permissions, an exotic MemoryError on a huge file) is INDETERMINATE — mark it
+            # so, so diff_fingerprints never miscalls it a create/remove (None means absent,
+            # ONLY), and never 500s a write that already landed.
+            out[str(path)] = {"unreadable": True}
             continue
         out[str(path)] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
     return out
 
 
+def _unreadable(fp: dict[str, Any] | None) -> bool:
+    """Whether a fingerprint marks a file that exists but couldn't be read (indeterminate)."""
+    return isinstance(fp, dict) and fp.get("unreadable") is True
+
+
 def diff_fingerprints(
-    before: dict[str, dict[str, str | int] | None], after: dict[str, dict[str, str | int] | None]
+    before: dict[str, dict[str, Any] | None], after: dict[str, dict[str, Any] | None]
 ) -> list[dict[str, Any]]:
     """List the files whose fingerprint changed between two :func:`file_fingerprints` snapshots.
 
     Each entry is ``{"file", "change", "before_sha256"?, "after_sha256"?, "after_bytes"?}``
-    where ``change`` is ``created`` / ``modified`` / ``removed``. Unchanged files are
-    omitted. Iterates ``before``'s keys (both snapshots watch the same path set), so a
-    path present only in ``after`` still needs to be in ``before`` (as ``None``) to be seen.
+    where ``change`` is ``created`` / ``modified`` / ``removed`` — or ``indeterminate`` when
+    a side couldn't be read (never miscalled a create/remove). Unchanged files are omitted.
+    Iterates ``before``'s keys (both snapshots watch the same path set), so a path present
+    only in ``after`` still needs to be in ``before`` (as ``None``) to be seen.
     """
     changes: list[dict[str, Any]] = []
     for path, b in before.items():
         a = after.get(path)
         if b == a:
+            continue
+        # A side we couldn't read is indeterminate — record that honestly rather than
+        # attributing a create/modify/remove from a hash we don't actually have.
+        if _unreadable(b) or _unreadable(a):
+            changes.append({"file": path, "change": "indeterminate"})
             continue
         if b is None:
             change = "created"

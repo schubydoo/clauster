@@ -2193,11 +2193,16 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
 
         # #958 Part 6: fingerprint the files this mutation might touch, before + after, so
         # the audit line shows which ones the write actually changed. The `claude mcp` CLI
-        # does Claude Code's own bookkeeping across several files (relocating an approval,
-        # rewriting ~/.claude.json), so a base line alone can't say where the change landed.
+        # does Claude Code's own bookkeeping across several files (relocating an approval into
+        # settings.local.json, editing .claude/settings.json, rewriting ~/.claude.json), so a
+        # base line alone can't say where the change landed. Best-effort: the snapshots bracket
+        # the write but do not sit inside its file lock, so under (rare, single-operator)
+        # concurrent writes to the same file the diff can observe the interleaved state — a
+        # forensic hint of where the change landed, not a transactional attribution.
         _watch = [
             runner.claude_json,
             cli_cwd / ".claude" / "settings.local.json",
+            cli_cwd / ".claude" / "settings.json",
             cli_cwd / ".mcp.json",
         ]
         before_fp = await asyncio.to_thread(config_audit.file_fingerprints, _watch)

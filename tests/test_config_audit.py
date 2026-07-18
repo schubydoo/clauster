@@ -147,6 +147,26 @@ def test_diff_fingerprints_modified_and_removed() -> None:
     assert changes["/r"]["before_sha256"] == "x" and "after_sha256" not in changes["/r"]
 
 
+def test_file_fingerprints_unreadable_is_indeterminate(tmp_path: Path, monkeypatch) -> None:
+    # A file that EXISTS but can't be read must be distinct from absent (None), so a diff
+    # never miscalls it a create/remove — and file_fingerprints must not raise on the
+    # critical path of a committed write.
+    p = tmp_path / "locked.json"
+    p.write_bytes(b"x")
+    real = Path.read_bytes
+
+    def boom(self):
+        if self == p:
+            raise PermissionError("nope")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", boom)
+    fp = config_audit.file_fingerprints([p])
+    assert fp[str(p)] == {"unreadable": True}
+    changes = config_audit.diff_fingerprints({str(p): {"sha256": "old", "bytes": 1}}, fp)
+    assert changes == [{"file": str(p), "change": "indeterminate"}]
+
+
 # --- route wiring: representative surfaces ----------------------------------
 
 
