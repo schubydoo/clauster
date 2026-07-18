@@ -177,9 +177,11 @@
       // a later 403 reauth_required (window lapsed) re-locks and re-prompts.
       configAdvanced: {
         supported: {{ config_write_enabled | tojson }},
-        // Step-up needs a password to prove; with auth disabled there is none, so the
-        // unlock form could never succeed (#978 review). Show a "needs auth" note instead.
-        authEnabled: {{ auth_enabled | tojson }},
+        // Step-up needs a PASSWORD to prove. auth.enabled can be true with none configured
+        // (reverse-proxy / API-token-only auth), where /api/reauth can never succeed — so
+        // gate the unlock form on whether a password hash is actually set (#978 review),
+        // and show a "needs a password" note otherwise.
+        passwordSet: {{ auth_password_set | tojson }},
         unlocked: false, loading: false, saving: false, gen: 0,
         reauthPassword: "", reauthing: false, reauthError: "",
         error: "", saved: false,
@@ -1102,10 +1104,14 @@
         const a = this.configAdvanced;
         a.gen = (a.gen || 0) + 1;  // bump so a stale in-flight advanced load/save is dropped on reopen
         a.unlocked = false; a.error = ""; a.saved = false; a.reauthError = ""; a.reauthPassword = "";
+        // Clear the busy flags too: a request stranded by the gen guard leaves its own
+        // reauthing/saving/loading set (its finally is gen-guarded), so the reopened modal
+        // must reset them here or its Unlock/Save button stays disabled until a reload.
+        a.reauthing = false; a.saving = false; a.loading = false;
         a.fields = {}; a.specs = {}; a.edits = {}; a.editable = []; a.hash = null;
-        // Only probe when a step-up can actually succeed: with auth off there is no password,
-        // so the endpoint would 403 forever — the panel shows a "needs auth" note instead.
-        if (a.supported && a.authEnabled) this.advancedLoad();
+        // Only probe when a step-up can actually succeed: with no password configured the
+        // endpoint would 403 forever — the panel shows a "needs a password" note instead.
+        if (a.supported && a.passwordSet) this.advancedLoad();
       },
       async saveConfig() {
         const c = this.configEditor;

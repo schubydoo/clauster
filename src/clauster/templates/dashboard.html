@@ -1484,14 +1484,15 @@
               </p>
 
               <div x-show="!configAdvanced.unlocked && !configAdvanced.loading" x-cloak>
-                {# With auth disabled there is no password to step up with, so the unlock
-                   form could never succeed — show a note pointing at how to enable it. #}
+                {# Step-up needs a password; without one configured the unlock form could
+                   never succeed (auth may still be on via reverse-proxy/API token) — show a
+                   note pointing at how to enable it. #}
                 <div class="text-secondary small" data-test="adv-needs-auth"
-                     x-show="!configAdvanced.authEnabled" x-cloak>
-                  Advanced settings require authentication. Set a password
-                  (<code>auth.password_hash</code>) in the config file to enable them.
+                     x-show="!configAdvanced.passwordSet" x-cloak>
+                  Advanced settings require a password. Set
+                  <code>auth.password_hash</code> in the config file to enable them.
                 </div>
-                <div x-show="configAdvanced.authEnabled" x-cloak>
+                <div x-show="configAdvanced.passwordSet" x-cloak>
                   <div class="alert alert-danger py-2" role="alert" data-test="adv-reauth-error"
                        x-show="configAdvanced.reauthError" x-cloak x-text="configAdvanced.reauthError"></div>
                   <form class="row g-2 align-items-end" @submit.prevent="advancedUnlock()">
