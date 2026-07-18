@@ -6,6 +6,9 @@ the ``clauster run`` glue that serves it when no config exists.
 
 from __future__ import annotations
 
+import os
+import stat
+import sys
 import types
 from pathlib import Path
 
@@ -75,6 +78,46 @@ def test_valid_submit_writes_auth_enabled_config(tmp_path):
     assert auth.verify_password(auth.make_hasher(), cfg.auth.password_hash, PASSWORD)
     # The plaintext password is never written to disk.
     assert PASSWORD not in write_path.read_text(encoding="utf-8")
+
+
+def test_atomic_write_config_cleans_up_temp_on_failure(tmp_path, monkeypatch):
+    target = tmp_path / "clauster.yml"
+
+    def _boom(*a, **k):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(setup_wizard.os, "replace", _boom)
+    with pytest.raises(OSError):
+        setup_wizard._atomic_write_config(target, "content")
+    assert not target.exists()
+    assert not list(tmp_path.glob("clauster.yml.*.tmp"))  # the temp file was removed
+
+
+def test_second_submit_after_completion_conflicts(tmp_path):
+    app, client, projects, _ = _app_and_paths(tmp_path)
+    assert client.post("/setup", json=_valid_payload(projects)).status_code == 200
+    # A second submit after completion is rejected — guards last-writer-wins credential lockout.
+    res = client.post(
+        "/setup",
+        json=_valid_payload(projects, password="another-secret", confirm="another-secret"),
+    )
+    assert res.status_code == 409
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_write_keeps_parent_dir_permissions(tmp_path):
+    # The wizard must NOT tighten its target's parent to 0700 (that would lock other users
+    # out of a shared dir like the cwd); only the config file itself is private (#978 review).
+    projects = tmp_path / "code"
+    projects.mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o755)  # noqa: S103 - deliberately shared, to prove the wizard won't tighten it
+    write_path = shared / "clauster.yml"
+    client = TestClient(setup_wizard.create_setup_app(write_path, port=7621))
+    assert client.post("/setup", json=_valid_payload(projects)).status_code == 200
+    assert stat.S_IMODE(os.stat(shared).st_mode) == 0o755  # parent untouched
+    assert stat.S_IMODE(os.stat(write_path).st_mode) == 0o600  # file private (holds the hash)
 
 
 def test_wildcard_host_url_has_no_single_host(tmp_path):
@@ -164,10 +207,12 @@ def test_write_failure_is_500(tmp_path, monkeypatch):
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(setup_wizard, "atomic_write_text", _boom)
+    monkeypatch.setattr(setup_wizard, "_atomic_write_config", _boom)
     res = client.post("/setup", json=_valid_payload(projects))
     assert res.status_code == 500
     assert "could not write" in res.json()["detail"]
+    # The raw OSError (which can carry the target path) is never surfaced.
+    assert "disk full" not in res.json()["detail"]
 
 
 def test_model_validate_gate_rejects(tmp_path, monkeypatch):
@@ -181,7 +226,9 @@ def test_model_validate_gate_rejects(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_wizard.ClausterConfig, "model_validate", staticmethod(_reject))
     res = client.post("/setup", json=_valid_payload(projects))
     assert res.status_code == 400
-    assert "invalid configuration" in res.json()["detail"]
+    assert "could not be validated" in res.json()["detail"]
+    # The raw exception (which can carry internal paths) is never surfaced.
+    assert "ValidationError" not in res.json()["detail"]
     assert not write_path.exists()
 
 
@@ -266,3 +313,9 @@ def test_setup_port_override(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUSTER_SETUP_PORT", "not-a-number")
     m._run_setup_wizard(None)
     assert captured["port"] == setup_wizard.DEFAULT_PORT  # bad value -> default, no crash
+
+    monkeypatch.setenv("CLAUSTER_SETUP_PORT", "70000")
+    m._run_setup_wizard(None)
+    assert (
+        captured["port"] == setup_wizard.DEFAULT_PORT
+    )  # out of range -> default (won't reach bind)

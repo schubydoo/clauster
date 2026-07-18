@@ -1359,6 +1359,8 @@ def _run_setup_wizard(config_path: str | None) -> int:
     # override for the rare case that port is already taken, and so tests can isolate it.
     try:
         port = int(os.environ.get("CLAUSTER_SETUP_PORT", setup_wizard.DEFAULT_PORT))
+        if not 1 <= port <= 65535:
+            raise ValueError  # out of range would just fail the bind — fall back to default
     except ValueError:
         port = setup_wizard.DEFAULT_PORT
     setup_logging("text")
