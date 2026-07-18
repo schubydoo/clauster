@@ -5,8 +5,8 @@
 # avoidable here — and a tag-pin would (a) fail the required `zizmor` "workflow audit" check
 # (unpinned-uses) and (b) re-introduce the Scorecard Pinned-Dependencies alerts that #319 just
 # cleared. The OSV docs show tags, so this is an easy regression; this guard fails fast — before
-# CI does. The repo's other pin guard (test_workflow_guards) only inspects STEP `uses:`, but a
-# reusable workflow is called at the JOB level, which this test covers explicitly.
+# CI does. A step-level `uses:` pin guard only inspects STEP `uses:`, but a reusable workflow
+# is called at the JOB level, which this test covers explicitly.
 
 import re
 from pathlib import Path

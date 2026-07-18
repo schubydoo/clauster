@@ -241,9 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     token_sub = token_p.add_subparsers(dest="token_verb")
     token_issue_p = token_sub.add_parser("issue", help="mint a new named token")
     token_issue_p.add_argument("-c", "--config", help="path to clauster.yml")
-    token_issue_p.add_argument(
-        "--label", required=True, help="unique operator-facing name for the token"
-    )
+    _add_token_label_args(token_issue_p)
     token_list_p = token_sub.add_parser(
         "list", help="list named tokens (label / created / last-used — never the secret)"
     )
@@ -252,10 +250,10 @@ def main(argv: list[str] | None = None) -> int:
         "rotate", help="mint a fresh secret for an existing label"
     )
     token_rotate_p.add_argument("-c", "--config", help="path to clauster.yml")
-    token_rotate_p.add_argument("label", help="the token's label")
+    _add_token_label_args(token_rotate_p)
     token_revoke_p = token_sub.add_parser("revoke", help="permanently delete a named token")
     token_revoke_p.add_argument("-c", "--config", help="path to clauster.yml")
-    token_revoke_p.add_argument("label", help="the token's label")
+    _add_token_label_args(token_revoke_p)
 
     # Headless read commands over the shared engine facade (#775, Slice A).
     projects_p = sub.add_parser("projects", help="list discoverable projects (no server)")
@@ -359,14 +357,19 @@ def main(argv: list[str] | None = None) -> int:
 
         return mcp_main(["-c", args.config] if args.config else [])
     if args.command == "api-token":
-        if args.token_verb == "issue":  # noqa: S105 — a subcommand name, not a secret
-            return _api_token_issue(args.config, args.label)
         if args.token_verb == "list":  # noqa: S105 — a subcommand name, not a secret
             return _api_token_list(args.config)
-        if args.token_verb == "rotate":  # noqa: S105 — a subcommand name, not a secret
-            return _api_token_rotate(args.config, args.label)
-        if args.token_verb == "revoke":  # noqa: S105 — a subcommand name, not a secret
-            return _api_token_revoke(args.config, args.label)
+        label_verbs = {  # noqa: S105 — subcommand names, not secrets
+            "issue": _api_token_issue,
+            "rotate": _api_token_rotate,
+            "revoke": _api_token_revoke,
+        }
+        action = label_verbs.get(args.token_verb)
+        if action is not None:
+            label = _resolve_token_label(args.token_verb, args)
+            if label is None:
+                return 2
+            return action(args.config, label)
         token_p.print_help(sys.stderr)
         return 2
     if args.command in ("projects", "status", "sessions", "logs", "open"):
@@ -482,6 +485,49 @@ def _hash_metrics_token() -> int:
 # `_authenticate`). Each verb here opens its own short-lived `Persistence` (the
 # same fail-closed migrate-to-head + legacy-import the server runs) and
 # disposes it before returning — there is no long-lived DB connection in the CLI.
+
+
+def _add_token_label_args(parser: argparse.ArgumentParser) -> None:
+    """Accept the token label as EITHER a positional or ``--label`` (#958 P7).
+
+    The three verbs that take a label (``issue`` / ``rotate`` / ``revoke``) used to
+    disagree — ``issue`` required ``--label`` while ``rotate``/``revoke`` took a
+    positional, so ``api-token revoke --label X`` errored. Both forms are now accepted
+    on all three; neither is required at the argparse level (:func:`_resolve_token_label`
+    enforces "exactly one label" in the dispatch, so a missing label is a clean exit 2).
+    """
+    parser.add_argument("label", nargs="?", default=None, help="the token's label")
+    parser.add_argument(
+        "--label",
+        dest="label_flag",
+        default=None,
+        metavar="LABEL",
+        help="the token's label (equivalent to the positional form)",
+    )
+
+
+def _resolve_token_label(verb: str, args: argparse.Namespace) -> str | None:
+    """Return the label from the positional OR ``--label`` form, or ``None`` on error.
+
+    The two forms are equivalent; supplying both with DIFFERENT values is rejected (so a
+    typo can't silently pick one). Prints the error itself and returns ``None`` — the
+    caller exits 2 — when no label was given or the two forms disagree.
+    """
+    positional, flag = args.label, args.label_flag
+    if positional is not None and flag is not None and positional != flag:
+        print(
+            f"clauster: api-token {verb}: give the label once (positional or --label), not both",
+            file=sys.stderr,
+        )
+        return None
+    label = flag if flag is not None else positional
+    if not label:
+        print(
+            f"clauster: api-token {verb}: a label is required (positional or --label)",
+            file=sys.stderr,
+        )
+        return None
+    return label
 
 
 def _open_persistence_or_exit(config) -> Persistence:

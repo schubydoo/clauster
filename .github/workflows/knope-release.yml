@@ -1,4 +1,4 @@
-name: Release
+name: "Release: publish (GitHub Release + sign + tag)"
 
 # knope's "publish" half. When the `chore: prepare release X.Y.Z` PR (opened by
 # knope-prepare.yml from the `release` branch) merges, this workflow builds the

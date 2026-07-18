@@ -112,22 +112,6 @@ MAX_TOTAL_BYTES = 2 * 1024 * 1024
 
 _FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?(.*)\Z", re.DOTALL)
 
-#: The documented SKILL.md frontmatter fields as of this build (2026-07-02) — see
-#: https://code.claude.com/docs/en/skills and https://code.claude.com/docs/en/claude-
-#: directory. An unknown key rejects the whole write (fail closed), same posture as
-#: :mod:`clauster.config_write_hooks`'s hook-entry allowlist; adding a newly-documented
-#: field later is a validator update, not a silent acceptance.
-_ALLOWED_FRONTMATTER_KEYS = frozenset(
-    {
-        "name",
-        "description",
-        "disable-model-invocation",
-        "user-invocable",
-        "allowed-tools",
-        "argument-hint",
-    }
-)
-
 #: See the module docstring's "Plugin skills are read-only" section.
 _PLUGIN_ROOT_MARKER = "CLAUDE_PLUGIN_ROOT"
 
@@ -187,17 +171,15 @@ def validate_frontmatter(candidate: Any) -> None:
     """Reject ``candidate`` unless it is a structurally valid SKILL.md frontmatter dict.
 
     ``description`` is the one required field (Claude Code always needs it to decide
-    when to invoke the skill). Every other recognized key is optional and
-    type-checked only; an unrecognized key rejects the whole write. STRUCTURE ONLY —
-    nothing here is ever resolved or executed, including ``allowed-tools``.
+    when to invoke the skill). Every recognized key is optional and type-checked only.
+    An UNRECOGNIZED key is passed through untouched rather than rejected: Claude Code
+    tolerates forward-compatible SKILL.md frontmatter (real skills carry keys such as
+    ``effort`` / ``license`` / ``metadata``), so a hardcoded allowlist produced false
+    "unknown key" errors on valid skills (#958/DF-3). STRUCTURE ONLY — nothing here is
+    ever resolved or executed, including ``allowed-tools``.
     """
     if not isinstance(candidate, dict):
         raise cw.InvalidCandidateError(f"{SKILL_FILENAME} frontmatter must be an object")
-    unknown = set(candidate) - _ALLOWED_FRONTMATTER_KEYS
-    if unknown:
-        raise cw.InvalidCandidateError(
-            f"{SKILL_FILENAME} frontmatter has unknown key(s): {sorted(unknown)}"
-        )
     description = candidate.get("description")
     if not isinstance(description, str) or not description.strip():
         raise cw.InvalidCandidateError(f"{SKILL_FILENAME} frontmatter 'description' is required")
