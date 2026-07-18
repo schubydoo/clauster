@@ -177,6 +177,9 @@
       // a later 403 reauth_required (window lapsed) re-locks and re-prompts.
       configAdvanced: {
         supported: {{ config_write_enabled | tojson }},
+        // Step-up needs a password to prove; with auth disabled there is none, so the
+        // unlock form could never succeed (#978 review). Show a "needs auth" note instead.
+        authEnabled: {{ auth_enabled | tojson }},
         unlocked: false, loading: false, saving: false, gen: 0,
         reauthPassword: "", reauthing: false, reauthError: "",
         error: "", saved: false,
@@ -1100,7 +1103,9 @@
         a.gen = (a.gen || 0) + 1;  // bump so a stale in-flight advanced load/save is dropped on reopen
         a.unlocked = false; a.error = ""; a.saved = false; a.reauthError = ""; a.reauthPassword = "";
         a.fields = {}; a.specs = {}; a.edits = {}; a.editable = []; a.hash = null;
-        if (a.supported) this.advancedLoad();
+        // Only probe when a step-up can actually succeed: with auth off there is no password,
+        // so the endpoint would 403 forever — the panel shows a "needs auth" note instead.
+        if (a.supported && a.authEnabled) this.advancedLoad();
       },
       async saveConfig() {
         const c = this.configEditor;
@@ -1243,12 +1248,14 @@
       async advancedUnlock() {
         const a = this.configAdvanced;
         if (a.reauthing) return;  // single-flight (the button is also :disabled while in flight)
+        const myGen = a.gen;  // a close+reopen voids this reauth's response (stale-modal guard)
         a.reauthing = true; a.reauthError = "";
         try {
           const res = await fetch(ROOT + "/api/reauth", {
             method: "POST", headers: JSON_HEADERS,
             body: JSON.stringify({ password: a.reauthPassword }),
           });
+          if (a.gen !== myGen) return;  // modal was closed+reopened mid-reauth — drop this response
           if (res.ok) { a.reauthPassword = ""; await this.advancedLoad(); return; }
           if (res.status === 429) { a.reauthError = "Too many attempts — wait a moment and retry."; return; }
           if (res.status === 401) {
@@ -1260,7 +1267,7 @@
           }
           a.reauthError = "Could not verify — try again.";
         } catch (e) { a.reauthError = "Could not verify — try again."; }
-        finally { a.reauthing = false; }
+        finally { if (a.gen === myGen) a.reauthing = false; }
       },
       // Group the Tier-B editable paths by section (order-preserving) for the render.
       advancedGroups() {

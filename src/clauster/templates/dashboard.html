@@ -1484,22 +1484,31 @@
               </p>
 
               <div x-show="!configAdvanced.unlocked && !configAdvanced.loading" x-cloak>
-                <div class="alert alert-danger py-2" role="alert" data-test="adv-reauth-error"
-                     x-show="configAdvanced.reauthError" x-cloak x-text="configAdvanced.reauthError"></div>
-                <form class="row g-2 align-items-end" @submit.prevent="advancedUnlock()">
-                  <div class="col-auto">
-                    <label class="form-label mb-0 small" for="adv-password">Confirm your password</label>
-                    <input class="form-control form-control-sm" type="password" id="adv-password"
-                           data-test="adv-password" autocomplete="current-password"
-                           x-model="configAdvanced.reauthPassword">
-                  </div>
-                  <div class="col-auto">
-                    <button type="submit" class="btn btn-sm btn-primary" data-test="adv-unlock"
-                            :disabled="configAdvanced.reauthing || !configAdvanced.reauthPassword">
-                      <span x-text="configAdvanced.reauthing ? 'Unlocking…' : 'Unlock'">Unlock</span>
-                    </button>
-                  </div>
-                </form>
+                {# With auth disabled there is no password to step up with, so the unlock
+                   form could never succeed — show a note pointing at how to enable it. #}
+                <div class="text-secondary small" data-test="adv-needs-auth"
+                     x-show="!configAdvanced.authEnabled" x-cloak>
+                  Advanced settings require authentication. Set a password
+                  (<code>auth.password_hash</code>) in the config file to enable them.
+                </div>
+                <div x-show="configAdvanced.authEnabled" x-cloak>
+                  <div class="alert alert-danger py-2" role="alert" data-test="adv-reauth-error"
+                       x-show="configAdvanced.reauthError" x-cloak x-text="configAdvanced.reauthError"></div>
+                  <form class="row g-2 align-items-end" @submit.prevent="advancedUnlock()">
+                    <div class="col-auto">
+                      <label class="form-label mb-0 small" for="adv-password">Confirm your password</label>
+                      <input class="form-control form-control-sm" type="password" id="adv-password"
+                             data-test="adv-password" autocomplete="current-password"
+                             x-model="configAdvanced.reauthPassword">
+                    </div>
+                    <div class="col-auto">
+                      <button type="submit" class="btn btn-sm btn-primary" data-test="adv-unlock"
+                              :disabled="configAdvanced.reauthing || !configAdvanced.reauthPassword">
+                        <span x-text="configAdvanced.reauthing ? 'Unlocking…' : 'Unlock'">Unlock</span>
+                      </button>
+                    </div>
+                  </form>
+                </div>
               </div>
 
               <div class="text-secondary" x-show="configAdvanced.loading" x-cloak>Loading…</div>

@@ -123,3 +123,19 @@ def test_advanced_panel_rejects_wrong_password(
     browser.expect_text('[data-test="adv-reauth-error"]', "Incorrect password.")
     # Still locked: the save button (unlocked-only) is absent.
     browser.expect_hidden('[data-test="adv-save"]')
+
+
+def test_advanced_panel_needs_auth_when_auth_disabled(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Config-write on but auth off: Advanced shows a needs-auth note, not an unlock form (#978).
+
+    Step-up has no password to prove when auth is disabled, so the unlock form could never
+    succeed — the panel points the operator at enabling authentication instead.
+    """
+    browser.goto(config_mgmt_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[data-test="adv-panel"]')
+    browser.expect_visible('[data-test="adv-needs-auth"]')
+    browser.expect_hidden('[data-test="adv-password"]')
