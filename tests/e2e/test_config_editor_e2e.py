@@ -139,3 +139,19 @@ def test_advanced_panel_needs_auth_when_auth_disabled(
     browser.expect_visible('[data-test="adv-panel"]')
     browser.expect_visible('[data-test="adv-needs-auth"]')
     browser.expect_hidden('[data-test="adv-password"]')
+
+
+def test_advanced_panel_absent_when_config_write_disabled(
+    browser: AgentBrowser, config_server: Server
+) -> None:
+    """The Advanced panel is invisible when config-write is off (#978).
+
+    Invisible-surface invariant at the UI layer: the panel's ``x-show`` is the
+    config-write capability, mirroring the /api/config/advanced 404 gate. The Tier-A
+    editor still opens normally.
+    """
+    browser.goto(config_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[id="cfg-usage.fx_rate"]')  # Tier-A editor open
+    browser.expect_hidden('[data-test="adv-panel"]')  # but no Advanced surface
