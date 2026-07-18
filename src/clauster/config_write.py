@@ -86,8 +86,16 @@ REDACTION_SENTINEL = "********"
 # ``config_write_mcp_cli.entry_needs_direct_write``, which errs on any env/headers value
 # instead). This is deliberately conservative — over-masking a non-secret only forces the
 # caller to resend it; under-masking would leak. Keys are matched case-insensitively.
+# The ``auth`` alternative excludes ONLY the benign ``author``/``authors`` field via a
+# negative lookahead (``(?!ors?\b)``) rather than an enumerated suffix list: every other
+# credential-shaped ``auth`` key still masks — ``auth``, ``authn``, ``authorization``,
+# ``auth_key``/``authHeader``/``auth_cookie`` (``_``/camelCase joins), ``AUTH_TOKEN`` — while a
+# bare ``auth`` substring no longer over-matches ``author`` and redacts a real name/email
+# (#958/DF-4). An enumerated ``auth(?:...)?\b`` list looked tighter but silently under-masked
+# every compound ``auth`` key (``\b`` does not fire before ``_`` or a camelCase boundary).
 _SECRET_KEY_RE = re.compile(
-    r"(?:token|secret|password|passwd|api[-_]?key|apikey|auth|credential|bearer)",
+    r"(?:token|secret|password|passwd|api[-_]?key|apikey|"
+    r"auth(?!ors?\b)|credential|bearer)",
     re.IGNORECASE,
 )
 _INTERP_RE = re.compile(r"\$\{[^}]+\}")

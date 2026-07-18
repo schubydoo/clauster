@@ -198,6 +198,14 @@
       gap: .5rem 1rem; padding: .75rem 0; }
     .empty-state-light-actions { display: flex; gap: .5rem; margin-left: auto; }
 
+    /* #958 P3: the last residual config-panel inline style="" attributes, lifted to
+       classes so style-src-attr no longer trips (completes the #533 conversion and
+       restores the intended max-widths the CSP was blocking). */
+    .cm-name-col { width: 40%; }
+    .cm-value-cap { max-width: 12rem; }
+    .cm-input-cap { max-width: 16rem; }
+    .cm-value-cap-wide { max-width: 20rem; }
+
     /* #846: login-shepherd mode picker — a segmented toggle, not Tabler's default
        .form-selectgroup. That component's unselected .form-selectgroup-label shares
        the same background/border/shadow as a plain .form-control, so an unselected
@@ -1583,7 +1591,7 @@
                 <table class="table table-sm mb-1" data-test="cm-settings-env-table"
                        x-show="configMgmt.settings.envRows.length" x-cloak>
                   <caption class="visually-hidden">Environment variables: name, value, and remove action</caption>
-                  <thead><tr><th style="width: 40%">Name</th><th>Value</th><th class="text-end">Remove</th></tr></thead>
+                  <thead><tr><th class="cm-name-col">Name</th><th>Value</th><th class="text-end">Remove</th></tr></thead>
                   <tbody>
                     <template x-for="(row, idx) in configMgmt.settings.envRows" :key="row.id">
                       <tr :data-test="'cm-settings-env-row-' + idx">
@@ -1645,7 +1653,7 @@
                       <template x-for="row in configMgmtEffectiveRows()" :key="row.key">
                         <tr>
                           <td class="font-monospace" x-text="row.key"></td>
-                          <td class="font-monospace text-truncate" style="max-width: 12rem"
+                          <td class="font-monospace text-truncate cm-value-cap"
                               :title="row.value" x-text="row.value"></td>
                           <td><span class="badge bg-secondary-lt text-capitalize" x-text="row.source"></span></td>
                         </tr>
@@ -1701,7 +1709,7 @@
                       <tr>
                         <td>
                           <span class="fw-medium" x-text="srv.name"></span>
-                          <div class="text-secondary small font-monospace text-truncate" style="max-width: 20rem"
+                          <div class="text-secondary small font-monospace text-truncate cm-value-cap-wide"
                                :title="configMgmtMcpEntrySummary(srv.entry)"
                                x-text="configMgmtMcpEntrySummary(srv.entry)"></div>
                         </td>
@@ -1741,26 +1749,45 @@
                     Whether Claude Code may use each committed <code>.mcp.json</code> server in this project.
                   </div>
                   <div class="text-secondary small" x-show="configMgmt.mcp.approvals.loading" x-cloak>Loading…</div>
-                  <div x-show="!configMgmt.mcp.approvals.loading" x-cloak>
+                  <!-- Fail closed: if the approval decisions + ownership didn't load, show an
+                       unavailable notice, never editable toggles whose empty state would hide the
+                       settings-owned badge and let a save clobber real ~/.claude.json choices. -->
+                  <div class="text-secondary small" data-test="cm-mcp-approvals-unavailable"
+                       x-show="!configMgmt.mcp.approvals.loading && !configMgmt.mcp.approvals.ready" x-cloak>
+                    Couldn’t load approval state. Reload to try again.
+                  </div>
+                  <div x-show="!configMgmt.mcp.approvals.loading && configMgmt.mcp.approvals.ready" x-cloak>
                   <table class="table table-sm mb-2">
                     <caption class="visually-hidden">Per-server approval state</caption>
                     <tbody>
                       <template x-for="srv in configMgmt.mcp.list" :key="'ap-' + srv.name">
                         <tr>
-                          <td class="font-monospace" x-text="srv.name"></td>
+                          <td class="font-monospace">
+                            <span x-text="srv.name"></span>
+                            <!-- Settings-owned decision: read-only here, changed on the settings
+                                 surface / `claude mcp` (the ~/.claude.json write path can't move it). -->
+                            <span x-show="configMgmtMcpApprovalLocked(srv.name)" x-cloak
+                                  :data-test="'cm-mcp-locked-' + srv.name"
+                                  class="badge bg-secondary-lt text-secondary ms-2 fw-normal"
+                                  aria-label="approval set in a project settings file, read-only here"
+                                  title="Set in a project settings file — change it there or via `claude mcp`.">settings</span>
+                          </td>
                           <td class="text-end">
                             <div class="btn-group btn-group-sm" role="group" :aria-label="'Approval for ' + srv.name">
                               <button type="button" class="btn" :data-test="'cm-mcp-approve-' + srv.name"
                                       :class="configMgmtMcpApprovalState(srv.name) === 'enabled' ? 'btn-success' : 'btn-ghost-secondary'"
                                       :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'enabled'"
+                                      :disabled="configMgmtMcpApprovalLocked(srv.name)"
                                       @click="configMgmtMcpSetApproval(srv.name, 'enabled')">Approve</button>
                               <button type="button" class="btn" :data-test="'cm-mcp-reject-' + srv.name"
                                       :class="configMgmtMcpApprovalState(srv.name) === 'disabled' ? 'btn-danger' : 'btn-ghost-secondary'"
                                       :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'disabled'"
+                                      :disabled="configMgmtMcpApprovalLocked(srv.name)"
                                       @click="configMgmtMcpSetApproval(srv.name, 'disabled')">Reject</button>
                               <button type="button" class="btn" :data-test="'cm-mcp-unset-' + srv.name"
                                       :class="configMgmtMcpApprovalState(srv.name) === 'unset' ? 'btn-secondary' : 'btn-ghost-secondary'"
                                       :aria-pressed="configMgmtMcpApprovalState(srv.name) === 'unset'"
+                                      :disabled="configMgmtMcpApprovalLocked(srv.name)"
                                       @click="configMgmtMcpSetApproval(srv.name, 'unset')">Unset</button>
                             </div>
                           </td>
@@ -1770,10 +1797,10 @@
                   </table>
                   <div class="d-flex gap-2 align-items-center flex-wrap mb-2"
                        x-show="configMgmtMcpApprovalsDirty()" x-cloak>
-                    <input type="text" class="form-control form-control-sm" data-test="cm-mcp-approvals-confirm"
+                    <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-mcp-approvals-confirm"
                            aria-label="Type the confirmation token to save approval choices"
                            autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.approvals.confirm"
-                           :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                           :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-primary" data-test="cm-mcp-approvals-save"
                             :disabled="!configMgmtCanSaveMcpApprovals()" @click="configMgmtSaveMcpApprovals()">
                       <span x-text="configMgmt.mcp.approvals.busy ? 'Saving…' : 'Save approvals'">Save approvals</span>
@@ -1782,10 +1809,10 @@
                   <details>
                     <summary class="small text-secondary">Reset all approval choices</summary>
                     <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
-                      <input type="text" class="form-control form-control-sm" data-test="cm-mcp-reset-confirm"
+                      <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-mcp-reset-confirm"
                              aria-label="Type the confirmation token to reset approval choices"
                              autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.approvals.resetConfirm"
-                             :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                             :placeholder="configMgmtConfirmToken()">
                       <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-mcp-reset-go"
                               :disabled="!configMgmtCanResetMcp()" @click="configMgmtResetMcpChoices()">Reset choices</button>
                     </div>
@@ -1813,9 +1840,9 @@
                     Type <code x-text="configMgmtConfirmToken()"></code> to confirm
                   </label>
                   <div class="d-flex gap-2 align-items-center flex-wrap">
-                    <input type="text" class="form-control form-control-sm" id="cm-mcp-confirm" data-test="cm-mcp-confirm"
+                    <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-mcp-confirm" data-test="cm-mcp-confirm"
                            autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.confirm"
-                           :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                           :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-primary" data-test="cm-mcp-save"
                             :disabled="!configMgmtCanSaveMcp()" @click="configMgmtSaveMcp()">
                       <span x-text="configMgmt.mcp.busy ? 'Saving…' : 'Save'">Save</span>
@@ -1901,9 +1928,9 @@
                     Type <code x-text="configMgmtConfirmToken()"></code> to confirm
                   </label>
                   <div class="d-flex gap-2 align-items-center flex-wrap">
-                    <input type="text" class="form-control form-control-sm" id="cm-agent-confirm" data-test="cm-agent-confirm"
+                    <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-agent-confirm" data-test="cm-agent-confirm"
                            autocomplete="off" spellcheck="false" x-model="configMgmt.subagents.confirm"
-                           :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                           :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-primary" data-test="cm-agent-save"
                             :disabled="!configMgmtCanSaveAgent()" @click="configMgmtSaveAgent()">
                       <span x-text="configMgmt.subagents.busy ? 'Saving…' : 'Save'">Save</span>
@@ -1988,9 +2015,9 @@
                     Type <code x-text="configMgmtConfirmToken()"></code> to confirm
                   </label>
                   <div class="d-flex gap-2 align-items-center flex-wrap">
-                    <input type="text" class="form-control form-control-sm" id="cm-skill-confirm" data-test="cm-skill-confirm"
+                    <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-skill-confirm" data-test="cm-skill-confirm"
                            autocomplete="off" spellcheck="false" x-model="configMgmt.skills.confirm"
-                           :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                           :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-primary" data-test="cm-skill-save"
                             :disabled="!configMgmtCanSaveSkill()" @click="configMgmtSaveSkill()">
                       <span x-text="configMgmt.skills.busy ? 'Saving…' : 'Save'">Save</span>
@@ -2010,9 +2037,9 @@
                 <label class="form-label small mb-1" for="cm-plugin-confirm">
                   Type <code x-text="configMgmtConfirmToken()"></code> to arm the actions below
                 </label>
-                <input type="text" class="form-control form-control-sm" id="cm-plugin-confirm" data-test="cm-plugin-confirm"
+                <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-plugin-confirm" data-test="cm-plugin-confirm"
                        autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.confirm"
-                       :placeholder="configMgmtConfirmToken()" style="max-width: 16rem">
+                       :placeholder="configMgmtConfirmToken()">
               </div>
 
               <!-- Installed plugins -->
@@ -2054,13 +2081,13 @@
               <div class="p-2 border rounded mb-3" data-test="cm-plugin-install">
                 <div class="small mb-1">Install a plugin (introduces new code — retype its id to confirm)</div>
                 <div class="d-flex gap-2 align-items-center flex-wrap">
-                  <input type="text" class="form-control form-control-sm" data-test="cm-plugin-install-id"
+                  <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-plugin-install-id"
                          aria-label="Plugin id to install (name@marketplace)" placeholder="name@marketplace"
-                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.installId" style="max-width: 16rem">
-                  <input type="text" class="form-control form-control-sm" data-test="cm-plugin-install-confirm"
+                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.installId">
+                  <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-plugin-install-confirm"
                          aria-label="Retype the exact plugin id to confirm the install"
                          :placeholder="configMgmt.plugins.installId || 'retype the id'"
-                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.installConfirm" style="max-width: 16rem">
+                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.installConfirm">
                   <button type="button" class="btn btn-sm btn-primary" data-test="cm-plugin-install-go"
                           :disabled="!configMgmtCanInstallPlugin()" @click="configMgmtInstallPlugin()">Install</button>
                 </div>
@@ -2080,7 +2107,7 @@
                     <tr>
                       <td>
                         <span class="fw-medium" x-text="m.name"></span>
-                        <div class="text-secondary small font-monospace text-truncate" style="max-width: 20rem"
+                        <div class="text-secondary small font-monospace text-truncate cm-value-cap-wide"
                              :title="m.source" x-text="m.source"></div>
                       </td>
                       <td class="text-end">
@@ -2100,9 +2127,9 @@
               <div class="p-2 border rounded" data-test="cm-marketplace-add">
                 <div class="small mb-1">Add a marketplace</div>
                 <div class="d-flex gap-2 align-items-center flex-wrap">
-                  <input type="text" class="form-control form-control-sm" data-test="cm-marketplace-add-source"
+                  <input type="text" class="form-control form-control-sm cm-value-cap-wide" data-test="cm-marketplace-add-source"
                          aria-label="Marketplace source (URL, owner/repo, or path)" placeholder="owner/repo or URL or path"
-                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.addSource" style="max-width: 20rem">
+                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.addSource">
                   <button type="button" class="btn btn-sm btn-primary" data-test="cm-marketplace-add-go"
                           :disabled="!configMgmtCanAddMarket()" @click="configMgmtAddMarketplace()">Add</button>
                 </div>
