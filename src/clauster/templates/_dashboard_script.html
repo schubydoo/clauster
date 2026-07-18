@@ -2056,9 +2056,9 @@
         // Strip a leading BOM so frontmatter starting at byte 1 is recognized — the
         // backend requires the opening `---` at the very start (\A), so a BOM'd file
         // would otherwise fail to validate; stripping it makes it savable.
-        const text = (content || "").replace(/^\uFEFF/, "");
+        const text = (content || "").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
         // Match a frontmatter block anchored at the start (mirrors the backend's \A---).
-        const m = text.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n[\s\S]*|)$/);
+        const m = text.match(/^---[ \t]*\n([\s\S]*?)\n---[ \t]*(\n[\s\S]*|)$/);
         if (!m) {
           // No cleanly-delimited leading frontmatter. Do NOT restructure the doc — that
           // could bury real (but malformed / leading-whitespace) frontmatter as body.
@@ -2067,11 +2067,11 @@
         }
         let yaml = m[1];
         const rest = m[2] || "";  // "" or "\n<body…>"
-        if (/^name[ \t]*:.*$/m.test(yaml)) {
-          yaml = yaml.replace(/^name[ \t]*:.*$/m, "name: " + nm);
-        } else {
-          yaml = "name: " + nm + (yaml ? "\n" + yaml : "");
-        }
+        // Remove EVERY top-level `name:` line then prepend the single authoritative one:
+        // a YAML loader takes the LAST value on duplicate keys, so replacing only the
+        // first could leave a stale name that still mismatches the filename (422).
+        yaml = yaml.replace(/^name[ \t]*:.*(?:\n|$)/gm, "").replace(/\n+$/, "");
+        yaml = "name: " + nm + (yaml ? "\n" + yaml : "");
         return "---\n" + yaml + "\n---" + rest;
       },
       async configMgmtOpenAgent(name) {
