@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -29,9 +31,36 @@ def _running(runner, project="alpha", *, pid=None, start=None):
     return inst
 
 
-async def test_refresh_samples_live_bridge_into_cache(runner_config):
+@pytest.fixture
+def live_pid():
+    """Yield the PID of a real, childless subprocess to sample.
+
+    The real-sample tests must NOT sample ``os.getpid()`` — the pytest-xdist worker.
+    ``metrics.sample_tree`` walks ``children(recursive=True)`` and then queries
+    cpu/memory/io on every descendant; the worker's tree includes the *leaked, dying*
+    subprocesses of sibling tests on the same worker, and querying a psutil handle to a
+    dying process on Windows faulted hard enough to crash the whole xdist worker (an
+    uncatchable native crash, not a Python exception the ``_GONE`` guards can swallow).
+    The odds rose whenever a PR added tests (more sibling churn), which is how this
+    surfaced. A dedicated childless subprocess bounds the walk to one stable, alive
+    process, so sampling is deterministic and can't fault on someone else's teardown.
+    Mirrors the spawn/teardown pattern in ``test_procutil.py``.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()  # a sleeping child dies at once → a single, always-covered path
+        proc.wait()
+
+
+async def test_refresh_samples_live_bridge_into_cache(runner_config, live_pid):
     runner = _runner(runner_config)
-    _running(runner)  # this test process's own pid → a real, live sample
+    _running(runner, pid=live_pid)  # a real, childless subprocess → a live sample
     await runner._refresh_metrics_cache()
     sample = runner.metrics_snapshot("alpha")
     assert sample is not None and "cpu_percent" in sample and sample["procs"] >= 1
@@ -46,10 +75,10 @@ async def test_refresh_excludes_non_running(runner_config):
     assert runner.metrics_snapshot("alpha") is None
 
 
-async def test_refresh_replaces_wholesale_dropping_stale(runner_config):
+async def test_refresh_replaces_wholesale_dropping_stale(runner_config, live_pid):
     runner = _runner(runner_config)
     runner._metrics_cache = {"ghost": {"cpu_percent": 9.0}}  # a stale, now-gone bridge
-    _running(runner)
+    _running(runner, pid=live_pid)
     await runner._refresh_metrics_cache()
     assert "ghost" not in runner.metrics_snapshots()  # stale entry dropped
     assert runner.metrics_snapshot("alpha") is not None
@@ -62,12 +91,12 @@ async def test_refresh_drops_bridge_on_pid_reuse(runner_config):
     assert runner.metrics_snapshot("alpha") is None
 
 
-async def test_refresh_samples_when_pid_create_time_matches(runner_config):
+async def test_refresh_samples_when_pid_create_time_matches(runner_config, live_pid):
     # start set AND matching the live pid's create-time → the guard passes, bridge sampled.
     from clauster import procutil
 
     runner = _runner(runner_config)
-    _running(runner, start=procutil.proc_create_time(os.getpid()))
+    _running(runner, pid=live_pid, start=procutil.proc_create_time(live_pid))
     await runner._refresh_metrics_cache()
     assert runner.metrics_snapshot("alpha") is not None
 
