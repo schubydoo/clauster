@@ -234,6 +234,15 @@ def test_run_missing_config_launches_setup_wizard(monkeypatch):
     assert captured["host"] == "127.0.0.1"
 
 
+def test_run_invalid_existing_config_exits_2(write_config, monkeypatch):
+    # #978: only a MISSING config triggers first-run. A config file that EXISTS but is invalid
+    # must ERROR (exit 2), never wizard-over-and-overwrite it. A nonexistent projects_root
+    # fails ClausterConfig validation (a ValueError) — the branch distinct from FileNotFoundError.
+    _stub_server(monkeypatch)
+    bad = str(write_config("projects_root: /no/such/clauster-projects-dir\n"))
+    assert cli.main(["run", "-c", bad]) == 2
+
+
 def test_run_claude_not_found_exits_2(write_config, tmp_path, monkeypatch):
     _stub_server(monkeypatch)
     # point the binary at something that won't resolve
