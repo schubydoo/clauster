@@ -47,6 +47,7 @@ The gate ordering the children must follow (each step aborts before the write)::
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
@@ -311,6 +312,63 @@ def redact_secret_lines(text: str) -> str:
             masked = f"{kv.group('prefix')}{REDACTION_SENTINEL}{kv.group('trail')}"
         out.append(masked + eol)
     return "".join(out)
+
+
+#: Request-scoped sink for the redacted argv of the ``claude …`` commands a config-write
+#: spawns (#958 Part 6). A route sets this to a fresh list around the write; each CLI
+#: ``_run`` appends its ``[verb, *redacted-args]`` via :func:`record_cli_argv`, so the audit
+#: line can record exactly what ran without threading an accumulator through every writer.
+#: Default ``None`` = "not capturing" (the CLI runs normally, nothing is recorded).
+cli_argv_sink: contextvars.ContextVar[list[list[str]] | None] = contextvars.ContextVar(
+    "cli_argv_sink", default=None
+)
+
+
+def _mask_json_values(obj: Any) -> Any:
+    """Return ``obj`` with every leaf value replaced by the sentinel (keys/structure kept).
+
+    Applied to a serialized config entry in argv so the audit records the entry's *shape*
+    (its keys), never a value — because a value can be a secret under a benign key (an API
+    key inside an ``args`` list) that neither key-name (:func:`redact_secrets`) nor
+    line-based (:func:`redact_secret_lines`) heuristics can catch.
+    """
+    if isinstance(obj, dict):
+        return {k: _mask_json_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_mask_json_values(v) for v in obj]
+    return REDACTION_SENTINEL
+
+
+def _redact_argv_arg(arg: str) -> str:
+    """Redact one argv element for the audit trail.
+
+    A JSON object/array arg (e.g. ``claude mcp add-json``'s serialized entry) has ALL its
+    values masked via :func:`_mask_json_values` — structure + keys kept, values dropped —
+    since it can carry a secret no heuristic detects. Every other arg is scanned by
+    :func:`redact_secret_lines` (masks ``${…}`` / ``scheme://user@host`` / secret-keyed KV).
+    """
+    if arg.lstrip()[:1] in ("{", "["):
+        try:
+            return json.dumps(_mask_json_values(json.loads(arg)))
+        except (ValueError, TypeError):
+            pass
+    return redact_secret_lines(arg)
+
+
+def record_cli_argv(verb: str, args: list[str]) -> None:
+    """Append ``[verb, *args]`` (each arg redacted) to the active :data:`cli_argv_sink`, if any.
+
+    A no-op when no route is capturing (``cli_argv_sink`` is ``None``). Each arg is redacted
+    by :func:`_redact_argv_arg` — a JSON entry has all its *values* masked (keys kept), other
+    args scanned line-wise — so the audit records what ran without ever persisting a value.
+    The CLI paths already keep secrets off argv by construction; this is the belt-and-braces
+    that also closes the benign-keyed-secret-inside-``args`` gap. The binary path itself is
+    intentionally not recorded (host-specific noise). Propagates across ``asyncio.to_thread``
+    because the sink is a mutable list the worker thread shares with the setting context.
+    """
+    sink = cli_argv_sink.get()
+    if sink is not None:
+        sink.append([verb, *(_redact_argv_arg(a) for a in args)])
 
 
 def merge_redacted(incoming: Any, stored: Any) -> Any:

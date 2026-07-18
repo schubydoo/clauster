@@ -242,6 +242,7 @@ def _run(
     verb = args[0] if args else ""
     resolved = claude_cli.resolve_binary(binary)
     argv = [resolved, "plugin", *args]
+    cw.record_cli_argv("plugin", args)  # #958 P6: capture the redacted argv for the audit line
     try:
         return run(
             argv,

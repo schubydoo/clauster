@@ -1857,6 +1857,55 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return HTTPException(status_code=404, detail=str(exc))
         return HTTPException(status_code=400, detail=str(exc))
 
+    def _config_write_watch(project_dir: Path) -> list[Path]:
+        """Return the config files a `claude mcp`/`claude plugin` write could touch.
+
+        A comprehensive candidate set across scopes for the #958 P6 before/after audit
+        fingerprint — an unchanged file simply never appears in the diff, so watching a
+        superset is harmless and avoids per-scope path guesswork.
+        """
+        home = runner.claude_json.parent
+        return [
+            runner.claude_json,
+            home / ".claude" / "settings.json",
+            home / ".claude" / "plugins" / "known_marketplaces.json",
+            project_dir / ".claude" / "settings.json",
+            project_dir / ".claude" / "settings.local.json",
+            project_dir / ".mcp.json",
+        ]
+
+    async def _audit_config_write(
+        *, work: Callable[[], None], watch: list[Path], **fields: Any
+    ) -> None:
+        """Record a committed config-write's audit line + its file/argv side effects (#958 P6).
+
+        Runs ``work`` off-thread, then records the base audit line enriched with (a) which
+        watched files it changed — path + sha256 + size, never contents — and (b) the redacted
+        ``claude …`` argv any spawned CLI ran.
+        Lets :class:`~config_write.ConfigWriteError` propagate (the caller maps it) and records
+        ONLY on success. The argv is captured via :data:`config_write.cli_argv_sink`, which
+        propagates into the worker thread; the audit append itself is best-effort and never
+        fails the already-committed write.
+
+        Best-effort fingerprint, not a transactional attribution: the snapshots bracket the
+        write but are not inside its file lock, and ``watch`` is a cross-scope superset, so
+        under (rare, single-operator) concurrent writes the diff can attribute another
+        request's change. It's a forensic hint of where a change landed — the base line's
+        surface/scope/target/action names the operation exactly.
+        """
+        before = await asyncio.to_thread(config_audit.file_fingerprints, watch)
+        sink: list[list[str]] = []
+        token = config_write.cli_argv_sink.set(sink)
+        try:
+            await asyncio.to_thread(work)
+        finally:
+            config_write.cli_argv_sink.reset(token)
+        after = await asyncio.to_thread(config_audit.file_fingerprints, watch)
+        extra: dict[str, Any] = {"files": config_audit.diff_fingerprints(before, after)}
+        if sink:
+            extra["argv"] = sink
+        await config_audit.arecord(config.state_dir, extra=extra, **fields)
+
     @app.get("/api/config-write/mcp")
     async def api_config_write_mcp_read(scope: str = "project", project: str = "") -> dict:
         # Read the (structurally redacted) MCP server map for a surface. Gated exactly
@@ -2191,39 +2240,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                     restore=_restore,
                 )
 
-        # #958 Part 6: fingerprint the files this mutation might touch, before + after, so
-        # the audit line shows which ones the write actually changed. The `claude mcp` CLI
-        # does Claude Code's own bookkeeping across several files (relocating an approval into
-        # settings.local.json, editing .claude/settings.json, rewriting ~/.claude.json), so a
-        # base line alone can't say where the change landed. Best-effort: the snapshots bracket
-        # the write but do not sit inside its file lock, so under (rare, single-operator)
-        # concurrent writes to the same file the diff can observe the interleaved state — a
-        # forensic hint of where the change landed, not a transactional attribution.
-        _watch = [
-            runner.claude_json,
-            cli_cwd / ".claude" / "settings.local.json",
-            cli_cwd / ".claude" / "settings.json",
-            cli_cwd / ".mcp.json",
-        ]
-        before_fp = await asyncio.to_thread(config_audit.file_fingerprints, _watch)
+        # Run the mutation (direct OR CLI-driven) and record the base audit line enriched
+        # with which files it changed + the redacted `claude mcp` argv it ran (#958 P6).
         try:
-            await asyncio.to_thread(_work)
+            await _audit_config_write(
+                work=_work,
+                watch=_config_write_watch(cli_cwd),
+                surface="mcp",
+                scope=scope,  # type: ignore[arg-type]
+                target=name,
+                action=op,
+                actor=_SESSION_USER,
+            )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-
-        after_fp = await asyncio.to_thread(config_audit.file_fingerprints, _watch)
-        # Base audit line for the mutation (direct OR CLI-driven), enriched with the
-        # changed-file fingerprints (path + sha256 + size, never contents). Recording the
-        # redacted `claude mcp` argv itself is a further #958 P6 slice.
-        await config_audit.arecord(
-            config.state_dir,
-            surface="mcp",
-            scope=scope,  # type: ignore[arg-type]
-            target=name,
-            action=op,
-            actor=_SESSION_USER,
-            extra={"files": config_audit.diff_fingerprints(before_fp, after_fp)},
-        )
         result = {"scope": scope, "name": name, "op": op, "ok": True}
         if scope != "user":
             result["project"] = project
@@ -2255,24 +2285,20 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         project_dir = _resolve_cw_project(project, require_exists=True)
         try:
-            await asyncio.to_thread(
-                config_write_mcp.write_project_approvals,
-                runner.claude_json,
-                project_dir,
-                enabled,
-                disabled,
+            await _audit_config_write(
+                work=lambda: config_write_mcp.write_project_approvals(
+                    runner.claude_json, project_dir, enabled, disabled
+                ),
+                watch=_config_write_watch(project_dir),
+                surface="mcp-approvals",
+                scope="project",
+                target=str(runner.claude_json),
+                action="update",
+                actor=_SESSION_USER,
+                keys=sorted(set(enabled) | set(disabled)),
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        await config_audit.arecord(
-            config.state_dir,
-            surface="mcp-approvals",
-            scope="project",
-            target=str(runner.claude_json),
-            action="update",
-            actor=_SESSION_USER,
-            keys=sorted(set(enabled) | set(disabled)),
-        )
         return {"project": project, "ok": True}
 
     @app.post("/api/config-write/mcp/reset-project-choices")
@@ -2285,20 +2311,19 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         config_write.require_confirm("project", project, body.get("confirm"))
         project_dir = _resolve_cw_project(project, require_exists=True)
         try:
-            await asyncio.to_thread(
-                config_write_mcp_cli.cli_reset_project_choices, config.claude.binary, project_dir
+            await _audit_config_write(
+                work=lambda: config_write_mcp_cli.cli_reset_project_choices(
+                    config.claude.binary, project_dir
+                ),
+                watch=_config_write_watch(project_dir),
+                surface="mcp-approvals",
+                scope="project",
+                target=str(runner.claude_json),
+                action="reset",
+                actor=_SESSION_USER,
             )
         except config_write.ConfigWriteError as exc:
             raise _map_config_write_error(exc) from exc
-        # CLI-driven; the redacted-argv + before/after diff is the follow-up slice of #958 P6.
-        await config_audit.arecord(
-            config.state_dir,
-            surface="mcp-approvals",
-            scope="project",
-            target=str(runner.claude_json),
-            action="reset",
-            actor=_SESSION_USER,
-        )
         return {"project": project, "ok": True}
 
     def _user_settings_json() -> Path:
@@ -3360,21 +3385,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             else:
                 config_write_plugins.cli_update_plugin(binary, cwd, plugin_id, scope)  # type: ignore[arg-type]
 
-        try:
-            await asyncio.to_thread(_work)
-        except config_write.ConfigWriteError as exc:
-            raise _map_config_write_error(exc) from exc
         # Audit right after the mutation commits, BEFORE the gitignore housekeeping — a
         # failure of that step must not drop the committed change from the trail (#958 P6).
-        # CLI-driven; redacted argv + before/after diff is the follow-up slice of #958 P6.
-        await config_audit.arecord(
-            config.state_dir,
-            surface="plugins",
-            scope=scope,  # type: ignore[arg-type]
-            target=plugin_id,
-            action=op,  # type: ignore[arg-type]
-            actor=_SESSION_USER,
-        )
+        # Records the changed files + the redacted `claude plugin` argv it ran.
+        try:
+            await _audit_config_write(
+                work=_work,
+                watch=_config_write_watch(cwd),
+                surface="plugins",
+                scope=scope,  # type: ignore[arg-type]
+                target=plugin_id,
+                action=op,  # type: ignore[arg-type]
+                actor=_SESSION_USER,
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
         if scope == "local":
             # The CLI writes settings.local.json directly (never through clauster's
             # own writer), so clauster must gitignore it itself here -- the
@@ -3512,21 +3537,21 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             else:
                 config_write_plugins.cli_marketplace_update(binary, cwd, name)
 
-        try:
-            await asyncio.to_thread(_work)
-        except config_write.ConfigWriteError as exc:
-            raise _map_config_write_error(exc) from exc
         # Audit right after the mutation commits, BEFORE the gitignore housekeeping — a
         # failure of that step must not drop the committed change from the trail (#958 P6).
-        # CLI-driven; redacted argv + before/after diff is the follow-up slice of #958 P6.
-        await config_audit.arecord(
-            config.state_dir,
-            surface="marketplaces",
-            scope=scope,  # type: ignore[arg-type]
-            target=(name or source or ""),
-            action=op,  # type: ignore[arg-type]
-            actor=_SESSION_USER,
-        )
+        # Records the changed files + the redacted `claude plugin marketplace` argv it ran.
+        try:
+            await _audit_config_write(
+                work=_work,
+                watch=_config_write_watch(cwd),
+                surface="marketplaces",
+                scope=scope,  # type: ignore[arg-type]
+                target=(name or source or ""),
+                action=op,  # type: ignore[arg-type]
+                actor=_SESSION_USER,
+            )
+        except config_write.ConfigWriteError as exc:
+            raise _map_config_write_error(exc) from exc
         if scope == "local" and op in ("add", "remove"):
             # Only add/remove actually touch the scope's settings file (`update`
             # merely refreshes a git checkout, writing no settings key) -- see the
