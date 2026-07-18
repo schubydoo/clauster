@@ -1886,6 +1886,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         ONLY on success. The argv is captured via :data:`config_write.cli_argv_sink`, which
         propagates into the worker thread; the audit append itself is best-effort and never
         fails the already-committed write.
+
+        Best-effort fingerprint, not a transactional attribution: the snapshots bracket the
+        write but are not inside its file lock, and ``watch`` is a cross-scope superset, so
+        under (rare, single-operator) concurrent writes the diff can attribute another
+        request's change. It's a forensic hint of where a change landed — the base line's
+        surface/scope/target/action names the operation exactly.
         """
         before = await asyncio.to_thread(config_audit.file_fingerprints, watch)
         sink: list[list[str]] = []
