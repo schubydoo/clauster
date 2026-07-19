@@ -160,7 +160,12 @@ Put an **IdP / IAP** in front — an SSO/forward-auth proxy (Authelia, Authentik
 Cloudflare Access, Pomerium, oauth2-proxy) or a private overlay (Tailscale,
 WireGuard) — so a real identity is checked *before* a request reaches Clauster.
 The reverse-proxy path (peer-IP allowlist + an HMAC-signed user header,
-`auth.reverse_proxy`) is built to trust exactly such a proxy. Once it is your
+`auth.reverse_proxy`) is built to trust exactly such a proxy. The proxy's
+identity check is **admission, not access control**: Clauster is single-operator
+by design, so whoever the IdP admits acts with the one operator's full host
+control, and the config-write audit trail attributes actions to the constant
+`admin` actor rather than the IdP identity. The IdP group is an on/off switch
+for the whole host — it should contain exactly one person. Once it is your
 primary gate, prefer **dropping `password_required` entirely** — the `/login`
 route is deliberately exempt from the auth middleware (so a locked-out operator
 can always reach it), which means there is *no* Clauster-side option to restrict
