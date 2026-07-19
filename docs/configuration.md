@@ -1,8 +1,9 @@
 # Configuration
 
-All settings live in `clauster.yml`. The full, commented schema is in
-[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example).
-This page is the exhaustive field reference. The tables below are **generated from
+All settings live in `clauster.yml`.
+[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example)
+is a lean starter (the common keys, with every other section shown commented at its default);
+**this page is the exhaustive field reference**. The tables below are **generated from
 the pydantic models** in `src/clauster/config.py` (via
 `scripts/gen_config_reference.py`), so they never drift from the code — a CI check
 fails the build if a field is added or changed without regenerating this page.
