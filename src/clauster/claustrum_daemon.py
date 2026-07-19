@@ -363,21 +363,29 @@ class ClaustrumDaemon:
     def _resolve_binary(self) -> str:
         """Locate the claustrum binary: an explicit config/PATH hit first, else the managed one.
 
-        ``config.claustrum.binary`` (default ``"claustrum"``) wins when it resolves on PATH — an
-        operator who set an absolute path or installed claustrum system-wide keeps control. Only
-        when that misses do we fall back to a ``clauster deps install claustrum`` binary under
-        ``<state_dir>/deps/bin`` (#deps), so the managed install "just works" without the operator
-        having to also point ``claustrum.binary`` at it.
+        ``config.claustrum.binary`` wins when it resolves on PATH — an operator who set an absolute
+        path or installed claustrum system-wide keeps control. The managed
+        ``<state_dir>/deps/bin/claustrum`` (from ``clauster deps install claustrum``) is a fallback
+        ONLY for the DEFAULT ``binary`` value: if the operator explicitly configured a *different*
+        binary and it doesn't resolve, that's their misconfiguration to see — we must NOT silently
+        run a different version than they asked for, so it raises rather than substituting.
         """
         resolved = shutil.which(self._cfg.binary)
         if resolved is not None:
             return resolved
-        managed = deps.installed_binary_path("claustrum", self._config.state_dir)
-        if managed is not None:
-            return str(managed)
+        default_binary = type(self._cfg).model_fields["binary"].default
+        if self._cfg.binary == default_binary:
+            managed = deps.installed_binary_path("claustrum", self._config.state_dir)
+            if managed is not None:
+                return str(managed)
         raise DaemonSpawnError(
-            f"claustrum binary not found: {self._cfg.binary!r} is not on PATH and no managed "
-            "binary is installed — run `clauster deps install claustrum`"
+            f"claustrum binary not found: {self._cfg.binary!r} is not on PATH"
+            + (
+                " and no managed binary is installed — run `clauster deps install claustrum`"
+                if self._cfg.binary == default_binary
+                else " (an explicit claustrum.binary must resolve; the managed install is only a "
+                "fallback for the default)"
+            )
         )
 
     @staticmethod
