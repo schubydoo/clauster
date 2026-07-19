@@ -694,14 +694,15 @@ def _deps_list(config_path: str | None) -> int:
             else:
                 status, detail = "missing", entry.capability_label
             print(f"{name:<8} {entry.dist:<10} {status:<10} {detail}")
-    for dep in deps.BINARY_DEPS:
-        if not deps.applies(dep):
-            status, detail = "n/a", f"{dep.label} (other platform)"
-        elif deps.installed_binary_path(dep.key, config.state_dir):
+    for key in deps.binary_dep_names():
+        dep = deps.resolve_binary_dep(key)  # the row for THIS host, or None off-platform/arch
+        if dep is None:
+            status, detail = "n/a", f"{deps.binary_dep_for(key).label} (other platform/arch)"
+        elif deps.installed_binary_path(key, config.state_dir):
             status, detail = "installed", f"{dep.label} {dep.version} in deps dir"
         else:
             status, detail = "missing", dep.label
-        print(f"{dep.key:<8} {'(binary)':<10} {status:<10} {detail}")
+        print(f"{key:<9} {'(binary)':<10} {status:<10} {detail}")
     return 0
 
 

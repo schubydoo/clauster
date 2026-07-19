@@ -1251,12 +1251,21 @@ def test_restore_swap_failure_into_fresh_dest_cleans_staging(write_config, tmp_p
     assert not list(tmp_path.glob(".fresh.restore-*"))  # staged dir cleaned up
 
 
+def _bin_cfg(tmp_path, *, claustrum_enabled=False):
+    """Minimal config stand-in for _check_binary_deps: state_dir + claustrum.enabled."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        state_dir=tmp_path, claustrum=SimpleNamespace(enabled=claustrum_enabled)
+    )
+
+
 def test_check_binary_deps_warns_when_shawl_missing(monkeypatch, tmp_path):
     from clauster import ops
 
     monkeypatch.setattr(ops.deps.sys, "platform", "win32")
     monkeypatch.setattr(ops.shutil, "which", lambda name: None)  # not on PATH, not in managed dir
-    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path))}
     assert by["binary:shawl"].status == WARN
     assert "clauster deps install shawl" in by["binary:shawl"].detail
 
@@ -1269,7 +1278,7 @@ def test_check_binary_deps_ok_via_managed_dir(monkeypatch, tmp_path):
     exe = deps.managed_bin_dir(tmp_path) / "shawl.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"x")
-    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path))}
     assert by["binary:shawl"].status == OK
 
 
@@ -1278,12 +1287,30 @@ def test_check_binary_deps_ok_via_path(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ops.deps.sys, "platform", "win32")
     monkeypatch.setattr(ops.shutil, "which", lambda name: "/usr/bin/shawl")
-    by = {c.name: c for c in ops._check_binary_deps(tmp_path)}
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path))}
     assert by["binary:shawl"].status == OK
 
 
 def test_check_binary_deps_skips_off_platform(monkeypatch, tmp_path):
     from clauster import ops
 
-    monkeypatch.setattr(ops.deps.sys, "platform", "linux")  # shawl is win32-only
-    assert ops._check_binary_deps(tmp_path) == []
+    # shawl is win32-only; claustrum is gated OFF here, so a linux host with the channel
+    # disabled reports no managed-binary checks.
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")
+    assert ops._check_binary_deps(_bin_cfg(tmp_path)) == []
+
+
+def test_check_binary_deps_claustrum_gated_on_enabled(monkeypatch, tmp_path):
+    from clauster import ops
+
+    # Direct Session channel OFF -> claustrum is not surfaced even on a supported platform.
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")
+    monkeypatch.setattr(ops.deps.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(ops.shutil, "which", lambda name: None)
+    assert not [
+        c for c in ops._check_binary_deps(_bin_cfg(tmp_path)) if c.name == "binary:claustrum"
+    ]
+    # Channel ON + binary absent -> a WARN nudging `deps install claustrum`.
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path, claustrum_enabled=True))}
+    assert by["binary:claustrum"].status == WARN
+    assert "clauster deps install claustrum" in by["binary:claustrum"].detail
