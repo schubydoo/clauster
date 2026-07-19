@@ -24,10 +24,10 @@ often turns up an answer or an existing thread to add to.
 ## Other channels
 
 - **Found a security vulnerability?** Please **don't** open a public issue —
-  follow [`SECURITY.md`](SECURITY.md) to report it privately through GitHub's
+  follow [`SECURITY.md`](https://github.com/schubydoo/clauster/blob/main/SECURITY.md) to report it privately through GitHub's
   security advisories.
 - **Want to contribute a fix or feature?** See
-  [`CONTRIBUTING.md`](CONTRIBUTING.md) for dev setup and the PR checklist.
+  [`CONTRIBUTING.md`](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) for dev setup and the PR checklist.
 
 Clauster is pre-1.0 and maintained by [@schubydoo](https://github.com/schubydoo)
 in spare time, so please be patient — but every report helps. Thanks!

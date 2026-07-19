@@ -4,7 +4,7 @@ Thanks for your interest in Clauster!
 
 ## Code of conduct
 
-This project adheres to the [Contributor Covenant](CODE_OF_CONDUCT.md) code of
+This project adheres to the [Contributor Covenant](https://github.com/schubydoo/clauster/blob/main/CODE_OF_CONDUCT.md) code of
 conduct. By participating, you are expected to uphold it; please report
 unacceptable behavior as described there.
 
@@ -110,7 +110,7 @@ subset of the OS/Python legs; the full matrix runs on release and fork PRs.
   thread on the thread itself — unresolved review threads block the merge.
 
 AI coding agents get the same rules in machine-facing form from
-[AGENTS.md](AGENTS.md) (Claude Code additionally reads [CLAUDE.md](CLAUDE.md)).
+[AGENTS.md](https://github.com/schubydoo/clauster/blob/main/AGENTS.md) (Claude Code additionally reads [CLAUDE.md](https://github.com/schubydoo/clauster/blob/main/CLAUDE.md)).
 If you change a workflow or gate, update those files in the same PR so they don't
 drift.
 
@@ -133,7 +133,7 @@ Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/st
    add the package to `package.json` — there's no runtime `dependencies` block; the
    tarball is the source.
 2. **Pin it for Renovate** — add a two-line block to
-   [`static/vendor/versions.txt`](src/clauster/static/vendor/versions.txt) in the exact
+   [`static/vendor/versions.txt`](https://github.com/schubydoo/clauster/blob/main/src/clauster/static/vendor/versions.txt) in the exact
    shape the `customManager` regex matches:
 
    ```text
@@ -148,7 +148,7 @@ Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/st
 3. **License + provenance** — copy the upstream `LICENSE` to `vendor/<dep>/LICENSE` and
    write a `vendor/<dep>/README.md` (package, version, a file→source table, and an
    `## Updating` recipe). When the asset is **shipped to users**, also add a section to
-   [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and credit it in the dashboard
+   [`THIRD_PARTY_NOTICES.md`](https://github.com/schubydoo/clauster/blob/main/THIRD_PARTY_NOTICES.md) and credit it in the dashboard
    footer (guarded by `test_dashboard_footer_credits_vendored_assets`).
 4. **Reference it cache-busted** — link it in the template with `?v={{ asset_version }}`
    (the clauster version), so an upgrade busts the `immutable` static cache. Tests in
