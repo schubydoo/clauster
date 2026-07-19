@@ -356,8 +356,9 @@ connections are authenticated before accept and origin-checked.
 
 ## Configuration
 
-All settings live in `clauster.yml` — see
-[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) for the full, commented schema. Any
+All settings live in `clauster.yml` —
+[`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) is a lean starter, and
+[`docs/configuration.md`](docs/configuration.md) is the exhaustive per-key reference. Any
 scalar key is overridable by an environment variable of the form
 `CLAUSTER_<UPPER_SNAKE_PATH>`. The schema is additive-only — old configs always
 validate against newer versions.

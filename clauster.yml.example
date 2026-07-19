@@ -3,43 +3,43 @@
 # Search order:  $CLAUSTER_CONFIG -> ./clauster.yml -> $CLAUSTER_HOME/clauster.yml
 # Any scalar key is env-overridable: CLAUSTER_<UPPER_SNAKE_PATH> (e.g. CLAUSTER_PORT=8080).
 # Schema is additive-only — old configs keep working in newer versions.
-# Every key + its full semantics: docs/configuration.md. Uncommented values below are the
-# defaults; commented-out keys are optional (shown at a default or an example value).
+#
+# This is a LEAN STARTER. The uncommented keys are what most deployments actually set; every
+# other section is still shown (commented, at its default) so you can see it exists without the
+# noise. The FULL per-key reference — every option, type, and default — lives in
+# docs/configuration.md, so this file points there by section instead of repeating it.
 
 schema_version: 1
 projects_root: ~/code        # required — dir whose subfolders are your projects (must exist, be readable)
-host: 127.0.0.1              # a non-loopback bind requires enforced auth (see auth:)
+host: 127.0.0.1              # a non-loopback bind REQUIRES enforced auth (see auth:)
 port: 7621
 state_dir: ~/.clauster       # DB, logs, pid/socket files
-root_path: ""                # URL subpath when behind a reverse proxy
 log_format: text             # text | json
-# instance_name: prod        # label; retitles the process to clauster[<name>] (<=32 chars [A-Za-z0-9_.-])
+# root_path: ""              # URL subpath when behind a reverse proxy
+# instance_name: prod        # process label -> clauster[<name>] (<=32 chars [A-Za-z0-9_.-])
 
 claude:
   binary: claude             # name on PATH or absolute path
-  min_version: "2.1.145"
-  agents_json_poll_interval_seconds: 30   # liveness/crash-detection poll cadence
-  startup_grace_seconds: 60  # a bridge alive-but-unregistered past this -> ERROR
-  auto_enable_remote_control: true        # pre-ack remote control so a detached bridge skips the prompt
-  resume_recap: false        # opt-in SessionStart hook: recap the prior transcript into a restarted bridge
-  resume_recap_max_chars: 8000
-  launch_mode: standard      # standard (headless Server Mode) | pty (Interactive Session, true resume;
-                             # POSIX pty, or a Windows ConPTY keeper with the `pty` extra, else Server Mode).
-                             # Default for NEW bridges only; the per-launch Mode picker overrides it.
-  # path_append: ["~/.local/bin"]   # dirs appended to the bridge PATH (~ expanded; appended, never replacing)
-  # node_from_nvm: true      # default-on (#859): append nvm `default` node's bin dir to the bridge PATH
-  #                          # (fixes npx/node MCP under systemd). Set false to skip it.
-  # env: {FOO: bar}          # extra bridge env, applied after the secret scrub
+  launch_mode: standard      # standard (headless Server Mode) | pty (Interactive Session, true resume)
+  # Tuning knobs — sensible defaults; the full list is in docs/configuration.md (claude section):
+  # min_version: "2.1.145"
+  # agents_json_poll_interval_seconds: 30    # liveness/crash-detection poll cadence
+  # startup_grace_seconds: 60                # a bridge alive-but-unregistered past this -> ERROR
+  # auto_enable_remote_control: true         # pre-ack remote control so a detached bridge skips the prompt
+  # resume_recap: false                      # SessionStart hook: recap the prior transcript into a restart
+  # path_append: ["~/.local/bin"]            # dirs appended to the bridge PATH (~ expanded)
+  # node_from_nvm: true                      # append nvm `default` node's bin dir to the bridge PATH (#859)
+  # env: {FOO: bar}                          # extra bridge env, applied after the secret scrub
 
 instance_defaults:
   spawn_mode: same-dir       # same-dir | worktree (git repos) | session
   permission_mode: default   # default | plan | acceptEdits | auto | dontAsk | bypassPermissions
   capacity: 32               # max sessions within one bridge (claude --capacity)
-  # session_name_prefix: myteam    # prefix for auto-generated session names (default: hostname)
+  # session_name_prefix: myteam   # prefix for auto-generated session names (default: hostname)
   # max_bridges: 8           # best-effort cap on remote-control bridges (unset = no limit)
 
-# Per-project overrides. allow_bypass_permissions is the hard ceiling for the
-# bypassPermissions footgun — not selectable in the UI unless set true here.
+# Per-project overrides. allow_bypass_permissions is the hard ceiling for the bypassPermissions
+# footgun — not selectable in the UI unless set true here.
 projects: {}
 #   my-project:
 #     allow_bypass_permissions: false
@@ -48,124 +48,93 @@ auth:
   enabled: false             # MASTER switch — required for password_required / reverse_proxy to be enforced
   password_required: false
   password_hash: null        # argon2id; generate via `clauster hash-password`
-  # api_token_hash: null     # SHA-256 (from `clauster hash-token`) enabling `Authorization: Bearer <token>`;
-  #                          # satisfies enforced-auth for a non-loopback bind. Store only the hash.
-  cookie_secure: auto        # auto | always | never
-  session_max_age_seconds: 604800   # 7 days
-  allowed_origins: []        # extra WS/CSRF origins (e.g. your proxy domain)
-  allow_unauthenticated_network: false
-  reverse_proxy:
-    enabled: false
-    user_header: "Remote-User"
-    shared_secret_header: "X-Proxy-Auth"
-    shared_secret: null      # HMAC key the proxy signs the auth header with
-    trusted_ips: []
-    hmac_window_seconds: 60
-    # require_hmac: true      # set false for header-only forward-auth proxies (Authelia/Traefik/oauth2-proxy)
-
-# Versioned /api/v1 public surface (docs/public-api.md). The internal /api/... routes are always present.
-api:
-  openapi_enabled: false      # serve /docs + /openapi.json (Bearer-gated when auth.enabled)
+  # api_token_hash: null     # SHA-256 (`clauster hash-token`) -> `Authorization: Bearer <token>`; satisfies
+  #                          # enforced-auth for a non-loopback bind. Store only the hash.
+  # Session/CSRF + reverse-proxy (Authelia/Traefik/oauth2-proxy forward-auth) options —
+  # full list in docs/configuration.md (auth / auth.reverse_proxy sections):
+  # cookie_secure: auto              # auto | always | never
+  # session_max_age_seconds: 604800  # 7 days
+  # allowed_origins: []              # extra WS/CSRF origins (e.g. your proxy domain)
+  # allow_unauthenticated_network: false
+  # reverse_proxy:
+  #   enabled: false
+  #   user_header: "Remote-User"
+  #   shared_secret: null            # HMAC key the proxy signs the auth header with
 
 # Web-dashboard kill switch (#806, restart required; NOT editable in-app). false = serve ONLY the
-# JSON API (dashboard page, /login, /static/*, HTML fragments 404). See docs/public-api.md#api-only-deployment.
+# JSON API. See docs/public-api.md#api-only-deployment.
 # ui:
 #   enabled: true
 
+# Versioned /api/v1 public surface (docs/public-api.md). The internal /api/... routes are always present.
+# api:
+#   openapi_enabled: false   # serve /docs + /openapi.json (Bearer-gated when auth.enabled)
+
 # Native HTTPS — Clauster terminates TLS itself (structural; file/CLI-managed only). Unset = plain HTTP.
-# Paths are validated fail-closed at load + start (a missing file aborts startup, never falls back to HTTP).
-# Full detail incl. self-signed provisioning: docs/configuration.md. (ACME / Let's Encrypt: issue #774.)
+# Full detail incl. self-signed provisioning: docs/configuration.md (tls section).
 # tls:
-#   cert_file: /etc/clauster/tls/fullchain.pem   # PEM cert chain (or use provision: self-signed)
+#   cert_file: /etc/clauster/tls/fullchain.pem
 #   key_file: /etc/clauster/tls/privkey.pem
-#   # provision: self-signed  # generate an RSA-2048 cert+key under state_dir/tls/; needs `cryptography`
-#   # hostnames: [192.168.1.10, clauster.local]  # first = CN, rest = SANs
+#   # provision: self-signed   # generate an RSA-2048 cert+key under state_dir/tls/ (needs `cryptography`)
 
 # Pre-migration SQLite snapshot (VACUUM INTO state_dir/backups/, keeps last 5). On by default.
 # db:
 #   backup_before_migrate: true
 
-logs:
-  bridge_log_max_size_mb: 10
-  keep_rotated: 5
-  redact_session_url: false  # false = verbatim on disk, redacted over WS
-  strip_ansi_in_stream: true
-  # retention_max_age_days: 30   # drop a spawn's log set once its newest file is older than this (0 = forever)
-  # retention_max_files: 0       # keep only the N most recent log sets (0 = unlimited)
-  # retention_max_total_mb: 0    # cap the bridge-logs dir size in MB (0 = unlimited)
+# Bridge-log rotation + redaction — defaults are fine for most (full list: docs/configuration.md, logs section).
+# logs:
+#   bridge_log_max_size_mb: 10
+#   keep_rotated: 5
+#   redact_session_url: false      # false = verbatim on disk, redacted over WS
+#   strip_ansi_in_stream: true
+#   # retention_max_age_days: 30   # drop a spawn's log set once its newest file is older (0 = forever)
 
-# Project create/clone guards (clone URLs are user-supplied + hit the network).
+# Project create/clone guards (clone URLs are user-supplied + hit the network). The scalars plus
+# `allowed_schemes` / `allowed_private_cidrs` are also editable from the **Advanced settings**
+# panel in the dashboard's Configuration editor (behind a step-up re-auth — re-enter your login
+# password). Full list: docs/configuration.md (clone section).
 clone:
   enabled: true
-  allowed_schemes: [https, ssh]
-  allow_private_hosts: false  # block private/LAN IPs by default (SSRF)
-  allowed_private_cidrs: []   # targeted LAN opt-in, e.g. ["192.168.1.0/24"]
-  timeout_seconds: 300
-  max_mb: 2048                # post-clone size cap; 0 = unlimited
+  # allowed_schemes: [https, ssh]
+  # allow_private_hosts: false     # block private/LAN IPs by default (SSRF)
+  # allowed_private_cidrs: []      # targeted LAN opt-in, e.g. ["192.168.1.0/24"]
+  # timeout_seconds: 300
+  # max_mb: 2048                   # post-clone size cap; 0 = unlimited
 
-# Ghost-environment reaper: the CLI (`clauster reap-environments`) is always available;
-# this only gates the destructive browser button.
-reaper:
-  ui_enabled: false
+# Ghost-environment reaper: the CLI (`clauster reap-environments`) is always available; this only
+# gates the destructive browser button.
+# reaper:
+#   ui_enabled: false
 
-# Per-project cost/token badge. cost is an APPROXIMATE estimate (transcript tokens x a
-# hand-maintained USD table); mode: off hides it (and skips the usage fetch).
-usage:
-  mode: cost                  # cost | tokens | off
-  # currency: USD
-  # currency_symbol: null     # cost-mode prefix; defaults to $ for USD
-  # fx_rate: 1.0              # STATIC multiplier on the USD figure (no live FX)
-  # token_total_includes_cache: true
+# Per-project cost/token badge (full list: docs/configuration.md, usage section).
+# usage:
+#   mode: cost               # cost | tokens | off
 
-# Live per-bridge resource metrics (CPU / memory / disk) on a running card. On by default.
+# Live per-bridge resource metrics (CPU / memory / disk). On by default (docs/configuration.md, metrics section).
 # metrics:
 #   enabled: true
-#   normalize_cpu: false      # divide CPU% by host cores
-#   show_disk: true
-#   sample_interval_seconds: 0.15   # two-snapshot window (<=2.0)
-#   poll_seconds: 4.0         # dashboard refresh cadence
 
-# Read-only Prometheus /metrics. Off by default; stays behind the auth guard unless a token hash is set.
+# Read-only Prometheus /metrics. Off by default (docs/configuration.md, observability section).
 # observability:
 #   prometheus_enabled: false
-#   metrics_token_hash: null  # SHA-256 (from `clauster hash-metrics-token`) for token-only scrape access
 
 # Outbound bridge-lifecycle notifications via Apprise (extra: pip install 'clauster[notify]').
-# Best-effort + fail-closed — a notify failure never affects the bridge lifecycle.
+# Best-effort + fail-closed. `urls` may embed secrets, so it stays file/CLI-managed (not web-editable).
 # notifications:
-#   enabled: false            # MASTER switch for the Apprise channel
-#   urls: []                  # e.g. ["discord://...", "tgram://..."]
-#   browser_enabled: false    # in-browser Web Notifications (no URL needed)
-#   notify_on_crash: true
-#   notify_on_ready: false
-#   notify_on_stop: false
-#   notify_on_permission: false
-#   notify_on_session_end: false
-#   notify_on_reconnect_failed: false
+#   enabled: false
+#   urls: []                 # e.g. ["discord://...", "tgram://..."]
 
 # Outbound HTTP webhooks on lifecycle transitions. Fail-open (timeout-bounded); http/https only.
+# The scalars + `events` are editable from the **Advanced settings** panel in the Configuration
+# editor; `urls` stays file/CLI-only (may embed secrets). Full list: docs/configuration.md (webhooks section).
 # webhooks:
 #   enabled: false
-#   urls: []                  # e.g. ["https://example.com/hooks/clauster"]
-#   timeout_seconds: 10.0
-#   block_private_targets: false   # opt-in SSRF guard for IP-literal targets (default keeps LAN receivers)
+#   urls: []
 #   events:
-#     spawn: true             # bridge events (absent = ENABLED, the historical default)
-#     ready: true
-#     stop: true
-#     crash: true
-#     bg-settled: false       # extended events (absent = DISABLED — opt in explicitly)
-#     permission-needed: false
-#     clone-done: false
+#     spawn: true                # bridge events (absent = ENABLED, the historical default)
+#     permission-needed: false   # extended events (absent = DISABLED — opt in explicitly)
 
-# Claustrum Direct Session live-view channel (EXPERIMENTAL). Connect-or-spawns one claustrum
-# daemon per deployment; hosts headless stream-json sessions with a live dashboard panel.
-# Fail-closed (surfaces in /healthz, never touches bridges). LOCAL live-view only — Direct
-# Sessions are NOT attachable from claude.ai/code or the mobile app.
+# Claustrum Direct Session live-view channel (EXPERIMENTAL). LOCAL live-view only — Direct Sessions
+# are NOT attachable from claude.ai/code or the mobile app. Full detail: docs/configuration.md (claustrum section).
 # claustrum:
 #   enabled: false
-#   binary: claustrum         # name on PATH or absolute path
-#   socket_path: null         # default: <state_dir>/claustrum/daemon.sock
-#   spawn_timeout_seconds: 10.0
-#   keep_children: true       # daemon restart leaves hosted sessions running (reattach on reconnect; POSIX)
-#   request_timeout_seconds: 30.0
