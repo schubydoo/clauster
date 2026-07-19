@@ -48,7 +48,9 @@ needs whenever `auth.enabled` is set: a session cookie, trusted-reverse-proxy
 auth, or an `Authorization: Bearer <token>` header. A headless/API client uses a
 Bearer token — see [Named API tokens](#named-api-tokens-clauster-api-token)
 below to mint one. With `auth.enabled: false` the whole API (bare and `/api/v1`
-alike) is unauthenticated, matching the existing `/api/*` posture.
+alike) is unauthenticated, matching the existing `/api/*` posture — safe only on
+loopback, because a non-loopback bind refuses to start without enforced auth
+unless `auth.allow_unauthenticated_network` explicitly opts out.
 
 ```sh
 curl -H "Authorization: Bearer clauster_pat_…" https://clauster.example/api/v1/instances

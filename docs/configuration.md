@@ -186,11 +186,11 @@ projects:
 <!-- BEGIN GEN: auth -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | **Master auth switch.** Must be `true` for password / reverse-proxy auth to actually gate requests. |
+| `enabled` | bool | `false` | **Master auth switch.** Must be `true` for password / reverse-proxy auth to actually gate requests. The `false` default is safe only on loopback: a non-loopback bind **refuses to start** without enforced auth (fail-closed) unless `allow_unauthenticated_network` explicitly opts out. |
 | `password_required` | bool | `false` | Require password login. Needs `password_hash`. |
 | `password_hash` | str \| null | `null` | argon2id hash from `clauster hash-password`. |
 | `api_token_hash` | str \| null | `null` | SHA-256 hash of an inbound API bearer token from `clauster hash-token`. Enables `Authorization: Bearer <token>` auth for headless/API clients. Only the hash is stored; the raw token is shown once. |
-| `allow_unauthenticated_network` | bool | `false` | Explicit opt-out: permit a non-loopback bind **without** enforced auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. |
+| `allow_unauthenticated_network` | bool | `false` | Explicit opt-out: permit a non-loopback bind **without** enforced auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. When `auth.enabled` is `false`, **anyone who can reach the port has full operator control of this host** — the dashboard drives a shell; treat it accordingly. |
 | `cookie_secure` | `auto` \| `always` \| `never` | `auto` | Session-cookie `Secure` flag. `auto` = Secure only over https (or a trusted proxy's `X-Forwarded-Proto=https`). |
 | `session_max_age_seconds` | int | `604800` | Session lifetime (≥1; default 7 days). |
 | `allowed_origins` | list[str] | `[]` | Extra WebSocket / CSRF origins (e.g. the proxy domain). |

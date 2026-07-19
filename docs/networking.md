@@ -221,6 +221,15 @@ The login rate-limiter never keys on the bare header: a forged-username flood fr
 a trusted IP collapses to the shared-IP global backoff, so it can't mint a fresh
 per-user login budget.
 
+!!! warning "Proxy identity is admission, not access control"
+    Clauster reads `user_header` only to authenticate the request. The identity
+    does not scope anything: every admitted request acts with the full
+    single-operator capability, and the config-write audit log records the
+    constant `admin` actor rather than the header value — actions by two
+    different IdP users are indistinguishable there. Admitting a second person
+    to this proxy grants them your shell; treat the IdP group as an on/off
+    switch for the whole host, not as per-user access control.
+
 ### Recipe — Caddy `forward_auth` + Authelia
 
 Caddy delegates each request to Authelia, then forwards Authelia's `Remote-User`

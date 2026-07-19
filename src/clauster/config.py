@@ -372,7 +372,10 @@ class AuthConfig(BaseModel):
     enabled: bool = Field(
         default=False,
         description="**Master auth switch.** Must be `true` for password / "
-        "reverse-proxy auth to actually gate requests.",
+        "reverse-proxy auth to actually gate requests. The `false` default is safe "
+        "only on loopback: a non-loopback bind **refuses to start** without enforced "
+        "auth (fail-closed) unless `allow_unauthenticated_network` explicitly opts "
+        "out.",
     )
     password_required: bool = Field(
         default=False, description="Require password login. Needs `password_hash`."
@@ -393,7 +396,10 @@ class AuthConfig(BaseModel):
     allow_unauthenticated_network: bool = Field(
         default=False,
         description="Explicit opt-out: permit a non-loopback bind **without** enforced "
-        "auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning.",
+        "auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. "
+        "When `auth.enabled` is `false`, **anyone who can reach the port has full "
+        "operator control of this host** — the dashboard drives a shell; treat it "
+        "accordingly.",
     )
     cookie_secure: Literal["auto", "always", "never"] = Field(
         default="auto",
