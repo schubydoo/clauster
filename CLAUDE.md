@@ -27,8 +27,9 @@ pointer.
 
 - **Prefer the dedicated file/search tools over shell equivalents.** Read/Edit/Grep
   rather than `cat`/`sed`/`grep`, so edits stay tracked.
-- **Run `just check` before proposing a PR** — it runs the same gates CI does
-  (tests + coverage, ruff, types, docs lint). Cheaper to fail locally.
+- **Run `just check` before proposing a PR** — it runs the local test, coverage,
+  ruff, type, and docs-lint gates. CI additionally runs the 3-OS matrix, package
+  build, and platform smoke jobs. Cheaper to fail locally.
 - **Verify before you report.** A status line in a planning doc, a TODO, a changelog,
   or a recalled memory is a *cache*, not truth. Confirm open-vs-shipped against
   `git log`, `gh pr view`, or the code itself before acting on it or telling the user

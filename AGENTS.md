@@ -38,16 +38,16 @@ one path.
 | Type check | `just typecheck` |
 | Docs lint | `just docs-lint` |
 | All local pre-PR gates | `just check` |
-| Docs site build | `uv run mkdocs build --strict` |
+| Docs site build | `uv run --extra docs mkdocs build --strict` |
 | Browser E2E (opt-in) | `scripts/e2e.sh` |
 
 **Always pass `-c clauster.yml`** when running locally. A bare `uv run clauster`
 falls through a three-step config search and may pick up a real config elsewhere on
 the machine — including one that binds a non-loopback address.
 
-`-n auto` (xdist) is the `addopts` default. For a **subset or `--cov` run**, prepend
-`-o addopts=""` — the default `addopts` injects `--cov … --cov-fail-under=96`, so a
-plain subset run otherwise dies with `unrecognized arguments: --cov`.
+`-n auto` (xdist) is the `addopts` default. For a **subset or custom `--cov` run**,
+prepend `-o addopts=""` — the default `addopts` injects repository-wide coverage
+options, so a plain subset run otherwise fails the 96% total-coverage threshold.
 
 The browser E2E suite is excluded from the default `pytest` run and the required
 CI gate; `scripts/e2e.sh` clears the addopts and runs it.
@@ -152,12 +152,12 @@ The branch ruleset enforces this; CI and review are the merge gate.
 | Gate | Detail |
 | --- | --- |
 | CI, all three OSes | Linux, macOS, Windows |
-| Coverage | ≥96%, and patch coverage on changed lines |
+| Coverage | ≥96% total (pytest `--cov-fail-under`). Codecov additionally flags patch coverage below 95% on changed lines — an advisory red X, not merge-blocking, but fix uncovered new lines rather than merging past it. |
 | `ruff check` + `ruff format` | 99 cols, docstrings required |
 | Type check + docs lint | `just check` runs everything locally |
 | **Changeset** | Add one under `.changeset/`, or apply the `no-changelog` label if the PR genuinely has no user-facing effect (CI, refactor). Keep the body to **one tight line**. Use `major` for anything breaking — including a removed or renamed config key. |
 | **Code review** | [Greptile](https://www.greptile.com/) reviews every PR automatically. Its threads must be resolved before merge; unresolved threads block. Reply *and* resolve on the thread itself. |
-| Docs | If the change alters behavior, update `README.md`, `docs/`, and `clauster.yml.example` **in the same PR**. The published site gates on `uv run mkdocs build --strict` (not part of `just check`) — run it whenever `docs/` or `mkdocs.yml` changes. |
+| Docs | If the change alters behavior, update `README.md`, `docs/`, and `clauster.yml.example` **in the same PR**. The published site gates on `uv run --extra docs mkdocs build --strict` (not part of `just check`) — run it whenever `docs/` or `mkdocs.yml` changes. |
 
 `Closes #N` goes in the PR **description**, never in a squash-merge commit body.
 
