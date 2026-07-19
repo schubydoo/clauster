@@ -95,6 +95,25 @@ via `.coveragerc-win`, which excludes the POSIX/ConPTY code it can't run), plus
 lint, security scanners, and dependency review. Internal PRs run a representative
 subset of the OS/Python legs; the full matrix runs on release and fork PRs.
 
+## Branching and review
+
+- **Branch off fresh `origin/main`** (`git fetch` first) and open a PR — every
+  change merges through one; the branch ruleset rejects direct pushes to `main`.
+  PRs always target `main`; don't stack one PR on another's branch.
+- **History is linear and PRs are squash-merged.** If your branch falls behind,
+  `git rebase origin/main` — the instinctive `git merge main` produces a merge
+  commit the ruleset will reject. The ruleset is also strict-up-to-date, so a
+  stale base shows the PR as BEHIND until rebased.
+- **[Greptile](https://www.greptile.com/) reviews every PR automatically** and
+  usually comments within a few minutes of a push. Read its summary (a green
+  score does not mean zero findings), then reply **and** resolve each inline
+  thread on the thread itself — unresolved review threads block the merge.
+
+AI coding agents get the same rules in machine-facing form from
+[AGENTS.md](AGENTS.md) (Claude Code additionally reads [CLAUDE.md](CLAUDE.md)).
+If you change a workflow or gate, update those files in the same PR so they don't
+drift.
+
 ## Documentation
 
 Project docs live under [`docs/`](docs/index.md) (published with MkDocs). When

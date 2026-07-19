@@ -14,10 +14,10 @@ junit.xml
 node_modules/
 
 # --- Local tooling (not part of the project) ---
+# CLAUDE.md and AGENTS.md are committed; CLAUDE.local.md holds per-machine notes.
 .claude/
 .vscode/settings.json
-CLAUDE.md
-AGENTS.md
+CLAUDE.local.md
 
 # --- Local config with real host paths (commit clauster.yml.example instead) ---
 clauster.yml
