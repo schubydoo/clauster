@@ -528,6 +528,92 @@ def _fake_shawl_zip(content: bytes = b"MZ-fake-shawl") -> tuple[bytes, str]:
     return data, hashlib.sha256(data).hexdigest()
 
 
+def _fake_claustrum_targz(content: bytes = b"\x7fELF-fake-claustrum") -> tuple[bytes, str]:
+    """Build an in-memory ``.tar.gz`` with a root ``claustrum`` member; return (bytes, sha256)."""
+    import hashlib
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as archive:
+        info = tarfile.TarInfo("claustrum")
+        info.size = len(content)
+        archive.addfile(info, io.BytesIO(content))
+    data = buf.getvalue()
+    return data, hashlib.sha256(data).hexdigest()
+
+
+def _install_fake_claustrum(monkeypatch, content: bytes = b"\x7fELF-fake-claustrum"):
+    """Register a fake linux/x86_64 claustrum BinaryDep for a fake tar.gz; return (bytes, dep)."""
+    data, sha = _fake_claustrum_targz(content)
+    dep = deps.BinaryDep(
+        key="claustrum",
+        label="claustrum (test)",
+        platform_marker="linux",
+        arch_marker="x86_64",
+        version="v1.7.1",
+        url="https://example.invalid/claustrum_1.7.1_Linux_x86_64.tar.gz",
+        sha256=sha,
+        member="claustrum",
+        dest="claustrum",
+    )
+    monkeypatch.setattr(deps, "BINARY_DEPS", (dep,))
+    monkeypatch.setattr(deps.sys, "platform", "linux")
+    monkeypatch.setattr(deps.platform, "machine", lambda: "x86_64")
+    return data, dep
+
+
+def test_extract_member_targz_and_zip_and_missing():
+    tg, _ = _fake_claustrum_targz(b"BODY")
+    assert deps._extract_member(tg, "x/claustrum_Linux_x86_64.tar.gz", "claustrum") == b"BODY"
+    zp, _ = _fake_shawl_zip(b"ZBODY")
+    assert deps._extract_member(zp, "x/shawl.zip", "shawl.exe") == b"ZBODY"
+    # A missing member raises KeyError from both backends (install_binary_dep catches it).
+    with pytest.raises(KeyError):
+        deps._extract_member(tg, "x/a.tar.gz", "nope")
+    with pytest.raises(KeyError):
+        deps._extract_member(zp, "x/a.zip", "nope")
+    # A tar whose member name is a DIRECTORY (extractfile -> None) is refused, not silently empty.
+    import io as _io
+    import tarfile as _tf
+
+    buf = _io.BytesIO()
+    with _tf.open(fileobj=buf, mode="w:gz") as archive:
+        info = _tf.TarInfo("claustrum")
+        info.type = _tf.DIRTYPE
+        archive.addfile(info)
+    with pytest.raises(ValueError, match="not a regular file"):
+        deps._extract_member(buf.getvalue(), "x/a.tar.gz", "claustrum")
+    # A SYMLINK member named `claustrum` must be refused, not silently followed to another
+    # in-archive entry's bytes (defense-in-depth on top of the checksum pin).
+    buf2 = _io.BytesIO()
+    with _tf.open(fileobj=buf2, mode="w:gz") as archive:
+        archive.addfile(_tf.TarInfo("real"), _io.BytesIO(b"secret"))
+        link = _tf.TarInfo("claustrum")
+        link.type = _tf.SYMTYPE
+        link.linkname = "real"
+        archive.addfile(link)
+    with pytest.raises(ValueError, match="not a regular file"):
+        deps._extract_member(buf2.getvalue(), "x/a.tar.gz", "claustrum")
+
+
+def test_install_binary_dep_targz_downloads_verifies_places(tmp_path, monkeypatch):
+    data, _dep = _install_fake_claustrum(monkeypatch)
+    rc = deps.install_binary_dep("claustrum", tmp_path, assume_yes=True, fetch=lambda _u: data)
+    assert rc == 0
+    exe = deps.managed_bin_dir(tmp_path) / "claustrum"
+    assert exe.read_bytes() == b"\x7fELF-fake-claustrum"
+
+
+def test_install_binary_dep_targz_checksum_mismatch_refuses(tmp_path, monkeypatch):
+    _install_fake_claustrum(monkeypatch)
+    rc = deps.install_binary_dep(
+        "claustrum", tmp_path, assume_yes=True, fetch=lambda _u: b"tampered"
+    )
+    assert rc == 1
+    assert not (deps.managed_bin_dir(tmp_path) / "claustrum").exists()
+
+
 def _install_fake_shawl(monkeypatch, content: bytes = b"MZ-fake-shawl"):
     """Register a fake win32 shawl BinaryDep matching a fake zip; return (zip bytes, dep)."""
     data, sha = _fake_shawl_zip(content)
@@ -547,22 +633,75 @@ def _install_fake_shawl(monkeypatch, content: bytes = b"MZ-fake-shawl"):
 
 
 def test_binary_dep_registry_and_lookup():
-    assert deps.binary_dep_names() == ("shawl",)
+    assert deps.binary_dep_names() == ("shawl", "claustrum")  # de-duped keys, order preserved
     assert deps.binary_dep_for("shawl").platform_marker == "win32"
     with pytest.raises(KeyError):
         deps.binary_dep_for("nope")
+
+
+def test_claustrum_variants_registered_for_every_platform_arch():
+    # One row per (OS, arch); each carries an arch_marker + a matching pinned url, and the Windows
+    # rows extract claustrum.exe while POSIX rows extract claustrum.
+    cl = [d for d in deps.BINARY_DEPS if d.key == "claustrum"]
+    assert len(cl) == 6
+    pairs = {(d.platform_marker, d.arch_marker) for d in cl}
+    assert pairs == {
+        ("linux", "x86_64"),
+        ("linux", "arm64"),
+        ("darwin", "x86_64"),
+        ("darwin", "arm64"),
+        ("win32", "x86_64"),
+        ("win32", "arm64"),
+    }
+    for d in cl:
+        assert d.arch_marker in d.url and d.version in d.url
+        assert (
+            d.member
+            == d.dest
+            == ("claustrum.exe" if d.platform_marker == "win32" else "claustrum")
+        )
+
+
+def test_host_arch_normalisation(monkeypatch):
+    for machine, want in [
+        ("x86_64", "x86_64"),
+        ("AMD64", "x86_64"),
+        ("aarch64", "arm64"),
+        ("arm64", "arm64"),
+        ("ARM64", "arm64"),
+    ]:
+        monkeypatch.setattr(deps.platform, "machine", lambda m=machine: m)
+        assert deps.host_arch() == want
+
+
+def test_resolve_binary_dep_picks_variant_and_none_off_matrix(monkeypatch):
+    monkeypatch.setattr(deps.sys, "platform", "darwin")
+    monkeypatch.setattr(deps.platform, "machine", lambda: "arm64")
+    got = deps.resolve_binary_dep("claustrum")
+    assert got is not None and got.platform_marker == "darwin" and got.arch_marker == "arm64"
+    # An unsupported arch resolves to nothing (never a wrong-arch archive).
+    monkeypatch.setattr(deps.platform, "machine", lambda: "riscv64")
+    assert deps.resolve_binary_dep("claustrum") is None
 
 
 def test_managed_bin_dir_is_deps_slash_bin(tmp_path):
     assert deps.managed_bin_dir(tmp_path) == tmp_path / "deps" / "bin"
 
 
-def test_installed_binary_path_none_then_present(tmp_path):
+def test_installed_binary_path_none_then_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(deps.sys, "platform", "win32")  # shawl only resolves on win32
     assert deps.installed_binary_path("shawl", tmp_path) is None
     exe = deps.managed_bin_dir(tmp_path) / "shawl.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"x")
     assert deps.installed_binary_path("shawl", tmp_path) == exe
+
+
+def test_installed_binary_path_none_off_platform(tmp_path, monkeypatch):
+    # An off-platform/arch binary resolves to no variant, so its managed path is never "installed"
+    # even if a stray file exists — the daemon fallback then correctly reports it absent.
+    monkeypatch.setattr(deps.sys, "platform", "linux")
+    assert deps.installed_binary_path("shawl", tmp_path) is None
 
 
 def test_install_binary_dep_unknown_returns_2(tmp_path, capsys):
@@ -573,7 +712,7 @@ def test_install_binary_dep_unknown_returns_2(tmp_path, capsys):
 def test_install_binary_dep_off_platform_returns_2(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(deps.sys, "platform", "linux")  # shawl is win32-only
     assert deps.install_binary_dep("shawl", tmp_path, assume_yes=True) == 2
-    assert "only for win32" in capsys.readouterr().err
+    assert "no shawl build for this platform/arch" in capsys.readouterr().err
 
 
 def test_install_binary_dep_downloads_verifies_places(tmp_path, monkeypatch):
@@ -663,12 +802,20 @@ def test_uninstall_binary_dep_unknown_returns_2(tmp_path, capsys):
     assert "unknown binary" in capsys.readouterr().err
 
 
-def test_uninstall_binary_dep_absent_is_a_noop(tmp_path, capsys):
+def test_uninstall_binary_dep_absent_is_a_noop(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(deps.sys, "platform", "win32")  # shawl only resolves on win32
     assert deps.uninstall_binary_dep("shawl", tmp_path) == 0
     assert "not installed" in capsys.readouterr().err
 
 
-def test_uninstall_binary_dep_removes_and_prunes(tmp_path, capsys):
+def test_uninstall_binary_dep_off_platform_is_a_noop(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(deps.sys, "platform", "linux")  # no shawl build here
+    assert deps.uninstall_binary_dep("shawl", tmp_path) == 0
+    assert "no build for this platform/arch" in capsys.readouterr().err
+
+
+def test_uninstall_binary_dep_removes_and_prunes(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(deps.sys, "platform", "win32")
     bindir = deps.managed_bin_dir(tmp_path)
     bindir.mkdir(parents=True)
     (bindir / "shawl.exe").write_bytes(b"x")
@@ -704,7 +851,8 @@ def test_install_binary_dep_confirm_accept_proceeds(tmp_path, monkeypatch):
     assert (deps.managed_bin_dir(tmp_path) / "shawl.exe").exists()
 
 
-def test_uninstall_binary_dep_unlink_error_returns_1(tmp_path, capsys):
+def test_uninstall_binary_dep_unlink_error_returns_1(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(deps.sys, "platform", "win32")
     bindir = deps.managed_bin_dir(tmp_path)
     bindir.mkdir(parents=True)
     (bindir / "shawl.exe").mkdir()  # a directory where the exe is → unlink raises OSError

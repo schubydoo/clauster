@@ -1107,7 +1107,8 @@ def test_deps_list_shawl_status_on_win32(write_config, tmp_path, monkeypatch, ca
     assert "installed" in line2
 
 
-def test_shawl_available_true_via_managed_dir(tmp_path):
+def test_shawl_available_true_via_managed_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.deps.sys, "platform", "win32")  # shawl only resolves on win32
     exe = cli.deps.managed_bin_dir(tmp_path) / "shawl.exe"
     exe.parent.mkdir(parents=True)
     exe.write_bytes(b"x")

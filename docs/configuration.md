@@ -570,6 +570,15 @@ Hosted sessions get their own dashboard panel — start a session, watch it stre
 live, drive it, approve/deny tool prompts, and resume or recover it after a
 restart (see [Architecture](architecture.md)).
 
+**Getting the daemon.** The channel needs the `claustrum` binary. The supported way is
+`clauster deps install claustrum` — it downloads the pinned, SHA-256-verified release for your
+OS/arch from [`schubydoo/claustrum`](https://github.com/schubydoo/claustrum) into
+`<state_dir>/deps/bin` and Clauster uses it automatically (no need to also set `binary`). An
+explicit `binary` path, or a `claustrum` already on `PATH`, still wins if set. Like every managed
+side-install it is fail-closed (a checksum mismatch refuses) and is **not** covered by Clauster's
+own release signature — you are trusting that project's pinned release. `clauster deps list` shows
+whether it is installed; `clauster deps uninstall claustrum` removes it.
+
 <!-- BEGIN GEN: claustrum -->
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |

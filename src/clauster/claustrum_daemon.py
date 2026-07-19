@@ -43,7 +43,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import procutil
+from . import deps, procutil
 from .claustrum_client import (
     AuthRejected,
     ClaustrumClient,
@@ -361,10 +361,24 @@ class ClaustrumDaemon:
         return token or None
 
     def _resolve_binary(self) -> str:
+        """Locate the claustrum binary: an explicit config/PATH hit first, else the managed one.
+
+        ``config.claustrum.binary`` (default ``"claustrum"``) wins when it resolves on PATH — an
+        operator who set an absolute path or installed claustrum system-wide keeps control. Only
+        when that misses do we fall back to a ``clauster deps install claustrum`` binary under
+        ``<state_dir>/deps/bin`` (#deps), so the managed install "just works" without the operator
+        having to also point ``claustrum.binary`` at it.
+        """
         resolved = shutil.which(self._cfg.binary)
-        if resolved is None:
-            raise DaemonSpawnError(f"claustrum binary not found: {self._cfg.binary!r}")
-        return resolved
+        if resolved is not None:
+            return resolved
+        managed = deps.installed_binary_path("claustrum", self._config.state_dir)
+        if managed is not None:
+            return str(managed)
+        raise DaemonSpawnError(
+            f"claustrum binary not found: {self._cfg.binary!r} is not on PATH and no managed "
+            "binary is installed — run `clauster deps install claustrum`"
+        )
 
     @staticmethod
     def _unlink_token_handoff(token_file: Path | None) -> None:

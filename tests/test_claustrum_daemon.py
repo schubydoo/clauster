@@ -192,6 +192,34 @@ async def test_binary_not_found(make_daemon):
     assert daemon.client is None
 
 
+async def test_resolve_binary_falls_back_to_managed_install(make_daemon, tmp_path, monkeypatch):
+    """When the config binary isn't on PATH, `_resolve_binary` uses the managed deps/bin one."""
+    from clauster import deps
+
+    monkeypatch.setattr("clauster.claustrum_daemon.shutil.which", lambda name: None)  # PATH miss
+    monkeypatch.setattr(deps.sys, "platform", "linux")  # deterministic variant -> dest "claustrum"
+    monkeypatch.setattr(deps.platform, "machine", lambda: "x86_64")
+    state = tmp_path / "state"
+    daemon = make_daemon(binary="claustrum", state_dir=state)
+    # No managed binary yet -> the fallback also misses -> a clear "run deps install" error.
+    with pytest.raises(DaemonSpawnError, match="deps install claustrum"):
+        daemon._resolve_binary()
+    # Place a managed binary; now _resolve_binary returns it.
+    managed = deps.managed_bin_dir(state) / "claustrum"
+    managed.parent.mkdir(parents=True)
+    managed.write_bytes(b"\x7fELF")
+    assert daemon._resolve_binary() == str(managed)
+
+
+async def test_resolve_binary_prefers_path_over_managed(make_daemon, tmp_path, monkeypatch):
+    """An explicit/PATH-resolved binary wins over a managed install (operator control)."""
+    monkeypatch.setattr(
+        "clauster.claustrum_daemon.shutil.which", lambda name: "/usr/local/bin/claustrum"
+    )
+    daemon = make_daemon(binary="claustrum", state_dir=tmp_path / "s")
+    assert daemon._resolve_binary() == "/usr/local/bin/claustrum"
+
+
 async def test_spawn_then_never_listens_times_out(make_daemon, monkeypatch):
     """A daemon that detaches but never binds the socket → ensure() fails closed."""
     monkeypatch.setenv("FAKE_CLAUSTRUM_NO_LISTEN", "1")

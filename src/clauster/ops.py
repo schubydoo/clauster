@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -167,7 +168,7 @@ def run_doctor(
     # install as "unavailable" even though the frozen binary loads it on the next start (#933).
     deps.add_deps_dir_to_sys_path(config.state_dir)
     checks.extend(_check_extras())
-    checks.extend(_check_binary_deps(config.state_dir))
+    checks.extend(_check_binary_deps(config))
 
     return checks, all(c.status != FAIL for c in checks)
 
@@ -201,18 +202,31 @@ def _check_extras() -> list[Check]:
     return checks
 
 
-def _check_binary_deps(state_dir: Path) -> list[Check]:
+#: Managed binaries only relevant when a capability is switched on — skip their doctor line
+#: unless the gate is true, so an operator not using that feature isn't nagged to install it.
+#: (Shawl has no gate: it's needed for the Windows service install, which is always a valid path.)
+_BINARY_DEP_GATES: dict[str, Callable[[ClausterConfig], bool]] = {
+    "claustrum": lambda config: config.claustrum.enabled,
+}
+
+
+def _check_binary_deps(config: ClausterConfig) -> list[Check]:
     """Report each managed binary dependency (#904 slice 2b): OK if present, else WARN.
 
-    Currently just Shawl, the Windows service wrapper the ``install-service`` path uses.
-    Off-platform entries (e.g. Shawl on a POSIX host) are skipped. "Present" means installed
-    in the managed ``<state_dir>/deps/bin`` dir OR already discoverable on ``PATH``. WARN, never
-    FAIL — like the extras, a missing binary only leaves a dormant feature (Windows service
-    install) and must not flip doctor's exit code.
+    Shawl (the Windows service wrapper ``install-service`` uses) and claustrum (the Direct
+    Session daemon). Off-platform/arch entries are skipped via :func:`deps.applies`, and a
+    gated binary (claustrum, only when ``claustrum.enabled``) is skipped when its feature is
+    off so a non-user isn't nagged. "Present" means installed in the managed
+    ``<state_dir>/deps/bin`` dir OR already discoverable on ``PATH``. WARN, never FAIL — a
+    missing binary only leaves a dormant feature and must not flip doctor's exit code.
     """
+    state_dir = config.state_dir
     checks: list[Check] = []
     for dep in deps.BINARY_DEPS:
         if not deps.applies(dep):
+            continue
+        gate = _BINARY_DEP_GATES.get(dep.key)
+        if gate is not None and not gate(config):
             continue
         present = deps.installed_binary_path(dep.key, state_dir) is not None or shutil.which(
             dep.key
