@@ -186,6 +186,10 @@
         reauthPassword: "", reauthing: false, reauthError: "",
         error: "", saved: false,
         fields: {}, specs: {}, edits: {}, editable: [], hash: null,
+        // Slice 4: list fields edit as {id, value} rows (stable ids so x-for keys on
+        // identity, never array index — else an add/remove steals input focus); `rowSeq`
+        // mints those ids. Map fields (webhooks.events) edit as {key, on, default} rows.
+        rowSeq: 0,
       },
       // --- Claude Code config management (#773) — the first UI over the gated ---
       // --- /api/config-write/* surfaces. Distinct from configEditor above, which ---
@@ -1244,7 +1248,7 @@
           const d = await res.json();
           a.fields = d.fields || {}; a.specs = d.specs || {};
           a.editable = d.editable || []; a.hash = d.hash;
-          a.edits = { ...a.fields };  // seed the form from current values
+          this._advancedSeedEdits();  // seed the form (scalars direct; list/map into row structs)
           a.unlocked = true;
           return true;
         } catch (e) { a.error = "Failed to load advanced settings."; return false; }
@@ -1287,9 +1291,99 @@
         }
         return groups;
       },
+      // Seed the edit model from the current baseline (a.fields). Scalars copy directly;
+      // a `list` field becomes {id, value} rows and a `map` field becomes {key, on, default}
+      // rows — deep structures, NOT aliases of a.fields, so editing never mutates the baseline.
+      _advancedSeedEdits() {
+        const a = this.configAdvanced;
+        const edits = {};
+        for (const p of a.editable) {
+          const spec = a.specs[p] || {};
+          const val = a.fields[p];
+          if (spec.type === "list") {
+            const items = Array.isArray(val) ? val : [];
+            edits[p] = items.map((v) => ({ id: a.rowSeq++, value: String(v) }));
+          } else if (spec.type === "map") {
+            const seed = (val && typeof val === "object") ? val : {};
+            edits[p] = (spec.map_keys || []).map((mk) => ({
+              key: mk.key, default: mk.default,
+              on: (mk.key in seed) ? !!seed[mk.key] : mk.default,
+            }));
+          } else {
+            edits[p] = val;
+          }
+        }
+        a.edits = edits;
+      },
+      // The value to SEND for a path, derived from the edit model. list -> array of trimmed
+      // non-empty strings; map -> a MINIMAL dict (only keys whose value differs from the
+      // per-key default, so an all-default map serializes to {} and never materializes all 7).
+      advancedCurrent(p) {
+        const a = this.configAdvanced;
+        const spec = a.specs[p] || {};
+        if (spec.type === "list") {
+          return (a.edits[p] || []).map((r) => (r.value || "").trim()).filter((v) => v !== "");
+        }
+        if (spec.type === "map") {
+          const out = {};
+          for (const r of (a.edits[p] || [])) { if (r.on !== r.default) out[r.key] = r.on; }
+          return out;
+        }
+        return a.edits[p];
+      },
+      // The baseline (a.fields[p]) normalised through the SAME rules, so a dirty compare is
+      // apples-to-apples (a list keeps order; a map is reduced to its minimal non-default form).
+      advancedBaseline(p) {
+        const a = this.configAdvanced;
+        const spec = a.specs[p] || {};
+        const val = a.fields[p];
+        // Normalise the baseline the SAME way advancedCurrent() serialises (trim + drop blanks),
+        // so a stored value like " https " or "" doesn't read as dirty the instant the panel opens
+        // (which would then silently trim/drop it on the next save — fail-closed violation, #982).
+        if (spec.type === "list") {
+          return (Array.isArray(val) ? val : []).map((v) => String(v).trim()).filter((v) => v !== "");
+        }
+        if (spec.type === "map") {
+          const seed = (val && typeof val === "object") ? val : {};
+          const out = {};
+          for (const mk of (spec.map_keys || [])) {
+            const on = (mk.key in seed) ? !!seed[mk.key] : mk.default;
+            if (on !== mk.default) out[mk.key] = on;
+          }
+          return out;
+        }
+        return val;
+      },
+      // Order-stable stringify (object keys sorted) so a map dirty-compare ignores key order.
+      _advCanon(v) {
+        if (Array.isArray(v)) return "[" + v.map((x) => this._advCanon(x)).join(",") + "]";
+        if (v && typeof v === "object") {
+          return "{" + Object.keys(v).sort().map(
+            (k) => JSON.stringify(k) + ":" + this._advCanon(v[k])).join(",") + "}";
+        }
+        return JSON.stringify(v);
+      },
+      advancedFieldDirty(p) {
+        const a = this.configAdvanced;
+        const t = (a.specs[p] || {}).type;
+        if (t === "list" || t === "map") {
+          return this._advCanon(this.advancedCurrent(p)) !== this._advCanon(this.advancedBaseline(p));
+        }
+        return a.edits[p] !== a.fields[p];
+      },
+      advancedListAdd(p) {
+        const a = this.configAdvanced;
+        if (!Array.isArray(a.edits[p])) a.edits[p] = [];  // seed first so push hits the reactive array
+        a.edits[p].push({ id: a.rowSeq++, value: "" });
+      },
+      advancedListRemove(p, id) {
+        const rows = this.configAdvanced.edits[p] || [];
+        const i = rows.findIndex((r) => r.id === id);
+        if (i >= 0) rows.splice(i, 1);
+      },
       advancedDirty() {
         const a = this.configAdvanced;
-        return a.editable.some((p) => a.edits[p] !== a.fields[p]);
+        return a.editable.some((p) => this.advancedFieldDirty(p));
       },
       // Persist changed Tier-B fields via PUT /api/config/advanced. A 403 mid-edit means the
       // unlock window lapsed — re-lock and re-prompt rather than silently failing.
@@ -1299,8 +1393,12 @@
         const myGen = a.gen;  // capture: a modal close+reopen voids this save's response
         const edits = {};
         for (const p of a.editable) {
-          const v = a.edits[p];
           const t = (a.specs[p] || {}).type;
+          if (t === "list" || t === "map") {
+            if (this.advancedFieldDirty(p)) edits[p] = this.advancedCurrent(p);  // send full value
+            continue;
+          }
+          const v = a.edits[p];
           if ((t === "int" || t === "float") && (v === "" || v === null)) continue;  // blanked -> no change
           if (v !== a.fields[p]) edits[p] = v;
         }
@@ -1317,7 +1415,7 @@
             const d = await res.json();
             a.hash = d.hash; a.saved = true;
             a.fields = { ...a.fields, ...edits };  // advance the baseline by the fields actually sent
-            a.edits = { ...a.fields };
+            this._advancedSeedEdits();  // re-seed (list/map need fresh row structs, not an alias)
           } else if (res.status === 403) {
             a.unlocked = false; a.reauthError = "Session expired — re-enter your password.";
           } else if (res.status === 409) {

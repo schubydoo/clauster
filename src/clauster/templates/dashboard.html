@@ -1526,8 +1526,18 @@
                     <template x-for="path in group.paths" :key="path">
                       <div class="cfg-row row align-items-start g-2">
                         <div class="col-5">
-                          <label class="form-label mb-0 small fw-medium" :for="'adv-' + path"
-                                 x-text="configAdvanced.specs[path].label"></label>
+                          {# A scalar has one control, so its caption is a real <label for>. A
+                             list/map is a control GROUP with no single target — caption it with a
+                             plain element (the group wrapper below carries its own aria-label),
+                             avoiding an orphan <label for> that points at nothing. #}
+                          <template x-if="!configAdvanced.specs[path].is_group">
+                            <label class="form-label mb-0 small fw-medium" :for="'adv-' + path"
+                                   x-text="configAdvanced.specs[path].label"></label>
+                          </template>
+                          <template x-if="configAdvanced.specs[path].is_group">
+                            <div class="form-label mb-0 small fw-medium"
+                                 x-text="configAdvanced.specs[path].label"></div>
+                          </template>
                           <div class="cfg-key" x-text="configAdvanced.specs[path].key"></div>
                         </div>
                         <div class="col-7">
@@ -1552,6 +1562,42 @@
                           <template x-if="configAdvanced.specs[path].type === 'str'">
                             <input class="form-control form-control-sm" type="text" :id="'adv-' + path"
                                    x-model="configAdvanced.edits[path]">
+                          </template>
+                          {# Slice 4 — list rows editor (e.g. clone.allowed_schemes). Stable :key
+                             on row.id keeps input focus across add/remove. #}
+                          <template x-if="configAdvanced.specs[path].type === 'list'">
+                            <div role="group" :aria-label="configAdvanced.specs[path].label"
+                                 :data-test="'adv-list-' + configAdvanced.specs[path].key">
+                              <template x-for="row in configAdvanced.edits[path]" :key="row.id">
+                                <div class="input-group input-group-sm mb-1">
+                                  <input class="form-control form-control-sm" type="text"
+                                         :placeholder="configAdvanced.specs[path].placeholder || ''"
+                                         x-model="row.value">
+                                  <button type="button" class="btn btn-outline-danger"
+                                          @click="advancedListRemove(path, row.id)"
+                                          :aria-label="'Remove ' + (row.value || 'empty') + ' from ' + configAdvanced.specs[path].label">&times;</button>
+                                </div>
+                              </template>
+                              <button type="button" class="btn btn-sm btn-ghost-secondary"
+                                      @click="advancedListAdd(path)"
+                                      :data-test="'adv-list-add-' + configAdvanced.specs[path].key">+ Add</button>
+                            </div>
+                          </template>
+                          {# Slice 4 — fixed-key boolean map (webhooks.events): one switch per known
+                             event; the "(default …)" hint shows when a toggle differs from its default. #}
+                          <template x-if="configAdvanced.specs[path].type === 'map'">
+                            <div role="group" :aria-label="configAdvanced.specs[path].label"
+                                 :data-test="'adv-map-' + configAdvanced.specs[path].key">
+                              <template x-for="row in configAdvanced.edits[path]" :key="row.key">
+                                <label class="form-check form-switch mb-1 d-flex align-items-center">
+                                  <input class="form-check-input mt-0" type="checkbox" x-model="row.on"
+                                         :data-test="'adv-event-' + row.key">
+                                  <span class="ms-2 small font-monospace" x-text="row.key"></span>
+                                  <span class="ms-1 small text-secondary" x-show="row.on != row.default" x-cloak
+                                        x-text="'(default ' + (row.default ? 'on' : 'off') + ')'"></span>
+                                </label>
+                              </template>
+                            </div>
                           </template>
                           <div class="cfg-help text-secondary" x-show="configAdvanced.specs[path].description" x-cloak
                                x-text="configAdvanced.specs[path].description"></div>

@@ -38,29 +38,24 @@ def test_config_reference_docs_are_up_to_date():
 def _parse_tier_a_table() -> set[str]:
     """Parse the hand-written Tier-A allowlist table into a set of ``section.key`` paths.
 
-    Locates the table by its heading anchors (not line numbers) so it survives edits
-    above it, then reads ``| `section` | `k1`, `k2`, ... |`` rows into dotted paths.
+    Locates the table by its ``editable_fields`` BEGIN/END GEN markers (not headings or
+    line numbers) so it survives edits above it AND can't scoop up the adjacent Tier-B
+    "Advanced fields" table, then reads ``| `section` | `k1`, `k2`, ... |`` rows into
+    dotted paths.
     """
     text = CONFIG_DOC.read_text(encoding="utf-8")
-    # The table lives between these two headings. It is now generated inside the
-    # `editable_fields` BEGIN/END markers (so the `--check` gate covers it too); this
-    # independent parse is a belt-and-suspenders cross-check that the RENDERED table
-    # equals `EDITABLE_FIELDS`, via a different code path than the generator. A missing
-    # heading means the page was restructured — fail clearly instead of a bare
-    # ValueError traceback.
+    # The table is generated inside the `editable_fields` BEGIN/END markers (so the
+    # `--check` gate covers it too); this independent parse is a belt-and-suspenders
+    # cross-check that the RENDERED table equals `EDITABLE_FIELDS`, via a different code
+    # path than the generator. Bounding by the markers keeps it from picking up the
+    # separate `tier_b_fields` table that now sits just below. A missing marker means the
+    # page was restructured — fail clearly instead of a bare ValueError traceback.
     try:
-        start = text.index("### What's editable")
+        start = text.index("<!-- BEGIN GEN: editable_fields -->")
+        end = text.index("<!-- END GEN: editable_fields -->", start)
     except ValueError:
         pytest.fail(
-            "Tier-A heading '### What's editable' not found — did "
-            "docs/configuration.md headings change?"
-        )
-    try:
-        end = text.index("### Why everything else", start)
-    except ValueError:
-        pytest.fail(
-            "Tier-A heading '### Why everything else' not found — did "
-            "docs/configuration.md headings change?"
+            "editable_fields GEN markers not found — did docs/configuration.md structure change?"
         )
     fields: set[str] = set()
     for line in text[start:end].splitlines():

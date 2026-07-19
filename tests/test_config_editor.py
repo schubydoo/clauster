@@ -215,9 +215,70 @@ def test_classify_and_constraints_cover_edge_annotations() -> None:
 
     # A union with >1 non-None member falls through to the scalar-string fallback.
     assert _classify(int | str | None) == ("str", None)
+    # list[...] -> a rows editor; dict[...] -> a fixed-key map editor (Slice 4).
+    assert _classify(list[str]) == ("list", None)
+    assert _classify(dict[str, bool]) == ("map", None)
+    # _list_item_kind resolves the ELEMENT type, unwrapping a single-member Optional so a
+    # `list[str] | None` field reports "str" (not the outer "list"); a bare list -> "str".
+    from clauster.config_editor import _list_item_kind
+
+    assert _list_item_kind(list[str]) == "str"
+    assert _list_item_kind(list[str] | None) == "str"
+    assert _list_item_kind(list) == "str"
+    # A multi-member union is NOT unwrapped (len != 1), so it falls through to the first arg.
+    assert _list_item_kind(str | int) == "str"
     # Lt maps to max; Ge to min; an unrecognized metadata item is simply skipped (loop tail).
     meta = _types.SimpleNamespace(metadata=[at.Lt(lt=5), at.Ge(ge=1), object()])
     assert _constraints(meta) == {"max": 5, "min": 1}
+
+
+def test_tier_b_list_and_map_specs() -> None:
+    # Slice 4: the three non-secret list/map fields are Tier-B with rich specs the rows/checkbox
+    # editors consume. The secret url lists + auth trust lists stay OUT of Tier-B.
+    from clauster.config_editor import TIER_B_FIELDS
+
+    specs = field_specs(fields=TIER_B_FIELDS)
+    assert specs["clone.allowed_schemes"]["type"] == "list"
+    assert specs["clone.allowed_schemes"]["item_type"] == "str"
+    assert specs["clone.allowed_private_cidrs"]["type"] == "list"
+    events = specs["webhooks.events"]
+    assert events["type"] == "map"
+    assert [mk["key"] for mk in events["map_keys"]] == [
+        "spawn",
+        "ready",
+        "stop",
+        "crash",
+        "bg-settled",
+        "permission-needed",
+        "clone-done",
+    ]
+    assert {mk["key"]: mk["default"] for mk in events["map_keys"]}["crash"] is True
+    # The secret / trust lists are never Tier-B (unsafe mask round-trip / trust surface).
+    for excluded in ("webhooks.urls", "notifications.urls", "auth.allowed_origins"):
+        assert excluded not in TIER_B_FIELDS
+
+
+def test_map_field_without_registry_entry_omits_map_keys(monkeypatch) -> None:
+    # Defensive fallback: a `map`-typed field NOT registered in FIELD_MAP_KEYS gets no
+    # `map_keys` (there's no safe checkbox rendering without a known key set) rather than a
+    # crash. With the registry emptied, webhooks.events still classifies as a map, just bare.
+    from clauster.config_editor import TIER_B_FIELDS
+
+    monkeypatch.setattr("clauster.config_editor.FIELD_MAP_KEYS", {})
+    specs = field_specs(fields=TIER_B_FIELDS)
+    assert specs["webhooks.events"]["type"] == "map"
+    assert "map_keys" not in specs["webhooks.events"]
+
+
+def test_webhook_event_order_covers_every_known_event() -> None:
+    # The editor's ordered taxonomy must stay in lock-step with config.py's known-event set:
+    # a NEW webhook event added there with no matching order entry should trip THIS test, not
+    # silently drop from (or scramble) the checkbox editor.
+    from clauster.config import _WEBHOOK_KNOWN_EVENTS
+    from clauster.config_editor import _WEBHOOK_EVENT_ORDER
+
+    assert set(_WEBHOOK_EVENT_ORDER) == _WEBHOOK_KNOWN_EVENTS
+    assert len(_WEBHOOK_EVENT_ORDER) == len(_WEBHOOK_KNOWN_EVENTS)  # no dupes
 
 
 def test_file_hash_changes_with_content(write_config) -> None:

@@ -677,16 +677,41 @@ The allowlist is the source of truth in `src/clauster/config_editor.py`
 (`EDITABLE_FIELDS`); `GET /api/config` returns it so the UI only renders fields
 it can actually write.
 
+### Advanced fields (Tier-B — behind step-up re-auth)
+
+A second, **operational-but-sensitive** allowlist (Tier-B) is editable from the
+config editor's **Advanced** panel, but only when `config_write.enabled` is on
+**and** the operator re-proves their password (a short-lived "step-up" elevation,
+separate from the login session). These are the clone/webhooks SSRF-adjacent knobs —
+safe to expose, but sensitive enough to gate behind a fresh password proof:
+
+<!-- BEGIN GEN: tier_b_fields -->
+| Section | Advanced fields |
+| --- | --- |
+| `clone` | `enabled`, `allow_private_hosts`, `allowed_schemes`, `allowed_private_cidrs`, `timeout_seconds`, `max_mb` |
+| `webhooks` | `enabled`, `timeout_seconds`, `block_private_targets`, `events` |
+<!-- END GEN: tier_b_fields -->
+
+`clone.allowed_schemes` / `clone.allowed_private_cidrs` (rows editors) and
+`webhooks.events` (a checkbox per known lifecycle event) are the list/map fields;
+the rest are scalars. The source of truth is `TIER_B_FIELDS` in the same module;
+`GET/PUT /api/config/advanced` back the panel. Step-up needs a password set
+(`clauster hash-password`), so a reverse-proxy- or token-only deployment shows a
+"needs a password" note instead of the unlock form.
+
 ### Why everything else is excluded (the security boundary)
 
-The allowlist is a **structural** security boundary, not a UI hint. Anything that
-is a secret, a bind/exposure decision, an auth gate, a clone/supply-chain guard,
+The allowlists are a **structural** security boundary, not a UI hint. Anything that
+is a secret, a bind/exposure decision, an auth gate, a code-executing capability,
 or a structural setting is excluded — for example `auth.*` (passwords, tokens,
 the `enabled` master switch), `host`/`port`, `projects_root`, the `projects` map,
-`clone.*`, `webhooks.*`, and the binary paths (`claude.binary`/`claustrum.binary`).
-Those stay file- or CLI-managed. (The rest of the `claustrum` block — `enabled`,
-`socket_path`, the timeouts — *is* editable, restart-required; see the table
-above.)
+`config_write.*` / `login_shepherd.*` (RCE / account-auth surface), the secret
+URL lists (`webhooks.urls`, `notifications.urls`) and auth trust lists
+(`auth.allowed_origins`, `auth.reverse_proxy.trusted_ips`), and the binary paths
+(`claude.binary`/`claustrum.binary`). Those stay file- or CLI-managed. (The
+clone/webhooks **scalars** plus the three non-secret list/map fields above *are*
+editable via the Advanced panel; the rest of the `claustrum` block — `enabled`,
+`socket_path`, the timeouts — is Tier-A editable, restart-required.)
 
 The exclusion is enforced two ways:
 
