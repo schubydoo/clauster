@@ -154,6 +154,25 @@ def test_advanced_panel_list_and_map_editors(
     assert data["webhooks"]["events"] == {"permission-needed": True}
 
 
+def test_advanced_panel_untrimmed_list_not_dirty_on_open(
+    browser: AgentBrowser, advanced_untrimmed_config_server: Server, e2e_password: str
+) -> None:
+    """A whitespace-padded stored list entry must not read as dirty on open (#982).
+
+    Regression for the P1: the list baseline must be normalised (trim + drop blanks) the
+    same way a save serialises, so an untouched ` " https " ` seed leaves Save DISABLED
+    rather than silently trimming it on the next save.
+    """
+    _login(browser, advanced_untrimmed_config_server.url, e2e_password)
+    browser.click('[aria-label="Edit configuration"]')
+    browser.fill('[data-test="adv-password"]', e2e_password)
+    browser.click('[data-test="adv-unlock"]')
+    save = '[data-test="adv-save"]'
+    browser.expect_visible(save)
+    # Nothing was touched, so despite the padded seed the panel is clean → Save disabled.
+    browser.expect_disabled(save)
+
+
 def test_advanced_panel_rejects_wrong_password(
     browser: AgentBrowser, advanced_config_server: Server, e2e_password: str
 ) -> None:

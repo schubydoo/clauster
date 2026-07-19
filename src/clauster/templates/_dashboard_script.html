@@ -1337,7 +1337,12 @@
         const a = this.configAdvanced;
         const spec = a.specs[p] || {};
         const val = a.fields[p];
-        if (spec.type === "list") return (Array.isArray(val) ? val : []).map(String);
+        // Normalise the baseline the SAME way advancedCurrent() serialises (trim + drop blanks),
+        // so a stored value like " https " or "" doesn't read as dirty the instant the panel opens
+        // (which would then silently trim/drop it on the next save — fail-closed violation, #982).
+        if (spec.type === "list") {
+          return (Array.isArray(val) ? val : []).map((v) => String(v).trim()).filter((v) => v !== "");
+        }
         if (spec.type === "map") {
           const seed = (val && typeof val === "object") ? val : {};
           const out = {};

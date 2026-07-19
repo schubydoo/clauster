@@ -398,6 +398,26 @@ def advanced_config_server(
 
 
 @pytest.fixture
+def advanced_untrimmed_config_server(
+    tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
+) -> Iterator[Server]:
+    """Advanced E2E server whose `clone.allowed_schemes` holds a whitespace-padded entry (#982).
+
+    `allowed_schemes` has no validator, so a hand-edited config can carry `" https "`. The
+    Advanced list editor must NOT read such a stored value as dirty the instant it opens
+    (else an untouched save would silently trim it). Seeds one padded entry to guard that.
+    """
+    tmp = tmp_path_factory.mktemp("e2e-advanced-untrimmed")
+    password_hash = hash_password(make_hasher(), E2E_PASSWORD)
+    extra = (
+        f'auth:\n  enabled: true\n  password_required: true\n  password_hash: "{password_hash}"\n'
+        "config_write:\n  enabled: true\n"
+        'clone:\n  allowed_schemes: [" https ", "ssh"]\n'
+    )
+    yield from _start_server(tmp, mutable_projects_tree, extra)
+
+
+@pytest.fixture
 def config_mgmt_plugins_server(
     tmp_path_factory: pytest.TempPathFactory, mutable_projects_tree: Path
 ) -> Iterator[Server]:
