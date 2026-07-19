@@ -397,8 +397,9 @@ class AuthConfig(BaseModel):
         default=False,
         description="Explicit opt-out: permit a non-loopback bind **without** enforced "
         "auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. "
-        "**Anyone who can reach the port then has full operator control of this "
-        "host** — the dashboard drives a shell; treat it accordingly.",
+        "When `auth.enabled` is `false`, **anyone who can reach the port has full "
+        "operator control of this host** — the dashboard drives a shell; treat it "
+        "accordingly.",
     )
     cookie_secure: Literal["auto", "always", "never"] = Field(
         default="auto",
