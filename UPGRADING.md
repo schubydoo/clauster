@@ -139,9 +139,19 @@ nothing about the schema, migrations, or `state_dir` layout changes.
 
 The published container image moved from Debian-slim to an **Alpine (musl)** base — it's
 smaller and installs explicitly pinned, Renovate-tracked packages instead of an unpinned
-`apt upgrade`. This only affects you if you **build a derived image `FROM` the clauster
-image**: use `apk` (not `apt`) to add packages, and note that **`su-exec` replaces `gosu`**
-as the privilege-drop helper. Running the stock image (`docker run …`) is unchanged.
+`apt upgrade`. Running the stock image (`docker run …`) is unchanged. Two setups **are**
+affected:
+
+- **You build a derived image `FROM` the clauster image**: use `apk` (not `apt`) to add
+  packages, and note that **`su-exec` replaces `gosu`** as the privilege-drop helper.
+- **You mount the host `claude` binary into the container** (the README /
+  `compose.yaml` pattern): a glibc build from your host **no longer execs** on the musl
+  base — launches fail with `exec /usr/local/bin/claude: no such file or directory` (or
+  `claude: not found` via a shell) even though the file is present; the kernel is
+  reporting the missing glibc loader, not the binary. Mount a **musl** build instead, or
+  build a derived image that installs one:
+  `apk add --no-cache bash curl && curl -fsSL https://claude.ai/install.sh | bash`
+  (the installer needs `bash`; busybox `sh` can't run it).
 
 ## 0.11 → 0.12: the state store moves to SQLite
 
