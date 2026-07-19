@@ -12,9 +12,11 @@ often turns up an answer or an existing thread to add to.
 
 - **A question or something not working?**
   [Open an issue](https://github.com/schubydoo/clauster/issues/new/choose). Include
-  your Clauster version, OS, and the relevant config / log lines (Clauster redacts
-  session IDs and secrets in its logs by default). `clauster doctor` output is handy
-  for environment problems.
+  your Clauster version, OS, and the relevant config / log lines. `clauster doctor`
+  output is handy for environment problems and safe to share. **Before copying
+  bridge log lines, note that the on-disk log is _not_ redacted by default** — the
+  redaction you see in the dashboard applies to the live stream only. Either set
+  `logs.redact_session_url: true` and reproduce, or scrub session URLs by hand.
 - **An idea or enhancement?** Open an issue describing the use case — feature
   requests live in the same tracker.
 

@@ -297,7 +297,10 @@ over a WebSocket to the dashboard's live log view.
 - **On disk** — the public log under `<state_dir>/logs/` is, by default, the
   verbatim debug file (redaction happens only over the WebSocket unless
   `logs.redact_session_url: true`, which also redacts the on-disk copy). Tail it
-  directly when the dashboard is unavailable. The on-disk filename is
+  directly when the dashboard is unavailable — but **scrub session URLs before
+  pasting this file into a public issue** (or set the option and reproduce);
+  the redaction you see in the dashboard does not protect the on-disk copy.
+  The on-disk filename is
   `<label>-<timestamp>-<seq>.log`, where `<label>` is the bridge label (the project
   name by default), so glob on the label:
 
