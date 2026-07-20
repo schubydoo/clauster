@@ -227,8 +227,11 @@ browser surface is a footgun with no way back in from the browser — see the
 `clauster.db` named `pre-<revision-before>-<revision-after>-<timestamp>.db`
 under `state_dir/backups/`, written just before a migration that changed the
 schema. To roll back: stop Clauster, replace `state_dir/clauster.db` with the
-desired `state_dir/backups/pre-*.db` snapshot (and its `-wal`/`-shm` siblings if
-present), then start the matching (older) `clauster` binary — a newer binary
+desired `state_dir/backups/pre-*.db` snapshot, **delete any stale
+`clauster.db-wal` / `clauster.db-shm` sidecars** (the snapshot is a
+self-contained `VACUUM INTO` copy; a leftover WAL belongs to the migrated
+database and must not be replayed), then start the matching (older) `clauster`
+binary — a newer binary
 would immediately re-run the same migration against the restored file. This is
 complementary to `clauster backup` / `restore` (a full `state_dir` + config
 tarball); the snapshot here is automatic, DB-only, and scoped to the migration
