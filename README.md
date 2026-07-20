@@ -147,6 +147,12 @@ on Clauster itself, see [CONTRIBUTING.md](https://github.com/schubydoo/clauster/
   state/config gone too. See [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/#how-to-purge)
   and the [Installation guide](https://schubydoo.github.io/clauster/installation/).
 
+## Contributing
+
+Working on Clauster itself? [`CONTRIBUTING.md`](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) has the
+from-source dev setup (`uv sync --extra dev`), the local test/lint gates, and
+the branching + review workflow.
+
 ## First bridge in 60 seconds
 
 Start Clauster (run `clauster`; it serves <http://127.0.0.1:7621> by default). With
@@ -187,79 +193,20 @@ list.
 
 ## Docker
 
-Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on each release.
-The image binds `0.0.0.0`, so it **requires enforced auth** to start. First generate a
-password hash — this runs `clauster` *inside* the image, so you don't need it on the host:
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to GHCR on each
+release, cosign-signed with provenance + SBOM attestations. Two things to know
+before `docker run`:
 
-```sh
-docker run --rm -it ghcr.io/schubydoo/clauster:latest clauster hash-password
-```
+- The image binds `0.0.0.0`, so it **refuses to start without enforced auth** —
+  set `CLAUSTER_AUTH_ENABLED=true`, `CLAUSTER_AUTH_PASSWORD_REQUIRED=true`, and a
+  `CLAUSTER_AUTH_PASSWORD_HASH` (generate one with
+  `docker run --rm -it ghcr.io/schubydoo/clauster:latest clauster hash-password`).
+- `claude` is **not baked into the image** — mount the CLI onto the container
+  `PATH` (or set `CLAUSTER_CLAUDE_BINARY`) along with the runtime user's
+  `~/.claude` credentials.
 
-Copy the printed `$argon2id$…` hash, then start the server with auth enabled:
-
-```sh
-docker run -d --name clauster \
-  -p 7621:7621 \
-  -e PUID=1000 -e PGID=1000 \
-  -e CLAUSTER_AUTH_ENABLED=true \
-  -e CLAUSTER_AUTH_PASSWORD_REQUIRED=true \
-  -e 'CLAUSTER_AUTH_PASSWORD_HASH=$argon2id$v=19$...' \
-  -v /path/to/config:/config \
-  -v /path/to/projects:/projects \
-  ghcr.io/schubydoo/clauster:latest
-```
-
-- The image binds `0.0.0.0`, so it won't start without **enforced** auth — set
-  `CLAUSTER_AUTH_ENABLED=true` **and** `CLAUSTER_AUTH_PASSWORD_REQUIRED=true` **and** a
-  `CLAUSTER_AUTH_PASSWORD_HASH` (or configure reverse-proxy trust in `/config/clauster.yml`),
-  or the container exits on start. Single-quote the hash env value — the argon2 hash
-  contains `$` that your shell would otherwise expand.
-- `/config` holds `clauster.yml` + state; `/projects` is your `projects_root`.
-  `PUID`/`PGID` remap the runtime user to own bind-mounts.
-- `claude` is **not** baked in — tell Clauster where it is one of two ways: mount the
-  binary somewhere on the container `PATH` (the default `claude.binary: claude` is
-  resolved via `PATH`), **or** set `CLAUSTER_CLAUDE_BINARY=/abs/path/to/claude` (a.k.a.
-  `claude.binary`) to an absolute path you've mounted anywhere. Either way, also mount
-  the runtime user's `~/.claude` credentials — or build a derived image that installs
-  `claude`.
-- Logs are human text by default; set `CLAUSTER_LOG_FORMAT=json` for structured
-  JSON (both redact session URLs / bearer ids). Health is at `/healthz`. Images
-  are cosign-signed with build provenance + SBOM attestations.
-
-### First-run setup wizard (Docker)
-
-Prefer a browser to the `hash-password` + env-var recipe above? Start the container with an
-**empty `/config`** and **without** the `CLAUSTER_AUTH_*` vars — Clauster serves the first-run
-[setup wizard](https://schubydoo.github.io/clauster/guides/configuration/) instead. In a container the wizard binds all interfaces
-(so a published port can reach it) and is gated by a **one-time token** printed to the log:
-
-```sh
-docker run -d --name clauster -p 7621:7621 \
-  -e PUID=1000 -e PGID=1000 \
-  -v /path/to/config:/config -v /path/to/projects:/projects \
-  ghcr.io/schubydoo/clauster:latest
-docker logs clauster        # → "...first-run setup at http://<this-host>:7621/?token=… (will write /config/clauster.yml)"
-```
-
-Open that URL (substituting the host that reaches the container) — the token gates access, so
-copy it exactly. Set `projects_root` (`/projects`), a bind host, and a password; the wizard
-writes an **auth-enabled** `/config/clauster.yml` on the persistent volume and restarts onto it.
-Because the config lands on `/config` (not the container's ephemeral layer), it survives
-`docker rm` / image updates. The token is single-use for that first boot; once a config exists
-the wizard never runs again.
-
-### Docker Compose
-
-A ready-to-edit [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) is included:
-
-```sh
-# 1. generate a password hash (runs inside the image)
-docker compose run --rm clauster clauster hash-password
-# 2. export it single-quoted, then edit the projects/claude volumes in compose.yaml
-export CLAUSTER_AUTH_PASSWORD_HASH='$argon2id$v=19$...'
-# 3. start (the image's HEALTHCHECK is inherited)
-docker compose up -d
-```
+Full run + [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) recipes, volumes, and PUID/PGID
+mapping: [Installation → Docker](https://schubydoo.github.io/clauster/installation/#docker).
 
 ## Auth & networking
 
