@@ -53,7 +53,7 @@ flowchart LR
     C -->|"spawns, stops,<br/>tails debug log"| S
     C -->|"spawns"| K
     K -->|"owns the PTY of"| I
-    C -->|"JSON-RPC over<br/>unix socket"| D
+    C -->|"JSON-RPC over<br/>local IPC"| D
     D -->|"runs"| H
     S --> CLOUD
     I --> CLOUD
@@ -78,7 +78,8 @@ secrets redacted — see
 [Reading the bridge debug log](../operations.md#reading-the-bridge-debug-log).
 
 Choosing **Here in the browser** instead starts a **Direct Session**: Clauster
-asks the claustrum daemon (over a local unix socket) to run `claude` on its
+asks the claustrum daemon (over local IPC — a unix socket on Linux/macOS, a
+named pipe on Windows) to run `claude` on its
 pipes, then renders the streamed conversation in its own panel — including
 tool-permission prompts you approve or deny there.
 
@@ -99,9 +100,12 @@ Everything Clauster persists sits under `state_dir` (default `~/.clauster`):
 | `claustrum/` | The claustrum daemon's socket and auth token. |
 | `backups/` | Automatic pre-migration snapshots of `clauster.db`. |
 
-Live facts — PIDs, environment ids, session URLs, running/stopped status — are
-deliberately *not* persisted: Clauster re-derives them from the processes and
-from `claude agents --json` every time it starts. The full inventory is in
+For bridges, live facts — PIDs, environment ids, session URLs,
+running/stopped status — are deliberately *not* persisted: Clauster re-derives
+them from the processes and from `claude agents --json` every time it starts.
+(Direct Session records are the exception: they persist the agent's PID and
+process start time in `clauster.db`, which is how Clauster reattaches to a
+still-running daemon session after a restart.) The full inventory is in
 [Privacy & data at rest](../privacy.md#at-rest-inventory).
 
 ## What survives a restart
