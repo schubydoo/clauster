@@ -128,7 +128,7 @@ Or pick another path — `uv tool install clauster` (recommended for a Python ho
 https://github.com/schubydoo/clauster && scoop install clauster`), or
 [Docker](#docker). Full recipes — including supply-chain verification — are in the
 [Installation guide](https://schubydoo.github.io/clauster/installation/). To hack
-on Clauster itself, see [CONTRIBUTING.md](https://github.com/schubydoo/clauster/blob/main/CONTRIBUTING.md) for the from-source path.
+on Clauster itself, see [Contributing](#contributing) below.
 
 ### Uninstall
 

@@ -251,9 +251,11 @@ Skipped the backup? If the upgrade ran a schema migration, Clauster snapshotted
 `clauster.db` first: the five most recent pre-migration copies live under
 `state_dir/backups/` as `pre-<rev-before>-<rev-after>-<timestamp>.db`
 (`db.backup_before_migrate`, on by default). Stop Clauster, copy the snapshot
-back over `state_dir/clauster.db` (and its `-wal`/`-shm` siblings if present),
-and start the matching **older** binary — a newer one would immediately re-run
-the same migration. This recovers the database only, not the rest of
+back over `state_dir/clauster.db`, **delete any stale `clauster.db-wal` /
+`clauster.db-shm` sidecars** (the snapshot is a self-contained `VACUUM INTO`
+copy; a leftover WAL belongs to the migrated database and must not be
+replayed), and start the matching **older** binary — a newer one would
+immediately re-run the same migration. This recovers the database only, not the rest of
 `state_dir` or your config.
 
 > **Server Mode** bridges are detached and survive a Clauster restart, so the
