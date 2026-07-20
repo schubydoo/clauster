@@ -1,47 +1,52 @@
 <h1 align="center">Clauster</h1>
 
 <p align="center">
-  <em>A self-hosted web dashboard for spawning and managing Claude Code <code>remote-control</code><br>
-  bridges into any project directory on a remote host — then attach to them from<br>
-  <code>claude.ai/code</code> or the Claude mobile app. No SSH session required.</em>
+  <b>Run Claude Code on your own server — and drive it from your phone.</b><br>
+  Clauster is a self-hosted web dashboard that starts Claude Code sessions in any
+  project directory on your homelab, NAS, or VPS. You attach from
+  <code>claude.ai/code</code> or the Claude mobile app. No SSH session required.
 </p>
 
 <p align="center">
   <a href="https://github.com/schubydoo/clauster/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/schubydoo/clauster/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/schubydoo/clauster/actions/workflows/lint.yml"><img alt="Lint" src="https://github.com/schubydoo/clauster/actions/workflows/lint.yml/badge.svg"></a>
-  <a href="https://codecov.io/gh/schubydoo/clauster"><img alt="codecov" src="https://codecov.io/gh/schubydoo/clauster/graph/badge.svg"></a>
-  <a href="https://greptile.com"><img alt="Reviewed by Greptile" src="https://img.shields.io/badge/Greptile-reviewed-7C3AED"></a>
-  <a href="https://scorecard.dev/viewer/?uri=github.com/schubydoo/clauster"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/schubydoo/clauster/badge"></a>
-  <a href="https://www.bestpractices.dev/projects/13081"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/13081/badge"></a>
-</p>
-
-<p align="center">
   <a href="https://pypi.org/project/clauster/"><img alt="PyPI" src="https://img.shields.io/pypi/v/clauster?logo=pypi&logoColor=white"></a>
-  <a href="https://pypi.org/project/clauster/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/clauster"></a>
   <a href="https://github.com/schubydoo/clauster/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
-  <a href="https://github.com/schubydoo/clauster/pkgs/container/clauster"><img alt="GHCR" src="https://img.shields.io/badge/ghcr.io-clauster-2496ED?logo=docker&logoColor=white"></a>
-  <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
-  <a href="https://pre-commit.com/"><img alt="pre-commit" src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white"></a>
+  <a href="https://schubydoo.github.io/clauster/"><img alt="Docs" src="https://img.shields.io/badge/docs-schubydoo.github.io-informational"></a>
 </p>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/schubydoo/clauster/main/docs/screenshots/clauster-demo.gif" alt="Spawn a Claude session from the Clauster dashboard — open a project's launch menu, trust the directory, and the session starts, then shows Running under Active sessions" width="860">
 </p>
 
-Anthropic's first-party tooling assumes terminal access on the host to spawn a
-bridge in a given project directory. Clauster fills that gap: a browser-based dispatcher of
-`claude remote-control` instances on a remote machine (NAS, homelab box). You pick
-a project, start a bridge, and attach to it from `claude.ai/code` or the mobile app.
+## Why not just SSH in and run `claude`?
 
-> **Status: 1.0 — stable and actively developed.** Loopback-only by default; password and
+| | SSH + terminal | Clauster |
+| --- | --- | --- |
+| **From a phone** | Type into a mobile SSH client | Tap a project in a browser, then use the Claude app |
+| **When you close the laptop** | Session dies with the shell | Session keeps running on the host; reattach later |
+| **Starting a session** | `cd` to the project, remember the flags | One click per project, spawn + permission modes preset |
+
+If you already live in a terminal on the same machine as your code, you don't need this.
+Clauster is for when your code lives on **a box you don't want to SSH into every time**.
+
+## Quick start
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash
+clauster run
+```
+
+Open <http://127.0.0.1:7621> — run with no config and Clauster serves a
+loopback-only **first-run setup wizard** that asks for your projects folder and a
+dashboard password, writes a `clauster.yml`, and starts on it. Then click
+**Start** on a project. Full recipes (uv / pip, Docker, systemd, reverse proxy) →
+[Installation guide](https://schubydoo.github.io/clauster/installation/).
+
+> **Status: 1.0 — stable and actively developed.** Requires an Anthropic account
+> with Claude Code access. Loopback-only by default; password and
 > reverse-proxy auth are available for networked deployments (see
 > [Auth & networking](#auth--networking)). **No telemetry, ever** — see
 > [Privacy & data at rest](https://schubydoo.github.io/clauster/privacy/) for what Clauster keeps locally.
-
-**Install now:** `curl -fsSL https://raw.githubusercontent.com/schubydoo/clauster/main/install.sh | bash`
-
-The full install recipes and verification steps are in the
-[Installation guide](https://schubydoo.github.io/clauster/installation/).
 
 <table>
   <tr>
@@ -347,6 +352,20 @@ translation contributor appears).
 
 Python 3.11+ · FastAPI · Alpine.js + Jinja2 + Tabler · `uv` · `pydantic`. Developed
 and CI-gated on Linux; macOS / Windows are in the test matrix. Apache-2.0 licensed.
+
+## Project health
+
+<p>
+  <a href="https://github.com/schubydoo/clauster/actions/workflows/lint.yml"><img alt="Lint" src="https://github.com/schubydoo/clauster/actions/workflows/lint.yml/badge.svg"></a>
+  <a href="https://codecov.io/gh/schubydoo/clauster"><img alt="codecov" src="https://codecov.io/gh/schubydoo/clauster/graph/badge.svg"></a>
+  <a href="https://greptile.com"><img alt="Reviewed by Greptile" src="https://img.shields.io/badge/Greptile-reviewed-7C3AED"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/schubydoo/clauster"><img alt="OpenSSF Scorecard" src="https://api.securityscorecards.dev/projects/github.com/schubydoo/clauster/badge"></a>
+  <a href="https://www.bestpractices.dev/projects/13081"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/13081/badge"></a>
+  <a href="https://pypi.org/project/clauster/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/clauster"></a>
+  <a href="https://github.com/schubydoo/clauster/pkgs/container/clauster"><img alt="GHCR" src="https://img.shields.io/badge/ghcr.io-clauster-2496ED?logo=docker&logoColor=white"></a>
+  <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
+  <a href="https://pre-commit.com/"><img alt="pre-commit" src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white"></a>
+</p>
 
 ## Support
 
