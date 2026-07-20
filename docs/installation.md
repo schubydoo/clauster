@@ -7,6 +7,25 @@ enough (the default floor is the `claude.min_version` config default; run
 `uv` / `pip` / `pipx` installs below also need **Python 3.11+**; the standalone
 binary, install script, Scoop, Homebrew, and Nix paths do not.
 
+## Which install method? {#which-install-method}
+
+Ten ways in, one decision: pick the row that matches your host, then jump to
+its section — the methods are interchangeable, and every one still needs the
+`claude` CLI on `PATH`.
+
+| Method | Platforms | Needs Python 3.11+ | Update with | Pick it when |
+| --- | --- | --- | --- | --- |
+| [uv](#with-uv-recommended) *(recommended)* | Linux · macOS · Windows | yes | `uv tool upgrade clauster` | You have Python and no strong reason otherwise |
+| [pip / pipx](#with-pip-pipx) | Linux · macOS · Windows | yes | `pip install -U clauster` / `pipx upgrade clauster` | You already manage tools with pip/pipx |
+| [Install script](#install-script-linux-macos-no-python) | Linux · macOS | no | re-run the one-liner | Fastest checksum-verified binary install, no Python |
+| [Install script (PowerShell)](#install-script-windows-powershell) | Windows | no | re-run the one-liner | Same, on Windows |
+| [Standalone binary](#standalone-binary-no-python) | Linux (x86_64/arm64) · macOS (arm64/x86_64) · Windows (x86_64) | no | download the next release | You want to verify Sigstore / SLSA provenance yourself |
+| [Scoop](#scoop-windows) | Windows | no | `scoop update clauster` | Windows with managed updates |
+| [Homebrew](#homebrew-macos-linux) | macOS · Linux | no | `brew update && brew upgrade clauster` | Your host is brew-managed |
+| [Nix](#nix-flake) | Linux · macOS | no | `nix profile upgrade` | Your host is Nix/flake-managed |
+| [From source](#from-source-development) | anywhere with `uv` | yes | `git pull && uv sync --extra dev` | Contributing to Clauster |
+| [Docker](#docker) | any `linux/amd64` / `linux/arm64` host | no | pull the new image tag | Container stacks — needs `claude` mounted in and enforced auth |
+
 ## With uv (recommended)
 
 [`uv`](https://docs.astral.sh/uv/) can install Clauster as a standalone tool:
@@ -33,7 +52,7 @@ uvx clauster run -c clauster.yml      # or: uvx clauster doctor / hash-password
 running prefer `uv tool install` above; pin a version for a reproducible one-off
 with `uvx clauster@<version> run -c clauster.yml`.
 
-## With pip / pipx
+## With pip / pipx {#with-pip-pipx}
 
 ```sh
 pip install clauster        # or: pipx install clauster
@@ -43,7 +62,7 @@ clauster run -c clauster.yml
 The package installs a single `clauster` console entry point
 (`clauster.__main__:main`); `python -m clauster` is equivalent.
 
-## Install script (Linux & macOS, no Python)
+## Install script (Linux & macOS, no Python) {#install-script-linux-macos-no-python}
 
 The quickest way to get the standalone binary. The script detects your OS +
 architecture, downloads the matching binary from the latest release, **verifies
@@ -191,7 +210,7 @@ clauster run -c clauster.yml
 `scoop update clauster` picks up new releases automatically (the manifest tracks
 GitHub releases and re-verifies the checksum on each update).
 
-## Homebrew (macOS & Linux)
+## Homebrew (macOS & Linux) {#homebrew-macos-linux}
 
 [Homebrew](https://brew.sh) installs the standalone binary on macOS (Apple Silicon
 and Intel) and Linux (x86_64 and arm64) from the project's tap:
