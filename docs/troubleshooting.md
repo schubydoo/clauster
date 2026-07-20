@@ -9,7 +9,7 @@ explains the mechanism.
 
 ```sh
 clauster doctor                        # config, claude binary, login, trust,
-                                       # state_dir, port — row by row
+                                       # state_dir, port — explained below
 curl -s http://127.0.0.1:7621/healthz  # liveness (default port 7621)
 journalctl -u clauster -n 100          # server log — or: docker logs <name>
 ```
@@ -434,7 +434,10 @@ WebSocket). Full walkthrough:
 reference](configuration.md#logs-bridge-log-rotation-redaction-logsconfig) ·
 [how redaction works](security.md#log-redaction).
 
-### What `clauster doctor` checks actually mean — row by row
+### What `clauster doctor` checks actually mean
+
+Doctor's output has two kinds of rows. The table lists the **core rows**,
+present in every run:
 
 | Row | OK means | A warn/fail usually means |
 | --- | --- | --- |
@@ -451,12 +454,22 @@ reference](configuration.md#logs-bridge-log-rotation-redaction-logsconfig) ·
 | `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |
 | `workspace-trust` | `projects_root is trusted` | an untrusted root — spawns will stall on the trust prompt (see above) |
 
-Doctor can also emit **conditional rows** that appear only when applicable on
-your platform and config: `extra:<name>` for an optional Python extra (a warn
-shows its install hint) and `binary:<name>` for a managed binary dependency —
-`shawl` on Windows, `claustrum` when `claustrum.enabled` — where a warn shows
-the `clauster deps install <name>` remedy. These warn, never fail: a missing
-optional piece leaves a feature dormant without flipping doctor's exit code.
+The rest belong to two **prefixed families** that grow as optional pieces are
+added, so read the prefix rather than expecting this page to enumerate them:
+
+- **`extra:<name>`** — an optional Python extra. Today: `extra:pyte` (live
+  terminal view), `extra:apprise` (outbound notifications), and on Windows
+  `extra:pywinpty` (Interactive Sessions). A warn carries the exact install
+  hint (e.g. `pip install 'clauster[notify]'`).
+- **`binary:<name>`** — a bundled companion binary managed by
+  `clauster deps`. Today: `binary:claustrum` (Direct Session daemon, shown
+  when `claustrum.enabled`) and on Windows `binary:shawl` (service wrapper).
+  A warn shows the `clauster deps install <name>` remedy.
+
+Family rows appear only when applicable on your platform and config, and they
+warn, never fail: a missing optional piece leaves a feature dormant without
+flipping doctor's exit code. `clauster deps list` shows the same inventory
+with install state.
 
 ## Still stuck — filing a useful issue
 
