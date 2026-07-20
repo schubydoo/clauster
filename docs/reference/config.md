@@ -85,7 +85,7 @@ matters — and nvm's bin dir is version-specific, so it's never baked into a st
 `path_append`. Interactive-launch deployments inherit `node` from your shell and
 never hit this.
 
-Set `claude.node_from_nvm: true` (off by default) to fix it: at each bridge spawn,
+`claude.node_from_nvm` (**on by default**) fixes it: at each bridge spawn,
 Clauster resolves nvm's `default` node version (`nvm which default`, same
 resolution nvm itself uses) and appends its bin dir to the bridge `PATH`, after
 `path_append`. It tracks nvm's current default across node upgrades — no shim
