@@ -7,7 +7,7 @@
 # This is a LEAN STARTER. The uncommented keys are what most deployments actually set; every
 # other section is still shown (commented, at its default) so you can see it exists without the
 # noise. The FULL per-key reference — every option, type, and default — lives in
-# docs/configuration.md, so this file points there by section instead of repeating it.
+# docs/reference/config.md, so this file points there by section instead of repeating it.
 
 schema_version: 1
 projects_root: ~/code        # required — dir whose subfolders are your projects (must exist, be readable)
@@ -21,7 +21,7 @@ log_format: text             # text | json
 claude:
   binary: claude             # name on PATH or absolute path
   launch_mode: standard      # standard (headless Server Mode) | pty (Interactive Session, true resume)
-  # Tuning knobs — sensible defaults; the full list is in docs/configuration.md (claude section):
+  # Tuning knobs — sensible defaults; the full list is in docs/reference/config.md (claude section):
   # min_version: "2.1.145"
   # agents_json_poll_interval_seconds: 30    # liveness/crash-detection poll cadence
   # startup_grace_seconds: 60                # a bridge alive-but-unregistered past this -> ERROR
@@ -51,7 +51,7 @@ auth:
   # api_token_hash: null     # SHA-256 (`clauster hash-token`) -> `Authorization: Bearer <token>`; satisfies
   #                          # enforced-auth for a non-loopback bind. Store only the hash.
   # Session/CSRF + reverse-proxy (Authelia/Traefik/oauth2-proxy forward-auth) options —
-  # full list in docs/configuration.md (auth / auth.reverse_proxy sections):
+  # full list in docs/reference/config.md (auth / auth.reverse_proxy sections):
   # cookie_secure: auto              # auto | always | never
   # session_max_age_seconds: 604800  # 7 days
   # allowed_origins: []              # extra WS/CSRF origins (e.g. your proxy domain)
@@ -71,7 +71,7 @@ auth:
 #   openapi_enabled: false   # serve /docs + /openapi.json (Bearer-gated when auth.enabled)
 
 # Native HTTPS — Clauster terminates TLS itself (structural; file/CLI-managed only). Unset = plain HTTP.
-# Full detail incl. self-signed provisioning: docs/configuration.md (tls section).
+# Full detail incl. self-signed provisioning: docs/reference/config.md (tls section).
 # tls:
 #   cert_file: /etc/clauster/tls/fullchain.pem
 #   key_file: /etc/clauster/tls/privkey.pem
@@ -81,7 +81,7 @@ auth:
 # db:
 #   backup_before_migrate: true
 
-# Bridge-log rotation + redaction — defaults are fine for most (full list: docs/configuration.md, logs section).
+# Bridge-log rotation + redaction — defaults are fine for most (full list: docs/reference/config.md, logs section).
 # logs:
 #   bridge_log_max_size_mb: 10
 #   keep_rotated: 5
@@ -92,7 +92,7 @@ auth:
 # Project create/clone guards (clone URLs are user-supplied + hit the network). The scalars plus
 # `allowed_schemes` / `allowed_private_cidrs` are also editable from the **Advanced settings**
 # panel in the dashboard's Configuration editor (behind a step-up re-auth — re-enter your login
-# password). Full list: docs/configuration.md (clone section).
+# password). Full list: docs/reference/config.md (clone section).
 clone:
   enabled: true
   # allowed_schemes: [https, ssh]
@@ -106,15 +106,15 @@ clone:
 # reaper:
 #   ui_enabled: false
 
-# Per-project cost/token badge (full list: docs/configuration.md, usage section).
+# Per-project cost/token badge (full list: docs/reference/config.md, usage section).
 # usage:
 #   mode: cost               # cost | tokens | off
 
-# Live per-bridge resource metrics (CPU / memory / disk). On by default (docs/configuration.md, metrics section).
+# Live per-bridge resource metrics (CPU / memory / disk). On by default (docs/reference/config.md, metrics section).
 # metrics:
 #   enabled: true
 
-# Read-only Prometheus /metrics. Off by default (docs/configuration.md, observability section).
+# Read-only Prometheus /metrics. Off by default (docs/reference/config.md, observability section).
 # observability:
 #   prometheus_enabled: false
 
@@ -126,7 +126,7 @@ clone:
 
 # Outbound HTTP webhooks on lifecycle transitions. Fail-open (timeout-bounded); http/https only.
 # The scalars + `events` are editable from the **Advanced settings** panel in the Configuration
-# editor; `urls` stays file/CLI-only (may embed secrets). Full list: docs/configuration.md (webhooks section).
+# editor; `urls` stays file/CLI-only (may embed secrets). Full list: docs/reference/config.md (webhooks section).
 # webhooks:
 #   enabled: false
 #   urls: []
@@ -135,6 +135,6 @@ clone:
 #     permission-needed: false   # extended events (absent = DISABLED — opt in explicitly)
 
 # Claustrum Direct Session live-view channel (EXPERIMENTAL). LOCAL live-view only — Direct Sessions
-# are NOT attachable from claude.ai/code or the mobile app. Full detail: docs/configuration.md (claustrum section).
+# are NOT attachable from claude.ai/code or the mobile app. Full detail: docs/reference/config.md (claustrum section).
 # claustrum:
 #   enabled: false

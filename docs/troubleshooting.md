@@ -132,7 +132,7 @@ clauster hash-password    # prints the hash to paste into auth.password_hash
 ```
 
 **Mechanism:** [Security — passwords](security.md#passwords) ·
-[`auth` config reference](configuration.md#auth-authentication-authconfig).
+[`auth` config reference](reference/config.md#auth-authentication-authconfig).
 
 ### "refusing non-loopback host ... without enforced auth" — it refuses to start
 
@@ -206,7 +206,7 @@ clauster doctor -c /path/to/clauster.yml   # same file the service uses
 ```
 
 **Mechanism:** [Configuration — loading &
-overrides](configuration.md#loading-overrides).
+overrides](guides/configuration.md#loading-overrides).
 
 ### "database migration failed; refusing to start"
 
@@ -281,9 +281,9 @@ installed per-user or via nvm-managed node.
    [Installation](installation.md#run-as-a-systemd-service-linux)).
 3. For nvm-managed node tooling in spawned bridges, see `claude.path_append`
    and `claude.node_from_nvm` in the
-   [`claude` config reference](configuration.md#claude-binary-bridge-spawn-claudeconfig)
+   [`claude` config reference](reference/config.md#claude-binary-bridge-spawn-claudeconfig)
    and [npx/node MCP servers under
-   systemd](configuration.md#npxnode-mcp-servers-under-systemd-nvm).
+   systemd](reference/config.md#npxnode-mcp-servers-under-systemd-nvm).
 
 ### The trust prompt keeps blocking the spawn
 
@@ -314,7 +314,7 @@ and then hang unauthenticated.
 
 **The fix:** run `claude` interactively **as the service user** and complete
 login, or use the dashboard login flow
-([`login_shepherd`](configuration.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)).
+([`login_shepherd`](reference/config.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)).
 An `ANTHROPIC_API_KEY` in the service environment also satisfies the check.
 
 ### The claude version is too old (min_version)
@@ -390,7 +390,7 @@ tail ~/.clauster/claustrum/daemon.log      # what did the daemon last say?
 ```
 
 **Mechanism:** [`claustrum` config
-reference](configuration.md#claustrum-hosted-live-view-channel-claustrumconfig).
+reference](reference/config.md#claustrum-hosted-live-view-channel-claustrumconfig).
 
 ### "claustrum daemon unavailable at startup"
 
@@ -431,7 +431,7 @@ under `<state_dir>/logs/` is, by default, the **verbatim** debug log
 WebSocket). Full walkthrough:
 [Reading the bridge debug log](operations.md#reading-the-bridge-debug-log) ·
 [`logs` config
-reference](configuration.md#logs-bridge-log-rotation-redaction-logsconfig) ·
+reference](reference/config.md#logs-bridge-log-rotation-redaction-logsconfig) ·
 [how redaction works](security.md#log-redaction).
 
 ### What `clauster doctor` checks actually mean

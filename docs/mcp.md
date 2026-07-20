@@ -29,7 +29,7 @@ protocol messages, as the stdio transport requires. It is a short-lived process
 launched and managed by the MCP client; it exits cleanly when the client closes
 its stdin.
 
-`-c/--config` follows the same [config discovery](configuration.md) as every
+`-c/--config` follows the same [config discovery](guides/configuration.md#loading-overrides) as every
 other subcommand (`$CLAUSTER_CONFIG`, then `./clauster.yml`, then
 `$CLAUSTER_HOME/clauster.yml`). A bad or missing config fails closed with a
 stderr message and a non-zero exit — the server never serves against an

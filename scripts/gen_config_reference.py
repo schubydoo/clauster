@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Generate the config-reference tables in ``docs/configuration.md`` from the models.
+"""Generate the config-reference tables in the docs from the models.
 
 Single source of truth: every field's description lives in ``Field(description=...)``
 in ``src/clauster/config.py``. This script renders one markdown table per config
 model and splices it between ``<!-- BEGIN GEN: <key> -->`` / ``<!-- END GEN: <key> -->``
-markers in the docs page, leaving all hand-written prose/admonitions/examples intact.
+markers in the docs pages, leaving all hand-written prose/admonitions/examples intact.
+The per-model tables live in ``docs/reference/config.md``; the config-editor
+allowlist tables live in ``docs/guides/config-editor.md``.
 
 Usage::
 
-    python scripts/gen_config_reference.py            # rewrite docs/configuration.md
-    python scripts/gen_config_reference.py --check     # exit 1 if the page is stale
+    python scripts/gen_config_reference.py            # rewrite the stale pages
+    python scripts/gen_config_reference.py --check     # exit 1 if a page is stale
 
 A pytest test runs ``--check`` so CI fails when a config field is added or changed
-without regenerating the page (the drift this exists to prevent).
+without regenerating the pages (the drift this exists to prevent).
 """
 
 from __future__ import annotations
@@ -49,7 +51,9 @@ from clauster.config import (
 )
 from clauster.config_editor import EDITABLE_FIELDS, TIER_B_FIELDS
 
-DOCS_PAGE = Path(__file__).resolve().parent.parent / "docs" / "configuration.md"
+DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
+REFERENCE_PAGE = DOCS_DIR / "reference" / "config.md"
+EDITOR_PAGE = DOCS_DIR / "guides" / "config-editor.md"
 
 # (marker key, model). The marker key matches `<!-- BEGIN GEN: <key> -->` in the page;
 # headings + prose around each block stay hand-written.
@@ -196,41 +200,46 @@ def render_tier_b_table() -> str:
     return "\n".join(rows)
 
 
-def _splice(text: str, key: str, content: str) -> str:
+def _splice(text: str, key: str, content: str, page: Path) -> str:
     """Replace the body between a block's BEGIN/END GEN markers with ``content``."""
     begin, end = f"<!-- BEGIN GEN: {key} -->", f"<!-- END GEN: {key} -->"
     if begin not in text or end not in text:
-        raise SystemExit(f"missing markers for section {key!r} in {DOCS_PAGE}")
+        raise SystemExit(f"missing markers for section {key!r} in {page}")
     head, rest = text.split(begin, 1)
     _, tail = rest.split(end, 1)
     return f"{head}{begin}\n{content}\n{end}{tail}"
 
 
-def apply_blocks(text: str) -> str:
-    """Splice every generated table (per-model, plus the editable-field allowlist)."""
+def apply_reference_blocks(text: str) -> str:
+    """Splice every per-model table into the reference page's text."""
     for key, model in SECTIONS:
-        text = _splice(text, key, render_table(model))
-    text = _splice(text, "editable_fields", render_editable_table())
-    text = _splice(text, "tier_b_fields", render_tier_b_table())
+        text = _splice(text, key, render_table(model), REFERENCE_PAGE)
     return text
 
 
+def apply_editor_blocks(text: str) -> str:
+    """Splice the two config-editor allowlist tables into the editor guide's text."""
+    text = _splice(text, "editable_fields", render_editable_table(), EDITOR_PAGE)
+    return _splice(text, "tier_b_fields", render_tier_b_table(), EDITOR_PAGE)
+
+
 def main(argv: list[str]) -> int:
-    """Rewrite the docs page, or with ``--check`` report whether it is stale."""
-    current = DOCS_PAGE.read_text(encoding="utf-8")
-    updated = apply_blocks(current)
-    if "--check" in argv:
-        if current != updated:
-            print(f"{DOCS_PAGE} is stale — run: python scripts/gen_config_reference.py")
-            return 1
-        print(f"{DOCS_PAGE} is up to date.")
-        return 0
-    if current != updated:
-        DOCS_PAGE.write_text(updated, encoding="utf-8")
-        print(f"updated {DOCS_PAGE}")
-    else:
-        print(f"{DOCS_PAGE} already up to date.")
-    return 0
+    """Rewrite the docs pages, or with ``--check`` report whether any is stale."""
+    stale = False
+    pages = ((REFERENCE_PAGE, apply_reference_blocks), (EDITOR_PAGE, apply_editor_blocks))
+    for page, apply in pages:
+        current = page.read_text(encoding="utf-8")
+        updated = apply(current)
+        if current == updated:
+            print(f"{page} is up to date.")
+            continue
+        if "--check" in argv:
+            print(f"{page} is stale — run: python scripts/gen_config_reference.py")
+            stale = True
+        else:
+            page.write_text(updated, encoding="utf-8")
+            print(f"updated {page}")
+    return 1 if stale else 0
 
 
 if __name__ == "__main__":

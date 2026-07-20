@@ -165,7 +165,7 @@ resume always honour the recorded mode.
 
 - `config.py` loads `clauster.yml` (search order + `CLAUSTER_<UPPER_SNAKE_PATH>`
     env overrides), applies the fail-closed validators, and produces a validated
-    `ClausterConfig`. See [Configuration](configuration.md).
+    `ClausterConfig`. See [Configuration](reference/config.md).
 - `db/` is the persistence layer: `db/engine.py` resolves the SQLite `clauster.db`
     URL under `state_dir` (Clauster is SQLite-only, #796) and `db/bootstrap.py`
     runs the Alembic migrations to head on startup — fail-closed, refusing to

@@ -8,7 +8,7 @@ into one page, plus the two operational caveats that bite most often (the
 state file).
 
 For installing Clauster as a service see [Installation](installation.md); for
-the full config surface see [Configuration](configuration.md).
+the full config surface see [Configuration](reference/config.md).
 
 ## Health checks
 
@@ -95,7 +95,7 @@ observability:
 When disabled, `/metrics` returns `404`. When enabled, it stays **behind the
 auth guard** like every other route — so by default a scraper must satisfy the
 deployment's auth, or scrape over loopback where no auth is enforced.
-See [Configuration → `observability`](configuration.md#observability-read-only-metrics-endpoint-observabilityconfig).
+See [Configuration → `observability`](reference/config.md#observability-read-only-metrics-endpoint-observabilityconfig).
 
 The endpoint exposes point-in-time gauges (and one counter) derived from live
 runner state:
@@ -214,9 +214,9 @@ Behaviour and caveats:
   A deliberate Stop does not notify.
 - **Secrets in URLs are yours to protect.** An Apprise URL often embeds a token;
   keep it out of any shared/committed config (see
-  [Configuration → `notifications`](configuration.md#notifications-outbound-alerts-via-apprise-notificationsconfig)).
+  [Configuration → `notifications`](reference/config.md#notifications-outbound-alerts-via-apprise-notificationsconfig)).
 
-See [Configuration → `notifications`](configuration.md#notifications-outbound-alerts-via-apprise-notificationsconfig)
+See [Configuration → `notifications`](reference/config.md#notifications-outbound-alerts-via-apprise-notificationsconfig)
 for the full field reference.
 
 ## Lifecycle webhooks
@@ -280,7 +280,7 @@ Behaviour and caveats:
   comes only from this config (an operator-trusted source), never from runtime or
   user input.
 
-See [Configuration → `webhooks`](configuration.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)
+See [Configuration → `webhooks`](reference/config.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)
 for the full field reference.
 
 ## Reading the bridge debug log

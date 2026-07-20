@@ -83,7 +83,7 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
   the runtime `claude` account logs out or its token expires, sign it back in
   from the browser (subscription OAuth, plus a separately-gated long-lived
   `setup-token` mode) instead of SSHing in. See the
-  [`login_shepherd` reference](configuration.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig).
+  [`login_shepherd` reference](reference/config.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig).
 - Background agents (**experimental**) — list / dispatch / stop `claude --bg`
   sessions from a dashboard panel (`/api/agents`); rides Claude Code's agent-view
   research preview, so it may change with the upstream CLI.
@@ -91,13 +91,13 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
   channel is enabled (`claustrum.enabled`, default off), the launch popover gains
   a third option whose sessions are local live-view only: streamed in the
   dashboard but, unlike bridges, never attachable from `claude.ai/code`. See
-  [Architecture](architecture.md) and [Configuration](configuration.md).
+  [Architecture](architecture.md) and [Configuration](reference/config.md).
 
 ## Where to next
 
 - [Quickstart](quickstart.md) — your first bridge in a few minutes.
 - [Installation](installation.md) — pip / uv, Docker / Compose, running.
-- [Configuration](configuration.md) — the complete `clauster.yml` reference.
+- [Configuration](reference/config.md) — the complete `clauster.yml` reference.
 - [Public API](public-api.md) — the versioned `/api/v1` surface and `clauster api-token` CLI.
 - [Security](security.md) — trust model, auth, redaction.
 - [Privacy](privacy.md) — what Clauster keeps on disk, and how to purge it.

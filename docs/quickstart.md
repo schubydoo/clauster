@@ -69,7 +69,7 @@ Also resolve any `!` warnings such as "not logged in": these don't block the
 server (`doctor` still exits 0), but a spawned bridge inherits your `claude`
 login, so run a `claude` session first. (You can also fix a logged-out runtime
 account later from the browser with the opt-in
-[login shepherd](configuration.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)
+[login shepherd](reference/config.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)
 panel — handy when the account expires after setup.)
 
 ## Run it
@@ -107,7 +107,7 @@ then click **Run ·** `<permission>` (the button names the mode you picked).
   when the hosted channel is enabled — `claustrum.enabled`, default off). Those
   sessions are local live-view only and, unlike a bridge, are never attachable
   from `claude.ai/code` — see [Architecture](architecture.md) and
-  [Configuration](configuration.md).
+  [Configuration](reference/config.md).
 
 !!! note "First-ever spawn"
     Before the first spawn, Clauster marks remote control acknowledged in your
@@ -144,4 +144,4 @@ stay visible on the card.
   [Networking](networking.md).
 - **Run it as a service** — `clauster install-service {systemd|launchd|windows}`.
 - **Run it in Docker** — see [Installation → Docker](installation.md#docker).
-- **Tune behaviour** — the full [Configuration](configuration.md) reference.
+- **Tune behaviour** — the full [Configuration](reference/config.md) reference.
