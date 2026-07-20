@@ -42,7 +42,11 @@ Clauster serves a one-page, loopback-only **first-run setup** at
 <http://127.0.0.1:7621> (override the port with `CLAUSTER_SETUP_PORT`). Enter
 your projects folder, bind address, and a dashboard password; it writes a
 `clauster.yml` with authentication enabled and starts up on it. Because it sets
-a password, it's also the quickest way to a non-loopback (LAN) deployment.
+a password, it's also the quickest way to a non-loopback (LAN) deployment —
+but the wizard does not configure TLS, so before picking a LAN bind, plan to
+serve over HTTPS ([built-in TLS](networking.md#native-https-built-in-tls) or a
+reverse proxy); otherwise the dashboard password crosses your network in
+plaintext.
 
 Prefer to write the file by hand? The only required key is `projects_root`,
 and on loopback no auth is needed:
