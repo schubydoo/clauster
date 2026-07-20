@@ -15,7 +15,7 @@ uv sync --extra dev
 npm ci                                 # markdownlint-cli2 (pinned, integrity-checked)
 uv run pre-commit install              # auto-lint on commit (ruff + yaml/markdown)
 cp clauster.yml.example clauster.yml   # edit projects_root
-uv run clauster
+uv run clauster run -c clauster.yml
 ```
 
 A [`justfile`](https://github.com/schubydoo/clauster/blob/main/justfile) and a [`Makefile`](https://github.com/schubydoo/clauster/blob/main/Makefile) wrap these commands, so

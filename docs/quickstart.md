@@ -4,7 +4,7 @@ This walks you from nothing to a running `claude` bridge you can pick up from
 `claude.ai/code`, on a single machine with no authentication (loopback only). For
 LAN / remote access, add auth afterwards — see [Networking](networking.md).
 
-## 1. Prerequisites
+## Prerequisites
 
 - **Python 3.11+**.
 - The **`claude` CLI on your `PATH`**, authenticated — either logged in via
@@ -23,19 +23,19 @@ claude login                                       # or: export ANTHROPIC_API_KE
 claude --version                                   # confirm it's on PATH
 ```
 
-`clauster doctor` (step 4) confirms `claude` is found and authenticated.
+`clauster doctor` (the **Check your environment** step) confirms `claude` is found and authenticated.
 
 ```sh
 mkdir -p ~/code/my-first-project    # one child dir = one project card
 ```
 
-## 2. Install
+## Install
 
 ```sh
 uv tool install clauster      # or: pipx install clauster / pip install clauster
 ```
 
-## 3. Write a minimal config
+## Write a minimal config
 
 The only required key is `projects_root`. On loopback, no auth is needed.
 
@@ -52,7 +52,7 @@ projects_root: ~/code
     `clauster.yml` with authentication enabled and starts up on it. Because it sets
     a password, it's the quickest way to a non-loopback (LAN) deployment.
 
-## 4. Check your environment
+## Check your environment
 
 ```sh
 clauster doctor
@@ -65,7 +65,7 @@ Also resolve any `!` warnings such as "not logged in": these don't block the
 server (`doctor` still exits 0), but a spawned bridge inherits your `claude`
 login, so run a `claude` session first.
 
-## 5. Run it
+## Run it
 
 ```sh
 clauster run -c clauster.yml
@@ -77,7 +77,7 @@ Open **<http://127.0.0.1:7621>**. You'll see one card per child directory of
 !!! tip "Empty dashboard or a page that won't load?"
     - **"No projects yet"** means `projects_root` resolved to a directory with no
       child folders — create or clone one from the dashboard, or drop a directory
-      under `projects_root` and refresh. Re-run `clauster doctor` (step 4) to
+      under `projects_root` and refresh. Re-run `clauster doctor` to
       confirm `projects_root` points where you think.
     - **The page won't load from another machine** because, by default, Clauster
       binds loopback (`127.0.0.1`) and is reachable only from the host itself. A
@@ -85,7 +85,7 @@ Open **<http://127.0.0.1:7621>**. You'll see one card per child directory of
       enforced** — that is deliberate. To go beyond loopback, add auth and follow
       [Networking](networking.md).
 
-## 6. Start your first bridge
+## Start your first bridge
 
 On the project card, click **Run Claude here**, choose **In claude.ai /
 Desktop** (the bridge this quickstart walks through), pick a permission mode,
@@ -108,14 +108,14 @@ then click **Run ·** `<permission>` (the button names the mode you picked).
     "Enable Remote Control? (y/n)" prompt. This is `claude.auto_enable_remote_control`
     (on by default).
 
-## 7. Pick it up from anywhere
+## Pick it up from anywhere
 
 On the running card, use **Open in Claude** (or scan the **QR code**) to
 attach the bridge from `claude.ai/code` or the Claude mobile app — no SSH session
 required. Drive the session there; the live debug-log tail and resource metrics
 stay visible on the card.
 
-## 8. Stop / resume
+## Stop / resume
 
 - **Stop** ends the bridge.
 - **Resume** brings a stopped bridge back. In the default *Server Mode* a
