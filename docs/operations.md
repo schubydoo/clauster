@@ -394,6 +394,17 @@ older `state.json` to the current JSON schema; on a database-backed install (the
 legacy `state.json` has already been imported and renamed `state.json.imported`)
 it has no meaningful state to migrate.
 
+<!-- Legacy anchors: these sections moved to reference/cli.md (same slugs);
+     the stubs keep old operations/#clauster-… deep links landing on the
+     pointer below instead of silently jumping to the top of the page. -->
+<a id="clauster-config-reconcile-clean-up-deprecated-config-keys"></a>
+<a id="clauster-keepers-stop-an-orphaned-pty-keeper"></a>
+<a id="clauster-deps-inspect-and-manage-optional-extras"></a>
+
+Looking for `clauster config reconcile`, `clauster keepers`, or
+`clauster deps`? Those maintenance commands moved to
+[CLI commands](reference/cli.md).
+
 ### Recovering from a corrupted state database
 
 Runtime state lives in the SQLite `clauster.db` under your `state_dir` (the live
