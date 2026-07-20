@@ -175,6 +175,25 @@ reinstall the prior version. To revert by hand instead: stop clauster, delete
 `clauster.db`, rename `state.json.imported` / `hosted_state.json.imported` back
 (drop the `.imported` suffix), and reinstall the prior clauster version.
 
+## Upgrade, by install method
+
+Match how you installed (the same rows as the
+[installation decision table](https://schubydoo.github.io/clauster/installation/#which-install-method)),
+then restart however you run it — systemd unit, supervisor, container, terminal:
+
+| Installed via | Upgrade with |
+| --- | --- |
+| uv | `uv tool upgrade clauster` |
+| pip / pipx | `pip install -U clauster` / `pipx upgrade clauster` |
+| Install script (Linux & macOS) | re-run the one-liner — it fetches and checksum-verifies the latest release |
+| Install script (Windows, PowerShell) | re-run the one-liner |
+| Standalone binary | download the next release, verify it against `SHA256SUMS`, replace the file |
+| Scoop | `scoop update clauster` |
+| Homebrew | `brew update && brew upgrade clauster` |
+| Nix | `nix profile upgrade` |
+| Docker / GHCR | pull the new tag + recreate — see below |
+| From source | `git pull` + restart — see below |
+
 ## PyPI install
 
 ```bash
@@ -214,6 +233,28 @@ detect dependency drift, so re-run `uv sync --extra dev` whenever
 `pyproject.toml` / `uv.lock` changed (per the code block above). (The database
 migrates automatically on startup; `clauster migrate` is only for folding in a
 pre-0.12 flat-file `state.json`.)
+
+## Rolling back
+
+Any upgrade is reversible if you took the pre-upgrade backup:
+
+1. Stop Clauster.
+2. Restore the tarball: `clauster restore <archive> --state-dir ~/.clauster`
+   (point `--state-dir` at your configured `state_dir`; add
+   `--config-out /path/to/clauster.yml` to also write the config back, and
+   `--force` to overwrite a non-empty target).
+3. Reinstall the **prior** version (e.g. `uv tool install clauster==<old>`,
+   `pip install clauster==<old>`, pin `CLAUSTER_VERSION=<old>` when re-running
+   the install script, or run the older binary / image tag) and start it.
+
+Skipped the backup? If the upgrade ran a schema migration, Clauster snapshotted
+`clauster.db` first: the five most recent pre-migration copies live under
+`state_dir/backups/` as `pre-<rev-before>-<rev-after>-<timestamp>.db`
+(`db.backup_before_migrate`, on by default). Stop Clauster, copy the snapshot
+back over `state_dir/clauster.db` (and its `-wal`/`-shm` siblings if present),
+and start the matching **older** binary — a newer one would immediately re-run
+the same migration. This recovers the database only, not the rest of
+`state_dir` or your config.
 
 > **Server Mode** bridges are detached and survive a Clauster restart, so the
 > upgrade only refreshes the manager and doesn't interrupt them.
