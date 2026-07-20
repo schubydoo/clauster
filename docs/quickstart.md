@@ -37,20 +37,20 @@ uv tool install clauster      # or: pipx install clauster / pip install clauster
 
 ## Write a minimal config
 
-The only required key is `projects_root`. On loopback, no auth is needed.
+The fastest path is the guided one: run `clauster run` with **no** config and
+Clauster serves a one-page, loopback-only **first-run setup** at
+<http://127.0.0.1:7621> (override the port with `CLAUSTER_SETUP_PORT`). Enter
+your projects folder, bind address, and a dashboard password; it writes a
+`clauster.yml` with authentication enabled and starts up on it. Because it sets
+a password, it's also the quickest way to a non-loopback (LAN) deployment.
+
+Prefer to write the file by hand? The only required key is `projects_root`,
+and on loopback no auth is needed:
 
 ```yaml
 # clauster.yml
 projects_root: ~/code
 ```
-
-!!! tip "Prefer a guided setup?"
-    You can skip writing this by hand. Run `clauster run` with **no** config and
-    Clauster serves a one-page, loopback-only **first-run setup** at
-    <http://127.0.0.1:7621> (override the port with `CLAUSTER_SETUP_PORT`). Enter
-    your projects folder, bind address, and a dashboard password; it writes a
-    `clauster.yml` with authentication enabled and starts up on it. Because it sets
-    a password, it's the quickest way to a non-loopback (LAN) deployment.
 
 ## Check your environment
 
@@ -63,7 +63,10 @@ that `projects_root` and the state dir are usable. Fix any ✗ (FAIL) before
 continuing — the most common one is "`claude` not found" (it's not on `PATH`).
 Also resolve any `!` warnings such as "not logged in": these don't block the
 server (`doctor` still exits 0), but a spawned bridge inherits your `claude`
-login, so run a `claude` session first.
+login, so run a `claude` session first. (You can also fix a logged-out runtime
+account later from the browser with the opt-in
+[login shepherd](configuration.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)
+panel — handy when the account expires after setup.)
 
 ## Run it
 
