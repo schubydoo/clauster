@@ -96,7 +96,9 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 ## Where to next
 
 - [Quickstart](quickstart.md) — your first bridge in a few minutes.
-- [Installation](installation.md) — pip / uv, Docker / Compose, running.
+- [Installation](installation.md) — ten install methods with a
+  [decision table](installation.md#which-install-method), plus running and
+  service setup.
 - [Configuration](reference/config.md) — the complete `clauster.yml` reference.
 - [Public API](public-api.md) — the versioned `/api/v1` surface and `clauster api-token` CLI.
 - [Security](security.md) — trust model, auth, redaction.
