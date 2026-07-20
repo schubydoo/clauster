@@ -56,7 +56,11 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
 
@@ -66,7 +70,9 @@ nav:
       - Quickstart: quickstart.md
       - Installation: installation.md
   - Concepts:
-      - How Clauster works: architecture.md
+      - How it works: concepts/how-it-works.md
+      - Glossary: concepts/glossary.md
+      - Architecture (contributors): architecture.md
       - How Clauster secures itself: security.md
       - Privacy: privacy.md
   - Guides:
