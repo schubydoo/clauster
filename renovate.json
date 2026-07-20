@@ -193,6 +193,11 @@
         "amannn/action-semantic-pull-request"
       ],
       "groupName": "release automation actions"
+    },
+    {
+      "description": "Hold mkdocs-redirects at 1.2.2 — the last release published from the mkdocs GitHub org. 1.2.3 moved the project to a third-party org and added a hard dependency on `properdocs`, a second documentation engine that lands in the docs environment and prints promotional output into every build; it also caps `mkdocs<=1.6.1`, which would block future MkDocs upgrades. pyproject pins `==1.2.2`; this upper bound is what stops Renovate re-proposing the bump (it opened #997 before this rule existed). Revisit if upstream publishes a release without the `properdocs` dependency, or when the docs site migrates off MkDocs (#996). Security advisories are unaffected — vulnerabilityAlerts bypasses allowedVersions.",
+      "matchPackageNames": ["mkdocs-redirects"],
+      "allowedVersions": "<1.2.3"
     }
   ]
 }
