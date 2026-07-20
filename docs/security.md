@@ -282,7 +282,7 @@ whose host is — or resolves to — a loopback / link-local / private / CGNAT /
 metadata IP, using the **same** private-range classifier as the clone guard
 (it imports `provisioning._EXTRA_PRIVATE_NETS`). Default-off preserves the
 LAN-receiver use case. See
-[`webhooks`](configuration.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)
+[`webhooks`](reference/config.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)
 in the configuration reference for the field.
 
 ## bypassPermissions footgun gate

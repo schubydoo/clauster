@@ -150,7 +150,7 @@ want the full supply-chain check.
     anyway** (installing via Scoop, below, avoids the browser-download prompt).
 
 !!! note "The live terminal view needs the `pty` extra"
-    The optional read-only live terminal view ([`pty_screen_enabled`](configuration.md))
+    The optional read-only live terminal view ([`pty_screen_enabled`](reference/config.md))
     depends on [`pyte`](https://pypi.org/project/pyte/), which
     is LGPL-licensed and so **is not bundled in the standalone binary**. On the binary, install
     it with `clauster deps install pty` (the binary bundles `pip` and side-installs the wheel
@@ -433,7 +433,7 @@ interpreter falls back to the `python -m clauster run …` form.
     the run-as user's `~/.local/bin` plus the standard system dirs (resolved from
     the `--user` you pass, so regenerate if you change it). For **shell-managed**
     toolchains a static directory can't cover — nvm/pyenv `node`, `cargo`, Go —
-    extend it with [`claude.path_append` / `claude.env`](configuration.md#claude-binary-bridge-spawn-claudeconfig)
+    extend it with [`claude.path_append` / `claude.env`](reference/config.md#claude-binary-bridge-spawn-claudeconfig)
     in `clauster.yml`; those append to (never replace) this baked `PATH`.
 
 !!! note "Auth + sandboxing"

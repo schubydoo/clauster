@@ -27,7 +27,8 @@ a non-loopback `host`.
 - [Installation](https://schubydoo.github.io/clauster/installation/): install script, uv/pip/pipx, Scoop, Docker, signed binaries, systemd/launchd/Windows service.
 - [How it works](https://schubydoo.github.io/clauster/concepts/how-it-works/): runtime topology — what runs where, what survives a restart.
 - [Glossary](https://schubydoo.github.io/clauster/concepts/glossary/): canonical vocabulary (bridge, keeper, Server Mode / Interactive Session / Direct Session, spawn modes).
-- [Configuration](https://schubydoo.github.io/clauster/configuration/): exhaustive per-key reference, generated from the pydantic models; env-var overrides (`CLAUSTER_<UPPER_SNAKE_PATH>`) and `*_FILE` secret files.
+- [Configuration reference](https://schubydoo.github.io/clauster/reference/config/): exhaustive per-key reference, generated from the pydantic models.
+- [Configuring Clauster](https://schubydoo.github.io/clauster/guides/configuration/): config-file search order; env-var overrides (`CLAUSTER_<UPPER_SNAKE_PATH>`) and `*_FILE` secret files.
 - [Config editor](https://schubydoo.github.io/clauster/guides/config-editor/): the dashboard editing surface and its fail-closed allowlist.
 - [Networking](https://schubydoo.github.io/clauster/networking/): the auth/bind matrix, TLS, reverse proxies. Read this before any LAN or remote-exposure answer.
 - [Security](https://schubydoo.github.io/clauster/security/): fail-closed auth, headers, workspace trust, log redaction, SSRF and bypassPermissions gates.

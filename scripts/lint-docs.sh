@@ -9,7 +9,8 @@
 #                       fetch, no unverified download).
 #   yamllint          — Python tool, installed as a dev dependency (uv run).
 #   config reference  — gen_config_reference.py --check fails if the tables in
-#                       docs/configuration.md drifted from the config models. The
+#                       docs/reference/config.md or docs/guides/config-editor.md
+#                       drifted from the config models. The
 #                       tests job covers config.py changes; running it here also
 #                       catches a hand-edit of the generated tables on a docs-only
 #                       PR (where the tests job is skipped).

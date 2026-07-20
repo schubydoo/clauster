@@ -86,7 +86,7 @@ _TOP_LEVEL_FLAGS = {"-h", "--help", "--version"}
 
 # Surfaced in `clauster --help` so needing `-c` isn't a surprise. Keep the order and
 # env-var names in lockstep with `clauster.config` (module docstring + `_candidate_paths`)
-# and docs/configuration.md, which are the canonical descriptions of the search order.
+# and docs/guides/configuration.md, which are the canonical descriptions of the search order.
 _CONFIG_DISCOVERY_EPILOG = (
     "config discovery (when -c/--config is omitted, the first existing file wins):\n"
     "  1. $CLAUSTER_CONFIG\n"

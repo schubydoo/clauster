@@ -44,7 +44,8 @@ plugins:
   # the only thing keeping bookmarked/externally-linked URLs alive, and
   # `mkdocs build --strict` will NOT flag a missing entry.
   - redirects:
-      redirect_maps: {}
+      redirect_maps:
+        configuration.md: reference/config.md
   - include-markdown
 
 markdown_extensions:
@@ -76,10 +77,11 @@ nav:
       - How Clauster secures itself: security.md
       - Privacy: privacy.md
   - Guides:
-      - Configuration: configuration.md
+      - Configuring Clauster: guides/configuration.md
       - The in-app config editor: guides/config-editor.md
       - Networking & exposing: networking.md
   - Reference:
+      - Configuration reference: reference/config.md
       - Public API: public-api.md
       - MCP server: mcp.md
       - Platform support: reference/platforms.md

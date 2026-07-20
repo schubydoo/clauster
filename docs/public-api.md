@@ -87,7 +87,7 @@ serve the interactive docs UI at `/docs` and the raw schema at `/openapi.json`.
 Both sit **behind the same auth guard** as every other `/api/*` route — an
 unauthenticated request gets a `401`, not a login-page redirect, and there is
 no way to expose docs without also exposing the API they document. See the
-`api` section in [Configuration](configuration.md) for the full toggle
+`api` section in [Configuration](reference/config.md) for the full toggle
 reference.
 
 ## API-only deployment
@@ -130,7 +130,7 @@ Beyond the inbound `/api/v1` reads, Clauster can push an **outbound** machine-re
 JSON `POST` to your own HTTP endpoint on a lifecycle transition — for wiring it into an
 automation, a queue, or your own dashboard. Enable and configure them under `webhooks:`
 in `clauster.yml` (see the
-[`webhooks` field reference](configuration.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)),
+[`webhooks` field reference](reference/config.md#webhooks-outbound-lifecycle-webhooks-webhooksconfig)),
 and see [Operations → Lifecycle webhooks](operations.md#lifecycle-webhooks) for the
 operational behaviour (fail-open, no retry, which bridges emit). This section is the
 **payload reference**.

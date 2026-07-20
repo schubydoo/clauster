@@ -121,7 +121,7 @@ it in [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/c
   read back to the browser. Writes are lost-update-guarded (a content hash from
   the read must still match on write), backed up, and applied atomically with
   your comments preserved; the running process keeps its startup config until
-  restarted. See [docs/configuration.md](docs/configuration.md#in-app-config-editor).
+  restarted. See [the config-editor guide](docs/guides/config-editor.md).
 - **Per-project cost badge** — approximate USD + token totals rolled up from a
   project's session transcripts. Token counts are exact (read from the transcript
   `usage`); the dollar figure is a ballpark — a hand-maintained USD price table
@@ -358,7 +358,7 @@ connections are authenticated before accept and origin-checked.
 
 All settings live in `clauster.yml` —
 [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) is a lean starter, and
-[`docs/configuration.md`](docs/configuration.md) is the exhaustive per-key reference. Any
+[`docs/reference/config.md`](docs/reference/config.md) is the exhaustive per-key reference. Any
 scalar key is overridable by an environment variable of the form
 `CLAUSTER_<UPPER_SNAKE_PATH>`. The schema is additive-only — old configs always
 validate against newer versions.

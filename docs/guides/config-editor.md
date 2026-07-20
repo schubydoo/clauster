@@ -8,11 +8,11 @@ distinct surfaces, opened from buttons in the dashboard header:
 - **Manage Claude Code config** (wrench icon) — manages the host's Claude Code
   configuration: CLAUDE.md, settings, permissions, hooks, MCP servers,
   subagents, skills, and plugins. This button only renders when the
-  [`config_write` trust tier](../configuration.md#config_write-code-executing-config-write-trust-tier-configwriteconfig)
+  [`config_write` trust tier](../reference/config.md#config_write-code-executing-config-write-trust-tier-configwriteconfig)
   is enabled — a disabled deployment ships no dead surface.
 
 This page is the operator's guide to both. For what every key means, see the
-[configuration reference](../configuration.md) — the field tables there are
+[configuration reference](../reference/config.md) — the field tables there are
 the single home for key-by-key detail.
 
 ## Editing `clauster.yml`
@@ -25,9 +25,28 @@ field renders as a typed control (toggle, bounded number, text, or a select
 with human-readable option labels), with its raw YAML key shown as subtext so
 you can cross-reference the file.
 
-Only the **Tier-A allowlist** of day-to-day operational fields appears here.
-The exact list is in
-[What's editable — the Tier-A allowlist](../configuration.md#whats-editable-the-tier-a-allowlist).
+Only the **Tier-A allowlist** of day-to-day operational fields appears here:
+
+<!-- BEGIN GEN: editable_fields -->
+| Section | Editable fields |
+| --- | --- |
+| `(top-level)` | `log_format` |
+| `api` | `openapi_enabled` |
+| `claude` | `min_version`, `agents_json_poll_interval_seconds`, `startup_grace_seconds`, `auto_enable_remote_control`, `resume_recap`, `resume_recap_max_chars`, `launch_mode`, `pty_screen_enabled` |
+| `instance_defaults` | `spawn_mode`, `permission_mode`, `verbose`, `session_name_prefix`, `capacity`, `max_bridges` |
+| `claustrum` | `enabled`, `socket_path`, `spawn_timeout_seconds`, `keep_children`, `request_timeout_seconds` |
+| `logs` | `bridge_log_max_size_mb`, `keep_rotated`, `redact_session_url`, `strip_ansi_in_stream`, `retention_max_age_days`, `retention_max_files`, `retention_max_total_mb` |
+| `reaper` | `ui_enabled` |
+| `usage` | `mode`, `currency`, `currency_symbol`, `fx_rate`, `token_total_includes_cache`, `show_cost` |
+| `metrics` | `enabled`, `normalize_cpu`, `show_disk`, `sample_interval_seconds`, `poll_seconds` |
+| `observability` | `prometheus_enabled` |
+| `notifications` | `enabled`, `browser_enabled`, `notify_on_crash`, `notify_on_ready`, `notify_on_stop`, `notify_on_permission`, `notify_on_session_end`, `notify_on_reconnect_failed` |
+<!-- END GEN: editable_fields -->
+
+The allowlist's source of truth is `EDITABLE_FIELDS` in
+`src/clauster/config_editor.py` (the table above is generated from it);
+`GET /api/config` returns it, so the UI only renders fields it can actually
+write.
 
 ### What it deliberately won't edit
 
@@ -45,10 +64,15 @@ and enforced fail-closed in two ways:
   full `ClausterConfig` before any disk I/O, so a value that fails the same
   fail-closed startup validation is refused with `422`.
 
+Concretely, that excludes — for example — `auth.*` (passwords, tokens, the
+`enabled` master switch), `host`/`port`, `projects_root`, the `projects` map,
+`config_write.*` / `login_shepherd.*` (RCE / account-auth surface), the secret
+URL lists (`webhooks.urls`, `notifications.urls`), auth trust lists
+(`auth.allowed_origins`, `auth.reverse_proxy.trusted_ips`), and the binary
+paths (`claude.binary`/`claustrum.binary`).
+
 If you can't find a field in the editor, that is by design, not a gap. Edit
-`clauster.yml` on the host (or use the CLI) instead. The per-field rationale
-is in
-[Why everything else is excluded](../configuration.md#why-everything-else-is-excluded-the-security-boundary).
+`clauster.yml` on the host (or use the CLI) instead.
 
 ### Advanced settings (step-up re-auth)
 
@@ -61,8 +85,17 @@ checkbox-per-event editor for `webhooks.events`. It appears only when
 password first — a short-lived "step-up" unlock, separate from your login
 session. Deployments without a password set (reverse-proxy or token-only
 auth) see a note instead of the unlock form; set one with
-`clauster hash-password`. Details:
-[Advanced fields (Tier-B)](../configuration.md#advanced-fields-tier-b-behind-step-up-re-auth).
+`clauster hash-password`. The Tier-B allowlist:
+
+<!-- BEGIN GEN: tier_b_fields -->
+| Section | Advanced fields |
+| --- | --- |
+| `clone` | `enabled`, `allow_private_hosts`, `allowed_schemes`, `allowed_private_cidrs`, `timeout_seconds`, `max_mb` |
+| `webhooks` | `enabled`, `timeout_seconds`, `block_private_targets`, `events` |
+<!-- END GEN: tier_b_fields -->
+
+Its source of truth is `TIER_B_FIELDS` in the same module;
+`GET`/`PUT /api/config/advanced` back the panel.
 
 ## How a save is applied
 
@@ -133,7 +166,7 @@ The surface tabs:
 
 | Symptom | Why | What to do |
 | --- | --- | --- |
-| A field isn't in the editor | Excluded by design (secret / auth / bind / structural / code-executing) | Edit `clauster.yml` on the host; see the [exclusion rationale](../configuration.md#why-everything-else-is-excluded-the-security-boundary) |
+| A field isn't in the editor | Excluded by design (secret / auth / bind / structural / code-executing) | Edit `clauster.yml` on the host; see [What it deliberately won't edit](#what-it-deliberately-wont-edit) |
 | Save rejected: config changed on disk (`409`) | The file was edited externally (or by a concurrent save) after the editor loaded it | Reopen the editor and re-apply your change |
 | Save refused with a validation error (`422`) | The value fails full-config validation — including the fail-closed auth check | Fix the value; the same rule would have refused it at startup |
 | Advanced settings ask for a password you don't have | Step-up re-auth requires a password even when login uses another mechanism | Set one with `clauster hash-password` |
