@@ -179,37 +179,12 @@ resume always honour the recorded mode.
 
 ## Platform support
 
-Clauster runs on Linux, macOS, and Windows. A handful of runtime capabilities
-are POSIX-specific or otherwise platform-bound; the table below is the single
-source of truth for "what works where". When one of these rows changes, update
-it **here** rather than restating the gap in another doc — the scattered notes
-elsewhere point back to this matrix.
-
-Legend: ✓ works · ✗ not available (honest platform gap) · 🟡 in progress
-
-| Capability | Linux | macOS | Windows | Notes |
-| --- | :---: | :---: | :---: | --- |
-| Standard (Server Mode) bridge | ✓ | ✓ | ✓ | Windows spawns the bridge with `CREATE_NEW_PROCESS_GROUP` and stops it via `CTRL_BREAK_EVENT`; POSIX uses `start_new_session` + `SIGINT`. |
-| Interactive Session (PTY) bridge | ✓ | ✓ | ✓ †‡ | POSIX uses `pty.openpty` + `termios`; Windows drives a **ConPTY** keeper via **pywinpty** ([#903](https://github.com/schubydoo/clauster/pull/903)). † Needs the `pty` extra (`pip install 'clauster[pty]'`) — without it `launch_mode: pty` falls back to Server Mode. ‡ **Stopping** an Interactive Session on Windows is a hard kill: the bridge lives in the keeper's *separate* ConPTY console, so the graceful `CTRL_BREAK` can't reach it — the local process is reaped, but the cloud session isn't deregistered (it re-registers on next launch). POSIX/macOS get the orderly double-`SIGINT`. |
-| Hosted channel (claustrum) | ✓ | ✓ | ✓ | Windows dials claustrum's named pipe (discovered via `rpc.pipe`) rather than the `AF_UNIX` socket, and clauster spawns the daemon with `-listen-pipe` + a `-token-file` handoff (a numeric token fd isn't usable there). Round-trip validated ([#902](https://github.com/schubydoo/clauster/pull/902)). |
-| Dashboard `claude` login | ✓ | ✓ | ✓ † | Subscription sign-in (`claude auth login`, plain pipes) works everywhere; the long-lived `setup-token` flow runs under a POSIX PTY on Linux/macOS and a **ConPTY** (pywinpty) on Windows ([#905](https://github.com/schubydoo/clauster/issues/905)). Because a ConPTY echoes written input back — which a parent can't disable the way POSIX `termios` does — the operator-pasted code is registered and redacted out of any returned/logged output. † Like the Interactive Session, the Windows ConPTY path needs the `pty` extra (`pip install 'clauster[pty]'`); without it `setup-token` fails closed with a clear message (subscription sign-in still works). |
-| Config-write CLI (`claude mcp` / `claude plugin`) | ✓ | ✓ | ✓ | Routes exercised on the Windows CI cells + VM. |
-| Per-bridge CPU % / RSS memory | ✓ | ✓ | ✓ | `psutil.cpu_times` / `memory_info` on every platform. |
-| Per-bridge disk I/O rate | ✓ | ✗ | ✓ | `psutil` has no per-process `io_counters` on macOS, so a bridge card's `disk_read_bps` / `disk_write_bps` fields are blank there. |
-| Advisory file locking (config writes + bridge lifecycle) | ✓ | ✓ | ✓ ‡ | An in-process lock serializes clauster's own concurrent writers on every OS; POSIX additionally takes an advisory `fcntl.flock` (which also guards *other* clauster processes — the config/CLAUDE.md writers, and since [#949](https://github.com/schubydoo/clauster/issues/949) the per-project spawn/stop/forget/adopt sections, so a headless CLI/MCP writer serializes against the live server). Neither coordinates with the `claude` CLI (which takes no lock) — that's the atomic `os.replace` (no torn files) + the caller's external-edit hash guard. ‡ Cross-clauster-process serialization needs the POSIX flock; a single clauster process is fully covered everywhere. |
-| Owner-only file modes (`0o600` / `0o700`) | ✓ | ✓ | ✓ ‡ | POSIX sets `0700`/`0600` mode bits; Windows sets an equivalent owner-only ACL on the state dir via `icacls` (remove inheritance; grant only the current user + SYSTEM). ‡ The Windows ACL is best-effort: the default `state_dir` (under `%USERPROFILE%`) already inherits a user + SYSTEM + Administrators ACL, so if `icacls` can't run (absent, a domain/service account with no resolvable `USERNAME`, a non-zero exit) clauster logs a loud warning and proceeds on the inherited ACL rather than blocking every state write. Relocate `state_dir` outside the user profile and you should tighten it yourself. |
-| Directory `fsync` (crash durability) | ✓ | ✓ | ✓ | POSIX `fsync`s the parent directory after a rename; Windows can't `fsync` a directory handle, but NTFS **journals** the metadata so the rename is recovered on reboot — equivalent durability via a different mechanism. |
-| Service-unit install (`install-service`) | ✓ | ✓ | ✓ † | Renders a systemd unit on Linux, a launchd plist on macOS (`launchd` kind), and a [Shawl](https://github.com/mtkennerly/shawl) service-install script on Windows (`windows` kind) — `ops.render_service_unit`. † Windows requires Shawl (`clauster deps install shawl`) before running the generated script. |
-
-The remaining gaps above are honest platform differences, not defects. All three OS
-cells enforce the same `--cov-fail-under=96` gate; Windows measures through
-`.coveragerc-win`, which excludes the POSIX/ConPTY code it genuinely can't run, so each
-platform holds the floor on the code it actually executes (all three currently sit at
-100% on their runnable surface, and the union across platforms is 100%). The per-OS
-Codecov flags add visibility on top of the gate. The **ConPTY keeper and the live pty-screen view both need
-the `pty` extra** (`pip install 'clauster[pty]'`, pulling pywinpty on Windows and pyte
-everywhere); it is intentionally not bundled in the standalone binary — see the module
-notes and [#904](https://github.com/schubydoo/clauster/issues/904).
+Clauster runs on Linux, macOS, and Windows; a handful of runtime capabilities
+are POSIX-specific or otherwise platform-bound. The full capability matrix —
+what works where, and the mechanism behind each cell (ConPTY keeper via the
+`pty` extra, Shawl service install, POSIX-only `fcntl.flock`, and so on) —
+lives in [Platform support](reference/platforms.md). When a platform behavior
+changes, update that matrix rather than restating the gap in another doc.
 
 ## Conventions
 

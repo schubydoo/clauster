@@ -82,6 +82,7 @@ nav:
   - Reference:
       - Public API: public-api.md
       - MCP server: mcp.md
+      - Platform support: reference/platforms.md
   - Operations:
       - Operations runbook: operations.md
       - Troubleshooting: troubleshooting.md
