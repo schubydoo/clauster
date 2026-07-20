@@ -81,7 +81,7 @@ SOFTWARE.
 
 - Project: <https://tabler.io/icons>
 - Source: <https://github.com/tabler/tabler-icons>
-- Version: 3.44.0
+- Version: 3.45.0
 - Files: a subset of `icons/outline/*.svg` assembled into an inline SVG sprite at
   `src/clauster/templates/_tabler_sprite.html` (provenance + notice retained at
   `src/clauster/static/vendor/tabler-icons/`)
