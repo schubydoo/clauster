@@ -33,11 +33,14 @@ Bracketed numbers point at the [notes](#notes) below.
 2. POSIX uses `pty.openpty` + `termios`; Windows drives a **ConPTY** keeper
    via **pywinpty**
    ([#903](https://github.com/schubydoo/clauster/pull/903)), which needs the
-   `pty` extra (`pip install 'clauster[pty]'`) — without it
-   `launch_mode: pty` falls back to Server Mode. The extra pulls pywinpty on
-   Windows and pyte everywhere (the live pty-screen terminal view needs it on
-   every OS), and is intentionally not bundled in the standalone binary — see
-   [#904](https://github.com/schubydoo/clauster/issues/904).
+   `pty` extra — without it `launch_mode: pty` falls back to Server Mode. The
+   extra pulls pywinpty on Windows and pyte everywhere (the live pty-screen
+   terminal view needs it on every OS). Install it with
+   `pip install 'clauster[pty]'` on a package install, or
+   `clauster deps install pty` on the standalone binary — the extra is
+   intentionally not bundled there, and `deps install` side-loads it instead
+   ([#904](https://github.com/schubydoo/clauster/issues/904); see
+   [`clauster deps`](../operations.md#clauster-deps-inspect-and-manage-optional-extras)).
 3. **Stopping** an Interactive Session on Windows is a hard kill: the bridge
    lives in the keeper's *separate* ConPTY console, so the graceful
    `CTRL_BREAK` can't reach it — the local process is reaped, but the cloud
