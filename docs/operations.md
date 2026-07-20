@@ -179,8 +179,8 @@ bridge's card) are a separate, dashboard-only fetch
 and are governed by the `metrics` config block, not `observability`. **Disk I/O is
 unavailable on macOS** — `psutil` has no per-process `io_counters` there, so the API
 returns `null` for `disk_read_bps` / `disk_write_bps` and the card leaves those fields
-blank on macOS (CPU and memory still show). See the platform-support matrix in
-`architecture.md` for the full per-OS list.
+blank on macOS (CPU and memory still show). See the
+[platform-support matrix](reference/platforms.md) for the full per-OS list.
 
 ## Crash alerts
 
