@@ -392,7 +392,14 @@ clauster reap-environments    # reap ghost bridge environments (dry-run by defau
 clauster keepers              # list or stop orphaned pty keepers
 clauster usage <transcript>   # token + approximate cost for a session transcript
 clauster config reconcile     # remove deprecated config keys, writing their replacements
+clauster deps list|install|uninstall          # manage optional extras beside the standalone binary
+clauster projects | status | sessions         # headless reads (--json), no server needed
+clauster logs <instance> | open <instance>    # tail a bridge's redacted log / print its connect URL
+clauster start <project> | stop <instance>    # headless spawn/stop through the same engine as the UI
 ```
+
+Full per-command reference:
+[docs/reference/cli.md](docs/reference/cli.md).
 
 ## Roadmap
 

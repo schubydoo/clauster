@@ -29,6 +29,7 @@ a non-loopback `host`.
 - [Glossary](https://schubydoo.github.io/clauster/concepts/glossary/): canonical vocabulary (bridge, keeper, Server Mode / Interactive Session / Direct Session, spawn modes).
 - [Configuration reference](https://schubydoo.github.io/clauster/reference/config/): exhaustive per-key reference, generated from the pydantic models.
 - [Configuring Clauster](https://schubydoo.github.io/clauster/guides/configuration/): config-file search order; env-var overrides (`CLAUSTER_<UPPER_SNAKE_PATH>`) and `*_FILE` secret files.
+- [CLI commands](https://schubydoo.github.io/clauster/reference/cli/): every `clauster` subcommand — secret helpers, doctor, backup/restore, config reconcile, keepers, deps, the headless read/write commands, usage, mcp.
 - [Config editor](https://schubydoo.github.io/clauster/guides/config-editor/): the dashboard editing surface and its fail-closed allowlist.
 - [Networking](https://schubydoo.github.io/clauster/networking/): the auth/bind matrix, TLS, reverse proxies. Read this before any LAN or remote-exposure answer.
 - [Security](https://schubydoo.github.io/clauster/security/): fail-closed auth, headers, workspace trust, log redaction, SSRF and bypassPermissions gates.

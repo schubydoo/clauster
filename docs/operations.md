@@ -8,7 +8,9 @@ into one page, plus the two operational caveats that bite most often (the
 state file).
 
 For installing Clauster as a service see [Installation](installation.md); for
-the full config surface see [Configuration](reference/config.md).
+the full config surface see [Configuration](reference/config.md); for the
+maintenance subcommands (`config reconcile`, `keepers`, `deps`, and the rest of
+the CLI) see [CLI commands](reference/cli.md).
 
 ## Health checks
 
@@ -391,95 +393,6 @@ separate `clauster migrate` command is a legacy helper that only upgrades an
 older `state.json` to the current JSON schema; on a database-backed install (the
 legacy `state.json` has already been imported and renamed `state.json.imported`)
 it has no meaningful state to migrate.
-
-### `clauster config reconcile` — clean up deprecated config keys
-
-The config schema is additive-only with back-compat aliases for renamed keys, so
-a deprecated key keeps working but warns at every load and lingers in your
-`clauster.yml`. `clauster config reconcile` scans the loaded config for known
-deprecated keys (e.g. `claude.resume_mode` → `claude.launch_mode`,
-`usage.show_cost` → `usage.mode`), explains each, and proposes the replacement key
-with the equivalent value:
-
-```sh
-clauster config reconcile -c /etc/clauster/clauster.yml          # interactive
-clauster config reconcile -c /etc/clauster/clauster.yml --dry-run  # preview only
-clauster config reconcile -c /etc/clauster/clauster.yml --yes      # accept all
-```
-
-It rewrites the file through the same atomic backup + comment-preserving writer the
-in-app editor uses (a timestamped `.bak-*` is kept), so your comments and formatting
-survive. `--dry-run` writes nothing; `--yes` applies every proposed replacement
-without prompting (handy in a config-management pipeline). A clean config is a no-op.
-
-### `clauster keepers` — stop an orphaned pty keeper
-
-A **pty** (true-resume) bridge runs under a detached *keeper* process that
-outlives a Clauster restart. The normal stop path cleans up a keeper still
-attached to a project card, but if the card is gone — its project was removed —
-no dashboard row can show or stop it, leaving a live keeper (and its bridge)
-running invisibly.
-
-`clauster keepers` sweeps the keeper sidecars and surfaces those **orphans** (a
-live keeper whose sidecar belongs to no current card):
-
-```sh
-clauster keepers -c /etc/clauster/clauster.yml             # list orphaned keepers
-clauster keepers -c /etc/clauster/clauster.yml --kill 12345 # stop one by keeper PID
-```
-
-`--kill` refuses any PID that isn't a current orphan, so it can never take down a
-keeper still attached to a card. On success it stops the keeper (and its bridge
-subtree) and removes the stale sidecar.
-
-### `clauster deps` — inspect and manage optional extras
-
-A few capabilities live behind optional `pip` **extras** the signed standalone
-binary deliberately does not bundle (`pty` → `pyte`/`pywinpty`, `notify` →
-`apprise`; see [Optional extras](installation.md#standalone-binary-no-python)).
-`clauster deps` reports their status and manages a side-install beside the binary:
-
-```sh
-clauster deps list                 -c /etc/clauster/clauster.yml  # status of every extra
-clauster deps install pty          -c /etc/clauster/clauster.yml  # fetch into <state_dir>/deps
-clauster deps uninstall pty        -c /etc/clauster/clauster.yml  # remove it again
-```
-
-`deps list` reports each extra as **loaded** (importable now), **installed**
-(present in the managed dir, pending a restart), **missing**, or **n/a** (a
-platform-only extra such as `pywinpty` off Windows).
-
-`deps install <extra>` fetches the extra's wheels into a managed `<state_dir>/deps`
-directory that the standalone binary adds to its import path at startup, so the
-capability loads on the next restart (a normal `pip`/`uv` install resolves extras
-the usual way and doesn't need this). The standalone binary bundles `pip` so it can
-run the install itself — no separate Python environment required. Because those
-wheels come from PyPI and are **not** covered by the release signature, the command
-prints an explicit notice and requires confirmation before downloading (`--yes` skips
-the prompt); it never auto-installs. `deps uninstall <extra>` removes the extra's own
-distribution from the managed dir (shared transitive dependencies are left in place).
-
-`clauster deps install shawl` (Windows only) is the same mechanism for a **binary**
-dependency: it downloads the pinned [Shawl](https://github.com/mtkennerly/shawl)
-service wrapper from its GitHub release, verifies it against a hardcoded SHA-256, and
-places `shawl.exe` under `<state_dir>/deps/bin`.
-
-**Installing Clauster as a Windows service is two steps, from an elevated prompt:**
-
-```powershell
-clauster deps install shawl          # 1. fetch the Shawl wrapper (once)
-clauster install-service windows --write   # 2. register + start the service
-```
-
-Add `-c <path>` to either only if your config isn't in the default search location.
-Like `install-service systemd/launchd --write`, `--write` on Windows *applies* the
-service directly — it runs `shawl add --name Clauster … -- clauster run -c <cfg>`
-(which does the `sc create`), then `sc config … start= auto` and `sc start`. It needs
-Shawl from step 1 and an elevated prompt (it fails with a clear "re-run as
-Administrator" if not). Omit `--write` to just print those commands for inspection.
-`clauster doctor` shows a `binary:shawl` row. The Windows uninstaller (`uninstall.ps1`)
-stops and deletes the `Clauster` service before removing the binary, so nothing is
-left pointing at a removed executable.
 
 ### Recovering from a corrupted state database
 

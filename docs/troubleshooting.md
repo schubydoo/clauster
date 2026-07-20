@@ -358,7 +358,7 @@ clauster keepers               # list orphaned pty keepers (no project card)
 clauster keepers --kill <pid>  # stop one by its keeper PID
 ```
 
-**Mechanism:** [`clauster keepers`](operations.md#clauster-keepers-stop-an-orphaned-pty-keeper)
+**Mechanism:** [`clauster keepers`](reference/cli.md#clauster-keepers-stop-an-orphaned-pty-keeper)
 · [the `KillMode` / restart caveat](operations.md#restart).
 
 ### Is the bridge dead, or is the stream dead? — how to tell

@@ -173,7 +173,7 @@ want the full supply-chain check.
     also adds a managed `<state_dir>/deps` directory to its import path at startup, so anything
     installed there (`pip install --target=<state_dir>/deps <dist>` from any Python) loads on the
     next start —
-    [`clauster deps`](operations.md#clauster-deps-inspect-and-manage-optional-extras)
+    [`clauster deps`](reference/cli.md#clauster-deps-inspect-and-manage-optional-extras)
     manages that directory (`clauster deps list` shows each extra's status; `clauster deps install
     <extra>` / `uninstall <extra>` populate or clear it).
 
@@ -305,59 +305,11 @@ searches `$CLAUSTER_CONFIG`, then `./clauster.yml`, then
 
 ### Other subcommands
 
-```text
-clauster run                  # start the server (default)
-clauster hash-password        # generate an argon2id hash for auth.password_hash
-clauster hash-token           # mint an API token + hash for auth.api_token_hash
-clauster hash-metrics-token   # mint a /metrics scrape token + hash for observability.metrics_token_hash
-clauster api-token issue|list|rotate|revoke   # manage named public-API bearer tokens
-clauster mcp                  # read-only MCP server over stdio (list + status)
-clauster config reconcile     # remove deprecated config keys, writing their replacements
-clauster doctor               # diagnose config / environment
-clauster backup | restore | migrate
-clauster install-service {systemd|launchd|windows}
-clauster reap-environments    # reap ghost bridge environments (dry-run by default)
-clauster keepers              # list or stop orphaned pty keepers
-clauster usage <transcript>   # token + approximate cost for a session transcript
-```
-
-Headless **read** commands drive the same engine the web UI uses, with no server
-running — they are read-only and never write the running service's shared state.
-`projects`, `status`, and `sessions` take `--json` for scriptable output.
-
-```text
-clauster projects                  # list discoverable projects (git / trust / bypass)
-clauster status                    # list bridge instances and their status
-clauster sessions                  # list live working sessions (claude agents)
-clauster logs <instance> [-f]      # tail a bridge's redacted log (--follow to stream)
-clauster open <instance>           # print a bridge's connect URL (--launch opens a browser)
-```
-
-Headless **write** commands spawn and stop bridges through that same engine —
-identical mode policy, singleton cap, and option validation to the dashboard. Both
-take `--json`; `start` exits non-zero on failure (`2` = bad request — unknown
-project, untrusted directory, invalid option; `1` = clauster tried and could not —
-bridge cap or launch failure). They are meant for driving clauster with **no
-server running**, but a concurrent live server is safe: the two processes
-serialize their per-project spawn/stop sections on a cross-process file lock in
-the deployment state dir, the spawn re-checks the on-disk bridge record under
-that lock (a bridge the server already started is handed back or reattached,
-never duplicated), and every state write merges onto the store's current
-contents — a record the other process added or removed in the meantime stays
-added or removed. (On Windows the file lock is unavailable, so two *processes*
-fall back to the atomic-write + re-detect behavior; a single process is always
-fully serialized.)
-
-```text
-clauster start <project> [--mode standard|pty] [--spawn-mode …] [--permission-mode …] \
-               [--name NAME] [--sandbox default|on|off] [--trust] [--json]
-clauster stop  <instance> [--json]        # stop a bridge by id / prefix / identity
-```
-
-`--mode` picks the bridge mode with no hidden coercion (the two modes are not
-interchangeable); `--trust` accepts the workspace-trust dialog before starting
-(otherwise an untrusted directory is refused). Sending a conversation turn to a
-running hosted session is not a headless command — it needs the live server.
+Everything else — the secret/token helpers, `doctor`, backup/restore,
+`config reconcile`, `keepers`, `deps`, the headless read/write commands
+(`projects`, `status`, `sessions`, `logs`, `open`, `start`, `stop`), `usage`,
+and the MCP server — is catalogued in
+[CLI commands](reference/cli.md).
 
 `clauster doctor` confirms `claude` is found and new enough and that
 `projects_root` and the state dir are usable — run it before your first spawn
