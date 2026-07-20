@@ -109,7 +109,7 @@ docs = [
     # engine in the docs env that injects text into builds) and caps mkdocs<=1.6.1,
     # blocking MkDocs upgrades. Keep 1.2.2 until the maintainer decides otherwise —
     # do not accept a Renovate bump to 1.2.3.
-    "mkdocs-redirects==1.2.2",
+    "mkdocs-redirects==1.2.3",
     # Surfaces the root community-health files (UPGRADING, CHANGELOG, CONTRIBUTING,
     # SUPPORT, SECURITY) on the site while they stay canonical at the repo root.
     "mkdocs-include-markdown-plugin>=6.2",
