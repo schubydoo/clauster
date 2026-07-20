@@ -67,7 +67,7 @@ nav:
       - Installation: installation.md
   - Concepts:
       - How Clauster works: architecture.md
-      - Security model: security.md
+      - How Clauster secures itself: security.md
       - Privacy: privacy.md
   - Guides:
       - Configuration: configuration.md
@@ -83,4 +83,4 @@ nav:
   - Project:
       - Contributing: contributing.md
       - Support: support.md
-      - Security policy: security-policy.md
+      - Reporting a vulnerability: security-policy.md
