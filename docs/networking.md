@@ -98,7 +98,7 @@ falling back to plain HTTP. The key material is never logged.
 
 Clauster can generate and manage a self-signed RSA-2048 cert+key pair for you,
 no external tools required. This requires the `cryptography` package (already a
-core dependency from v0.13 onwards):
+core dependency since 0.13):
 
 ```yaml
 projects_root: ~/code
