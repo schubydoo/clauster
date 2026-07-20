@@ -79,6 +79,11 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 - Native Interactive Session mode (`claude.launch_mode: pty`).
 - Ghost-environment reaper (CLI always available; dashboard gated by
   `reaper.ui_enabled`).
+- Dashboard **login shepherd** (`login_shepherd.enabled`, default off) — when
+  the runtime `claude` account logs out or its token expires, sign it back in
+  from the browser (subscription OAuth, plus a separately-gated long-lived
+  `setup-token` mode) instead of SSHing in. See the
+  [`login_shepherd` reference](configuration.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig).
 - Background agents (**experimental**) — list / dispatch / stop `claude --bg`
   sessions from a dashboard panel (`/api/agents`); rides Claude Code's agent-view
   research preview, so it may change with the upstream CLI.
@@ -99,7 +104,9 @@ Interactive Session mode, this *recaps* the prior conversation rather than truly
 - [Networking](networking.md) — the loopback / non-loopback auth matrix.
 - [MCP server](mcp.md) — the read-only `clauster mcp` stdio server.
 - [Architecture](architecture.md) — module map and bridge lifecycle.
-- [Operations](operations.md) — monitoring + troubleshooting runbook.
+- [Operations](operations.md) — monitoring and the operational runbook.
+- [Troubleshooting](troubleshooting.md) — symptom-first fixes, with the exact
+  error strings you can search for.
 
 ## Stack
 

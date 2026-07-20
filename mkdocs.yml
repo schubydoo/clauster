@@ -71,6 +71,7 @@ nav:
       - Privacy: privacy.md
   - Guides:
       - Configuration: configuration.md
+      - The in-app config editor: guides/config-editor.md
       - Networking & exposing: networking.md
   - Reference:
       - Public API: public-api.md
