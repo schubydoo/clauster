@@ -449,6 +449,14 @@ reference](configuration.md#logs-bridge-log-rotation-redaction-logsconfig) ·
 | `version` | build up to date | upstream has a newer release / stale checkout |
 | `systemd` | `KillMode=process` (bridges survive a restart) | a restart would kill live pty bridges |
 | `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |
+| `workspace-trust` | `projects_root is trusted` | an untrusted root — spawns will stall on the trust prompt (see above) |
+
+Doctor can also emit **conditional rows** that appear only when applicable on
+your platform and config: `extra:<name>` for an optional Python extra (a warn
+shows its install hint) and `binary:<name>` for a managed binary dependency —
+`shawl` on Windows, `claustrum` when `claustrum.enabled` — where a warn shows
+the `clauster deps install <name>` remedy. These warn, never fail: a missing
+optional piece leaves a feature dormant without flipping doctor's exit code.
 
 ## Still stuck — filing a useful issue
 
