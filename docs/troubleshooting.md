@@ -1,0 +1,497 @@
+# Troubleshooting
+
+Symptom-first fixes for an install that is not behaving. Every section follows
+the same shape: what you see (with the verbatim error string, so search finds
+it), the most likely cause, the command to run, and a link to the page that
+explains the mechanism.
+
+## Start here — three commands
+
+```sh
+clauster doctor                        # config, claude binary, login, trust,
+                                       # state_dir, port — explained below
+curl -s http://127.0.0.1:7621/healthz  # liveness (default port 7621)
+journalctl -u clauster -n 100          # server log — or: docker logs <name>
+```
+
+Bridge debug logs live under `<state_dir>/logs/` (default `~/.clauster/logs/`),
+one file per spawn named `<label>-<timestamp>-<seq>.log`. What `doctor` and
+`/healthz` report is described under
+[Health checks](operations.md#health-checks); how to read a bridge log is in
+[Reading the bridge debug log](operations.md#reading-the-bridge-debug-log).
+
+## The dashboard won't load
+
+### "connection refused" / the page just times out
+
+**What you see:** the browser reports `ERR_CONNECTION_REFUSED` or times out;
+`curl` says `Connection refused`.
+
+**Most likely cause:** Clauster is not running, crashed at startup (see
+[It won't start at all](#it-wont-start-at-all)), or is on a different port
+than the one you are hitting (default `7621`).
+
+```sh
+systemctl status clauster        # is it running? what did it last print?
+curl -s http://127.0.0.1:7621/healthz   # from the host itself
+ss -tlnp | grep 7621             # is anything listening on the port?
+```
+
+**Mechanism:** [Networking — loopback vs
+non-loopback](networking.md#loopback-vs-non-loopback).
+
+### The page loads locally but not from another machine
+
+**What you see:** `curl http://127.0.0.1:7621/healthz` works on the host, but
+the same port from your laptop or phone refuses to connect.
+
+**Most likely cause:** Clauster binds `127.0.0.1` by default, so only the host
+itself can reach it. Binding a LAN address (`host: 0.0.0.0`) requires enforced
+auth — see the "refusing non-loopback host" refusal under
+[I can't get in](#i-cant-get-in) — or a reverse proxy in front of the
+loopback bind.
+
+**Mechanism:** [The auth / networking
+matrix](networking.md#the-auth-networking-matrix).
+
+### The container exits immediately after `docker run`
+
+**What you see** (in `docker logs <name>`): one of
+
+```text
+exec /usr/local/bin/claude: no such file or directory
+claude: not found
+```
+
+**Most likely cause:** the official image is Alpine-based (musl libc), and you
+bind-mounted a **glibc** build of `claude` from the host into the container.
+The file is present, but the glibc loader it needs is not, so exec fails with
+a misleading "no such file or directory".
+
+**The fix:** mount a musl build of `claude` instead, or derive your own image
+that installs one (the installer needs `bash`):
+
+```sh
+apk add --no-cache bash curl && curl -fsSL https://claude.ai/install.sh | bash
+```
+
+A container can also exit immediately because of a config refusal — a
+non-loopback bind without enforced auth, or `password_required` without a
+hash. Check `docker logs` for the strings in
+[I can't get in](#i-cant-get-in).
+
+**Mechanism:** [Installation — Docker](installation.md#docker) ·
+[Networking — Docker](networking.md#docker).
+
+## I can't get in
+
+### I get a 403 after putting it behind nginx / Caddy / Traefik
+
+**What you see:** the proxy reaches Clauster, but requests are denied with
+`403`.
+
+**Most likely cause:** trusted-header (forward-auth) mode is misconfigured —
+the request does not arrive from an IP in the trusted-proxy list, or the
+identity header the proxy is supposed to inject is missing or stripped.
+Test directly against the Clauster port (bypassing the proxy) to isolate
+which side is denying.
+
+**Mechanism:** [Behind a reverse proxy](networking.md#behind-a-reverse-proxy)
+· [Trusted-header (forward-auth)
+mode](networking.md#trusted-header-forward-auth-mode).
+
+### Login redirects in a loop / the session cookie doesn't stick
+
+**What you see:** the password is accepted but you land back on the login
+page; every click bounces you to `/login`.
+
+**Most likely cause:** the signed session cookie never makes it back —
+a proxy stripping `Cookie`/`Set-Cookie`, the browser blocking the cookie, or
+mixing origins (reaching the same instance via both `http://` and `https://`
+or via two hostnames). Try a private-browsing window directly against the
+Clauster port; if that works, the proxy layer is eating the cookie.
+
+**Mechanism:** [Behind a reverse proxy](networking.md#behind-a-reverse-proxy)
+· [Security — sessions & cookies](security.md#sessions-cookies).
+
+### "password_required but no password_hash set"
+
+**What you see:** `clauster doctor` fails the `auth` row with
+`password_required but no password_hash set`, and startup refuses with:
+
+```text
+auth.password_required is set but auth.password_hash is empty. Generate one
+with `clauster hash-password` (or set CLAUSTER_AUTH_PASSWORD_HASH).
+```
+
+**Most likely cause:** password login is enabled but no hash is configured.
+Clauster fails closed rather than serving a login form nobody can pass.
+
+```sh
+clauster hash-password    # prints the hash to paste into auth.password_hash
+```
+
+**Mechanism:** [Security — passwords](security.md#passwords) ·
+[`auth` config reference](configuration.md#auth-authentication-authconfig).
+
+### "refusing non-loopback host ... without enforced auth" — it refuses to start
+
+**What you see:** startup aborts (or `doctor` fails the `auth` row with
+`non-loopback host <x> without enforced auth`):
+
+```text
+refusing non-loopback host='0.0.0.0' without enforced auth. Set auth.enabled:
+true together with auth.password_required (+ a hash from `clauster
+hash-password`), auth.reverse_proxy.enabled, or auth.api_token_hash (from
+`clauster hash-token`) — or, to opt out on a trusted LAN,
+auth.allow_unauthenticated_network.
+```
+
+**Most likely cause:** you changed `host` to a LAN/all-interfaces address
+without configuring an auth method — deliberate fail-closed behavior, since
+an open dashboard on a network port hands out control of your machine. Follow
+the message: enable one of the listed auth methods, or explicitly opt out
+with `auth.allow_unauthenticated_network` on a trusted network.
+
+**Mechanism:** [Authentication
+(fail-closed)](security.md#authentication-fail-closed) · [Password auth on a
+non-loopback bind](networking.md#password-auth-on-a-non-loopback-bind).
+
+## It won't start at all
+
+### "address already in use" — port already taken
+
+**What you see:** startup dies with an OS-level `address already in use`
+error; `clauster doctor` warns on the `port` row:
+`7621 already in use (Clauster already running?)`.
+
+**Most likely cause:** another Clauster (often a still-running service unit)
+or an unrelated process owns the port.
+
+```sh
+ss -tlnp | grep 7621     # who owns it?
+```
+
+Stop the other process, or change `port` in `clauster.yml`.
+
+### "not writable" / permission denied writing state
+
+**What you see:** `doctor` fails the `state_dir` row with
+`<state_dir> not writable: ...` or
+`<state_dir> can't be created: <ancestor> not writable`.
+
+**Most likely cause:** the user running Clauster (often a dedicated service
+user under systemd) does not own the state directory (default `~/.clauster`).
+
+```sh
+ls -ld ~/.clauster       # as the service user — who owns it?
+```
+
+Fix ownership, or point `state_dir` somewhere the service user can write.
+
+**Mechanism:** [Run as a systemd
+service](installation.md#run-as-a-systemd-service-linux).
+
+### "no config found" / "invalid config"
+
+**What you see:** `doctor` fails the `config` row with `no config found: ...`
+or `invalid config: ...`; `clauster run` exits with a config validation error.
+
+**Most likely cause:** no `clauster.yml` where Clauster looks for one, or a
+YAML/typing mistake in it. The `invalid config` detail names the offending
+key.
+
+```sh
+clauster doctor -c /path/to/clauster.yml   # same file the service uses
+```
+
+**Mechanism:** [Configuration — loading &
+overrides](configuration.md#loading-overrides).
+
+### "database migration failed; refusing to start"
+
+**What you see** (server log):
+
+```text
+database migration to head failed; refusing to start: ...
+```
+
+followed by a `database migration failed: ...` error.
+
+**Most likely cause:** the state database is ahead of the binary (it was
+migrated by a newer build and you downgraded), or the file is corrupted.
+Clauster refuses to run against a schema it does not understand rather than
+guessing.
+
+**The fix:** upgrade back to (at least) the version that migrated the DB, or
+restore a backup — see [Recovering from a corrupted state
+database](operations.md#recovering-from-a-corrupted-state-database) and
+[upgrading.md](upgrading.md).
+
+## A bridge won't start, or dies right after starting
+
+### The card sits on "starting" then goes to "error"
+
+**What you see:** the project card shows `starting`, then flips to `error`.
+
+**Most likely cause:** the bridge spawned but never registered an environment
+within `startup_grace_seconds` — most often a `claude` login problem (the
+bridge starts, then hangs unauthenticated).
+
+```sh
+clauster doctor                          # read the claude-login row
+tail ~/.clauster/logs/<label>-*.log      # the bridge's own account of it
+```
+
+**Mechanism:** [Reading the bridge debug
+log](operations.md#reading-the-bridge-debug-log) · [Bridge
+lifecycle](architecture.md#bridge-lifecycle).
+
+### The card goes straight to "crashed"
+
+**What you see:** the card shows `crashed` shortly after spawn.
+
+**Most likely cause:** the `claude` process exited unexpectedly. The bridge
+logs its failure reason to its debug file before exiting, and a spawn that
+fails outright also captures a stderr tail — so the card's log view (or the
+on-disk log) usually names the cause.
+
+### "spawn of ... failed to launch"
+
+**What you see** (server log): `spawn of <name> failed to launch: ...`
+(or `pty spawn of <name> failed to launch: ...` for an Interactive Session).
+
+**Most likely cause:** the `claude` process could not be started at all —
+a bad binary path, a permissions problem, or a PATH issue (next section).
+The tail of the message is the underlying OS error; start there.
+
+### "claude binary 'claude' not found on PATH; Clauster cannot start."
+
+**What you see:** exactly that string, from `clauster run` or `doctor`'s
+`claude` row.
+
+**Most likely cause:** Clauster runs in an environment whose `PATH` does not
+include `claude` — classically a systemd unit (minimal `PATH`) with `claude`
+installed per-user or via nvm-managed node.
+
+**The fix**, in order of preference:
+
+1. Set `claude.binary` in `clauster.yml` to the absolute path of the binary.
+2. Add its directory to the service unit's `PATH` (see the systemd notes in
+   [Installation](installation.md#run-as-a-systemd-service-linux)).
+3. For nvm-managed node tooling in spawned bridges, see `claude.path_append`
+   and `claude.node_from_nvm` in the
+   [`claude` config reference](configuration.md#claude-binary-bridge-spawn-claudeconfig)
+   and [npx/node MCP servers under
+   systemd](configuration.md#npxnode-mcp-servers-under-systemd-nvm).
+
+### The trust prompt keeps blocking the spawn
+
+**What you see:** a bridge spawns but sits waiting on Claude's workspace-trust
+prompt instead of becoming ready.
+
+**Most likely cause:** the project directory is not trusted and Clauster's
+trust pre-write did not cover it (for example, the project lives outside
+`projects_root`). Trust is ancestor-inheriting: trusting `projects_root`
+covers every project under it.
+
+**Mechanism:** [Security — workspace trust](security.md#workspace-trust).
+
+## Claude itself is the problem
+
+### "not logged in" / "access token has expired; re-authenticate with `claude`"
+
+**What you see:** `doctor` warns on the `claude-login` row —
+``not logged in (... missing) — run `claude` to authenticate; bridges inherit
+the operator's login`` or ``logged out (no access token in ...) — re-run
+`claude` `` — or an operation fails with
+``access token has expired; re-authenticate with `claude` `` or
+`no claudeAiOauth.accessToken in ...`.
+
+**Most likely cause:** the account that runs Clauster has no usable `claude`
+credentials. Bridges inherit the *operator's* login, so a bridge can spawn
+and then hang unauthenticated.
+
+**The fix:** run `claude` interactively **as the service user** and complete
+login, or use the dashboard login flow
+([`login_shepherd`](configuration.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)).
+An `ANTHROPIC_API_KEY` in the service environment also satisfies the check.
+
+### The claude version is too old (min_version)
+
+**What you see:** `doctor` fails the `claude` row with
+``<version> < required <min_version> — run `claude update` (or reinstall via
+the installer) to reach >= <min_version>``.
+
+**The fix:** `claude update` (as the same user Clauster runs as), then re-run
+`clauster doctor`.
+
+## An Interactive Session (pty) bridge is wedged
+
+### The live log tail is silent or frozen
+
+**What you see:** the dashboard's live log view stops updating.
+
+**Most likely cause:** the WebSocket stream died, not the bridge. Check
+whether the on-disk log is still growing:
+
+```sh
+tail -f ~/.clauster/logs/<label>-*.log
+```
+
+If it grows, the bridge is fine — reload the dashboard to reconnect the
+stream. If it is silent too, treat it as a wedged bridge: stop and resume it
+from the card.
+
+### The bridge survived a restart and I can't stop it
+
+**What you see:** after a Clauster restart there is a `claude` process (and
+its keeper) still running with no project card that controls it.
+
+**Most likely cause:** pty (Interactive Session) bridges are designed to
+survive a `systemctl restart` under the shipped unit's `KillMode=process`;
+normally Clauster reattaches to them at startup. One that was orphaned
+instead is cleaned up with:
+
+```sh
+clauster keepers               # list orphaned pty keepers (no project card)
+clauster keepers --kill <pid>  # stop one by its keeper PID
+```
+
+**Mechanism:** [`clauster keepers`](operations.md#clauster-keepers-stop-an-orphaned-pty-keeper)
+· [the `KillMode` / restart caveat](operations.md#restart).
+
+### Is the bridge dead, or is the stream dead? — how to tell
+
+Three probes, from cheapest to most direct:
+
+1. **On-disk log growing?** (`tail -f` as above) — growing means the bridge is
+   alive and only the dashboard stream is stale; reload the page.
+2. **Card status** — `crashed`/`error` mean the bridge is gone (the status
+   table is in
+   [Reading the bridge debug log](operations.md#reading-the-bridge-debug-log)).
+3. **Process there?** `pgrep -a -f 'claude.*remote-control'` — a live process
+   with a dead card usually means an orphaned keeper (previous section).
+
+## Everything looks fine but the session never responds
+
+### Hosted / Direct Session: "cannot connect to claustrum"
+
+**What you see:** a Direct Session fails with
+`cannot connect to claustrum at <state_dir>/claustrum/daemon.sock`, or the
+API returns `hosted channel unavailable: claustrum daemon not connected`.
+
+**Most likely cause:** the claustrum daemon is not running (or not installed —
+it is an optional dependency), or its socket path is wrong.
+
+```sh
+clauster deps list                         # is claustrum installed?
+tail ~/.clauster/claustrum/daemon.log      # what did the daemon last say?
+```
+
+**Mechanism:** [`claustrum` config
+reference](configuration.md#claustrum-hosted-live-view-channel-claustrumconfig).
+
+### "claustrum daemon unavailable at startup"
+
+**What you see** (server log): `claustrum daemon unavailable at startup: ...`
+— Clauster keeps running, but Direct Sessions are unavailable. Related
+messages: `running claustrum daemon rejected the persisted token` and
+`claustrum daemon connection lost`.
+
+**Most likely cause:** the daemon failed to start or an old daemon is running
+with a token Clauster no longer holds. `/healthz` reflects claustrum health;
+restarting Clauster retries the connect-or-spawn cycle.
+
+### Reattach failed after a restart
+
+**What you see:** after a Clauster restart, a previously live Direct Session
+card shows an error like `reattach failed: ...` (server log:
+`hosted: reattach of <id> failed: ...`).
+
+**Most likely cause:** the underlying daemon process ended while Clauster was
+down, so there was nothing to reattach to. The transcript is not lost — start
+a new Direct Session for the project and resume from the captured session.
+
+## Getting more detail
+
+### Raising the log level
+
+The server log level is **not currently adjustable** — Clauster runs uvicorn
+pinned at `info`. A verbosity knob is tracked in
+[#993](https://github.com/schubydoo/clauster/issues/993). Note that the
+`logs.*` config keys control the **bridge debug log** stream (rotation, ANSI
+stripping, redaction), not server verbosity.
+
+### Reading the bridge debug log (on-disk vs the redacted stream)
+
+The dashboard's live tail is ANSI-stripped and redacted; the on-disk file
+under `<state_dir>/logs/` is, by default, the **verbatim** debug log
+(`logs.redact_session_url: false` — redaction happens only over the
+WebSocket). Full walkthrough:
+[Reading the bridge debug log](operations.md#reading-the-bridge-debug-log) ·
+[`logs` config
+reference](configuration.md#logs-bridge-log-rotation-redaction-logsconfig) ·
+[how redaction works](security.md#log-redaction).
+
+### What `clauster doctor` checks actually mean
+
+Doctor's output has two kinds of rows. The table lists the **core rows**,
+present in every run:
+
+| Row | OK means | A warn/fail usually means |
+| --- | --- | --- |
+| `config` | `clauster.yml` found and valid | `no config found: ...` / `invalid config: ...` |
+| `claude` | binary found, version ≥ `min_version` | not on PATH, or too old — see above |
+| `claude-login` | usable `claude` credentials | not logged in — bridges will spawn then hang |
+| `projects_root` | the directory exists | wrong path in config |
+| `git` | `git` on PATH | create/clone features unavailable |
+| `state_dir` | writable | permissions — see above |
+| `auth` | configuration consistent | one of the two auth refusals above |
+| `port` | port free | `already in use (Clauster already running?)` |
+| `version` | build up to date | upstream has a newer release / stale checkout |
+| `systemd` | `KillMode=process` (bridges survive a restart) | a restart would kill live pty bridges |
+| `node-toolchain` | node resolvable for npx MCP servers | nvm-only node invisible to bridges |
+| `workspace-trust` | `projects_root is trusted` | an untrusted root — spawns will stall on the trust prompt (see above) |
+
+The rest belong to two **prefixed families** that grow as optional pieces are
+added, so read the prefix rather than expecting this page to enumerate them:
+
+- **`extra:<name>`** — an optional Python extra. Today: `extra:pyte` (live
+  terminal view), `extra:apprise` (outbound notifications), and on Windows
+  `extra:pywinpty` (Interactive Sessions). A warn carries the exact install
+  hint (e.g. `pip install 'clauster[notify]'`).
+- **`binary:<name>`** — a bundled companion binary managed by
+  `clauster deps`. Today: `binary:claustrum` (Direct Session daemon, shown
+  when `claustrum.enabled`) and on Windows `binary:shawl` (service wrapper).
+  A warn shows the `clauster deps install <name>` remedy.
+
+Family rows appear only when applicable on your platform and config, and they
+warn, never fail: a missing optional piece leaves a feature dormant without
+flipping doctor's exit code. `clauster deps list` shows the same inventory
+with install state.
+
+## Still stuck — filing a useful issue
+
+### What to attach
+
+- `clauster --version` and your OS / install method (pip, binary, Docker...).
+- Full `clauster doctor` output — it is designed to be safe to share.
+- The relevant server-log excerpt (`journalctl -u clauster` / `docker logs`).
+- For bridge problems: the tail of the bridge's
+  `<label>-<timestamp>-<seq>.log` — **scrubbed first, see below**.
+
+The issue tracker is the support channel — see [Support](support.md).
+
+### Scrubbing logs before you post them
+
+!!! warning "The on-disk bridge log is not redacted by default"
+    The redaction you see in the dashboard applies to the live stream only —
+    with the default `logs.redact_session_url: false`, the on-disk log under
+    `<state_dir>/logs/` is verbatim, including session URLs that act as
+    bearer-equivalent credentials. Set `logs.redact_session_url: true` and
+    reproduce if possible, then **review the log and scrub any remaining
+    session URLs or secrets before sharing it** — even with redaction
+    enabled, the redactor only recognizes known token shapes.
+
+**Mechanism:** [Log redaction](security.md#log-redaction).

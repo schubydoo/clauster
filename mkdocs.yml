@@ -36,6 +36,17 @@ theme:
     - search.suggest
     - search.highlight
 
+plugins:
+  # Listing `plugins:` at all disables the implicit default set, so `search` must
+  # be re-listed explicitly or the site silently loses its search box.
+  - search
+  # Every moved or renamed page MUST add `old-path.md: new-path.md` here — this is
+  # the only thing keeping bookmarked/externally-linked URLs alive, and
+  # `mkdocs build --strict` will NOT flag a missing entry.
+  - redirects:
+      redirect_maps: {}
+  - include-markdown
+
 markdown_extensions:
   - admonition
   - attr_list
@@ -51,13 +62,25 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Quickstart: quickstart.md
-  - Installation: installation.md
-  - Configuration: configuration.md
-  - Public API: public-api.md
-  - Security: security.md
-  - Privacy: privacy.md
-  - Networking: networking.md
-  - Architecture: architecture.md
-  - Operations: operations.md
-  - MCP server: mcp.md
+  - Start here:
+      - Quickstart: quickstart.md
+      - Installation: installation.md
+  - Concepts:
+      - How Clauster works: architecture.md
+      - How Clauster secures itself: security.md
+      - Privacy: privacy.md
+  - Guides:
+      - Configuration: configuration.md
+      - Networking & exposing: networking.md
+  - Reference:
+      - Public API: public-api.md
+      - MCP server: mcp.md
+  - Operations:
+      - Operations runbook: operations.md
+      - Troubleshooting: troubleshooting.md
+      - Upgrading: upgrading.md
+      - Changelog: changelog.md
+  - Project:
+      - Contributing: contributing.md
+      - Support: support.md
+      - Reporting a vulnerability: security-policy.md

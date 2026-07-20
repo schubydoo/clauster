@@ -4,7 +4,7 @@ Thanks for your interest in Clauster!
 
 ## Code of conduct
 
-This project adheres to the [Contributor Covenant](CODE_OF_CONDUCT.md) code of
+This project adheres to the [Contributor Covenant](https://github.com/schubydoo/clauster/blob/main/CODE_OF_CONDUCT.md) code of
 conduct. By participating, you are expected to uphold it; please report
 unacceptable behavior as described there.
 
@@ -18,12 +18,12 @@ cp clauster.yml.example clauster.yml   # edit projects_root
 uv run clauster
 ```
 
-A [`justfile`](justfile) and a [`Makefile`](Makefile) wrap these commands, so
+A [`justfile`](https://github.com/schubydoo/clauster/blob/main/justfile) and a [`Makefile`](https://github.com/schubydoo/clauster/blob/main/Makefile) wrap these commands, so
 `just setup` / `make setup` do the first three lines and `just check` /
 `make check` run every pre-PR gate below in one shot. Both run the same commands —
 use whichever you have (`just` is a separate install; `make` ships with most
 systems). The `uv run …` invocations documented here remain the source of truth.
-Local dev pins Python **3.13** via [`.python-version`](.python-version) to match
+Local dev pins Python **3.13** via [`.python-version`](https://github.com/schubydoo/clauster/blob/main/.python-version) to match
 the CI coverage-gate interpreter (`uv` still supports the full 3.11+ floor).
 
 ## Before opening a PR
@@ -110,7 +110,7 @@ subset of the OS/Python legs; the full matrix runs on release and fork PRs.
   thread on the thread itself — unresolved review threads block the merge.
 
 AI coding agents get the same rules in machine-facing form from
-[AGENTS.md](AGENTS.md) (Claude Code additionally reads [CLAUDE.md](CLAUDE.md)).
+[AGENTS.md](https://github.com/schubydoo/clauster/blob/main/AGENTS.md) (Claude Code additionally reads [CLAUDE.md](https://github.com/schubydoo/clauster/blob/main/CLAUDE.md)).
 If you change a workflow or gate, update those files in the same PR so they don't
 drift.
 
@@ -125,7 +125,7 @@ reading the bridge debug log, the `KillMode` restart caveat, and backup/recovery
 
 Clauster **self-hosts** its front-end dependencies (no CDN) so the dashboard works
 on an air-gapped / loopback deploy and `script-src` / `connect-src` stay `'self'`.
-Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/static/vendor)
+Vendored assets live under [`src/clauster/static/vendor/<dep>/`](https://github.com/schubydoo/clauster/tree/main/src/clauster/static/vendor)
 (Alpine is the one exception — it sits flat at `static/alpine.csp.min.js`). To add or update one:
 
 1. **Fetch the published dist** — `npm pack <pkg>@<version>` then `tar xzf` and copy the
@@ -133,7 +133,7 @@ Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/st
    add the package to `package.json` — there's no runtime `dependencies` block; the
    tarball is the source.
 2. **Pin it for Renovate** — add a two-line block to
-   [`static/vendor/versions.txt`](src/clauster/static/vendor/versions.txt) in the exact
+   [`static/vendor/versions.txt`](https://github.com/schubydoo/clauster/blob/main/src/clauster/static/vendor/versions.txt) in the exact
    shape the `customManager` regex matches:
 
    ```text
@@ -148,7 +148,7 @@ Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/st
 3. **License + provenance** — copy the upstream `LICENSE` to `vendor/<dep>/LICENSE` and
    write a `vendor/<dep>/README.md` (package, version, a file→source table, and an
    `## Updating` recipe). When the asset is **shipped to users**, also add a section to
-   [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and credit it in the dashboard
+   [`THIRD_PARTY_NOTICES.md`](https://github.com/schubydoo/clauster/blob/main/THIRD_PARTY_NOTICES.md) and credit it in the dashboard
    footer (guarded by `test_dashboard_footer_credits_vendored_assets`).
 4. **Reference it cache-busted** — link it in the template with `?v={{ asset_version }}`
    (the clauster version), so an upgrade busts the `immutable` static cache. Tests in
@@ -157,4 +157,4 @@ Vendored assets live under [`src/clauster/static/vendor/<dep>/`](src/clauster/st
 ## License
 
 By contributing, you agree that your contributions are licensed under the
-project's [Apache-2.0 License](LICENSE).
+project's [Apache-2.0 License](https://github.com/schubydoo/clauster/blob/main/LICENSE).
