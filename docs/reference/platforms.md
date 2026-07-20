@@ -40,7 +40,7 @@ Bracketed numbers point at the [notes](#notes) below.
    `clauster deps install pty` on the standalone binary — the extra is
    intentionally not bundled there, and `deps install` side-loads it instead
    ([#904](https://github.com/schubydoo/clauster/issues/904); see
-   [`clauster deps`](../operations.md#clauster-deps-inspect-and-manage-optional-extras)).
+   [`clauster deps`](cli.md#clauster-deps-inspect-and-manage-optional-extras)).
 3. **Stopping** an Interactive Session on Windows is a hard kill: the bridge
    lives in the keeper's *separate* ConPTY console, so the graceful
    `CTRL_BREAK` can't reach it — the local process is reaped, but the cloud

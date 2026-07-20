@@ -82,6 +82,7 @@ nav:
       - Networking & exposing: networking.md
   - Reference:
       - Configuration reference: reference/config.md
+      - CLI commands: reference/cli.md
       - Public API: public-api.md
       - MCP server: mcp.md
       - Platform support: reference/platforms.md
