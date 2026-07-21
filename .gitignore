@@ -41,3 +41,7 @@ scratch/
 
 # mkdocs-material build output (`mkdocs build`) — generated, never committed.
 /site/
+
+# PyInstaller binary build output (`pyinstaller clauster.spec`) — generated, never committed.
+/build/
+/dist/
