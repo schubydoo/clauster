@@ -55,14 +55,16 @@ def test_get_renders_form_with_csp(tmp_path):
 
 
 def test_setup_form_opts_non_credential_inputs_out_of_autofill(tmp_path):
-    # #1036: the non-credential setup inputs carry the per-vendor no-autofill attrs; the two
-    # password fields do NOT (a manager should still offer to save the new password).
+    # #1036: EVERY non-password setup input opts out of autofill (per field); the two password
+    # fields do NOT (a manager should still offer to save the new password).
+    from conftest import audit_autofill
+
     _, client, _, _ = _app_and_paths(tmp_path)
     html = client.get("/").text
-    assert 'data-lpignore="true"' in html and "data-1p-ignore" in html
-    assert (
-        html.count("data-1p-ignore") == 3
-    )  # 3 non-password inputs; the 2 password fields excluded
+    missing, pw_optout = audit_autofill(html)
+    assert not missing, f"non-credential setup inputs missing the opt-out: {missing}"
+    assert not pw_optout, f"setup password fields wrongly opted out: {pw_optout}"
+    assert 'data-lpignore="true"' in html  # the shared global rendered in this separate env
 
 
 def test_healthz(tmp_path):

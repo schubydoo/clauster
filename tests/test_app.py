@@ -75,15 +75,16 @@ def test_dashboard_renders(write_config):
 
 
 def test_dashboard_non_credential_inputs_opt_out_of_autofill(write_config):
-    # #1036: every non-password dashboard input carries the per-vendor no-autofill attributes so a
-    # password manager stops offering to fill config rows / launch fields / the clone URL.
+    # #1036: EVERY non-password dashboard input/textarea opts out of password-manager autofill,
+    # and no credential field does — audited per field, not just page-wide.
+    from conftest import audit_autofill
+
     html = _client(write_config).get("/").text
-    for attr in (
-        'data-lpignore="true"',
-        "data-1p-ignore",
-        "data-bwignore",
-        'data-form-type="other"',
-    ):
+    missing, pw_optout = audit_autofill(html)
+    assert not missing, f"non-credential inputs missing the opt-out: {missing}"
+    assert not pw_optout, f"password inputs wrongly opted out of autofill: {pw_optout}"
+    # ...and the full per-vendor set is present (not just data-lpignore).
+    for attr in ("data-1p-ignore", "data-bwignore", 'data-form-type="other"'):
         assert attr in html
 
 
