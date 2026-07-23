@@ -8,6 +8,7 @@ asserts the wired UI round-trips to a real running server.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -260,3 +261,79 @@ def test_modal_ignores_drag_that_releases_on_backdrop(
         "ev('mousedown'); ev('mouseup'); ev('click'); })();"
     )
     browser.expect_hidden('[data-test="cfg-modal"]')
+
+
+def test_advanced_save_banner_scrolls_into_view(
+    browser: AgentBrowser, advanced_config_server: Server, e2e_password: str
+) -> None:
+    """A successful Advanced save reveals its banner even from the panel foot (#1031).
+
+    Discriminating setup: after editing, park the scrollable modal body at the
+    BOTTOM (where the Save button lives) — without the reveal, the body stays
+    parked there and the saved-banner (top of the panel) remains outside the
+    scrollport, failing the containment check. Save is disabled when nothing is
+    dirty, so the success path is the one a user can actually reach.
+    """
+    _login(browser, advanced_config_server.url, e2e_password)
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[data-test="adv-password"]')
+    browser.fill('[data-test="adv-password"]', e2e_password)
+    browser.click('[data-test="adv-unlock"]')
+    field = '[id="adv-clone.timeout_seconds"]'
+    browser.expect_visible(field)
+    browser.fill(field, "139")
+
+    # Park the scrollable modal body at the bottom, like a user who just found Save.
+    browser.eval_js(
+        "(() => { const b = document.querySelector('[data-test=\"cfg-modal\"] .modal-body');"
+        " b.scrollTop = b.scrollHeight; })()"
+    )
+    browser.click('[data-test="adv-save"]')
+    browser.expect_visible('[data-test="adv-saved"]')
+
+    # The smooth scroll needs a beat; poll the banner into the modal-body scrollport.
+    deadline = time.monotonic() + 5
+    contained = False
+    while time.monotonic() < deadline and not contained:
+        contained = browser.eval_json(
+            "(() => { const body = document"
+            ".querySelector('[data-test=\"cfg-modal\"] .modal-body');"
+            " const el = document.querySelector('[data-test=\"adv-saved\"]');"
+            " const b = body.getBoundingClientRect(), r = el.getBoundingClientRect();"
+            " return r.top >= b.top && r.bottom <= b.bottom; })()"
+        )
+        if not contained:
+            time.sleep(0.25)
+    assert contained, "adv-saved banner should be scrolled into the modal-body scrollport"
+
+
+def test_advanced_jump_nav_chip_scrolls_to_panel(
+    browser: AgentBrowser, advanced_config_server: Server, e2e_password: str
+) -> None:
+    """The jump-nav renders an Advanced chip that lands the panel in view (#1032).
+
+    The Advanced panel renders outside the configSections() loop, so it needs its
+    own chip — without one it's the only section with no jump entry.
+    """
+    _login(browser, advanced_config_server.url, e2e_password)
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[data-test="cfg-jump-advanced"]')
+    browser.click('[data-test="cfg-jump-advanced"]')
+
+    # The smooth scroll needs a beat; poll the panel heading into the scrollport,
+    # below the sticky nav (scrollToSection applies the measured nav offset).
+    deadline = time.monotonic() + 5
+    landed = False
+    while time.monotonic() < deadline and not landed:
+        landed = browser.eval_json(
+            "(() => { const el = document.getElementById('cfg-sec-advanced');"
+            " const nav = document.querySelector('.cfg-nav');"
+            " const body = document"
+            ".querySelector('[data-test=\"cfg-modal\"] .modal-body');"
+            " const r = el.getBoundingClientRect(), b = body.getBoundingClientRect();"
+            " const navBottom = nav ? nav.getBoundingClientRect().bottom : b.top;"
+            " return r.top >= navBottom - 2 && r.top <= b.bottom; })()"
+        )
+        if not landed:
+            time.sleep(0.25)
+    assert landed, "Advanced panel should land below the sticky nav after the chip click"
