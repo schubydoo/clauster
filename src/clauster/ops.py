@@ -209,6 +209,36 @@ _BINARY_DEP_GATES: dict[str, Callable[[ClausterConfig], bool]] = {
     "claustrum": lambda config: config.claustrum.enabled,
 }
 
+#: Binary deps whose resolution honors an operator-configured path, mapped to
+#: ``config -> (configured_value, default_value)``. Deps absent here have no configurable
+#: path and fall back to the managed dir / bare-key ``PATH`` lookup (#1013).
+_BINARY_DEP_CONFIGURED: dict[str, Callable[[ClausterConfig], tuple[str, str]]] = {
+    "claustrum": lambda config: (
+        config.claustrum.binary,
+        type(config.claustrum).model_fields["binary"].default,
+    ),
+}
+
+
+def resolve_configured_binary(key: str, config: ClausterConfig) -> str | None:
+    """Resolve the path binary dep ``key`` will actually be spawned from, or ``None`` (#1013).
+
+    Honors an operator-configured path (e.g. ``claustrum.binary``, the documented
+    minimal-PATH workaround) via the shared :func:`deps.resolve_effective_binary`
+    precedence, so ``doctor``, the session-start preflight, and ``deps list`` all agree
+    with the daemon instead of disagreeing by construction. A dep with no configurable
+    path falls back to the managed ``<state_dir>/deps/bin`` install, then a bare-key
+    ``PATH`` lookup. Read-only.
+    """
+    wiring = _BINARY_DEP_CONFIGURED.get(key)
+    if wiring is not None:
+        configured, default = wiring(config)
+        return deps.resolve_effective_binary(key, configured, default, config.state_dir)
+    managed = deps.installed_binary_path(key, config.state_dir)
+    if managed is not None:
+        return str(managed)
+    return shutil.which(key)
+
 
 def _check_binary_deps(config: ClausterConfig) -> list[Check]:
     """Report each managed binary dependency (#904 slice 2b): OK if present, else WARN.
@@ -216,11 +246,13 @@ def _check_binary_deps(config: ClausterConfig) -> list[Check]:
     Shawl (the Windows service wrapper ``install-service`` uses) and claustrum (the Direct
     Session daemon). Off-platform/arch entries are skipped via :func:`deps.applies`, and a
     gated binary (claustrum, only when ``claustrum.enabled``) is skipped when its feature is
-    off so a non-user isn't nagged. "Present" means installed in the managed
-    ``<state_dir>/deps/bin`` dir OR already discoverable on ``PATH``. WARN, never FAIL — a
-    missing binary only leaves a dormant feature and must not flip doctor's exit code.
+    off so a non-user isn't nagged. "Present" is resolved by :func:`resolve_configured_binary`
+    — the same precedence the daemon spawns with, so a configured ``claustrum.binary`` (the
+    documented minimal-PATH workaround) counts as present instead of a false "unavailable"
+    (#1013) — covering the managed ``<state_dir>/deps/bin`` dir, ``PATH``, and an operator
+    override. WARN, never FAIL — a missing binary only leaves a dormant feature and must not
+    flip doctor's exit code.
     """
-    state_dir = config.state_dir
     checks: list[Check] = []
     for dep in deps.BINARY_DEPS:
         if not deps.applies(dep):
@@ -228,9 +260,7 @@ def _check_binary_deps(config: ClausterConfig) -> list[Check]:
         gate = _BINARY_DEP_GATES.get(dep.key)
         if gate is not None and not gate(config):
             continue
-        present = deps.installed_binary_path(dep.key, state_dir) is not None or shutil.which(
-            dep.key
-        )
+        present = resolve_configured_binary(dep.key, config) is not None
         if present:
             checks.append(Check(f"binary:{dep.key}", OK, f"{dep.label} available"))
         else:

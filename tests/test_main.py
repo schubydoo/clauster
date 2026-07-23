@@ -1120,6 +1120,10 @@ def test_deps_list_includes_shawl_binary(write_config, tmp_path, capsys):
 def test_deps_list_shawl_status_on_win32(write_config, tmp_path, monkeypatch, capsys):
     # On Windows the shawl binary row flips missing → installed once it's in the managed bin dir.
     monkeypatch.setattr(cli.deps.sys, "platform", "win32")
+    # deps list now resolves the same way doctor does (#1013), which includes a PATH lookup;
+    # stub it to a miss so the managed-dir transition is what this test exercises (and so the
+    # simulated-win32 platform doesn't drive real shutil.which into a Windows-only _winapi call).
+    monkeypatch.setattr("shutil.which", lambda name: None)
     cfg = _cfg(write_config, tmp_path)
     cli.main(["deps", "list", "-c", cfg])
     line = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("shawl"))
@@ -1130,6 +1134,18 @@ def test_deps_list_shawl_status_on_win32(write_config, tmp_path, monkeypatch, ca
     cli.main(["deps", "list", "-c", cfg])
     line2 = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("shawl"))
     assert "installed" in line2
+
+
+def test_deps_list_claustrum_on_path_shows_installed(write_config, tmp_path, monkeypatch, capsys):
+    # #1013 Bug 2: deps list must agree with doctor — a claustrum resolvable on PATH (or via a
+    # configured binary) reads as "installed" with its resolved path, not a false "missing".
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/usr/local/bin/claustrum" if "claustrum" in name else None
+    )
+    cli.main(["deps", "list", "-c", _cfg(write_config, tmp_path)])
+    line = next(x for x in capsys.readouterr().out.splitlines() if x.startswith("claustrum"))
+    assert "installed" in line
+    assert "/usr/local/bin/claustrum" in line
 
 
 def test_shawl_available_true_via_managed_dir(tmp_path, monkeypatch):
