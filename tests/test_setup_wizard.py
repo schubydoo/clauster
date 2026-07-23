@@ -54,6 +54,17 @@ def test_get_renders_form_with_csp(tmp_path):
     assert res.headers["X-Frame-Options"] == "DENY"
 
 
+def test_setup_form_opts_non_credential_inputs_out_of_autofill(tmp_path):
+    # #1036: the non-credential setup inputs carry the per-vendor no-autofill attrs; the two
+    # password fields do NOT (a manager should still offer to save the new password).
+    _, client, _, _ = _app_and_paths(tmp_path)
+    html = client.get("/").text
+    assert 'data-lpignore="true"' in html and "data-1p-ignore" in html
+    assert (
+        html.count("data-1p-ignore") == 3
+    )  # 3 non-password inputs; the 2 password fields excluded
+
+
 def test_healthz(tmp_path):
     _, client, _, _ = _app_and_paths(tmp_path)
     assert client.get("/healthz").json() == {"status": "setup"}

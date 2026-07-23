@@ -74,6 +74,19 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_dashboard_non_credential_inputs_opt_out_of_autofill(write_config):
+    # #1036: every non-password dashboard input carries the per-vendor no-autofill attributes so a
+    # password manager stops offering to fill config rows / launch fields / the clone URL.
+    html = _client(write_config).get("/").text
+    for attr in (
+        'data-lpignore="true"',
+        "data-1p-ignore",
+        "data-bwignore",
+        'data-form-type="other"',
+    ):
+        assert attr in html
+
+
 def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config, monkeypatch):
     # #534 S5 / #904: the per-bridge "Live terminal" control + the xterm.js assets render ONLY
     # when the (default-off) claude.pty_screen_enabled tap is on AND the optional `pty` extra

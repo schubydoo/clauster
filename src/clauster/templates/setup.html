@@ -34,7 +34,7 @@
             <div class="mb-3">
               <label class="form-label required" for="projects_root">Projects folder</label>
               <input class="form-control" type="text" id="projects_root" name="projects_root"
-                     placeholder="~/code" autofocus required aria-describedby="err-projects_root">
+                     placeholder="~/code" autofocus required aria-describedby="err-projects_root" {{ NO_AUTOFILL }}>
               <div class="form-hint">An existing folder whose subdirectories are your projects.</div>
               <div class="invalid-feedback" id="err-projects_root" data-error="projects_root"></div>
             </div>
@@ -43,14 +43,14 @@
               <div class="col-8">
                 <label class="form-label" for="host">Bind address</label>
                 <input class="form-control" type="text" id="host" name="host" value="127.0.0.1"
-                       aria-describedby="err-host">
+                       aria-describedby="err-host" {{ NO_AUTOFILL }}>
                 <div class="form-hint">127.0.0.1 = this machine only. Use 0.0.0.0 to allow your LAN.</div>
                 <div class="invalid-feedback" id="err-host" data-error="host"></div>
               </div>
               <div class="col-4">
                 <label class="form-label" for="port">Port</label>
                 <input class="form-control" type="number" id="port" name="port"
-                       value="{{ default_port }}" min="1" max="65535" aria-describedby="err-port">
+                       value="{{ default_port }}" min="1" max="65535" aria-describedby="err-port" {{ NO_AUTOFILL }}>
                 <div class="invalid-feedback" id="err-port" data-error="port"></div>
               </div>
             </div>

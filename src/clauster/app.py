@@ -52,6 +52,7 @@ from . import (
     ops,
     prometheus,
     pty_screen,
+    setup_wizard,
     supervisor,
     usage,
 )
@@ -704,6 +705,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     # Version-bust the vendored asset URLs so the immutable cache below is safe across
     # upgrades (templates link them as `...?v={{ asset_version }}`).
     templates.env.globals["asset_version"] = __version__
+    # Per-vendor "don't autofill" attributes for NON-credential inputs (#1036) — shared with the
+    # setup wizard's separate template env (see setup_wizard.NO_AUTOFILL). Baked into the markup so
+    # Alpine `x-for` row clones inherit it; password fields deliberately omit it (login autofill).
+    templates.env.globals["NO_AUTOFILL"] = setup_wizard.NO_AUTOFILL
 
     def _render(
         request: Request,

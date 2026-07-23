@@ -83,7 +83,7 @@
                       <template x-for="m in launchModes()" :key="m.id">
                         <label class="launch-opt" :class="lmode === m.id ? 'is-sel' : ''">
                           <input type="radio" class="form-check-input mt-1 me-2" :name="'lm-{{ p.name }}'" :value="m.id" x-model="lmode"
-                                 @change="clampPermForMode()">
+                                 @change="clampPermForMode()" {{ NO_AUTOFILL }}>
                           <span>
                             <span class="fw-medium d-block">
                               <span x-text="m.label"></span>
@@ -95,7 +95,7 @@
                       </template>
                       <!-- cloud option folds into Background -->
                       <label class="form-check small mt-1 ms-1" x-show="lmode === 'detached'" x-cloak>
-                        <input type="checkbox" class="form-check-input" data-test="launch-cloud-optin" x-model="lcloud">
+                        <input type="checkbox" class="form-check-input" data-test="launch-cloud-optin" x-model="lcloud" {{ NO_AUTOFILL }}>
                         <span class="form-check-label">also register on claude.ai</span>
                       </label>
                       <!-- With claude.ai on, a Background run is actually live and
@@ -108,7 +108,7 @@
                            composer, so launched blank it idles forever. -->
                       <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
                         <label class="form-label small mb-1" for="lprompt-{{ p.name }}">First prompt <span class="text-secondary" x-text="lcloud ? '(optional)' : '(required)'">(required)</span></label>
-                        <input id="lprompt-{{ p.name }}" class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…">
+                        <input id="lprompt-{{ p.name }}" class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…" {{ NO_AUTOFILL }}>
                         <p class="form-hint text-secondary small mt-1 mb-0" data-test="launch-bg-prompt-required"
                            id="bg-prompt-req-{{ p.name }}"
                            x-show="bgPromptMissing(lmode, lcloud, lprompt)" x-cloak>
@@ -182,7 +182,7 @@
                             <label class="form-label small mb-1" for="name-{{ p.name }}">Session name <span class="text-secondary">(optional)</span></label>
                             <input id="name-{{ p.name }}" class="form-control form-control-sm" x-model="customName['{{ p.name }}']"
                                    maxlength="128" placeholder="{{ p.name }}" aria-describedby="name-hint-{{ p.name }}"
-                                   title="Custom display name for this bridge, shown in claude.ai/code in place of the project name. Leave blank to use the project name.">
+                                   title="Custom display name for this bridge, shown in claude.ai/code in place of the project name. Leave blank to use the project name." {{ NO_AUTOFILL }}>
                             <p id="name-hint-{{ p.name }}" class="form-hint text-secondary small mt-1 mb-0">Leave blank to use the project name (<code>{{ p.name }}</code>).</p>
                           </div>
                           {# Sandbox toggle (#780) removed for 1.0 (#1037): `--sandbox` never
@@ -270,7 +270,7 @@
                           lets it run tools and execute any code in <code>CLAUDE.md</code> /
                           <code>.claude</code> in this directory.</p>
                         <label class="form-check mb-2">
-                          <input class="form-check-input" type="checkbox" x-ref="trustCheck" x-model="trustConfirmed['{{ p.name }}']">
+                          <input class="form-check-input" type="checkbox" x-ref="trustCheck" x-model="trustConfirmed['{{ p.name }}']" {{ NO_AUTOFILL }}>
                           <span class="form-check-label">I trust the files in this directory</span>
                         </label>
                         <div class="btn-list">
@@ -291,7 +291,7 @@
                         <div class="input-group">
                           <input type="text" class="form-control" x-ref="bypassInput" x-model="bypassTyped['{{ p.name }}']" placeholder="{{ p.name }}"
                                  aria-label="Type the project name to confirm bypassPermissions"
-                                 @keyup.enter="confirmBypassStart('{{ p.name }}')">
+                                 @keyup.enter="confirmBypassStart('{{ p.name }}')" {{ NO_AUTOFILL }}>
                           <button type="button" class="btn btn-danger" data-test="bypass-start-go" @click="confirmBypassStart('{{ p.name }}')"
                                   :disabled="(bypassTyped['{{ p.name }}'] || '') !== '{{ p.name }}'">Start with bypass</button>
                           <button type="button" class="btn" @click="cancelBypass('{{ p.name }}')">Cancel</button>
@@ -414,7 +414,7 @@
                   <svg class="ico me-1 text-warning" aria-hidden="true"><use href="#ic-alert"/></svg>A session is running — saved changes apply to <strong>new</strong> sessions, not the attached one.</div>
                 <div class="alert alert-danger py-1" x-show="cmd['{{ p.name }}'].error" x-cloak x-text="cmd['{{ p.name }}'].error"></div>
                 <textarea class="form-control cmd-text" x-model="cmd['{{ p.name }}'].content" rows="12"
-                          spellcheck="false" autocomplete="off" aria-label="CLAUDE.md contents for {{ p.name }}"
+                          spellcheck="false" {{ NO_AUTOFILL }} aria-label="CLAUDE.md contents for {{ p.name }}"
                           :disabled="cmd['{{ p.name }}'].loading || cmd['{{ p.name }}'].saving"></textarea>
                 <div class="btn-list mt-2">
                   <button type="button" class="btn btn-sm btn-primary" data-test="cmd-save" @click="saveClaudeMd('{{ p.name }}')"
