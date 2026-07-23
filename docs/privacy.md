@@ -73,7 +73,9 @@ remove that directory while the app is **stopped**.
   `~/.clauster/session.epoch`; everyone is logged out and a fresh secret is
   minted on the next start.
 - **Clear the config-change audit history** — delete
-  `~/.clauster/config_audit.log`.
+  `~/.clauster/config_audit.log` **and its rotated files**
+  `~/.clauster/config_audit.log.1` … `.5` (the log is size-rotated, so history
+  also lives in the numbered files — remove `config_audit.log*` to clear it all).
 - **Full Clauster reset** — remove the whole `~/.clauster/` directory. Your
   projects under `projects_root` and the `claude`-owned transcripts are not
   touched.

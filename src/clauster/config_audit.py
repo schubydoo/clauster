@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +50,13 @@ _log = logging.getLogger("clauster.config_audit")
 # ceiling (not a config key) keeps rotation surgical on this deliberately best-effort path.
 _AUDIT_MAX_BYTES = 5 * 1024 * 1024
 _AUDIT_KEEP_ROTATED = 5
+
+# Serializes the rotate-then-append against itself: config writes audit from concurrent
+# ``asyncio.to_thread`` workers (see :func:`arecord`), and the unlink+rename rotation sequence
+# would otherwise interleave and clobber archive generations. Intra-process only — a rare edge of
+# two clauster processes sharing one state_dir isn't covered (single-operator norm), and the worst
+# case there is a lost archive generation, never a corrupt live log.
+_AUDIT_LOCK = threading.Lock()
 
 
 def _rotate_audit_log_if_needed(path: Path) -> None:
@@ -118,9 +126,13 @@ def record(
         resolved = state_dir.expanduser()
         resolved.mkdir(parents=True, exist_ok=True)
         audit_path = resolved / AUDIT_FILE
-        _rotate_audit_log_if_needed(audit_path)
-        with open(audit_path, "a", encoding="utf-8", newline="") as fh:
-            fh.write(json.dumps(entry, separators=(",", ":"), default=str) + "\n")
+        # Hold the lock across rotate + append so a concurrent audit can't interleave with the
+        # unlink/rename sequence (both run from asyncio worker threads). The critical section is a
+        # size stat + a rare append, so contention is negligible.
+        with _AUDIT_LOCK:
+            _rotate_audit_log_if_needed(audit_path)
+            with open(audit_path, "a", encoding="utf-8", newline="") as fh:
+                fh.write(json.dumps(entry, separators=(",", ":"), default=str) + "\n")
     except OSError as exc:
         _log.error(
             "config write to %s (%s/%s) committed but audit append failed: %s",

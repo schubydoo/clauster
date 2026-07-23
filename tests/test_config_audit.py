@@ -147,6 +147,40 @@ def test_record_rotation_error_is_swallowed(tmp_path: Path, monkeypatch, caplog)
     assert [json.loads(line)["target"] for line in lines] == ["r1", "r2"]
 
 
+def test_record_concurrent_writes_stay_valid(tmp_path: Path, monkeypatch) -> None:
+    # #1062 P1: audits fire from concurrent asyncio worker threads; rotate+append is lock-guarded,
+    # so every generation stays a valid JSON-lines file (no torn/clobbered writes) and none raise.
+    import threading
+
+    monkeypatch.setattr(config_audit, "_AUDIT_MAX_BYTES", 200)  # rotate often under load
+    monkeypatch.setattr(config_audit, "_AUDIT_KEEP_ROTATED", 3)
+    state = tmp_path / "state"
+    state.mkdir()
+    ready = threading.Barrier(8)
+    errors: list[Exception] = []
+
+    def worker(i: int) -> None:
+        try:
+            ready.wait()
+            for j in range(10):
+                config_audit.record(
+                    state, surface="x", scope="user", target=f"{i}-{j}", action="u"
+                )
+        except Exception as exc:  # noqa: BLE001 - a raise here fails the concurrency guarantee
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    # Every current + rotated generation parses as JSON lines (no interleaving/tearing).
+    for p in state.glob("config_audit.log*"):
+        for line in p.read_text(encoding="utf-8").strip().splitlines():
+            assert "surface" in json.loads(line)
+
+
 def test_record_appends_one_line_per_call(tmp_path: Path) -> None:
     state = tmp_path / "state"
     config_audit.record(state, surface="a", scope="user", target="t1", action="update")
