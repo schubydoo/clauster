@@ -103,10 +103,17 @@
                       <p class="form-hint text-secondary small mt-1 ms-1 mb-0" x-show="lmode === 'detached' && lcloud" x-cloak>
                         Connectable from claude.ai / Desktop — converse with it, and Stop it here when done.
                       </p>
-                      <!-- optional first prompt for Background -->
+                      <!-- First prompt for Background: REQUIRED unless the session is
+                           cloud-registered (#1033) — an unregistered bg agent has no
+                           composer, so launched blank it idles forever. -->
                       <div class="mt-2" x-show="lmode === 'detached'" x-cloak>
-                        <label class="form-label small mb-1" for="lprompt-{{ p.name }}">First prompt <span class="text-secondary">(optional)</span></label>
+                        <label class="form-label small mb-1" for="lprompt-{{ p.name }}">First prompt <span class="text-secondary" x-text="lcloud ? '(optional)' : '(required)'">(required)</span></label>
                         <input id="lprompt-{{ p.name }}" class="form-control form-control-sm" x-model="lprompt" placeholder="Initial instruction…">
+                        <p class="form-hint text-secondary small mt-1 mb-0" data-test="launch-bg-prompt-required"
+                           id="bg-prompt-req-{{ p.name }}"
+                           x-show="bgPromptMissing(lmode, lcloud, lprompt)" x-cloak>
+                          Required — an unregistered Background session can't be given a prompt
+                          later. Check "also register on claude.ai" to start without one.</p>
                       </div>
                       <!-- permissions — shown for EVERY mode; the key safety choice, and it
                            matters most for Background, which runs unattended. bypassPermissions
@@ -332,7 +339,8 @@
                          popover closes; when it opens a gate it returns false and the popover stays. #}
                       <button type="button" class="btn btn-primary w-100 mt-2" data-test="launch-run-go" x-ref="launchGo"
                               x-show="!confirmTrust['{{ p.name }}'] && !confirmBypass['{{ p.name }}'] && !confirmMcp['{{ p.name }}']" x-cloak
-                              :disabled="launching['{{ p.name }}']"
+                              :disabled="launching['{{ p.name }}'] || bgPromptMissing(lmode, lcloud, lprompt)"
+                              aria-describedby="bg-prompt-req-{{ p.name }}"
                               @click="launchRunAndClose('{{ p.name }}', lmode, lperm, lcloud, lprompt)">
                         <svg class="ico me-1" aria-hidden="true"><use href="#ic-play"/></svg>Run · <span x-text="permLabel(lperm)"></span>
                       </button>

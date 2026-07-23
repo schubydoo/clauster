@@ -685,9 +685,10 @@ def test_api_dispatch_agent_bypass_with_ceiling_dispatches(write_config, monkeyp
     # ceiling gate let the bypass request through to dispatch with the mode intact.
     monkeypatch.setattr("clauster.supervisor.dispatch_background_job", _fake_dispatch)
     with _client(write_config, _BYPASS_CEILING) as client:
+        # prompt required since #1033 (unregistered bg dispatch); ceiling intent unchanged
         resp = client.post(
             "/api/agents",
-            json={"project": "alpha", "permission_mode": "bypassPermissions"},
+            json={"project": "alpha", "permission_mode": "bypassPermissions", "prompt": "hi"},
         )
         assert resp.status_code == 201
         assert resp.json() == {"id": "abcd1234"}
@@ -735,7 +736,8 @@ def test_api_dispatch_agent_default_bypass_with_ceiling_dispatches(write_config,
 
     monkeypatch.setattr("clauster.supervisor.dispatch_background_job", _fake_dispatch)
     with _client(write_config, _DEFAULT_BYPASS + _BYPASS_CEILING) as client:
-        resp = client.post("/api/agents", json={"project": "alpha"})
+        # prompt required since #1033 (unregistered bg dispatch); ceiling intent unchanged
+        resp = client.post("/api/agents", json={"project": "alpha", "prompt": "hi"})
         assert resp.status_code == 201
         assert resp.json() == {"id": "abcd1234"}
         # The resolved default ("bypassPermissions"), not the omitted raw field, is forwarded.
@@ -938,8 +940,10 @@ def test_bypass_denied_unknown_project_denies_bypass(projects_root):
 # hosted/background ALLOW paths clear the gate without a real spawn and are asserted below.
 def _bypass_post(client: TestClient, channel: str):
     if channel == "background":
+        # prompt required since #1033 (unregistered bg dispatch); ceiling intent unchanged
         return client.post(
-            "/api/agents", json={"project": "alpha", "permission_mode": "bypassPermissions"}
+            "/api/agents",
+            json={"project": "alpha", "permission_mode": "bypassPermissions", "prompt": "hi"},
         )
     body = {"project": "alpha", "permission_mode": "bypassPermissions"}
     if channel == "hosted":

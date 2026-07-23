@@ -4138,6 +4138,13 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return value
 
         prompt = _opt_text("prompt")
+        if prompt is not None and not prompt.replace("\ufeff", "").strip():
+            # Whitespace-only == no prompt (#1033): the dashboard trims before its
+            # gate, so the API must normalize identically or a direct request
+            # dispatches a nominally-promptless session around the 422 below.
+            # JS trim() also strips U+FEFF (ECMA WhiteSpace) while Python's
+            # strip() does not — drop it from the emptiness test for parity.
+            prompt = None
         rc_name = _opt_text("rc_name", empty_ok=False)
         model = _opt_text("model", empty_ok=False)
         permission_mode = _opt_text("permission_mode", empty_ok=False)
@@ -4151,6 +4158,22 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # bypassPermissions. (Also makes bg honor instance_defaults, like the other channels.)
         pm = permission_mode or config.instance_defaults.permission_mode
         _enforce_bypass_ceiling(name, pm)
+        if prompt is None and rc_name is None:
+            # #1033: an un-registered background session has no composer and no
+            # cloud surface — dispatched without a prompt it parks at "send a
+            # prompt to start" forever, with no way to ever receive one (the bg
+            # card offers only Stop/Forget). ``rc_name`` opens the claude.ai door,
+            # where the session is conversational, so a blank prompt is legitimate
+            # there. Gated after the 404/403 checks so existence and the bypass
+            # ceiling keep their precedence (same ordering rationale as
+            # _enforce_bypass_ceiling above).
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "prompt is required for a background session unless rc_name "
+                    "registers it on claude.ai"
+                ),
+            )
         try:
             job_id = await asyncio.to_thread(
                 supervisor.dispatch_background_job,

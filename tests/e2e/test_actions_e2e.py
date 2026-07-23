@@ -117,3 +117,39 @@ def test_live_log_tail_populates_and_redacts(
     assert _RAW_SESSION_ID not in streamed, "session id leaked into the streamed log"
     assert _RAW_TOKEN not in streamed, "bearer token leaked into the streamed log"
     assert "redacted" in streamed.lower(), "expected a <redacted> marker in the streamed log"
+
+
+def test_background_launch_requires_prompt_unless_cloud(
+    browser: AgentBrowser, config_server: Server
+) -> None:
+    """Background launch blocks on a blank prompt unless cloud-registered (#1033).
+
+    An unregistered background agent has no composer, so launched blank it would
+    idle at "send a prompt to start" forever — the Run button stays disabled with
+    an explanatory hint until a prompt is typed or the claude.ai opt-in is checked.
+    """
+    browser.goto(config_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    browser.click('[data-project="alpha"] [data-test="run-launch"]')
+    browser.expect_visible('[data-project="alpha"] .launch-pop')
+    browser.check('[data-project="alpha"] input[name="lm-alpha"][value="detached"]')
+
+    run = '[data-project="alpha"] [data-test="launch-run-go"]'
+    hint = '[data-project="alpha"] [data-test="launch-bg-prompt-required"]'
+    cloud = '[data-project="alpha"] [data-test="launch-cloud-optin"]'
+
+    # Blank prompt, not registered: blocked, with the explanatory hint.
+    browser.expect_visible(hint)
+    browser.expect_disabled(run)
+
+    # Registering on claude.ai legitimizes a blank prompt (conversational there).
+    browser.check(cloud)
+    browser.expect_hidden(hint)
+    browser.expect_enabled(run)
+
+    # Un-register again: blocked again — then a typed prompt clears the block.
+    browser.click(cloud)
+    browser.expect_disabled(run)
+    browser.fill('[id="lprompt-alpha"]', "count to three")
+    browser.expect_hidden(hint)
+    browser.expect_enabled(run)

@@ -467,6 +467,13 @@
       // Close the readiness panel. Replaces:
       //   @click="readiness.showPanel = false"
       closeReadinessPanel() { this.readiness.showPanel = false; },
+      // #1033: an un-registered Background launch with no prompt parks at "send a
+      // prompt to start" forever (the bg card has no composer), so the Run button
+      // blocks it. With `lcloud` the session is conversational from claude.ai and
+      // a blank first prompt is legitimate. Server mirrors this as a 422.
+      bgPromptMissing(lmode, lcloud, lprompt) {
+        return lmode === "detached" && !lcloud && !(lprompt || "").trim();
+      },
       // Clear both np.error and np.warn (name / type-radio inputs). Replaces:
       //   @input="np.error = null; np.warn = null"
       clearNpErrors() { this.np.error = null; this.np.warn = null; },

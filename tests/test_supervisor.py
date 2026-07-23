@@ -497,8 +497,30 @@ def test_api_dispatch_agent_rejects_present_empty_option(
     assert called == []
 
 
-def test_api_dispatch_agent_empty_prompt_is_allowed(write_config, tmp_path, monkeypatch):
-    # an empty prompt legitimately means "no prompt" -> dropped to None, dispatch proceeds
+def test_api_dispatch_agent_requires_prompt_when_unregistered(write_config, tmp_path, monkeypatch):
+    # #1033: no prompt + no rc_name = a session that parks at "send a prompt to
+    # start" forever (the bg card has no composer) -> 422, dispatch never reached
+    called: list = []
+    monkeypatch.setattr(supervisor, "dispatch_background_job", lambda *a, **k: called.append(1))
+    for body in (
+        {"project": "alpha"},
+        {"project": "alpha", "prompt": ""},
+        # whitespace-only must not bypass the gate (the dashboard trims; so must the API)
+        {"project": "alpha", "prompt": "   "},
+        # U+FEFF: JS trim() strips it, Python strip() does not — parity required
+        {"project": "alpha", "prompt": "\ufeff \ufeff"},
+    ):
+        r = _client(write_config, tmp_path).post("/api/agents", json=body)
+        assert r.status_code == 422
+        assert "prompt is required" in r.json()["detail"]
+    assert called == []
+
+
+def test_api_dispatch_agent_blank_prompt_ok_when_cloud_registered(
+    write_config, tmp_path, monkeypatch
+):
+    # with rc_name the session is conversational from claude.ai, so an empty
+    # prompt legitimately means "no prompt" -> dropped to None, dispatch proceeds
     seen: dict = {}
 
     def fake(*a, **k):
@@ -507,7 +529,7 @@ def test_api_dispatch_agent_empty_prompt_is_allowed(write_config, tmp_path, monk
 
     monkeypatch.setattr(supervisor, "dispatch_background_job", fake)
     r = _client(write_config, tmp_path).post(
-        "/api/agents", json={"project": "alpha", "prompt": ""}
+        "/api/agents", json={"project": "alpha", "prompt": "", "rc_name": "alpha-rc"}
     )
     assert r.status_code == 201
     assert seen["prompt"] is None
@@ -518,7 +540,9 @@ def test_api_dispatch_agent_maps_dispatch_error(write_config, tmp_path, monkeypa
         raise supervisor.DispatchError("nope")
 
     monkeypatch.setattr(supervisor, "dispatch_background_job", boom)
-    r = _client(write_config, tmp_path).post("/api/agents", json={"project": "alpha"})
+    r = _client(write_config, tmp_path).post(
+        "/api/agents", json={"project": "alpha", "prompt": "hi"}
+    )
     assert r.status_code == 502
 
 
@@ -527,7 +551,9 @@ def test_api_dispatch_agent_maps_claude_not_found(write_config, tmp_path, monkey
         raise ClaudeNotFound("no claude on PATH")
 
     monkeypatch.setattr(supervisor, "dispatch_background_job", boom)
-    r = _client(write_config, tmp_path).post("/api/agents", json={"project": "alpha"})
+    r = _client(write_config, tmp_path).post(
+        "/api/agents", json={"project": "alpha", "prompt": "hi"}
+    )
     assert r.status_code == 503
 
 
