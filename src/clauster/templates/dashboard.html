@@ -290,11 +290,19 @@
    the config-editor and transcript modals. The caller supplies the data-test id, title
    id, close/trap handler names, and the title content (which may include Alpine bindings).
    SECURITY: `title_content` is rendered with `| safe` so Alpine bindings survive; callers
-   MUST NEVER pass user-controlled data — only static developer strings + Alpine directives. #}
+   MUST NEVER pass user-controlled data — only static developer strings + Alpine directives.
+   Backdrop dismissal is gesture-guarded (#1030): a text-selection drag that starts inside
+   the dialog and releases over the backdrop makes the browser synthesize the `click` on
+   their COMMON ANCESTOR — this very div — so a bare `@click.self` closes the modal
+   mid-selection. `bdDown`/`bdUp` record whether the gesture started AND ended on the
+   backdrop itself; only a true backdrop click (both ends) dismisses. Escape and the ✕
+   button are unaffected. #}
 {% macro modal_shell(data_test, title_id, close_fn, trap_fn, title_content) %}
     <div class="modal modal-blur d-block modal-backdrop-dim" tabindex="-1" data-test="{{ data_test }}"
+         x-data="{ bdDown: false, bdUp: false }"
          @keydown.escape.window="{{ close_fn }}()" @keydown.tab="{{ trap_fn }}($event)"
-         @click.self="{{ close_fn }}()">
+         @mousedown="bdDown = ($event.target === $el)" @mouseup="bdUp = ($event.target === $el)"
+         @click.self="bdDown && bdUp && {{ close_fn }}()">
       <div class="modal-dialog modal-lg modal-dialog-scrollable" role="dialog" aria-modal="true"
            aria-labelledby="{{ title_id }}">
         <div class="modal-content" x-init="focusModalClose($el)">

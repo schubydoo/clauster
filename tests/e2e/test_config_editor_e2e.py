@@ -221,6 +221,48 @@ def test_advanced_panel_absent_when_config_write_disabled(
     browser.expect_hidden('[data-test="adv-panel"]')  # but no Advanced surface
 
 
+def test_modal_ignores_drag_that_releases_on_backdrop(
+    browser: AgentBrowser, config_server: Server
+) -> None:
+    """A drag crossing the dialog/backdrop boundary must not dismiss the modal (#1030).
+
+    When a mousedown and mouseup land on different elements, the browser synthesizes
+    the ``click`` on their common ancestor — the backdrop div itself — so a bare
+    ``@click.self`` closes the modal mid-text-selection. The gesture guard requires
+    the mousedown AND mouseup to both land on the backdrop before dismissing.
+    """
+    browser.goto(config_server.url)
+    browser.expect_visible('[data-project="alpha"]')
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[data-test="cfg-modal"]')
+
+    # Text-selection drag: starts inside the dialog, releases over the backdrop.
+    browser.eval_js(
+        "(() => { const m = document.querySelector('[data-test=\"cfg-modal\"]');"
+        "const inner = m.querySelector('.modal-content');"
+        "const ev = (t, el) => el.dispatchEvent(new MouseEvent(t, {bubbles: true}));"
+        "ev('mousedown', inner); ev('mouseup', m); ev('click', m); })();"
+    )
+    browser.expect_visible('[data-test="cfg-modal"]')
+
+    # Reverse drag: starts on the backdrop, releases inside the dialog.
+    browser.eval_js(
+        "(() => { const m = document.querySelector('[data-test=\"cfg-modal\"]');"
+        "const inner = m.querySelector('.modal-content');"
+        "const ev = (t, el) => el.dispatchEvent(new MouseEvent(t, {bubbles: true}));"
+        "ev('mousedown', m); ev('mouseup', inner); ev('click', m); })();"
+    )
+    browser.expect_visible('[data-test="cfg-modal"]')
+
+    # Control: a true backdrop click (gesture starts and ends there) still dismisses.
+    browser.eval_js(
+        "(() => { const m = document.querySelector('[data-test=\"cfg-modal\"]');"
+        "const ev = (t) => m.dispatchEvent(new MouseEvent(t, {bubbles: true}));"
+        "ev('mousedown'); ev('mouseup'); ev('click'); })();"
+    )
+    browser.expect_hidden('[data-test="cfg-modal"]')
+
+
 def test_advanced_save_banner_scrolls_into_view(
     browser: AgentBrowser, advanced_config_server: Server, e2e_password: str
 ) -> None:
