@@ -17,6 +17,7 @@ import json
 import math
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -623,23 +624,33 @@ def invalidate_usage_cache() -> None:
     _USAGE_CACHE.clear()
 
 
+# Upper bound on the per-file transcript-summary cache. Without it, a path removed from disk
+# would linger forever, so a long-running install with ongoing session churn accumulates an
+# ever-growing set of summaries (#1058 review). A summary is tiny (4 fields), so the cap is
+# generous; past it the least-recently-used entries are evicted and an evicted-then-reopened
+# transcript simply re-parses once.
+_TRANSCRIPT_SUMMARY_CACHE_MAX = 4096
+
+
 class _TranscriptSummaryCache:
-    """Process-wide per-file cache of a transcript's :class:`TranscriptSummary` (#1035).
+    """Process-wide, bounded per-file cache of a transcript's :class:`TranscriptSummary` (#1035).
 
     The Transcripts selector and the resume/fork picker share ``/api/projects/{name}/transcripts``,
     which re-parsed *every* ``.jsonl`` on every open just to derive turn_count + labels — O(total
     turns), a ~20 s stall on a large project. Cache the derived summary keyed on the file's
     ``(st_mtime_ns, st_size)`` stamp: an append moves the mtime **and** grows the file, so an
     unchanged transcript never re-parses (the same append-mostly reasoning as the #424 usage
-    cache). No TTL is needed — the per-file stamp captures every change exactly. Thread-safe: the
-    listing runs from an ``asyncio`` worker thread. Summaries are immutable, so no defensive copy.
+    cache). No TTL is needed — the per-file stamp captures every change exactly. **LRU-bounded** to
+    ``max_entries`` so churn of deleted transcripts can't grow it without limit (#1058).
+    Thread-safe: the listing runs from an ``asyncio`` worker thread. Summaries are immutable.
     """
 
-    def __init__(self) -> None:
-        """Create an empty cache."""
+    def __init__(self, max_entries: int = _TRANSCRIPT_SUMMARY_CACHE_MAX) -> None:
+        """Create an empty cache bounded to ``max_entries`` (least-recently-used eviction)."""
         self._lock = threading.Lock()
-        # str(path) -> ((st_mtime_ns, st_size), summary)
-        self._entries: dict[str, tuple[tuple[int, int], TranscriptSummary]] = {}
+        self._max = max_entries
+        # str(path) -> ((st_mtime_ns, st_size), summary); ordered least- to most-recently-used.
+        self._entries: OrderedDict[str, tuple[tuple[int, int], TranscriptSummary]] = OrderedDict()
 
     def get(self, path: Path) -> TranscriptSummary:
         """Return the cached summary for ``path`` when its stamp is unchanged, else re-derive.
@@ -653,12 +664,17 @@ class _TranscriptSummaryCache:
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None and entry[0] == stamp:
+                self._entries.move_to_end(key)  # mark most-recently-used
                 return entry[1]
         # Derive outside the lock: the per-line parse must not serialize concurrent listings for
         # different projects, and a duplicate parse on a race is harmless.
         summary = _derive_transcript_summary(path)
         with self._lock:
             self._entries[key] = (stamp, summary)
+            self._entries.move_to_end(key)
+            # Evict least-recently-used entries so deleted-transcript churn stays bounded (#1058).
+            while len(self._entries) > self._max:
+                self._entries.popitem(last=False)
         return summary
 
     def clear(self) -> None:

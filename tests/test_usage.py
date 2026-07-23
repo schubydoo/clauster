@@ -750,6 +750,29 @@ def test_read_transcript_summary_missing_file_raises_filenotfound(
         read_transcript_summary(tmp_path / "nope.jsonl")
 
 
+def test_transcript_summary_cache_is_lru_bounded(tmp_path):
+    # #1058: the cache is bounded so a churn of deleted transcripts can't grow it without limit.
+    # Past the cap the least-recently-used entry is evicted; a recently-touched one survives.
+    from clauster.usage import _TranscriptSummaryCache
+
+    def _make(name):
+        p = tmp_path / name
+        p.write_text(json.dumps({"message": {"role": "user", "content": name}}) + "\n")
+        return p
+
+    cache = _TranscriptSummaryCache(max_entries=2)
+    p0, p1 = _make("t0.jsonl"), _make("t1.jsonl")
+    cache.get(p0)
+    cache.get(p1)
+    cache.get(p0)  # touch t0 so t1 becomes the least-recently-used
+    p2 = _make("t2.jsonl")
+    cache.get(p2)  # over the cap -> evict the LRU (t1), keep the touched t0 + the new t2
+    assert len(cache._entries) == 2
+    assert str(p0) in cache._entries
+    assert str(p1) not in cache._entries
+    assert str(p2) in cache._entries
+
+
 def test_read_transcript_turns_render_content_unexpected_shape(tmp_path):
     # A content that is neither str nor list (an int, or a bare dict) is summarized
     # as a generic [content] placeholder — never dumped raw and never raised.
