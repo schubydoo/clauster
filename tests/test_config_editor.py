@@ -606,3 +606,24 @@ def test_editable_and_excluded_reference_only_real_leaves() -> None:
     assert not stale_excluded, (
         f"EXCLUDED_FIELDS names non-existent leaf(s): {sorted(stale_excluded)}"
     )
+
+
+def test_validation_error_message_is_operator_friendly(write_config) -> None:
+    """A bad value yields a per-field message, not the raw pydantic dump (#1034).
+
+    The dashboard banner renders this string verbatim, so it must name the field
+    and the reason — and must NOT leak the internal model name, pydantic's type
+    internals, or the errors.pydantic.dev URL.
+    """
+    raw = _raw(write_config)
+    with pytest.raises(ConfigValidationError) as ei:
+        validate_edits(
+            raw,
+            {"clone.allowed_private_cidrs": ["999.999.0.0/33"]},
+            allowed=frozenset({"clone.allowed_private_cidrs"}),
+        )
+    msg = str(ei.value)
+    assert "clone.allowed_private_cidrs" in msg
+    assert "999.999.0.0/33" in msg
+    for leaked in ("ClausterConfig", "pydantic.dev", "input_type", "[type="):
+        assert leaked not in msg

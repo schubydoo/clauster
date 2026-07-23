@@ -28,7 +28,7 @@ from .config import (
     ClausterConfig,
     load_config,
 )
-from .config_write import hash_bytes
+from .config_write import hash_bytes, redact_secret_lines
 
 # Tier-A allowlist: dotted paths editable from the web UI. Operational only — no
 # auth/secret/bind/structural/clone/supply-chain field appears here (those stay
@@ -335,8 +335,32 @@ def validate_edits(
     try:
         ClausterConfig.model_validate(candidate)
     except ValidationError as exc:
-        raise ConfigValidationError(str(exc)) from exc
+        raise ConfigValidationError(_friendly_validation_message(exc)) from exc
     return candidate
+
+
+def _friendly_validation_message(exc: ValidationError) -> str:
+    """Compress a pydantic ``ValidationError`` into operator-facing per-field lines.
+
+    ``str(exc)`` leaks the internal model name, pydantic type internals, and a docs
+    URL ("1 validation error for ClausterConfig … [type=value_error, input_value=…]
+    … https://errors.pydantic.dev/…") — none of it actionable in the dashboard
+    banner (#1034). Render one ``field.path: reason`` line per error instead; the
+    full exception still reaches the log via the ``from exc`` chain.
+    """
+    parts: list[str] = []
+    for err in exc.errors(include_url=False, include_input=False):
+        loc = ".".join(str(piece) for piece in err.get("loc", ()))
+        msg = err.get("msg") or "invalid value"
+        # pydantic prefixes custom-validator failures with "Value error, " — noise here.
+        msg = msg.removeprefix("Value error, ")
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    # ``msg`` can echo the offending INPUT value. Safe today because every
+    # secret-bearing field sits in EXCLUDED_FIELDS (never editable) and the
+    # secret-adjacent model validators raise static messages — but wrap in the
+    # secret-line redactor anyway so a future Tier-A/B addition or a validator
+    # that starts echoing its value cannot leak into the dashboard banner.
+    return redact_secret_lines("; ".join(parts)) or "validation failed"
 
 
 def _resolve_field_info(path: str) -> Any:
