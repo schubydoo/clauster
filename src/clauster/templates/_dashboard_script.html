@@ -434,6 +434,30 @@
       focusModalClose(el) {
         this.$nextTick(() => { const b = el.querySelector(".btn-close"); if (b) b.focus(); });
       },
+      // #1031: bring action-revealed feedback into view. The config panels render
+      // delete confirms at the panel foot and the Advanced save/error banners above
+      // a bottom Save button, so the acting control and its feedback can sit on
+      // opposite sides of the fold — the action looks dead until the user scrolls.
+      // querySelector, not $refs: modal content sits under modal_shell's nested
+      // x-data scope (#1030), so refs registered there never reach dashboard().
+      revealFeedback(selector, focusInput = false) {
+        // Alpine applies the x-show display flip AFTER $nextTick callbacks run
+        // (verified empirically: the confirm box still computes display:none at
+        // tick time, so a bare focus() silently no-ops). Retry across a few
+        // animation frames until the element is actually laid out.
+        const attempt = (tries) => {
+          const el = document.querySelector(selector);
+          if (!el || !el.offsetParent) {  // absent or not yet visible (x-show pending)
+            if (tries > 0) requestAnimationFrame(() => attempt(tries - 1));
+            return;
+          }
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          if (!focusInput) return;
+          const inp = el.matches("input, textarea") ? el : el.querySelector("input, textarea");
+          if (inp) inp.focus({ preventScroll: true });
+        };
+        this.$nextTick(() => attempt(5));
+      },
       // Toggle the readiness panel open/closed. Replaces:
       //   @click="readiness.showPanel = !readiness.showPanel"
       toggleReadinessPanel() { this.readiness.showPanel = !this.readiness.showPanel; },
@@ -1409,7 +1433,11 @@
           if ((t === "int" || t === "float") && (v === "" || v === null)) continue;  // blanked -> no change
           if (v !== a.fields[p]) edits[p] = v;
         }
-        if (Object.keys(edits).length === 0) { a.error = "No changes to save."; a.saved = false; return; }
+        if (Object.keys(edits).length === 0) {
+          a.error = "No changes to save."; a.saved = false;
+          this.revealFeedback('[data-test="adv-error"]');
+          return;
+        }
         a.saving = true; a.error = ""; a.saved = false;
         try {
           const res = await fetch(ROOT + "/api/config/advanced", {
@@ -1432,7 +1460,16 @@
             a.error = d.detail || ("Save failed (" + res.status + ").");
           }
         } catch (e) { a.error = "Save failed."; }
-        finally { if (a.gen === myGen) a.saving = false; }
+        finally {
+          if (a.gen === myGen) {
+            a.saving = false;
+            // The banners render ABOVE the fold while Save sits at the panel foot —
+            // bring whichever one this save produced into view (#1031).
+            if (a.error || a.saved) {
+              this.revealFeedback(a.error ? '[data-test="adv-error"]' : '[data-test="adv-saved"]');
+            }
+          }
+        }
       },
       // --- Claude Code config management (#773) ------------------------------
       // Open/close mirror the configEditor modal: remember the opener for focus
@@ -2372,6 +2409,7 @@
         const c = this.configMgmt, s = c.subagents;
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenAgent fetch
         c.error = ""; c.saved = false; s.deletingName = name; s.confirm = "";
+        this.revealFeedback('[data-test="cm-agent-delete-confirm"]', true);
       },
       configMgmtCancelDeleteAgent() {
         this.configMgmt.subagents.deletingName = ""; this.configMgmt.subagents.confirm = "";
@@ -2503,6 +2541,7 @@
         const c = this.configMgmt, m = c.mcp;
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight load
         c.error = ""; c.saved = false; m.deletingName = name; m.confirm = "";
+        this.revealFeedback('[data-test="cm-mcp-delete-confirm"]', true);
       },
       configMgmtCancelDeleteMcp() {
         const m = this.configMgmt.mcp;
@@ -2721,6 +2760,7 @@
         const c = this.configMgmt, s = c.skills;
         c.gen = (c.gen || 0) + 1;  // supersede any in-flight configMgmtOpenSkill fetch
         c.error = ""; c.saved = false; s.deletingName = name; s.confirm = "";
+        this.revealFeedback('[data-test="cm-skill-delete-confirm"]', true);
       },
       configMgmtCancelDeleteSkill() {
         this.configMgmt.skills.deletingName = ""; this.configMgmt.skills.confirm = "";

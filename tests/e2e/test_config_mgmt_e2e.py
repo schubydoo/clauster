@@ -869,3 +869,44 @@ def test_config_mgmt_mcp_approvals_confirm_clears_on_surface_switch(
     browser.click('[data-test="cm-mcp-approve-gizmo"]')
     browser.expect_visible('[data-test="cm-mcp-approvals-confirm"]')
     browser.expect_value('[data-test="cm-mcp-approvals-confirm"]', "")
+
+
+def test_delete_confirm_scrolls_into_view_and_focuses(
+    browser: AgentBrowser, config_mgmt_server: Server
+) -> None:
+    """Arming a delete brings its confirm box into view and focuses the input (#1031).
+
+    The confirm renders at the panel foot while the row's Delete button can sit
+    anywhere above it — without the reveal, the panel doesn't move and Delete
+    looks like a no-op. The focus assertion is the discriminating check: it can
+    only pass when configMgmtAskDeleteAgent actually ran revealFeedback.
+    """
+    _open_modal(browser, config_mgmt_server)
+    browser.click('[data-test="cm-surface-subagents"]')
+    browser.expect_visible('[data-test="cm-agent-new"]')
+    browser.click('[data-test="cm-agent-new"]')
+    browser.expect_visible('[data-test="cm-agent-editor"]')
+    browser.fill('[data-test="cm-agent-name"]', "del-target")
+    browser.fill(
+        '[data-test="cm-agent-content"]',
+        "---\ndescription: temp\n---\n\nBody.",
+    )
+    browser.fill('[data-test="cm-agent-confirm"]', "alpha")
+    browser.click('[data-test="cm-agent-save"]')
+    browser.expect_visible('[data-test="cm-agent-del-del-target"]')
+
+    browser.click('[data-test="cm-agent-del-del-target"]')
+    browser.expect_visible('[data-test="cm-agent-delete-confirm"]')
+    # Discriminating assertion: the confirm INPUT holds focus only via the reveal.
+    import time
+
+    deadline = time.monotonic() + 5
+    focused = False
+    while time.monotonic() < deadline and not focused:
+        focused = browser.eval_json(
+            "(() => document.activeElement ==="
+            " document.querySelector('[data-test=\"cm-agent-delete-input\"]'))()"
+        )
+        if not focused:
+            time.sleep(0.2)
+    assert focused, "delete-confirm input should receive focus when the confirm is armed"
