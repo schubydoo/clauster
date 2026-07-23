@@ -358,9 +358,6 @@
       // project name -> operator-typed custom bridge/session display name (#780,
       // standard/Server Mode only — blank keeps the project-name default).
       customName: {},
-      // project name -> per-launch sandbox toggle (#780, standard/Server Mode only):
-      // "default" (send nothing) | "on" (--sandbox) | "off" (--no-sandbox).
-      sandboxMode: {},
       // Resume picker (#303, pty/Interactive Session only): project name -> the picked
       // past-conversation uuid ("" = fresh conversation; reset on every popover open
       // and after each launch so a stale pick can never silently fork a later spawn),
@@ -509,7 +506,6 @@
           this.permMode[n] = DEFAULT_PERMISSION_MODE;
           this.resumeMode[n] = DEFAULT_RESUME_MODE;
           this.customName[n] = "";
-          this.sandboxMode[n] = "default";
         }
         this.trustState = { ...INITIAL_TRUST };
         await this.refresh();
@@ -4278,7 +4274,6 @@
         if (!(name in this.permMode)) this.permMode[name] = DEFAULT_PERMISSION_MODE;
         if (!(name in this.resumeMode)) this.resumeMode[name] = DEFAULT_RESUME_MODE;
         if (!(name in this.customName)) this.customName[name] = "";
-        if (!(name in this.sandboxMode)) this.sandboxMode[name] = "default";
         if (proj && proj.trust_state) this.trustState[name] = proj.trust_state;
         // The rows list only exists once there is ≥1 project; the very first project has no
         // #project-grid yet (the empty-state renders instead), so reload to render it.
@@ -4346,11 +4341,9 @@
           // mode is ever added.
           const customName = (this.customName[name] || "").trim();
           if (effective === "standard" && customName) reqBody.name = customName;
-          // Sandbox toggle (#780) — standard-only, SAME `=== 'standard'` gate as the
-          // template's x-show so the two can't diverge; only send an explicit on/off
-          // ("default" means "let claude decide", so omit the field entirely).
-          const sandbox = this.sandboxMode[name] || "default";
-          if (effective === "standard" && sandbox !== "default") reqBody.sandbox = sandbox;
+          // Sandbox toggle (#780) removed for 1.0 (#1037): it never reached the session
+          // worker, so the launch popover no longer offers it and no `sandbox` field is
+          // sent. Returns behind preflight + platform gating in #1046.
           // Resume picker (#303) — pty/Interactive Session only, SAME `=== 'pty'` gate
           // as the template's x-show so the two can't diverge; "" means a fresh
           // conversation, so omit the field entirely.

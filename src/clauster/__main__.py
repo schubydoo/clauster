@@ -297,7 +297,9 @@ def main(argv: list[str] | None = None) -> int:
         "--name", help="custom display name for a standard bridge (ignored for pty)"
     )
     start_p.add_argument(
-        "--sandbox", choices=SANDBOX_MODES, help="per-launch sandbox toggle for a standard bridge"
+        "--sandbox",
+        choices=SANDBOX_MODES,
+        help="per-launch sandbox toggle for a standard bridge (disabled this release; see #1046)",
     )
     start_p.add_argument(
         "--trust",

@@ -332,7 +332,8 @@ _TOOLS: list[dict[str, Any]] = [
                 "custom_name": {"type": "string", "description": "Display name (standard only)."},
                 "sandbox": {
                     "type": "string",
-                    "description": "default | on | off (standard only).",
+                    "description": "default | on | off (standard only). Disabled in this release "
+                    "(#1037) — accepted but inert; returns via #1046.",
                 },
                 "trust": {
                     "type": "boolean",

@@ -61,6 +61,15 @@ RESUME_MODES: tuple[str, ...] = ("standard", "pty")
 # claude removes them.
 SandboxMode = Literal["default", "on", "off"]
 SANDBOX_MODES: tuple[str, ...] = ("default", "on", "off")
+# The per-launch sandbox toggle (#780) is DISABLED for the 1.0 release (#1037). Evidence from
+# the pre-RC dogfood: `--sandbox` reaches the remote-control bridge but is NOT passed to the
+# server-mode session worker that actually runs Bash, so the security-labeled control silently
+# did nothing (fully unsandboxed, no warning) — a "fail closed visibly" violation. Rather than
+# ship a toggle that lies, clauster stops emitting the flag and coerces every requested/persisted
+# value to "default". The plumbing (this enum, the API/CLI/MCP params, the runner threading) is
+# kept intact so re-enabling behind dependency preflight + platform gating in #1046 is a one-line
+# flip of this flag. Left as a plain bool (not Final/Literal) so it stays runtime-togglable.
+SANDBOX_TOGGLE_ENABLED = False
 PERMISSION_MODES: tuple[str, ...] = (
     "default",
     "plan",

@@ -399,30 +399,44 @@ async def test_resume_default_name_bridge_passes_none_not_project_name(runner_co
 # ----- sandbox toggle (#780) -------------------------------------------
 
 
-async def test_spawn_sandbox_on_reaches_argv_and_instance(runner_config, monkeypatch):
+async def test_spawn_sandbox_disabled_coerces_to_default(runner_config, monkeypatch):
+    # #1037: the toggle is disabled for 1.0, so a requested "on"/"off" is coerced to "default"
+    # — nothing is recorded on the instance and no flag reaches the bridge argv.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _runner(runner_config)
-    inst = await runner.spawn("alpha", sandbox="on")
+    for requested in ("on", "off"):
+        inst = await runner.spawn("alpha", sandbox=requested)
+        try:
+            assert inst.sandbox_mode == "default"
+            argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+            assert "--sandbox" not in argv
+            assert "--no-sandbox" not in argv
+        finally:
+            await runner.stop(inst.instance_id)
+
+
+async def test_spawn_sandbox_reaches_argv_when_enabled(runner_config, monkeypatch):
+    # When re-enabled (#1046, gate flipped) the requested choice is recorded and the matching
+    # flag reaches the bridge argv.
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    on = await runner.spawn("alpha", sandbox="on")
     try:
-        assert inst.sandbox_mode == "on"
-        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert on.sandbox_mode == "on"
+        argv = json.loads(Path(str(on.bridge_debug_log_path) + ".argv.json").read_text())
         assert "--sandbox" in argv
         assert "--no-sandbox" not in argv
     finally:
-        await runner.stop(inst.instance_id)
-
-
-async def test_spawn_sandbox_off_reaches_argv(runner_config, monkeypatch):
-    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
-    runner = _runner(runner_config)
-    inst = await runner.spawn("alpha", sandbox="off")
+        await runner.stop(on.instance_id)
+    off = await runner.spawn("alpha", sandbox="off")
     try:
-        assert inst.sandbox_mode == "off"
-        argv = json.loads(Path(str(inst.bridge_debug_log_path) + ".argv.json").read_text())
+        assert off.sandbox_mode == "off"
+        argv = json.loads(Path(str(off.bridge_debug_log_path) + ".argv.json").read_text())
         assert "--no-sandbox" in argv
         assert "--sandbox" not in argv
     finally:
-        await runner.stop(inst.instance_id)
+        await runner.stop(off.instance_id)
 
 
 async def test_spawn_sandbox_default_appends_neither(runner_config, monkeypatch):
@@ -445,7 +459,24 @@ async def test_spawn_invalid_sandbox_rejected_before_any_spawn(runner_config):
     assert runner.running_count() == 0  # rejected before _popen ever ran
 
 
-async def test_resume_preserves_sandbox_choice(runner_config, monkeypatch):
+async def test_resume_sandbox_disabled_stays_default(runner_config, monkeypatch):
+    # #1037: with the toggle disabled, a resume re-applies "default" (no flag) even though the
+    # original request was "on".
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
+    runner = _runner(runner_config)
+    inst = await runner.spawn("alpha", sandbox="on")
+    await runner.stop(inst.instance_id)
+    resumed = await runner.resume(inst.instance_id)
+    try:
+        assert resumed.sandbox_mode == "default"
+        argv = json.loads(Path(str(resumed.bridge_debug_log_path) + ".argv.json").read_text())
+        assert "--sandbox" not in argv
+    finally:
+        await runner.stop(resumed.instance_id)
+
+
+async def test_resume_preserves_sandbox_choice_when_enabled(runner_config, monkeypatch):
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _runner(runner_config)
     inst = await runner.spawn("alpha", sandbox="on")
@@ -468,9 +499,21 @@ def test_sandbox_persisted_in_subset(runner_config):
     assert record["sandbox_mode"] == "off"
 
 
-def test_stopped_from_persisted_restores_sandbox(runner_config):
-    # A gone standard bridge rebuilt from state.json keeps its sandbox choice so a
-    # resume re-applies it. Coerces an absent/bad value to "default".
+def test_stopped_from_persisted_coerces_sandbox_when_disabled(runner_config):
+    # #1037: a gone standard bridge rebuilt from state.json coerces a persisted "on"/"off" to
+    # "default" while the toggle is disabled, so a resume re-applies no flag.
+    runner = _runner(runner_config)
+    runner._persisted = {
+        "iid-1": {"project_name": "alpha", "label": "alpha", "sandbox_mode": "off"},
+    }
+    inst = runner._stopped_from_persisted("alpha")
+    assert inst is not None
+    assert inst.sandbox_mode == "default"
+
+
+def test_stopped_from_persisted_restores_sandbox_when_enabled(runner_config, monkeypatch):
+    # When re-enabled (#1046) a rebuilt STOPPED card keeps its recorded sandbox choice.
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
     runner = _runner(runner_config)
     runner._persisted = {
         "iid-1": {"project_name": "alpha", "label": "alpha", "sandbox_mode": "off"},
@@ -488,15 +531,17 @@ def test_stopped_from_persisted_defaults_sandbox_when_absent(runner_config):
     assert inst.sandbox_mode == "default"
 
 
-def test_api_spawn_sandbox_on_reaches_argv(runner_config, monkeypatch):
+def test_api_spawn_sandbox_disabled_coerces_to_default(runner_config, monkeypatch):
+    # #1037: the API still accepts `sandbox` (a bad value still 422s below) but it's inert while
+    # the toggle is disabled — coerced to "default", no flag in argv.
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     with _runner_client(runner_config) as client:
         resp = client.post("/api/instances", json={"project": "alpha", "sandbox": "on"})
         assert resp.status_code == 201, resp.text
         body = resp.json()
-        assert body["sandbox_mode"] == "on"
+        assert body["sandbox_mode"] == "default"
         argv = json.loads(Path(str(body["bridge_debug_log_path"]) + ".argv.json").read_text())
-        assert "--sandbox" in argv
+        assert "--sandbox" not in argv
 
 
 def test_api_spawn_invalid_sandbox_is_422(write_config):
@@ -789,23 +834,17 @@ def test_dashboard_renders_pickers(write_config):
     assert '<option value="worktree">worktree</option>' in html  # alpha is a git repo
 
 
-def test_dashboard_renders_name_and_sandbox_controls(write_config, monkeypatch):
-    # #780 launch popover controls (standard-only): the Session name input and the
-    # Sandbox select, both gated on the SAME `=== 'standard'` x-show predicate as each
-    # other. Assert on the binding markup (the contract), not the copy.
-    #
-    # The `=== 'standard'` x-show gate is emitted only inside `{% if pty_supported %}`
-    # (there's nothing to hide when there's no pty mode), and pty_supported is
-    # `sys.platform != "win32"` — so force a non-win32 platform to make the predicate
-    # render (and the count assertion hold) on EVERY OS, not just POSIX CI.
+def test_dashboard_renders_name_control_and_omits_sandbox(write_config, monkeypatch):
+    # #780 Session-name launch-popover control (standard-only) still renders on its
+    # `=== 'standard'` x-show gate. The Sandbox select is REMOVED for 1.0 (#1037) — it never
+    # reached the session worker — so none of its markup is present. Assert on the binding
+    # markup (the contract), not the copy. Force non-win32 so the standard-only gate renders.
     monkeypatch.setattr(sys, "platform", "linux")
     html = _client(write_config).get("/").text
-    assert "x-model=\"customName['alpha']\"" in html  # Session name input
-    assert "x-model=\"sandboxMode['alpha']\"" in html  # Sandbox select
-    assert '<option value="on">Enabled</option>' in html
-    assert '<option value="off">Disabled</option>' in html
-    # Both #780 controls share the standard-only gate (never shown in pty mode).
-    assert html.count("(resumeMode['alpha'] || defaultResumeMode) === 'standard'") >= 2
+    assert "x-model=\"customName['alpha']\"" in html  # Session name input still present
+    assert "sandboxMode" not in html  # Sandbox select + its Alpine state removed
+    assert 'id="sandbox-alpha"' not in html
+    assert '<option value="on">Enabled</option>' not in html
 
 
 # The picker <option> gained a `:disabled` binding restricting bypass to the Desktop
