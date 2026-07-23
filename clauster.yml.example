@@ -70,6 +70,21 @@ auth:
 # api:
 #   openapi_enabled: false   # serve /docs + /openapi.json (Bearer-gated when auth.enabled)
 
+# Config-management trust tier (#347/#687): edit Claude Code's OWN config (MCP servers, hooks,
+# permission rules, skills) from the dashboard's Configuration editor. Both flags default OFF and are
+# file/CLI-managed only (never web-editable — the spawned `claude` runs that config as you, so the
+# browser is treated as the threat). Full detail: docs/reference/config.md (config_write section).
+# config_write:
+#   enabled: false
+#   allow_user_scope: false        # also expose the User scope, not just Local/Project
+
+# Dashboard-driven `claude` account login (#839): re-authenticate the runtime `claude` account from
+# the browser when it's logged out / its token expired, instead of SSHing in. Defaults OFF, file/CLI-
+# managed only. Full detail: docs/reference/config.md (login_shepherd section).
+# login_shepherd:
+#   enabled: false
+#   allow_setup_token: false       # also offer setup-token mode (mints a durable token — more dangerous)
+
 # Native HTTPS — Clauster terminates TLS itself (structural; file/CLI-managed only). Unset = plain HTTP.
 # Full detail incl. self-signed provisioning: docs/reference/config.md (tls section).
 # tls:
