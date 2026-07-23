@@ -41,6 +41,39 @@ from typing import Any
 AUDIT_FILE = "config_audit.log"
 _log = logging.getLogger("clauster.config_audit")
 
+# Size-based rotation ceiling for the audit log (#1011). One compact JSON line is appended per
+# committed config write — a rare event — so at 5 MB the current file already holds tens of
+# thousands of records; past it the file rotates to `.1`, shifting `.i` -> `.i+1` and dropping
+# anything beyond `_AUDIT_KEEP_ROTATED`. Total on-disk audit is therefore bounded at
+# ~(keep + 1) x ceiling (~30 MB), instead of growing forever on a long-lived instance. A fixed
+# ceiling (not a config key) keeps rotation surgical on this deliberately best-effort path.
+_AUDIT_MAX_BYTES = 5 * 1024 * 1024
+_AUDIT_KEEP_ROTATED = 5
+
+
+def _rotate_audit_log_if_needed(path: Path) -> None:
+    """Rotate the audit log when it reaches the size ceiling. Best-effort — never raises.
+
+    ``<name>`` -> ``<name>.1``, shifting ``<name>.i`` -> ``<name>.i+1`` up to
+    :data:`_AUDIT_KEEP_ROTATED` (older dropped). A rotation error must never block the append
+    (itself best-effort, on an already-committed write), so it is swallowed + logged and the
+    append then continues against the existing file.
+    """
+    try:
+        if path.stat().st_size < _AUDIT_MAX_BYTES:
+            return
+    except OSError:
+        return  # no file yet, or un-stat-able — nothing to rotate
+    try:
+        path.with_name(f"{path.name}.{_AUDIT_KEEP_ROTATED}").unlink(missing_ok=True)
+        for i in range(_AUDIT_KEEP_ROTATED - 1, 0, -1):
+            src = path.with_name(f"{path.name}.{i}")
+            if src.exists():
+                src.replace(path.with_name(f"{path.name}.{i + 1}"))
+        path.replace(path.with_name(f"{path.name}.1"))
+    except OSError as exc:
+        _log.warning("config audit log rotation failed (append will continue): %s", exc)
+
 
 def record(
     state_dir: Path | None,
@@ -84,7 +117,9 @@ def record(
     try:
         resolved = state_dir.expanduser()
         resolved.mkdir(parents=True, exist_ok=True)
-        with open(resolved / AUDIT_FILE, "a", encoding="utf-8", newline="") as fh:
+        audit_path = resolved / AUDIT_FILE
+        _rotate_audit_log_if_needed(audit_path)
+        with open(audit_path, "a", encoding="utf-8", newline="") as fh:
             fh.write(json.dumps(entry, separators=(",", ":"), default=str) + "\n")
     except OSError as exc:
         _log.error(
