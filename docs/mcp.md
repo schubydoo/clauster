@@ -102,7 +102,7 @@ dashboard's **Run Claude here**).
 | `spawn_mode` | string | `same-dir` · `worktree` · `session`. |
 | `permission_mode` | string | The claude permission mode. |
 | `custom_name` | string | Display name (standard/Server Mode only). |
-| `sandbox` | string | `default` · `on` · `off` (standard only). |
+| `sandbox` | string | `default` · `on` · `off` (standard only). **Disabled in this release** ([#1037](https://github.com/schubydoo/clauster/issues/1037)) — accepted but inert (coerced to `default`); the launch popover no longer offers it. Returns behind dependency-preflight + platform gating in [#1046](https://github.com/schubydoo/clauster/issues/1046). |
 | `trust` | boolean | Accept the workspace-trust dialog for this project. **Defaults to `false`** — an untrusted directory is refused unless you pass `true`, the headless equivalent of the dashboard's Trust action. |
 
 Returns `{"created": <bool>, "reason": ..., "warnings": [...], "session": {...}}`.

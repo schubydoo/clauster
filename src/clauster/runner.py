@@ -50,6 +50,7 @@ from .config import (
     PERMISSION_MODES,
     RESUME_MODES,
     SANDBOX_MODES,
+    SANDBOX_TOGGLE_ENABLED,
     SPAWN_MODES,
     ClausterConfig,
     PermissionMode,
@@ -1158,9 +1159,13 @@ class SessionRunner:
         defaults = self._config.instance_defaults
         spawn_mode = spawn_mode or defaults.spawn_mode
         permission_mode = permission_mode or defaults.permission_mode
-        # None == "default" (append neither sandbox flag); normalize up front so the
-        # value stored on the instance and validated below is always one of SANDBOX_MODES.
-        sandbox_mode: SandboxMode = sandbox or "default"
+        # None == "default" (append neither sandbox flag); normalize up front so the value
+        # validated below is always one of SANDBOX_MODES. The toggle is DISABLED for 1.0
+        # (#1037, config.SANDBOX_TOGGLE_ENABLED): the requested value is still validated (a bad
+        # value 422s below) but coerced to "default" so nothing on/off is recorded, resumed, or
+        # emitted while `--sandbox` doesn't reach the server-mode worker. Re-enabled via #1046.
+        requested_sandbox: SandboxMode = sandbox or "default"
+        sandbox_mode: SandboxMode = requested_sandbox if SANDBOX_TOGGLE_ENABLED else "default"
         # Resolve resume_mode early so we can apply the per-mode policy checks below
         # before spending side-effect budget (trust writes, log file creation, etc.).
         # For a resume the prior instance is the SPECIFIC one being revived
@@ -1170,7 +1175,9 @@ class SessionRunner:
         effective_resume_mode: ResumeMode = (
             "pty" if self._is_pty_mode(prior_for_mode, requested=resume_mode) else "standard"
         )
-        self._validate_spawn_options(proj, spawn_mode, permission_mode, resume_mode, sandbox_mode)
+        self._validate_spawn_options(
+            proj, spawn_mode, permission_mode, resume_mode, requested_sandbox
+        )
         # Fork-a-past-conversation (#303): validate BEFORE any spawn side effect, and
         # strictly — this string ends up on a subprocess argv, so nothing but a UUID
         # shape may pass (fail closed; list-argv means no shell, but defense in depth).
@@ -1810,7 +1817,10 @@ class SessionRunner:
         ]
         # Sandbox toggle (#780) — append only for an explicit on/off; "default" leaves it
         # to claude's own setting. Placed before the config-driven flags below, order is
-        # immaterial to claude's parser.
+        # immaterial to claude's parser. Disabled for 1.0 (#1037) not here but at the source:
+        # `sandbox` is coerced to "default" on the way in (fresh spawn) and on persisted read,
+        # so nothing but "default" reaches this builder until #1046 re-enables the toggle —
+        # keeping this low-level emission intact and directly tested for that re-enable.
         if sandbox == "on":
             cmd += ["--sandbox"]
         elif sandbox == "off":
@@ -2789,7 +2799,13 @@ class SessionRunner:
         the safe no-flag behavior — so a rebuilt STOPPED card offers the same sandbox
         choice on resume that the original launch used, without failing the model on a
         hand-edited value.
+
+        While the toggle is DISABLED for 1.0 (#1037), every persisted value coerces to
+        ``"default"`` so an existing STOPPED card that recorded ``"on"``/``"off"`` resumes
+        safely with no flag — matching the (now inert) live behavior.
         """
+        if not SANDBOX_TOGGLE_ENABLED:
+            return "default"
         sb = saved.get("sandbox_mode")
         return cast(SandboxMode, sb) if sb in SANDBOX_MODES else "default"
 

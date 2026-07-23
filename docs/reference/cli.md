@@ -224,6 +224,12 @@ interchangeable); `--trust` accepts the workspace-trust dialog before starting
 (otherwise an untrusted directory is refused). Sending a conversation turn to a
 running hosted session is not a headless command — it needs the live server.
 
+`--sandbox` is **disabled in this release** ([#1037](https://github.com/schubydoo/clauster/issues/1037)):
+it is still accepted and validated, but inert (coerced to `default`) — the flag
+never reached the server-mode session worker, so it silently did nothing. It
+returns behind dependency-preflight + platform gating in
+[#1046](https://github.com/schubydoo/clauster/issues/1046).
+
 ## `clauster usage` — transcript cost summary {#clauster-usage-transcript-cost-summary}
 
 `clauster usage <transcript>` prints the token counts and approximate cost for

@@ -4342,9 +4342,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # side effect, surfaced here as a 422 via _spawn_or_http's InvalidSpawnOption
         # mapping.
         name = body.get("name")
-        # Optional per-launch sandbox toggle (#780) — tri-state "default"/"on"/"off"
-        # for a standard bridge (--sandbox / --no-sandbox / neither). Enum-validated by
-        # runner.spawn_detailed before any spawn side effect → 422 on a bad value.
+        # Optional per-launch sandbox toggle (#780) — tri-state "default"/"on"/"off" for a
+        # standard bridge. DISABLED for 1.0 (#1037): still accepted + enum-validated by
+        # runner.spawn_detailed (422 on a bad value), but inert — the runner emits no
+        # --sandbox flag and coerces persisted values to "default" until #1046 re-enables it.
         sandbox = body.get("sandbox")
         # Optional past-conversation fork for a pty launch (#303) — the transcripts
         # API's session uuid, spawned as `--resume <uuid> --fork-session`. Format,
