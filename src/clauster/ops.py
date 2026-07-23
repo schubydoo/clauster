@@ -167,13 +167,26 @@ def run_doctor(
     # probes reflect what the server will actually import — otherwise doctor reports a managed-dir
     # install as "unavailable" even though the frozen binary loads it on the next start (#933).
     deps.add_deps_dir_to_sys_path(config.state_dir)
-    checks.extend(_check_extras())
+    checks.extend(_check_extras(config))
     checks.extend(_check_binary_deps(config))
 
     return checks, all(c.status != FAIL for c in checks)
 
 
-def _check_extras() -> list[Check]:
+#: Optional extras whose warning is only relevant when their feature is actually going to run —
+#: skip the doctor/preflight line otherwise, so the operator isn't nagged about a dep they don't
+#: need (#1016; mirrors _BINARY_DEP_GATES for binaries). Only ``apprise`` is here: runtime imports
+#: it ONLY when notifications are enabled AND a url is configured (``notify.py`` — no url means
+#: nothing is ever sent, so nothing to install for). ``pyte``/``pywinpty`` are deliberately NOT
+#: gated: pyte also reassembles the bridge connect-URL (``pty_keeper``) and pywinpty IS the Windows
+#: ConPTY interactive backend, so both matter beyond the opt-in live view and a missing one is
+#: worth surfacing regardless of ``claude.pty_screen_enabled``.
+_EXTRA_DEP_GATES: dict[str, Callable[[ClausterConfig], bool]] = {
+    "apprise": lambda config: config.notifications.enabled and bool(config.notifications.urls),
+}
+
+
+def _check_extras(config: ClausterConfig) -> list[Check]:
     """Report each optional extra's presence (#904): OK if importable, else WARN.
 
     Extras are optional capabilities the default install / signed binary may not
@@ -181,13 +194,20 @@ def _check_extras() -> list[Check]:
     ``apprise`` for notifications). Detection is a side-effect-free
     :func:`clauster.deps.probe` (never imports the module). Off-platform entries
     (a win32-only extra on a POSIX host) are skipped — the capability can't run
-    there, so its absence isn't worth reporting. WARN, never FAIL: a missing extra
-    only leaves its feature dormant, and a FAIL would wrongly flip doctor's exit
-    code. The detail names the capability and the environment-correct install hint.
+    there, so its absence isn't worth reporting. An extra whose feature won't run is
+    skipped too via ``_EXTRA_DEP_GATES`` (#1016) — today just ``apprise`` when
+    notifications aren't enabled-with-a-url — so the panel isn't cluttered with a nag
+    for a dep that would never be imported. WARN, never FAIL: a missing extra only
+    leaves its feature dormant,
+    and a FAIL would wrongly flip doctor's exit code. The detail names the capability
+    and the environment-correct install hint.
     """
     checks: list[Check] = []
     for entry in deps.EXTRAS:
         if not deps.applies(entry):
+            continue
+        gate = _EXTRA_DEP_GATES.get(entry.key)
+        if gate is not None and not gate(config):
             continue
         if deps.probe(entry):
             checks.append(Check(f"extra:{entry.key}", OK, f"{entry.capability_label} available"))

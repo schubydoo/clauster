@@ -460,7 +460,13 @@ added, so read the prefix rather than expecting this page to enumerate them:
 - **`extra:<name>`** — an optional Python extra. Today: `extra:pyte` (live
   terminal view), `extra:apprise` (outbound notifications), and on Windows
   `extra:pywinpty` (Interactive Sessions). A warn carries the exact install
-  hint (e.g. `pip install 'clauster[notify]'`).
+  hint (e.g. `pip install 'clauster[notify]'`). `apprise` is shown **only when
+  notifications will actually send** — `notifications.enabled` with at least one
+  `notifications.urls` entry (#1016); with the channel off or no URL configured,
+  runtime never imports apprise, so it isn't a nag worth carrying here. `pyte` and
+  `pywinpty` are always shown when missing: pyte also reassembles the bridge
+  connect-URL and pywinpty is the Windows Interactive-Session backend, so they
+  matter beyond the opt-in live-terminal view.
 - **`binary:<name>`** — a bundled companion binary managed by
   `clauster deps`. Today: `binary:claustrum` (Direct Session daemon, shown
   when `claustrum.enabled`) and on Windows `binary:shawl` (service wrapper).

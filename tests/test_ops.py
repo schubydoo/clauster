@@ -126,10 +126,22 @@ def test_doctor_git_missing_warns(write_config, tmp_path, monkeypatch):
 # ----- optional-extras rows (#904) --------------------------------------
 
 
+def _extras_cfg(*, notify: bool = True, urls: list[str] | None = None):
+    # Minimal config stand-in for _check_extras' feature gates (#1016): only apprise is gated,
+    # on notifications.enabled AND a configured url (runtime imports apprise only then).
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        notifications=SimpleNamespace(
+            enabled=notify, urls=urls if urls is not None else ["mailto://x"]
+        ),
+    )
+
+
 def test_check_extras_warns_with_install_hint_when_missing(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: False)
     monkeypatch.setattr(deps.sys, "platform", "linux")  # pywinpty (win32-only) is skipped
-    by = {c.name: c for c in _check_extras()}
+    by = {c.name: c for c in _check_extras(_extras_cfg())}  # both features enabled
     assert set(by) == {"extra:pyte", "extra:apprise"}
     assert by["extra:pyte"].status == WARN
     assert "Live terminal view (#534)" in by["extra:pyte"].detail
@@ -140,7 +152,7 @@ def test_check_extras_warns_with_install_hint_when_missing(monkeypatch):
 def test_check_extras_ok_when_present(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: True)
     monkeypatch.setattr(deps.sys, "platform", "linux")
-    by = {c.name: c for c in _check_extras()}
+    by = {c.name: c for c in _check_extras(_extras_cfg())}
     assert by["extra:pyte"].status == OK
     assert "available" in by["extra:pyte"].detail
 
@@ -148,8 +160,23 @@ def test_check_extras_ok_when_present(monkeypatch):
 def test_check_extras_includes_win32_entry_only_on_windows(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: False)
     monkeypatch.setattr(deps.sys, "platform", "win32")
-    names = {c.name for c in _check_extras()}
+    names = {c.name for c in _check_extras(_extras_cfg())}
     assert "extra:pywinpty" in names
+
+
+def test_check_extras_gates_apprise_on_notifications(monkeypatch):
+    # #1016: apprise is nagged only when notifications will actually send — enabled AND a url
+    # configured (runtime imports apprise only then). pyte/pywinpty are NOT gated: pyte also
+    # reassembles the connect-URL and pywinpty is the Windows ConPTY backend, beyond the live view.
+    monkeypatch.setattr(deps, "probe", lambda entry: False)
+    monkeypatch.setattr(deps.sys, "platform", "linux")
+    # notifications off -> no apprise row; pyte still shows (it's ungated)
+    off = {c.name for c in _check_extras(_extras_cfg(notify=False))}
+    assert "extra:apprise" not in off and "extra:pyte" in off
+    # enabled but no url -> still no apprise (runtime would never import it)
+    assert "extra:apprise" not in {c.name for c in _check_extras(_extras_cfg(urls=[]))}
+    # enabled + a url -> apprise surfaces
+    assert "extra:apprise" in {c.name for c in _check_extras(_extras_cfg(urls=["mailto://x"]))}
 
 
 def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, monkeypatch):
@@ -161,7 +188,9 @@ def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, mon
     order: list[str] = []
     real_check = ops_mod._check_extras
     monkeypatch.setattr(deps, "add_deps_dir_to_sys_path", lambda sd: order.append(f"add:{sd}"))
-    monkeypatch.setattr(ops_mod, "_check_extras", lambda: order.append("probe") or real_check())
+    monkeypatch.setattr(
+        ops_mod, "_check_extras", lambda cfg: order.append("probe") or real_check(cfg)
+    )
     run_doctor(cfg, check_port=False)
     # Both that it ran with the right state_dir AND that it ran before the extra probes.
     assert order == [f"add:{load_config(cfg).state_dir}", "probe"]
@@ -170,7 +199,7 @@ def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, mon
 def test_doctor_includes_extra_rows_never_failing(write_config, tmp_path):
     checks, ok = run_doctor(_cfg_file(write_config, tmp_path))
     extra_rows = [c for c in checks if c.name.startswith("extra:")]
-    assert extra_rows  # at least pyte + apprise on a POSIX host
+    assert extra_rows  # pyte is ungated (#1016), so it shows on a POSIX host by default
     # Extras are optional: a missing one WARNs but must never FAIL (which would flip the
     # doctor exit code for a dormant feature).
     assert all(c.status in {OK, WARN} for c in extra_rows)
