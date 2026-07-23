@@ -298,16 +298,26 @@ def _managed_shadow_check(
     If ``key`` was installed via ``clauster deps install`` but a PATH/configured binary wins
     resolution, the managed copy never runs — surface that (Bug 5) rather than silently running
     an unexpected version. ``None`` when there's no managed install or it IS the resolved one.
+
+    Compares file *identity* (``Path.samefile`` — inode/device), not path spelling, so a symlink
+    or an alternate spelling of the same executable doesn't raise a false shadow warning. If a
+    path can't be stat'd (a racing removal), we can't confirm a shadow, so we stay silent rather
+    than nag about a possibly-valid install.
     """
     managed = deps.installed_binary_path(key, config.state_dir)
-    if managed is not None and str(managed) != resolved:
-        return Check(
-            f"binary:{key}:shadow",
-            WARN,
-            f"managed {label} at {managed} is shadowed by {resolved} — remove one so the "
-            f"expected version runs",
-        )
-    return None
+    if managed is None:
+        return None
+    try:
+        if managed.samefile(resolved):
+            return None
+    except OSError:
+        return None
+    return Check(
+        f"binary:{key}:shadow",
+        WARN,
+        f"managed {label} at {managed} is shadowed by {resolved} — remove one so the "
+        f"expected version runs",
+    )
 
 
 def _check_binary_deps(config: ClausterConfig) -> list[Check]:

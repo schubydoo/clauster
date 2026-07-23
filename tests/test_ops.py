@@ -1424,14 +1424,26 @@ def test_check_claustrum_version_warns_on_probe_error(monkeypatch):
     assert c.status == WARN and "version" in c.detail.lower()
 
 
+def _managed_shawl(tmp_path):
+    """Create a managed shawl.exe under <tmp_path>/deps/bin and return its Path."""
+    from clauster import ops
+
+    exe = ops.deps.managed_bin_dir(tmp_path) / "shawl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    return exe
+
+
 def test_managed_shadow_check_warns_when_managed_shadowed(tmp_path, monkeypatch):
     from clauster import ops
 
     monkeypatch.setattr(ops.deps.sys, "platform", "win32")  # shawl resolves on win32
-    exe = ops.deps.managed_bin_dir(tmp_path) / "shawl.exe"
-    exe.parent.mkdir(parents=True)
-    exe.write_bytes(b"x")
-    c = ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), "/usr/local/bin/shawl")
+    _managed_shawl(tmp_path)
+    # A genuinely different executable (own inode) wins resolution.
+    other = tmp_path / "elsewhere" / "shawl.exe"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"y")
+    c = ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), str(other))
     assert c is not None and c.status == WARN and "shadowed" in c.detail
 
 
@@ -1439,10 +1451,32 @@ def test_managed_shadow_check_none_when_resolved_is_managed(tmp_path, monkeypatc
     from clauster import ops
 
     monkeypatch.setattr(ops.deps.sys, "platform", "win32")
-    exe = ops.deps.managed_bin_dir(tmp_path) / "shawl.exe"
-    exe.parent.mkdir(parents=True)
-    exe.write_bytes(b"x")
+    exe = _managed_shawl(tmp_path)
     assert ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), str(exe)) is None
+
+
+@needs_symlink
+def test_managed_shadow_check_no_false_warning_via_symlink(tmp_path, monkeypatch):
+    # #1013 Bug 5 review: a symlink / alternate spelling of the SAME file must not warn (compare
+    # inode identity, not path strings).
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    exe = _managed_shawl(tmp_path)
+    link = tmp_path / "link-to-shawl.exe"
+    link.symlink_to(exe)
+    assert ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), str(link)) is None
+
+
+def test_managed_shadow_check_none_when_resolved_unstattable(tmp_path, monkeypatch):
+    # A racing removal (resolved path gone) can't confirm a shadow -> stay silent, don't nag.
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    _managed_shawl(tmp_path)
+    assert (
+        ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), "/no/such/shawl") is None
+    )
 
 
 def test_managed_shadow_check_none_when_no_managed(tmp_path):
@@ -1463,7 +1497,10 @@ def test_check_binary_deps_surfaces_claustrum_shadow(monkeypatch, tmp_path):
     managed = ops.deps.managed_bin_dir(tmp_path) / "claustrum"
     managed.parent.mkdir(parents=True)
     managed.write_bytes(b"x")
-    monkeypatch.setattr(ops.shutil, "which", lambda name: "/usr/local/bin/claustrum")
+    other = tmp_path / "elsewhere" / "claustrum"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"y")
+    monkeypatch.setattr(ops.shutil, "which", lambda name: str(other))
     monkeypatch.setattr(ops, "_claustrum_version", lambda binary: deps.claustrum_pinned_version())
     by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path, claustrum_enabled=True))}
     assert by["binary:claustrum"].status == OK
