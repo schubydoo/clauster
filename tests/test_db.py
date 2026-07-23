@@ -284,6 +284,20 @@ def test_upgrade_to_head_wraps_failure_in_migration_error(tmp_path):
         engine.dispose()
 
 
+def test_alembic_ini_is_ascii_readable_under_ascii_locale():
+    # #1015: the frozen binary started with no LANG/LC_ALL resolves configparser's
+    # default encoding to ASCII, so a non-ASCII byte in alembic.ini (an em-dash in
+    # a comment) crashed the very first migration on a fresh DB. Read the packaged
+    # ini exactly as configparser does under that locale — any non-ASCII byte
+    # re-raises the UnicodeDecodeError this regression guards against.
+    import configparser
+
+    parser = configparser.ConfigParser()
+    with open(bootstrap._ALEMBIC_INI, encoding="ascii") as fh:
+        parser.read_file(fh)
+    assert parser.has_section("alembic")
+
+
 def test_persistence_propagates_migration_error(tmp_path):
     with mock.patch.object(bootstrap.command, "upgrade", side_effect=RuntimeError("boom")):
         with pytest.raises(MigrationError):
