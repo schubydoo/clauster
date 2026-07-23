@@ -126,10 +126,21 @@ def test_doctor_git_missing_warns(write_config, tmp_path, monkeypatch):
 # ----- optional-extras rows (#904) --------------------------------------
 
 
+def _extras_cfg(*, pty: bool = True, notify: bool = True):
+    # Minimal config stand-in for _check_extras' feature gates (#1016): the live-terminal switch
+    # (claude.pty_screen_enabled → pyte/pywinpty) and the notifications switch (→ apprise).
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        claude=SimpleNamespace(pty_screen_enabled=pty),
+        notifications=SimpleNamespace(enabled=notify),
+    )
+
+
 def test_check_extras_warns_with_install_hint_when_missing(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: False)
     monkeypatch.setattr(deps.sys, "platform", "linux")  # pywinpty (win32-only) is skipped
-    by = {c.name: c for c in _check_extras()}
+    by = {c.name: c for c in _check_extras(_extras_cfg())}  # both features enabled
     assert set(by) == {"extra:pyte", "extra:apprise"}
     assert by["extra:pyte"].status == WARN
     assert "Live terminal view (#534)" in by["extra:pyte"].detail
@@ -140,7 +151,7 @@ def test_check_extras_warns_with_install_hint_when_missing(monkeypatch):
 def test_check_extras_ok_when_present(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: True)
     monkeypatch.setattr(deps.sys, "platform", "linux")
-    by = {c.name: c for c in _check_extras()}
+    by = {c.name: c for c in _check_extras(_extras_cfg())}
     assert by["extra:pyte"].status == OK
     assert "available" in by["extra:pyte"].detail
 
@@ -148,8 +159,19 @@ def test_check_extras_ok_when_present(monkeypatch):
 def test_check_extras_includes_win32_entry_only_on_windows(monkeypatch):
     monkeypatch.setattr(deps, "probe", lambda entry: False)
     monkeypatch.setattr(deps.sys, "platform", "win32")
-    names = {c.name for c in _check_extras()}
+    names = {c.name for c in _check_extras(_extras_cfg())}
     assert "extra:pywinpty" in names
+
+
+def test_check_extras_skips_extra_when_feature_switch_off(monkeypatch):
+    # #1016: a dep for a feature the operator turned OFF is not nagged about (the live terminal
+    # off → no pyte/pywinpty row; notifications off → no apprise row).
+    monkeypatch.setattr(deps, "probe", lambda entry: False)
+    monkeypatch.setattr(deps.sys, "platform", "linux")
+    assert _check_extras(_extras_cfg(pty=False, notify=False)) == []
+    # Turning notifications back on resurfaces only apprise.
+    by = {c.name for c in _check_extras(_extras_cfg(pty=False, notify=True))}
+    assert by == {"extra:apprise"}
 
 
 def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, monkeypatch):
@@ -161,16 +183,20 @@ def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, mon
     order: list[str] = []
     real_check = ops_mod._check_extras
     monkeypatch.setattr(deps, "add_deps_dir_to_sys_path", lambda sd: order.append(f"add:{sd}"))
-    monkeypatch.setattr(ops_mod, "_check_extras", lambda: order.append("probe") or real_check())
+    monkeypatch.setattr(
+        ops_mod, "_check_extras", lambda cfg: order.append("probe") or real_check(cfg)
+    )
     run_doctor(cfg, check_port=False)
     # Both that it ran with the right state_dir AND that it ran before the extra probes.
     assert order == [f"add:{load_config(cfg).state_dir}", "probe"]
 
 
 def test_doctor_includes_extra_rows_never_failing(write_config, tmp_path):
-    checks, ok = run_doctor(_cfg_file(write_config, tmp_path))
+    # Enable the live-terminal feature so its extra rows are gated IN (#1016 — a default config
+    # with the feature off now shows no extra nag at all).
+    checks, ok = run_doctor(_cfg_file(write_config, tmp_path, "  pty_screen_enabled: true\n"))
     extra_rows = [c for c in checks if c.name.startswith("extra:")]
-    assert extra_rows  # at least pyte + apprise on a POSIX host
+    assert extra_rows  # at least pyte on a POSIX host, now that pty_screen is enabled
     # Extras are optional: a missing one WARNs but must never FAIL (which would flip the
     # doctor exit code for a dormant feature).
     assert all(c.status in {OK, WARN} for c in extra_rows)

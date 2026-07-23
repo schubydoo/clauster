@@ -167,13 +167,25 @@ def run_doctor(
     # probes reflect what the server will actually import — otherwise doctor reports a managed-dir
     # install as "unavailable" even though the frozen binary loads it on the next start (#933).
     deps.add_deps_dir_to_sys_path(config.state_dir)
-    checks.extend(_check_extras())
+    checks.extend(_check_extras(config))
     checks.extend(_check_binary_deps(config))
 
     return checks, all(c.status != FAIL for c in checks)
 
 
-def _check_extras() -> list[Check]:
+#: Optional extras are only relevant when their feature switch is ON — skip the doctor line for a
+#: feature the operator deliberately turned off, so they aren't nagged to install a dep they don't
+#: want on a panel read before every session (#1016; mirrors _BINARY_DEP_GATES for binaries).
+#: pyte/pywinpty back the live terminal (claude.pty_screen_enabled); apprise backs outbound
+#: notifications (notifications.enabled).
+_EXTRA_DEP_GATES: dict[str, Callable[[ClausterConfig], bool]] = {
+    "pyte": lambda config: config.claude.pty_screen_enabled,
+    "pywinpty": lambda config: config.claude.pty_screen_enabled,
+    "apprise": lambda config: config.notifications.enabled,
+}
+
+
+def _check_extras(config: ClausterConfig) -> list[Check]:
     """Report each optional extra's presence (#904): OK if importable, else WARN.
 
     Extras are optional capabilities the default install / signed binary may not
@@ -181,13 +193,19 @@ def _check_extras() -> list[Check]:
     ``apprise`` for notifications). Detection is a side-effect-free
     :func:`clauster.deps.probe` (never imports the module). Off-platform entries
     (a win32-only extra on a POSIX host) are skipped — the capability can't run
-    there, so its absence isn't worth reporting. WARN, never FAIL: a missing extra
-    only leaves its feature dormant, and a FAIL would wrongly flip doctor's exit
-    code. The detail names the capability and the environment-correct install hint.
+    there, so its absence isn't worth reporting. An extra whose **feature switch is
+    off** is skipped too (#1016): a dep for a capability the operator disabled is not
+    a nag worth putting on the preflight panel (same reasoning as ``_BINARY_DEP_GATES``
+    for binaries). WARN, never FAIL: a missing extra only leaves its feature dormant,
+    and a FAIL would wrongly flip doctor's exit code. The detail names the capability
+    and the environment-correct install hint.
     """
     checks: list[Check] = []
     for entry in deps.EXTRAS:
         if not deps.applies(entry):
+            continue
+        gate = _EXTRA_DEP_GATES.get(entry.key)
+        if gate is not None and not gate(config):
             continue
         if deps.probe(entry):
             checks.append(Check(f"extra:{entry.key}", OK, f"{entry.capability_label} available"))
