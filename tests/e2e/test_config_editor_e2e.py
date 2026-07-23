@@ -8,6 +8,7 @@ asserts the wired UI round-trips to a real running server.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -218,3 +219,47 @@ def test_advanced_panel_absent_when_config_write_disabled(
     browser.click('[aria-label="Edit configuration"]')
     browser.expect_visible('[id="cfg-usage.fx_rate"]')  # Tier-A editor open
     browser.expect_hidden('[data-test="adv-panel"]')  # but no Advanced surface
+
+
+def test_advanced_save_banner_scrolls_into_view(
+    browser: AgentBrowser, advanced_config_server: Server, e2e_password: str
+) -> None:
+    """A successful Advanced save reveals its banner even from the panel foot (#1031).
+
+    Discriminating setup: after editing, park the scrollable modal body at the
+    BOTTOM (where the Save button lives) — without the reveal, the body stays
+    parked there and the saved-banner (top of the panel) remains outside the
+    scrollport, failing the containment check. Save is disabled when nothing is
+    dirty, so the success path is the one a user can actually reach.
+    """
+    _login(browser, advanced_config_server.url, e2e_password)
+    browser.click('[aria-label="Edit configuration"]')
+    browser.expect_visible('[data-test="adv-password"]')
+    browser.fill('[data-test="adv-password"]', e2e_password)
+    browser.click('[data-test="adv-unlock"]')
+    field = '[id="adv-clone.timeout_seconds"]'
+    browser.expect_visible(field)
+    browser.fill(field, "139")
+
+    # Park the scrollable modal body at the bottom, like a user who just found Save.
+    browser.eval_js(
+        "(() => { const b = document.querySelector('[data-test=\"cfg-modal\"] .modal-body');"
+        " b.scrollTop = b.scrollHeight; })()"
+    )
+    browser.click('[data-test="adv-save"]')
+    browser.expect_visible('[data-test="adv-saved"]')
+
+    # The smooth scroll needs a beat; poll the banner into the modal-body scrollport.
+    deadline = time.monotonic() + 5
+    contained = False
+    while time.monotonic() < deadline and not contained:
+        contained = browser.eval_json(
+            "(() => { const body = document"
+            ".querySelector('[data-test=\"cfg-modal\"] .modal-body');"
+            " const el = document.querySelector('[data-test=\"adv-saved\"]');"
+            " const b = body.getBoundingClientRect(), r = el.getBoundingClientRect();"
+            " return r.top >= b.top && r.bottom <= b.bottom; })()"
+        )
+        if not contained:
+            time.sleep(0.25)
+    assert contained, "adv-saved banner should be scrolled into the modal-body scrollport"
