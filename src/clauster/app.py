@@ -4138,6 +4138,11 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return value
 
         prompt = _opt_text("prompt")
+        if prompt is not None and not prompt.strip():
+            # Whitespace-only == no prompt (#1033): the dashboard trims before its
+            # gate, so the API must normalize identically or a direct request
+            # dispatches a nominally-promptless session around the 422 below.
+            prompt = None
         rc_name = _opt_text("rc_name", empty_ok=False)
         model = _opt_text("model", empty_ok=False)
         permission_mode = _opt_text("permission_mode", empty_ok=False)

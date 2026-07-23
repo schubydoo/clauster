@@ -502,7 +502,12 @@ def test_api_dispatch_agent_requires_prompt_when_unregistered(write_config, tmp_
     # start" forever (the bg card has no composer) -> 422, dispatch never reached
     called: list = []
     monkeypatch.setattr(supervisor, "dispatch_background_job", lambda *a, **k: called.append(1))
-    for body in ({"project": "alpha"}, {"project": "alpha", "prompt": ""}):
+    for body in (
+        {"project": "alpha"},
+        {"project": "alpha", "prompt": ""},
+        # whitespace-only must not bypass the gate (the dashboard trims; so must the API)
+        {"project": "alpha", "prompt": "   "},
+    ):
         r = _client(write_config, tmp_path).post("/api/agents", json=body)
         assert r.status_code == 422
         assert "prompt is required" in r.json()["detail"]
