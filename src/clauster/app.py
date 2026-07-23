@@ -4138,10 +4138,12 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return value
 
         prompt = _opt_text("prompt")
-        if prompt is not None and not prompt.strip():
+        if prompt is not None and not prompt.replace("\ufeff", "").strip():
             # Whitespace-only == no prompt (#1033): the dashboard trims before its
             # gate, so the API must normalize identically or a direct request
             # dispatches a nominally-promptless session around the 422 below.
+            # JS trim() also strips U+FEFF (ECMA WhiteSpace) while Python's
+            # strip() does not — drop it from the emptiness test for parity.
             prompt = None
         rc_name = _opt_text("rc_name", empty_ok=False)
         model = _opt_text("model", empty_ok=False)

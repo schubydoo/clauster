@@ -507,6 +507,8 @@ def test_api_dispatch_agent_requires_prompt_when_unregistered(write_config, tmp_
         {"project": "alpha", "prompt": ""},
         # whitespace-only must not bypass the gate (the dashboard trims; so must the API)
         {"project": "alpha", "prompt": "   "},
+        # U+FEFF: JS trim() strips it, Python strip() does not — parity required
+        {"project": "alpha", "prompt": "\ufeff \ufeff"},
     ):
         r = _client(write_config, tmp_path).post("/api/agents", json=body)
         assert r.status_code == 422
