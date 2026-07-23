@@ -39,7 +39,7 @@ clauster run
 Open <http://127.0.0.1:7621> — run with no config and Clauster serves a
 loopback-only **first-run setup wizard** that asks for your projects folder and a
 dashboard password, writes a `clauster.yml`, and starts on it. Then click
-**Start** on a project. Full recipes (uv / pip, Docker, systemd, reverse proxy) →
+**Run Claude here** on a project. Full recipes (uv / pip, Docker, systemd, reverse proxy) →
 [Installation guide](https://schubydoo.github.io/clauster/installation/).
 
 > **Status: 1.0 — stable and actively developed.** Requires an Anthropic account
