@@ -27,6 +27,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import markupsafe
 import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -41,6 +42,16 @@ from .config import ClausterConfig
 _PKG_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
+
+# Per-vendor "don't autofill" attribute set for NON-credential inputs (#1036), rendered raw via
+# a `{{ NO_AUTOFILL }}` template global. `autocomplete="off"` alone is ignored by Chromium Autofill
+# and the manager extensions (crbug 468153), so non-password fields also carry the 1Password /
+# LastPass / Bitwarden / Dashlane opt-out `data-*` attributes. Defined here (the lighter,
+# pre-config module) and shared with the main app's template env; password fields deliberately
+# omit it so login autofill keeps working. `Markup` so it isn't autoescaped.
+NO_AUTOFILL = markupsafe.Markup(
+    'autocomplete="off" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other"'
+)
 
 SETUP_HOST = "127.0.0.1"
 DEFAULT_PORT = int(ClausterConfig.model_fields["port"].default)
@@ -120,6 +131,7 @@ def create_setup_app(write_path: Path, *, port: int = DEFAULT_PORT) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    templates.env.globals["NO_AUTOFILL"] = NO_AUTOFILL  # #1036 (this env is separate from app's)
     app.state.setup_complete = False
     app.state.uvicorn_server = None
     allowed_origins = _loopback_origins(port)

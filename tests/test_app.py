@@ -74,6 +74,20 @@ def test_dashboard_renders(write_config):
     assert "alpha" in resp.text
 
 
+def test_dashboard_non_credential_inputs_opt_out_of_autofill(write_config):
+    # #1036: EVERY non-password dashboard input/textarea opts out of password-manager autofill,
+    # and no credential field does — audited per field, not just page-wide.
+    from conftest import audit_autofill
+
+    html = _client(write_config).get("/").text
+    missing, pw_optout = audit_autofill(html)
+    assert not missing, f"non-credential inputs missing the opt-out: {missing}"
+    assert not pw_optout, f"password inputs wrongly opted out of autofill: {pw_optout}"
+    # ...and the full per-vendor set is present (not just data-lpignore).
+    for attr in ("data-1p-ignore", "data-bwignore", 'data-form-type="other"'):
+        assert attr in html
+
+
 def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config, monkeypatch):
     # #534 S5 / #904: the per-bridge "Live terminal" control + the xterm.js assets render ONLY
     # when the (default-off) claude.pty_screen_enabled tap is on AND the optional `pty` extra

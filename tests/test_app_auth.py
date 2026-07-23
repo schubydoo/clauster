@@ -37,6 +37,14 @@ def _login(client: TestClient) -> None:
     assert resp.status_code == 303, resp.text
 
 
+def test_login_form_stays_autofillable(runner_config):
+    # #1036: credential fields must NOT carry the no-autofill opt-outs, so a password manager still
+    # offers to fill the login form (bug-bash item 38 must keep passing).
+    html = _password_client(runner_config).get("/login").text
+    assert 'type="password"' in html  # it IS the login form
+    assert "data-lpignore" not in html and "data-1p-ignore" not in html
+
+
 def _healthz_after_probe(client: TestClient) -> dict:
     """Return /healthz once the #838 login-status cache has run its first probe.
 

@@ -433,7 +433,7 @@
                            :placeholder="hostedView[h.claustrum_process_id].ended ? 'Session ended — not accepting messages' : 'Send a message…'"
                            x-model="hostedView[h.claustrum_process_id].input"
                            @keydown.enter="sendHosted(h.claustrum_process_id)"
-                           :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended">
+                           :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended" {{ NO_AUTOFILL }}>
                     <button class="btn btn-primary" @click="sendHosted(h.claustrum_process_id)"
                             :disabled="hostedView[h.claustrum_process_id].sending || hostedView[h.claustrum_process_id].ended || !(hostedView[h.claustrum_process_id].input || '').trim()">
                       <span x-text="hostedView[h.claustrum_process_id].sending ? 'Sending…' : 'Send'">Send</span>
@@ -953,7 +953,7 @@
             <option value="cost">Cost</option>
           </select>
           <input type="search" class="form-control form-control-sm proj-search" placeholder="Search projects…"
-                 x-model="projectFilter" aria-label="Search projects">
+                 x-model="projectFilter" aria-label="Search projects" {{ NO_AUTOFILL }}>
           <button type="button" class="btn btn-sm btn-ghost-secondary" x-cloak
                   x-show="projectNames.length > 6 && !projectFilter.trim()"
                   @click="showAllProjects = !showAllProjects"
@@ -972,29 +972,29 @@
               <div class="col-md-5">
                 <label class="form-label" for="np-name">Name</label>
                 <input id="np-name" type="text" class="form-control" x-model="np.name" placeholder="my-project"
-                       pattern="[a-zA-Z0-9_-]+" @input="clearNpErrors()" @keyup.enter="submitNew()">
+                       pattern="[a-zA-Z0-9_-]+" @input="clearNpErrors()" @keyup.enter="submitNew()" {{ NO_AUTOFILL }}>
               </div>
               <div class="col-md-7">
                 <label class="form-label" id="np-type-label">Type</label>
                 <div class="btn-group w-100" role="group" aria-labelledby="np-type-label">
                   <input type="radio" class="btn-check" id="np-create" value="create" x-model="np.mode"
-                         @change="clearNpErrors()">
+                         @change="clearNpErrors()" {{ NO_AUTOFILL }}>
                   <label class="btn" for="np-create">Create empty</label>
                   <input type="radio" class="btn-check" id="np-clone" value="clone" x-model="np.mode"
-                         @change="clearNpErrors()">
+                         @change="clearNpErrors()" {{ NO_AUTOFILL }}>
                   <label class="btn" for="np-clone">Clone from git URL</label>
                 </div>
               </div>
             </div>
             <div class="mt-2" x-show="np.mode === 'create'">
-              <label class="form-check"><input type="checkbox" class="form-check-input" x-model="np.gitInit">
+              <label class="form-check"><input type="checkbox" class="form-check-input" x-model="np.gitInit" {{ NO_AUTOFILL }}>
                 <span class="form-check-label">run <code>git init</code></span></label>
             </div>
             <div class="mt-2" x-show="np.mode === 'clone'">
               <label class="form-label" for="np-url">Git URL</label>
-              <input id="np-url" type="text" class="form-control" x-model="np.url" autocomplete="off" spellcheck="false"
+              <input id="np-url" type="text" class="form-control" x-model="np.url" {{ NO_AUTOFILL }} spellcheck="false"
                      placeholder="https://github.com/owner/repo.git" @input="clearNpError()" @keyup.enter="submitNew()">
-              <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow">
+              <label class="form-check mt-2"><input type="checkbox" class="form-check-input" x-model="np.shallow" {{ NO_AUTOFILL }}>
                 <span class="form-check-label">shallow clone (<code>--depth 1</code>)</span></label>
               <p class="text-secondary small mt-1 mb-0">https / ssh only · private/LAN hosts need
                 <code>clone.allow_private_hosts</code> in clauster.yml · cloning only fetches files (nothing runs).</p>
@@ -1159,7 +1159,7 @@
                   <div class="mt-2">
                     <label class="form-label" for="force-delete-confirm">Permanently delete — this can't be undone. Type <code>DELETE</code> to confirm:</label>
                     <div class="input-group input-group-narrow">
-                      <input id="force-delete-confirm" type="text" class="form-control" x-model="deleteTyped" placeholder="DELETE" autocomplete="off">
+                      <input id="force-delete-confirm" type="text" class="form-control" x-model="deleteTyped" placeholder="DELETE" {{ NO_AUTOFILL }}>
                       <button class="btn btn-danger" @click="del()" :disabled="busy || deleteTyped !== 'DELETE'">Permanently delete</button>
                     </div>
                   </div>
@@ -1202,12 +1202,12 @@
                 <div class="ls-mode-toggle mb-2" role="group" aria-label="Sign-in mode">
                   <label class="ls-mode-opt" :class="{ 'ls-mode-opt-sel': mode === 'login' }">
                     <input type="radio" class="ls-mode-input" name="login-shepherd-mode"
-                           value="login" x-model="mode">
+                           value="login" x-model="mode" {{ NO_AUTOFILL }}>
                     <span>Sign in with your Claude subscription</span>
                   </label>
                   <label class="ls-mode-opt" :class="{ 'ls-mode-opt-sel': mode === 'setup-token' }">
                     <input type="radio" class="ls-mode-input" name="login-shepherd-mode"
-                           value="setup-token" x-model="mode">
+                           value="setup-token" x-model="mode" {{ NO_AUTOFILL }}>
                     <span>Create a long-lived token</span>
                   </label>
                 </div>
@@ -1251,7 +1251,7 @@
                 <div class="input-group input-group-narrow mb-2">
                   <input type="text" class="form-control" x-model="code" placeholder="Paste code"
                          aria-label="Authorization code"
-                         autocomplete="off" spellcheck="false" @keydown.enter="submitCode()">
+                         {{ NO_AUTOFILL }} spellcheck="false" @keydown.enter="submitCode()">
                   <button class="btn btn-primary" @click="submitCode()" :disabled="busy || !code"
                           x-text="busy ? 'Submitting…' : 'Submit'">Submit</button>
                 </div>
@@ -1272,7 +1272,7 @@
                   <div class="mb-2">
                     <label class="form-label" for="ls-token">Long-lived token (shown once — copy it now)</label>
                     <div class="input-group input-group-narrow">
-                      <input type="text" id="ls-token" class="form-control" readonly :value="result.token" @focus="$el.select()">
+                      <input type="text" id="ls-token" class="form-control" readonly :value="result.token" @focus="$el.select()" {{ NO_AUTOFILL }}>
                       <button class="btn" @click="copyToken()" x-text="copied ? 'Copied' : 'Copy'">Copy</button>
                     </div>
                     <p class="text-secondary small mt-1">
@@ -1401,7 +1401,7 @@
             <!-- Filter + section jump-nav (sticky) -->
             <div class="cfg-nav" x-show="!configEditor.loading" x-cloak>
               <input type="search" class="form-control form-control-sm mb-2" x-model="configQuery"
-                     placeholder="Filter settings…" aria-label="Filter settings">
+                     placeholder="Filter settings…" aria-label="Filter settings" {{ NO_AUTOFILL }}>
               <div class="cfg-jump" role="group" aria-label="Jump to section">
                 <template x-for="s in configSections()" :key="s">
                   <button type="button" class="btn btn-sm btn-ghost-secondary" @click="scrollToSection(s)"
@@ -1436,7 +1436,7 @@
                       <template x-if="configEditor.specs[path].type === 'bool'">
                         <label class="form-check form-switch mb-0 d-inline-flex align-items-center">
                           <input class="form-check-input" type="checkbox" :id="'cfg-' + path"
-                                 :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]">
+                                 :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]" {{ NO_AUTOFILL }}>
                           <span class="ms-2 small text-secondary" x-text="configEditor.edits[path] ? 'On' : 'Off'"></span>
                         </label>
                       </template>
@@ -1461,7 +1461,7 @@
                                  :min="configEditor.specs[path].min" :max="configEditor.specs[path].max"
                                  :step="configEditor.specs[path].step"
                                  :placeholder="configEditor.specs[path].placeholder || (configEditor.specs[path].default != null ? 'default ' + configEditor.specs[path].default : '')"
-                                 :disabled="configFieldDisabled(path)" x-model.number="configEditor.edits[path]">
+                                 :disabled="configFieldDisabled(path)" x-model.number="configEditor.edits[path]" {{ NO_AUTOFILL }}>
                           <span class="input-group-text" x-show="configEditor.specs[path].unit"
                                 x-text="configEditor.specs[path].unit"></span>
                         </div>
@@ -1469,7 +1469,7 @@
                       <template x-if="configEditor.specs[path].type === 'str'">
                         <input class="form-control form-control-sm" type="text" :id="'cfg-' + path"
                                :placeholder="configEditor.specs[path].placeholder || (configEditor.specs[path].default != null ? configEditor.specs[path].default : '')"
-                               :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]">
+                               :disabled="configFieldDisabled(path)" x-model="configEditor.edits[path]" {{ NO_AUTOFILL }}>
                       </template>
                       <div class="cfg-help text-secondary" x-show="configEditor.specs[path].description" x-cloak
                            x-text="configEditor.specs[path].description"></div>
@@ -1561,7 +1561,7 @@
                           <template x-if="configAdvanced.specs[path].type === 'bool'">
                             <label class="form-check form-switch mb-0 d-inline-flex align-items-center">
                               <input class="form-check-input" type="checkbox" :id="'adv-' + path"
-                                     x-model="configAdvanced.edits[path]">
+                                     x-model="configAdvanced.edits[path]" {{ NO_AUTOFILL }}>
                               <span class="ms-2 small text-secondary" x-text="configAdvanced.edits[path] ? 'On' : 'Off'"></span>
                             </label>
                           </template>
@@ -1571,14 +1571,14 @@
                                      :min="configAdvanced.specs[path].min" :max="configAdvanced.specs[path].max"
                                      :step="configAdvanced.specs[path].step"
                                      :placeholder="configAdvanced.specs[path].default != null ? 'default ' + configAdvanced.specs[path].default : ''"
-                                     x-model.number="configAdvanced.edits[path]">
+                                     x-model.number="configAdvanced.edits[path]" {{ NO_AUTOFILL }}>
                               <span class="input-group-text" x-show="configAdvanced.specs[path].unit"
                                     x-text="configAdvanced.specs[path].unit"></span>
                             </div>
                           </template>
                           <template x-if="configAdvanced.specs[path].type === 'str'">
                             <input class="form-control form-control-sm" type="text" :id="'adv-' + path"
-                                   x-model="configAdvanced.edits[path]">
+                                   x-model="configAdvanced.edits[path]" {{ NO_AUTOFILL }}>
                           </template>
                           {# Slice 4 — list rows editor (e.g. clone.allowed_schemes). Stable :key
                              on row.id keeps input focus across add/remove. #}
@@ -1589,7 +1589,7 @@
                                 <div class="input-group input-group-sm mb-1">
                                   <input class="form-control form-control-sm" type="text"
                                          :placeholder="configAdvanced.specs[path].placeholder || ''"
-                                         x-model="row.value">
+                                         x-model="row.value" {{ NO_AUTOFILL }}>
                                   <button type="button" class="btn btn-outline-danger"
                                           @click="advancedListRemove(path, row.id)"
                                           :aria-label="'Remove ' + (row.value || 'empty') + ' from ' + configAdvanced.specs[path].label">&times;</button>
@@ -1608,7 +1608,7 @@
                               <template x-for="row in configAdvanced.edits[path]" :key="row.key">
                                 <label class="form-check form-switch mb-1 d-flex align-items-center">
                                   <input class="form-check-input mt-0" type="checkbox" x-model="row.on"
-                                         :data-test="'adv-event-' + row.key">
+                                         :data-test="'adv-event-' + row.key" {{ NO_AUTOFILL }}>
                                   <span class="ms-2 small font-monospace" x-text="row.key"></span>
                                   <span class="ms-1 small text-secondary" x-show="row.on != row.default" x-cloak
                                         x-text="'(default ' + (row.default ? 'on' : 'off') + ')'"></span>
@@ -1733,7 +1733,7 @@
               <label class="form-label small" for="cm-claudemd">CLAUDE.md</label>
               <textarea id="cm-claudemd" class="form-control form-control-sm font-monospace" rows="12"
                         data-test="cm-claudemd-text" spellcheck="false"
-                        x-model="configMgmt.claudeMd.content"></textarea>
+                        x-model="configMgmt.claudeMd.content" {{ NO_AUTOFILL }}></textarea>
               <div class="form-hint small mt-1">Free-form guidance. Blank clears it — there is no delete.</div>
             </div>
 
@@ -1774,13 +1774,13 @@
                       <tr :data-test="'cm-settings-env-row-' + idx">
                         <td>
                           <input type="text" class="form-control form-control-sm font-monospace"
-                                 data-test="cm-settings-env-key" autocomplete="off" spellcheck="false"
+                                 data-test="cm-settings-env-key" {{ NO_AUTOFILL }} spellcheck="false"
                                  :aria-label="'Name for environment variable ' + (idx + 1)"
                                  x-model="row.key">
                         </td>
                         <td>
                           <input type="text" class="form-control form-control-sm font-monospace"
-                                 data-test="cm-settings-env-value" autocomplete="off" spellcheck="false"
+                                 data-test="cm-settings-env-value" {{ NO_AUTOFILL }} spellcheck="false"
                                  :aria-label="'Value for ' + (row.key || 'environment variable')"
                                  :title="row.masked ? 'Masked — leave as ******** to keep the stored value' : ''"
                                  x-model="row.value" @input="configMgmtEnvRowEdited(idx, $event.target.value)">
@@ -1809,7 +1809,7 @@
                 <label class="visually-hidden" for="cm-settings">settings.json (raw)</label>
                 <textarea id="cm-settings" class="form-control form-control-sm font-monospace" rows="12"
                           data-test="cm-settings-text" spellcheck="false"
-                          x-model="configMgmt.settings.text"></textarea>
+                          x-model="configMgmt.settings.text" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
                   Permissions, hooks, plugins, and MCP-enable have their own tabs and are not shown here.
                   Secret-shaped values are masked as <code>********</code> — leave the mask to keep the stored value.
@@ -1890,7 +1890,7 @@
                     <template x-for="(row, idx) in bucket.rows" :key="row.id">
                       <div class="input-group input-group-sm mb-1">
                         <input type="text" class="form-control font-monospace"
-                               :data-test="'cm-perm-rule-' + bucket.key" autocomplete="off" spellcheck="false"
+                               :data-test="'cm-perm-rule-' + bucket.key" {{ NO_AUTOFILL }} spellcheck="false"
                                :aria-label="bucket.label + ' rule ' + (idx + 1)"
                                x-model="row.value">
                         <button type="button" class="btn btn-outline-danger" :data-test="'cm-perm-remove-' + bucket.key"
@@ -1914,7 +1914,7 @@
                 <label class="visually-hidden" for="cm-permissions">permissions (raw)</label>
                 <textarea id="cm-permissions" class="form-control form-control-sm font-monospace" rows="12"
                           data-test="cm-permissions-text" spellcheck="false"
-                          x-model="configMgmt.permissions.text"></textarea>
+                          x-model="configMgmt.permissions.text" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
                   The tool-permission rules Claude Code enforces (<code>allow</code> / <code>deny</code> / <code>ask</code>). Edited as JSON.
                 </div>
@@ -1975,19 +1975,19 @@
                         </td>
                         <td>
                           <input type="text" class="form-control form-control-sm font-monospace"
-                                 data-test="cm-hook-matcher" autocomplete="off" spellcheck="false"
+                                 data-test="cm-hook-matcher" {{ NO_AUTOFILL }} spellcheck="false"
                                  placeholder="(any)" :aria-label="'Matcher for hook ' + (idx + 1)"
                                  x-model="row.matcher">
                         </td>
                         <td>
                           <input type="text" class="form-control form-control-sm font-monospace"
-                                 data-test="cm-hook-command" autocomplete="off" spellcheck="false"
+                                 data-test="cm-hook-command" {{ NO_AUTOFILL }} spellcheck="false"
                                  :aria-label="'Command for hook ' + (idx + 1)" x-model="row.command">
                         </td>
                         <td>
                           <input type="number" min="0" step="1" class="form-control form-control-sm"
                                  data-test="cm-hook-timeout" :aria-label="'Timeout (seconds) for hook ' + (idx + 1)"
-                                 x-model="row.timeout">
+                                 x-model="row.timeout" {{ NO_AUTOFILL }}>
                         </td>
                         <td class="text-end">
                           <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-hook-remove"
@@ -2013,7 +2013,7 @@
                 <label class="visually-hidden" for="cm-hooks">hooks (raw)</label>
                 <textarea id="cm-hooks" class="form-control form-control-sm font-monospace" rows="12"
                           data-test="cm-hooks-text" spellcheck="false"
-                          x-model="configMgmt.hooks.text"></textarea>
+                          x-model="configMgmt.hooks.text" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
                   Shell commands Claude Code runs on lifecycle events — review carefully before saving. Edited as JSON.
                 </div>
@@ -2065,7 +2065,7 @@
                   <div class="d-flex gap-2 align-items-center">
                     <input type="text" class="form-control form-control-sm" data-test="cm-mcp-delete-input"
                            aria-label="Type the confirmation token to delete this MCP server"
-                           autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.confirm"
+                           {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.confirm"
                            :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-danger" data-test="cm-mcp-delete-go"
                             :disabled="!configMgmtCanDeleteMcp()" @click="configMgmtDeleteMcp()">Delete</button>
@@ -2131,7 +2131,7 @@
                        x-show="configMgmtMcpApprovalsDirty()" x-cloak>
                     <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-mcp-approvals-confirm"
                            aria-label="Type the confirmation token to save approval choices"
-                           autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.approvals.confirm"
+                           {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.approvals.confirm"
                            :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-primary" data-test="cm-mcp-approvals-save"
                             :disabled="!configMgmtCanSaveMcpApprovals()" @click="configMgmtSaveMcpApprovals()">
@@ -2143,7 +2143,7 @@
                     <div class="d-flex gap-2 align-items-center flex-wrap mt-2">
                       <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-mcp-reset-confirm"
                              aria-label="Type the confirmation token to reset approval choices"
-                             autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.approvals.resetConfirm"
+                             {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.approvals.resetConfirm"
                              :placeholder="configMgmtConfirmToken()">
                       <button type="button" class="btn btn-sm btn-ghost-danger" data-test="cm-mcp-reset-go"
                               :disabled="!configMgmtCanResetMcp()" @click="configMgmtResetMcpChoices()">Reset choices</button>
@@ -2156,12 +2156,12 @@
               <div x-show="configMgmt.mcp.editing" x-cloak data-test="cm-mcp-editor">
                 <label class="form-label small" for="cm-mcp-name">Name</label>
                 <input type="text" class="form-control form-control-sm mb-2" id="cm-mcp-name" data-test="cm-mcp-name"
-                       autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.name"
+                       {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.name"
                        :readonly="!configMgmt.mcp.isNew" placeholder="my-server">
                 <label class="form-label small" for="cm-mcp-entry">Definition (JSON)</label>
                 <textarea id="cm-mcp-entry" class="form-control form-control-sm font-monospace" rows="10"
                           data-test="cm-mcp-entry" spellcheck="false"
-                          x-model="configMgmt.mcp.entryText"></textarea>
+                          x-model="configMgmt.mcp.entryText" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
                   e.g. <code>{"command": "npx", "args": ["-y", "a-server"]}</code> or
                   <code>{"type": "http", "url": "https://…"}</code>. Secret-shaped values are
@@ -2173,7 +2173,7 @@
                   </label>
                   <div class="d-flex gap-2 align-items-center flex-wrap">
                     <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-mcp-confirm" data-test="cm-mcp-confirm"
-                           autocomplete="off" spellcheck="false" x-model="configMgmt.mcp.confirm"
+                           {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.mcp.confirm"
                            :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-primary" data-test="cm-mcp-save"
                             :disabled="!configMgmtCanSaveMcp()" @click="configMgmtSaveMcp()">
@@ -2237,7 +2237,7 @@
                   <div class="d-flex gap-2 align-items-center">
                     <input type="text" class="form-control form-control-sm" data-test="cm-agent-delete-input"
                            aria-label="Type the confirmation token to delete this subagent"
-                           autocomplete="off" spellcheck="false" x-model="configMgmt.subagents.confirm"
+                           {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.subagents.confirm"
                            :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-danger" data-test="cm-agent-delete-go"
                             :disabled="!configMgmtCanDeleteAgent()" @click="configMgmtDeleteAgent()">Delete</button>
@@ -2249,12 +2249,12 @@
               <div x-show="configMgmt.subagents.editing" x-cloak data-test="cm-agent-editor">
                 <label class="form-label small" for="cm-agent-name">Name</label>
                 <input type="text" class="form-control form-control-sm mb-2" id="cm-agent-name" data-test="cm-agent-name"
-                       autocomplete="off" spellcheck="false" x-model="configMgmt.subagents.name"
+                       {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.subagents.name"
                        :readonly="!configMgmt.subagents.isNew" placeholder="my-agent">
                 <label class="form-label small" for="cm-agent-content">Definition (Markdown + frontmatter)</label>
                 <textarea id="cm-agent-content" class="form-control form-control-sm font-monospace" rows="11"
                           data-test="cm-agent-content" spellcheck="false" aria-describedby="cm-agent-name-hint"
-                          x-model="configMgmt.subagents.content"></textarea>
+                          x-model="configMgmt.subagents.content" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1" id="cm-agent-name-hint" data-test="cm-agent-name-hint">
                   The <strong>Name</strong> above is the single source — it's written into the frontmatter
                   <code>name:</code> automatically on save, so you don't need to repeat it here.
@@ -2265,7 +2265,7 @@
                   </label>
                   <div class="d-flex gap-2 align-items-center flex-wrap">
                     <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-agent-confirm" data-test="cm-agent-confirm"
-                           autocomplete="off" spellcheck="false" x-model="configMgmt.subagents.confirm"
+                           {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.subagents.confirm"
                            :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-primary" data-test="cm-agent-save"
                             :disabled="!configMgmtCanSaveAgent()" @click="configMgmtSaveAgent()">
@@ -2325,7 +2325,7 @@
                   <div class="d-flex gap-2 align-items-center">
                     <input type="text" class="form-control form-control-sm" data-test="cm-skill-delete-input"
                            aria-label="Type the confirmation token to delete this skill"
-                           autocomplete="off" spellcheck="false" x-model="configMgmt.skills.confirm"
+                           {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.skills.confirm"
                            :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-danger" data-test="cm-skill-delete-go"
                             :disabled="!configMgmtCanDeleteSkill()" @click="configMgmtDeleteSkill()">Delete</button>
@@ -2337,12 +2337,12 @@
               <div x-show="configMgmt.skills.editing" x-cloak data-test="cm-skill-editor">
                 <label class="form-label small" for="cm-skill-name">Name</label>
                 <input type="text" class="form-control form-control-sm mb-2" id="cm-skill-name" data-test="cm-skill-name"
-                       autocomplete="off" spellcheck="false" x-model="configMgmt.skills.name"
+                       {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.skills.name"
                        :readonly="!configMgmt.skills.isNew" placeholder="my-skill">
                 <label class="form-label small" for="cm-skill-content">SKILL.md (Markdown + frontmatter)</label>
                 <textarea id="cm-skill-content" class="form-control form-control-sm font-monospace" rows="11"
                           data-test="cm-skill-content" spellcheck="false"
-                          x-model="configMgmt.skills.content"></textarea>
+                          x-model="configMgmt.skills.content" {{ NO_AUTOFILL }}></textarea>
                 <div class="form-hint small mt-1">
                   Edits the skill's <code>SKILL.md</code>. Supporting scripts aren't managed here.
                 </div>
@@ -2352,7 +2352,7 @@
                   </label>
                   <div class="d-flex gap-2 align-items-center flex-wrap">
                     <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-skill-confirm" data-test="cm-skill-confirm"
-                           autocomplete="off" spellcheck="false" x-model="configMgmt.skills.confirm"
+                           {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.skills.confirm"
                            :placeholder="configMgmtConfirmToken()">
                     <button type="button" class="btn btn-sm btn-primary" data-test="cm-skill-save"
                             :disabled="!configMgmtCanSaveSkill()" @click="configMgmtSaveSkill()">
@@ -2374,7 +2374,7 @@
                   Type <code x-text="configMgmtConfirmToken()"></code> to arm the actions below
                 </label>
                 <input type="text" class="form-control form-control-sm cm-input-cap" id="cm-plugin-confirm" data-test="cm-plugin-confirm"
-                       autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.confirm"
+                       {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.plugins.confirm"
                        :placeholder="configMgmtConfirmToken()">
               </div>
 
@@ -2419,11 +2419,11 @@
                 <div class="d-flex gap-2 align-items-center flex-wrap">
                   <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-plugin-install-id"
                          aria-label="Plugin id to install (name@marketplace)" placeholder="name@marketplace"
-                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.installId">
+                         {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.plugins.installId">
                   <input type="text" class="form-control form-control-sm cm-input-cap" data-test="cm-plugin-install-confirm"
                          aria-label="Retype the exact plugin id to confirm the install"
                          :placeholder="configMgmt.plugins.installId || 'retype the id'"
-                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.installConfirm">
+                         {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.plugins.installConfirm">
                   <button type="button" class="btn btn-sm btn-primary" data-test="cm-plugin-install-go"
                           :disabled="!configMgmtCanInstallPlugin()" @click="configMgmtInstallPlugin()">Install</button>
                 </div>
@@ -2465,7 +2465,7 @@
                 <div class="d-flex gap-2 align-items-center flex-wrap">
                   <input type="text" class="form-control form-control-sm cm-value-cap-wide" data-test="cm-marketplace-add-source"
                          aria-label="Marketplace source (URL, owner/repo, or path)" placeholder="owner/repo or URL or path"
-                         autocomplete="off" spellcheck="false" x-model="configMgmt.plugins.addSource">
+                         {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.plugins.addSource">
                   <button type="button" class="btn btn-sm btn-primary" data-test="cm-marketplace-add-go"
                           :disabled="!configMgmtCanAddMarket()" @click="configMgmtAddMarketplace()">Add</button>
                 </div>
@@ -2482,7 +2482,7 @@
                 Type <code x-text="configMgmtConfirmToken()"></code> to confirm
               </label>
               <input type="text" class="form-control form-control-sm" id="cm-confirm" data-test="cm-confirm"
-                     autocomplete="off" spellcheck="false" x-model="configMgmt.confirm"
+                     {{ NO_AUTOFILL }} spellcheck="false" x-model="configMgmt.confirm"
                      :placeholder="configMgmtConfirmToken()">
             </div>
             <span class="d-flex gap-2 ms-auto">
@@ -2570,7 +2570,7 @@
                   <input type="search" class="form-control" data-test="transcript-search"
                          placeholder="Search in messages…" aria-label="Search in messages"
                          x-model="transcripts.q" @input="onTranscriptSearchInput()"
-                         @search="onTranscriptSearchInput()">
+                         @search="onTranscriptSearchInput()" {{ NO_AUTOFILL }}>
                   <button type="button" class="btn" data-test="transcript-search-clear"
                           x-show="transcripts.q.length > 0" @click="clearTranscriptSearch()"
                           aria-label="Clear search">Clear</button>
