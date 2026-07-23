@@ -91,7 +91,8 @@ def _published_digest(dep) -> tuple[str, str | None]:  # noqa: ANN001 - dep is a
     * ``"mismatch"`` — the pin is stale; ``value`` is the correct sha256 to write.
     * ``"skip"``     — not a github releases-download URL; ``value`` is a reason to warn+pass.
     * ``"warn"``     — asset exists but GitHub publishes no sha256; ``value`` is a reason.
-    * ``"error"``    — could not fetch/locate the asset; ``value`` is the failure detail.
+    * ``"error"``    — could not fetch/locate the asset, or GitHub published a malformed
+      (non-64-hex) digest; ``value`` is the failure detail.
 
     Only the network/lookup path lives here; the caller decides how each status prints and, in
     ``--fix`` mode, what to rewrite. Errors are surfaced (never swallowed) so the caller can
@@ -115,6 +116,11 @@ def _published_digest(dep) -> tuple[str, str | None]:  # noqa: ANN001 - dep is a
     if not (isinstance(digest, str) and digest.startswith("sha256:")):
         return "warn", f"GitHub publishes no sha256 for {asset} — pinned {dep.sha256}"
     published = digest.removeprefix("sha256:")
+    if re.fullmatch(r"[0-9a-f]{64}", published) is None:
+        # A malformed digest (empty / non-hex / wrong length) is NOT a legitimate "new" pin:
+        # writing it would replace a good hash with a value that always fails install-time
+        # verification. Refuse it — fail-closed, same as an unverifiable pin.
+        return "error", f"GitHub published a malformed sha256 for {asset}: {digest!r}"
     if published == dep.sha256:
         return "ok", None
     return "mismatch", published
@@ -126,19 +132,21 @@ def _apply_fixes(path: Path, replacements: dict[str, str]) -> list[str]:
     Each sha256 is a unique 64-hex literal in ``deps.py`` (Shawl as a ``sha256=`` kwarg, each
     claustrum variant as a table entry), so a textual replace is unambiguous. A ``new`` value the
     ``old`` string can't be found for is reported (never silently dropped) so the caller fails
-    closed. Writes once, only when at least one replacement actually applied.
+    closed. All-or-nothing: if ANY replacement can't be located the file is left untouched — a
+    stale pin is never rewritten alongside one that couldn't be, so a failed run leaves no
+    partially-reconciled tree.
     """
     text = path.read_text(encoding="utf-8")
-    notes: list[str] = []
-    applied = 0
+    notes = [
+        f"could not locate sha256 {old} in {path.name} to rewrite"
+        for old in replacements
+        if text.count(old) == 0
+    ]
+    if notes:
+        return notes  # fail closed: locate every pin before mutating any
     for old, new in replacements.items():
-        count = text.count(old)
-        if count == 0:
-            notes.append(f"could not locate sha256 {old} in {path.name} to rewrite")
-            continue
         text = text.replace(old, new)
-        applied += count
-    if applied:
+    if replacements:
         path.write_text(text, encoding="utf-8")
     return notes
 
@@ -192,12 +200,20 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 failures += 1
 
-    if args.fix and replacements:
+    if args.fix and replacements and not failures:
+        # Only mutate the tree once the WHOLE pin set verified: if any other pin failed to
+        # fetch/locate, the run is already exit-1, so writing a subset here would leave a
+        # partially-reconciled deps.py behind a failed postUpgradeTask. Fail closed, write nothing.
         for note in _apply_fixes(deps_path, replacements):
             print(f"FAIL {note}")
             failures += 1
         if not failures:
             print(f"wrote {len(replacements)} refreshed sha256 pin(s) to {deps_path}")
+    elif args.fix and replacements:
+        print(
+            f"SKIP not rewriting {len(replacements)} stale pin(s): "
+            f"{failures} pin(s) could not be verified — refusing a partial fix"
+        )
     return 1 if failures else 0
 
 
