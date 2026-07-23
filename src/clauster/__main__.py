@@ -1330,6 +1330,24 @@ def _set_process_title(config: ClausterConfig) -> None:
             pass
 
 
+def _reexec_argv() -> list[str]:
+    """Build the argv vector for the in-place restart re-exec (#1014).
+
+    A frozen PyInstaller one-file build has ``sys.executable`` == the clauster binary
+    **and** ``sys.argv[0]`` == that same path, so the interpreter slot and ``argv[0]``
+    collapse to one token. Passing both — ``[BIN, BIN, "run", "-c", cfg]`` — hands
+    argparse a stray positional (``unrecognized arguments: <bin> run``) and aborts,
+    killing the setup wizard's post-completion restart and ``POST /api/restart``. Drop
+    the duplicate when frozen; a source/venv run keeps the usual
+    ``[python, script, *args]`` (``sys.executable`` is the interpreter there, distinct
+    from ``argv[0]``). Extracted from :func:`_reexec` so the vector is testable without
+    replacing the process image — the whole-function monkeypatch is what hid the bug.
+    """
+    if deps.is_frozen():
+        return [sys.executable, *sys.argv[1:]]
+    return [sys.executable, *sys.argv]
+
+
 def _reexec() -> None:  # pragma: no cover - replaces the process image; tested via monkeypatch
     """Re-exec this interpreter in place with the same argv (the #483 restart mechanism).
 
@@ -1343,8 +1361,9 @@ def _reexec() -> None:  # pragma: no cover - replaces the process image; tested 
     endpoint triggers exactly one re-exec without actually replacing the test process.
     """
     # S606: re-exec the SAME interpreter with our own argv — no shell, no user input
-    # (argv is the process's own ``sys.argv``). This is the whole point of the action.
-    os.execv(sys.executable, [sys.executable, *sys.argv])  # noqa: S606
+    # (argv is the process's own ``sys.argv``, frozen-corrected by ``_reexec_argv``).
+    # This is the whole point of the action.
+    os.execv(sys.executable, _reexec_argv())  # noqa: S606
 
 
 def _run_setup_wizard(config_path: str | None) -> int:

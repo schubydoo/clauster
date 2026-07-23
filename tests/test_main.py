@@ -607,6 +607,31 @@ def test_key_perms_warning_silent_when_stat_raises_oserror(capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_reexec_argv_frozen_drops_duplicate_binary_path(monkeypatch):
+    # #1014: a PyInstaller one-file build has sys.executable == sys.argv[0] == the
+    # binary path, so re-execing with both ([BIN, BIN, "run", ...]) hands argparse a
+    # stray positional and aborts the restart. When frozen, argv[0] is dropped.
+    monkeypatch.setattr(cli.deps, "is_frozen", lambda: True)
+    monkeypatch.setattr(cli.sys, "executable", "/opt/clauster/clauster")
+    monkeypatch.setattr(cli.sys, "argv", ["/opt/clauster/clauster", "run", "-c", "cfg.yml"])
+    assert cli._reexec_argv() == ["/opt/clauster/clauster", "run", "-c", "cfg.yml"]
+
+
+def test_reexec_argv_source_keeps_interpreter_and_script(monkeypatch):
+    # A source/venv run has a distinct interpreter and script path; both are kept so
+    # os.execv re-invokes `python <script> run …` correctly.
+    monkeypatch.setattr(cli.deps, "is_frozen", lambda: False)
+    monkeypatch.setattr(cli.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(cli.sys, "argv", ["/venv/bin/clauster", "run", "-c", "cfg.yml"])
+    assert cli._reexec_argv() == [
+        "/usr/bin/python3",
+        "/venv/bin/clauster",
+        "run",
+        "-c",
+        "cfg.yml",
+    ]
+
+
 def test_run_reexecs_when_restart_requested(write_config, tmp_path, monkeypatch):
     # #483: when the in-app restart endpoint flips app.state.restart_requested during
     # serve(), _run re-execs in place exactly once after the server returns.
