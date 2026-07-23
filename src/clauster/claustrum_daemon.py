@@ -36,7 +36,6 @@ import contextlib
 import logging
 import os
 import secrets
-import shutil
 import stat
 import sys
 import time
@@ -370,14 +369,12 @@ class ClaustrumDaemon:
         binary and it doesn't resolve, that's their misconfiguration to see — we must NOT silently
         run a different version than they asked for, so it raises rather than substituting.
         """
-        resolved = shutil.which(self._cfg.binary)
+        default_binary = type(self._cfg).model_fields["binary"].default
+        resolved = deps.resolve_effective_binary(
+            "claustrum", self._cfg.binary, default_binary, self._config.state_dir
+        )
         if resolved is not None:
             return resolved
-        default_binary = type(self._cfg).model_fields["binary"].default
-        if self._cfg.binary == default_binary:
-            managed = deps.installed_binary_path("claustrum", self._config.state_dir)
-            if managed is not None:
-                return str(managed)
         raise DaemonSpawnError(
             f"claustrum binary not found: {self._cfg.binary!r} is not on PATH"
             + (

@@ -1251,13 +1251,22 @@ def test_restore_swap_failure_into_fresh_dest_cleans_staging(write_config, tmp_p
     assert not list(tmp_path.glob(".fresh.restore-*"))  # staged dir cleaned up
 
 
-def _bin_cfg(tmp_path, *, claustrum_enabled=False):
-    """Minimal config stand-in for _check_binary_deps: state_dir + claustrum.enabled."""
+def _bin_cfg(tmp_path, *, claustrum_enabled=False, claustrum_binary=None):
+    """Minimal config stand-in for _check_binary_deps: state_dir + a real claustrum sub-config.
+
+    Uses a real ``ClaustrumConfig`` (not a bare namespace) so the binary resolver can read
+    ``claustrum.binary`` and its pydantic default (#1013).
+    """
     from types import SimpleNamespace
 
-    return SimpleNamespace(
-        state_dir=tmp_path, claustrum=SimpleNamespace(enabled=claustrum_enabled)
+    from clauster.config import ClaustrumConfig
+
+    claustrum = (
+        ClaustrumConfig(enabled=claustrum_enabled, binary=claustrum_binary)
+        if claustrum_binary is not None
+        else ClaustrumConfig(enabled=claustrum_enabled)
     )
+    return SimpleNamespace(state_dir=tmp_path, claustrum=claustrum)
 
 
 def test_check_binary_deps_warns_when_shawl_missing(monkeypatch, tmp_path):
@@ -1314,3 +1323,23 @@ def test_check_binary_deps_claustrum_gated_on_enabled(monkeypatch, tmp_path):
     by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path, claustrum_enabled=True))}
     assert by["binary:claustrum"].status == WARN
     assert "clauster deps install claustrum" in by["binary:claustrum"].detail
+
+
+def test_check_binary_deps_honors_configured_claustrum_binary(monkeypatch, tmp_path):
+    from clauster import ops
+
+    # #1013 Bug 1: a configured claustrum.binary (the documented minimal-PATH workaround —
+    # an absolute path off PATH and outside the managed dir) must read as AVAILABLE, not a
+    # false "unavailable". Preflight/doctor now resolve the same way the daemon spawns.
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")
+    monkeypatch.setattr(ops.deps.platform, "machine", lambda: "x86_64")
+    # PATH resolves ONLY the operator's absolute path; nothing in the managed dir.
+    monkeypatch.setattr(
+        ops.shutil,
+        "which",
+        lambda name: "/home/op/go/bin/claustrum" if name.startswith("/") else None,
+    )
+    cfg = _bin_cfg(tmp_path, claustrum_enabled=True, claustrum_binary="/home/op/go/bin/claustrum")
+    by = {c.name: c for c in ops._check_binary_deps(cfg)}
+    assert by["binary:claustrum"].status == OK
+    assert "available" in by["binary:claustrum"].detail

@@ -704,6 +704,47 @@ def test_installed_binary_path_none_off_platform(tmp_path, monkeypatch):
     assert deps.installed_binary_path("shawl", tmp_path) is None
 
 
+def test_resolve_effective_binary_prefers_configured_on_path(tmp_path, monkeypatch):
+    # #1013: an explicit/PATH hit on the configured value wins outright — even an absolute
+    # path the operator set (the documented minimal-PATH workaround) resolves, so a presence
+    # check can't call it "unavailable".
+    monkeypatch.setattr(
+        deps.shutil, "which", lambda name: "/opt/go/bin/claustrum" if "claustrum" in name else None
+    )
+    assert (
+        deps.resolve_effective_binary("claustrum", "/opt/go/bin/claustrum", "claustrum", tmp_path)
+        == "/opt/go/bin/claustrum"
+    )
+
+
+def test_resolve_effective_binary_default_falls_back_to_managed(tmp_path, monkeypatch):
+    # With the DEFAULT binary and nothing on PATH, the managed <state_dir>/deps/bin install is
+    # the fallback (mirrors `deps install claustrum`).
+    monkeypatch.setattr(deps.sys, "platform", "win32")  # claustrum.exe resolves on win32
+    monkeypatch.setattr(deps.shutil, "which", lambda name: None)  # PATH miss
+    assert deps.resolve_effective_binary("claustrum", "claustrum", "claustrum", tmp_path) is None
+    exe = deps.managed_bin_dir(tmp_path) / "claustrum.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    assert deps.resolve_effective_binary("claustrum", "claustrum", "claustrum", tmp_path) == str(
+        exe
+    )
+
+
+def test_resolve_effective_binary_explicit_missing_does_not_fall_back(tmp_path, monkeypatch):
+    # An operator who configured a NON-default binary that doesn't resolve must see it fail —
+    # never silently substitute the managed install of a possibly-different version.
+    monkeypatch.setattr(deps.sys, "platform", "win32")
+    monkeypatch.setattr(deps.shutil, "which", lambda name: None)
+    exe = deps.managed_bin_dir(tmp_path) / "claustrum.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")  # managed IS installed, but the configured path is explicit + missing
+    assert (
+        deps.resolve_effective_binary("claustrum", "/nope/claustrum", "claustrum", tmp_path)
+        is None
+    )
+
+
 def test_install_binary_dep_unknown_returns_2(tmp_path, capsys):
     assert deps.install_binary_dep("nope", tmp_path, assume_yes=True) == 2
     assert "unknown binary" in capsys.readouterr().err
