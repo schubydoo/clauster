@@ -25,6 +25,15 @@ field renders as a typed control (toggle, bounded number, text, or a select
 with human-readable option labels), with its raw YAML key shown as subtext so
 you can cross-reference the file.
 
+A switch whose feature needs an **optional dependency** that isn't installed
+(Direct Sessions → the `claustrum` binary, notifications → `apprise`, the live
+terminal view → `pyte`) can't be turned on and shows a "Requires … — run
+`clauster deps install …`" note, so you're told what a feature needs at the
+moment you'd enable it rather than discovering it dormant later. Availability is
+resolved exactly the way the runtime resolves it (including a configured
+`claustrum.binary`), so a dependency that *is* present never greys out its
+switch.
+
 Only the **Tier-A allowlist** of day-to-day operational fields appears here:
 
 <!-- BEGIN GEN: editable_fields -->

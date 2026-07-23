@@ -662,8 +662,49 @@ def _constraints(info: Any) -> dict[str, Any]:
     return out
 
 
+def field_dep_status(config: ClausterConfig) -> dict[str, dict[str, Any]]:
+    """Runtime-consistent availability of the optional dependency behind each dep-gated switch.
+
+    A feature switch whose dependency isn't installed can't do anything if flipped on, so the
+    editor annotates (and prevents enabling) it — "Requires <dep>" (#1016). Resolution uses the
+    SAME machinery the runtime/doctor use — :func:`deps.resolve_effective_binary` for the
+    claustrum binary (honoring ``config.claustrum.binary``, #1013) and :func:`deps.probe` for the
+    pip extras — so a switch is never greyed out for a dependency that is present. Returns only the
+    switches that have an optional dep, each as ``{available, hint}``.
+    """
+    from . import deps
+
+    # Reflect what the (frozen) binary will actually import: a side-installed extra only counts
+    # once its deps dir is on sys.path, exactly as `doctor` primes it before probing (#933).
+    deps.add_deps_dir_to_sys_path(config.state_dir)
+    default_binary = type(config.claustrum).model_fields["binary"].default
+    claustrum_ok = (
+        deps.resolve_effective_binary(
+            "claustrum", config.claustrum.binary, default_binary, config.state_dir
+        )
+        is not None
+    )
+    return {
+        "claustrum.enabled": {
+            "available": claustrum_ok,
+            "hint": "Needs the claustrum binary — run `clauster deps install claustrum` first.",
+        },
+        "notifications.enabled": {
+            "available": deps.probe(deps.by_key("apprise")),
+            "hint": f"Needs the apprise dependency — {deps.install_hint(deps.by_key('apprise'))}.",
+        },
+        "claude.pty_screen_enabled": {
+            "available": deps.probe(deps.by_key("pyte")),
+            "hint": f"Needs the pyte dependency — {deps.install_hint(deps.by_key('pyte'))}.",
+        },
+    }
+
+
 def field_specs(
-    present: set[str] | None = None, *, fields: tuple[str, ...] = EDITABLE_FIELDS
+    present: set[str] | None = None,
+    *,
+    fields: tuple[str, ...] = EDITABLE_FIELDS,
+    config: ClausterConfig | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return rich per-field UI metadata for the editor (label, help, control, bounds).
 
@@ -674,7 +715,12 @@ def field_specs(
     ``config reconcile``) no longer renders as a flagged-deprecated field. When ``present``
     is ``None`` (the file could not be read) nothing is hidden: fail-open on display, never
     drop a field we cannot prove is absent.
+
+    When ``config`` is given, a dep-gated switch (:func:`field_dep_status`) also carries a
+    ``dep_status`` (``{available, hint}``) so the editor can annotate + prevent enabling a
+    feature whose optional dependency is missing (#1016).
     """
+    dep_status = field_dep_status(config) if config is not None else {}
     specs: dict[str, dict[str, Any]] = {}
     for path in fields:
         section, key = path.split(".", 1) if "." in path else ("", path)
@@ -715,5 +761,7 @@ def field_specs(
             registered = FIELD_MAP_KEYS.get(path)
             if registered is not None:
                 spec["map_keys"] = [{"key": k, "default": d} for k, d in registered]
+        if path in dep_status:
+            spec["dep_status"] = dep_status[path]
         specs[path] = spec
     return specs
