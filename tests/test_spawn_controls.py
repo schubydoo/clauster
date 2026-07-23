@@ -418,7 +418,7 @@ async def test_spawn_sandbox_disabled_coerces_to_default(runner_config, monkeypa
 async def test_spawn_sandbox_reaches_argv_when_enabled(runner_config, monkeypatch):
     # When re-enabled (#1046, gate flipped) the requested choice is recorded and the matching
     # flag reaches the bridge argv.
-    monkeypatch.setattr("clauster.runner.SANDBOX_TOGGLE_ENABLED", True)
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _runner(runner_config)
     on = await runner.spawn("alpha", sandbox="on")
@@ -476,7 +476,7 @@ async def test_resume_sandbox_disabled_stays_default(runner_config, monkeypatch)
 
 
 async def test_resume_preserves_sandbox_choice_when_enabled(runner_config, monkeypatch):
-    monkeypatch.setattr("clauster.runner.SANDBOX_TOGGLE_ENABLED", True)
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "ready")
     runner = _runner(runner_config)
     inst = await runner.spawn("alpha", sandbox="on")
@@ -513,7 +513,7 @@ def test_stopped_from_persisted_coerces_sandbox_when_disabled(runner_config):
 
 def test_stopped_from_persisted_restores_sandbox_when_enabled(runner_config, monkeypatch):
     # When re-enabled (#1046) a rebuilt STOPPED card keeps its recorded sandbox choice.
-    monkeypatch.setattr("clauster.runner.SANDBOX_TOGGLE_ENABLED", True)
+    monkeypatch.setattr("clauster.config.SANDBOX_TOGGLE_ENABLED", True)
     runner = _runner(runner_config)
     runner._persisted = {
         "iid-1": {"project_name": "alpha", "label": "alpha", "sandbox_mode": "off"},

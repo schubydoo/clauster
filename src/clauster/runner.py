@@ -37,6 +37,7 @@ from . import (
     auth,
     bridge_log,
     code_sessions,
+    config,
     inspector,
     metrics,
     pointers,
@@ -50,7 +51,6 @@ from .config import (
     PERMISSION_MODES,
     RESUME_MODES,
     SANDBOX_MODES,
-    SANDBOX_TOGGLE_ENABLED,
     SPAWN_MODES,
     ClausterConfig,
     PermissionMode,
@@ -1165,7 +1165,9 @@ class SessionRunner:
         # value 422s below) but coerced to "default" so nothing on/off is recorded, resumed, or
         # emitted while `--sandbox` doesn't reach the server-mode worker. Re-enabled via #1046.
         requested_sandbox: SandboxMode = sandbox or "default"
-        sandbox_mode: SandboxMode = requested_sandbox if SANDBOX_TOGGLE_ENABLED else "default"
+        sandbox_mode: SandboxMode = (
+            requested_sandbox if config.SANDBOX_TOGGLE_ENABLED else "default"
+        )
         # Resolve resume_mode early so we can apply the per-mode policy checks below
         # before spending side-effect budget (trust writes, log file creation, etc.).
         # For a resume the prior instance is the SPECIFIC one being revived
@@ -2804,7 +2806,7 @@ class SessionRunner:
         ``"default"`` so an existing STOPPED card that recorded ``"on"``/``"off"`` resumes
         safely with no flag — matching the (now inert) live behavior.
         """
-        if not SANDBOX_TOGGLE_ENABLED:
+        if not config.SANDBOX_TOGGLE_ENABLED:
             return "default"
         sb = saved.get("sandbox_mode")
         return cast(SandboxMode, sb) if sb in SANDBOX_MODES else "default"
