@@ -17,8 +17,10 @@ from clauster.usage import (
     aggregate_project_usage,
     aggregate_project_usage_cached,
     cost_usd,
+    invalidate_transcript_summary_cache,
     invalidate_usage_cache,
     parse_transcript,
+    read_transcript_summary,
     read_transcript_turns,
     read_transcript_turns_from_offset,
     resolve_session_transcript,
@@ -653,6 +655,122 @@ def test_read_transcript_turns_tolerates_malformed(tmp_path):
 def test_read_transcript_turns_missing_file_raises_filenotfound(tmp_path):
     with pytest.raises(FileNotFoundError):
         read_transcript_turns(tmp_path / "nope.jsonl")
+
+
+# ----- read_transcript_summary (#1035) ----------------------------------
+# The summary cache is process-wide, so every cache test clears it around itself.
+
+
+@pytest.fixture
+def _clean_transcript_cache():
+    """Drop the process-wide transcript-summary cache before and after a cache test."""
+    invalidate_transcript_summary_cache()
+    yield
+    invalidate_transcript_summary_cache()
+
+
+def _summary_records():
+    return [
+        {
+            "message": {"role": "user", "content": "first question"},
+            "timestamp": "2026-01-01T00:00:00Z",
+        },
+        {
+            "message": {"role": "assistant", "content": "an answer"},
+            "timestamp": "2026-01-01T00:01:00Z",
+        },
+        {
+            "message": {"role": "user", "content": "second question"},
+            "timestamp": "2026-01-01T00:02:00Z",
+        },
+    ]
+
+
+def test_read_transcript_summary_fields(tmp_path, _clean_transcript_cache):
+    p = _transcript(tmp_path, _summary_records())
+    summary = read_transcript_summary(p)
+    assert summary.turn_count == 3
+    assert summary.first_prompt == "first question"  # first USER turn labels it
+    assert summary.first_ts == "2026-01-01T00:00:00Z"
+    assert summary.last_ts == "2026-01-01T00:02:00Z"
+
+
+def test_transcript_summary_first_prompt_truncated_to_120(tmp_path, _clean_transcript_cache):
+    p = _transcript(tmp_path, [{"message": {"role": "user", "content": "x" * 500}}])
+    assert len(read_transcript_summary(p).first_prompt) == 120
+
+
+def test_transcript_summary_cached_hit_skips_reparse(
+    tmp_path, monkeypatch, _clean_transcript_cache
+):
+    import clauster.usage as usage_mod
+
+    p = _transcript(tmp_path, _summary_records())
+    calls = [0]
+    real = usage_mod.read_transcript_turns
+
+    def _counting(path):
+        calls[0] += 1
+        return real(path)
+
+    monkeypatch.setattr(usage_mod, "read_transcript_turns", _counting)
+    first = read_transcript_summary(p)
+    second = read_transcript_summary(p)
+    # The unchanged transcript is parsed once; the second open is served from cache.
+    assert calls[0] == 1
+    assert first == second
+
+
+def test_transcript_summary_reparses_when_file_changes(
+    tmp_path, monkeypatch, _clean_transcript_cache
+):
+    import clauster.usage as usage_mod
+
+    p = _transcript(tmp_path, _summary_records())
+    calls = [0]
+    real = usage_mod.read_transcript_turns
+
+    def _counting(path):
+        calls[0] += 1
+        return real(path)
+
+    monkeypatch.setattr(usage_mod, "read_transcript_turns", _counting)
+    assert read_transcript_summary(p).turn_count == 3
+    # Append a turn: the (mtime_ns, size) stamp moves, so the summary re-derives.
+    with p.open("a") as fh:
+        fh.write(json.dumps({"message": {"role": "user", "content": "third"}}) + "\n")
+    assert read_transcript_summary(p).turn_count == 4
+    assert calls[0] == 2  # a real re-parse, not a stale cache hit
+
+
+def test_read_transcript_summary_missing_file_raises_filenotfound(
+    tmp_path, _clean_transcript_cache
+):
+    with pytest.raises(FileNotFoundError):
+        read_transcript_summary(tmp_path / "nope.jsonl")
+
+
+def test_transcript_summary_cache_is_lru_bounded(tmp_path):
+    # #1058: the cache is bounded so a churn of deleted transcripts can't grow it without limit.
+    # Past the cap the least-recently-used entry is evicted; a recently-touched one survives.
+    from clauster.usage import _TranscriptSummaryCache
+
+    def _make(name):
+        p = tmp_path / name
+        p.write_text(json.dumps({"message": {"role": "user", "content": name}}) + "\n")
+        return p
+
+    cache = _TranscriptSummaryCache(max_entries=2)
+    p0, p1 = _make("t0.jsonl"), _make("t1.jsonl")
+    cache.get(p0)
+    cache.get(p1)
+    cache.get(p0)  # touch t0 so t1 becomes the least-recently-used
+    p2 = _make("t2.jsonl")
+    cache.get(p2)  # over the cap -> evict the LRU (t1), keep the touched t0 + the new t2
+    assert len(cache._entries) == 2
+    assert str(p0) in cache._entries
+    assert str(p1) not in cache._entries
+    assert str(p2) in cache._entries
 
 
 def test_read_transcript_turns_render_content_unexpected_shape(tmp_path):

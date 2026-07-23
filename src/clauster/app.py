@@ -1498,30 +1498,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             for path in usage.transcript_paths_for(project_path):
                 try:
                     mtime = path.stat().st_mtime
-                    # One per-line scan serves turn_count AND the resume-picker fields
-                    # (#303); the reader streams the file (never loaded whole) and every
-                    # turn is already redaction-safe (sanitize_line in _line_to_turn).
-                    turns = usage.read_transcript_turns(path)
+                    # turn_count AND the resume-picker fields (#303) come from a cached
+                    # per-file summary (#1035): an unchanged transcript skips the full
+                    # re-parse, so reopening the selector is near-instant. Every derived
+                    # turn is redaction-safe (sanitize_line in _line_to_turn).
+                    summary = usage.read_transcript_summary(path)
                 except FileNotFoundError:
                     # A session removed mid-walk (racing cleanup) is skipped, not fatal.
                     continue
-                # First USER turn labels the conversation in the resume picker —
-                # truncated server-side so a pasted wall of text can't bloat the
-                # listing payload. Timestamps bound the conversation for the
-                # picker's "when · duration" display ("" when the record has none).
-                first_prompt = next(
-                    (t["content"] for t in turns if t.get("role") == "user" and t.get("content")),
-                    "",
-                )[:120]
+                # Timestamps bound the conversation for the picker's "when · duration"
+                # display ("" when the record has none); first_prompt labels it.
                 out.append(
                     {
                         "session": path.stem,
                         "mtime": mtime,
-                        "turn_count": len(turns),
+                        "turn_count": summary.turn_count,
                         "live": path.stem in live_uuids,
-                        "first_prompt": first_prompt,
-                        "first_ts": (turns[0].get("timestamp") or "") if turns else "",
-                        "last_ts": (turns[-1].get("timestamp") or "") if turns else "",
+                        "first_prompt": summary.first_prompt,
+                        "first_ts": summary.first_ts,
+                        "last_ts": summary.last_ts,
                     }
                 )
             # Live sessions first (a glance at what's running now), then newest-first
