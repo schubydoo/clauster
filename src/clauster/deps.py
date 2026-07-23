@@ -658,6 +658,15 @@ def managed_bin_dir(state_dir: str | Path) -> Path:
     return managed_deps_dir(state_dir) / BIN_SUBDIR
 
 
+def claustrum_pinned_version() -> str:
+    """Return the claustrum release version clauster pins/ships (e.g. ``v1.7.1``).
+
+    The advisory compatibility floor for the Direct Session daemon (#1013): the doctor
+    version check WARNs when the running/configured binary can't be confirmed at or above it.
+    """
+    return _CLAUSTRUM_VERSION
+
+
 def installed_binary_path(key: str, state_dir: str | Path) -> Path | None:
     """Return the managed path of binary ``key`` if it is installed here, else ``None``.
 

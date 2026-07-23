@@ -240,6 +240,76 @@ def resolve_configured_binary(key: str, config: ClausterConfig) -> str | None:
     return shutil.which(key)
 
 
+def _claustrum_version(binary: str) -> str:
+    """Return the version token from ``<binary> --version`` (e.g. ``v1.7.1`` / ``claustrum-dev``).
+
+    Output is ``claustrum <version> (built <date>)``; an unstamped local build reports
+    ``claustrum claustrum-dev (built unknown)``, so a non-semver value is tolerated. A bare
+    ``<version> …`` form is handled too. Raised subprocess/OS errors are the caller's to turn
+    into an advisory WARN (doctor must not crash on a daemon that mis-speaks ``--version``).
+    """
+    proc = subprocess.run(
+        [binary, "--version"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=procutil.child_env(),
+        check=True,
+    )
+    parts = proc.stdout.strip().split()
+    if not parts:
+        return ""
+    # "claustrum <version> (built <date>)" -> the version is the second token; tolerate a
+    # bare "<version> ..." (no leading program name) too.
+    return parts[1] if parts[0] == "claustrum" and len(parts) >= 2 else parts[0]
+
+
+def _check_claustrum_version(resolved: str) -> Check:
+    """Advisory version check for a resolved claustrum binary (#1013 Bug 3-4).
+
+    Reports the detected version and WARNs — never FAILs — when it can't be confirmed at or
+    above the pinned floor (an unstamped/dev build parses below any floor; an older release is
+    under it). A ``--version`` probe that errors is itself a WARN, not a doctor failure. This is
+    deliberately advisory: an older or unstamped daemon may work fine, and a hard floor would
+    flag the common ``go install …@latest`` / local dev build.
+    """
+    floor = deps.claustrum_pinned_version()
+    try:
+        version = _claustrum_version(resolved)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Check(
+            "binary:claustrum", WARN, f"claustrum available but `--version` failed: {exc}"
+        )
+    if version and _version_ge(version, floor):
+        return Check("binary:claustrum", OK, f"claustrum {version} available (>= {floor})")
+    return Check(
+        "binary:claustrum",
+        WARN,
+        f"claustrum {version or 'unknown'} available — could not confirm >= {floor} "
+        f"(unstamped/dev or older build; Direct Sessions may be incompatible)",
+    )
+
+
+def _managed_shadow_check(
+    key: str, label: str, config: ClausterConfig, resolved: str
+) -> Check | None:
+    """WARN when a managed ``deps/bin`` install is shadowed by a different resolved binary (#1013).
+
+    If ``key`` was installed via ``clauster deps install`` but a PATH/configured binary wins
+    resolution, the managed copy never runs — surface that (Bug 5) rather than silently running
+    an unexpected version. ``None`` when there's no managed install or it IS the resolved one.
+    """
+    managed = deps.installed_binary_path(key, config.state_dir)
+    if managed is not None and str(managed) != resolved:
+        return Check(
+            f"binary:{key}:shadow",
+            WARN,
+            f"managed {label} at {managed} is shadowed by {resolved} — remove one so the "
+            f"expected version runs",
+        )
+    return None
+
+
 def _check_binary_deps(config: ClausterConfig) -> list[Check]:
     """Report each managed binary dependency (#904 slice 2b): OK if present, else WARN.
 
@@ -250,8 +320,9 @@ def _check_binary_deps(config: ClausterConfig) -> list[Check]:
     — the same precedence the daemon spawns with, so a configured ``claustrum.binary`` (the
     documented minimal-PATH workaround) counts as present instead of a false "unavailable"
     (#1013) — covering the managed ``<state_dir>/deps/bin`` dir, ``PATH``, and an operator
-    override. WARN, never FAIL — a missing binary only leaves a dormant feature and must not
-    flip doctor's exit code.
+    override. For claustrum the check also reports the detected version against an advisory
+    floor (Bug 3-4), and any managed-vs-resolved shadowing is surfaced (Bug 5). WARN, never FAIL
+    — a missing/old binary only leaves a dormant feature and must not flip doctor's exit code.
     """
     checks: list[Check] = []
     for dep in deps.BINARY_DEPS:
@@ -260,10 +331,8 @@ def _check_binary_deps(config: ClausterConfig) -> list[Check]:
         gate = _BINARY_DEP_GATES.get(dep.key)
         if gate is not None and not gate(config):
             continue
-        present = resolve_configured_binary(dep.key, config) is not None
-        if present:
-            checks.append(Check(f"binary:{dep.key}", OK, f"{dep.label} available"))
-        else:
+        resolved = resolve_configured_binary(dep.key, config)
+        if resolved is None:
             checks.append(
                 Check(
                     f"binary:{dep.key}",
@@ -271,6 +340,14 @@ def _check_binary_deps(config: ClausterConfig) -> list[Check]:
                     f"{dep.label} unavailable — clauster deps install {dep.key}",
                 )
             )
+            continue
+        if dep.key == "claustrum":
+            checks.append(_check_claustrum_version(resolved))
+        else:
+            checks.append(Check(f"binary:{dep.key}", OK, f"{dep.label} available"))
+        shadow = _managed_shadow_check(dep.key, dep.label, config, resolved)
+        if shadow is not None:
+            checks.append(shadow)
     return checks
 
 

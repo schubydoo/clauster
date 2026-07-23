@@ -468,6 +468,12 @@ added, so read the prefix rather than expecting this page to enumerate them:
   the same way the daemon spawns, so a configured
   [`claustrum.binary`](reference/config.md#claustrum-hosted-live-view-channel-claustrumconfig)
   path (the minimal-PATH workaround) counts as present rather than warning falsely.
+  For claustrum the row also reports the **detected version** from `claustrum
+  --version` and warns (advisorily — never a doctor failure) when it can't be
+  confirmed at or above the release clauster pins; an unstamped local/dev build
+  (`claustrum-dev`) is expected to warn. A separate `binary:<name>:shadow` warn
+  appears when a managed `deps/bin` install exists but a different `PATH`/configured
+  binary wins resolution, so you know which copy actually runs.
 
 Family rows appear only when applicable on your platform and config, and they
 warn, never fail: a missing optional piece leaves a feature dormant without

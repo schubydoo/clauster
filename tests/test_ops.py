@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -1339,7 +1340,132 @@ def test_check_binary_deps_honors_configured_claustrum_binary(monkeypatch, tmp_p
         "which",
         lambda name: "/home/op/go/bin/claustrum" if name.startswith("/") else None,
     )
+    # A resolved claustrum is version-probed (#1013 Bug 3-4); stub a current version so this
+    # test stays about presence resolution (Bug 1), not the floor.
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: deps.claustrum_pinned_version())
     cfg = _bin_cfg(tmp_path, claustrum_enabled=True, claustrum_binary="/home/op/go/bin/claustrum")
     by = {c.name: c for c in ops._check_binary_deps(cfg)}
     assert by["binary:claustrum"].status == OK
     assert "available" in by["binary:claustrum"].detail
+
+
+# ----- claustrum version floor + shadowing (#1013 Bug 3-5) ---------------
+
+
+def _stub_run(stdout):
+    from types import SimpleNamespace
+
+    return lambda *a, **k: SimpleNamespace(stdout=stdout)
+
+
+def test_claustrum_version_parses_program_prefixed_output(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.subprocess, "run", _stub_run("claustrum v1.7.1 (built 2026-01-01)\n"))
+    assert ops._claustrum_version("/x/claustrum") == "v1.7.1"
+
+
+def test_claustrum_version_tolerates_unstamped_dev_build(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(
+        ops.subprocess, "run", _stub_run("claustrum claustrum-dev (built unknown)\n")
+    )
+    assert ops._claustrum_version("/x/claustrum") == "claustrum-dev"
+
+
+def test_claustrum_version_tolerates_bare_version(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.subprocess, "run", _stub_run("v1.8.0\n"))
+    assert ops._claustrum_version("/x/claustrum") == "v1.8.0"
+
+
+def test_claustrum_version_empty_output_returns_empty(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.subprocess, "run", _stub_run("\n"))
+    assert ops._claustrum_version("/x/claustrum") == ""
+
+
+def test_check_claustrum_version_ok_at_or_above_floor(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "v9.9.9")
+    c = ops._check_claustrum_version("/x/claustrum")
+    assert c.status == OK and "v9.9.9" in c.detail
+
+
+def test_check_claustrum_version_warns_below_floor(monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "v0.0.1")
+    c = ops._check_claustrum_version("/x/claustrum")
+    assert c.status == WARN and "could not confirm" in c.detail
+
+
+def test_check_claustrum_version_warns_on_unstamped_dev(monkeypatch):
+    # The maintainer's own dogfood runs an unstamped `claustrum-dev`: advisory WARN, never FAIL.
+    from clauster import ops
+
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: "claustrum-dev")
+    c = ops._check_claustrum_version("/x/claustrum")
+    assert c.status == WARN and "claustrum-dev" in c.detail
+
+
+def test_check_claustrum_version_warns_on_probe_error(monkeypatch):
+    from clauster import ops
+
+    def _boom(binary):
+        raise subprocess.SubprocessError("boom")
+
+    monkeypatch.setattr(ops, "_claustrum_version", _boom)
+    c = ops._check_claustrum_version("/x/claustrum")
+    assert c.status == WARN and "version" in c.detail.lower()
+
+
+def test_managed_shadow_check_warns_when_managed_shadowed(tmp_path, monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")  # shawl resolves on win32
+    exe = ops.deps.managed_bin_dir(tmp_path) / "shawl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    c = ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), "/usr/local/bin/shawl")
+    assert c is not None and c.status == WARN and "shadowed" in c.detail
+
+
+def test_managed_shadow_check_none_when_resolved_is_managed(tmp_path, monkeypatch):
+    from clauster import ops
+
+    monkeypatch.setattr(ops.deps.sys, "platform", "win32")
+    exe = ops.deps.managed_bin_dir(tmp_path) / "shawl.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"x")
+    assert ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), str(exe)) is None
+
+
+def test_managed_shadow_check_none_when_no_managed(tmp_path):
+    from clauster import ops
+
+    assert (
+        ops._managed_shadow_check("shawl", "Shawl", _bin_cfg(tmp_path), "/usr/bin/shawl") is None
+    )
+
+
+def test_check_binary_deps_surfaces_claustrum_shadow(monkeypatch, tmp_path):
+    from clauster import ops
+
+    # managed claustrum installed, but PATH resolves a DIFFERENT binary -> OK version row + a
+    # shadow WARN row (#1013 Bug 5).
+    monkeypatch.setattr(ops.deps.sys, "platform", "linux")
+    monkeypatch.setattr(ops.deps.platform, "machine", lambda: "x86_64")
+    managed = ops.deps.managed_bin_dir(tmp_path) / "claustrum"
+    managed.parent.mkdir(parents=True)
+    managed.write_bytes(b"x")
+    monkeypatch.setattr(ops.shutil, "which", lambda name: "/usr/local/bin/claustrum")
+    monkeypatch.setattr(ops, "_claustrum_version", lambda binary: deps.claustrum_pinned_version())
+    by = {c.name: c for c in ops._check_binary_deps(_bin_cfg(tmp_path, claustrum_enabled=True))}
+    assert by["binary:claustrum"].status == OK
+    assert by["binary:claustrum:shadow"].status == WARN
+    assert "shadowed" in by["binary:claustrum:shadow"].detail
