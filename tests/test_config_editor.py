@@ -184,6 +184,36 @@ def test_pty_screen_enabled_is_editable_bool_with_safety_note() -> None:
     assert "redact" in spec["description"].lower()
 
 
+def test_field_dep_status_reports_optional_dep_availability(tmp_path, monkeypatch) -> None:
+    # #1016 Part 2: runtime-consistent availability of the dep behind each dep-gated switch.
+    from clauster import config_editor, deps
+
+    monkeypatch.setattr("clauster.deps.shutil.which", lambda name: "/usr/local/bin/claustrum")
+    monkeypatch.setattr(deps, "probe", lambda entry: entry.key == "apprise")  # pyte absent
+    cfg = ClausterConfig(projects_root=tmp_path, state_dir=tmp_path / ".s")
+    st = config_editor.field_dep_status(cfg)
+    assert set(st) == {"claustrum.enabled", "notifications.enabled", "claude.pty_screen_enabled"}
+    assert st["claustrum.enabled"]["available"] is True
+    assert st["notifications.enabled"]["available"] is True
+    assert st["claude.pty_screen_enabled"]["available"] is False
+    assert "clauster deps install claustrum" in st["claustrum.enabled"]["hint"]
+
+
+def test_field_specs_attaches_dep_status_only_with_config(tmp_path, monkeypatch) -> None:
+    # #1016 Part 2: dep_status rides on the gated switches when config is given, not otherwise.
+    from clauster import deps
+
+    monkeypatch.setattr("clauster.deps.shutil.which", lambda name: None)  # claustrum missing
+    monkeypatch.setattr(deps, "probe", lambda entry: False)  # extras missing
+    cfg = ClausterConfig(projects_root=tmp_path, state_dir=tmp_path / ".s")
+    specs = field_specs(config=cfg)
+    assert specs["claustrum.enabled"]["dep_status"]["available"] is False
+    assert "clauster deps install claustrum" in specs["claustrum.enabled"]["dep_status"]["hint"]
+    assert "dep_status" not in specs["log_format"]  # a field with no optional dep
+    # Without config, no dep_status is computed at all (the metadata-only call path).
+    assert "dep_status" not in field_specs()["claustrum.enabled"]
+
+
 def test_verbose_toggle_is_editable_bool_with_restart_note() -> None:
     # The standard-bridge --verbose toggle is a Tier-A editable bool carrying a friendly label
     # and the standard-only / restart-required note in its description.

@@ -3906,7 +3906,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             content_hash, present = config_editor.disk_state(path)
         if fields is None:
             fields = config_editor.editable_values(cfg)
-        specs = config_editor.field_specs(present)
+        specs = config_editor.field_specs(present, config=cfg)
         # The front-end builds its rendered rows from `editable`, so a hidden deprecated
         # field is removed by dropping it here — editing `specs` alone would not hide the row.
         editable = [p for p in config_editor.EDITABLE_FIELDS if not specs[p]["hidden"]]
@@ -3988,7 +3988,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             )
         if fields is None:
             fields = config_editor.editable_values(cfg, fields=config_editor.TIER_B_FIELDS)
-        specs = config_editor.field_specs(present, fields=config_editor.TIER_B_FIELDS)
+        specs = config_editor.field_specs(present, fields=config_editor.TIER_B_FIELDS, config=cfg)
         editable = [p for p in config_editor.TIER_B_FIELDS if not specs[p]["hidden"]]
         return {
             "fields": fields,

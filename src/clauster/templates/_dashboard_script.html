@@ -986,6 +986,11 @@
       configFieldDisabled(path) {
         const spec = this.configEditor.specs[path];
         if (!spec) return false;
+        // #1016: an optional-dep switch whose dependency is missing can't be turned ON (the
+        // feature would silently not work). It stays togglable OFF, so an existing
+        // on-but-dep-missing config isn't trapped — configFieldHint() annotates it either way.
+        const depStatus = spec.dep_status;
+        if (depStatus && !depStatus.available && !this.configEditor.edits[path]) return true;
         // #664: the browser-notifications channel can't deliver in an insecure context or an
         // unsupported browser — facts the server config can't change. Disable the toggle so we
         // never silently offer a no-op. (A mere "denied" permission is left enabled: the user
@@ -1053,6 +1058,10 @@
           const caveat = this.notifyClientCaveat();
           if (caveat) return caveat;
         }
+        // #1016: surface the "Requires <dep>" hint whenever the optional dependency is missing —
+        // even if the switch is currently on (a misconfig worth showing), not just when disabled.
+        const spec = this.configEditor.specs[path];
+        if (spec && spec.dep_status && !spec.dep_status.available) return spec.dep_status.hint;
         return this.configFieldDisabled(path) ? this.configDependHint(path) : "";
       },
       scrollToSection(section) {
