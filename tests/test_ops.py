@@ -126,14 +126,15 @@ def test_doctor_git_missing_warns(write_config, tmp_path, monkeypatch):
 # ----- optional-extras rows (#904) --------------------------------------
 
 
-def _extras_cfg(*, pty: bool = True, notify: bool = True):
-    # Minimal config stand-in for _check_extras' feature gates (#1016): the live-terminal switch
-    # (claude.pty_screen_enabled → pyte/pywinpty) and the notifications switch (→ apprise).
+def _extras_cfg(*, notify: bool = True, urls: list[str] | None = None):
+    # Minimal config stand-in for _check_extras' feature gates (#1016): only apprise is gated,
+    # on notifications.enabled AND a configured url (runtime imports apprise only then).
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        claude=SimpleNamespace(pty_screen_enabled=pty),
-        notifications=SimpleNamespace(enabled=notify),
+        notifications=SimpleNamespace(
+            enabled=notify, urls=urls if urls is not None else ["mailto://x"]
+        ),
     )
 
 
@@ -163,15 +164,19 @@ def test_check_extras_includes_win32_entry_only_on_windows(monkeypatch):
     assert "extra:pywinpty" in names
 
 
-def test_check_extras_skips_extra_when_feature_switch_off(monkeypatch):
-    # #1016: a dep for a feature the operator turned OFF is not nagged about (the live terminal
-    # off → no pyte/pywinpty row; notifications off → no apprise row).
+def test_check_extras_gates_apprise_on_notifications(monkeypatch):
+    # #1016: apprise is nagged only when notifications will actually send — enabled AND a url
+    # configured (runtime imports apprise only then). pyte/pywinpty are NOT gated: pyte also
+    # reassembles the connect-URL and pywinpty is the Windows ConPTY backend, beyond the live view.
     monkeypatch.setattr(deps, "probe", lambda entry: False)
     monkeypatch.setattr(deps.sys, "platform", "linux")
-    assert _check_extras(_extras_cfg(pty=False, notify=False)) == []
-    # Turning notifications back on resurfaces only apprise.
-    by = {c.name for c in _check_extras(_extras_cfg(pty=False, notify=True))}
-    assert by == {"extra:apprise"}
+    # notifications off -> no apprise row; pyte still shows (it's ungated)
+    off = {c.name for c in _check_extras(_extras_cfg(notify=False))}
+    assert "extra:apprise" not in off and "extra:pyte" in off
+    # enabled but no url -> still no apprise (runtime would never import it)
+    assert "extra:apprise" not in {c.name for c in _check_extras(_extras_cfg(urls=[]))}
+    # enabled + a url -> apprise surfaces
+    assert "extra:apprise" in {c.name for c in _check_extras(_extras_cfg(urls=["mailto://x"]))}
 
 
 def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, monkeypatch):
@@ -192,11 +197,9 @@ def test_doctor_adds_managed_deps_dir_before_probing(write_config, tmp_path, mon
 
 
 def test_doctor_includes_extra_rows_never_failing(write_config, tmp_path):
-    # Enable the live-terminal feature so its extra rows are gated IN (#1016 — a default config
-    # with the feature off now shows no extra nag at all).
-    checks, ok = run_doctor(_cfg_file(write_config, tmp_path, "  pty_screen_enabled: true\n"))
+    checks, ok = run_doctor(_cfg_file(write_config, tmp_path))
     extra_rows = [c for c in checks if c.name.startswith("extra:")]
-    assert extra_rows  # at least pyte on a POSIX host, now that pty_screen is enabled
+    assert extra_rows  # pyte is ungated (#1016), so it shows on a POSIX host by default
     # Extras are optional: a missing one WARNs but must never FAIL (which would flip the
     # doctor exit code for a dormant feature).
     assert all(c.status in {OK, WARN} for c in extra_rows)

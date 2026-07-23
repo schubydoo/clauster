@@ -173,15 +173,16 @@ def run_doctor(
     return checks, all(c.status != FAIL for c in checks)
 
 
-#: Optional extras are only relevant when their feature switch is ON — skip the doctor line for a
-#: feature the operator deliberately turned off, so they aren't nagged to install a dep they don't
-#: want on a panel read before every session (#1016; mirrors _BINARY_DEP_GATES for binaries).
-#: pyte/pywinpty back the live terminal (claude.pty_screen_enabled); apprise backs outbound
-#: notifications (notifications.enabled).
+#: Optional extras whose warning is only relevant when their feature is actually going to run —
+#: skip the doctor/preflight line otherwise, so the operator isn't nagged about a dep they don't
+#: need (#1016; mirrors _BINARY_DEP_GATES for binaries). Only ``apprise`` is here: runtime imports
+#: it ONLY when notifications are enabled AND a url is configured (``notify.py`` — no url means
+#: nothing is ever sent, so nothing to install for). ``pyte``/``pywinpty`` are deliberately NOT
+#: gated: pyte also reassembles the bridge connect-URL (``pty_keeper``) and pywinpty IS the Windows
+#: ConPTY interactive backend, so both matter beyond the opt-in live view and a missing one is
+#: worth surfacing regardless of ``claude.pty_screen_enabled``.
 _EXTRA_DEP_GATES: dict[str, Callable[[ClausterConfig], bool]] = {
-    "pyte": lambda config: config.claude.pty_screen_enabled,
-    "pywinpty": lambda config: config.claude.pty_screen_enabled,
-    "apprise": lambda config: config.notifications.enabled,
+    "apprise": lambda config: config.notifications.enabled and bool(config.notifications.urls),
 }
 
 
@@ -193,10 +194,11 @@ def _check_extras(config: ClausterConfig) -> list[Check]:
     ``apprise`` for notifications). Detection is a side-effect-free
     :func:`clauster.deps.probe` (never imports the module). Off-platform entries
     (a win32-only extra on a POSIX host) are skipped — the capability can't run
-    there, so its absence isn't worth reporting. An extra whose **feature switch is
-    off** is skipped too (#1016): a dep for a capability the operator disabled is not
-    a nag worth putting on the preflight panel (same reasoning as ``_BINARY_DEP_GATES``
-    for binaries). WARN, never FAIL: a missing extra only leaves its feature dormant,
+    there, so its absence isn't worth reporting. An extra whose feature won't run is
+    skipped too via ``_EXTRA_DEP_GATES`` (#1016) — today just ``apprise`` when
+    notifications aren't enabled-with-a-url — so the panel isn't cluttered with a nag
+    for a dep that would never be imported. WARN, never FAIL: a missing extra only
+    leaves its feature dormant,
     and a FAIL would wrongly flip doctor's exit code. The detail names the capability
     and the environment-correct install hint.
     """
