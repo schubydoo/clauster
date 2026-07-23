@@ -350,6 +350,39 @@ def read_transcript_turns(path: Path) -> list[dict]:
     return turns
 
 
+@dataclass(frozen=True)
+class TranscriptSummary:
+    """The transcript-listing fields both the Transcripts selector and the resume picker need.
+
+    ``turn_count`` drives the picker's ``turn_count > 0`` filter; ``first_prompt`` (the first
+    user turn, already truncated + redacted) labels the conversation; ``first_ts``/``last_ts``
+    bound its "when · duration" display. Derived from a full parse but far smaller than the
+    turn list, so it caches per file (see :func:`read_transcript_summary`).
+    """
+
+    turn_count: int
+    first_prompt: str
+    first_ts: str
+    last_ts: str
+
+
+def _derive_transcript_summary(path: Path) -> TranscriptSummary:
+    """Parse ``path`` and reduce it to a :class:`TranscriptSummary` (the cache-miss body)."""
+    turns = read_transcript_turns(path)
+    # First USER turn labels the conversation in the resume picker — truncated server-side so a
+    # pasted wall of text can't bloat the listing payload.
+    first_prompt = next(
+        (t["content"] for t in turns if t.get("role") == "user" and t.get("content")),
+        "",
+    )[:120]
+    return TranscriptSummary(
+        turn_count=len(turns),
+        first_prompt=first_prompt,
+        first_ts=(turns[0].get("timestamp") or "") if turns else "",
+        last_ts=(turns[-1].get("timestamp") or "") if turns else "",
+    )
+
+
 def read_transcript_turns_from_offset(path: Path, offset: int) -> tuple[list[dict], int, bool]:
     """Read the redacted turns appended to a transcript since byte ``offset`` (live tail, #614).
 
@@ -588,3 +621,66 @@ def aggregate_project_usage_cached(
 def invalidate_usage_cache() -> None:
     """Drop the usage cache so the next read re-aggregates (used by tests)."""
     _USAGE_CACHE.clear()
+
+
+class _TranscriptSummaryCache:
+    """Process-wide per-file cache of a transcript's :class:`TranscriptSummary` (#1035).
+
+    The Transcripts selector and the resume/fork picker share ``/api/projects/{name}/transcripts``,
+    which re-parsed *every* ``.jsonl`` on every open just to derive turn_count + labels — O(total
+    turns), a ~20 s stall on a large project. Cache the derived summary keyed on the file's
+    ``(st_mtime_ns, st_size)`` stamp: an append moves the mtime **and** grows the file, so an
+    unchanged transcript never re-parses (the same append-mostly reasoning as the #424 usage
+    cache). No TTL is needed — the per-file stamp captures every change exactly. Thread-safe: the
+    listing runs from an ``asyncio`` worker thread. Summaries are immutable, so no defensive copy.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty cache."""
+        self._lock = threading.Lock()
+        # str(path) -> ((st_mtime_ns, st_size), summary)
+        self._entries: dict[str, tuple[tuple[int, int], TranscriptSummary]] = {}
+
+    def get(self, path: Path) -> TranscriptSummary:
+        """Return the cached summary for ``path`` when its stamp is unchanged, else re-derive.
+
+        ``path.stat()`` (and thus a ``FileNotFoundError`` for a session removed mid-walk) is
+        raised exactly as :func:`read_transcript_turns` would, so callers skip a racing removal.
+        """
+        st = path.stat()
+        key = str(path)
+        stamp = (st.st_mtime_ns, st.st_size)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry[0] == stamp:
+                return entry[1]
+        # Derive outside the lock: the per-line parse must not serialize concurrent listings for
+        # different projects, and a duplicate parse on a race is harmless.
+        summary = _derive_transcript_summary(path)
+        with self._lock:
+            self._entries[key] = (stamp, summary)
+        return summary
+
+    def clear(self) -> None:
+        """Drop all cached entries (used by tests)."""
+        with self._lock:
+            self._entries.clear()
+
+
+_TRANSCRIPT_SUMMARY_CACHE = _TranscriptSummaryCache()
+
+
+def read_transcript_summary(path: Path) -> TranscriptSummary:
+    """Return ``path``'s :class:`TranscriptSummary` via a per-file ``(mtime, size)`` cache (#1035).
+
+    Use on the transcript-listing path in place of a full :func:`read_transcript_turns` + manual
+    field derivation: a repeat open of an unchanged transcript skips the re-parse entirely. The
+    cache-miss path is behavior-identical to deriving the fields inline (a ``FileNotFoundError``
+    for a vanished file still propagates).
+    """
+    return _TRANSCRIPT_SUMMARY_CACHE.get(path)
+
+
+def invalidate_transcript_summary_cache() -> None:
+    """Drop the transcript-summary cache so the next listing re-derives (used by tests)."""
+    _TRANSCRIPT_SUMMARY_CACHE.clear()
