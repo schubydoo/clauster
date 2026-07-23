@@ -698,8 +698,17 @@ def _deps_list(config_path: str | None) -> int:
         dep = deps.resolve_binary_dep(key)  # the row for THIS host, or None off-platform/arch
         if dep is None:
             status, detail = "n/a", f"{deps.binary_dep_for(key).label} (other platform/arch)"
-        elif deps.installed_binary_path(key, config.state_dir):
-            status, detail = "installed", f"{dep.label} {dep.version} in deps dir"
+        elif (resolved := ops.resolve_configured_binary(key, config)) is not None:
+            # Resolve the same way doctor/preflight and the daemon do (#1013): a configured
+            # or PATH binary counts as installed, not "missing". Keep the managed-dir row's
+            # pinned-version label; otherwise show the path actually in effect.
+            status = "installed"
+            managed = deps.installed_binary_path(key, config.state_dir)
+            detail = (
+                f"{dep.label} {dep.version} in deps dir"
+                if managed is not None and resolved == str(managed)
+                else f"{dep.label} at {resolved}"
+            )
         else:
             status, detail = "missing", dep.label
         print(f"{key:<9} {'(binary)':<10} {status:<10} {detail}")

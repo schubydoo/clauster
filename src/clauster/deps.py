@@ -18,6 +18,7 @@ import importlib.metadata
 import importlib.util
 import io
 import platform
+import shutil
 import sys
 import tarfile
 import zipfile
@@ -668,6 +669,28 @@ def installed_binary_path(key: str, state_dir: str | Path) -> Path | None:
         return None
     dest = managed_bin_dir(state_dir) / dep.dest
     return dest if dest.is_file() else None
+
+
+def resolve_effective_binary(
+    key: str, configured: str, default: str, state_dir: str | Path
+) -> str | None:
+    """Resolve the binary a configurable dep would actually run, or ``None`` (#1013).
+
+    Mirrors the precedence the claustrum daemon spawns with, so a presence check and the
+    daemon can never disagree *by construction*: an explicit or ``PATH`` hit on the
+    *configured* value wins, and the managed ``<state_dir>/deps/bin`` install is a fallback
+    ONLY while the configured value is still the ``default`` — an operator who pointed
+    ``binary`` at a specific path must see it fail rather than have a different version
+    silently substituted. Pure/read-only (a ``shutil.which`` plus one file stat).
+    """
+    resolved = shutil.which(configured)
+    if resolved is not None:
+        return resolved
+    if configured == default:
+        managed = installed_binary_path(key, state_dir)
+        if managed is not None:
+            return str(managed)
+    return None
 
 
 #: Upper bound on a managed-binary download (Shawl's win64 zip is ~1.3 MB). A body larger than this

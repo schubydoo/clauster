@@ -464,7 +464,10 @@ added, so read the prefix rather than expecting this page to enumerate them:
 - **`binary:<name>`** — a bundled companion binary managed by
   `clauster deps`. Today: `binary:claustrum` (Direct Session daemon, shown
   when `claustrum.enabled`) and on Windows `binary:shawl` (service wrapper).
-  A warn shows the `clauster deps install <name>` remedy.
+  A warn shows the `clauster deps install <name>` remedy. Presence is resolved
+  the same way the daemon spawns, so a configured
+  [`claustrum.binary`](reference/config.md#claustrum-hosted-live-view-channel-claustrumconfig)
+  path (the minimal-PATH workaround) counts as present rather than warning falsely.
 
 Family rows appear only when applicable on your platform and config, and they
 warn, never fail: a missing optional piece leaves a feature dormant without

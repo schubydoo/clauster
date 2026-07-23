@@ -198,7 +198,7 @@ async def test_resolve_binary_falls_back_to_managed_install(make_daemon, monkeyp
 
     from clauster import deps
 
-    monkeypatch.setattr("clauster.claustrum_daemon.shutil.which", lambda name: None)  # PATH miss
+    monkeypatch.setattr("clauster.deps.shutil.which", lambda name: None)  # PATH miss
     monkeypatch.setattr(deps.sys, "platform", "linux")  # deterministic variant -> dest "claustrum"
     monkeypatch.setattr(deps.platform, "machine", lambda: "x86_64")
     daemon = make_daemon(binary="claustrum")  # fixture's short state_dir (AF_UNIX path limit)
@@ -215,9 +215,7 @@ async def test_resolve_binary_falls_back_to_managed_install(make_daemon, monkeyp
 
 async def test_resolve_binary_prefers_path_over_managed(make_daemon, monkeypatch):
     """An explicit/PATH-resolved binary wins over a managed install (operator control)."""
-    monkeypatch.setattr(
-        "clauster.claustrum_daemon.shutil.which", lambda name: "/usr/local/bin/claustrum"
-    )
+    monkeypatch.setattr("clauster.deps.shutil.which", lambda name: "/usr/local/bin/claustrum")
     daemon = make_daemon(binary="claustrum")
     assert daemon._resolve_binary() == "/usr/local/bin/claustrum"
 
@@ -232,7 +230,7 @@ async def test_resolve_binary_explicit_missing_binary_does_not_fall_back(make_da
 
     from clauster import deps
 
-    monkeypatch.setattr("clauster.claustrum_daemon.shutil.which", lambda name: None)
+    monkeypatch.setattr("clauster.deps.shutil.which", lambda name: None)
     monkeypatch.setattr(deps.sys, "platform", "linux")
     monkeypatch.setattr(deps.platform, "machine", lambda: "x86_64")
     daemon = make_daemon(binary="/opt/claustrum-v2")
@@ -492,7 +490,7 @@ def _simulate_win32(monkeypatch) -> None:
     before the argv is built.
     """
     monkeypatch.setattr("clauster.claustrum_daemon.sys.platform", "win32")
-    monkeypatch.setattr("clauster.claustrum_daemon.shutil.which", lambda name: name)
+    monkeypatch.setattr("clauster.deps.shutil.which", lambda name: name)
 
 
 async def test_spawn_appends_listen_pipe_on_win32(make_daemon, monkeypatch):
