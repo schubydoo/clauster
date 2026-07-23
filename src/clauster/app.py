@@ -4151,6 +4151,22 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         # bypassPermissions. (Also makes bg honor instance_defaults, like the other channels.)
         pm = permission_mode or config.instance_defaults.permission_mode
         _enforce_bypass_ceiling(name, pm)
+        if prompt is None and rc_name is None:
+            # #1033: an un-registered background session has no composer and no
+            # cloud surface — dispatched without a prompt it parks at "send a
+            # prompt to start" forever, with no way to ever receive one (the bg
+            # card offers only Stop/Forget). ``rc_name`` opens the claude.ai door,
+            # where the session is conversational, so a blank prompt is legitimate
+            # there. Gated after the 404/403 checks so existence and the bypass
+            # ceiling keep their precedence (same ordering rationale as
+            # _enforce_bypass_ceiling above).
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "prompt is required for a background session unless rc_name "
+                    "registers it on claude.ai"
+                ),
+            )
         try:
             job_id = await asyncio.to_thread(
                 supervisor.dispatch_background_job,
