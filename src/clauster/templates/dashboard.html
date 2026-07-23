@@ -1408,6 +1408,13 @@
                           x-show="configFieldsVisible(s).length"
                           x-text="configSectionLabel(s)"></button>
                 </template>
+                <!-- The Advanced (Tier-B, #978) panel renders OUTSIDE the configSections()
+                     loop, so it gets an explicit chip (#1032) — otherwise it's the only
+                     .cfg-section with no jump entry, undiscoverable without scrolling to
+                     the panel foot. Gated on the same `supported` flag as the panel. -->
+                <button type="button" class="btn btn-sm btn-ghost-secondary" data-test="cfg-jump-advanced"
+                        x-show="configAdvanced.supported" x-cloak
+                        @click="scrollToSection('advanced')">Advanced</button>
               </div>
             </div>
 
@@ -1482,7 +1489,9 @@
                config_write capability + a step-up re-auth. Shown only when config-write is
                enabled; locked until the operator re-confirms the password. Bind address,
                auth switches, and TLS deliberately stay file/CLI-managed (never here). #}
-            <section class="cfg-section" data-test="adv-panel" x-show="configAdvanced.supported" x-cloak>
+            {# id follows the cfg-sec-<name> convention so scrollToSection('advanced')
+               resolves it and applies the measured sticky-nav scroll offset (#1032). #}
+            <section class="cfg-section" id="cfg-sec-advanced" data-test="adv-panel" x-show="configAdvanced.supported" x-cloak>
               <hr class="my-3">
               <h4 class="cfg-section-head">Advanced settings</h4>
               <p class="text-secondary small mb-2">
