@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +41,46 @@ from typing import Any
 #: One shared JSON-lines file under the state dir (was #818's ``claude_md_audit.log``).
 AUDIT_FILE = "config_audit.log"
 _log = logging.getLogger("clauster.config_audit")
+
+# Size-based rotation ceiling for the audit log (#1011). One compact JSON line is appended per
+# committed config write — a rare event — so at 5 MB the current file already holds tens of
+# thousands of records; past it the file rotates to `.1`, shifting `.i` -> `.i+1` and dropping
+# anything beyond `_AUDIT_KEEP_ROTATED`. Total on-disk audit is therefore bounded at
+# ~(keep + 1) x ceiling (~30 MB), instead of growing forever on a long-lived instance. A fixed
+# ceiling (not a config key) keeps rotation surgical on this deliberately best-effort path.
+_AUDIT_MAX_BYTES = 5 * 1024 * 1024
+_AUDIT_KEEP_ROTATED = 5
+
+# Serializes the rotate-then-append against itself: config writes audit from concurrent
+# ``asyncio.to_thread`` workers (see :func:`arecord`), and the unlink+rename rotation sequence
+# would otherwise interleave and clobber archive generations. Intra-process only — a rare edge of
+# two clauster processes sharing one state_dir isn't covered (single-operator norm), and the worst
+# case there is a lost archive generation, never a corrupt live log.
+_AUDIT_LOCK = threading.Lock()
+
+
+def _rotate_audit_log_if_needed(path: Path) -> None:
+    """Rotate the audit log when it reaches the size ceiling. Best-effort — never raises.
+
+    ``<name>`` -> ``<name>.1``, shifting ``<name>.i`` -> ``<name>.i+1`` up to
+    :data:`_AUDIT_KEEP_ROTATED` (older dropped). A rotation error must never block the append
+    (itself best-effort, on an already-committed write), so it is swallowed + logged and the
+    append then continues against the existing file.
+    """
+    try:
+        if path.stat().st_size < _AUDIT_MAX_BYTES:
+            return
+    except OSError:
+        return  # no file yet, or un-stat-able — nothing to rotate
+    try:
+        path.with_name(f"{path.name}.{_AUDIT_KEEP_ROTATED}").unlink(missing_ok=True)
+        for i in range(_AUDIT_KEEP_ROTATED - 1, 0, -1):
+            src = path.with_name(f"{path.name}.{i}")
+            if src.exists():
+                src.replace(path.with_name(f"{path.name}.{i + 1}"))
+        path.replace(path.with_name(f"{path.name}.1"))
+    except OSError as exc:
+        _log.warning("config audit log rotation failed (append will continue): %s", exc)
 
 
 def record(
@@ -84,8 +125,14 @@ def record(
     try:
         resolved = state_dir.expanduser()
         resolved.mkdir(parents=True, exist_ok=True)
-        with open(resolved / AUDIT_FILE, "a", encoding="utf-8", newline="") as fh:
-            fh.write(json.dumps(entry, separators=(",", ":"), default=str) + "\n")
+        audit_path = resolved / AUDIT_FILE
+        # Hold the lock across rotate + append so a concurrent audit can't interleave with the
+        # unlink/rename sequence (both run from asyncio worker threads). The critical section is a
+        # size stat + a rare append, so contention is negligible.
+        with _AUDIT_LOCK:
+            _rotate_audit_log_if_needed(audit_path)
+            with open(audit_path, "a", encoding="utf-8", newline="") as fh:
+                fh.write(json.dumps(entry, separators=(",", ":"), default=str) + "\n")
     except OSError as exc:
         _log.error(
             "config write to %s (%s/%s) committed but audit append failed: %s",

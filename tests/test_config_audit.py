@@ -93,6 +93,94 @@ def test_record_best_effort_on_oserror(tmp_path: Path, caplog) -> None:
     assert any("audit append failed" in r.message for r in caplog.records)
 
 
+# --- unit: audit-log rotation (#1011) --------------------------------------
+
+
+def _target_of(path: Path) -> str:
+    return json.loads(path.read_text(encoding="utf-8").strip())["target"]
+
+
+def test_record_does_not_rotate_under_ceiling(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    config_audit.record(state, surface="x", scope="user", target="a", action="create")
+    config_audit.record(state, surface="x", scope="user", target="b", action="update")
+    assert not (state / "config_audit.log.1").exists()  # well under the default 5 MB ceiling
+    assert len((state / "config_audit.log").read_text().strip().splitlines()) == 2
+
+
+def test_record_rotates_when_over_ceiling(tmp_path: Path, monkeypatch) -> None:
+    # A tiny ceiling makes any existing content trigger rotation on the next append (#1011).
+    monkeypatch.setattr(config_audit, "_AUDIT_MAX_BYTES", 1)
+    state = tmp_path / "state"
+    config_audit.record(state, surface="x", scope="user", target="a", action="create")
+    config_audit.record(state, surface="x", scope="user", target="b", action="update")
+    assert _target_of(state / "config_audit.log.1") == "a"  # prior content rotated out
+    assert _target_of(state / "config_audit.log") == "b"  # fresh log has the newest record
+
+
+def test_record_rotation_shifts_and_drops_beyond_keep(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(config_audit, "_AUDIT_MAX_BYTES", 1)
+    monkeypatch.setattr(config_audit, "_AUDIT_KEEP_ROTATED", 2)
+    state = tmp_path / "state"
+    for t in ("r1", "r2", "r3", "r4"):
+        config_audit.record(state, surface="x", scope="user", target=t, action="update")
+    assert _target_of(state / "config_audit.log") == "r4"
+    assert _target_of(state / "config_audit.log.1") == "r3"
+    assert _target_of(state / "config_audit.log.2") == "r2"
+    assert not (state / "config_audit.log.3").exists()  # keep=2 bound; r1 dropped
+
+
+def test_record_rotation_error_is_swallowed(tmp_path: Path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(config_audit, "_AUDIT_MAX_BYTES", 1)
+    state = tmp_path / "state"
+    config_audit.record(state, surface="x", scope="user", target="r1", action="create")
+
+    def _boom(self, target):
+        raise OSError("boom")
+
+    monkeypatch.setattr(config_audit.Path, "replace", _boom)  # rotation rename fails
+    with caplog.at_level(logging.WARNING, logger="clauster.config_audit"):
+        config_audit.record(state, surface="x", scope="user", target="r2", action="update")
+    assert any("rotation failed" in r.message for r in caplog.records)
+    # rotation failed, so the append continued against the existing file — nothing lost.
+    lines = (state / "config_audit.log").read_text().strip().splitlines()
+    assert [json.loads(line)["target"] for line in lines] == ["r1", "r2"]
+
+
+def test_record_concurrent_writes_stay_valid(tmp_path: Path, monkeypatch) -> None:
+    # #1062 P1: audits fire from concurrent asyncio worker threads; rotate+append is lock-guarded,
+    # so every generation stays a valid JSON-lines file (no torn/clobbered writes) and none raise.
+    import threading
+
+    monkeypatch.setattr(config_audit, "_AUDIT_MAX_BYTES", 200)  # rotate often under load
+    monkeypatch.setattr(config_audit, "_AUDIT_KEEP_ROTATED", 3)
+    state = tmp_path / "state"
+    state.mkdir()
+    ready = threading.Barrier(8)
+    errors: list[Exception] = []
+
+    def worker(i: int) -> None:
+        try:
+            ready.wait()
+            for j in range(10):
+                config_audit.record(
+                    state, surface="x", scope="user", target=f"{i}-{j}", action="u"
+                )
+        except Exception as exc:  # noqa: BLE001 - a raise here fails the concurrency guarantee
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    # Every current + rotated generation parses as JSON lines (no interleaving/tearing).
+    for p in state.glob("config_audit.log*"):
+        for line in p.read_text(encoding="utf-8").strip().splitlines():
+            assert "surface" in json.loads(line)
+
+
 def test_record_appends_one_line_per_call(tmp_path: Path) -> None:
     state = tmp_path / "state"
     config_audit.record(state, surface="a", scope="user", target="t1", action="update")
