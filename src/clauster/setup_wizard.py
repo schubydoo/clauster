@@ -30,11 +30,13 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import os
+import re
 import secrets
 import socket
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import markupsafe
 import yaml
@@ -69,6 +71,10 @@ _LOOPBACK_HOSTNAMES = ("127.0.0.1", "localhost", "[::1]")
 # A non-loopback bind tells the browser nothing, so those hosts are for the config only —
 # never a place the wizard itself is reachable.
 _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::"})  # noqa: S104 - compared against, never a bind
+# A real Origin host is a DNS name or an IP literal. Anything else (a comma-mangled value,
+# an embedded path) can only come from a junk header; it would be inert against the runtime's
+# exact-match allowlist, but there is no reason to write it into the config file.
+_ORIGIN_HOST_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9\-.]*[a-z0-9])?|[0-9a-f:.]+)$")
 
 _CSP = (
     "default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self'; "
@@ -186,8 +192,8 @@ def _display_url(host: str, port: int) -> str:
     return f"http://{host}:{port}/"
 
 
-def _origins_to_persist(host: str, origin: str | None) -> list[str]:
-    """Return the origins to record in ``auth.allowed_origins`` for a ``host`` bind.
+def _origins_to_persist(host: str, port: int, origin: str | None) -> list[str]:
+    """Return the origins to record in ``auth.allowed_origins`` for a ``host``/``port`` bind.
 
     ``auth.build_allowed_origins`` auto-allows ``127.0.0.1``/``localhost``/``[::1]`` only when
     the bind host is in ``_LOOPBACK_HOSTS``; every other bind auto-allows **nothing**. So
@@ -208,13 +214,19 @@ def _origins_to_persist(host: str, origin: str | None) -> list[str]:
     """
     if host in _LOOPBACK_HOSTS or not origin:
         return []
-    normalized = auth.normalize_origin(origin)
     # normalize_origin returns the cleaned input unchanged when it can't parse a
-    # scheme+host, so re-check the shape rather than trusting it round-tripped.
-    scheme, _, rest = normalized.partition("://")
-    if scheme not in ("http", "https") or not rest:
+    # scheme+host, so re-derive the parts rather than trusting it round-tripped.
+    parts = urlsplit(auth.normalize_origin(origin))
+    hostname = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not _ORIGIN_HOST_RE.match(hostname):
         return []
-    return [normalized]
+    if ":" in hostname:  # IPv6 literal — urlsplit drops the brackets a real Origin carries
+        hostname = f"[{hostname}]"
+    # Pair the operator's HOST with the port the app will actually serve, not the port the
+    # Origin carries. The wizard runs on its own port, and when CLAUSTER_PORT is unset the
+    # operator can edit the bind port on the form — recording the browsing port would then
+    # write an allowlist entry that is known-wrong and 403 exactly as before.
+    return [auth.normalize_origin(f"{parts.scheme}://{hostname}:{port}")]
 
 
 def _build_config_data(
@@ -425,7 +437,7 @@ def create_setup_app(
                 host,
                 port_val,
                 password_hash,
-                _origins_to_persist(host, request.headers.get("origin")),
+                _origins_to_persist(host, port_val, request.headers.get("origin")),
             )
             # Final fail-closed gate: the model validates projects_root existence/readability
             # and every other field. A projects_root failure maps to a friendly field error;

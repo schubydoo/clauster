@@ -376,7 +376,62 @@ def test_token_mode_records_lan_origin_so_login_is_reachable(tmp_path):
     )
 
 
-@pytest.mark.parametrize("bad", ["not-an-origin", "file:///etc/passwd", "://x", "javascript:x"])
+def test_recorded_origin_uses_the_bind_port_not_the_wizard_port(tmp_path):
+    # The wizard serves on its own port, and with CLAUSTER_PORT unset the operator can edit
+    # the bind port on the form. Recording the port the Origin carries would then write an
+    # allowlist entry that is known-wrong — the app binds :8000, the browser sends :8000,
+    # and the login POST 403s exactly as #1071 describes. The host is the operator's; the
+    # port must be the one the app will actually serve.
+    projects = tmp_path / "code"
+    projects.mkdir()
+    write_path = tmp_path / "clauster.yml"
+    app = setup_wizard.create_setup_app(
+        write_path, port=7621, setup_token=_TOKEN, env_host="0.0.0.0"
+    )
+    client = TestClient(app)
+    res = client.post(
+        "/setup",
+        headers={"x-setup-token": _TOKEN, "origin": "http://nas.local:7621"},
+        json=_valid_payload(projects, port=8000),
+    )
+    assert res.status_code == 200
+
+    config = load_config(write_path)
+    assert config.port == 8000
+    assert config.auth.allowed_origins == ["http://nas.local:8000"]
+    # The property that actually matters: the URL the operator will browse is accepted.
+    assert auth.normalize_origin("http://nas.local:8000") in auth.build_allowed_origins(config)
+
+
+def test_recorded_origin_keeps_ipv6_literal_bracketed(tmp_path):
+    # urlsplit strips the brackets off an IPv6 host, so rebuilding the origin has to put
+    # them back — otherwise it normalizes to the malformed `http://::1` and matches nothing.
+    projects = tmp_path / "code"
+    projects.mkdir()
+    write_path = tmp_path / "clauster.yml"
+    app = setup_wizard.create_setup_app(
+        write_path, port=7621, setup_token=_TOKEN, env_host="fd00::1"
+    )
+    res = TestClient(app).post(
+        "/setup",
+        headers={"x-setup-token": _TOKEN, "origin": "http://[fd00::2]:7621"},
+        json=_valid_payload(projects),
+    )
+    assert res.status_code == 200
+    assert load_config(write_path).auth.allowed_origins == ["http://[fd00::2]:7621"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not-an-origin",
+        "file:///etc/passwd",
+        "://x",
+        "javascript:x",
+        "http://:80",  # hostless
+        "http://a.com,http",  # comma-mangled host
+    ],
+)
 def test_wildcard_bind_rejects_malformed_origin(tmp_path, bad):
     # normalize_origin returns the cleaned input unchanged when it can't parse scheme+host, so
     # a junk header must not be written through into the allowlist verbatim. Token mode is the
