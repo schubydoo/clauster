@@ -349,6 +349,19 @@ def test_env_port_makes_field_readonly_and_config_records_it(tmp_path):
     assert load_config(write_path).port == 9000
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "::1"])
+def test_host_is_bindable_true(host):
+    assert setup_wizard.host_is_bindable(host) is True
+
+
+@pytest.mark.parametrize("host", ["clauster.invalid", "not a host!!", "192.0.2.7"])
+def test_host_is_bindable_false(host):
+    # Not bindable: an unresolvable / malformed host (RFC 6761 `.invalid`) fails at getaddrinfo;
+    # a syntactically-valid address not on any local interface (RFC 5737 TEST-NET `192.0.2.7`)
+    # resolves but fails the ephemeral bind — exercising both rejection paths.
+    assert setup_wizard.host_is_bindable(host) is False
+
+
 def test_resolve_env_port_unset_is_none(monkeypatch):
     monkeypatch.delenv("CLAUSTER_PORT", raising=False)
     assert setup_wizard.resolve_env_port() is None

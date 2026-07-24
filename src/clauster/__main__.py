@@ -1419,6 +1419,17 @@ def _run_setup_wizard(config_path: str | None) -> int:
             file=sys.stderr,
         )
         return 2
+    # CLAUSTER_HOST likewise reapplies over the written config on re-exec, and any string loads
+    # (only the bind fails), so a set-but-unbindable value would let setup "succeed" and then the
+    # app fail to bind. Refuse it up front too (#1017 review).
+    if env_host is not None and not setup_wizard.host_is_bindable(env_host):
+        print(
+            f"clauster: CLAUSTER_HOST={env_host!r} cannot be bound on this machine "
+            "(unresolvable, or not an address on any local interface). Fix or unset it and "
+            "restart — first-run setup won't write a config the app would then fail to bind.",
+            file=sys.stderr,
+        )
+        return 2
     app = setup_wizard.create_setup_app(
         write_path, port=port, setup_token=setup_token, env_host=env_host, env_port=env_port
     )

@@ -258,6 +258,16 @@ def test_run_missing_config_invalid_env_port_fails_closed(monkeypatch, capsys, b
     assert captured == {}  # never served a wizard whose result couldn't boot
 
 
+def test_run_missing_config_unbindable_env_host_fails_closed(monkeypatch, capsys):
+    # #1017 review: an unbindable CLAUSTER_HOST loads fine (any string validates) but fails at the
+    # re-exec's bind, so refuse it up front instead of completing setup into an unbindable config.
+    monkeypatch.setenv("CLAUSTER_HOST", "clauster.invalid")
+    captured = _stub_server(monkeypatch)
+    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 2
+    assert "CLAUSTER_HOST" in capsys.readouterr().err
+    assert captured == {}
+
+
 def test_run_invalid_existing_config_exits_2(write_config, monkeypatch):
     # #978: only a MISSING config triggers first-run. A config file that EXISTS but is invalid
     # must ERROR (exit 2), never wizard-over-and-overwrite it. A nonexistent projects_root

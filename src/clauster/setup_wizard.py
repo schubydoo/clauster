@@ -31,6 +31,7 @@ import asyncio
 import ipaddress
 import os
 import secrets
+import socket
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,30 @@ def resolve_setup_host() -> str:
     wizard; a host install leaves it unset and stays loopback-only.
     """
     return os.environ.get("CLAUSTER_SETUP_HOST", "").strip() or SETUP_HOST
+
+
+def host_is_bindable(host: str) -> bool:
+    """Return whether ``host`` can actually be bound on this machine (#1017 review).
+
+    ``CLAUSTER_HOST`` is written to the config and reapplied over it on the post-setup re-exec.
+    Unlike the port, *any* string passes config validation, so an unresolvable name or an address
+    not assigned to a local interface loads fine and then fails only when the re-exec's uvicorn
+    binds — after setup already "succeeded". This resolves and attempts an ephemeral bind so the
+    wizard can refuse such a value up front. Best-effort: any resolve/bind error → not bindable;
+    a wildcard / loopback / locally-assigned address → bindable.
+    """
+    try:
+        infos = socket.getaddrinfo(host, 0, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    for family, socktype, proto, _canon, sockaddr in infos:
+        try:
+            with socket.socket(family, socktype, proto) as sock:
+                sock.bind(sockaddr)
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def resolve_env_port() -> int | None:
