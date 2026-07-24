@@ -1402,7 +1402,12 @@ def _run_setup_wizard(config_path: str | None) -> int:
     # off-host, so mint a one-time token that gates the wizard; a loopback bind is the boundary
     # itself and needs none (#1017). The token is printed only here, to the server log.
     setup_token = setup_wizard.mint_setup_token(host)
-    app = setup_wizard.create_setup_app(write_path, port=port, setup_token=setup_token)
+    # CLAUSTER_HOST (if set) overrides the file's bind on the post-setup re-exec, so the wizard
+    # fixes its bind field to it instead of offering a choice it would silently ignore (#1017).
+    env_host = os.environ.get("CLAUSTER_HOST", "").strip() or None
+    app = setup_wizard.create_setup_app(
+        write_path, port=port, setup_token=setup_token, env_host=env_host
+    )
     print(
         f"clauster {__version__}: no configuration found — starting first-run setup at "
         f"{setup_wizard.setup_url(host, port, token=setup_token)}  (will write {write_path})",

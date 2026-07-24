@@ -42,9 +42,15 @@
             <div class="row g-2 mb-3">
               <div class="col-8">
                 <label class="form-label" for="host">Bind address</label>
+                {% if env_host %}
+                <input class="form-control" type="text" id="host" name="host" value="{{ env_host }}"
+                       readonly aria-describedby="err-host" {{ NO_AUTOFILL }}>
+                <div class="form-hint">Fixed by the <code>CLAUSTER_HOST</code> environment variable — the container controls the bind.</div>
+                {% else %}
                 <input class="form-control" type="text" id="host" name="host" value="127.0.0.1"
                        aria-describedby="err-host" {{ NO_AUTOFILL }}>
                 <div class="form-hint">127.0.0.1 = this machine only. Use 0.0.0.0 to allow your LAN.</div>
+                {% endif %}
                 <div class="invalid-feedback" id="err-host" data-error="host"></div>
               </div>
               <div class="col-4">
@@ -86,7 +92,11 @@
         </div>
       </div>
       <div class="text-center text-secondary small mt-3">
+        {% if setup_token %}
+        Token-gated setup — reachable on this host; complete it with the one-time token from the server log.
+        {% else %}
         Loopback-only setup — served on this machine until a password is set.
+        {% endif %}
       </div>
     </div>
   </div>

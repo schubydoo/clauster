@@ -187,7 +187,11 @@ def _atomic_write_config(target: Path, text: str) -> None:
 
 
 def create_setup_app(
-    write_path: Path, *, port: int = DEFAULT_PORT, setup_token: str | None = None
+    write_path: Path,
+    *,
+    port: int = DEFAULT_PORT,
+    setup_token: str | None = None,
+    env_host: str | None = None,
 ) -> FastAPI:
     """Build the first-run setup app that writes ``write_path`` (#978, token-gate #1017).
 
@@ -196,6 +200,12 @@ def create_setup_app(
     mode (a non-loopback bind — the GET needs ``?token=`` and the submit an ``X-Setup-Token``
     header). On a successful submit it sets ``app.state.setup_complete`` and asks the wired
     uvicorn server to shut down, so the ``clauster run`` caller can re-exec onto the new config.
+
+    ``env_host`` is the ``CLAUSTER_HOST`` env value when set (the Docker case): because an env
+    override wins over the written file on re-exec, a free-choice bind field would be a control
+    that lies. So when it's set the wizard fixes the bind to it — the field renders read-only and
+    the submit writes ``env_host`` regardless of what was posted — and the operator sees the
+    address the app will actually bind (#1017 review).
     """
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -237,6 +247,9 @@ def create_setup_app(
                 # Only rendered in token mode (empty string otherwise → the attribute is omitted
                 # and setup.js sends no header, exactly the loopback flow).
                 "setup_token": setup_token or "",
+                # When set (CLAUSTER_HOST), the bind field is read-only at this value — the app
+                # binds it regardless of what's posted, so the control can't lie (#1017 review).
+                "env_host": env_host or "",
             },
         )
         resp.headers["Content-Security-Policy"] = _CSP.format(nonce=nonce)
@@ -279,7 +292,11 @@ def create_setup_app(
         # the is_dir check) rather than with a direct path operation on request data; a bad
         # path is mapped back to a friendly field error there.
 
-        host = str(body.get("host", "")).strip() or SETUP_HOST
+        # A CLAUSTER_HOST env override wins over the written file on re-exec, so when it's set the
+        # bind is fixed to it — writing what was posted would put a value in the config the app
+        # then ignores (a control that lies, #1017 review). Loopback/host installs keep the
+        # posted choice.
+        host = env_host or (str(body.get("host", "")).strip() or SETUP_HOST)
         try:
             port_val = int(body.get("port", port))
         except (TypeError, ValueError):

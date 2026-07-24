@@ -240,7 +240,7 @@ _TOKEN = "s3cret-setup-token"
 
 def _token_app(tmp_path: Path):
     projects = tmp_path / "code"
-    projects.mkdir()
+    projects.mkdir(exist_ok=True)  # a test may build both a loopback and a token app in one tmp
     write_path = tmp_path / "clauster.yml"
     app = setup_wizard.create_setup_app(write_path, port=7621, setup_token=_TOKEN)
     return TestClient(app), projects, write_path
@@ -292,6 +292,55 @@ def test_token_mode_submit_with_header_writes_config_ignoring_origin(tmp_path):
     )
     assert res.status_code == 200
     assert write_path.exists()
+
+
+# ----- bind-field honesty vs CLAUSTER_HOST, and footer (#1017 review) -------
+
+
+def _env_host_app(tmp_path: Path, env_host: str = "0.0.0.0"):
+    projects = tmp_path / "code"
+    projects.mkdir(exist_ok=True)
+    write_path = tmp_path / "clauster.yml"
+    app = setup_wizard.create_setup_app(write_path, port=7621, env_host=env_host)
+    return TestClient(app), projects, write_path
+
+
+def test_env_host_makes_bind_field_readonly_and_prefilled(tmp_path):
+    # With CLAUSTER_HOST set the bind is env-controlled, so the field can't be a free choice the
+    # re-exec would silently override — it renders read-only at the env value with an explanation.
+    client, _, _ = _env_host_app(tmp_path, env_host="0.0.0.0")
+    html = client.get("/").text
+    assert 'value="0.0.0.0"' in html
+    assert "readonly" in html
+    assert "CLAUSTER_HOST" in html
+
+
+def test_env_host_written_config_records_env_not_posted_host(tmp_path):
+    # A stale/crafted posted host must not win: the app binds CLAUSTER_HOST regardless, so the
+    # written config records that, never a value the runtime ignores (no control that lies).
+    client, projects, write_path = _env_host_app(tmp_path, env_host="0.0.0.0")
+    res = client.post("/setup", json=_valid_payload(projects, host="127.0.0.1"))
+    assert res.status_code == 200
+    assert load_config(write_path).host == "0.0.0.0"
+
+
+def test_no_env_host_keeps_free_bind_choice(tmp_path):
+    # Host install (no CLAUSTER_HOST): the field stays editable and the posted host is honored.
+    _, client, projects, write_path = _app_and_paths(tmp_path)
+    assert "readonly" not in client.get("/").text
+    res = client.post("/setup", json=_valid_payload(projects, host="0.0.0.0"))
+    assert res.status_code == 200
+    assert load_config(write_path).host == "0.0.0.0"
+
+
+def test_footer_reflects_exposure_mode(tmp_path):
+    # Loopback footer says loopback; token mode says reachable/token-gated (not "Loopback-only").
+    _, loopback_client, _, _ = _app_and_paths(tmp_path)
+    assert "Loopback-only" in loopback_client.get("/").text
+    token_client, _, _ = _token_app(tmp_path)
+    html = token_client.get("/", params={"token": _TOKEN}).text
+    assert "Loopback-only" not in html
+    assert "Token-gated" in html
 
 
 # ----- host / token policy helpers (#1017) ---------------------------------
