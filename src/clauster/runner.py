@@ -693,14 +693,28 @@ class SessionRunner:
 
         The result lets the read-only transcript viewer badge a transcript as "live"
         when its session id maps to a running bridge/agent. It covers any kind of live
-        session landing in that dir (a bridge child, an external terminal session); a
-        worktree-spawn session lives under a *different* sanitized cwd, so it is neither
-        listed here nor by :func:`usage.transcript_paths_for` for the project root —
-        the two stay consistent. Hosted (claustrum) sessions are folded in separately
-        by the route, since they run no ``agents --json`` session.
+        session landing in that dir (a bridge child, an external terminal session), plus
+        sessions running in the project's git worktrees.
+
+        Those worktrees MUST stay in lockstep with :func:`usage.transcript_paths_for`,
+        which lists the same set (#1020). If a worktree session were listed but not
+        counted live here, it would render as a dormant conversation — and the fork
+        picker's ``!live && turn_count > 0`` filter would then offer a *running* session
+        as forkable, which is exactly what that filter exists to prevent. Hosted
+        (claustrum) sessions are folded in separately by the route, since they run no
+        ``agents --json`` session.
         """
         target = pointers.sanitize_cwd(project_path)
-        return {s.local_uuid for s in self._sessions if pointers.sanitize_cwd(s.cwd) == target}
+        worktrees = Path(project_path) / pointers.WORKTREE_SUBDIR
+
+        def _belongs(cwd: Path) -> bool:
+            if pointers.sanitize_cwd(cwd) == target:
+                return True
+            # Containment on the worktrees subtree only — not the whole project — so a
+            # stray `claude` run by hand elsewhere under the project is not claimed.
+            return cwd.is_relative_to(worktrees)
+
+        return {s.local_uuid for s in self._sessions if _belongs(Path(s.cwd))}
 
     # ----- persistence (state.json, D14) ----------------------------------
 

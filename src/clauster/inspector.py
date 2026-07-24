@@ -23,6 +23,7 @@ from pathlib import Path
 from . import procutil
 from .claude_cli import resolve_binary
 from .models import Attribution, WorkingSession
+from .pointers import WORKTREE_SUBDIR
 
 # Agent-view lifecycle states that mean the session is over — not live anywhere,
 # neither for bridge attribution nor for the ghost-reaper's keep set.
@@ -31,12 +32,11 @@ _TERMINAL_STATES = frozenset({"done", "failed", "stopped"})
 # "interactive"; "" tolerates a pre-agent-view CLI that omits the field. Anything
 # else ("background", future kinds) is allowlisted out — fail-closed attribution.
 _BRIDGE_KINDS = frozenset({"", "interactive"})
-# Where `claude remote-control --spawn worktree` places each session's git worktree,
-# relative to the project root. A worktree bridge's sessions live in this subtree,
-# never at the root, so containment attribution matches HERE specifically rather than
-# the whole project tree — a stray interactive `claude` run by hand elsewhere under
-# the project must not be claimed as the bridge's session.
-_WORKTREE_SUBDIR = Path(".claude") / "worktrees"
+# A worktree bridge's sessions live in this subtree, never at the root, so containment
+# attribution matches HERE specifically rather than the whole project tree — a stray
+# interactive `claude` run by hand elsewhere under the project must not be claimed as the
+# bridge's session. Shared with `usage` (see the definition) so the two can't disagree.
+_WORKTREE_SUBDIR = WORKTREE_SUBDIR
 
 
 def list_working_sessions(binary: str, *, timeout: float = 10.0) -> list[WorkingSession]:

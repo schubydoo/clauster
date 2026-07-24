@@ -1379,6 +1379,38 @@ def test_live_session_uuids_matches_by_sanitized_cwd(runner_config):
     assert runner.live_session_uuids(root / "gamma") == set()
 
 
+def test_live_session_uuids_includes_worktree_sessions(runner_config):
+    """A worktree session counts live for its project, in lockstep with the listing (#1020).
+
+    usage.transcript_paths_for now lists worktree transcripts, so this must count them live.
+    If it did not, a RUNNING worktree session would render as a dormant conversation and the
+    fork picker's `!live && turn_count > 0` filter would offer it as forkable — the precise
+    situation that filter exists to prevent.
+    """
+    config, _ = runner_config
+    runner = _make_runner(runner_config)
+    root = config.projects_root
+
+    def session(uuid, cwd):
+        return WorkingSession(
+            pid=hash(uuid) & 0xFFFF,
+            cwd=cwd,
+            kind="interactive",
+            started_at=1,
+            local_uuid=uuid,
+            attribution=Attribution.TRACKED,
+        )
+
+    runner._sessions = [
+        session("u-root", root / "alpha"),
+        session("u-wt", root / "alpha" / ".claude" / "worktrees" / "sess-1"),
+        # Under the project but NOT in the worktrees subtree: a stray hand-run `claude`
+        # must still not be claimed, so containment stays scoped to .claude/worktrees.
+        session("u-stray", root / "alpha" / "subdir"),
+    ]
+    assert runner.live_session_uuids(root / "alpha") == {"u-root", "u-wt"}
+
+
 def test_live_session_uuids_empty_when_no_sessions(runner_config):
     config, _ = runner_config
     runner = _make_runner(runner_config)

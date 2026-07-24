@@ -272,6 +272,88 @@ def test_transcript_paths_for_missing_dir_is_empty(tmp_path):
     )
 
 
+def test_transcript_paths_for_includes_worktree_sessions(tmp_path):
+    # #1020: a worktree-spawn session runs with the worktree as its cwd, so Claude files its
+    # transcript in a SIBLING directory. Keying only on the project root hid those
+    # conversations from the fork/resume picker and dropped their tokens from the rollup.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    root = _project_transcript_dir(claude_dir, project)
+    (root / "main.jsonl").write_text("")
+    wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-abc123")
+    (wt / "worktree.jsonl").write_text("")
+
+    names = [p.name for p in transcript_paths_for(project, claude_dir)]
+    assert sorted(names) == ["main.jsonl", "worktree.jsonl"]
+
+
+def test_transcript_paths_for_excludes_neighbouring_project(tmp_path):
+    # The prefix trap: sanitize_cwd maps `/` and `-` alike to `-`, so the sibling project
+    # `my_proj-other` yields a directory name starting with sanitize_cwd(my_proj) + "-".
+    # Matching on that bare prefix would leak an UNRELATED project's conversations into this
+    # project's picker and token totals; anchoring on the `.claude/worktrees` segment won't.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    root = _project_transcript_dir(claude_dir, project)
+    (root / "mine.jsonl").write_text("")
+    neighbour = _project_transcript_dir(claude_dir, Path("/srv/projects/my_proj-other"))
+    (neighbour / "theirs.jsonl").write_text("")
+    nested = _project_transcript_dir(claude_dir, Path("/srv/projects/my_proj_backup"))
+    (nested / "backup.jsonl").write_text("")
+
+    names = [p.name for p in transcript_paths_for(project, claude_dir)]
+    assert names == ["mine.jsonl"]
+
+
+def test_resolve_session_transcript_finds_worktree_session(tmp_path):
+    # Cross-layer: the picker lists worktree conversations, so the resolver behind
+    # selecting one must find them too. Listing without resolving would 404 every worktree
+    # session the moment it was clicked — the two directory sets must stay in lockstep.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    _project_transcript_dir(claude_dir, project)
+    wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-1")
+    (wt / "abc-123.jsonl").write_text("")
+    resolved = resolve_session_transcript(project, "abc-123", claude_dir)
+    assert resolved is not None and resolved.name == "abc-123.jsonl"
+
+
+def test_resolve_session_transcript_still_rejects_traversal(tmp_path):
+    # Widening the candidate DIRECTORIES must not widen what a crafted `session` can reach:
+    # the stem checks and the per-directory parent-identity check both still apply.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    _project_transcript_dir(claude_dir, project)
+    outsider = _project_transcript_dir(claude_dir, Path("/srv/projects/other"))
+    (outsider / "secret.jsonl").write_text("")
+    for evil in ("../" + sanitize_cwd(Path("/srv/projects/other")) + "/secret", "..", "", "a/b"):
+        assert resolve_session_transcript(project, evil, claude_dir) is None
+
+
+def test_project_usage_counts_worktree_transcripts(tmp_path):
+    # The rollup shares transcript_paths_for, so worktree sessions must now be counted —
+    # their tokens were previously invisible in the project's usage totals.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    _project_transcript_dir(claude_dir, project)
+    wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-1")
+    (wt / "s.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "model": "claude-opus-4",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            }
+        )
+        + "\n"
+    )
+    result = aggregate_project_usage(project, claude_projects_dir=claude_dir)
+    assert result.transcript_count == 1
+    assert result.by_model["claude-opus-4"].input == 10
+
+
 def test_aggregate_project_usage_sums_across_transcripts(tmp_path):
     claude_dir = tmp_path / "claude_projects"
     project = Path("/srv/projects/my_proj")

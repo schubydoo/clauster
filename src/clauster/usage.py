@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import redact
-from .pointers import CLAUDE_PROJECTS_DIR, sanitize_cwd
+from .pointers import CLAUDE_PROJECTS_DIR, WORKTREE_SUBDIR, sanitize_cwd
 
 # aggregate_project_usage re-streams every line of every transcript on each call,
 # and the /api/projects/{name}/usage badge is fetched once per project at first
@@ -234,14 +234,47 @@ def transcript_paths_for(
 
     Claude stores per-session transcripts under ``<claude_projects_dir>/<sanitized-cwd>/``,
     where the directory name is the cwd with every non-alphanumeric character replaced
-    by ``-`` (the same mapping the bridge-pointer walk uses). Returns ``[]`` if that
-    directory is absent or unreadable.
+    by ``-`` (the same mapping the bridge-pointer walk uses).
+
+    A **worktree-spawn** session runs with the worktree as its cwd, so Claude files it under
+    a different sanitized directory — a sibling of the project's own. Those sessions belong
+    to the project, so the project directory AND every worktree sibling are searched; keying
+    only on the project root hid worktree conversations from the fork/resume picker and left
+    their tokens out of the usage rollup (#1020). A directory that is absent or unreadable
+    contributes nothing rather than failing the walk.
     """
-    transcript_dir = Path(claude_projects_dir) / sanitize_cwd(Path(project_path))
+    out: list[Path] = []
+    for directory in _transcript_dirs_for(project_path, claude_projects_dir):
+        try:
+            out.extend(p for p in directory.glob("*.jsonl") if p.is_file())
+        except OSError:
+            continue
+    return sorted(out)
+
+
+def _transcript_dirs_for(project_path: Path, claude_projects_dir: Path) -> list[Path]:
+    """Return the project's own transcript directory plus one per git worktree under it.
+
+    The worktree siblings are matched on the sanitized ``<project>/.claude/worktrees`` path,
+    NOT on a bare ``sanitize_cwd(project) + "-"`` prefix. Sanitizing maps ``/`` and ``-``
+    alike to ``-``, so a *neighbouring project* named ``<project>-other`` produces a
+    directory name that starts with that bare prefix — the loose form would pull an
+    unrelated project's conversations into this project's picker and token totals. Anchoring
+    on the worktrees subdir requires the path to actually descend through it.
+    """
+    base = Path(claude_projects_dir)
+    dirs = [base / sanitize_cwd(Path(project_path))]
+    worktree_prefix = sanitize_cwd(Path(project_path) / WORKTREE_SUBDIR)
     try:
-        return sorted(p for p in transcript_dir.glob("*.jsonl") if p.is_file())
+        entries = sorted(base.iterdir())
     except OSError:
-        return []
+        return dirs
+    dirs.extend(
+        entry
+        for entry in entries
+        if entry.is_dir() and entry.name.startswith(f"{worktree_prefix}-")
+    )
+    return dirs
 
 
 def _render_content(content: object) -> str:
@@ -437,15 +470,22 @@ def resolve_session_transcript(
     session: str,
     claude_projects_dir: Path = CLAUDE_PROJECTS_DIR,
 ) -> Path | None:
-    """Resolve a session id to its transcript file *strictly inside* the project dir.
+    """Resolve a session id to its transcript file *strictly inside* the project's own dirs.
 
     ``session`` is the transcript filename stem (the per-session uuid). This
     fails closed against path traversal: it rejects an empty stem, any path
-    separator or ``..`` component, and confirms the resolved path's parent is the
-    project's own transcript directory before returning it — so a crafted
+    separator or ``..`` component, and confirms the resolved path's parent is one
+    of the project's transcript directories before returning it — so a crafted
     ``session`` can never escape to read an arbitrary file. Returns ``None`` when
     the session is unsafe or no matching transcript exists (the caller maps that
     to a 404), never raising.
+
+    The candidate directories are the project's own plus its worktree siblings — the
+    same set :func:`transcript_paths_for` lists. They must stay in lockstep: listing a
+    worktree conversation in the picker while resolving only the project root would make
+    every worktree session 404 the moment it was selected (#1020). Widening the set does
+    not weaken the gate — the parent-identity check is applied per directory, against an
+    enumerated set derived from the project path, never from ``session``.
     """
     # Reject anything that isn't a bare filename stem outright: separators,
     # parent refs, NUL, or an absolute/drive-qualified value. We never join an
@@ -458,19 +498,20 @@ def resolve_session_transcript(
         or "\x00" in session
     ):
         return None
-    transcript_dir = (Path(claude_projects_dir) / sanitize_cwd(Path(project_path))).resolve()
-    candidate = (transcript_dir / f"{session}.jsonl").resolve()
-    # Defense in depth: even after the component checks above, confirm the
-    # resolved file sits directly in the expected dir (parent identity), so a
-    # symlink or surprise normalization can't smuggle it elsewhere.
-    if candidate.parent != transcript_dir:
-        return None
-    try:
-        if not candidate.is_file():
-            return None
-    except OSError:
-        return None
-    return candidate
+    for directory in _transcript_dirs_for(project_path, claude_projects_dir):
+        transcript_dir = directory.resolve()
+        candidate = (transcript_dir / f"{session}.jsonl").resolve()
+        # Defense in depth: even after the component checks above, confirm the
+        # resolved file sits directly in the expected dir (parent identity), so a
+        # symlink or surprise normalization can't smuggle it elsewhere.
+        if candidate.parent != transcript_dir:
+            continue
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def aggregate_project_usage(
