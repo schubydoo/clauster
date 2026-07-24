@@ -38,8 +38,14 @@ CLAUSTER_AUTH_ALLOWED_ORIGINS='https://clauster.example.com,http://localhost:762
 CLAUSTER_CLONE_ALLOWED_SCHEMES='https,ssh'
 ```
 
-A value that itself contains a comma can't be expressed this way — set that key
-in the YAML file instead.
+A **newline** separates as well, so the `*_FILE` form below can be written one
+entry per line. An **empty** value means an empty list — it does *not* fall
+through to the value in the YAML file. A value that itself contains a comma
+can't be expressed this way; set that key in the YAML file instead.
+
+Which keys are lists is visible in the
+[configuration reference](../reference/config.md) — they are the ones typed
+`list[str]`.
 
 !!! note "Env mapping is by leaf path"
     The mapping recurses nested models and uses the *full dotted path*, so

@@ -473,7 +473,7 @@ def test_env_override_list_field_single_value_and_blanks(write_config, monkeypat
 
 
 def test_env_override_list_field_via_secret_file(write_config, monkeypatch, tmp_path):
-    # The _FILE indirection has to comma-split too — it shares the assignment path, so a
+    # The _FILE indirection has to split too — it shares the assignment path, so a
     # list leaf read from a file would otherwise land as a raw string and crash.
     secret_file = tmp_path / "origins"
     secret_file.write_text("http://a.example,http://b.example\n", encoding="utf-8")
@@ -481,6 +481,32 @@ def test_env_override_list_field_via_secret_file(write_config, monkeypatch, tmp_
     monkeypatch.setenv("CLAUSTER_AUTH_ALLOWED_ORIGINS_FILE", str(secret_file))
     config = load_config(cfg_path)
     assert config.auth.allowed_origins == ["http://a.example", "http://b.example"]
+
+
+def test_env_override_list_field_secret_file_one_per_line(write_config, monkeypatch, tmp_path):
+    # One-entry-per-line is the natural way to write a secret file, and splitting on commas
+    # alone collapsed it into a single entry holding a raw newline. That entry matches no
+    # real Origin, so the operator got "origin check failed" with nothing pointing at the
+    # cause — a silent misconfiguration in exactly the Docker/secrets shape this serves.
+    secret_file = tmp_path / "origins"
+    secret_file.write_text("http://a.example\nhttp://b.example\n", encoding="utf-8")
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_AUTH_ALLOWED_ORIGINS_FILE", str(secret_file))
+    config = load_config(cfg_path)
+    assert config.auth.allowed_origins == ["http://a.example", "http://b.example"]
+
+
+def test_env_override_empty_list_value_clears_rather_than_falling_through(
+    write_config, monkeypatch
+):
+    # An empty value is an empty list, NOT "unset" — it does not fall back to the YAML
+    # value. Pinned because a Compose file with `CLAUSTER_AUTH_ALLOWED_ORIGINS: ""` would
+    # otherwise silently wipe a configured allowlist, and the origin gate now runs even
+    # with auth off (#1070). Clearing fails closed (nothing is allowed), which is the safe
+    # direction, but it must be deliberate and documented rather than accidental.
+    cfg_path = write_config("auth:\n  allowed_origins:\n    - https://from-yaml.example\n")
+    monkeypatch.setenv("CLAUSTER_AUTH_ALLOWED_ORIGINS", "")
+    assert load_config(cfg_path).auth.allowed_origins == []
 
 
 def test_dict_leaves_are_not_env_addressable(write_config, monkeypatch):

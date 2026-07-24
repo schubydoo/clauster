@@ -1,7 +1,9 @@
 # Clauster configuration — copy to clauster.yml and edit.
 #
 # Search order:  $CLAUSTER_CONFIG -> ./clauster.yml -> $CLAUSTER_HOME/clauster.yml
-# Any scalar key is env-overridable: CLAUSTER_<UPPER_SNAKE_PATH> (e.g. CLAUSTER_PORT=8080).
+# Any scalar or list key is env-overridable: CLAUSTER_<UPPER_SNAKE_PATH> (e.g.
+# CLAUSTER_PORT=8080; lists are comma-separated, e.g.
+# CLAUSTER_AUTH_ALLOWED_ORIGINS=https://a.example,https://b.example).
 # Schema is additive-only — old configs keep working in newer versions.
 #
 # This is a LEAN STARTER. The uncommented keys are what most deployments actually set; every

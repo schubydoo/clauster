@@ -384,9 +384,9 @@ origin and must set `auth.allowed_origins`.
 All settings live in `clauster.yml` —
 [`clauster.yml.example`](https://github.com/schubydoo/clauster/blob/main/clauster.yml.example) is a lean starter, and
 [`docs/reference/config.md`](docs/reference/config.md) is the exhaustive per-key reference. Any
-scalar key is overridable by an environment variable of the form
-`CLAUSTER_<UPPER_SNAKE_PATH>`. The schema is additive-only — old configs always
-validate against newer versions.
+scalar or list key is overridable by an environment variable of the form
+`CLAUSTER_<UPPER_SNAKE_PATH>` (lists take a comma-separated value). The schema is
+additive-only — old configs always validate against newer versions.
 
 | Common flag | Default | What it does |
 | --- | --- | --- |

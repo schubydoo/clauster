@@ -1,7 +1,8 @@
 """Configuration loading for Clauster.
 
 Search order:  $CLAUSTER_CONFIG  ->  ./clauster.yml  ->  $CLAUSTER_HOME/clauster.yml
-Any scalar key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value.
+Any scalar or list key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value
+(lists comma-separated); dict keys (projects, claude.env, webhooks.events) are file-only.
 Every such var also has a CLAUSTER_<...>_FILE form that reads the value from a file
 (file wins; trailing whitespace stripped) — for secrets rendered to /run/secrets by
 Docker/K8s/Vault, keeping them out of the process environment.
@@ -1564,16 +1565,25 @@ def _env_leaf_map(
 
 
 def _split_env_list(value: str) -> list[str]:
-    """Split a comma-separated env value into a list, dropping blank entries.
+    """Split a comma- or newline-separated env value into a list, dropping blank entries.
 
-    Container tooling passes lists as comma-separated strings, so that is the separator.
-    Blanks are dropped so a trailing comma or an all-separator value yields ``[]`` rather
-    than ``[""]``, which would fail validation in a way that hides the operator's intent.
+    Container tooling passes lists as comma-separated strings, so a comma is the primary
+    separator. A **newline** separates too, because the same value can arrive through the
+    ``_FILE`` secret-file form, where one-entry-per-line is the natural thing to write —
+    splitting on commas alone turned such a file into a single bogus entry holding the
+    raw newline. That entry then matches nothing, which for an allowlist
+    means a silent misconfiguration surfacing only as ``origin check failed``. No value
+    these fields hold (origins, URLs, CIDRs, schemes, hostnames, PATH entries) can contain
+    a newline, so treating it as a separator cannot split a legitimate value.
+
+    Blanks are dropped so a trailing separator yields ``[]`` rather than ``[""]``, which
+    would fail validation in a way that hides the operator's intent. An empty value is
+    therefore an empty list — it does NOT fall through to the YAML value.
 
     A value containing a literal comma cannot be expressed this way; those (a directory
     with a comma in its name, say) must be set in the YAML file.
     """
-    return [item.strip() for item in value.split(",") if item.strip()]
+    return [item.strip() for item in value.replace("\n", ",").split(",") if item.strip()]
 
 
 def _set_nested(d: dict, path: tuple[str, ...], value: object) -> None:
