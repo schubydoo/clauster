@@ -246,6 +246,18 @@ def test_run_missing_config_wizard_non_loopback_binds_and_mints_token(monkeypatc
     assert "?token=" in err  # the operator gets the gated URL from the container log
 
 
+@pytest.mark.parametrize("bad", ["abc", "", "0", "99999"])
+def test_run_missing_config_invalid_env_port_fails_closed(monkeypatch, capsys, bad):
+    # #1017 review: CLAUSTER_PORT is reapplied verbatim over the written config on re-exec, so a
+    # set-but-invalid value must fail the wizard UP FRONT — not "complete" setup into a config the
+    # restart then refuses to load. An empty captured dict proves no server was ever constructed.
+    monkeypatch.setenv("CLAUSTER_PORT", bad)
+    captured = _stub_server(monkeypatch)
+    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 2
+    assert "CLAUSTER_PORT" in capsys.readouterr().err
+    assert captured == {}  # never served a wizard whose result couldn't boot
+
+
 def test_run_invalid_existing_config_exits_2(write_config, monkeypatch):
     # #978: only a MISSING config triggers first-run. A config file that EXISTS but is invalid
     # must ERROR (exit 2), never wizard-over-and-overwrite it. A nonexistent projects_root

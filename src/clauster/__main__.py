@@ -1406,6 +1406,19 @@ def _run_setup_wizard(config_path: str | None) -> int:
     # fixes its bind field to it instead of offering a choice it would silently ignore (#1017).
     env_host = os.environ.get("CLAUSTER_HOST", "").strip() or None
     env_port = setup_wizard.resolve_env_port()  # CLAUSTER_PORT also overrides on re-exec
+    # CLAUSTER_PORT is reapplied verbatim over the written config on re-exec, so a set-but-invalid
+    # value would let setup "succeed" and then the app fail to load (#1017 review). Refuse up front
+    # with a clear, fail-closed message rather than writing a config the restart can't use. (Only
+    # PORT needs this — an arbitrary CLAUSTER_HOST string loads fine; it can only fail later at
+    # bind, which surfaces its own error.)
+    if "CLAUSTER_PORT" in os.environ and env_port is None:
+        print(
+            f"clauster: CLAUSTER_PORT={os.environ['CLAUSTER_PORT']!r} is not a valid port "
+            "(1-65535). Fix or unset it and restart — first-run setup won't write a config the "
+            "app would then refuse to load.",
+            file=sys.stderr,
+        )
+        return 2
     app = setup_wizard.create_setup_app(
         write_path, port=port, setup_token=setup_token, env_host=env_host, env_port=env_port
     )
