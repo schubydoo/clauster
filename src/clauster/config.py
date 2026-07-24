@@ -1,7 +1,8 @@
 """Configuration loading for Clauster.
 
 Search order:  $CLAUSTER_CONFIG  ->  ./clauster.yml  ->  $CLAUSTER_HOME/clauster.yml
-Any scalar key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value.
+Any scalar or list key is overridable via env: CLAUSTER_<UPPER_SNAKE_CASE_PATH>=value
+(lists comma-separated); dict keys (projects, claude.env, webhooks.events) are file-only.
 Every such var also has a CLAUSTER_<...>_FILE form that reads the value from a file
 (file wins; trailing whitespace stripped) — for secrets rendered to /run/secrets by
 Docker/K8s/Vault, keeping them out of the process environment.
@@ -1518,25 +1519,92 @@ def _nested_model(ann: object) -> type[BaseModel] | None:
     return None
 
 
-def _scalar_env_map(
-    model: type[BaseModel], prefix: tuple[str, ...] = ()
-) -> dict[str, tuple[str, ...]]:
-    """Map CLAUSTER_<UPPER_SNAKE_PATH> -> dotted path for every scalar leaf.
+def _env_leaf_kind(ann: object) -> str | None:
+    """Classify a leaf annotation for env-override purposes.
 
-    Nested models recurse (including ``Optional`` ones); dict/list leaves (e.g.
-    projects, trusted_ips) are skipped because a single env var can't express them
-    unambiguously.
+    Returns ``"scalar"`` when one env var carries the value verbatim, ``"list"`` when
+    a comma-separated value can express it, and ``None`` for a leaf no single env var
+    can address unambiguously (``dict`` maps such as ``projects``), which is therefore
+    left unmapped rather than advertised-but-broken.
+
+    ``Optional`` wrappers are unwrapped, so ``list[str] | None`` still classifies as a
+    list.
     """
-    out: dict[str, tuple[str, ...]] = {}
+    for candidate in (ann, *(a for a in get_args(ann) if a is not type(None))):
+        origin = get_origin(candidate) or candidate
+        if origin is dict:
+            return None
+        if origin in (list, set, tuple, frozenset):
+            # Only a list of SCALARS can be carried by a delimited string. A list of
+            # models or nested containers has no such spelling, so it is left unmapped
+            # rather than advertised — mapping it would assign `list[str]` into it and
+            # crash config load, which is precisely the #1072 class this map removes.
+            # No such field exists today; this keeps one from being added silently.
+            items = [a for a in get_args(candidate) if a is not Ellipsis]
+            if items and all(_is_scalar_item(a) for a in items):
+                return "list"
+            return None
+    return "scalar"
+
+
+def _is_scalar_item(ann: object) -> bool:
+    """Whether a list's item type is a plain scalar a delimited string can carry."""
+    origin = get_origin(ann)
+    if origin is Literal:
+        return True
+    if origin is not None:  # a nested container (list/dict/union) inside the list
+        return False
+    return isinstance(ann, type) and not issubclass(ann, BaseModel)
+
+
+def _env_leaf_map(
+    model: type[BaseModel], prefix: tuple[str, ...] = ()
+) -> dict[str, tuple[tuple[str, ...], str]]:
+    """Map CLAUSTER_<UPPER_SNAKE_PATH> -> (dotted path, leaf kind) for env-addressable leaves.
+
+    Nested models recurse (including ``Optional`` ones). ``dict`` leaves (``projects``,
+    ``claude.env``, ``webhooks.events``) are omitted: a single env var cannot address one
+    entry of a map, so they stay file-only. Before #1072 they were mapped anyway and the
+    raw string was assigned straight into the field, so *setting* one crashed config load
+    at startup — the var was discoverable but unusable.
+    """
+    out: dict[str, tuple[tuple[str, ...], str]] = {}
     for name, field in model.model_fields.items():
         path = (*prefix, name)
         nested = _nested_model(field.annotation)
         if nested is not None:
-            out.update(_scalar_env_map(nested, path))
-        else:
-            env_name = "CLAUSTER_" + "_".join(path).upper()
-            out[env_name] = path
+            out.update(_env_leaf_map(nested, path))
+            continue
+        kind = _env_leaf_kind(field.annotation)
+        if kind is None:
+            continue
+        out["CLAUSTER_" + "_".join(path).upper()] = (path, kind)
     return out
+
+
+def _split_env_list(value: str) -> list[str]:
+    """Split a comma- or newline-separated env value into a list, dropping blank entries.
+
+    Container tooling passes lists as comma-separated strings, so a comma is the primary
+    separator. A **newline** separates too, because the same value can arrive through the
+    ``_FILE`` secret-file form, where one-entry-per-line is the natural thing to write —
+    splitting on commas alone turned such a file into a single bogus entry holding the
+    raw newline. That entry then matches nothing, which for an allowlist
+    means a silent misconfiguration surfacing only as ``origin check failed``. Origins,
+    URLs, CIDRs, schemes and hostnames cannot contain a newline, so treating it as a
+    separator cannot split a legitimate value. A filesystem path legally can (as it can
+    contain a comma), so a ``claude.path_append`` entry holding either must be set in the
+    YAML file — see below.
+
+    Blanks are dropped so a trailing separator yields ``[]`` rather than ``[""]``, which
+    would fail validation in a way that hides the operator's intent. An empty value is
+    therefore an empty list — it does NOT fall through to the YAML value.
+
+    An entry containing a literal comma or newline cannot be expressed this way and must
+    be set in the YAML file — a filesystem path in ``claude.path_append``, or an Apprise
+    URL in ``notifications.urls`` whose query carries comma-separated targets.
+    """
+    return [item.strip() for item in value.replace("\n", ",").split(",") if item.strip()]
 
 
 def _set_nested(d: dict, path: tuple[str, ...], value: object) -> None:
@@ -1580,16 +1648,26 @@ _LEGACY_ENV_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _apply_env_overrides(data: dict) -> dict:
-    for env_name, path in _scalar_env_map(ClausterConfig).items():
+    leaves = _env_leaf_map(ClausterConfig)
+    kinds = {path: kind for path, kind in leaves.values()}
+    for env_name, (path, kind) in leaves.items():
         # Secret indirection: for any CLAUSTER_<X>, a CLAUSTER_<X>_FILE wins and reads
         # the value from a file, keeping the argon2 hash / session secret out of the
         # process environment. A blank _FILE is treated as unset (falls through).
         file_path = os.environ.get(f"{env_name}_FILE", "").strip()
         if file_path:
-            _set_nested(data, path, _read_secret_file(f"{env_name}_FILE", file_path))
+            raw_value = _read_secret_file(f"{env_name}_FILE", file_path)
         elif env_name in os.environ:
-            _set_nested(data, path, os.environ[env_name])
+            raw_value = os.environ[env_name]
+        else:
+            continue
+        _set_nested(data, path, _split_env_list(raw_value) if kind == "list" else raw_value)
     for env_name, path in _LEGACY_ENV_ALIASES.items():
+        if path not in kinds:
+            # The alias points at a leaf no env var can address (a dict, or a field since
+            # removed). Honoring it would assign a raw string into a non-scalar and crash
+            # config load — the same #1072 class — so it is skipped, not resurrected.
+            continue
         new_env = "CLAUSTER_" + "_".join(path).upper()
         legacy_set = bool(env_name in os.environ or os.environ.get(f"{env_name}_FILE", "").strip())
         # The new name wins: skip the legacy var when the new one is set — but if the operator
@@ -1617,7 +1695,9 @@ def _apply_env_overrides(data: dict) -> dict:
             env_name,
             new_env,
         )
-        _set_nested(data, path, value)
+        # Coerce by the same rule as the new name: an alias pointing at a list leaf must
+        # comma-split too, or the deprecated spelling would crash where the new one works.
+        _set_nested(data, path, _split_env_list(value) if kinds.get(path) == "list" else value)
     return data
 
 
@@ -1645,7 +1725,7 @@ def load_config(path: str | os.PathLike | None = None) -> ClausterConfig:
     # operator who set a Postgres DSN would otherwise believe their data lives there while
     # every write goes to local SQLite ("fail closed, never silently"). Catch BOTH sources:
     # the YAML key AND the CLAUSTER_DATABASE_URL[_FILE] env override — removing the model
-    # field also drops the env var from `_scalar_env_map`, so it never reaches `raw` and the
+    # field also drops the env var from `_env_leaf_map`, so it never reaches `raw` and the
     # `in raw` check alone would miss the env path (Greptile #801 R2).
     env_dsn_set = "CLAUSTER_DATABASE_URL" in os.environ or bool(
         os.environ.get("CLAUSTER_DATABASE_URL_FILE", "").strip()
