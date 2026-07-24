@@ -284,7 +284,10 @@ def _transcript_dirs_for(project_path: Path, claude_projects_dir: Path) -> list[
     try:
         siblings = {sanitize_cwd(p) for p in project.parent.iterdir() if p.is_dir()}
     except OSError:
-        siblings = set()
+        # FAIL CLOSED. Without the sibling set the ambiguous names cannot be filtered, and
+        # this feeds the ownership proof behind pty resume — an unreadable projects root
+        # must cost worktree conversations, never admit a neighbouring project's.
+        return dirs
     try:
         entries = sorted(base.iterdir())
     except OSError:

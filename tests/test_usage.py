@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -247,6 +249,29 @@ def test_token_totals_merge():
 # ----- per-project discovery + aggregation -----------------------------
 
 
+@pytest.fixture
+def short_tmp_root():
+    """A SHORT root for tests that need REAL project directories on disk.
+
+    ``sanitize_cwd`` collapses an absolute path into a single directory NAME, so a
+    transcript directory is about as long as the project path itself — the full path is
+    effectively doubled. pytest's ``tmp_path`` already carries a
+    ``popen-gwN/<test-name>`` segment under xdist (the default here), and the doubled
+    length then exceeds Windows' 260-char MAX_PATH: ``mkdir`` fails with
+    ``FileNotFoundError: [WinError 206] The filename or extension is too long``. It
+    reproduces ONLY under xdist, so a serial run of the same test passes — caught by the
+    3-OS matrix, not locally.
+
+    Most tests here pass a fake path (``/srv/projects/...``) that is never created and are
+    unaffected; this is for the ones that must enumerate real sibling directories.
+    """
+    root = Path(tempfile.mkdtemp())
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _project_transcript_dir(claude_projects_dir: Path, project_path: Path) -> Path:
     """Build the dir Claude would use for a project's transcripts, and create it."""
     d = claude_projects_dir / sanitize_cwd(project_path)
@@ -272,12 +297,17 @@ def test_transcript_paths_for_missing_dir_is_empty(tmp_path):
     )
 
 
-def test_transcript_paths_for_includes_worktree_sessions(tmp_path):
+def test_transcript_paths_for_includes_worktree_sessions(short_tmp_root):
     # #1020: a worktree-spawn session runs with the worktree as its cwd, so Claude files its
     # transcript in a SIBLING directory. Keying only on the project root hid those
     # conversations from the fork/resume picker and dropped their tokens from the rollup.
-    claude_dir = tmp_path / "claude_projects"
-    project = Path("/srv/projects/my_proj")
+    #
+    # The project dir must EXIST: the sibling-exclusion filter reads the projects root, and
+    # fails closed (project dir only) when it can't — so a fake path would silently assert
+    # nothing here.
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    project.mkdir(parents=True)
     root = _project_transcript_dir(claude_dir, project)
     (root / "main.jsonl").write_text("")
     wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-abc123")
@@ -285,6 +315,21 @@ def test_transcript_paths_for_includes_worktree_sessions(tmp_path):
 
     names = [p.name for p in transcript_paths_for(project, claude_dir)]
     assert sorted(names) == ["main.jsonl", "worktree.jsonl"]
+
+
+def test_transcript_paths_for_fails_closed_when_projects_root_unreadable(short_tmp_root):
+    # The exclusion set is what keeps a neighbouring project's conversations out, and it
+    # feeds the ownership proof behind pty resume. If the projects root can't be read the
+    # ambiguous names can't be filtered, so the worktree scan is skipped entirely: an
+    # unreadable root costs worktree conversations rather than admitting a foreign one.
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "gone" / "my_proj"  # parent never created
+    root = _project_transcript_dir(claude_dir, project)
+    (root / "main.jsonl").write_text("")
+    wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-1")
+    (wt / "worktree.jsonl").write_text("")
+
+    assert [p.name for p in transcript_paths_for(project, claude_dir)] == ["main.jsonl"]
 
 
 @pytest.mark.parametrize(
@@ -302,13 +347,13 @@ def test_transcript_paths_for_includes_worktree_sessions(tmp_path):
         "my_proj__claude_worktrees_y",
     ],
 )
-def test_transcript_paths_for_excludes_neighbouring_project(tmp_path, sibling):
-    projects_root = tmp_path / "projects"
+def test_transcript_paths_for_excludes_neighbouring_project(short_tmp_root, sibling):
+    projects_root = short_tmp_root / "projects"
     project = projects_root / "my_proj"
     project.mkdir(parents=True)
     (projects_root / sibling).mkdir()  # a REAL sibling project on disk
 
-    claude_dir = tmp_path / "claude_projects"
+    claude_dir = short_tmp_root / "claude_projects"
     root = _project_transcript_dir(claude_dir, project)
     (root / "mine.jsonl").write_text("")
     neighbour = _project_transcript_dir(claude_dir, projects_root / sibling)
@@ -319,12 +364,13 @@ def test_transcript_paths_for_excludes_neighbouring_project(tmp_path, sibling):
     assert resolve_session_transcript(project, "theirs", claude_dir) is None
 
 
-def test_resolve_session_transcript_finds_worktree_session(tmp_path):
+def test_resolve_session_transcript_finds_worktree_session(short_tmp_root):
     # Cross-layer: the picker lists worktree conversations, so the resolver behind
     # selecting one must find them too. Listing without resolving would 404 every worktree
     # session the moment it was clicked — the two directory sets must stay in lockstep.
-    claude_dir = tmp_path / "claude_projects"
-    project = Path("/srv/projects/my_proj")
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    project.mkdir(parents=True)
     _project_transcript_dir(claude_dir, project)
     wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-1")
     (wt / "abc-123.jsonl").write_text("")
@@ -344,11 +390,12 @@ def test_resolve_session_transcript_still_rejects_traversal(tmp_path):
         assert resolve_session_transcript(project, evil, claude_dir) is None
 
 
-def test_project_usage_counts_worktree_transcripts(tmp_path):
+def test_project_usage_counts_worktree_transcripts(short_tmp_root):
     # The rollup shares transcript_paths_for, so worktree sessions must now be counted —
     # their tokens were previously invisible in the project's usage totals.
-    claude_dir = tmp_path / "claude_projects"
-    project = Path("/srv/projects/my_proj")
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    project.mkdir(parents=True)
     _project_transcript_dir(claude_dir, project)
     wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-1")
     (wt / "s.jsonl").write_text(
