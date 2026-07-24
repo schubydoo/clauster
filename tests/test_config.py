@@ -531,9 +531,13 @@ def test_list_of_non_scalars_is_not_env_addressable():
     # would advertise a var that assigns list[str] into it and crash load — the #1072 class
     # this map exists to remove. No such field exists today; this stops one being added
     # silently. Asserted on the classifier because the schema has no such leaf to drive it.
+    from typing import Literal
+
     from clauster.config import ProjectConfig, _env_leaf_kind
 
     assert _env_leaf_kind(list[str]) == "list"
+    # A list of Literals is still scalar-item — an enum-ish list stays env-settable.
+    assert _env_leaf_kind(list[Literal["a", "b"]]) == "list"
     assert _env_leaf_kind(list[ProjectConfig]) is None
     assert _env_leaf_kind(list[dict[str, str]]) is None
     assert _env_leaf_kind(list[list[str]]) is None
@@ -548,6 +552,21 @@ def test_legacy_env_aliases_all_target_addressable_leaves():
     leaves = {path for path, _kind in _env_leaf_map(ClausterConfig).values()}
     for env_name, path in _LEGACY_ENV_ALIASES.items():
         assert path in leaves, f"{env_name} aliases {'.'.join(path)}, which is not env-addressable"
+
+
+def test_legacy_alias_onto_unaddressable_leaf_is_skipped(write_config, monkeypatch):
+    # The guard branch itself: an alias whose target is NOT env-addressable must be skipped,
+    # not honored — honoring it would assign a raw string into a dict leaf and crash config
+    # load, the same #1072 class. Driven with an injected alias because every real alias
+    # targets a scalar, so the branch is otherwise unreachable.
+    from clauster import config as config_mod
+
+    monkeypatch.setitem(
+        config_mod._LEGACY_ENV_ALIASES, "CLAUSTER_OLD_CLAUDE_ENV", ("claude", "env")
+    )
+    monkeypatch.setenv("CLAUSTER_OLD_CLAUDE_ENV", "FOO=bar")
+    config = load_config(write_config())  # must not raise
+    assert config.claude.env == {}  # skipped entirely, not partially applied
 
 
 def test_every_list_env_var_validates_through_the_model(write_config, monkeypatch):
