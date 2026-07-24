@@ -157,7 +157,7 @@ The branch ruleset enforces this; CI and review are the merge gate.
 | Type check + docs lint | `just check` runs everything locally |
 | **Changeset** | Add one under `.changeset/`, or apply the `no-changelog` label if the PR genuinely has no user-facing effect (CI, refactor). Keep the body to **one tight line**. Use `major` for anything breaking — including a removed or renamed config key. |
 | **Code review** | [Greptile](https://www.greptile.com/) reviews every PR automatically. Its threads must be resolved before merge; unresolved threads block. Reply *and* resolve on the thread itself. |
-| Docs | If the change alters behavior, update `README.md`, `docs/`, and `clauster.yml.example` **in the same PR**. The published site gates on `uv run --extra docs mkdocs build --strict` (not part of `just check`) — run it whenever `docs/` or `mkdocs.yml` changes. |
+| Docs | If the change alters behavior, update `README.md`, `docs/`, and `clauster.yml.example` **in the same PR**. The published site gates on `uv run --extra docs mkdocs build --strict`, which `just check` now runs (also available alone as `just docs-build`). It catches what `lint-docs.sh` cannot: markdownlint checks Markdown *style*, not whether a link target resolves, so a link leaving the `docs/` tree (e.g. `../UPGRADING.md` — link the rendered `upgrading.md` instead) lints clean and still fails CI. |
 
 `Closes #N` goes in the PR **description**, never in a squash-merge commit body.
 

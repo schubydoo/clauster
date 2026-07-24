@@ -35,6 +35,14 @@ typecheck:
 docs-lint:
     bash scripts/lint-docs.sh
 
+# Build the docs site the way CI's docs job gates it (--strict: a broken link or a
+# nav entry that doesn't resolve FAILS). `lint-docs.sh` can't cover this: it runs in
+# CI's lint job, whose setup action syncs a single extra (`dev`), while the site build
+# needs `docs`. Run it here instead of widening that job — a link leaving the docs/
+# tree (`../UPGRADING.md`) passes markdownlint and still breaks the site.
+docs-build:
+    uv run --extra docs mkdocs build --strict
+
 # All pre-PR gates: lint, format check, types, changeset lint, tests, docs, CSP guard
 check:
     uv run ruff check .
@@ -43,6 +51,7 @@ check:
     uv run python scripts/lint_changesets.py
     uv run pytest
     bash scripts/lint-docs.sh
+    uv run --extra docs mkdocs build --strict
     node scripts/check_csp_expressions.mjs
 
 # Run the dev server against ./clauster.yml
