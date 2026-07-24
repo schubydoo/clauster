@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from clauster import deps
+from clauster import ops as ops_mod
 from clauster.config import load_config
 from clauster.ops import (
     FAIL,
@@ -671,6 +672,73 @@ def test_restore_config_out_forces_0600_even_when_source_is_loose(write_config, 
         os.umask(old_umask)
     assert result["config"] == str(cfg_out)
     assert cfg_out.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink/mode semantics")
+def test_restore_config_out_replaces_symlink_without_touching_its_target(write_config, tmp_path):
+    # A symlink sitting at --config-out must be REPLACED, not written through: copy2 would
+    # follow it, overwriting an unrelated file with the config (and the old chmod would then
+    # tighten that unrelated file). os.replace swaps the link itself, so the victim keeps
+    # both its content and its mode.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    victim = tmp_path / "unrelated.txt"
+    victim.write_text("do not clobber", encoding="utf-8")
+    victim.chmod(0o644)
+    cfg_out = tmp_path / "restored.yml"
+    cfg_out.symlink_to(victim)
+
+    restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out, force=True)
+
+    assert victim.read_text(encoding="utf-8") == "do not clobber"
+    assert victim.stat().st_mode & 0o777 == 0o644
+    assert not cfg_out.is_symlink()
+    assert cfg_out.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode semantics")
+def test_restore_config_out_does_not_tighten_its_parent_directory(write_config, tmp_path):
+    # --config-out is an operator-chosen path (often a shared /etc or project dir), so the
+    # restore must not chmod its parent to 0700 the way atomicio.atomic_write_text does —
+    # that would lock out other users/services (the #978 reasoning the setup wizard records).
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o755)
+    restore_backup(archive, state_dir=tmp_path / "st", config_out=shared / "clauster.yml")
+
+    assert shared.stat().st_mode & 0o777 == 0o755
+
+
+def test_restore_config_out_failure_leaves_no_temp_and_no_partial(
+    write_config, tmp_path, monkeypatch
+):
+    # If the atomic swap fails, the restore must leave NOTHING behind: no half-written temp
+    # beside the destination (it would hold the argon2 hash), and no partial destination.
+    # This is the branch that replaced the old copy2+chmod, whose failure mode was a
+    # permissive config left on disk after a restore reported as failed.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    dest_dir = tmp_path / "dest"
+    dest_dir.mkdir()
+    cfg_out = dest_dir / "clauster.yml"
+
+    def _boom(src, dst, **kwargs):
+        raise OSError("swap failed")
+
+    monkeypatch.setattr(ops_mod.atomicio, "replace_with_retry", _boom)
+    with pytest.raises(OSError, match="swap failed"):
+        restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out)
+
+    assert not cfg_out.exists()
+    assert list(dest_dir.iterdir()) == []
 
 
 def test_restore_refuses_nonempty_without_force(write_config, tmp_path):

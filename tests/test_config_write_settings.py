@@ -160,6 +160,22 @@ def test_project_write_drops_misc_keys_not_resent(tmp_path: Path) -> None:
     assert settings == {"model": "sonnet"}
 
 
+def test_local_write_gitignores_before_writing(tmp_path: Path) -> None:
+    # Fail-closed ordering: the ignore entries must be in place BEFORE the write that
+    # creates the secret-bearing `.bak`. Proven by making the write itself fail (stale
+    # hash) and asserting the .gitignore was still updated — with the old write-then-ignore
+    # order this file would not exist, and a failure between the two steps would leave the
+    # previous env values trackable.
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.local.json").write_text('{"env": {"API": "old-secret"}}')
+    stale = cw.hash_bytes(b"something else")
+    with pytest.raises(cw.StaleConfigWriteError):
+        cws.write_project_local_settings(tmp_path, {"env": {"API": "new"}}, stale)
+    lines = (tmp_path / ".gitignore").read_text().splitlines()
+    assert ".claude/settings.local.json" in lines
+    assert ".claude/settings.local.json.bak" in lines
+
+
 def test_project_write_stale_hash_raises(tmp_path: Path) -> None:
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / "settings.json").write_text('{"model": "opus"}')

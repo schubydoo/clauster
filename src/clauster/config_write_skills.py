@@ -648,11 +648,15 @@ def write_project_local_skill_overrides(
 ) -> None:
     """Validate + write the local-scope ``.claude/settings.local.json`` ``skillOverrides`` block.
 
-    A successful write runs :func:`~clauster.config_write.ensure_gitignored` so a
-    newly created ``settings.local.json`` is never accidentally committed (#766).
+    :func:`~clauster.config_write.ensure_gitignored` runs *before* the write (fail-closed:
+    the write creates a secret-bearing ``.bak``), so ``settings.local.json`` and that
+    backup are never accidentally committed (#766).
     """
     cw.validate_candidate(incoming, validate_skill_overrides)
     path = cw.project_local_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    cw.write_settings_subtree(path, SKILL_OVERRIDES_KEY, incoming, expected_hash)
+    # Ignore BEFORE writing, never after: the write creates a `.bak` holding the PREVIOUS
+    # values, so an ensure_gitignored that failed afterwards would leave that secret-bearing
+    # file trackable. Ignoring first is the fail-closed order (the call is idempotent).
     cw.ensure_gitignored(project_dir, ".claude/settings.local.json", ignore_backup_sibling=True)
+    cw.write_settings_subtree(path, SKILL_OVERRIDES_KEY, incoming, expected_hash)

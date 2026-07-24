@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict
 from xml.sax.saxutils import escape as _xml_escape
 
-from . import claude_cli, config_write_mcp, deps, environments, procutil
+from . import atomicio, claude_cli, config_write_mcp, deps, environments, procutil
 from .config import ClausterConfig, _missing_enforced_auth, load_config
 from .discovery import Project, _load_trusted_paths, trust_state_for
 from .state import CURRENT_SCHEMA, StateStore
@@ -771,6 +771,44 @@ def _atomic_replace_state(src_state: Path, state_dir: Path) -> int:
     return count
 
 
+def _write_restored_config(src: Path, config_out: Path) -> None:
+    """Write the restored ``clauster.yml`` to ``config_out``, owner-only and atomically.
+
+    The restored config carries the argon2 ``password_hash`` (and ``api_token_hash``), so
+    it must never exist at a permissive mode, even briefly. A ``shutil.copy2`` + ``chmod``
+    pair fails that three ways: ``copy2`` propagates the *source* mode (the tar member
+    ``_safe_extract_tar`` wrote via a bare ``open()``, i.e. the umask default 0644), so the
+    hash is world-readable for the window between the two calls; a ``chmod`` that raises
+    leaves that permissive file behind on a restore reported as failed; and both follow a
+    symlink AT ``config_out``, writing through to — and then tightening — an unrelated file.
+
+    Writing a ``mkstemp`` temp (created 0600) and ``os.replace``-ing it onto the target
+    closes all three: the bytes are never readable by anyone else, a failure leaves the
+    destination untouched, and ``os.replace`` replaces a symlink sitting at ``config_out``
+    rather than writing through it.
+
+    The parent directory is deliberately **not** tightened (unlike
+    :func:`clauster.atomicio.atomic_write_text`, which calls ``ensure_private_dir``):
+    ``--config-out`` is an operator-chosen path — often a shared ``/etc`` or project dir —
+    and forcing it 0700 would lock out other users and services, the same reasoning
+    :func:`clauster.setup_wizard._atomic_write_config` records for #978. On Windows the
+    mode is advisory, exactly as the previous ``chmod`` was.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=config_out.parent, prefix=config_out.name + ".", suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(src.read_bytes())
+            fh.flush()
+            os.fsync(fh.fileno())
+        atomicio.replace_with_retry(tmp, config_out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 class RestoreResult(TypedDict):
     """The outcome of :func:`restore_backup`: how many state files, and the config path."""
 
@@ -820,16 +858,7 @@ def restore_backup(
             cfgs = [p for p in src_cfg_dir.iterdir() if p.is_file()]
             if cfgs:
                 config_out.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(cfgs[0], config_out)
-                # The restored config carries the argon2 password hash, so force it
-                # owner-only (0600) — matching config_writer / the setup wizard.
-                # shutil.copy2 copies the SOURCE file's mode, and that source is the
-                # tar member _safe_extract_tar just wrote via a bare open(), i.e. the
-                # umask default (typically 0644) — NOT the mode stored in the archive.
-                # So the copy alone would publish the hash to every local user.
-                # (0600 has no group/other bits for the umask to clear; on Windows
-                # this only keeps the file writable — a no-op.)
-                os.chmod(config_out, 0o600)
+                _write_restored_config(cfgs[0], config_out)
                 restored["config"] = str(config_out)
     return restored
 
