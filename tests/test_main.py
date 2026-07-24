@@ -234,6 +234,18 @@ def test_run_missing_config_launches_setup_wizard(monkeypatch):
     assert captured["host"] == "127.0.0.1"
 
 
+def test_run_missing_config_wizard_non_loopback_binds_and_mints_token(monkeypatch, capsys):
+    # #1017: with CLAUSTER_SETUP_HOST set (the Docker case), the wizard binds that non-loopback
+    # host so a published port can reach it, and mints a one-time token printed to the log —
+    # the token is what keeps the reachable, auth-less wizard from being an open config-writer.
+    monkeypatch.setenv("CLAUSTER_SETUP_HOST", "0.0.0.0")
+    captured = _stub_server(monkeypatch)
+    assert cli.main(["run", "-c", "/no/such/clauster.yml"]) == 0
+    assert captured["host"] == "0.0.0.0"  # bound to the opt-in interface, not loopback
+    err = capsys.readouterr().err
+    assert "?token=" in err  # the operator gets the gated URL from the container log
+
+
 def test_run_invalid_existing_config_exits_2(write_config, monkeypatch):
     # #978: only a MISSING config triggers first-run. A config file that EXISTS but is invalid
     # must ERROR (exit 2), never wizard-over-and-overwrite it. A nonexistent projects_root

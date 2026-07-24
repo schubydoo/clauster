@@ -1397,16 +1397,21 @@ def _run_setup_wizard(config_path: str | None) -> int:
     except ValueError:
         port = setup_wizard.DEFAULT_PORT
     setup_logging("text")
-    app = setup_wizard.create_setup_app(write_path, port=port)
+    host = setup_wizard.resolve_setup_host()
+    # A non-loopback bind (e.g. the Docker image's CLAUSTER_SETUP_HOST=0.0.0.0) is reachable
+    # off-host, so mint a one-time token that gates the wizard; a loopback bind is the boundary
+    # itself and needs none (#1017). The token is printed only here, to the server log.
+    setup_token = setup_wizard.mint_setup_token(host)
+    app = setup_wizard.create_setup_app(write_path, port=port, setup_token=setup_token)
     print(
         f"clauster {__version__}: no configuration found — starting first-run setup at "
-        f"http://{setup_wizard.SETUP_HOST}:{port}/  (will write {write_path})",
+        f"{setup_wizard.setup_url(host, port, token=setup_token)}  (will write {write_path})",
         file=sys.stderr,
     )
     server = uvicorn.Server(
         uvicorn.Config(
             app,
-            host=setup_wizard.SETUP_HOST,
+            host=host,
             port=port,
             log_level="info",
             log_config=None,

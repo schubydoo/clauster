@@ -331,6 +331,28 @@ docker run -d --name clauster \
   JSON (both redact session URLs / bearer ids). Health is at `/healthz`. Images
   are cosign-signed with build provenance + SBOM attestations.
 
+### First-run setup wizard (Docker)
+
+Prefer a browser to the `hash-password` + env-var recipe above? Start the container with an
+**empty `/config`** and **without** the `CLAUSTER_AUTH_*` vars — Clauster serves the first-run
+[setup wizard](guides/configuration.md) instead. In a container the wizard binds all interfaces
+(so a published port can reach it) and is gated by a **one-time token** printed to the log:
+
+```sh
+docker run -d --name clauster -p 7621:7621 \
+  -e PUID=1000 -e PGID=1000 \
+  -v /path/to/config:/config -v /path/to/projects:/projects \
+  ghcr.io/schubydoo/clauster:latest
+docker logs clauster        # → "...first-run setup at http://<this-host>:7621/?token=… (will write /config/clauster.yml)"
+```
+
+Open that URL (substituting the host that reaches the container) — the token gates access, so
+copy it exactly. Set `projects_root` (`/projects`), a bind host, and a password; the wizard
+writes an **auth-enabled** `/config/clauster.yml` on the persistent volume and restarts onto it.
+Because the config lands on `/config` (not the container's ephemeral layer), it survives
+`docker rm` / image updates. The token is single-use for that first boot; once a config exists
+the wizard never runs again.
+
 ### Docker Compose
 
 A ready-to-edit [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml) is included:

@@ -30,7 +30,7 @@
 
           <div class="alert alert-danger" role="alert" id="setup-error" hidden></div>
 
-          <form id="setup-form" autocomplete="off">
+          <form id="setup-form" autocomplete="off"{% if setup_token %} data-setup-token="{{ setup_token }}"{% endif %}>
             <div class="mb-3">
               <label class="form-label required" for="projects_root">Projects folder</label>
               <input class="form-control" type="text" id="projects_root" name="projects_root"
