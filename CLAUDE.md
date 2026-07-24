@@ -28,8 +28,10 @@ pointer.
 - **Prefer the dedicated file/search tools over shell equivalents.** Read/Edit/Grep
   rather than `cat`/`sed`/`grep`, so edits stay tracked.
 - **Run `just check` before proposing a PR** — it runs the local test, coverage,
-  ruff, type, and docs-lint gates. CI additionally runs the 3-OS matrix, package
-  build, and platform smoke jobs. Cheaper to fail locally.
+  ruff, type, docs-lint, and docs-site-build (`mkdocs build --strict`) gates. CI
+  additionally runs the 3-OS matrix, package build, and platform smoke jobs.
+  Cheaper to fail locally. Running one sub-gate by hand is not a substitute: a
+  broken docs link passes `lint-docs.sh` and only the site build catches it.
 - **Verify before you report.** A status line in a planning doc, a TODO, a changelog,
   or a recalled memory is a *cache*, not truth. Confirm open-vs-shipped against
   `git log`, `gh pr view`, or the code itself before acting on it or telling the user

@@ -15,6 +15,13 @@
 #                       catches a hand-edit of the generated tables on a docs-only
 #                       PR (where the tests job is skipped).
 #
+# NOT covered here: link/nav resolution. markdownlint checks Markdown *style*, not
+# whether a link target exists, so a link that leaves the docs/ tree (e.g.
+# `../UPGRADING.md`) passes this script and still fails CI's docs job. That gate is
+# `mkdocs build --strict`, which needs the `docs` extra while this script runs in
+# CI's lint job under `dev` — so it lives in `just docs-build`, and `just check`
+# runs it alongside this script. Adding a docs link? Run `just check`, not just this.
+#
 # Prereqs: `npm ci` and `uv sync --extra dev` (see CONTRIBUTING). CI installs both.
 # Usage:   bash scripts/lint-docs.sh
 set -euo pipefail
