@@ -316,8 +316,25 @@ environment:
   CLAUSTER_AUTH_ENABLED: "true"
   CLAUSTER_AUTH_PASSWORD_REQUIRED: "true"
   CLAUSTER_AUTH_PASSWORD_HASH: ${CLAUSTER_AUTH_PASSWORD_HASH:?...}
+  CLAUSTER_AUTH_ALLOWED_ORIGINS: ${CLAUSTER_AUTH_ALLOWED_ORIGINS:-http://localhost:7621}
   PUID: "1000"
   PGID: "1000"
+```
+
+!!! warning "Set the origin you browse to"
+    The container binds `0.0.0.0`, which auto-allows **no** browser origin — only
+    a loopback bind gets `localhost` for free. If the origin you open the
+    dashboard at is not listed in `auth.allowed_origins`, the login POST is
+    refused with `403 origin check failed` and the dashboard is unreachable.
+    Completing the **first-run setup wizard** records the origin you used
+    automatically, so this only needs setting when you configure by environment
+    instead.
+
+The Compose file defaults that origin to `http://localhost:7621`. Override it for
+a LAN address, hostname, or reverse proxy — comma-separate to list several:
+
+```sh
+export CLAUSTER_AUTH_ALLOWED_ORIGINS='http://nas.local:7621,http://192.168.1.50:7621'
 ```
 
 !!! note "Hashes in a `.env` file"

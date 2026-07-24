@@ -305,6 +305,105 @@ def _env_host_app(tmp_path: Path, env_host: str = "0.0.0.0"):
     return TestClient(app), projects, write_path
 
 
+# ----- the post-setup login must actually work (#1071) ----------------------
+
+
+def test_wildcard_bind_records_browser_origin_so_login_is_reachable(tmp_path):
+    # THE #1071 regression, asserted the way the operator experiences it: complete setup on a
+    # 0.0.0.0 bind (what the Docker image forces) and the very next request — the login POST —
+    # must clear the Origin gate. Before the fix the wizard wrote no allowed_origins,
+    # build_allowed_origins returned an EMPTY set for a non-loopback bind, and login 403'd
+    # "origin check failed" with the dashboard permanently unreachable.
+    browser_origin = "http://localhost:7621"
+    client, projects, write_path = _env_host_app(tmp_path, env_host="0.0.0.0")
+    res = client.post("/setup", headers={"origin": browser_origin}, json=_valid_payload(projects))
+    assert res.status_code == 200
+
+    config = load_config(write_path)
+    assert config.host == "0.0.0.0"
+    assert auth.normalize_origin(browser_origin) in auth.build_allowed_origins(config)
+
+
+def test_loopback_bind_still_records_no_allowed_origins(tmp_path):
+    # A loopback install must be untouched: build_allowed_origins already auto-allows
+    # 127.0.0.1/localhost/[::1] at the bound port, so writing the key would be redundant noise
+    # in the generated file.
+    _, client, projects, write_path = _app_and_paths(tmp_path)
+    res = client.post(
+        "/setup", headers={"origin": "http://localhost:7621"}, json=_valid_payload(projects)
+    )
+    assert res.status_code == 200
+    assert load_config(write_path).auth.allowed_origins == []
+    assert "allowed_origins" not in write_path.read_text(encoding="utf-8")
+
+
+def test_wildcard_bind_without_origin_records_nothing(tmp_path):
+    # A scripted submit (curl/compose provisioning) carries no Origin. There is nothing to
+    # record and nothing may be guessed — the operator sets allowed_origins themselves. Fails
+    # closed and visibly rather than widening the allowlist to something invented.
+    client, projects, write_path = _env_host_app(tmp_path, env_host="0.0.0.0")
+    assert client.post("/setup", json=_valid_payload(projects)).status_code == 200
+    assert load_config(write_path).auth.allowed_origins == []
+
+
+def _token_env_host_app(tmp_path: Path, env_host: str = "0.0.0.0"):
+    """The real container shape: wizard itself bound non-loopback (token-gated) AND the app
+    re-execing onto a non-loopback CLAUSTER_HOST. Only here is a LAN/any Origin actually
+    reachable — in loopback mode the wizard's own Origin gate 403s it first."""
+    projects = tmp_path / "code"
+    projects.mkdir(exist_ok=True)
+    write_path = tmp_path / "clauster.yml"
+    app = setup_wizard.create_setup_app(
+        write_path, port=7621, setup_token=_TOKEN, env_host=env_host
+    )
+    return TestClient(app), projects, write_path
+
+
+def test_token_mode_records_lan_origin_so_login_is_reachable(tmp_path):
+    # The container case end to end: the operator reaches the wizard at a LAN address that
+    # could never be pre-allowlisted, the token header authorizes the submit, and the origin
+    # they actually used is what gets recorded — so the login POST that follows is accepted.
+    browser_origin = "http://192.168.1.50:7621"
+    client, projects, write_path = _token_env_host_app(tmp_path)
+    res = client.post(
+        "/setup",
+        headers={"x-setup-token": _TOKEN, "origin": browser_origin},
+        json=_valid_payload(projects),
+    )
+    assert res.status_code == 200
+    assert auth.normalize_origin(browser_origin) in auth.build_allowed_origins(
+        load_config(write_path)
+    )
+
+
+@pytest.mark.parametrize("bad", ["not-an-origin", "file:///etc/passwd", "://x", "javascript:x"])
+def test_wildcard_bind_rejects_malformed_origin(tmp_path, bad):
+    # normalize_origin returns the cleaned input unchanged when it can't parse scheme+host, so
+    # a junk header must not be written through into the allowlist verbatim. Token mode is the
+    # only place this is reachable — loopback mode rejects a non-loopback Origin outright.
+    client, projects, write_path = _token_env_host_app(tmp_path)
+    res = client.post(
+        "/setup", headers={"x-setup-token": _TOKEN, "origin": bad}, json=_valid_payload(projects)
+    )
+    assert res.status_code == 200
+    assert load_config(write_path).auth.allowed_origins == []
+
+
+def test_non_wildcard_loopback_literal_bind_still_records_origin(tmp_path):
+    # 127.0.0.2 is loopback to _is_loopback_host (all of 127.0.0.0/8) but NOT in the
+    # _LOOPBACK_HOSTS set that build_allowed_origins consults, so it auto-allows nothing and
+    # DOES need the origin recorded. Keying the decision off the wrong predicate would silently
+    # reintroduce #1071 for this bind.
+    client, projects, write_path = _token_env_host_app(tmp_path, env_host="127.0.0.2")
+    res = client.post(
+        "/setup",
+        headers={"x-setup-token": _TOKEN, "origin": "http://127.0.0.2:7621"},
+        json=_valid_payload(projects),
+    )
+    assert res.status_code == 200
+    assert auth.build_allowed_origins(load_config(write_path)) == {"http://127.0.0.2:7621"}
+
+
 def test_env_host_makes_bind_field_readonly_and_prefilled(tmp_path):
     # With CLAUSTER_HOST set the bind is env-controlled, so the field can't be a free choice the
     # re-exec would silently override — it renders read-only at the env value with an explanation.

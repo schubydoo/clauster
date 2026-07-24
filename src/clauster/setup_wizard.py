@@ -46,7 +46,7 @@ from pydantic import ValidationError
 
 from . import __version__, auth
 from .atomicio import fsync_dir
-from .config import ClausterConfig
+from .config import _LOOPBACK_HOSTS, ClausterConfig
 
 _PKG_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
@@ -186,17 +186,59 @@ def _display_url(host: str, port: int) -> str:
     return f"http://{host}:{port}/"
 
 
-def _build_config_data(projects_root: str, host: str, port: int, password_hash: str) -> dict:
+def _origins_to_persist(host: str, origin: str | None) -> list[str]:
+    """Return the origins to record in ``auth.allowed_origins`` for a ``host`` bind.
+
+    ``auth.build_allowed_origins`` auto-allows ``127.0.0.1``/``localhost``/``[::1]`` only when
+    the bind host is in ``_LOOPBACK_HOSTS``; every other bind auto-allows **nothing**. So
+    unless the operator's browser origin is recorded here, the very next request after setup
+    — the login POST — fails the Origin check with 403 and the dashboard is unreachable. The
+    Docker image bakes ``CLAUSTER_HOST=0.0.0.0``, so that was every containerised first run
+    (#1071).
+
+    Keyed on ``_LOOPBACK_HOSTS`` — the exact set the runtime gate consults — and deliberately
+    NOT on the neighbouring :func:`_is_loopback_host`, which counts all of ``127.0.0.0/8``: a
+    ``127.0.0.2`` bind would look loopback to it, get nothing written, and still 403.
+
+    The Origin is trusted exactly as far as the submit that carried it, and reaching this point
+    already cleared the wizard's gate — token mode verified ``X-Setup-Token``, loopback mode
+    checked the Origin against the loopback set. An absent or malformed Origin (a scripted
+    submit, never a browser) writes nothing rather than guessing a value that would silently
+    widen the allowlist.
+    """
+    if host in _LOOPBACK_HOSTS or not origin:
+        return []
+    normalized = auth.normalize_origin(origin)
+    # normalize_origin returns the cleaned input unchanged when it can't parse a
+    # scheme+host, so re-check the shape rather than trusting it round-tripped.
+    scheme, _, rest = normalized.partition("://")
+    if scheme not in ("http", "https") or not rest:
+        return []
+    return [normalized]
+
+
+def _build_config_data(
+    projects_root: str,
+    host: str,
+    port: int,
+    password_hash: str,
+    allowed_origins: list[str] | None = None,
+) -> dict:
     """Build the clauster.yml mapping the wizard writes — auth enabled, password required."""
+    auth_block: dict[str, Any] = {
+        "enabled": True,
+        "password_required": True,
+        "password_hash": password_hash,
+    }
+    # Omitted rather than written empty when there is nothing to record, so a loopback
+    # install's generated config stays exactly as it was before #1071.
+    if allowed_origins:
+        auth_block["allowed_origins"] = allowed_origins
     return {
         "projects_root": projects_root,
         "host": host,
         "port": port,
-        "auth": {
-            "enabled": True,
-            "password_required": True,
-            "password_hash": password_hash,
-        },
+        "auth": auth_block,
     }
 
 
@@ -378,7 +420,13 @@ def create_setup_app(
             # Store projects_root as typed (the model expands `~` on load); passing the raw
             # string — instead of constructing a Path from request data — keeps path handling
             # inside the model.
-            data = _build_config_data(pr_raw, host, port_val, password_hash)
+            data = _build_config_data(
+                pr_raw,
+                host,
+                port_val,
+                password_hash,
+                _origins_to_persist(host, request.headers.get("origin")),
+            )
             # Final fail-closed gate: the model validates projects_root existence/readability
             # and every other field. A projects_root failure maps to a friendly field error;
             # anything else is generic — the raw exception (which can carry internal paths) is
