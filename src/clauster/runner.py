@@ -705,14 +705,24 @@ class SessionRunner:
         ``agents --json`` session.
         """
         target = pointers.sanitize_cwd(project_path)
-        worktrees = Path(project_path) / pointers.WORKTREE_SUBDIR
+        # Resolved, mirroring inspector's containment check on the same constant:
+        # is_relative_to is purely lexical, so an unresolved `…/worktrees/../../etc` would
+        # match and a symlinked worktree cwd would not. Sharing the constant only makes the
+        # two agree on the VALUE; they have to agree on the policy too.
+        try:
+            worktrees = (Path(project_path) / pointers.WORKTREE_SUBDIR).resolve()
+        except OSError:  # pragma: no cover - resolve() on a pathological path
+            worktrees = Path(project_path) / pointers.WORKTREE_SUBDIR
 
         def _belongs(cwd: Path) -> bool:
             if pointers.sanitize_cwd(cwd) == target:
                 return True
             # Containment on the worktrees subtree only — not the whole project — so a
             # stray `claude` run by hand elsewhere under the project is not claimed.
-            return cwd.is_relative_to(worktrees)
+            try:
+                return cwd.resolve().is_relative_to(worktrees)
+            except OSError:  # pragma: no cover - unreadable/looping symlink
+                return False
 
         return {s.local_uuid for s in self._sessions if _belongs(Path(s.cwd))}
 
@@ -1220,9 +1230,15 @@ class SessionRunner:
             # Scope the pick to THIS project's own conversations (fail closed): a
             # well-formed uuid belonging to another project's transcript must never
             # fork foreign context into this session. resolve_session_transcript
-            # walks only the project's sanitized-cwd transcript dir — the same
-            # source the picker lists from — so anything it can't resolve is
-            # rejected before any spawn side effect.
+            # walks the project's own sanitized-cwd transcript dir PLUS its worktree
+            # dirs (#1020) — the same source the picker lists from — so anything it
+            # can't resolve is rejected before any spawn side effect.
+            #
+            # The worktree dirs are found by name prefix, and the same punctuation
+            # ambiguity described below applies to them: a sibling project named
+            # "<project>--claude-worktrees-x" sanitizes into this project's worktree
+            # prefix. _transcript_dirs_for therefore excludes every real sibling
+            # project's directory, so the set stays this project's own.
             #
             # Ownership requires that dir to be UNAMBIGUOUS. Claude keys transcripts
             # by sanitize_cwd (non-alphanumerics → "-"), so two configured project

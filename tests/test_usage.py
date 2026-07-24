@@ -287,22 +287,36 @@ def test_transcript_paths_for_includes_worktree_sessions(tmp_path):
     assert sorted(names) == ["main.jsonl", "worktree.jsonl"]
 
 
-def test_transcript_paths_for_excludes_neighbouring_project(tmp_path):
-    # The prefix trap: sanitize_cwd maps `/` and `-` alike to `-`, so the sibling project
-    # `my_proj-other` yields a directory name starting with sanitize_cwd(my_proj) + "-".
-    # Matching on that bare prefix would leak an UNRELATED project's conversations into this
-    # project's picker and token totals; anchoring on the `.claude/worktrees` segment won't.
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        "my_proj-other",  # short prefix — cannot reach the worktree prefix
+        "my_proj_backup",
+        # These two DO sanitize into this project's worktree prefix: sanitize_cwd maps `/`,
+        # `.`, `-` and `_` all to `-`, and is_valid_project_name admits both spellings. An
+        # unfiltered prefix scan resolves their transcripts as this project's — which the
+        # pty resume path uses as its ownership proof, so a foreign conversation could be
+        # forked into this project's session. The earlier version of this test used only the
+        # two short names above and passed for a trivial reason.
+        "my_proj--claude-worktrees-x",
+        "my_proj__claude_worktrees_y",
+    ],
+)
+def test_transcript_paths_for_excludes_neighbouring_project(tmp_path, sibling):
+    projects_root = tmp_path / "projects"
+    project = projects_root / "my_proj"
+    project.mkdir(parents=True)
+    (projects_root / sibling).mkdir()  # a REAL sibling project on disk
+
     claude_dir = tmp_path / "claude_projects"
-    project = Path("/srv/projects/my_proj")
     root = _project_transcript_dir(claude_dir, project)
     (root / "mine.jsonl").write_text("")
-    neighbour = _project_transcript_dir(claude_dir, Path("/srv/projects/my_proj-other"))
+    neighbour = _project_transcript_dir(claude_dir, projects_root / sibling)
     (neighbour / "theirs.jsonl").write_text("")
-    nested = _project_transcript_dir(claude_dir, Path("/srv/projects/my_proj_backup"))
-    (nested / "backup.jsonl").write_text("")
 
-    names = [p.name for p in transcript_paths_for(project, claude_dir)]
-    assert names == ["mine.jsonl"]
+    assert [p.name for p in transcript_paths_for(project, claude_dir)] == ["mine.jsonl"]
+    # The ownership proof behind pty resume must refuse it too, not just the listing.
+    assert resolve_session_transcript(project, "theirs", claude_dir) is None
 
 
 def test_resolve_session_transcript_finds_worktree_session(tmp_path):

@@ -255,16 +255,36 @@ def transcript_paths_for(
 def _transcript_dirs_for(project_path: Path, claude_projects_dir: Path) -> list[Path]:
     """Return the project's own transcript directory plus one per git worktree under it.
 
-    The worktree siblings are matched on the sanitized ``<project>/.claude/worktrees`` path,
-    NOT on a bare ``sanitize_cwd(project) + "-"`` prefix. Sanitizing maps ``/`` and ``-``
-    alike to ``-``, so a *neighbouring project* named ``<project>-other`` produces a
-    directory name that starts with that bare prefix — the loose form would pull an
-    unrelated project's conversations into this project's picker and token totals. Anchoring
-    on the worktrees subdir requires the path to actually descend through it.
+    Worktree transcripts must be found by scanning, not by listing the live worktrees: a
+    worktree is usually ``git worktree remove``d when its session ends while the transcript
+    it produced stays on disk forever, and those finished conversations are exactly what
+    the fork picker exists to offer. Enumerating only extant worktrees would hide nearly
+    all of them.
+
+    Scanning means matching directory NAMES, and ``sanitize_cwd`` is lossy — it maps every
+    non-alphanumeric to ``-``, so ``/``, ``.``, ``-`` and ``_`` are indistinguishable
+    afterwards. A ``<project>/.claude/worktrees/x`` prefix is therefore ALSO produced by a
+    sibling project literally named ``<project>--claude-worktrees-x`` (or
+    ``<project>__claude_worktrees_y``), and ``is_valid_project_name`` admits both. Since
+    :func:`resolve_session_transcript` is the ownership proof the pty resume path uses, an
+    unfiltered prefix match would let a uuid from a neighbouring project resolve as this
+    one's and be forked into its session.
+
+    So every candidate that is the transcript directory of a REAL sibling project is
+    excluded. ``pointers`` resolves forward (project path -> expected dir) precisely
+    because the reverse is ambiguous; the exclusion set is likewise built forward, from the
+    sibling paths themselves, never by trying to parse a directory name back into a path.
     """
     base = Path(claude_projects_dir)
-    dirs = [base / sanitize_cwd(Path(project_path))]
-    worktree_prefix = sanitize_cwd(Path(project_path) / WORKTREE_SUBDIR)
+    project = Path(project_path)
+    dirs = [base / sanitize_cwd(project)]
+    worktree_prefix = sanitize_cwd(project / WORKTREE_SUBDIR)
+    # Forward-built: the sanitized dir name of every project beside this one. A collision
+    # can only be a real project's directory, so this removes exactly the ambiguous names.
+    try:
+        siblings = {sanitize_cwd(p) for p in project.parent.iterdir() if p.is_dir()}
+    except OSError:
+        siblings = set()
     try:
         entries = sorted(base.iterdir())
     except OSError:
@@ -272,7 +292,9 @@ def _transcript_dirs_for(project_path: Path, claude_projects_dir: Path) -> list[
     dirs.extend(
         entry
         for entry in entries
-        if entry.is_dir() and entry.name.startswith(f"{worktree_prefix}-")
+        if entry.is_dir()
+        and entry.name.startswith(f"{worktree_prefix}-")
+        and entry.name not in siblings
     )
     return dirs
 
