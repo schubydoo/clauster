@@ -113,7 +113,7 @@ cross-site defence, not an authentication method, so it is enforced even when
 `auth.enabled` is `false`.
 
 **Mechanism:** [The master switch](security.md#the-master-switch) ·
-[Upgrading](../UPGRADING.md).
+[Upgrading](upgrading.md).
 
 ### I get a 403 after putting it behind nginx / Caddy / Traefik
 
