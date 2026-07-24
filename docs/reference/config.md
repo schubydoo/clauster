@@ -354,6 +354,26 @@ redaction path — the same surface as any other `env` row or `settings.json` ke
 login detector (`claude auth status --json`) already reports all three as logged-in, so
 an account configured this way is **not** nagged to sign in.
 
+## `mcp` — `clauster mcp` write-tool gate (`McpConfig`)
+
+The [`clauster mcp`](../mcp.md) stdio server exposes read tools (`list_sessions` /
+`session_status`) always, and **write** tools (`spawn_session` / `stop_session` /
+`resume_session`) only when `allow_writes` is on. The stdio transport is
+local-privileged and **unauthenticated** by design, so the write surface is gated
+behind this switch and defaults **off** — attaching the server to an agent cannot
+start, stop, or resume a bridge until an operator opts in. Like the `config_write`
+and `login_shepherd` gates it is **not** web-editable (file/CLI-managed only).
+
+> **Changed in 1.0 (breaking):** the write tools shipped always-on in #950; they now
+> default off. An MCP client that drove `spawn`/`stop`/`resume_session` needs
+> `mcp.allow_writes: true`. See [UPGRADING](../upgrading.md).
+
+<!-- BEGIN GEN: mcp -->
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `allow_writes` | bool | `false` | Expose the `clauster mcp` **write** tools (`spawn_session` / `stop_session` / `resume_session`) that start, stop, and resume bridges. Off by default: the stdio MCP surface is read-only (`list_sessions` / `session_status` only) until you opt in. The surface is local-privileged and unauthenticated, so turning this on lets any agent the server is attached to drive the bridge lifecycle. **Not** web-editable — file/CLI-managed only, like the auth / config_write / login_shepherd gates. |
+<!-- END GEN: mcp -->
+
 ## `usage` — per-project cost/token badge (`UsageConfig`)
 
 <!-- BEGIN GEN: usage -->

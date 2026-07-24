@@ -1,7 +1,8 @@
-"""Tests for the read-only ``clauster mcp`` stdio MCP server (#527).
+"""Tests for the ``clauster mcp`` stdio MCP server (#527/#950/#1010).
 
-Covers the JSON-RPC/MCP protocol surface (initialize, tools/list, tools/call for
-both tools, and the error paths) driven directly against ``MCPServer`` and the
+Covers the JSON-RPC/MCP protocol surface (initialize, tools/list, tools/call, and
+the error paths), the ``mcp.allow_writes`` capability gate (read-only by default;
+the write tools opt-in), driven directly against ``MCPServer`` and the
 ``serve`` loop — no real subprocess — plus a ``gather_sessions`` integration test
 that seeds the same read sources the dashboard uses (a persisted bridge, a hosted
 record, a background job) and asserts the summarized shapes and that no free-text
@@ -37,7 +38,20 @@ def cfg(runner_config):
 
 @pytest.fixture
 def server(cfg) -> mcp_server.MCPServer:
-    """An ``MCPServer`` bound to the trusted tmp config."""
+    """An ``MCPServer`` with the #950 write tools exposed (``mcp.allow_writes`` on).
+
+    Most protocol/write tests exercise the full tool surface; the read tools are
+    identical in both modes. The read-only *default* (writes gated off, #1010) is
+    covered by :func:`readonly_server` and the capability-gate tests below.
+    """
+    cfg.mcp.allow_writes = True
+    return mcp_server.MCPServer(cfg)
+
+
+@pytest.fixture
+def readonly_server(cfg) -> mcp_server.MCPServer:
+    """An ``MCPServer`` with writes gated OFF — the production default (#1010)."""
+    cfg.mcp.allow_writes = False
     return mcp_server.MCPServer(cfg)
 
 
@@ -103,6 +117,66 @@ def test_tools_list_exposes_read_and_write_tools(server):
     assert by_name["spawn_session"]["inputSchema"]["required"] == ["project"]
     assert by_name["stop_session"]["inputSchema"]["required"] == ["id"]
     assert by_name["resume_session"]["inputSchema"]["required"] == ["id"]
+
+
+# --------------------------------------------------------------------------- #
+# Capability gate (#1010): mcp.allow_writes — read-only by default, writes opt-in
+# --------------------------------------------------------------------------- #
+_READ_TOOL_NAMES = ["list_sessions", "session_status"]
+_WRITE_TOOL_NAMES = ["spawn_session", "stop_session", "resume_session"]
+
+
+def test_default_config_gates_writes_off():
+    """A freshly-defaulted config is read-only: mcp.allow_writes defaults False."""
+    from clauster.config import McpConfig
+
+    assert McpConfig().allow_writes is False
+
+
+def test_tools_list_readonly_hides_write_tools(readonly_server):
+    """With writes gated off, tools/list advertises ONLY the read tools."""
+    resp = _handle(readonly_server, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    names = [t["name"] for t in resp["result"]["tools"]]
+    assert names == _READ_TOOL_NAMES
+    for write_tool in _WRITE_TOOL_NAMES:
+        assert write_tool not in names
+
+
+def test_readonly_server_rejects_write_tool_as_unknown(readonly_server, fake_engine):
+    """A write-tool call on a read-only server is an *unknown tool* (fail-closed),
+    never a silent no-op — and the write handler is not even reached (fake_engine
+    would raise if it were, since no bridge exists)."""
+    resp = _call(readonly_server, "spawn_session", {"project": "alpha", "trust": True})
+    assert resp["result"]["isError"] is True
+    assert "unknown tool" in resp["result"]["content"][0]["text"].lower()
+    assert "spawn_session" in resp["result"]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("allow_writes", [False, True])
+def test_advertised_tools_match_dispatchable_handlers(allow_writes):
+    """The capability string cannot drift: for BOTH modes the set of tools
+    advertised by tools/list is EXACTLY the set of handlers tools/call dispatches
+    (issue #1010's anti-drift guard)."""
+    advertised = {t["name"] for t in mcp_server.tools_for(allow_writes=allow_writes)}
+    dispatchable = set(mcp_server.handlers_for(allow_writes=allow_writes))
+    assert advertised == dispatchable
+    expected = set(_READ_TOOL_NAMES)
+    if allow_writes:
+        expected |= set(_WRITE_TOOL_NAMES)
+    assert advertised == expected
+
+
+def test_capability_label_reflects_mode():
+    """The startup banner label names the active surface for each mode."""
+    ro = mcp_server.capability_label(allow_writes=False)
+    rw = mcp_server.capability_label(allow_writes=True)
+    assert "read-only" in ro
+    assert "mcp.allow_writes" in ro  # tells the operator how to enable writes
+    assert "write" in rw
+    for tool in _WRITE_TOOL_NAMES:
+        # the label names the write verbs so the banner can't understate the surface
+        assert tool.split("_")[0] in rw  # spawn / stop / resume
+    assert ro != rw
 
 
 # --------------------------------------------------------------------------- #
@@ -465,6 +539,7 @@ async def _reader_from(payload: bytes) -> asyncio.StreamReader:
 
 def test_serve_handshake_then_tools_list_over_stdio(cfg):
     """Each request line yields exactly one single-line JSON-RPC response."""
+    cfg.mcp.allow_writes = True  # exercise the full surface (incl. write tools) over stdio
     requests = (
         json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         + "\n"

@@ -13,7 +13,9 @@ Read tools:
 ``session_status``
     The detail of one session, looked up by its id.
 
-Write tools (#527 write slice) — the **bridge** channel only, thin wrappers over
+Write tools (#527 write slice) — **gated behind ``mcp.allow_writes``** (#1010,
+default off), so the surface is read-only until the operator opts in. The **bridge**
+channel only, thin wrappers over
 the #775 :class:`~clauster.engine.ClausterEngine` facade (the same
 ``spawn_detailed``/``stop``/``resume`` the dashboard ``/api`` routes call, so the
 per-mode policy, standard-singleton cap, option validation, and per-project spawn
@@ -114,8 +116,9 @@ _INVALID_REQUEST = -32600
 _METHOD_NOT_FOUND = -32601
 _INTERNAL_ERROR = -32603
 
-# Max bytes for one JSON-RPC line. Our two read-only tools' replies are small, and
-# a *request* is tiny (a method name + a short id) — so a generous-but-bounded cap
+# Max bytes for one JSON-RPC line. Our tools' replies are small (session summaries /
+# structural lifecycle fields), and a *request* is tiny (a method name + a short id)
+# — so a generous-but-bounded cap
 # keeps a single pathological/oversized line from growing the read buffer without
 # limit, while never tripping on a legitimate message. An overlong line is drained
 # and answered with a parse error rather than crashing the server (see ``serve``).
@@ -277,7 +280,9 @@ def _summarize_job(job: BackgroundJob) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Tool definitions
 # --------------------------------------------------------------------------- #
-_TOOLS: list[dict[str, Any]] = [
+# The read tools are always exposed; the write tools below are gated behind
+# ``mcp.allow_writes`` (#1010) so the default surface is read-only.
+_READ_TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_sessions",
         "title": "List Clauster sessions",
@@ -308,6 +313,12 @@ _TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+]
+
+# Write tools (#950) — gated behind ``mcp.allow_writes`` (#1010, default off). They
+# mutate bridge state, so the default read-only surface never advertises or dispatches
+# them; an operator opts in explicitly.
+_WRITE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "spawn_session",
         "title": "Start a Clauster bridge",
@@ -491,32 +502,74 @@ async def _tool_resume_session(config: ClausterConfig, args: dict[str, Any]) -> 
     return {"resumed": True, "session": _summarize_instance(inst, kind="bridge")}
 
 
-_TOOL_HANDLERS = {
+_READ_TOOL_HANDLERS = {
     "list_sessions": _tool_list_sessions,
     "session_status": _tool_session_status,
+}
+_WRITE_TOOL_HANDLERS = {
     "spawn_session": _tool_spawn_session,
     "stop_session": _tool_stop_session,
     "resume_session": _tool_resume_session,
 }
 
 
+def tools_for(*, allow_writes: bool) -> list[dict[str, Any]]:
+    """Return the tool definitions advertised by ``tools/list`` for the active mode.
+
+    Read tools always; the #950 write tools only when ``allow_writes`` (#1010).
+    Kept in lockstep with :func:`handlers_for` so the advertised surface can never
+    drift from the dispatchable one (asserted by the capability-sync test).
+    """
+    return [*_READ_TOOLS, *_WRITE_TOOLS] if allow_writes else list(_READ_TOOLS)
+
+
+def handlers_for(*, allow_writes: bool) -> dict[str, Any]:
+    """Return the tool handlers dispatchable by ``tools/call`` for the active mode.
+
+    The write handlers are present only when ``allow_writes`` — so a ``spawn_session``
+    call on a read-only server is an *unknown tool* (fail-closed), not a silent no-op.
+    """
+    return (
+        {**_READ_TOOL_HANDLERS, **_WRITE_TOOL_HANDLERS}
+        if allow_writes
+        else dict(_READ_TOOL_HANDLERS)
+    )
+
+
+def capability_label(*, allow_writes: bool) -> str:
+    """One-line description of the active tool surface (startup banner / logs)."""
+    if allow_writes:
+        return "read+write (list/status + spawn/stop/resume)"
+    return "read-only (list/status; writes gated by mcp.allow_writes)"
+
+
 # --------------------------------------------------------------------------- #
 # JSON-RPC / MCP server
 # --------------------------------------------------------------------------- #
 class MCPServer:
-    """A minimal stdio JSON-RPC 2.0 server speaking the read-only MCP subset.
+    """A minimal stdio JSON-RPC 2.0 server speaking the MCP tool subset.
 
     Drives the ``initialize`` handshake, answers ``tools/list`` / ``tools/call``
-    for the two read-only tools, and replies to ``ping``. Unknown methods get a
-    JSON-RPC ``method not found`` error; a tool that raises is returned as an
-    ``isError`` tool result rather than crashing the server (fail-closed, never
-    silently). Notifications (no ``id``) are acknowledged without a reply.
+    for the active tool set — the read tools always, the #950 write tools only when
+    ``mcp.allow_writes`` is on (#1010, default off) — and replies to ``ping``.
+    Unknown methods get a JSON-RPC ``method not found`` error; a tool that raises is
+    returned as an ``isError`` tool result rather than crashing the server
+    (fail-closed, never silently). On a read-only server a write-tool call is simply
+    an unknown tool. Notifications (no ``id``) are acknowledged without a reply.
     """
 
     def __init__(self, config: ClausterConfig) -> None:
-        """Bind the server to an already-loaded :class:`ClausterConfig`."""
+        """Bind the server to an already-loaded :class:`ClausterConfig`.
+
+        The advertised tool set and the dispatch table are both derived from the
+        one ``mcp.allow_writes`` flag (#1010), so ``tools/list`` and ``tools/call``
+        agree on the active surface — read-only by default, +write when opted in.
+        """
         self._config = config
         self._initialized = False
+        self._allow_writes = config.mcp.allow_writes
+        self._tools = tools_for(allow_writes=self._allow_writes)
+        self._handlers = handlers_for(allow_writes=self._allow_writes)
 
     async def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         """Dispatch one parsed JSON-RPC message, returning a response or ``None``.
@@ -546,7 +599,7 @@ class MCPServer:
         if method == "ping":
             return _result(msg_id, {})
         if method == "tools/list":
-            return _result(msg_id, {"tools": _TOOLS})
+            return _result(msg_id, {"tools": self._tools})
         if method == "tools/call":
             return await self._on_tools_call(msg_id, params)
         return _error(msg_id, _METHOD_NOT_FOUND, f"unknown method: {method}")
@@ -570,20 +623,20 @@ class MCPServer:
     async def _on_tools_call(
         self, msg_id: int | str | None, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """Answer ``tools/call``: run a read-only tool and wrap its result.
+        """Answer ``tools/call``: run the named tool and wrap its result.
 
         A handler that raises is reported as an ``isError`` tool result (per the
         tools spec) so the client sees the failure as data, not a transport
         error — and never as a misleading empty success.
         """
         name = params.get("name")
-        if not isinstance(name, str) or name not in _TOOL_HANDLERS:
+        if not isinstance(name, str) or name not in self._handlers:
             return _result(msg_id, _tool_error(f"unknown tool: {name!r}"))
         arguments = params.get("arguments") or {}
         if not isinstance(arguments, dict):
             return _result(msg_id, _tool_error("tool arguments must be an object"))
         try:
-            payload = await _TOOL_HANDLERS[name](self._config, arguments)
+            payload = await self._handlers[name](self._config, arguments)
         except Exception as exc:  # noqa: BLE001 - surface as an isError tool result, never crash
             _log.warning("tool %s failed: %s", name, exc)
             return _result(msg_id, _tool_error(f"{name} failed: {exc}"))
@@ -697,7 +750,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="clauster mcp",
-        description="Run the read-only Clauster MCP server over stdio (#527).",
+        description="Run the Clauster MCP server over stdio (#527/#950). Read-only by "
+        "default (list_sessions / session_status); set `mcp.allow_writes: true` to also "
+        "expose the write tools (spawn/stop/resume_session).",
     )
     parser.add_argument("-c", "--config", help="path to clauster.yml")
     args = parser.parse_args(argv)
@@ -710,7 +765,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # All human-readable output goes to stderr — stdout is the protocol channel
     # and must carry nothing but MCP messages (stdio transport requirement).
-    print(f"clauster mcp {__version__} | read-only | stdio", file=sys.stderr)
+    label = capability_label(allow_writes=config.mcp.allow_writes)
+    print(f"clauster mcp {__version__} | {label} | stdio", file=sys.stderr)
     try:
         asyncio.run(_run_stdio(config))
     except KeyboardInterrupt:

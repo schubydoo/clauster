@@ -29,6 +29,28 @@ run a database migration by hand. (The separate `clauster migrate` command is a
 *legacy* helper that only upgrades an older flat-file `state.json`; on a 0.12+
 deployment it has nothing to do.)
 
+## 0.12 → 1.0: `clauster mcp` write tools default off
+
+The [`clauster mcp`](docs/mcp.md) stdio server's **write** tools —
+`spawn_session`, `stop_session`, `resume_session` — shipped always-on in #950. As
+of 1.0 they are gated behind a new **`mcp.allow_writes`** config key that
+**defaults off**, so the stdio MCP surface is **read-only by default**
+(`list_sessions` / `session_status` only). The stdio transport is local-privileged
+and unauthenticated, so understating its capability — a banner/help that said
+"read-only" while the surface could start and stop bridges — was the security-
+relevant misstatement this closes (#1010).
+
+If an MCP client relied on driving the bridge lifecycle through `clauster mcp`,
+re-enable it explicitly:
+
+```yaml
+mcp:
+  allow_writes: true
+```
+
+Like the `config_write` / `login_shepherd` gates, `mcp.allow_writes` is
+file/CLI-managed only (**not** web-editable). The read tools are unchanged.
+
 ## 0.12 → 0.13: SQLite-only; `database_url` removed
 
 0.13 commits to SQLite as the only persistence substrate (#796) — the

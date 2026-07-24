@@ -5,17 +5,43 @@ server over stdio, so an MCP client — Claude Desktop, Claude Code, or any othe
 MCP host — can ask Clauster about its sessions through tools instead of the web
 UI.
 
-It exposes **read** tools (`list_sessions`, `session_status`) that report session
-state, and **write** tools (`spawn_session`, `stop_session`, `resume_session`,
-issue #527) that drive the bridge lifecycle. The server reuses the same machinery
-the dashboard's `/api` routes use — the read tools see exactly what the dashboard
-sees, and the write tools go through the same engine facade, so option validation,
-the standard-singleton cap, and workspace-trust behave identically headless or in
-the browser.
+It always exposes **read** tools (`list_sessions`, `session_status`) that report
+session state. It can also expose **write** tools (`spawn_session`, `stop_session`,
+`resume_session`, issue #527) that drive the bridge lifecycle — but those are
+**gated behind `mcp.allow_writes` and default off** (see [Read-only by
+default](#read-only-by-default-mcpallow_writes) below). The server reuses the same
+machinery the dashboard's `/api` routes use — the read tools see exactly what the
+dashboard sees, and the write tools go through the same engine facade, so option
+validation, the standard-singleton cap, and workspace-trust behave identically
+headless or in the browser.
 
 The stdio transport is **local-privileged** (reachable only by a process the
 operator launched on the host), so it carries no token auth — a future
-daemon-socket transport can add it.
+daemon-socket transport can add it. Because the surface is unauthenticated, the
+write tools are gated off by default: attaching the server to an agent cannot start
+or stop bridges until you opt in.
+
+## Read-only by default (`mcp.allow_writes`)
+
+The write tools mutate bridge state, so they are opt-in. With the default config the
+server is **read-only** — `tools/list` advertises only `list_sessions` and
+`session_status`, and a `spawn_session` / `stop_session` / `resume_session` call is
+rejected as an unknown tool. To expose them, set:
+
+```yaml
+mcp:
+  allow_writes: true
+```
+
+Then the server advertises and dispatches all five tools. The startup banner on
+stderr names the active surface — `… | read-only (…)  | stdio` versus
+`… | read+write (…) | stdio` — so you can see which mode a running server is in. Like
+the `config_write` and `login_shepherd` gates, `mcp.allow_writes` is **not**
+web-editable — set it in `clauster.yml` (file/CLI-managed only).
+
+> **Changed in 1.0 (breaking):** the write tools shipped always-on in #950. They now
+> default off; an MCP client that drove `spawn`/`stop`/`resume_session` needs
+> `mcp.allow_writes: true`. See [UPGRADING](upgrading.md).
 
 ## Running it
 
@@ -91,6 +117,10 @@ Returns `{"found": true, "session": {...}}` for a match, or
 back as a tool error rather than a guess.
 
 ### `spawn_session`
+
+> `spawn_session`, `stop_session`, and `resume_session` are the **write** tools —
+> exposed only when [`mcp.allow_writes`](#read-only-by-default-mcpallow_writes) is on.
+> On a read-only server they are not advertised and a call is rejected as unknown.
 
 Starts a `claude` bridge for a project (the bridge channel — the same as the
 dashboard's **Run Claude here**).
