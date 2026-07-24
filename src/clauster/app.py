@@ -910,6 +910,23 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.middleware("http")
     async def guard(request: Request, call_next):
         if not config.auth.enabled:
+            # Auth off (the shipped loopback default) still enforces the CSRF Origin gate
+            # on unsafe methods, so a cross-site page the operator visits can't drive the
+            # tokenless loopback API — a confused-deputy attack on a loopback-only service.
+            # There are NO credentials on this path, so a legitimate non-browser client
+            # (CLI/curl/script) sends no Origin and MUST still be allowed: reject ONLY a
+            # *present* Origin that isn't allowlisted, never an absent one. Browsers always
+            # attach Origin to a cross-origin state-changing fetch/XHR/form-POST and JS can't
+            # suppress it, so "Origin absent" is a same-origin or non-browser request, never
+            # the cross-site attack, while "Origin present, not allowlisted" is exactly it.
+            # (DNS-rebinding hardening via TrustedHostMiddleware is a follow-up: it can't be
+            # pinned here without risking legitimate LAN host/IP access to the dashboard.)
+            if (
+                request.method in _UNSAFE_METHODS
+                and request.headers.get("origin") is not None
+                and not _origin_allowed(request)
+            ):
+                return JSONResponse({"detail": "origin check failed"}, status_code=403)
             return await call_next(request)
         user, via_proxy, via_token = await _authenticate(request)
         # CSRF: an unsafe method needs a trusted Origin — unless the credential is
@@ -2231,6 +2248,25 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             raise HTTPException(
                 status_code=422, detail="'client_secret' must be a string when present"
             )
+        # An OAuth client-secret is only deliverable through the CLI (which passes it via
+        # MCP_CLIENT_SECRET in the child env). An entry that must bypass the CLI — inline
+        # env/headers, or a url carrying a query/userinfo/fragment — takes the direct
+        # writer, which has nowhere to put it. Refuse rather than write the entry and
+        # silently drop the secret: the operator would believe it was stored and only
+        # discover otherwise when the server fails to authenticate.
+        if client_secret is not None and entry is not None:
+            if config_write_mcp_cli.entry_needs_direct_write(entry):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "'client_secret' cannot be stored for this entry: it carries a "
+                        "value that must be kept off the CLI's argv (inline env/headers, "
+                        "or a url with a query string, userinfo, or fragment), so it is "
+                        "written directly to the config file, which has no way to deliver "
+                        "the secret. Put the credential in the entry's 'env' or 'headers' "
+                        "instead."
+                    ),
+                )
 
         if scope == "user":
             cli_cwd = runner.claude_json.parent
@@ -3477,7 +3513,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # gitignore-on-create hard requirement (#766) still applies even when
             # the file is CLI-written rather than clauster-written.
             await asyncio.to_thread(
-                config_write.ensure_gitignored, cwd, ".claude/settings.local.json"
+                config_write.ensure_gitignored,
+                cwd,
+                ".claude/settings.local.json",
+                ignore_backup_sibling=True,
             )
         result = {"scope": scope, "plugin": plugin_id, "op": op, "ok": True}
         if scope != "user":
@@ -3630,7 +3669,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             # all: the CLI writes settings.local.json directly, bypassing
             # clauster's own gitignore-on-create writer path.
             await asyncio.to_thread(
-                config_write.ensure_gitignored, cwd, ".claude/settings.local.json"
+                config_write.ensure_gitignored,
+                cwd,
+                ".claude/settings.local.json",
+                ignore_backup_sibling=True,
             )
         result: dict[str, Any] = {"scope": scope, "op": op, "ok": True}
         if name is not None:
@@ -4721,10 +4763,30 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         origin = websocket.headers.get("origin")
         return bool(origin) and auth.normalize_origin(origin) in _allowed_origins
 
+    async def _ws_gate(websocket: WebSocket) -> bool:
+        """Whether the WS handshake may proceed, BEFORE accept() (D12).
+
+        The Origin allowlist is a cross-site WS-hijack defence, NOT an
+        authentication method, so it must run even when ``config.auth.enabled``
+        is false (the shipped default). Tying it to the auth master switch let
+        ``config.auth.enabled and ...`` short-circuit, so ``_ws_authorized``
+        never ran and any page the operator visited could open a socket to the
+        loopback service and read-stream live output (CWE-1385). A browser
+        WebSocket ALWAYS sends Origin, so an absent Origin means a non-browser
+        client (never the cross-site attack) and passes; a present,
+        non-allowlisted Origin is rejected. When auth is enabled the full
+        session/proxy/token gate applies unchanged (it also rejects an absent
+        Origin for ambient cookie credentials, and exempts the Bearer path).
+        """
+        if config.auth.enabled:
+            return await _ws_authorized(websocket)
+        origin = websocket.headers.get("origin")
+        return origin is None or auth.normalize_origin(origin) in _allowed_origins
+
     @app.websocket("/ws/bridge-log/{instance_id}")
     async def ws_bridge_log(websocket: WebSocket, instance_id: str) -> None:
         """Tail the bridge debug log — ANSI-stripped and ID-redacted (feature 6, D11)."""
-        if config.auth.enabled and not await _ws_authorized(websocket):
+        if not await _ws_gate(websocket):
             await websocket.close(
                 code=1008
             )  # validate before accept — never open an unauthed socket
@@ -4767,7 +4829,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.websocket("/ws/hosted/{instance_id}")
     async def ws_hosted(websocket: WebSocket, instance_id: str) -> None:
         """Stream a hosted session's live events, replaying the ring past ``?after=``."""
-        if config.auth.enabled and not await _ws_authorized(websocket):
+        if not await _ws_gate(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
@@ -4795,7 +4857,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
     @app.websocket("/ws/clone-progress/{job_id}")
     async def ws_clone_progress(websocket: WebSocket, job_id: str) -> None:
         """Stream a clone job's ``{phase, percent}`` progress, then a terminal frame."""
-        if config.auth.enabled and not await _ws_authorized(websocket):
+        if not await _ws_gate(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()
@@ -4835,7 +4897,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         The wire carries only pyte-rendered cells + cursor + state, never raw ANSI, so the
         at-rest redaction invariant holds end to end.
         """
-        if config.auth.enabled and not await _ws_authorized(websocket):
+        if not await _ws_gate(websocket):
             await websocket.close(code=1008)  # validate before accept
             return
         await websocket.accept()

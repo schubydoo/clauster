@@ -85,6 +85,36 @@ hash. Check `docker logs` for the strings in
 
 ## I can't get in
 
+### Buttons are refused with `origin check failed`, or a live view won't connect
+
+**What you see:** the dashboard loads and reads fine, but any action (start a
+session, trust a folder, restart) returns `403 {"detail": "origin check
+failed"}`, and/or the live log / terminal view never connects (the WebSocket
+closes with code `1008`).
+
+**Most likely cause:** the browser origin you use is not in the `Origin`
+allowlist. Clauster auto-trusts `127.0.0.1`/`localhost`/`[::1]` **only at
+`config.port`, and only when `host:` is itself a loopback address**. A
+non-loopback bind — `0.0.0.0`, a LAN IP, or the Docker image (which binds
+`0.0.0.0`) — auto-trusts *nothing*, so even browsing it at
+`http://localhost:7621` is rejected. A tunnel, reverse proxy, or an SSH
+port-forward onto a *different* local port has the same effect on a loopback
+bind.
+
+**Fix:** list the address exactly as it appears in the browser's URL bar:
+
+```yaml
+auth:
+  allowed_origins: ["http://localhost:7621"]   # scheme + host + port
+```
+
+This applies whether or not a password is set — the origin allowlist is a
+cross-site defence, not an authentication method, so it is enforced even when
+`auth.enabled` is `false`.
+
+**Mechanism:** [The master switch](security.md#the-master-switch) ·
+[Upgrading](upgrading.md).
+
 ### I get a 403 after putting it behind nginx / Caddy / Traefik
 
 **What you see:** the proxy reaches Clauster, but requests are denied with

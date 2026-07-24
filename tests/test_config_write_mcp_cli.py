@@ -107,7 +107,61 @@ def test_entry_needs_direct_write_detects_secretish_header() -> None:
 
 
 def test_entry_needs_direct_write_false_for_clean_entry() -> None:
-    assert not mcp_cli.entry_needs_direct_write({"command": "x", "args": ["--flag"]})
+    # A stdio entry with no args, and a remote url with only a path (no userinfo/query/
+    # fragment), carry nothing that could land a secret on argv -> the CLI path is fine.
+    assert not mcp_cli.entry_needs_direct_write({"command": "x"})
+    assert not mcp_cli.entry_needs_direct_write(
+        {"type": "http", "url": "https://mcp.vendor.com/v1"}
+    )
+
+
+def test_entry_needs_direct_write_true_for_url_query_credential() -> None:
+    # F4: a credential in the url QUERY (`?api_key=…`) reaches `add-json` as an ordinary
+    # argv token (ps/proc-visible). redact_secrets misses it (no `@`, benign key), so the
+    # predicate must route it to the direct writer.
+    entry = {"type": "http", "url": "https://mcp.vendor.com/v1?api_key=sk-live-query"}
+    assert cw.redact_secrets(entry) == entry  # redaction heuristic misses it
+    assert mcp_cli.entry_needs_direct_write(entry)  # but the predicate routes it away
+
+
+def test_entry_needs_direct_write_true_for_url_userinfo() -> None:
+    # A `user:pass@host` url carries a credential in its userinfo.
+    assert mcp_cli.entry_needs_direct_write(
+        {"type": "http", "url": "https://user:pass@mcp.vendor.com/v1"}
+    )
+
+
+def test_entry_needs_direct_write_true_for_url_fragment_credential() -> None:
+    # F4 (fragment case): a credential in the url FRAGMENT (`#api_key=…`) also rides argv,
+    # and redact_secrets misses it just like the query case -> route to the direct writer.
+    entry = {"type": "http", "url": "https://mcp.vendor.com/v1#api_key=sk-live-frag"}
+    assert cw.redact_secrets(entry) == entry  # redaction heuristic misses it (gap is real)
+    assert mcp_cli.entry_needs_direct_write(entry)  # but the predicate routes it away
+
+
+def test_entry_needs_direct_write_true_for_unparseable_url() -> None:
+    # A url urlsplit cannot parse (unterminated IPv6 bracket) -> fail closed, keep it off
+    # the CLI rather than trust a value we could not inspect.
+    assert mcp_cli.entry_needs_direct_write({"type": "http", "url": "http://[::1"})
+
+
+def test_entry_needs_direct_write_true_for_nonempty_args() -> None:
+    # F4 (args case): a token can hide in a stdio args element (`--api-key sk-…`), which
+    # add-json serializes into argv. redact_secrets misses it -> route it to the direct
+    # writer. (An empty/absent args list stays on the CLI — see the clean-entry test.)
+    entry = {"command": "npx", "args": ["--api-key", "sk-live-args"]}
+    assert cw.redact_secrets(entry) == entry  # redaction heuristic misses it
+    assert mcp_cli.entry_needs_direct_write(entry)
+
+
+def test_entry_needs_direct_write_false_for_path_only_url_is_conscious_boundary() -> None:
+    # SCOPE BOUNDARY: a secret in the url PATH is a KNOWN uncovered residual. Every hosted
+    # MCP url has a path, so routing all path-bearing urls off the CLI needs a broader
+    # allowlist redesign (follow-up). This asserts the deliberate non-coverage so a future
+    # change here is a conscious one, not an accident.
+    assert not mcp_cli.entry_needs_direct_write(
+        {"type": "http", "url": "https://mcp.vendor.com/mcp/sk-live-inpath/sse"}
+    )
 
 
 def test_entry_needs_direct_write_true_for_interpolation_placeholder() -> None:
@@ -763,9 +817,12 @@ def test_route_server_add_audits_redacted_argv(
     # the shared config_audit.log. Proves (1) the argv sink set by the route propagates into
     # the worker-thread `_run` across asyncio.to_thread (the reason it's a contextvar), and
     # (2) the serialized entry is recorded SHAPE-ONLY — every value masked, keys kept — so a
-    # secret riding a benign key (an API key in `args`, undetectable by key/line heuristics)
-    # never lands in the durable audit log, even though the real CLI still receives it.
-    monkeypatch.setenv("FAKE_CLAUDE_MCP_STDOUT", "Added stdio MCP server srv to project config")
+    # secret the key/line heuristics miss never lands in the durable audit log, even though
+    # the real CLI still receives it. The entry here hides its secret in the url PATH — the
+    # F4-uncovered residual that DOES still reach the live CLI argv (see the
+    # entry_needs_direct_write boundary) — exactly the case where the audit's shape-only
+    # masking is the log's last line of defense.
+    monkeypatch.setenv("FAKE_CLAUDE_MCP_STDOUT", "Added http MCP server srv to project config")
     with _client(write_config, tmp_path, _ON) as c:
         resp = c.post(
             "/api/config-write/mcp/server",
@@ -775,7 +832,10 @@ def test_route_server_add_audits_redacted_argv(
                 "confirm": "alpha",
                 "op": "add",
                 "name": "srv",
-                "entry": {"command": "npx", "args": ["--api-key", "sk-live-SHOULD-NOT-LEAK"]},
+                "entry": {
+                    "type": "http",
+                    "url": "https://mcp.vendor.com/mcp/sk-live-SHOULD-NOT-LEAK/sse",
+                },
             },
         )
         assert resp.status_code == 200
@@ -787,7 +847,7 @@ def test_route_server_add_audits_redacted_argv(
             "mcp",
             "add-json",
             "srv",
-            json.dumps({"command": m, "args": [m, m]}),
+            json.dumps({"type": m, "url": m}),
             "--scope",
             "project",
         ]
@@ -1021,6 +1081,11 @@ def test_route_server_local_scope_add_with_secret_bypasses_cli(
         {"command": "node", "env": {"DEPLOY_KEY": "AKIAEXAMPLE1234567890"}},
         {"command": "node", "env": {"GH_PAT": "ghp_exampletokenvalue000"}},
         {"type": "http", "url": "https://x/mcp", "headers": {"X-Custom": "Bearer sk-benign"}},
+        # F4: a secret in the url QUERY, url FRAGMENT, or a stdio args element likewise
+        # evades redact_secrets and must never reach `claude mcp add-json`'s argv.
+        {"type": "http", "url": "https://mcp.vendor.com/v1?api_key=sk-live-query"},
+        {"type": "http", "url": "https://mcp.vendor.com/v1#api_key=sk-live-frag"},
+        {"command": "node", "args": ["--api-key", "sk-live-args"]},
     ],
 )
 def test_route_server_benign_keyed_secret_never_reaches_cli_argv(
@@ -1233,6 +1298,48 @@ def test_route_server_bad_client_secret_type_is_422(write_config, tmp_path, proj
             },
         )
         assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # Each of these must bypass the CLI, which is the only path that can deliver an
+        # OAuth client-secret (via MCP_CLIENT_SECRET in the child env).
+        {"type": "http", "url": "https://mcp.example.com/v1?tenant=acme"},
+        {"type": "http", "url": "https://mcp.example.com/v1#frag"},
+        {"command": "x", "args": ["--flag"]},
+        {"command": "x", "env": {"TOKEN": "sk-live"}},
+    ],
+)
+def test_route_server_client_secret_with_direct_write_entry_is_422(
+    write_config, tmp_path, projects_root, entry
+) -> None:
+    # A client_secret is only deliverable through the CLI. An entry that must be kept off
+    # argv takes the direct writer, which has nowhere to put it — so the route must REFUSE
+    # rather than write the entry and silently drop the secret (the operator would believe
+    # it was stored and only find out when the server fails to authenticate).
+    with _client(write_config, tmp_path, _ON) as c:
+        resp = c.post(
+            "/api/config-write/mcp/server",
+            json={
+                "scope": "project",
+                "project": "alpha",
+                "confirm": "alpha",
+                "op": "add",
+                "name": "srv",
+                "entry": entry,
+                "client_secret": "sk-oauth-secret",  # noqa: S106 - test literal
+            },
+        )
+        assert resp.status_code == 422
+        assert "client_secret" in resp.json()["detail"]
+    # and nothing was written for that name
+    cfg = (
+        json.loads((projects_root / "alpha" / ".mcp.json").read_text())
+        if (projects_root / "alpha" / ".mcp.json").exists()
+        else {"mcpServers": {}}
+    )
+    assert "srv" not in cfg.get("mcpServers", {})
 
 
 def test_route_server_user_scope_404_when_user_off(write_config, tmp_path) -> None:

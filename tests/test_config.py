@@ -381,6 +381,24 @@ def test_blank_api_token_hash_normalizes_to_none(write_config):
     assert config.auth.api_token_hash is None
 
 
+@pytest.mark.parametrize("blank", ["''", "'   '", '"\t"'])
+def test_blank_password_hash_normalizes_to_none(write_config, blank):
+    # F3 regression (CWE-798): a blank / whitespace-only password_hash must normalize to
+    # None, not survive as an empty string. An empty hash is falsy-yet-not-None and,
+    # paired with auth.verify_password's dummy-hash timing guard, would let the
+    # source-visible dummy password authenticate. Mirrors the api_token_hash case.
+    config = load_config(write_config(f"auth:\n  enabled: true\n  password_hash: {blank}\n"))
+    assert config.auth.password_hash is None
+
+
+def test_blank_password_hash_env_var_normalizes_to_none(write_config, monkeypatch):
+    # The env-var path assigns os.environ verbatim, so a present-but-empty
+    # CLAUSTER_AUTH_PASSWORD_HASH must be normalized to None too (not applied as "").
+    monkeypatch.setenv("CLAUSTER_AUTH_PASSWORD_HASH", "   ")
+    config = load_config(write_config("auth:\n  enabled: true\n"))
+    assert config.auth.password_hash is None
+
+
 @pytest.mark.parametrize("bad", ["not_a_real_hash", "deadbeef", "DEADBEEF" * 8, "g" * 64])
 def test_malformed_metrics_token_hash_rejected(write_config, bad):
     # Parity with api_token_hash (#473): the metrics scrape token is stored as a

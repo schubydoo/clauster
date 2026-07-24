@@ -374,7 +374,10 @@ switch) together with either password login (`auth.password_required` + a hash f
 `clauster hash-password`) or reverse-proxy trust (peer-IP allowlist + HMAC header) —
 or, to opt out on a trusted LAN, `auth.allow_unauthenticated_network`. Sessions
 are signed cookies with server-side revocation ("log out everywhere"); WebSocket
-connections are authenticated before accept and origin-checked.
+connections are authenticated before accept and origin-checked. The origin
+allowlist is a cross-site defence rather than an authentication method, so it is
+enforced even with `auth.enabled: false`; a non-loopback bind auto-trusts no
+origin and must set `auth.allowed_origins`.
 
 ## Configuration
 

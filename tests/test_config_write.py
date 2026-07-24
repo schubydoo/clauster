@@ -473,6 +473,39 @@ def test_ensure_gitignored_never_reorders_existing_lines(tmp_path: Path) -> None
     assert text == "b\na\nc\nd\n"  # existing order untouched, only appended
 
 
+def test_ensure_gitignored_adds_backup_sibling_when_requested(tmp_path: Path) -> None:
+    # F6: the backup-taking writers must also ignore the <name>.bak sibling.
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text == ".claude/settings.local.json\n.claude/settings.local.json.bak\n"
+
+
+def test_ensure_gitignored_backup_sibling_off_by_default(tmp_path: Path) -> None:
+    # Callers whose writer takes no backup get only the file entry -- no phantom
+    # .bak line for a file that never exists (e.g. CLAUDE.local.md).
+    cw.ensure_gitignored(tmp_path, "CLAUDE.local.md")
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text == "CLAUDE.local.md\n"
+
+
+def test_ensure_gitignored_backup_sibling_idempotent(tmp_path: Path) -> None:
+    # A second call adds nothing once both the file and its .bak are present.
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert lines.count(".claude/settings.local.json") == 1
+    assert lines.count(".claude/settings.local.json.bak") == 1
+
+
+def test_ensure_gitignored_adds_only_missing_backup_sibling(tmp_path: Path) -> None:
+    # The base entry already present (an earlier pre-fix write), the .bak absent:
+    # only the missing sibling is appended, existing content untouched.
+    (tmp_path / ".gitignore").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    cw.ensure_gitignored(tmp_path, ".claude/settings.local.json", ignore_backup_sibling=True)
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text == ".claude/settings.local.json\n.claude/settings.local.json.bak\n"
+
+
 def test_project_local_settings_path() -> None:
     project_dir = Path("/repo/alpha")
     assert cw.project_local_settings_path(project_dir) == project_dir / ".claude" / (

@@ -54,7 +54,9 @@ auth:
   # full list in docs/reference/config.md (auth / auth.reverse_proxy sections):
   # cookie_secure: auto              # auto | always | never
   # session_max_age_seconds: 604800  # 7 days
-  # allowed_origins: []              # extra WS/CSRF origins (e.g. your proxy domain)
+  # allowed_origins: []              # extra WS/CSRF origins (e.g. your proxy domain). The Origin
+  #                                  # allowlist is enforced even when enabled=false; a loopback bind
+  #                                  # auto-allows itself, a non-loopback bind MUST list its origin.
   # allow_unauthenticated_network: false
   # reverse_proxy:
   #   enabled: false

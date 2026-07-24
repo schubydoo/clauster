@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from clauster import deps
+from clauster import ops as ops_mod
 from clauster.config import load_config
 from clauster.ops import (
     FAIL,
@@ -653,6 +654,131 @@ def test_backup_includes_config(write_config, tmp_path):
     assert cfg_out.is_file() and result["config"] == str(cfg_out)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
+def test_restore_config_out_forces_0600_even_when_source_is_loose(write_config, tmp_path):
+    # The restored config carries the argon2 password hash, so restore --config-out must
+    # write it owner-only (0600) — never the umask-derived 0644 that shutil.copy2 would
+    # otherwise carry over from the loose extracted source (matching config_writer / the
+    # setup wizard). Pin the umask to 0022 so extraction reproduces the 0644 source the
+    # finding describes, then prove the destination is tightened to 0600 regardless.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    cfg_out = tmp_path / "restored.yml"
+    old_umask = os.umask(0o022)
+    try:
+        result = restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out)
+    finally:
+        os.umask(old_umask)
+    assert result["config"] == str(cfg_out)
+    assert cfg_out.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink/mode semantics")
+def test_restore_config_out_replaces_symlink_without_touching_its_target(write_config, tmp_path):
+    # A symlink sitting at --config-out must be REPLACED, not written through: copy2 would
+    # follow it, overwriting an unrelated file with the config (and the old chmod would then
+    # tighten that unrelated file). os.replace swaps the link itself, so the victim keeps
+    # both its content and its mode.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    victim = tmp_path / "unrelated.txt"
+    victim.write_text("do not clobber", encoding="utf-8")
+    victim.chmod(0o644)
+    cfg_out = tmp_path / "restored.yml"
+    cfg_out.symlink_to(victim)
+
+    restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out, force=True)
+
+    assert victim.read_text(encoding="utf-8") == "do not clobber"
+    assert victim.stat().st_mode & 0o777 == 0o644
+    assert not cfg_out.is_symlink()
+    assert cfg_out.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode semantics")
+def test_restore_config_out_does_not_tighten_its_parent_directory(write_config, tmp_path):
+    # --config-out is an operator-chosen path (often a shared /etc or project dir), so the
+    # restore must not chmod its parent to 0700 the way atomicio.atomic_write_text does —
+    # that would lock out other users/services (the #978 reasoning the setup wizard records).
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o755)
+    restore_backup(archive, state_dir=tmp_path / "st", config_out=shared / "clauster.yml")
+
+    assert shared.stat().st_mode & 0o777 == 0o755
+
+
+def test_restore_config_out_failure_leaves_no_temp_and_no_partial(
+    write_config, tmp_path, monkeypatch
+):
+    # If the atomic swap fails, the restore must leave NOTHING behind: no half-written temp
+    # beside the destination (it would hold the argon2 hash), and no partial destination.
+    # This is the branch that replaced the old copy2+chmod, whose failure mode was a
+    # permissive config left on disk after a restore reported as failed.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    dest_dir = tmp_path / "dest"
+    dest_dir.mkdir()
+    cfg_out = dest_dir / "clauster.yml"
+
+    def _boom(src, dst, **kwargs):
+        raise OSError("swap failed")
+
+    monkeypatch.setattr(ops_mod.atomicio, "replace_with_retry", _boom)
+    with pytest.raises(OSError, match="swap failed"):
+        restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out)
+
+    assert not cfg_out.exists()
+    assert list(dest_dir.iterdir()) == []
+
+
+def test_restore_config_out_closes_fd_when_fdopen_fails(write_config, tmp_path, monkeypatch):
+    # Mirror of test_atomic_write_text_closes_fd_when_fdopen_fails for the restore path:
+    # if os.fdopen raises before the `with` adopts the fd (EMFILE under fd-table pressure),
+    # the raw mkstemp fd must be closed rather than leaked onto an unlinked inode, and the
+    # temp — which would hold the argon2 hash — removed.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    dest_dir = tmp_path / "dest"
+    dest_dir.mkdir()
+    captured: dict[str, int] = {}
+    real_mkstemp = ops_mod.tempfile.mkstemp
+    real_close = ops_mod.os.close
+    closed: list[int] = []
+
+    def _spy_mkstemp(*a, **k):
+        fd, name = real_mkstemp(*a, **k)
+        captured["fd"] = fd
+        return fd, name
+
+    def _boom_fdopen(*a, **k):
+        raise OSError("too many open files")
+
+    def _spy_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(ops_mod.tempfile, "mkstemp", _spy_mkstemp)
+    monkeypatch.setattr(ops_mod.os, "fdopen", _boom_fdopen)
+    monkeypatch.setattr(ops_mod.os, "close", _spy_close)
+
+    with pytest.raises(OSError, match="too many open files"):
+        restore_backup(archive, state_dir=tmp_path / "st", config_out=dest_dir / "clauster.yml")
+    assert captured["fd"] in closed  # the raw fd was closed, not leaked
+    assert list(dest_dir.iterdir()) == []  # temp removed, destination not written
+
+
 def test_restore_refuses_nonempty_without_force(write_config, tmp_path):
     config = load_config(_cfg_file(write_config, tmp_path))
     _seed_state(config.state_dir)
@@ -1222,6 +1348,30 @@ def test_safe_extract_skips_member_without_file_object(tmp_path, monkeypatch):
     dest.mkdir()
     _safe_extract_tar(arch, dest)
     assert not (dest / "state" / "ghost.txt").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX execute-bit semantics")
+def test_safe_extract_never_grants_execute_bit(tmp_path):
+    # A restore archive is untrusted: _safe_extract_tar must NOT carry an archived member's
+    # mode onto disk. If it did, a crafted backup could set the execute bit on e.g.
+    # state/deps/bin/claustrum and — since deps.installed_binary_path gates only on
+    # is_file(), not os.access(X_OK) — get a planted native binary executed by the next
+    # daemon spawn (execve requires the exec bit). Extraction writes via open(..., "wb") at
+    # the umask default, which never sets an execute bit, so an archived 0755 member lands
+    # non-executable regardless of the ambient umask.
+    arch = tmp_path / "evil.tar.gz"
+    with tarfile.open(arch, "w:gz") as tar:
+        data = b"#!/bin/sh\necho pwned\n"
+        info = tarfile.TarInfo("state/deps/bin/claustrum")
+        info.size = len(data)
+        info.mode = 0o755  # attacker-set executable bit in the archive
+        tar.addfile(info, io.BytesIO(data))
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _safe_extract_tar(arch, dest)
+    planted = dest / "state" / "deps" / "bin" / "claustrum"
+    assert planted.is_file()
+    assert not (planted.stat().st_mode & 0o111)  # no user/group/other execute bits
 
 
 def test_restore_rolls_back_when_swap_fails(write_config, tmp_path, monkeypatch):
