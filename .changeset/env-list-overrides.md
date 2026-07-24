@@ -1,0 +1,5 @@
+---
+default: patch
+---
+
+List-valued config keys can now be set from the environment as a comma-separated value, and dict-valued keys no longer advertise a variable that crashes startup. Eight `list[str]` keys — including `auth.allowed_origins`, which an auth-on deployment behind a proxy, tunnel, or non-loopback bind needs — were mapped to a `CLAUSTER_*` variable whose raw string was assigned straight into the field, so setting the documented variable failed config validation with `Input should be a valid list` and the process never started; env-only deployments (Docker/Compose in particular) had no way to set them short of hand-editing `clauster.yml`. Values now split on commas with surrounding whitespace trimmed and blank entries dropped, through both the plain variable and its `_FILE` secret-file form. The three `dict` keys (`projects`, `claude.env`, `webhooks.events`) genuinely cannot be addressed by one variable and are now omitted from the env map entirely rather than being discoverable-but-fatal, matching what the configuration guide already documented.

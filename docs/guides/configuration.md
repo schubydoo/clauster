@@ -20,20 +20,33 @@ Clauster searches for a config in this order (first file that exists wins):
 If none is found, startup fails with a `FileNotFoundError` listing the paths it
 searched.
 
-**Environment overrides.** Any *scalar* key is overridable by an environment
-variable named `CLAUSTER_<UPPER_SNAKE_PATH>` — the dotted path uppercased and
-joined with underscores. For example:
+**Environment overrides.** Any *scalar* or *list* key is overridable by an
+environment variable named `CLAUSTER_<UPPER_SNAKE_PATH>` — the dotted path
+uppercased and joined with underscores. For example:
 
 - `auth.enabled` → `CLAUSTER_AUTH_ENABLED`
 - `auth.password_hash` → `CLAUSTER_AUTH_PASSWORD_HASH`
 - `claude.launch_mode` → `CLAUSTER_CLAUDE_LAUNCH_MODE` *(full dotted path — see note)*
+- `auth.allowed_origins` → `CLAUSTER_AUTH_ALLOWED_ORIGINS` *(comma-separated list)*
+
+**List keys take a comma-separated value**, which is how container tooling
+usually passes lists. Surrounding spaces are trimmed and blank entries dropped,
+so a trailing comma is harmless:
+
+```bash
+CLAUSTER_AUTH_ALLOWED_ORIGINS='https://clauster.example.com,http://localhost:7621'
+CLAUSTER_CLONE_ALLOWED_SCHEMES='https,ssh'
+```
+
+A value that itself contains a comma can't be expressed this way — set that key
+in the YAML file instead.
 
 !!! note "Env mapping is by leaf path"
     The mapping recurses nested models and uses the *full dotted path*, so
-    `claude.launch_mode` maps to `CLAUSTER_CLAUDE_LAUNCH_MODE`. `dict`/`list`
-    leaves (e.g. `projects`, `reverse_proxy.trusted_ips`,
-    `clone.allowed_private_cidrs`) **cannot** be set via env — a single env var
-    can't express them unambiguously; set those in the YAML file.
+    `claude.launch_mode` maps to `CLAUSTER_CLAUDE_LAUNCH_MODE`. `dict` leaves
+    (`projects`, `claude.env`, `webhooks.events`) **cannot** be set via env — a
+    single variable can't address one entry of a map — so they have no
+    `CLAUSTER_*` variable at all; set those in the YAML file.
 
 **Secret files (`*_FILE`).** Every `CLAUSTER_<X>` variable also accepts a
 `CLAUSTER_<X>_FILE` form that reads the value from a file instead of the
