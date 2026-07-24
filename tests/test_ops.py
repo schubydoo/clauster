@@ -653,6 +653,26 @@ def test_backup_includes_config(write_config, tmp_path):
     assert cfg_out.is_file() and result["config"] == str(cfg_out)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
+def test_restore_config_out_forces_0600_even_when_source_is_loose(write_config, tmp_path):
+    # The restored config carries the argon2 password hash, so restore --config-out must
+    # write it owner-only (0600) — never the umask-derived 0644 that shutil.copy2 would
+    # otherwise carry over from the loose extracted source (matching config_writer / the
+    # setup wizard). Pin the umask to 0022 so extraction reproduces the 0644 source the
+    # finding describes, then prove the destination is tightened to 0600 regardless.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+    cfg_out = tmp_path / "restored.yml"
+    old_umask = os.umask(0o022)
+    try:
+        result = restore_backup(archive, state_dir=tmp_path / "st", config_out=cfg_out)
+    finally:
+        os.umask(old_umask)
+    assert result["config"] == str(cfg_out)
+    assert cfg_out.stat().st_mode & 0o777 == 0o600
+
+
 def test_restore_refuses_nonempty_without_force(write_config, tmp_path):
     config = load_config(_cfg_file(write_config, tmp_path))
     _seed_state(config.state_dir)
@@ -1222,6 +1242,30 @@ def test_safe_extract_skips_member_without_file_object(tmp_path, monkeypatch):
     dest.mkdir()
     _safe_extract_tar(arch, dest)
     assert not (dest / "state" / "ghost.txt").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX execute-bit semantics")
+def test_safe_extract_never_grants_execute_bit(tmp_path):
+    # A restore archive is untrusted: _safe_extract_tar must NOT carry an archived member's
+    # mode onto disk. If it did, a crafted backup could set the execute bit on e.g.
+    # state/deps/bin/claustrum and — since deps.installed_binary_path gates only on
+    # is_file(), not os.access(X_OK) — get a planted native binary executed by the next
+    # daemon spawn (execve requires the exec bit). Extraction writes via open(..., "wb") at
+    # the umask default, which never sets an execute bit, so an archived 0755 member lands
+    # non-executable regardless of the ambient umask.
+    arch = tmp_path / "evil.tar.gz"
+    with tarfile.open(arch, "w:gz") as tar:
+        data = b"#!/bin/sh\necho pwned\n"
+        info = tarfile.TarInfo("state/deps/bin/claustrum")
+        info.size = len(data)
+        info.mode = 0o755  # attacker-set executable bit in the archive
+        tar.addfile(info, io.BytesIO(data))
+    dest = tmp_path / "out"
+    dest.mkdir()
+    _safe_extract_tar(arch, dest)
+    planted = dest / "state" / "deps" / "bin" / "claustrum"
+    assert planted.is_file()
+    assert not (planted.stat().st_mode & 0o111)  # no user/group/other execute bits
 
 
 def test_restore_rolls_back_when_swap_fails(write_config, tmp_path, monkeypatch):

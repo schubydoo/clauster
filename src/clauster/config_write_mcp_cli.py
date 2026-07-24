@@ -31,18 +31,29 @@ memory or docs alone, per #769:
   (confirmed: with the env var set and stdin closed, the OAuth flow does not hang)
   — used for a remote server's OAuth client secret, passed here via the child
   process's environment, never as a CLI argument. A server's own ``env``/``headers``
-  values (and a token-bearing ``url``) have **no** such escape hatch in the upstream
-  CLI (``-e`` and ``add-json``'s JSON argument are both ordinary argv), so
-  :func:`entry_needs_direct_write` routes any entry carrying an inline ``env`` or
-  ``headers`` value — or a secret-shaped ``url`` — away from this module entirely,
-  into :mod:`clauster.config_write_mcp`'s direct (non-spawning) writers instead. The
+  values (and a token-bearing ``url`` or stdio ``args``) have **no** such escape hatch
+  in the upstream CLI (``-e`` and ``add-json``'s JSON argument are both ordinary argv),
+  so :func:`entry_needs_direct_write` routes any entry carrying an inline ``env`` or
+  ``headers`` value — a ``url`` whose userinfo, query, or **fragment** could carry a
+  credential (``user:pass@host``, ``?api_key=…``, ``#api_key=…``) or that
+  :func:`urllib.parse.urlsplit` cannot parse (fail-closed), or a non-empty stdio
+  ``args`` list — away from this module entirely, into
+  :mod:`clauster.config_write_mcp`'s direct (non-spawning) writers instead. The
   predicate deliberately errs toward "keep it off the CLI": key-name-based redaction
   (:func:`clauster.config_write.redact_secrets`) cannot see a real secret stored under
-  a benign key (``{"env": {"DEPLOY_KEY": "AKIA…"}}``), so we treat *any* non-empty
-  ``env``/``headers`` value as potentially secret rather than trusting the key name.
+  a benign key (``{"env": {"DEPLOY_KEY": "AKIA…"}}``) or a token in a ``url`` query/
+  fragment, so we treat *any* non-empty ``env``/``headers`` value — and any of those
+  ``url``/``args`` shapes — as potentially secret rather than trusting the key name.
   The direct writer yields the same ``mcpServers`` file state as the CLI would, minus
   the CLI's cosmetic ``"args": []`` normalization. See that module's "#769 additions"
   docstring for the reconciliation with the design doc's "hybrid" strategy.
+
+  **Uncovered residual (conscious boundary):** a secret embedded in the ``url`` *path*
+  (``https://host/mcp/sk-live-…/sse``) is **not** routed off the CLI — every legitimate
+  hosted-MCP ``url`` has a path (``/v1``, ``/sse``, ``/mcp``), so treating every
+  path-bearing ``url`` as secret-shaped would push essentially every remote server onto
+  the direct writer. Closing that gap needs a broader allowlist redesign and is a
+  documented follow-up, not this guard.
 
 Every spawn here is validate-before-spawn: the binary is resolved to an absolute
 path (:func:`clauster.claude_cli.resolve_binary`), argv is always a list (never
@@ -60,6 +71,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import claude_cli, procutil
 from . import config_write as cw
@@ -85,6 +97,29 @@ def _has_nonempty_value(block: Any) -> bool:
     return isinstance(block, dict) and any(isinstance(v, str) and v for v in block.values())
 
 
+def _url_carries_credential(url: str) -> bool:
+    """Whether ``url`` carries a credential that must not reach ``add-json``'s argv.
+
+    Fails **closed** (CWE-214): an MCP ``url`` reaches ``claude mcp add-json`` as an
+    ordinary argv token, so a secret smuggled into its userinfo (``user[:pass]@host``),
+    query string (``?api_key=…``), or **fragment** (``#api_key=…``) would be visible via
+    ``ps`` / ``/proc/<pid>/cmdline``. Any of those components — or a ``url`` so malformed
+    that :func:`urllib.parse.urlsplit` raises ``ValueError`` — is treated as
+    credential-bearing so the entry routes to the direct file writer instead.
+
+    Deliberately does **not** flag a secret embedded in the ``url`` *path*
+    (``https://host/mcp/sk-live-…/sse``): every legitimate hosted-MCP ``url`` has a path
+    (``/v1``, ``/sse``, ``/mcp``), so routing all path-bearing urls off the CLI would push
+    essentially every remote server onto the direct writer. That needs a broader allowlist
+    redesign and is a documented follow-up — the path case is a known uncovered residual.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return True  # unparseable -> fail closed, keep it off the CLI
+    return bool(parts.query or parts.username or parts.password or parts.fragment)
+
+
 def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
     """Whether ``entry`` must be written by the direct file writer, never the CLI.
 
@@ -93,6 +128,10 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
 
     * any non-empty ``env`` value (stdio or remote), **or**
     * any non-empty ``headers`` value (remote), **or**
+    * a ``url`` whose userinfo, query, or **fragment** could carry a credential, or that
+      cannot be parsed at all (see :func:`_url_carries_credential`), **or**
+    * a non-empty stdio ``args`` list (a token can hide as ``["--api-key", "sk-…"]``),
+      **or**
     * a token-bearing / interpolated value the Foundation's structural detector
       catches anywhere else (e.g. a ``scheme://user@host`` ``url``, a ``${VAR}``).
 
@@ -100,15 +139,23 @@ def entry_needs_direct_write(entry: dict[str, Any]) -> bool:
     (:func:`clauster.config_write.redact_secrets`) can only spot a secret by its KEY
     (``token``/``secret``/…), so a real secret under a benign key
     (``{"DEPLOY_KEY": "AKIA…"}``, ``{"GH_PAT": "ghp_…"}``,
-    ``{"X-Custom": "Bearer sk-…"}``) would slip past a key-only check and land in
-    argv. Treating *every* non-empty ``env``/``headers`` value as
-    must-not-touch-the-CLI closes that gap — the CLI ``add-json`` path is thereby
-    reserved for entries with no ``env``/``headers`` at all (plus the OAuth
-    ``--client-secret`` case, whose secret rides ``MCP_CLIENT_SECRET`` in the child
-    env, not argv). The cost is only that a genuinely non-secret ``env`` also skips
-    the CLI — harmless, since the direct writer produces equivalent file state.
+    ``{"X-Custom": "Bearer sk-…"}``) — or a token in a ``url`` query/fragment or an
+    ``args`` element — would slip past a key-only check and land in argv. Treating
+    *every* such shape as must-not-touch-the-CLI closes that gap — the CLI ``add-json``
+    path is thereby reserved for entries with no ``env``/``headers``, a credential-free
+    ``url``, and no ``args`` (plus the OAuth ``--client-secret`` case, whose secret rides
+    ``MCP_CLIENT_SECRET`` in the child env, not argv). The cost is only that a genuinely
+    non-secret ``env``/``url``/``args`` also skips the CLI — harmless, since the direct
+    writer produces equivalent file state. A secret in the ``url`` *path* stays uncovered
+    (see :func:`_url_carries_credential` for that conscious boundary).
     """
     if _has_nonempty_value(entry.get("env")) or _has_nonempty_value(entry.get("headers")):
+        return True
+    url = entry.get("url")
+    if isinstance(url, str) and url and _url_carries_credential(url):
+        return True
+    args = entry.get("args")
+    if isinstance(args, list) and args:
         return True
     return cw.redact_secrets(entry) != entry
 
@@ -213,7 +260,8 @@ def cli_add_server(
     if entry_needs_direct_write(entry):
         raise ValueError(
             f"cli_add_server refuses to add {name!r}: entry carries an inline env/headers "
-            "value that must not reach the CLI argv (route to the direct writer instead)"
+            "value, a credential-bearing url, or non-empty args that must not reach the "
+            "CLI argv (route to the direct writer instead)"
         )
     cw.validate_candidate({name: entry}, mcp.validate_mcp_servers)
     args = ["add-json", name, json.dumps(entry), "--scope", scope]

@@ -46,6 +46,17 @@ A second validator independently refuses to start when `password_required` is
 set but `password_hash` is empty — regardless of host — because that would lock
 everyone out or be silently skipped.
 
+> **Every non-loopback bind also needs `auth.allowed_origins`.** A loopback bind
+> auto-trusts `127.0.0.1`/`localhost`/`[::1]` at its own port; a non-loopback
+> bind auto-trusts **nothing**. The strict `Origin` allowlist gates every unsafe
+> request and every WebSocket handshake — and, since 1.0, it does so *whether or
+> not* `auth.enabled` is set, because it is a cross-site defence rather than an
+> authentication method. So list the browser-facing origin, or the dashboard's
+> own actions and live views are refused with `origin check failed`. This bites
+> even when you browse the service at `http://localhost:<port>` (a published
+> Docker port, for instance) — the *bind* host is what decides, not the address
+> you type.
+
 ## Password auth on a non-loopback bind
 
 ```yaml

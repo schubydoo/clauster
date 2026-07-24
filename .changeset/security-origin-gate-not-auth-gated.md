@@ -1,0 +1,5 @@
+---
+default: major
+---
+
+The cross-site `Origin` allowlist is now enforced even when `auth.enabled` is false (the shipped default), closing a CSRF / WebSocket-hijack hole: previously the HTTP `guard` middleware returned before the Origin check and all four WebSocket routes short-circuited theirs, so a page the operator merely visited could drive unsafe requests against the loopback dashboard (trust a directory, resume a bridge, clone a repo, restart) and read-stream live session output. With auth off the gate rejects only a *present*, non-allowlisted `Origin` — an absent one (a CLI/script client, never a browser) still passes. A loopback bind auto-allows `127.0.0.1`/`localhost`/`[::1]` **at its configured port**, so the default deployment needs no change; an auth-off deployment the browser reaches at any other address — a non-loopback bind, a tunnel or reverse proxy, or an SSH port-forward onto a different local port — must now list that origin in `auth.allowed_origins`, the same setting an authenticated deployment in those positions already needs. It fails closed and visibly, never silently (see UPGRADING.md).

@@ -43,6 +43,19 @@ def test_password_no_hash_is_false():
     assert auth.verify_password(h, "not-a-valid-argon2-hash", "anything") is False
 
 
+def test_falsy_hash_never_authenticates_dummy_password():
+    # F3 regression (CWE-798): a falsy stored_hash (None OR "") must never authenticate,
+    # not even when the attempt is the module dummy's literal plaintext. The dummy verify
+    # exists only to keep timing constant when no password is configured — a match against
+    # it must NOT return True, or the source-visible "clauster-dummy-do-not-use" string
+    # would be a working login credential. (The prior test only covered a NON-matching
+    # attempt, so the empty-hash + matching-dummy path went unguarded.)
+    h = auth.make_hasher()
+    for stored in (None, ""):
+        assert auth.verify_password(h, stored, "clauster-dummy-do-not-use") is False
+        assert auth.verify_password(h, stored, "anything-else") is False
+
+
 # ----- API tokens (#360) ---------------------------------------------------
 
 

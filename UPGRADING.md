@@ -51,6 +51,54 @@ mcp:
 Like the `config_write` / `login_shepherd` gates, `mcp.allow_writes` is
 file/CLI-managed only (**not** web-editable). The read tools are unchanged.
 
+## 0.12 → 1.0: the dashboard now blocks cross-site requests even with no password
+
+**What changed, in plain terms.** A website you open in your browser can quietly send
+requests to programs running on your own computer — clauster included. Before 1.0, when
+clauster had no password set (the default), it didn't check *where* a request came from.
+So a malicious page you happened to visit could drive your dashboard (start/stop sessions,
+trust a folder, restart the service) or read your live session output, without you ever
+seeing it. As of 1.0 clauster checks the origin of every state-changing request and every
+live-view (WebSocket) connection and rejects any that came from somewhere else. (Requests
+with no origin at all — command-line tools, scripts, `curl` — are unaffected: only a
+browser attaches an origin, so there is nothing to spoof.)
+
+**Do you need to do anything?** Check your config's `host:` setting first — that, not the
+address you browse, is what decides:
+
+- **`host:` is `127.0.0.1` or `localhost` (the default), and you browse it at that same
+  address and port.** Nothing to do. You're simply safer.
+- **`host:` is loopback, but you reach it some *other* way** — you need to list that
+  address (one line, below):
+  - a **tunnel or reverse proxy** in front of clauster (Cloudflare Tunnel, Tailscale
+    Serve, nginx/Caddy) — the address is the public hostname, not `localhost`;
+  - an **SSH port-forward onto a different local port**, e.g.
+    `ssh -L 9000:localhost:7621` → you browse `http://localhost:9000`, and the *port*
+    no longer matches. (Forwarding to the *same* port keeps working.)
+- **`host:` is anything else — `0.0.0.0`, a LAN IP, or Docker (the image binds `0.0.0.0`).**
+  Then clauster trusts **nothing** automatically, and you must list the address you browse
+  to **even if that address is `http://localhost:7621`**. This is the case most likely to
+  surprise you: the container is on `0.0.0.0` internally, so browsing it at `localhost`
+  still needs the entry.
+
+In the second and third cases your own buttons and live views are refused until you
+list the address you actually browse to:
+
+```yaml
+auth:
+  allowed_origins: ["http://localhost:9000"]   # the address you type into the browser
+```
+
+Use the address **as it appears in your browser's URL bar** — scheme, host, and port — not
+clauster's internal bind address. It fails loudly, never silently: a refused action, or a
+live view that won't connect, with `origin check failed` in the response.
+
+If clauster **already has a password**, nothing changes for you here — a
+non-loopback or proxied deployment has always needed `auth.allowed_origins`. This change
+only extends that same requirement to deployments running *without* a password, which
+previously skipped the check entirely. (And if you're reachable beyond your own machine,
+setting a password is worth doing regardless.)
+
 ## 0.12 → 0.13: SQLite-only; `database_url` removed
 
 0.13 commits to SQLite as the only persistence substrate (#796) — the

@@ -821,6 +821,15 @@ def restore_backup(
             if cfgs:
                 config_out.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(cfgs[0], config_out)
+                # The restored config carries the argon2 password hash, so force it
+                # owner-only (0600) — matching config_writer / the setup wizard.
+                # shutil.copy2 copies the SOURCE file's mode, and that source is the
+                # tar member _safe_extract_tar just wrote via a bare open(), i.e. the
+                # umask default (typically 0644) — NOT the mode stored in the archive.
+                # So the copy alone would publish the hash to every local user.
+                # (0600 has no group/other bits for the umask to clear; on Windows
+                # this only keeps the file writable — a no-op.)
+                os.chmod(config_out, 0o600)
                 restored["config"] = str(config_out)
     return restored
 

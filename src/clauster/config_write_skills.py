@@ -655,4 +655,4 @@ def write_project_local_skill_overrides(
     path = cw.project_local_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     cw.write_settings_subtree(path, SKILL_OVERRIDES_KEY, incoming, expected_hash)
-    cw.ensure_gitignored(project_dir, ".claude/settings.local.json")
+    cw.ensure_gitignored(project_dir, ".claude/settings.local.json", ignore_backup_sibling=True)

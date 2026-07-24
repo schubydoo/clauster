@@ -17,6 +17,8 @@ account is never touched.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -285,7 +287,10 @@ def test_local_write_gitignore_idempotent_across_writes(tmp_path: Path) -> None:
     _s2, h1 = cws.read_project_local_settings(tmp_path)
     cws.write_project_local_settings(tmp_path, {"model": "opus"}, h1)
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert gitignore.count(".claude/settings.local.json") == 1
+    # Count exact lines, not substrings: the ``.bak`` sibling entry (#F6) contains
+    # ``.claude/settings.local.json`` as a substring, so the base entry is asserted
+    # unduplicated by line, not by substring occurrence.
+    assert gitignore.splitlines().count(".claude/settings.local.json") == 1
 
 
 def test_local_scope_is_independent_of_project_scope_file(tmp_path: Path) -> None:
@@ -310,6 +315,41 @@ def test_local_write_stale_hash_raises(tmp_path: Path) -> None:
     stale = cw.hash_bytes(b"something else")
     with pytest.raises(cw.StaleConfigWriteError):
         cws.write_project_local_settings(tmp_path, {"model": "sonnet"}, stale)
+
+
+def test_local_write_backup_sibling_is_gitignored(tmp_path: Path) -> None:
+    # F6 regression: the overwrite drops a real settings.local.json.bak holding the
+    # PREVIOUS (unredacted) env values; that plaintext sibling must be gitignored
+    # alongside the file itself, or a later ``git add`` could publish the old secret.
+    _s0, h0 = cws.read_project_local_settings(tmp_path)
+    cws.write_project_local_settings(tmp_path, {"env": {"API_KEY": "sk-first"}}, h0)
+    _s1, h1 = cws.read_project_local_settings(tmp_path)
+    cws.write_project_local_settings(tmp_path, {"env": {"API_KEY": "sk-second"}}, h1)
+
+    backup = tmp_path / ".claude" / "settings.local.json.bak"
+    assert backup.exists()  # the second (overwrite) write really dropped a .bak
+    assert "sk-first" in backup.read_text(encoding="utf-8")  # it holds the prior env value
+
+    lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".claude/settings.local.json.bak" in lines
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git binary not available")
+def test_local_write_backup_sibling_matched_by_git_check_ignore(tmp_path: Path) -> None:
+    # Prove git itself treats the real .bak as ignored (not just that the entry is
+    # present): check-ignore exits 0 when the path matches an ignore rule.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    _s0, h0 = cws.read_project_local_settings(tmp_path)
+    cws.write_project_local_settings(tmp_path, {"env": {"API_KEY": "sk-first"}}, h0)
+    _s1, h1 = cws.read_project_local_settings(tmp_path)
+    cws.write_project_local_settings(tmp_path, {"env": {"API_KEY": "sk-second"}}, h1)
+
+    result = subprocess.run(
+        ["git", "check-ignore", ".claude/settings.local.json.bak"],
+        cwd=tmp_path,
+        capture_output=True,
+    )
+    assert result.returncode == 0  # 0 => git ignores the .bak sibling
 
 
 # --- scope-merge provenance (the novel #772 part) -------------------------------------

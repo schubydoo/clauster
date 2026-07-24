@@ -317,7 +317,7 @@ def write_project_local_settings(
     path = cw.project_local_settings_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     _locked_write_misc(path, incoming, expected_hash)
-    cw.ensure_gitignored(project_dir, ".claude/settings.local.json")
+    cw.ensure_gitignored(project_dir, ".claude/settings.local.json", ignore_backup_sibling=True)
 
 
 def _compute_effective_settings(

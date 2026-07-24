@@ -369,7 +369,10 @@ def test_local_write_gitignore_idempotent_across_writes(tmp_path: Path) -> None:
     _b1, h1 = hooks.read_project_local_hooks(tmp_path)
     hooks.write_project_local_hooks(tmp_path, {"PreToolUse": [_GROUP]}, expected_hash=h1)
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert gitignore.count(".claude/settings.local.json") == 1
+    # Count exact lines, not substrings: the ``.bak`` sibling entry (#F6) contains
+    # ``.claude/settings.local.json`` as a substring, so the base entry is asserted
+    # unduplicated by line, not by substring occurrence.
+    assert gitignore.splitlines().count(".claude/settings.local.json") == 1
 
 
 def test_local_write_bad_shape_writes_nothing_and_no_gitignore(tmp_path: Path) -> None:

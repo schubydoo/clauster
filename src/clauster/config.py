@@ -408,7 +408,9 @@ class AuthConfig(BaseModel):
         "auth (e.g. a trusted LAN). `ops._check_auth` downgrades this to a warning. "
         "When `auth.enabled` is `false`, **anyone who can reach the port has full "
         "operator control of this host** — the dashboard drives a shell; treat it "
-        "accordingly.",
+        "accordingly. A non-loopback bind auto-allows no `Origin`, so pair this with "
+        "`allowed_origins` (the cross-site gate runs even with auth off) or the "
+        "dashboard's own writes and live views are rejected.",
     )
     cookie_secure: Literal["auto", "always", "never"] = Field(
         default="auto",
@@ -420,7 +422,13 @@ class AuthConfig(BaseModel):
     )
     allowed_origins: list[str] = Field(
         default_factory=list,
-        description="Extra WebSocket / CSRF origins (e.g. the proxy domain).",
+        description="Extra WebSocket / CSRF origins (e.g. the proxy domain). The `Origin` "
+        "allowlist is enforced on unsafe methods and WebSocket handshakes **even when "
+        "`enabled` is `false`** — it is a cross-site defence, not an authentication "
+        "method. A loopback bind auto-allows only `127.0.0.1`/`localhost`/`[::1]` **at "
+        "the configured port**, so list your real browser-facing origin here whenever it "
+        "differs: a non-loopback bind, a reverse proxy or tunnel, or an SSH port-forward "
+        "onto a different local port.",
     )
 
     @field_validator("api_token_hash", mode="before")
@@ -445,6 +453,22 @@ class AuthConfig(BaseModel):
                 "api_token_hash must be a 64-character lowercase hex string "
                 "(the SHA-256 output from `clauster hash-token`)"
             )
+        return v
+
+    @field_validator("password_hash", mode="before")
+    @classmethod
+    def _blank_password_hash_is_none(cls, v: object) -> object:
+        # A blank / whitespace-only password hash can never verify a password, but an
+        # empty string is falsy-yet-not-None: it slips past the `password_hash is None`
+        # unset checks and, paired with auth.verify_password's dummy-hash timing guard,
+        # would make the source-visible dummy password a working login credential
+        # (CWE-798). Normalize it to None so only a REAL hash counts — mirroring
+        # _blank_token_hash_is_none, and closing the `password_hash: ""` yaml path and
+        # the present-but-empty CLAUSTER_AUTH_PASSWORD_HASH env-var path at load time.
+        # No hex-format check here: an argon2id hash is a structured `$argon2id$...`
+        # string, not a fixed-width hex digest.
+        if isinstance(v, str) and not v.strip():
+            return None
         return v
 
 

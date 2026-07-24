@@ -556,7 +556,9 @@ def project_local_settings_path(project_dir: Path) -> Path:
     return project_dir / ".claude" / "settings.local.json"
 
 
-def ensure_gitignored(project_dir: Path, relative_path: str) -> None:
+def ensure_gitignored(
+    project_dir: Path, relative_path: str, *, ignore_backup_sibling: bool = False
+) -> None:
     """Idempotently append ``relative_path`` to ``<project_dir>/.gitignore``.
 
     Mirrors Claude Code's own behavior: a project-local file (``.claude/settings.local
@@ -564,25 +566,42 @@ def ensure_gitignored(project_dir: Path, relative_path: str) -> None:
     accidentally committed. Called by the local-scope writers *after* a successful
     write, so a validation failure never touches ``.gitignore``.
 
-    Idempotent: a ``relative_path`` already present as an exact line (surrounding
-    whitespace ignored) is left untouched — no duplicate append, and the existing
-    content is never rewritten or reordered (only ever appended to). A missing
-    ``.gitignore`` is created. This is deliberately a simple exact-line check, not a
-    full gitignore-pattern matcher — good enough for the fixed, known entries this
-    surface writes, and conservative (a near-duplicate pattern is harmless, just
-    untidy, never unsafe).
+    ``ignore_backup_sibling`` additionally ignores the ``<relative_path>.bak``
+    sibling. The backup-taking JSON writers reach
+    :func:`~clauster.claude_json._atomic_write_json`, which — on an overwrite — drops
+    a one-time ``<name>.bak`` holding the *previous* file contents beside the target.
+    For the secret-bearing ``settings.local.json`` that snapshot can carry the prior
+    ``env`` map (API keys and the like), so ignoring only the file itself lets the
+    plaintext backup be committed and pushed. Ignoring the sibling up front closes
+    that gap before the ``.bak`` is ever created. Callers whose writer takes no backup
+    (``CLAUDE.local.md`` is replaced without one) leave this off, so no phantom
+    ``.bak`` entry is added for a file that never exists.
+
+    Idempotent: an entry already present as an exact line (surrounding whitespace
+    ignored) is left untouched — no duplicate append, and the existing content is
+    never rewritten or reordered (only ever appended to). A missing ``.gitignore`` is
+    created. This is deliberately a simple exact-line check, not a full
+    gitignore-pattern matcher — good enough for the fixed, known entries this surface
+    writes, and conservative (a near-duplicate pattern is harmless, just untidy, never
+    unsafe).
     """
     gitignore = project_dir / ".gitignore"
     try:
         existing = gitignore.read_text(encoding="utf-8")
     except FileNotFoundError:
         existing = ""
-    if relative_path in (line.strip() for line in existing.splitlines()):
+    present = {line.strip() for line in existing.splitlines()}
+    wanted = [relative_path]
+    if ignore_backup_sibling:
+        wanted.append(relative_path + ".bak")
+    missing = [entry for entry in wanted if entry not in present]
+    if not missing:
         return
     with gitignore.open("a", encoding="utf-8") as fh:
         if existing and not existing.endswith("\n"):
             fh.write("\n")
-        fh.write(relative_path + "\n")
+        for entry in missing:
+            fh.write(entry + "\n")
 
 
 def write_settings_subtree(

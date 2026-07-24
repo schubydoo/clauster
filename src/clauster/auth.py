@@ -172,7 +172,11 @@ def verify_password(hasher: PasswordHasher, stored_hash: str | None, attempt: st
         hasher.verify(target, attempt)
     except (VerificationError, InvalidHashError):
         return False
-    return stored_hash is not None
+    # Only a REAL configured hash may authenticate. A falsy stored_hash — None OR the
+    # empty string — means no password is set: the verify above still ran against the
+    # dummy to keep timing constant, but a match against that source-visible dummy must
+    # never grant access (else its literal plaintext would be a working credential).
+    return bool(stored_hash)
 
 
 # ----- API tokens (inbound Bearer credential, #360) ------------------------
