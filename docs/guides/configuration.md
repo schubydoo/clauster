@@ -40,8 +40,13 @@ CLAUSTER_CLONE_ALLOWED_SCHEMES='https,ssh'
 
 A **newline** separates as well, so the `*_FILE` form below can be written one
 entry per line. An **empty** value means an empty list — it does *not* fall
-through to the value in the YAML file. A value that itself contains a comma
-can't be expressed this way; set that key in the YAML file instead.
+through to the value in the YAML file.
+
+An entry that itself contains a comma can't be expressed this way; set that key
+in the YAML file instead. The realistic case is `notifications.urls`, where an
+Apprise URL often carries comma-separated targets in its query
+(`mailto://…?to=a@example,b@example`) — split on the comma, it silently becomes
+two junk URLs that only fail when a notification is sent.
 
 Which keys are lists is visible in the
 [configuration reference](../reference/config.md) — they are the ones typed

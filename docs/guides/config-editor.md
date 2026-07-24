@@ -81,8 +81,10 @@ URL lists (`webhooks.urls`, `notifications.urls`), auth trust lists
 paths (`claude.binary`/`claustrum.binary`).
 
 If you can't find a field in the editor, that is by design, not a gap. Edit
-`clauster.yml` on the host (or use the CLI) instead — or, for the list keys
-above, set the corresponding comma-separated `CLAUSTER_*` environment override.
+`clauster.yml` on the host (or use the CLI) instead. That same host access also
+allows the corresponding comma-separated `CLAUSTER_*` environment override for
+the list keys above — both require the host, which is exactly the boundary the
+editor's exclusions draw.
 
 ### Advanced settings (step-up re-auth)
 

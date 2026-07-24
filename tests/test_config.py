@@ -526,6 +526,69 @@ def test_dict_leaves_are_not_env_addressable(write_config, monkeypatch):
     assert config.claude.env == {}
 
 
+def test_list_of_non_scalars_is_not_env_addressable():
+    # A list of MODELS or nested containers has no delimited-string spelling. Mapping one
+    # would advertise a var that assigns list[str] into it and crash load — the #1072 class
+    # this map exists to remove. No such field exists today; this stops one being added
+    # silently. Asserted on the classifier because the schema has no such leaf to drive it.
+    from clauster.config import ProjectConfig, _env_leaf_kind
+
+    assert _env_leaf_kind(list[str]) == "list"
+    assert _env_leaf_kind(list[ProjectConfig]) is None
+    assert _env_leaf_kind(list[dict[str, str]]) is None
+    assert _env_leaf_kind(list[list[str]]) is None
+
+
+def test_legacy_env_aliases_all_target_addressable_leaves():
+    # A legacy alias pointing at a dropped dict leaf would assign a raw string and crash
+    # config load. _apply_env_overrides skips such an alias, but an alias that SHOULD work
+    # silently doing nothing is its own bug — so pin that every declared alias resolves.
+    from clauster.config import _LEGACY_ENV_ALIASES, ClausterConfig, _env_leaf_map
+
+    leaves = {path for path, _kind in _env_leaf_map(ClausterConfig).values()}
+    for env_name, path in _LEGACY_ENV_ALIASES.items():
+        assert path in leaves, f"{env_name} aliases {'.'.join(path)}, which is not env-addressable"
+
+
+def test_every_list_env_var_validates_through_the_model(write_config, monkeypatch):
+    # Companion to the coercion test below: that one bypasses model validation on purpose,
+    # so it would pass even for a var that is fatal at load. This pushes each list var all
+    # the way through load_config with a value valid for its field.
+    samples = {
+        "CLAUSTER_AUTH_ALLOWED_ORIGINS": "https://a.example,https://b.example",
+        "CLAUSTER_AUTH_REVERSE_PROXY_TRUSTED_IPS": "10.0.0.0/8,192.168.1.1",
+        "CLAUSTER_CLAUDE_PATH_APPEND": "/opt/bin,/usr/local/bin",
+        "CLAUSTER_CLONE_ALLOWED_PRIVATE_CIDRS": "10.0.0.0/8",
+        "CLAUSTER_CLONE_ALLOWED_SCHEMES": "https,ssh",
+        "CLAUSTER_NOTIFICATIONS_URLS": "json://example.com",
+        "CLAUSTER_TLS_HOSTNAMES": "clauster.example.com",
+        "CLAUSTER_WEBHOOKS_URLS": "https://hook.example.com",
+    }
+    from clauster.config import ClausterConfig, _env_leaf_map
+
+    list_vars = {e for e, (_p, k) in _env_leaf_map(ClausterConfig).items() if k == "list"}
+    assert list_vars == set(samples), "a list env var gained/lost — add it to the samples"
+
+    # A few leaves carry cross-field model rules that a lone value can't satisfy; that is
+    # the model working, not a coercion failure, so the companion key goes in with it.
+    companions = {
+        # A tls block holding only hostnames trips "cert_file is required when
+        # provision = off" before the list is ever inspected.
+        "CLAUSTER_TLS_HOSTNAMES": {"CLAUSTER_TLS_PROVISION": "self-signed"},
+    }
+
+    for env_name, value in samples.items():
+        monkeypatch.setenv(env_name, value)
+        for extra_name, extra_value in companions.get(env_name, {}).items():
+            monkeypatch.setenv(extra_name, extra_value)
+        try:
+            load_config(write_config())  # must not raise
+        finally:
+            monkeypatch.delenv(env_name, raising=False)
+            for extra_name in companions.get(env_name, {}):
+                monkeypatch.delenv(extra_name, raising=False)
+
+
 def test_every_list_env_var_coerces_to_a_list(monkeypatch):
     # Guards the whole class rather than the one field #1072 was filed for: EVERY list-kind
     # var must reach the model as a list, so a future list field added to the schema fails

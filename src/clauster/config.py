@@ -1535,8 +1535,26 @@ def _env_leaf_kind(ann: object) -> str | None:
         if origin is dict:
             return None
         if origin in (list, set, tuple, frozenset):
-            return "list"
+            # Only a list of SCALARS can be carried by a delimited string. A list of
+            # models or nested containers has no such spelling, so it is left unmapped
+            # rather than advertised — mapping it would assign `list[str]` into it and
+            # crash config load, which is precisely the #1072 class this map removes.
+            # No such field exists today; this keeps one from being added silently.
+            items = [a for a in get_args(candidate) if a is not Ellipsis]
+            if items and all(_is_scalar_item(a) for a in items):
+                return "list"
+            return None
     return "scalar"
+
+
+def _is_scalar_item(ann: object) -> bool:
+    """Whether a list's item type is a plain scalar a delimited string can carry."""
+    origin = get_origin(ann)
+    if origin is Literal:
+        return True
+    if origin is not None:  # a nested container (list/dict/union) inside the list
+        return False
+    return isinstance(ann, type) and not issubclass(ann, BaseModel)
 
 
 def _env_leaf_map(
@@ -1572,16 +1590,19 @@ def _split_env_list(value: str) -> list[str]:
     ``_FILE`` secret-file form, where one-entry-per-line is the natural thing to write —
     splitting on commas alone turned such a file into a single bogus entry holding the
     raw newline. That entry then matches nothing, which for an allowlist
-    means a silent misconfiguration surfacing only as ``origin check failed``. No value
-    these fields hold (origins, URLs, CIDRs, schemes, hostnames, PATH entries) can contain
-    a newline, so treating it as a separator cannot split a legitimate value.
+    means a silent misconfiguration surfacing only as ``origin check failed``. Origins,
+    URLs, CIDRs, schemes and hostnames cannot contain a newline, so treating it as a
+    separator cannot split a legitimate value. A filesystem path legally can (as it can
+    contain a comma), so a ``claude.path_append`` entry holding either must be set in the
+    YAML file — see below.
 
     Blanks are dropped so a trailing separator yields ``[]`` rather than ``[""]``, which
     would fail validation in a way that hides the operator's intent. An empty value is
     therefore an empty list — it does NOT fall through to the YAML value.
 
-    A value containing a literal comma cannot be expressed this way; those (a directory
-    with a comma in its name, say) must be set in the YAML file.
+    An entry containing a literal comma or newline cannot be expressed this way and must
+    be set in the YAML file — a filesystem path in ``claude.path_append``, or an Apprise
+    URL in ``notifications.urls`` whose query carries comma-separated targets.
     """
     return [item.strip() for item in value.replace("\n", ",").split(",") if item.strip()]
 
@@ -1642,6 +1663,11 @@ def _apply_env_overrides(data: dict) -> dict:
             continue
         _set_nested(data, path, _split_env_list(raw_value) if kind == "list" else raw_value)
     for env_name, path in _LEGACY_ENV_ALIASES.items():
+        if path not in kinds:
+            # The alias points at a leaf no env var can address (a dict, or a field since
+            # removed). Honoring it would assign a raw string into a non-scalar and crash
+            # config load — the same #1072 class — so it is skipped, not resurrected.
+            continue
         new_env = "CLAUSTER_" + "_".join(path).upper()
         legacy_set = bool(env_name in os.environ or os.environ.get(f"{env_name}_FILE", "").strip())
         # The new name wins: skip the legacy var when the new one is set — but if the operator
