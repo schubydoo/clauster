@@ -1,5 +1,8 @@
 // First-run setup wizard client (#978). Submits the setup form via fetch (so the request
 // always carries an Origin the loopback CSRF check can verify) and renders per-field errors.
+// In token-gated mode (a non-loopback bind, #1017) the server embeds a one-time token in the
+// form's data-setup-token attribute; we echo it as an X-Setup-Token header, which is what the
+// server checks instead of the Origin (a custom header is CSRF-safe cross-origin).
 (function () {
   "use strict";
   var form = document.getElementById("setup-form");
@@ -55,9 +58,12 @@
       password: document.getElementById("password").value,
       confirm: document.getElementById("confirm").value,
     };
+    var headers = { "Content-Type": "application/json" };
+    var setupToken = form.getAttribute("data-setup-token");
+    if (setupToken) headers["X-Setup-Token"] = setupToken;
     fetch("/setup", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headers,
       body: JSON.stringify(payload),
     })
       .then(function (res) {

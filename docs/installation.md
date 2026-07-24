@@ -280,6 +280,20 @@ host:
 docker compose run --rm clauster clauster hash-password
 ```
 
+!!! tip "First-run without a hash: the setup wizard"
+    Start the container with an **empty `/config`** and **without** the
+    `CLAUSTER_AUTH_*` vars and Clauster serves the [first-run setup
+    wizard](guides/configuration.md) instead of exiting. In a container the wizard
+    binds all interfaces (`CLAUSTER_SETUP_HOST=0.0.0.0`, baked into the image) so a
+    published port can reach it, and it is gated by a **one-time token** printed to
+    the log — `docker logs <name>` shows a
+    `http://<this-host>:7621/?token=…` URL. Open it, set `projects_root`
+    (`/projects`), a bind host, and a password; the wizard writes an auth-enabled
+    `clauster.yml` to the **persistent `/config` volume**
+    (`CLAUSTER_CONFIG=/config/clauster.yml`, so it survives recreate) and restarts
+    onto it. The token gates the reachable, not-yet-authed wizard; a plain
+    non-loopback bind with no config is otherwise refused at load (#88).
+
 ### Docker Compose
 
 A ready-to-edit [`compose.yaml`](https://github.com/schubydoo/clauster/blob/main/compose.yaml)

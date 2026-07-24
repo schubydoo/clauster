@@ -1,7 +1,8 @@
-"""Tests for the first-run setup wizard (#978).
+"""Tests for the first-run setup wizard (#978, token-gate #1017).
 
-Drives the loopback-only setup app end-to-end (render, validate, write, re-exec wiring) and
-the ``clauster run`` glue that serves it when no config exists.
+Drives the setup app end-to-end (render, validate, write, re-exec wiring) in both modes — the
+default loopback (Origin-checked) and the non-loopback token-gated mode — plus the
+``clauster run`` glue that serves it when no config exists.
 """
 
 from __future__ import annotations
@@ -223,6 +224,213 @@ def test_loopback_origin_accepted(tmp_path):
         "/setup", headers={"origin": "http://localhost:7621"}, json=_valid_payload(projects)
     )
     assert res.status_code == 200
+
+
+def test_loopback_form_has_no_setup_token_attribute(tmp_path):
+    # Loopback mode (setup_token=None): the form carries no data-setup-token, so setup.js sends
+    # no header — the flow is exactly as before the token gate existed.
+    _, client, _, _ = _app_and_paths(tmp_path)
+    assert "data-setup-token" not in client.get("/").text
+
+
+# ----- token-gated (non-loopback) mode (#1017) -----------------------------
+
+_TOKEN = "s3cret-setup-token"
+
+
+def _token_app(tmp_path: Path):
+    projects = tmp_path / "code"
+    projects.mkdir(exist_ok=True)  # a test may build both a loopback and a token app in one tmp
+    write_path = tmp_path / "clauster.yml"
+    app = setup_wizard.create_setup_app(write_path, port=7621, setup_token=_TOKEN)
+    return TestClient(app), projects, write_path
+
+
+def test_token_mode_get_without_token_is_403_and_hides_form(tmp_path):
+    client, _, _ = _token_app(tmp_path)
+    res = client.get("/")
+    assert res.status_code == 403
+    assert 'id="setup-form"' not in res.text  # the form is never rendered without the token
+    assert _TOKEN not in res.text  # the page never reflects/leaks the expected token
+
+
+def test_token_mode_get_with_wrong_token_is_403(tmp_path):
+    client, _, _ = _token_app(tmp_path)
+    assert client.get("/", params={"token": "nope"}).status_code == 403
+
+
+def test_token_mode_get_with_token_renders_form_carrying_token(tmp_path):
+    client, _, _ = _token_app(tmp_path)
+    res = client.get("/", params={"token": _TOKEN})
+    assert res.status_code == 200
+    assert f'data-setup-token="{_TOKEN}"' in res.text
+
+
+def test_token_mode_submit_requires_header(tmp_path):
+    client, projects, write_path = _token_app(tmp_path)
+    res = client.post("/setup", json=_valid_payload(projects))
+    assert res.status_code == 403
+    assert "setup token" in res.json()["detail"]
+    assert not write_path.exists()  # nothing written without the token
+
+
+def test_token_mode_submit_wrong_header_rejected(tmp_path):
+    client, projects, write_path = _token_app(tmp_path)
+    res = client.post("/setup", headers={"x-setup-token": "wrong"}, json=_valid_payload(projects))
+    assert res.status_code == 403
+    assert not write_path.exists()
+
+
+def test_token_mode_submit_with_header_writes_config_ignoring_origin(tmp_path):
+    # The header is the CSRF defense in token mode, so a foreign Origin is irrelevant as long as
+    # the token header is correct (the browser Origin is the operator's un-allowlistable LAN IP).
+    client, projects, write_path = _token_app(tmp_path)
+    res = client.post(
+        "/setup",
+        headers={"x-setup-token": _TOKEN, "origin": "http://192.168.1.50:7621"},
+        json=_valid_payload(projects),
+    )
+    assert res.status_code == 200
+    assert write_path.exists()
+
+
+# ----- bind-field honesty vs CLAUSTER_HOST, and footer (#1017 review) -------
+
+
+def _env_host_app(tmp_path: Path, env_host: str = "0.0.0.0"):
+    projects = tmp_path / "code"
+    projects.mkdir(exist_ok=True)
+    write_path = tmp_path / "clauster.yml"
+    app = setup_wizard.create_setup_app(write_path, port=7621, env_host=env_host)
+    return TestClient(app), projects, write_path
+
+
+def test_env_host_makes_bind_field_readonly_and_prefilled(tmp_path):
+    # With CLAUSTER_HOST set the bind is env-controlled, so the field can't be a free choice the
+    # re-exec would silently override — it renders read-only at the env value with an explanation.
+    client, _, _ = _env_host_app(tmp_path, env_host="0.0.0.0")
+    html = client.get("/").text
+    assert 'value="0.0.0.0"' in html
+    assert "readonly" in html
+    assert "CLAUSTER_HOST" in html
+
+
+def test_env_host_written_config_records_env_not_posted_host(tmp_path):
+    # A stale/crafted posted host must not win: the app binds CLAUSTER_HOST regardless, so the
+    # written config records that, never a value the runtime ignores (no control that lies).
+    client, projects, write_path = _env_host_app(tmp_path, env_host="0.0.0.0")
+    res = client.post("/setup", json=_valid_payload(projects, host="127.0.0.1"))
+    assert res.status_code == 200
+    assert load_config(write_path).host == "0.0.0.0"
+
+
+def test_no_env_host_keeps_free_bind_choice(tmp_path):
+    # Host install (no CLAUSTER_HOST): the field stays editable and the posted host is honored.
+    _, client, projects, write_path = _app_and_paths(tmp_path)
+    assert "readonly" not in client.get("/").text
+    res = client.post("/setup", json=_valid_payload(projects, host="0.0.0.0"))
+    assert res.status_code == 200
+    assert load_config(write_path).host == "0.0.0.0"
+
+
+def test_env_port_makes_field_readonly_and_config_records_it(tmp_path):
+    # CLAUSTER_PORT overrides the file on re-exec exactly like CLAUSTER_HOST, so the port field
+    # is read-only at the env value and a posted port is ignored in the written config.
+    projects = tmp_path / "code"
+    projects.mkdir()
+    write_path = tmp_path / "clauster.yml"
+    client = TestClient(setup_wizard.create_setup_app(write_path, port=7621, env_port=9000))
+    html = client.get("/").text
+    assert 'value="9000"' in html
+    assert "readonly" in html
+    assert "CLAUSTER_PORT" in html
+    res = client.post("/setup", json=_valid_payload(projects, port=12345))
+    assert res.status_code == 200
+    assert load_config(write_path).port == 9000
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "::1"])
+def test_host_is_bindable_true(host):
+    assert setup_wizard.host_is_bindable(host) is True
+
+
+@pytest.mark.parametrize("host", ["clauster.invalid", "not a host!!", "192.0.2.7"])
+def test_host_is_bindable_false(host):
+    # Not bindable: an unresolvable / malformed host (RFC 6761 `.invalid`) fails at getaddrinfo;
+    # a syntactically-valid address not on any local interface (RFC 5737 TEST-NET `192.0.2.7`)
+    # resolves but fails the ephemeral bind — exercising both rejection paths.
+    assert setup_wizard.host_is_bindable(host) is False
+
+
+def test_resolve_env_port_unset_is_none(monkeypatch):
+    monkeypatch.delenv("CLAUSTER_PORT", raising=False)
+    assert setup_wizard.resolve_env_port() is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("9000", 9000), ("  8080 ", 8080), ("", None), ("nope", None), ("0", None), ("70000", None)],
+)
+def test_resolve_env_port_parsing(monkeypatch, raw, expected):
+    monkeypatch.setenv("CLAUSTER_PORT", raw)
+    assert setup_wizard.resolve_env_port() == expected
+
+
+def test_footer_reflects_exposure_mode(tmp_path):
+    # Loopback footer says loopback; token mode says reachable/token-gated (not "Loopback-only").
+    _, loopback_client, _, _ = _app_and_paths(tmp_path)
+    assert "Loopback-only" in loopback_client.get("/").text
+    token_client, _, _ = _token_app(tmp_path)
+    html = token_client.get("/", params={"token": _TOKEN}).text
+    assert "Loopback-only" not in html
+    assert "Token-gated" in html
+
+
+# ----- host / token policy helpers (#1017) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host", "loopback"),
+    [
+        ("127.0.0.1", True),
+        ("localhost", True),
+        ("::1", True),
+        ("[::1]", True),
+        ("127.0.0.5", True),
+        ("0.0.0.0", False),
+        ("::", False),
+        ("192.168.1.10", False),
+        ("clauster.lan", False),  # unresolvable hostname → fail-safe non-loopback (token)
+    ],
+)
+def test_is_loopback_host(host, loopback):
+    assert setup_wizard._is_loopback_host(host) is loopback
+
+
+def test_resolve_setup_host_env_and_default(monkeypatch):
+    monkeypatch.delenv("CLAUSTER_SETUP_HOST", raising=False)
+    assert setup_wizard.resolve_setup_host() == setup_wizard.SETUP_HOST
+    monkeypatch.setenv("CLAUSTER_SETUP_HOST", "0.0.0.0")
+    assert setup_wizard.resolve_setup_host() == "0.0.0.0"
+    monkeypatch.setenv("CLAUSTER_SETUP_HOST", "  ")  # blank → falls back to loopback default
+    assert setup_wizard.resolve_setup_host() == setup_wizard.SETUP_HOST
+
+
+def test_mint_setup_token_only_for_non_loopback():
+    assert setup_wizard.mint_setup_token("127.0.0.1") is None
+    tok = setup_wizard.mint_setup_token("0.0.0.0")
+    assert isinstance(tok, str) and len(tok) >= 32
+
+
+def test_setup_url_appends_token_and_handles_wildcard():
+    assert setup_wizard.setup_url("127.0.0.1", 7621) == "http://127.0.0.1:7621/"
+    assert (
+        setup_wizard.setup_url("192.168.1.9", 80, token="abc")
+        == "http://192.168.1.9:80/?token=abc"
+    )
+    # A wildcard bind has no single host — the placeholder is rendered, the token still literal.
+    wild = setup_wizard.setup_url("0.0.0.0", 7621, token="abc")
+    assert "<this-host>" in wild and wild.endswith("?token=abc")
 
 
 def test_write_failure_is_500(tmp_path, monkeypatch):

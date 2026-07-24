@@ -1397,16 +1397,51 @@ def _run_setup_wizard(config_path: str | None) -> int:
     except ValueError:
         port = setup_wizard.DEFAULT_PORT
     setup_logging("text")
-    app = setup_wizard.create_setup_app(write_path, port=port)
+    host = setup_wizard.resolve_setup_host()
+    # A non-loopback bind (e.g. the Docker image's CLAUSTER_SETUP_HOST=0.0.0.0) is reachable
+    # off-host, so mint a one-time token that gates the wizard; a loopback bind is the boundary
+    # itself and needs none (#1017). The token is printed only here, to the server log.
+    setup_token = setup_wizard.mint_setup_token(host)
+    # CLAUSTER_HOST (if set) overrides the file's bind on the post-setup re-exec, so the wizard
+    # fixes its bind field to it instead of offering a choice it would silently ignore (#1017).
+    env_host = os.environ.get("CLAUSTER_HOST", "").strip() or None
+    env_port = setup_wizard.resolve_env_port()  # CLAUSTER_PORT also overrides on re-exec
+    # CLAUSTER_PORT is reapplied verbatim over the written config on re-exec, so a set-but-invalid
+    # value would let setup "succeed" and then the app fail to load (#1017 review). Refuse up front
+    # with a clear, fail-closed message rather than writing a config the restart can't use. (Only
+    # PORT needs this — an arbitrary CLAUSTER_HOST string loads fine; it can only fail later at
+    # bind, which surfaces its own error.)
+    if "CLAUSTER_PORT" in os.environ and env_port is None:
+        print(
+            f"clauster: CLAUSTER_PORT={os.environ['CLAUSTER_PORT']!r} is not a valid port "
+            "(1-65535). Fix or unset it and restart — first-run setup won't write a config the "
+            "app would then refuse to load.",
+            file=sys.stderr,
+        )
+        return 2
+    # CLAUSTER_HOST likewise reapplies over the written config on re-exec, and any string loads
+    # (only the bind fails), so a set-but-unbindable value would let setup "succeed" and then the
+    # app fail to bind. Refuse it up front too (#1017 review).
+    if env_host is not None and not setup_wizard.host_is_bindable(env_host):
+        print(
+            f"clauster: CLAUSTER_HOST={env_host!r} cannot be bound on this machine "
+            "(unresolvable, or not an address on any local interface). Fix or unset it and "
+            "restart — first-run setup won't write a config the app would then fail to bind.",
+            file=sys.stderr,
+        )
+        return 2
+    app = setup_wizard.create_setup_app(
+        write_path, port=port, setup_token=setup_token, env_host=env_host, env_port=env_port
+    )
     print(
         f"clauster {__version__}: no configuration found — starting first-run setup at "
-        f"http://{setup_wizard.SETUP_HOST}:{port}/  (will write {write_path})",
+        f"{setup_wizard.setup_url(host, port, token=setup_token)}  (will write {write_path})",
         file=sys.stderr,
     )
     server = uvicorn.Server(
         uvicorn.Config(
             app,
-            host=setup_wizard.SETUP_HOST,
+            host=host,
             port=port,
             log_level="info",
             log_config=None,

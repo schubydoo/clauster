@@ -30,7 +30,7 @@
 
           <div class="alert alert-danger" role="alert" id="setup-error" hidden></div>
 
-          <form id="setup-form" autocomplete="off">
+          <form id="setup-form" autocomplete="off"{% if setup_token %} data-setup-token="{{ setup_token }}"{% endif %}>
             <div class="mb-3">
               <label class="form-label required" for="projects_root">Projects folder</label>
               <input class="form-control" type="text" id="projects_root" name="projects_root"
@@ -42,15 +42,27 @@
             <div class="row g-2 mb-3">
               <div class="col-8">
                 <label class="form-label" for="host">Bind address</label>
+                {% if env_host %}
+                <input class="form-control" type="text" id="host" name="host" value="{{ env_host }}"
+                       readonly aria-describedby="err-host" {{ NO_AUTOFILL }}>
+                <div class="form-hint">Fixed by the <code>CLAUSTER_HOST</code> environment variable — the container controls the bind.</div>
+                {% else %}
                 <input class="form-control" type="text" id="host" name="host" value="127.0.0.1"
                        aria-describedby="err-host" {{ NO_AUTOFILL }}>
                 <div class="form-hint">127.0.0.1 = this machine only. Use 0.0.0.0 to allow your LAN.</div>
+                {% endif %}
                 <div class="invalid-feedback" id="err-host" data-error="host"></div>
               </div>
               <div class="col-4">
                 <label class="form-label" for="port">Port</label>
+                {% if env_port %}
+                <input class="form-control" type="number" id="port" name="port"
+                       value="{{ env_port }}" min="1" max="65535" readonly aria-describedby="err-port" {{ NO_AUTOFILL }}>
+                <div class="form-hint">Fixed by <code>CLAUSTER_PORT</code>.</div>
+                {% else %}
                 <input class="form-control" type="number" id="port" name="port"
                        value="{{ default_port }}" min="1" max="65535" aria-describedby="err-port" {{ NO_AUTOFILL }}>
+                {% endif %}
                 <div class="invalid-feedback" id="err-port" data-error="port"></div>
               </div>
             </div>
@@ -86,7 +98,11 @@
         </div>
       </div>
       <div class="text-center text-secondary small mt-3">
+        {% if setup_token %}
+        Token-gated setup — reachable on this host; complete it with the one-time token from the server log.
+        {% else %}
         Loopback-only setup — served on this machine until a password is set.
+        {% endif %}
       </div>
     </div>
   </div>
