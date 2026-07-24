@@ -196,6 +196,11 @@ EXCLUDED_FIELDS: dict[str, str] = {
     "login_shepherd.allow_setup_token": "login-shepherd: setup-token second opt-in; mints a "
     "long-lived credential the operator copies out, file/CLI-managed only, never "
     "web-editable (same rationale as login_shepherd.enabled)",
+    # mcp (#1010) — opt-in that exposes the local-privileged, unauthenticated MCP write tools
+    # (spawn/stop/resume bridges). A browser toggle would let a dashboard session widen a
+    # separate privileged surface it doesn't otherwise control — file/CLI-managed only.
+    "mcp.allow_writes": "mcp-writes: exposes the local-privileged MCP write tools "
+    "(spawn/stop/resume); file/CLI-managed only, never web-editable (privileged capability)",
 }
 _EXCLUDED = frozenset(EXCLUDED_FIELDS)
 

@@ -85,6 +85,13 @@ auth:
 #   enabled: false
 #   allow_setup_token: false       # also offer setup-token mode (mints a durable token — more dangerous)
 
+# `clauster mcp` stdio server (#527/#950): read-only by default (list_sessions / session_status). The
+# stdio transport is local-privileged and unauthenticated, so the write tools (spawn/stop/resume_session)
+# are gated OFF and file/CLI-managed only. Turn on to let an attached MCP client drive the bridge
+# lifecycle. Full detail: docs/reference/config.md (mcp section) + docs/mcp.md.
+# mcp:
+#   allow_writes: false
+
 # Native HTTPS — Clauster terminates TLS itself (structural; file/CLI-managed only). Unset = plain HTTP.
 # Full detail incl. self-signed provisioning: docs/reference/config.md (tls section).
 # tls:

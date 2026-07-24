@@ -232,7 +232,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     mcp_p = sub.add_parser(
-        "mcp", help="run the read-only MCP server over stdio (list + status, #527)"
+        "mcp",
+        help="run the MCP server over stdio; read-only by default (list + status), "
+        "writes opt-in via mcp.allow_writes (#527/#950)",
     )
     mcp_p.add_argument("-c", "--config", help="path to clauster.yml")
 

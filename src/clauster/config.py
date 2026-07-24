@@ -630,6 +630,36 @@ class LoginShepherdConfig(BaseModel):
     )
 
 
+class McpConfig(BaseModel):
+    """Capability gate for the ``clauster mcp`` stdio server (#527/#950/#1010).
+
+    The stdio MCP surface is **local-privileged and unauthenticated by design** —
+    reachable only by a process the operator already launched on the host, so it
+    carries no token auth. Its read tools (``list_sessions`` / ``session_status``)
+    are always exposed; the write tools (``spawn_session`` / ``stop_session`` /
+    ``resume_session``, added in #950) mutate bridge state and are gated behind this
+    switch.
+
+    ``allow_writes`` defaults **off** — the surface is read-only until the operator
+    opts in — so attaching the server to an agent cannot start, stop, or resume a
+    bridge unless writes are explicitly enabled. A missing/garbled flag means *off*
+    (fail closed). **Not** in the config-editor Tier-A allowlist: a privileged-
+    capability switch is file/CLI-managed only, never web-editable (mirrors the
+    auth / config_write / login_shepherd exclusions).
+    """
+
+    allow_writes: bool = Field(
+        default=False,
+        description="Expose the `clauster mcp` **write** tools (`spawn_session` / "
+        "`stop_session` / `resume_session`) that start, stop, and resume bridges. Off "
+        "by default: the stdio MCP surface is read-only (`list_sessions` / "
+        "`session_status` only) until you opt in. The surface is local-privileged and "
+        "unauthenticated, so turning this on lets any agent the server is attached to "
+        "drive the bridge lifecycle. **Not** web-editable — file/CLI-managed only, like "
+        "the auth / config_write / login_shepherd gates.",
+    )
+
+
 class LogsConfig(BaseModel):
     """Bridge-log rotation sizing and WebSocket redaction/ANSI-stripping toggles."""
 
@@ -1318,6 +1348,7 @@ class ClausterConfig(BaseModel):
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
     config_write: ConfigWriteConfig = Field(default_factory=ConfigWriteConfig)
     login_shepherd: LoginShepherdConfig = Field(default_factory=LoginShepherdConfig)
+    mcp: McpConfig = Field(default_factory=McpConfig)
     usage: UsageConfig = Field(default_factory=UsageConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
