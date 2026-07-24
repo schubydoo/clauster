@@ -36,9 +36,9 @@ Three surfaces, one entry shape (mirroring Claude Code's own ``settings.json``):
   external-edit check + path containment.
 * **local** scope ⇒ ``<project>/.claude/settings.local.json`` — you, this project
   only, never shared or committed. Same stale-hash guard + path containment as
-  project scope; a successful write also runs
-  :func:`~clauster.config_write.ensure_gitignored` so a newly created file is never
-  accidentally committed (#766).
+  project scope; :func:`~clauster.config_write.ensure_gitignored` runs *before* the
+  write (the write drops a secret-bearing ``.bak``), so neither that file nor its
+  backup is ever accidentally committed (#766).
 * **user** scope ⇒ ``~/.claude/settings.json`` (the settings file — *not*
   ``~/.claude.json``), gated additionally on ``allow_user_scope`` and likewise guarded
   by the stale-hash check (it is a real file, not a ``~/.claude.json`` subtree).

@@ -550,8 +550,9 @@ def project_local_settings_path(project_dir: Path) -> Path:
 
     Mirrors :func:`project_settings_path` for the third (local) scope: a real file
     that is **you, this project only** — never shared, never committed (see
-    :func:`ensure_gitignored`, called by the local-scope writers after a successful
-    write). Same stale-hash / atomic-write discipline as the project file.
+    :func:`ensure_gitignored`, which the local-scope writers call *before* their write,
+    since that write drops a secret-bearing ``.bak``). Same stale-hash / atomic-write
+    discipline as the project file.
     """
     return project_dir / ".claude" / "settings.local.json"
 
@@ -563,8 +564,19 @@ def ensure_gitignored(
 
     Mirrors Claude Code's own behavior: a project-local file (``.claude/settings.local
     .json``, ``CLAUDE.local.md``) is private to the operator and must never be
-    accidentally committed. Called by the local-scope writers *after* a successful
-    write, so a validation failure never touches ``.gitignore``.
+    accidentally committed.
+
+    **Call order depends on whether the writer takes a backup.** The four
+    ``settings.local.json`` writers call this **before** their write: that write drops a
+    ``<name>.bak`` holding the PREVIOUS (unredacted) ``env`` values, so an ignore that
+    failed afterwards would leave a secret-bearing file trackable. Ignoring first is the
+    fail-closed order, at the cost of a failed write (stale-hash 409, malformed-JSON 422)
+    leaving a ``.gitignore`` entry for a file that was not created — harmless, and this
+    call is exact-line idempotent so the later successful write is a no-op here.
+    :func:`clauster.claude_md.write_local` legitimately still calls this *after* its write,
+    because its writer takes no backup and so has no such window. Shape validation
+    (:func:`validate_candidate`) runs before either order, so a 422 for a malformed
+    candidate still never reaches ``.gitignore``.
 
     ``ignore_backup_sibling`` additionally ignores the ``<relative_path>.bak``
     sibling. The backup-taking JSON writers reach

@@ -741,6 +741,44 @@ def test_restore_config_out_failure_leaves_no_temp_and_no_partial(
     assert list(dest_dir.iterdir()) == []
 
 
+def test_restore_config_out_closes_fd_when_fdopen_fails(write_config, tmp_path, monkeypatch):
+    # Mirror of test_atomic_write_text_closes_fd_when_fdopen_fails for the restore path:
+    # if os.fdopen raises before the `with` adopts the fd (EMFILE under fd-table pressure),
+    # the raw mkstemp fd must be closed rather than leaked onto an unlinked inode, and the
+    # temp — which would hold the argon2 hash — removed.
+    config = load_config(_cfg_file(write_config, tmp_path))
+    _seed_state(config.state_dir)
+    archive = make_backup(config, tmp_path / "out")
+
+    dest_dir = tmp_path / "dest"
+    dest_dir.mkdir()
+    captured: dict[str, int] = {}
+    real_mkstemp = ops_mod.tempfile.mkstemp
+    real_close = ops_mod.os.close
+    closed: list[int] = []
+
+    def _spy_mkstemp(*a, **k):
+        fd, name = real_mkstemp(*a, **k)
+        captured["fd"] = fd
+        return fd, name
+
+    def _boom_fdopen(*a, **k):
+        raise OSError("too many open files")
+
+    def _spy_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(ops_mod.tempfile, "mkstemp", _spy_mkstemp)
+    monkeypatch.setattr(ops_mod.os, "fdopen", _boom_fdopen)
+    monkeypatch.setattr(ops_mod.os, "close", _spy_close)
+
+    with pytest.raises(OSError, match="too many open files"):
+        restore_backup(archive, state_dir=tmp_path / "st", config_out=dest_dir / "clauster.yml")
+    assert captured["fd"] in closed  # the raw fd was closed, not leaked
+    assert list(dest_dir.iterdir()) == []  # temp removed, destination not written
+
+
 def test_restore_refuses_nonempty_without_force(write_config, tmp_path):
     config = load_config(_cfg_file(write_config, tmp_path))
     _seed_state(config.state_dir)

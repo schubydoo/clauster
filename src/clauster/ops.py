@@ -6,6 +6,7 @@ of these touch the network or spawn bridges; they inspect config + manage state_
 
 from __future__ import annotations
 
+import contextlib
 import json
 import ntpath
 import os
@@ -799,14 +800,31 @@ def _write_restored_config(src: Path, config_out: Path) -> None:
     )
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "wb") as fh:
+        # If fdopen raises at the open(2)/FileIO level (EMFILE/ENFILE under fd-table
+        # pressure) the fd was NOT adopted, so the raw mkstemp fd would leak — close it.
+        # Guarded, because if FileIO *did* adopt it before a later stage raised, the fd is
+        # already closed and an unguarded os.close would raise EBADF over the real error.
+        # (Same shape as atomicio.atomic_write_text, which this deliberately mirrors — it
+        # cannot be reused directly because it tightens the parent directory.)
+        try:
+            fh = os.fdopen(fd, "wb")
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        with fh:
             fh.write(src.read_bytes())
             fh.flush()
             os.fsync(fh.fileno())
         atomicio.replace_with_retry(tmp, config_out)
     except BaseException:
+        # BaseException (not just Exception) so a KeyboardInterrupt mid-write still removes
+        # a temp holding the argon2 hash. Re-raised immediately — never a swallow.
         tmp.unlink(missing_ok=True)
         raise
+    # fsync the file's data, then the directory entry: restore is the disaster-recovery
+    # path, so a crash right after the rename must not lose the config we just reported.
+    atomicio.fsync_dir(config_out.parent)
 
 
 class RestoreResult(TypedDict):
