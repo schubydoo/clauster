@@ -118,6 +118,24 @@ def resolve_setup_host() -> str:
     return os.environ.get("CLAUSTER_SETUP_HOST", "").strip() or SETUP_HOST
 
 
+def resolve_env_port() -> int | None:
+    """Return the ``CLAUSTER_PORT`` env override (the app's future bind port), or ``None``.
+
+    Like ``CLAUSTER_HOST``, this env wins over the written file on the post-setup re-exec, so the
+    wizard fixes its port field to it rather than offering a choice it would silently ignore
+    (#1017 review). A missing / non-numeric / out-of-range value returns ``None`` — the operator
+    picks, and ``load_config`` validates the env override on the restart.
+    """
+    raw = os.environ.get("CLAUSTER_PORT", "").strip()
+    if not raw:
+        return None
+    try:
+        val = int(raw)
+    except ValueError:
+        return None
+    return val if 1 <= val <= 65535 else None
+
+
 def mint_setup_token(host: str) -> str | None:
     """Return a one-time setup token for a non-loopback bind, or ``None`` for loopback (#1017).
 
@@ -192,6 +210,7 @@ def create_setup_app(
     port: int = DEFAULT_PORT,
     setup_token: str | None = None,
     env_host: str | None = None,
+    env_port: int | None = None,
 ) -> FastAPI:
     """Build the first-run setup app that writes ``write_path`` (#978, token-gate #1017).
 
@@ -201,11 +220,11 @@ def create_setup_app(
     header). On a successful submit it sets ``app.state.setup_complete`` and asks the wired
     uvicorn server to shut down, so the ``clauster run`` caller can re-exec onto the new config.
 
-    ``env_host`` is the ``CLAUSTER_HOST`` env value when set (the Docker case): because an env
-    override wins over the written file on re-exec, a free-choice bind field would be a control
-    that lies. So when it's set the wizard fixes the bind to it — the field renders read-only and
-    the submit writes ``env_host`` regardless of what was posted — and the operator sees the
-    address the app will actually bind (#1017 review).
+    ``env_host`` / ``env_port`` are the ``CLAUSTER_HOST`` / ``CLAUSTER_PORT`` env values when set
+    (the Docker case): because an env override wins over the written file on re-exec, a
+    free-choice bind field would be a control that lies. So when one is set the wizard fixes that
+    field to it — it renders read-only and the submit writes the env value regardless of what was
+    posted — and the operator sees the address/port the app will actually bind (#1017 review).
     """
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -247,9 +266,10 @@ def create_setup_app(
                 # Only rendered in token mode (empty string otherwise → the attribute is omitted
                 # and setup.js sends no header, exactly the loopback flow).
                 "setup_token": setup_token or "",
-                # When set (CLAUSTER_HOST), the bind field is read-only at this value — the app
-                # binds it regardless of what's posted, so the control can't lie (#1017 review).
+                # When set (CLAUSTER_HOST / CLAUSTER_PORT), that field is read-only at this value —
+                # the app binds it regardless of what's posted, so the control can't lie (#1017).
                 "env_host": env_host or "",
+                "env_port": env_port or "",
             },
         )
         resp.headers["Content-Security-Policy"] = _CSP.format(nonce=nonce)
@@ -297,14 +317,19 @@ def create_setup_app(
         # then ignores (a control that lies, #1017 review). Loopback/host installs keep the
         # posted choice.
         host = env_host or (str(body.get("host", "")).strip() or SETUP_HOST)
-        try:
-            port_val = int(body.get("port", port))
-        except (TypeError, ValueError):
-            errors["port"] = "Must be a number."
-            port_val = port
+        if env_port is not None:
+            # CLAUSTER_PORT is pre-validated (resolve_env_port) and wins on re-exec, so — like the
+            # host — the posted port is ignored and the config records what the app will bind.
+            port_val = env_port
         else:
-            if not 1 <= port_val <= 65535:
-                errors["port"] = "Must be between 1 and 65535."
+            try:
+                port_val = int(body.get("port", port))
+            except (TypeError, ValueError):
+                errors["port"] = "Must be a number."
+                port_val = port
+            else:
+                if not 1 <= port_val <= 65535:
+                    errors["port"] = "Must be between 1 and 65535."
 
         password = str(body.get("password", ""))
         confirm = str(body.get("confirm", ""))

@@ -1405,8 +1405,9 @@ def _run_setup_wizard(config_path: str | None) -> int:
     # CLAUSTER_HOST (if set) overrides the file's bind on the post-setup re-exec, so the wizard
     # fixes its bind field to it instead of offering a choice it would silently ignore (#1017).
     env_host = os.environ.get("CLAUSTER_HOST", "").strip() or None
+    env_port = setup_wizard.resolve_env_port()  # CLAUSTER_PORT also overrides on re-exec
     app = setup_wizard.create_setup_app(
-        write_path, port=port, setup_token=setup_token, env_host=env_host
+        write_path, port=port, setup_token=setup_token, env_host=env_host, env_port=env_port
     )
     print(
         f"clauster {__version__}: no configuration found — starting first-run setup at "

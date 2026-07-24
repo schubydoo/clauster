@@ -333,6 +333,36 @@ def test_no_env_host_keeps_free_bind_choice(tmp_path):
     assert load_config(write_path).host == "0.0.0.0"
 
 
+def test_env_port_makes_field_readonly_and_config_records_it(tmp_path):
+    # CLAUSTER_PORT overrides the file on re-exec exactly like CLAUSTER_HOST, so the port field
+    # is read-only at the env value and a posted port is ignored in the written config.
+    projects = tmp_path / "code"
+    projects.mkdir()
+    write_path = tmp_path / "clauster.yml"
+    client = TestClient(setup_wizard.create_setup_app(write_path, port=7621, env_port=9000))
+    html = client.get("/").text
+    assert 'value="9000"' in html
+    assert "readonly" in html
+    assert "CLAUSTER_PORT" in html
+    res = client.post("/setup", json=_valid_payload(projects, port=12345))
+    assert res.status_code == 200
+    assert load_config(write_path).port == 9000
+
+
+def test_resolve_env_port_unset_is_none(monkeypatch):
+    monkeypatch.delenv("CLAUSTER_PORT", raising=False)
+    assert setup_wizard.resolve_env_port() is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("9000", 9000), ("  8080 ", 8080), ("", None), ("nope", None), ("0", None), ("70000", None)],
+)
+def test_resolve_env_port_parsing(monkeypatch, raw, expected):
+    monkeypatch.setenv("CLAUSTER_PORT", raw)
+    assert setup_wizard.resolve_env_port() == expected
+
+
 def test_footer_reflects_exposure_mode(tmp_path):
     # Loopback footer says loopback; token mode says reachable/token-gated (not "Loopback-only").
     _, loopback_client, _, _ = _app_and_paths(tmp_path)
