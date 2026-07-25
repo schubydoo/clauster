@@ -297,67 +297,80 @@ def test_transcript_paths_for_missing_dir_is_empty(tmp_path):
     )
 
 
+def _write_transcript(directory: Path, name: str, cwd: Path | str | None, **extra) -> Path:
+    """Write a transcript that records ``cwd``, the way Claude does.
+
+    Ownership of a worktree transcript is proven from this recorded cwd, not from the
+    containing directory name (which is a lossy one-way hash of it), so a fixture that
+    omits it is correctly refused as unproven — pass ``cwd=None`` to exercise that.
+    """
+    record: dict = {"type": "user", "message": {"role": "user"}, **extra}
+    if cwd is not None:
+        record["cwd"] = str(cwd)
+    path = directory / name
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return path
+
+
 def test_transcript_paths_for_includes_worktree_sessions(short_tmp_root):
     # #1020: a worktree-spawn session runs with the worktree as its cwd, so Claude files its
     # transcript in a SIBLING directory. Keying only on the project root hid those
-    # conversations from the fork/resume picker and dropped their tokens from the rollup.
-    #
-    # The project dir must EXIST: the sibling-exclusion filter reads the projects root, and
-    # fails closed (project dir only) when it can't — so a fake path would silently assert
-    # nothing here.
+    # conversations from the Conversation picker and dropped their tokens from the rollup.
     claude_dir = short_tmp_root / "claude_projects"
     project = short_tmp_root / "projects" / "my_proj"
+    worktree = project / ".claude" / "worktrees" / "sess-abc123"
     project.mkdir(parents=True)
-    root = _project_transcript_dir(claude_dir, project)
-    (root / "main.jsonl").write_text("")
-    wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-abc123")
-    (wt / "worktree.jsonl").write_text("")
+    _write_transcript(_project_transcript_dir(claude_dir, project), "main.jsonl", project)
+    _write_transcript(_project_transcript_dir(claude_dir, worktree), "worktree.jsonl", worktree)
 
     names = [p.name for p in transcript_paths_for(project, claude_dir)]
     assert sorted(names) == ["main.jsonl", "worktree.jsonl"]
 
 
-def test_transcript_paths_for_fails_closed_when_projects_root_unreadable(short_tmp_root):
-    # The exclusion set is what keeps a neighbouring project's conversations out, and it
-    # feeds the ownership proof behind pty resume. If the projects root can't be read the
-    # ambiguous names can't be filtered, so the worktree scan is skipped entirely: an
-    # unreadable root costs worktree conversations rather than admitting a foreign one.
+def test_worktree_transcript_without_a_recorded_cwd_is_refused(short_tmp_root):
+    # Fail closed on UNPROVEN. A candidate dir is only a lossy name match, so a transcript
+    # that never states its cwd cannot be shown to belong here — and this feeds the pty
+    # resume ownership gate, so "can't tell" must mean "no".
     claude_dir = short_tmp_root / "claude_projects"
-    project = short_tmp_root / "gone" / "my_proj"  # parent never created
-    root = _project_transcript_dir(claude_dir, project)
-    (root / "main.jsonl").write_text("")
-    wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-1")
-    (wt / "worktree.jsonl").write_text("")
+    project = short_tmp_root / "projects" / "my_proj"
+    worktree = project / ".claude" / "worktrees" / "sess-1"
+    project.mkdir(parents=True)
+    _write_transcript(_project_transcript_dir(claude_dir, project), "main.jsonl", project)
+    _write_transcript(_project_transcript_dir(claude_dir, worktree), "mystery.jsonl", None)
 
     assert [p.name for p in transcript_paths_for(project, claude_dir)] == ["main.jsonl"]
+    assert resolve_session_transcript(project, "mystery", claude_dir) is None
 
 
 @pytest.mark.parametrize(
-    "sibling",
+    "foreign",
     [
-        "my_proj-other",  # short prefix — cannot reach the worktree prefix
-        "my_proj_backup",
-        # These two DO sanitize into this project's worktree prefix: sanitize_cwd maps `/`,
-        # `.`, `-` and `_` all to `-`, and is_valid_project_name admits both spellings. An
-        # unfiltered prefix scan resolves their transcripts as this project's — which the
-        # pty resume path uses as its ownership proof, so a foreign conversation could be
-        # forked into this project's session. The earlier version of this test used only the
-        # two short names above and passed for a trivial reason.
-        "my_proj--claude-worktrees-x",
-        "my_proj__claude_worktrees_y",
+        # A sibling PROJECT whose name sanitizes into this project's worktree prefix:
+        # sanitize_cwd maps `/`, `.`, `-` and `_` all to `-`, and is_valid_project_name
+        # admits both spellings.
+        "projects/my_proj--claude-worktrees-x",
+        "projects/my_proj__claude_worktrees_y",
+        # Greptile P1 (security): the colliding family is NOT limited to the projects root.
+        # `<root>/projects-my_proj--claude-worktrees-z` sanitizes IDENTICALLY to
+        # `<root>/projects/my_proj/.claude/worktrees/z`, yet is not a sibling of the project
+        # at all — so no enumeration of neighbours can exclude it. Ownership has to be proven
+        # from the transcript's own recorded cwd instead.
+        "projects-my_proj--claude-worktrees-z",
     ],
 )
-def test_transcript_paths_for_excludes_neighbouring_project(short_tmp_root, sibling):
-    projects_root = short_tmp_root / "projects"
-    project = projects_root / "my_proj"
+def test_transcript_paths_for_excludes_foreign_collisions(short_tmp_root, foreign):
+    project = short_tmp_root / "projects" / "my_proj"
     project.mkdir(parents=True)
-    (projects_root / sibling).mkdir()  # a REAL sibling project on disk
+    foreign_path = short_tmp_root / foreign
+    foreign_path.mkdir(parents=True, exist_ok=True)
 
     claude_dir = short_tmp_root / "claude_projects"
-    root = _project_transcript_dir(claude_dir, project)
-    (root / "mine.jsonl").write_text("")
-    neighbour = _project_transcript_dir(claude_dir, projects_root / sibling)
-    (neighbour / "theirs.jsonl").write_text("")
+    _write_transcript(_project_transcript_dir(claude_dir, project), "mine.jsonl", project)
+    # The foreign transcript honestly records ITS OWN cwd — which is exactly what proves it
+    # is not ours, even though its directory name is indistinguishable from one of ours.
+    _write_transcript(
+        _project_transcript_dir(claude_dir, foreign_path), "theirs.jsonl", foreign_path
+    )
 
     assert [p.name for p in transcript_paths_for(project, claude_dir)] == ["mine.jsonl"]
     # The ownership proof behind pty resume must refuse it too, not just the listing.
@@ -367,13 +380,13 @@ def test_transcript_paths_for_excludes_neighbouring_project(short_tmp_root, sibl
 def test_resolve_session_transcript_finds_worktree_session(short_tmp_root):
     # Cross-layer: the picker lists worktree conversations, so the resolver behind
     # selecting one must find them too. Listing without resolving would 404 every worktree
-    # session the moment it was clicked — the two directory sets must stay in lockstep.
+    # session the moment it was clicked — the two sides must stay in lockstep.
     claude_dir = short_tmp_root / "claude_projects"
     project = short_tmp_root / "projects" / "my_proj"
+    worktree = project / ".claude" / "worktrees" / "sess-1"
     project.mkdir(parents=True)
     _project_transcript_dir(claude_dir, project)
-    wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-1")
-    (wt / "abc-123.jsonl").write_text("")
+    _write_transcript(_project_transcript_dir(claude_dir, worktree), "abc-123.jsonl", worktree)
     resolved = resolve_session_transcript(project, "abc-123", claude_dir)
     assert resolved is not None and resolved.name == "abc-123.jsonl"
 
@@ -397,18 +410,13 @@ def test_project_usage_counts_worktree_transcripts(short_tmp_root):
     project = short_tmp_root / "projects" / "my_proj"
     project.mkdir(parents=True)
     _project_transcript_dir(claude_dir, project)
-    wt = _project_transcript_dir(claude_dir, project / ".claude" / "worktrees" / "sess-1")
-    (wt / "s.jsonl").write_text(
-        json.dumps(
-            {
-                "type": "assistant",
-                "message": {
-                    "model": "claude-opus-4",
-                    "usage": {"input_tokens": 10, "output_tokens": 5},
-                },
-            }
-        )
-        + "\n"
+    worktree = project / ".claude" / "worktrees" / "sess-1"
+    _write_transcript(
+        _project_transcript_dir(claude_dir, worktree),
+        "s.jsonl",
+        worktree,
+        type="assistant",
+        message={"model": "claude-opus-4", "usage": {"input_tokens": 10, "output_tokens": 5}},
     )
     result = aggregate_project_usage(project, claude_projects_dir=claude_dir)
     assert result.transcript_count == 1

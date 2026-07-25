@@ -247,62 +247,124 @@ def transcript_paths_for(
     or unreadable contributes nothing rather than failing the walk.
     """
     out: list[Path] = []
-    for directory in _transcript_dirs_for(project_path, claude_projects_dir):
+    own = Path(claude_projects_dir) / sanitize_cwd(Path(project_path))
+    try:
+        out.extend(p for p in own.glob("*.jsonl") if p.is_file())
+    except OSError:
+        pass
+    for directory in _worktree_candidate_dirs(project_path, claude_projects_dir):
         try:
-            out.extend(p for p in directory.glob("*.jsonl") if p.is_file())
+            candidates = [p for p in directory.glob("*.jsonl") if p.is_file()]
         except OSError:
             continue
+        # Candidate dirs are matched on a LOSSY name prefix, so each file must prove it
+        # belongs here from its own recorded cwd before it is listed.
+        out.extend(p for p in candidates if _transcript_is_owned(project_path, p))
     return sorted(out)
 
 
-def _transcript_dirs_for(project_path: Path, claude_projects_dir: Path) -> list[Path]:
-    """Return the project's own transcript directory plus one per git worktree under it.
+# Ownership proofs are read from transcript CONTENT, so they are cached on the same
+# (path, mtime_ns, size) identity the summary cache uses — a transcript's recorded cwd
+# cannot change without the file changing. Keeps `_transcript_dir_stamp` (documented as a
+# cheap probe) from re-reading every worktree candidate on each poll. Cleared wholesale
+# at the cap rather than evicted per-entry: the working set is one project's worktrees.
+_CWD_CACHE_MAX = 4096
+_CWD_CACHE: dict[tuple[str, int, int], tuple[str | None]] = {}
 
-    Worktree transcripts must be found by scanning, not by listing the live worktrees: a
-    worktree is usually ``git worktree remove``d when its session ends while the transcript
-    it produced stays on disk forever, and those finished conversations are exactly what
-    the fork picker exists to offer. Enumerating only extant worktrees would hide nearly
-    all of them.
 
-    Scanning means matching directory NAMES, and ``sanitize_cwd`` is lossy — it maps every
+def _worktree_candidate_dirs(project_path: Path, claude_projects_dir: Path) -> list[Path]:
+    """Directories that MIGHT hold transcripts from ``project_path``'s git worktrees.
+
+    Candidates only — every file taken from one must still clear
+    :func:`_transcript_is_owned`. Worktree transcripts have to be found by scanning, not by
+    listing the live worktrees: a worktree is usually ``git worktree remove``d when its
+    session ends while the transcript it produced stays on disk forever, and those finished
+    conversations are exactly what the Conversation picker offers. Enumerating only extant
+    worktrees would hide nearly all of them.
+
+    Scanning means matching directory NAMES, and ``sanitize_cwd`` is lossy: it maps every
     non-alphanumeric to ``-``, so ``/``, ``.``, ``-`` and ``_`` are indistinguishable
-    afterwards. A ``<project>/.claude/worktrees/x`` prefix is therefore ALSO produced by a
-    sibling project literally named ``<project>--claude-worktrees-x`` (or
-    ``<project>__claude_worktrees_y``), and ``is_valid_project_name`` admits both. Since
-    :func:`resolve_session_transcript` is the ownership proof the pty resume path uses, an
-    unfiltered prefix match would let a uuid from a neighbouring project resolve as this
-    one's and be forked into its session.
-
-    So every candidate that is the transcript directory of a REAL sibling project is
-    excluded. ``pointers`` resolves forward (project path -> expected dir) precisely
-    because the reverse is ambiguous; the exclusion set is likewise built forward, from the
-    sibling paths themselves, never by trying to parse a directory name back into a path.
+    afterwards. That makes this prefix test **unsound in both directions** and it is
+    deliberately not trusted on its own — see :func:`_transcript_is_owned`.
     """
     base = Path(claude_projects_dir)
     project = Path(project_path)
-    dirs = [base / sanitize_cwd(project)]
     worktree_prefix = sanitize_cwd(project / WORKTREE_SUBDIR)
-    # Forward-built: the sanitized dir name of every project beside this one. A collision
-    # can only be a real project's directory, so this removes exactly the ambiguous names.
-    try:
-        siblings = {sanitize_cwd(p) for p in project.parent.iterdir() if p.is_dir()}
-    except OSError:
-        # FAIL CLOSED. Without the sibling set the ambiguous names cannot be filtered, and
-        # this feeds the ownership proof behind pty resume — an unreadable projects root
-        # must cost worktree conversations, never admit a neighbouring project's.
-        return dirs
     try:
         entries = sorted(base.iterdir())
     except OSError:
-        return dirs
-    dirs.extend(
-        entry
-        for entry in entries
-        if entry.is_dir()
-        and entry.name.startswith(f"{worktree_prefix}-")
-        and entry.name not in siblings
-    )
-    return dirs
+        return []
+    return [e for e in entries if e.is_dir() and e.name.startswith(f"{worktree_prefix}-")]
+
+
+def _recorded_cwd(path: Path, max_lines: int = 200) -> str | None:
+    """Return the cwd a transcript records for itself, or ``None`` if it does not.
+
+    Claude writes a ``cwd`` on its conversation records, so a transcript states which
+    directory produced it. That is the only NON-ambiguous ownership signal available:
+    the containing directory name is a lossy one-way hash of that same path.
+
+    Bounded scan — the leading records can be ``queue-operation``/``attachment`` entries
+    that carry no cwd, so it reads until one does, up to ``max_lines``. A missing,
+    unreadable or cwd-less transcript returns ``None``, which callers treat as unproven.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    cached = _CWD_CACHE.get(key)
+    if cached is not None:
+        return cached[0]
+    found: str | None = None
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for index, line in enumerate(handle):
+                if index >= max_lines:
+                    break
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(record, dict) and isinstance(record.get("cwd"), str):
+                    if record["cwd"]:
+                        found = record["cwd"]
+                        break
+    except OSError:
+        return None
+    if len(_CWD_CACHE) >= _CWD_CACHE_MAX:
+        _CWD_CACHE.clear()
+    _CWD_CACHE[key] = (found,)
+    return found
+
+
+def _transcript_is_owned(project_path: Path, path: Path) -> bool:
+    """Whether a worktree-candidate transcript really belongs to ``project_path``.
+
+    Proven from the transcript's OWN recorded cwd, which must resolve inside
+    ``<project>/.claude/worktrees``. The directory name is NOT evidence: ``sanitize_cwd``
+    collapses ``/``, ``.``, ``-`` and ``_`` alike, so wildly different real paths produce
+    the same name. Two of those collisions are reachable in practice:
+
+    * a *sibling project* named ``<project>--claude-worktrees-x``, and
+    * a path that is not under the projects root at all — ``/srv/projects-foo--claude-
+      worktrees-x`` sanitizes exactly like ``/srv/projects/foo/.claude/worktrees/x``.
+
+    The second is why filtering by "is it a sibling project?" was not enough: the colliding
+    family is unbounded, so no enumeration of neighbours can close it. This matters because
+    :func:`resolve_session_transcript` is the ownership proof behind the pty resume path —
+    an unowned transcript that resolved here could be read, or branched into this project's
+    session via ``--resume <uuid> --fork-session``.
+
+    Fails closed: a transcript that does not state a cwd is not proven, so it is refused.
+    """
+    cwd = _recorded_cwd(path)
+    if cwd is None:
+        return False
+    try:
+        return Path(cwd).resolve().is_relative_to((Path(project_path) / WORKTREE_SUBDIR).resolve())
+    except (OSError, ValueError):
+        return False
 
 
 def _render_content(content: object) -> str:
@@ -526,7 +588,8 @@ def resolve_session_transcript(
         or "\x00" in session
     ):
         return None
-    for directory in _transcript_dirs_for(project_path, claude_projects_dir):
+    own = Path(claude_projects_dir) / sanitize_cwd(Path(project_path))
+    for directory in [own, *_worktree_candidate_dirs(project_path, claude_projects_dir)]:
         transcript_dir = directory.resolve()
         candidate = (transcript_dir / f"{session}.jsonl").resolve()
         # Defense in depth: even after the component checks above, confirm the
@@ -535,10 +598,15 @@ def resolve_session_transcript(
         if candidate.parent != transcript_dir:
             continue
         try:
-            if candidate.is_file():
-                return candidate
+            if not candidate.is_file():
+                continue
         except OSError:
             continue
+        # A worktree candidate is only a NAME match until its own recorded cwd proves it.
+        # This is the ownership gate the pty resume path relies on, so it fails closed.
+        if directory != own and not _transcript_is_owned(project_path, candidate):
+            continue
+        return candidate
     return None
 
 
