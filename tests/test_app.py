@@ -88,6 +88,38 @@ def test_dashboard_non_credential_inputs_opt_out_of_autofill(write_config):
         assert attr in html
 
 
+def test_optout_inputs_declare_an_explicit_type(write_config):
+    # #1094: the opt-out attributes are NOT enough on their own — a manager that classifies
+    # fields by heuristic can skip the `data-lpignore` check on an input with no `type`.
+    # Observed live: the launch popover's First prompt and custom session name were the only
+    # two opt-out inputs in the templates without an explicit type, and were the only two
+    # LastPass still filled. Everything with `type="text"` was left alone.
+    #
+    # A filled *prompt* box is worse than a filled config row: whatever lands there is sent
+    # to Claude as the session's opening instruction, so a silently injected credential ends
+    # up in a transcript.
+    from html.parser import HTMLParser
+
+    class _Untyped(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bad: list[dict] = []
+
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            if tag != "input":
+                return
+            d = {k: v for k, v in attrs}
+            # `textarea` has no `type`, so this applies to `input` only. `type=""` counts
+            # as missing: HTML invalid-value-defaults it to Text exactly like an absent
+            # attribute, so a heuristic manager sees the same undeclared field.
+            if "data-lpignore" in d and not d.get("type"):
+                self.bad.append(d)
+
+    p = _Untyped()
+    p.feed(_client(write_config).get("/").text)
+    assert not p.bad, f"autofill-opt-out inputs missing an explicit type: {p.bad}"
+
+
 def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config, monkeypatch):
     # #534 S5 / #904: the per-bridge "Live terminal" control + the xterm.js assets render ONLY
     # when the (default-off) claude.pty_screen_enabled tap is on AND the optional `pty` extra
