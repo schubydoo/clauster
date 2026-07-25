@@ -704,9 +704,12 @@ class SessionRunner:
         only ever BRANCHES: a fresh session id, picked conversation never clobbered.
         (The two flags are independent — ``hosted``/``supervisor`` send ``--resume``
         bare to continue a conversation in place — the picker simply never offers that.)
-        So surfacing a live session is not destructive; it is the wrong control, since a
-        live session is resumed from its own row, and branching from a conversation still
-        being written yields a mid-flight snapshot. Hosted
+        Surfacing a live session there is not destructive. Whether it SHOULD be offered is
+        an open product question (``scratch`` FE-5): Claude Code's own ``/branch`` branches
+        a live conversation by design, but it does so from the writing process itself,
+        whereas this picker would spawn a SECOND process against a transcript the first is
+        still appending to. Either way, what this function owes the picker is an ACCURATE
+        flag — the filter can then be whatever we decide. Hosted
         (claustrum) sessions are folded in separately by the route, since they run no
         ``agents --json`` session.
         """
