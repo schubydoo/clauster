@@ -269,7 +269,7 @@ def transcript_paths_for(
 # cheap probe) from re-reading every worktree candidate on each poll. Cleared wholesale
 # at the cap rather than evicted per-entry: the working set is one project's worktrees.
 _CWD_CACHE_MAX = 4096
-_CWD_CACHE: dict[tuple[str, int, int], tuple[str | None]] = {}
+_CWD_CACHE: dict[tuple[str, int, int, int], tuple[str | None]] = {}
 
 
 def _worktree_candidate_dirs(project_path: Path, claude_projects_dir: Path) -> list[Path]:
@@ -312,7 +312,9 @@ def _recorded_cwd(path: Path, max_lines: int = 200) -> str | None:
         stat = path.stat()
     except OSError:
         return None
-    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    # `max_lines` is part of the key: the answer is "the cwd found WITHIN this bound", so a
+    # miss at a small bound must not be served to a caller asking with a larger one.
+    key = (str(path), stat.st_mtime_ns, stat.st_size, max_lines)
     cached = _CWD_CACHE.get(key)
     if cached is not None:
         return cached[0]

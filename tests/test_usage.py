@@ -312,6 +312,102 @@ def _write_transcript(directory: Path, name: str, cwd: Path | str | None, **extr
     return path
 
 
+def test_recorded_cwd_skips_records_without_one(short_tmp_root):
+    # Leading records are often queue-operation/attachment entries carrying no cwd, and a
+    # corrupt line can appear anywhere, so the scan must step over both rather than give up
+    # at the first record. An explicitly EMPTY cwd is not a cwd either.
+    from clauster.usage import _recorded_cwd
+
+    path = short_tmp_root / "t.jsonl"
+    path.write_text(
+        json.dumps({"type": "queue-operation"}) + "\n"
+        "{not json\n"
+        + json.dumps({"type": "user", "cwd": ""})
+        + "\n"
+        + json.dumps({"type": "user", "cwd": "/srv/projects/found"})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert _recorded_cwd(path) == "/srv/projects/found"
+
+
+def test_recorded_cwd_gives_up_past_the_line_bound(short_tmp_root):
+    # Bounded scan: a transcript whose cwd only appears beyond the cap reads as unproven
+    # rather than making the walk read an arbitrarily large file.
+    from clauster.usage import _recorded_cwd
+
+    path = short_tmp_root / "late.jsonl"
+    filler = json.dumps({"type": "attachment"}) + "\n"
+    path.write_text(
+        filler * 20 + json.dumps({"type": "user", "cwd": "/srv/projects/late"}) + "\n",
+        encoding="utf-8",
+    )
+    assert _recorded_cwd(path, max_lines=5) is None
+    assert _recorded_cwd(path, max_lines=50) == "/srv/projects/late"
+
+
+def test_recorded_cwd_unreadable_transcript_is_unproven(short_tmp_root):
+    # stat/open failures must read as "unproven" (-> refused downstream), never raise into
+    # a listing. A directory stands in for the unreadable file: opening one raises OSError
+    # on every platform (IsADirectoryError on POSIX, PermissionError on Windows).
+    from clauster.usage import _recorded_cwd
+
+    assert _recorded_cwd(short_tmp_root / "does-not-exist.jsonl") is None
+    directory = short_tmp_root / "not-a-file.jsonl"
+    directory.mkdir()
+    assert _recorded_cwd(directory) is None
+
+
+def test_recorded_cwd_cache_clears_at_the_cap(short_tmp_root, monkeypatch):
+    # The cache is cleared wholesale at the cap rather than evicted per-entry; pin that it
+    # actually bounds, so a long-lived process can't grow it without limit.
+    from clauster import usage as usage_mod
+
+    monkeypatch.setattr(usage_mod, "_CWD_CACHE_MAX", 1)
+    usage_mod._CWD_CACHE.clear()
+    for i in range(3):
+        p = short_tmp_root / f"c{i}.jsonl"
+        p.write_text(json.dumps({"type": "user", "cwd": f"/srv/p{i}"}) + "\n", encoding="utf-8")
+        assert usage_mod._recorded_cwd(p) == f"/srv/p{i}"
+    assert len(usage_mod._CWD_CACHE) <= 1
+    usage_mod._CWD_CACHE.clear()
+
+
+def test_transcript_is_owned_rejects_an_unresolvable_cwd(short_tmp_root):
+    # A recorded cwd is untrusted input from a file on disk. One that cannot even be
+    # resolved (a NUL byte makes Path.resolve raise ValueError) must fail closed, not
+    # propagate out of a listing.
+    from clauster.usage import _transcript_is_owned
+
+    project = short_tmp_root / "projects" / "my_proj"
+    project.mkdir(parents=True)
+    path = short_tmp_root / "bad.jsonl"
+    path.write_text(json.dumps({"type": "user", "cwd": "/srv/\x00/x"}) + "\n", encoding="utf-8")
+    assert _transcript_is_owned(project, path) is False
+
+
+def test_transcript_paths_for_tolerates_an_unreadable_candidate_dir(short_tmp_root, monkeypatch):
+    # An unreadable worktree candidate dir contributes nothing rather than failing the whole
+    # walk — the project's own conversations must still list.
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    worktree = project / ".claude" / "worktrees" / "sess-1"
+    project.mkdir(parents=True)
+    _write_transcript(_project_transcript_dir(claude_dir, project), "main.jsonl", project)
+    candidate = _project_transcript_dir(claude_dir, worktree)
+    _write_transcript(candidate, "wt.jsonl", worktree)
+
+    real_glob = Path.glob
+
+    def boom(self, pattern):
+        if self == candidate:
+            raise OSError("permission denied")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", boom)
+    assert [p.name for p in transcript_paths_for(project, claude_dir)] == ["main.jsonl"]
+
+
 def test_transcript_paths_for_includes_worktree_sessions(short_tmp_root):
     # #1020: a worktree-spawn session runs with the worktree as its cwd, so Claude files its
     # transcript in a SIBLING directory. Keying only on the project root hid those
