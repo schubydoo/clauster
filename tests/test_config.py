@@ -51,7 +51,7 @@ def test_legacy_database_url_key_still_loads_with_warning(write_config, caplog):
 
 
 def test_legacy_database_url_env_var_warns(write_config, caplog, monkeypatch):
-    # The removed field also drops CLAUSTER_DATABASE_URL from _scalar_env_map, so a DSN set
+    # The removed field also drops CLAUSTER_DATABASE_URL from _env_leaf_map, so a DSN set
     # ONLY via the env override never reaches `raw` — the YAML-key check alone would miss it
     # and the setting would be silently ignored (Greptile #801 R2). The warning must fire for
     # the env path too, not just the YAML key.
@@ -450,6 +450,188 @@ def test_env_override_merges_into_existing_nested_mapping(write_config, monkeypa
     config = load_config(cfg_path)
     assert config.logs.strip_ansi_in_stream is False  # env override applied
     assert config.logs.keep_rotated == 9  # the file-set sibling key was preserved
+
+
+def test_env_override_list_field_splits_on_commas(write_config, monkeypatch):
+    # #1072: a list[str] leaf used to take the raw string straight into the field, so
+    # setting the advertised var crashed config load with a pydantic list_type error.
+    cfg_path = write_config()
+    monkeypatch.setenv(
+        "CLAUSTER_AUTH_ALLOWED_ORIGINS", "http://localhost:7621, https://box.example.com"
+    )
+    config = load_config(cfg_path)
+    assert config.auth.allowed_origins == ["http://localhost:7621", "https://box.example.com"]
+
+
+def test_env_override_list_field_single_value_and_blanks(write_config, monkeypatch):
+    # A single value is a one-element list, and a trailing comma must not produce an
+    # empty-string origin (which would validate but never match a real Origin header).
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_CLONE_ALLOWED_SCHEMES", "https,")
+    config = load_config(cfg_path)
+    assert config.clone.allowed_schemes == ["https"]
+
+
+def test_env_override_list_field_via_secret_file(write_config, monkeypatch, tmp_path):
+    # The _FILE indirection has to split too — it shares the assignment path, so a
+    # list leaf read from a file would otherwise land as a raw string and crash.
+    secret_file = tmp_path / "origins"
+    secret_file.write_text("http://a.example,http://b.example\n", encoding="utf-8")
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_AUTH_ALLOWED_ORIGINS_FILE", str(secret_file))
+    config = load_config(cfg_path)
+    assert config.auth.allowed_origins == ["http://a.example", "http://b.example"]
+
+
+def test_env_override_list_field_secret_file_one_per_line(write_config, monkeypatch, tmp_path):
+    # One-entry-per-line is the natural way to write a secret file, and splitting on commas
+    # alone collapsed it into a single entry holding a raw newline. That entry matches no
+    # real Origin, so the operator got "origin check failed" with nothing pointing at the
+    # cause — a silent misconfiguration in exactly the Docker/secrets shape this serves.
+    secret_file = tmp_path / "origins"
+    secret_file.write_text("http://a.example\nhttp://b.example\n", encoding="utf-8")
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_AUTH_ALLOWED_ORIGINS_FILE", str(secret_file))
+    config = load_config(cfg_path)
+    assert config.auth.allowed_origins == ["http://a.example", "http://b.example"]
+
+
+def test_env_override_empty_list_value_clears_rather_than_falling_through(
+    write_config, monkeypatch
+):
+    # An empty value is an empty list, NOT "unset" — it does not fall back to the YAML
+    # value. Pinned because a Compose file with `CLAUSTER_AUTH_ALLOWED_ORIGINS: ""` would
+    # otherwise silently wipe a configured allowlist, and the origin gate now runs even
+    # with auth off (#1070). Clearing fails closed (nothing is allowed), which is the safe
+    # direction, but it must be deliberate and documented rather than accidental.
+    cfg_path = write_config("auth:\n  allowed_origins:\n    - https://from-yaml.example\n")
+    monkeypatch.setenv("CLAUSTER_AUTH_ALLOWED_ORIGINS", "")
+    assert load_config(cfg_path).auth.allowed_origins == []
+
+
+def test_dict_leaves_are_not_env_addressable(write_config, monkeypatch):
+    # #1072: dict leaves can't be expressed by one env var, so they must not be mapped at
+    # all. Before the fix they WERE mapped and assigned a raw string, turning the obvious
+    # env var into a startup crash loop. Setting them now is inert, not fatal.
+    from clauster.config import ClausterConfig, _env_leaf_map
+
+    env_map = _env_leaf_map(ClausterConfig)
+    for unmapped in ("CLAUSTER_PROJECTS", "CLAUSTER_CLAUDE_ENV", "CLAUSTER_WEBHOOKS_EVENTS"):
+        assert unmapped not in env_map
+    cfg_path = write_config()
+    monkeypatch.setenv("CLAUSTER_PROJECTS", "anything")
+    monkeypatch.setenv("CLAUSTER_CLAUDE_ENV", "FOO=bar")
+    config = load_config(cfg_path)  # must not raise
+    assert config.projects == {}
+    assert config.claude.env == {}
+
+
+def test_list_of_non_scalars_is_not_env_addressable():
+    # A list of MODELS or nested containers has no delimited-string spelling. Mapping one
+    # would advertise a var that assigns list[str] into it and crash load — the #1072 class
+    # this map exists to remove. No such field exists today; this stops one being added
+    # silently. Asserted on the classifier because the schema has no such leaf to drive it.
+    from typing import Literal
+
+    from clauster.config import ProjectConfig, _env_leaf_kind
+
+    assert _env_leaf_kind(list[str]) == "list"
+    # A list of Literals is still scalar-item — an enum-ish list stays env-settable.
+    assert _env_leaf_kind(list[Literal["a", "b"]]) == "list"
+    assert _env_leaf_kind(list[ProjectConfig]) is None
+    assert _env_leaf_kind(list[dict[str, str]]) is None
+    assert _env_leaf_kind(list[list[str]]) is None
+
+
+def test_legacy_env_aliases_all_target_addressable_leaves():
+    # A legacy alias pointing at a dropped dict leaf would assign a raw string and crash
+    # config load. _apply_env_overrides skips such an alias, but an alias that SHOULD work
+    # silently doing nothing is its own bug — so pin that every declared alias resolves.
+    from clauster.config import _LEGACY_ENV_ALIASES, ClausterConfig, _env_leaf_map
+
+    leaves = {path for path, _kind in _env_leaf_map(ClausterConfig).values()}
+    for env_name, path in _LEGACY_ENV_ALIASES.items():
+        assert path in leaves, f"{env_name} aliases {'.'.join(path)}, which is not env-addressable"
+
+
+def test_legacy_alias_onto_unaddressable_leaf_is_skipped(write_config, monkeypatch):
+    # The guard branch itself: an alias whose target is NOT env-addressable must be skipped,
+    # not honored — honoring it would assign a raw string into a dict leaf and crash config
+    # load, the same #1072 class. Driven with an injected alias because every real alias
+    # targets a scalar, so the branch is otherwise unreachable.
+    from clauster import config as config_mod
+
+    monkeypatch.setitem(
+        config_mod._LEGACY_ENV_ALIASES, "CLAUSTER_OLD_CLAUDE_ENV", ("claude", "env")
+    )
+    monkeypatch.setenv("CLAUSTER_OLD_CLAUDE_ENV", "FOO=bar")
+    config = load_config(write_config())  # must not raise
+    assert config.claude.env == {}  # skipped entirely, not partially applied
+
+
+def test_every_list_env_var_validates_through_the_model(write_config, monkeypatch):
+    # Companion to the coercion test below: that one bypasses model validation on purpose,
+    # so it would pass even for a var that is fatal at load. This pushes each list var all
+    # the way through load_config with a value valid for its field.
+    samples = {
+        "CLAUSTER_AUTH_ALLOWED_ORIGINS": "https://a.example,https://b.example",
+        "CLAUSTER_AUTH_REVERSE_PROXY_TRUSTED_IPS": "10.0.0.0/8,192.168.1.1",
+        "CLAUSTER_CLAUDE_PATH_APPEND": "/opt/bin,/usr/local/bin",
+        "CLAUSTER_CLONE_ALLOWED_PRIVATE_CIDRS": "10.0.0.0/8",
+        "CLAUSTER_CLONE_ALLOWED_SCHEMES": "https,ssh",
+        "CLAUSTER_NOTIFICATIONS_URLS": "json://example.com",
+        "CLAUSTER_TLS_HOSTNAMES": "clauster.example.com",
+        "CLAUSTER_WEBHOOKS_URLS": "https://hook.example.com",
+    }
+    from clauster.config import ClausterConfig, _env_leaf_map
+
+    list_vars = {e for e, (_p, k) in _env_leaf_map(ClausterConfig).items() if k == "list"}
+    assert list_vars == set(samples), "a list env var gained/lost — add it to the samples"
+
+    # A few leaves carry cross-field model rules that a lone value can't satisfy; that is
+    # the model working, not a coercion failure, so the companion key goes in with it.
+    companions = {
+        # A tls block holding only hostnames trips "cert_file is required when
+        # provision = off" before the list is ever inspected.
+        "CLAUSTER_TLS_HOSTNAMES": {"CLAUSTER_TLS_PROVISION": "self-signed"},
+    }
+
+    for env_name, value in samples.items():
+        monkeypatch.setenv(env_name, value)
+        for extra_name, extra_value in companions.get(env_name, {}).items():
+            monkeypatch.setenv(extra_name, extra_value)
+        try:
+            load_config(write_config())  # must not raise
+        finally:
+            monkeypatch.delenv(env_name, raising=False)
+            for extra_name in companions.get(env_name, {}):
+                monkeypatch.delenv(extra_name, raising=False)
+
+
+def test_every_list_env_var_coerces_to_a_list(monkeypatch):
+    # Guards the whole class rather than the one field #1072 was filed for: EVERY list-kind
+    # var must reach the model as a list, so a future list field added to the schema fails
+    # here instead of shipping as an advertised-but-crashing var.
+    #
+    # Asserted against _apply_env_overrides, not load_config, on purpose: the bug was the
+    # shape handed to pydantic (str where list[str] was required). Going through load_config
+    # would also drag in each field's CONTENT validation — trusted_ips wants IPs/CIDRs, not
+    # URLs — so one sample value can't satisfy every field and a content rejection would
+    # masquerade as the coercion regression this test exists to catch.
+    from clauster.config import ClausterConfig, _apply_env_overrides, _env_leaf_map
+
+    for env_name, (path, kind) in sorted(_env_leaf_map(ClausterConfig).items()):
+        if kind != "list":
+            continue
+        monkeypatch.setenv(env_name, "one,two")
+        try:
+            data = _apply_env_overrides({})
+        finally:
+            monkeypatch.delenv(env_name, raising=False)
+        value = data
+        for key in path:
+            value = value[key]
+        assert value == ["one", "two"], f"{env_name} ({'.'.join(path)}) did not coerce to a list"
 
 
 def test_reaper_ui_disabled_by_default(write_config):

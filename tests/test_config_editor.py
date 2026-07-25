@@ -45,9 +45,9 @@ def _config_leaf_paths(
 ) -> list[str]:
     """Enumerate every dotted leaf-field path in ClausterConfig (nested models recurse).
 
-    Same recursion as ``config._scalar_env_map`` — nested models recurse, dict/list
-    leaves stay leaves — so the editor's coverage decision is taken against exactly the
-    addressable scalar leaves.
+    Same recursion as ``config._env_leaf_map`` — nested models recurse, dict/list leaves
+    stay leaves — so the editor's coverage decision is taken against exactly the
+    addressable leaves.
     """
     out: list[str] = []
     for name, field in model.model_fields.items():
