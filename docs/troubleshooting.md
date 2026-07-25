@@ -347,6 +347,20 @@ login, or use the dashboard login flow
 ([`login_shepherd`](reference/config.md#login_shepherd-dashboard-driven-claude-account-login-loginshepherdconfig)).
 An `ANTHROPIC_API_KEY` in the service environment also satisfies the check.
 
+### "a login flow is already in progress; cancel it first"
+
+**What you see:** the dashboard sign-in panel refuses to start, reporting that a
+login flow is already in progress.
+
+**Most likely cause:** an earlier sign-in was started but its authorize link was
+never used. The shepherd runs one flow at a time, so the abandoned one holds the
+slot.
+
+**The fix:** reload the dashboard. The sign-in panel reads the server's state on
+load, so it re-opens on the in-progress flow with its authorize link and a
+**Cancel** button — cancel, then start again. A flow untouched for more than 15
+minutes is also reclaimed automatically by the next sign-in attempt.
+
 ### The claude version is too old (min_version)
 
 **What you see:** `doctor` fails the `claude` row with

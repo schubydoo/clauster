@@ -5194,6 +5194,38 @@
       authorizeUrl: null, output: "", code: "", error: null, result: null, copied: false,
       pending: false, pendingMessage: "", pollTimer: null, rechecking: false,
       toggle() { this.open = !this.open; },
+      // Rehydrate the in-progress flow from the server on load (#1078). This state is
+      // per-page-load, so without this a reload renders the empty Start form while the
+      // server still holds the flow open — every /start then 409s ("already in progress")
+      // with no Cancel control anywhere, because Cancel lives behind `started`. Reading the
+      // server's view restores it, and the panel auto-opens so the stuck flow is visible
+      // rather than hidden behind a collapsed toggle.
+      //
+      // Advisory: a failed fetch, or the 404 the route returns when the feature is disabled,
+      // just leaves the idle form exactly as before. Never starts polling — a rehydrated
+      // flow is parked awaiting a code, not verifying a submitted one (that is `pending`,
+      // which only /code and /status set).
+      async init() {
+        try {
+          const res = await fetch(ROOT + "/api/login-shepherd/state");
+          if (!res.ok) return;
+          const body = await res.json();
+          if (!body.active) return;
+          if (body.mode) this.mode = body.mode;
+          this.authorizeUrl = body.authorize_url || null;
+          this.started = true;
+          this.open = true;
+          // A code was already submitted and the verification is still running. Resume
+          // polling: `poll()` is the ONLY thing that finalizes an exited flow and extracts
+          // a one-time setup-token, so a reload that left this false would strand that
+          // credential until the idle reclaim destroyed it unseen.
+          if (body.pending) {
+            this.pending = true;
+            this.pendingMessage = "Still verifying…";
+            this.startPolling();
+          }
+        } catch (e) { /* advisory — leave the idle form untouched */ }
+      },
       async start() {
         this.busy = true; this.error = null;
         try {
@@ -5285,6 +5317,11 @@
       async startAnother() { await this.cancel(); },
       reset() {
         this.stopPolling();
+        // Back to the default mode too, since init() can now adopt a live flow's mode:
+        // rehydrating a `setup-token` flow started before allow_setup_token was turned off
+        // would otherwise leave `mode` pinned there with no rendered control to change it,
+        // and the next Start would 404 on the gate with no way back but a page reload.
+        this.mode = "login";
         this.started = false; this.finished = false; this.authorizeUrl = null;
         this.output = ""; this.code = ""; this.result = null; this.error = null;
         this.copied = false; this.pending = false; this.pendingMessage = "";
