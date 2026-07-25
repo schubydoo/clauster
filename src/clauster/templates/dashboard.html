@@ -1225,9 +1225,10 @@
                 </p>
                 {% else %}
                 <!-- allow_setup_token is off (#846 second gate): only the `login` mode
-                     is offered — no toggle, just its description. `mode` already
-                     defaults to "login" in loginShepherd() and start() re-asserts it,
-                     so setup-token can never be selected or submitted from here. -->
+                     is offered — no toggle, just its description. `mode` defaults to
+                     "login" in loginShepherd() and reset() restores it, and with no radio
+                     rendered nothing here can select setup-token. (The server is the real
+                     gate regardless: a setup-token request 404s when the flag is off.) -->
                 <p class="ls-mode-desc text-secondary small mb-2">
                   Opens a one-time authorize link tied to your Claude subscription.
                 </p>
@@ -1239,21 +1240,38 @@
 
             <div class="alert alert-danger mt-2" x-show="error" x-cloak x-text="error"></div>
 
-            <template x-if="started && authorizeUrl && !finished">
+            <!-- In-progress block. Gated on `started` ALONE, never on `authorizeUrl` (#1078):
+                 a flow becomes active server-side the moment it spawns, and its authorize URL
+                 only lands up to START_TIMEOUT_SECONDS later, so a page rehydrating in that
+                 window (init() reads /state) would otherwise match NEITHER this nor the
+                 !started start-form above — an empty card with no Start and no Cancel, the very
+                 dead end this issue removes. Cancel must be reachable whenever a flow exists;
+                 the link and code box are what wait on the URL, inside. -->
+            <template x-if="started && !finished">
               <div>
-                <p class="mb-1">
-                  1. Open the authorize link, sign in, and approve access:
-                </p>
-                <p>
-                  <a :href="authorizeUrl" target="_blank" rel="noopener noreferrer" x-text="authorizeUrl"></a>
-                </p>
-                <p class="mb-1">2. Paste the code it gives you back here:</p>
-                <div class="input-group input-group-narrow mb-2">
-                  <input type="text" class="form-control" x-model="code" placeholder="Paste code"
-                         aria-label="Authorization code"
-                         {{ NO_AUTOFILL }} spellcheck="false" @keydown.enter="submitCode()">
-                  <button class="btn btn-primary" @click="submitCode()" :disabled="busy || !code"
-                          x-text="busy ? 'Submitting…' : 'Submit'">Submit</button>
+                <template x-if="authorizeUrl">
+                  <div>
+                    <p class="mb-1">
+                      1. Open the authorize link, sign in, and approve access:
+                    </p>
+                    <p>
+                      <a :href="authorizeUrl" target="_blank" rel="noopener noreferrer" x-text="authorizeUrl"></a>
+                    </p>
+                    <p class="mb-1">2. Paste the code it gives you back here:</p>
+                    <div class="input-group input-group-narrow mb-2">
+                      <input type="text" class="form-control" x-model="code" placeholder="Paste code"
+                             aria-label="Authorization code"
+                             {{ NO_AUTOFILL }} spellcheck="false" @keydown.enter="submitCode()">
+                      <button class="btn btn-primary" @click="submitCode()" :disabled="busy || !code"
+                              x-text="busy ? 'Submitting…' : 'Submit'">Submit</button>
+                    </div>
+                  </div>
+                </template>
+                <!-- Active flow whose URL hasn't been printed yet (another tab is mid-start).
+                     Explains the state instead of showing a bare card, and keeps Cancel below. -->
+                <div class="alert alert-info" role="status" x-show="!authorizeUrl" x-cloak>
+                  A sign-in is already starting. Reload in a moment to pick up its authorize
+                  link, or cancel it and start again.
                 </div>
                 <!-- Still-verifying (pending) state: the login is running server-side and
                      hasn't resolved yet. The UI polls /status every ~3s; the message shows,

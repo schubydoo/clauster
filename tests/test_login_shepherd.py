@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -752,6 +753,123 @@ def test_cancel_then_start_again_succeeds(shepherd, monkeypatch) -> None:
         shepherd.cancel()
 
 
+# --- abandoned-flow recovery (#1078): state() rehydration + lazy idle reclaim -------
+
+
+def test_state_reports_inactive_when_no_flow(shepherd) -> None:
+    assert shepherd.state() == {"active": False}
+
+
+def test_state_describes_an_active_flow(shepherd, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        started = shepherd.start("login")
+        state = shepherd.state()
+        assert state["active"] is True
+        assert state["mode"] == "login"
+        # The URL survives on the flow so a client that lost its copy can recover it.
+        assert state["authorize_url"] == started["authorize_url"]
+        assert state["pending"] is False  # no code submitted yet — the flow is parked
+        assert state["idle_seconds"] >= 0.0
+        assert state["idle_ttl_seconds"] == ls.IDLE_FLOW_TTL_SECONDS
+    finally:
+        shepherd.cancel()
+
+
+def test_state_never_reaps_the_flow(shepherd, monkeypatch) -> None:
+    # state() is the side-effect-free read: unlike poll() it must not finalize or reap,
+    # or a rehydrating page load would race the polling client for a one-time result.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("login")
+        for _ in range(3):
+            assert shepherd.state()["active"] is True
+        assert shepherd.is_active()
+    finally:
+        shepherd.cancel()
+
+
+def test_state_omits_captured_output(shepherd, monkeypatch) -> None:
+    # The subprocess buffer can hold a pasted code; the rehydration read must not carry it.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("login")
+        assert "output" not in shepherd.state()
+    finally:
+        shepherd.cancel()
+
+
+def test_start_reclaims_a_flow_idle_past_the_ttl(shepherd, monkeypatch) -> None:
+    # The wedge in #1078: an abandoned flow refused every later sign-in forever. Age the
+    # parked flow past the TTL and the next start() must reclaim it rather than raise.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        first = shepherd.start("login")
+        flow = shepherd._flow  # noqa: SLF001 - aging the flow is what the test controls
+        assert flow is not None
+        flow.last_active_at = time.monotonic() - ls.IDLE_FLOW_TTL_SECONDS - 1.0
+        second = shepherd.start("login")
+        assert second["authorize_url"]
+        # A genuinely new flow, not the stale one handed back.
+        assert shepherd._flow is not flow  # noqa: SLF001 - identity is the assertion
+        assert first["authorize_url"]
+    finally:
+        shepherd.cancel()
+
+
+def test_start_still_refuses_a_flow_within_the_ttl(shepherd, monkeypatch) -> None:
+    # The reclaim must not weaken single-flight for a flow the operator is still using:
+    # only an IDLE-past-TTL flow is reclaimable.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("login")
+        flow = shepherd._flow  # noqa: SLF001 - internals: assert the flow is untouched
+        flow.last_active_at = time.monotonic() - (ls.IDLE_FLOW_TTL_SECONDS / 2)
+        with pytest.raises(ls.AlreadyActiveError):
+            shepherd.start("login")
+        assert shepherd._flow is flow  # noqa: SLF001 - the live flow survived the refusal
+    finally:
+        shepherd.cancel()
+
+
+def test_poll_resets_the_idle_clock(shepherd, monkeypatch) -> None:
+    # The TTL must mean "untouched", not "started N ago": a verification the operator is
+    # still polling must never be reclaimed (and its one-time token destroyed) mid-flight.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("login")
+        flow = shepherd._flow  # noqa: SLF001 - the idle clock is what the test drives
+        flow.last_active_at = time.monotonic() - ls.IDLE_FLOW_TTL_SECONDS - 1.0
+        shepherd.poll()  # an operator waiting on the result IS activity
+        assert (time.monotonic() - flow.last_active_at) < 1.0
+        # …so the flow is no longer reclaimable and single-flight still holds.
+        with pytest.raises(ls.AlreadyActiveError):
+            shepherd.start("login")
+        assert shepherd._flow is flow  # noqa: SLF001 - the polled flow survived
+    finally:
+        shepherd.cancel()
+
+
+def test_state_reports_pending_once_a_code_is_submitted(shepherd, monkeypatch) -> None:
+    # Rehydration must distinguish "parked, paste a code" from "code already in flight".
+    # Only poll()/submit_code() extract a one-time setup-token, so a reloaded page that
+    # failed to resume polling would strand it until the reclaim destroyed it unseen.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("login")
+        assert shepherd.state()["pending"] is False
+        flow = shepherd._flow  # noqa: SLF001 - drive the submitted flag without a real code
+        flow.code_submitted = True
+        assert shepherd.state()["pending"] is True
+    finally:
+        shepherd.cancel()
+
+
+def test_reclaim_is_a_noop_with_no_flow(shepherd) -> None:
+    shepherd._reclaim_if_idle()  # noqa: SLF001 - must be safe with nothing active
+    assert not shepherd.is_active()
+
+
 # --- submit_code(): success, rejection, not-active ----------------------------------
 
 
@@ -1248,7 +1366,47 @@ def test_routes_404_when_disabled(tmp_path: Path) -> None:
         assert c.post("/api/login-shepherd/start", json={"mode": "login"}).status_code == 404
         assert c.post("/api/login-shepherd/code", json={"code": "x"}).status_code == 404
         assert c.post("/api/login-shepherd/status").status_code == 404
+        assert c.get("/api/login-shepherd/state").status_code == 404
         assert c.post("/api/login-shepherd/cancel").status_code == 404
+
+
+def test_state_route_is_inactive_with_no_flow(tmp_path: Path) -> None:
+    with _client(tmp_path, enabled=True) as c:
+        resp = c.get("/api/login-shepherd/state")
+        assert resp.status_code == 200
+        # 200 + active:false, NOT the 409 /status returns — "no flow" is the expected
+        # answer to a rehydration read, not an error the client must special-case.
+        assert resp.json() == {"active": False}
+
+
+def test_state_route_rehydrates_an_abandoned_flow_after_a_reload(tmp_path: Path) -> None:
+    # The #1078 regression: start a flow, never consume the authorize link, then come back
+    # with FRESH CLIENT STATE (what a page reload gives you). Before the fix the browser had
+    # no idea a flow was open, so it rendered the empty Start form, whose /start then 409'd —
+    # and Cancel was unreachable because it renders only behind the client's own `started`.
+    with _client(tmp_path, enabled=True) as c:
+        started = c.post("/api/login-shepherd/start", json={"mode": "login"})
+        assert started.status_code == 200
+        authorize_url = started.json()["authorize_url"]
+
+        # A second /start still 409s — the flow really is wedged from the client's view.
+        assert c.post("/api/login-shepherd/start", json={"mode": "login"}).status_code == 409
+
+        # What a reloaded page now reads on init: enough to re-render the in-progress
+        # panel, including the authorize link the operator's local copy went down with.
+        state = c.get("/api/login-shepherd/state")
+        assert state.status_code == 200
+        body = state.json()
+        assert body["active"] is True
+        assert body["mode"] == "login"
+        assert body["authorize_url"] == authorize_url
+
+        # And the recovery the operator can now reach: cancel, then sign in again — no
+        # service restart, no hand-called API.
+        assert c.post("/api/login-shepherd/cancel").status_code == 200
+        assert c.get("/api/login-shepherd/state").json() == {"active": False}
+        assert c.post("/api/login-shepherd/start", json={"mode": "login"}).status_code == 200
+        c.post("/api/login-shepherd/cancel")
 
 
 def test_start_route_bad_mode_is_422_when_enabled(tmp_path: Path) -> None:
@@ -1474,6 +1632,50 @@ def test_dashboard_context_reflects_flag(tmp_path: Path) -> None:
         resp = c.get("/")
         assert resp.status_code == 200
         assert 'x-data="loginShepherd()"' not in resp.text
+
+
+def test_template_login_component_rehydrates_on_init(tmp_path: Path) -> None:
+    # Cross-layer guard (#1078): the /state route is only half the fix — it does nothing
+    # unless the Alpine component actually reads it on init. There is no JS test harness
+    # here, so assert the wiring in the served DOM: an init() that fetches the route and
+    # flips `started` (which is what gates the Cancel control) when a flow is active.
+    with _client(tmp_path, enabled=True) as c:
+        resp = c.get("/")
+        assert resp.status_code == 200
+        html = resp.text
+        assert "/api/login-shepherd/state" in html
+        assert "async init()" in html
+        assert "this.started = true" in html
+
+
+def test_template_cancel_is_not_gated_on_the_authorize_url(tmp_path: Path) -> None:
+    # A flow is registered server-side BEFORE its authorize URL is printed (`start()` sets
+    # `_flow` then waits up to START_TIMEOUT_SECONDS for the URL), so `state()` can legitimately
+    # report active with `authorize_url: null`. If the in-progress block were gated on the URL
+    # as well as `started`, a page rehydrating in that window would match neither it nor the
+    # `!started` start form — an empty card with no Start and no Cancel, which is the exact
+    # dead end #1078 exists to remove. Pin the guard so it can't regress back.
+    with _client(tmp_path, enabled=True) as c:
+        html = c.get("/").text
+        assert 'x-if="started && !finished"' in html
+        assert 'x-if="started && authorizeUrl && !finished"' not in html
+        # The link/code box is what waits on the URL, nested inside the Cancel-bearing block.
+        assert 'x-if="authorizeUrl"' in html
+
+
+def test_state_of_a_flow_without_a_url_still_reports_active(tmp_path: Path) -> None:
+    # The server half of the same invariant: an active-but-URL-less flow must still be
+    # reported active, so the client renders the in-progress panel (and its Cancel).
+    (tmp_path / "projects").mkdir(exist_ok=True)
+    app = create_app(_cfg(login_shepherd_enabled=True, auth_enabled=False, tmp_path=tmp_path))
+    with TestClient(app) as c:
+        assert c.post("/api/login-shepherd/start", json={"mode": "login"}).status_code == 200
+        # Reproduce the pre-URL window deterministically, without racing a real slow spawn.
+        app.state.login_shepherd._flow.authorize_url = None  # noqa: SLF001 - that window
+        body = c.get("/api/login-shepherd/state").json()
+        assert body["active"] is True
+        assert body["authorize_url"] is None
+        c.post("/api/login-shepherd/cancel")
 
 
 # --- template: the setup-token mode control is gated on allow_setup_token (#846) ----

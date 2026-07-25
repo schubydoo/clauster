@@ -83,6 +83,16 @@ SUBMIT_TIMEOUT_SECONDS = 45.0
 #: Poll cadence for the bounded waits below.
 _POLL_INTERVAL_SECONDS = 0.1
 
+#: How long a flow parked awaiting an authorize code may sit idle before a NEW `start()`
+#: is allowed to reclaim it (#1078). The shepherd is single-flight, and nothing else ages
+#: a parked flow out: `START_TIMEOUT_SECONDS` bounds only the wait for the URL, so a flow
+#: whose authorize link is never consumed stays active until `cancel()` or process exit,
+#: refusing every later sign-in. Expiry is LAZY — evaluated only when a new `start()`
+#: arrives, so there is no background timer and an untouched flow is never killed out from
+#: under an operator who is still mid-authorize in another tab. Generous enough to cover a
+#: real browser round trip (find the device, log in, approve) with room to spare.
+IDLE_FLOW_TTL_SECONDS = 900.0
+
 #: After `start()` sees an authorize URL while the process still *looks* alive, how long
 #: to wait to confirm it stays alive (a genuine login BLOCKS on stdin here) before trusting
 #: the URL. `poll()` can lag a just-returned `exit()` by a scheduling tick, so a process
@@ -252,6 +262,19 @@ class _Flow:
     which echoes written input back (see `_redact`), and harmless defense-in-depth elsewhere.
     ``pty_lock`` serializes native access to ``pty_process`` between the reader and control
     threads (used only by the ConPTY transport; see `_ConPtyPopen`), a no-op cost elsewhere.
+
+    ``authorize_url`` is the URL `start()` handed back, retained so a client that lost it
+    (a page reload) can rehydrate the in-progress flow from :meth:`LoginShepherd.state`
+    instead of being stranded (#1078). ``code_submitted`` records that a code was written,
+    which is what tells a rehydrating client to resume POLLING rather than re-offer the
+    paste box — without it a reload during a slow verification strands the one-time
+    `setup-token` credential, since only `poll()`/`submit_code()` ever extract it.
+
+    ``last_active_at`` is a monotonic stamp — never wall clock, which a clock adjustment
+    could run backwards — refreshed by every operator interaction (`submit_code`, `poll`).
+    The idle expiry in `start()` measures against it, so the TTL means "untouched for N
+    seconds", not "started N seconds ago": a flow whose verification is genuinely still
+    being polled is never reclaimed out from under it.
     """
 
     mode: Mode
@@ -266,6 +289,13 @@ class _Flow:
     pty_process: Any = None
     pty_lock: threading.Lock = field(default_factory=threading.Lock)
     pasted_secrets: list[str] = field(default_factory=list)
+    authorize_url: str | None = None
+    code_submitted: bool = False
+    last_active_at: float = field(default_factory=time.monotonic)
+
+    def touch(self) -> None:
+        """Reset the idle clock — called on every operator interaction with this flow."""
+        self.last_active_at = time.monotonic()
 
     def snapshot(self) -> str:
         """Return everything captured from the subprocess so far."""
@@ -292,6 +322,64 @@ class LoginShepherd:
         """Whether a login subprocess is currently running (or awaiting a code)."""
         with self._flow_lock:
             return self._flow is not None
+
+    def state(self) -> dict:
+        """Describe the active flow (if any) without touching it — the rehydration read (#1078).
+
+        The dashboard's login component holds its in-progress state per PAGE LOAD, so after a
+        reload it renders a fresh empty form while the server still refuses `start()` with
+        `AlreadyActiveError` — the Cancel affordance disappears exactly when it is needed. This
+        gives the client the server's view on init so an already-active flow re-renders with its
+        authorize URL and its Cancel / "Start another" controls.
+
+        Deliberately side-effect-free, unlike :meth:`poll`: it never calls `proc.poll()`, never
+        finalizes, and never reaps. A GET that could reap a completed flow would race the
+        polling client for its one-time `setup-token` result — so a flow that has exited but not
+        yet been finalized still reports ``active: true`` here, and the existing `/status` poll
+        (or `cancel`) remains the only thing that retires it. No captured subprocess output is
+        included: `authorize_url` is the one field a rehydrating client needs, and the buffer can
+        carry the pasted code (see `_redact`).
+        """
+        with self._flow_lock:
+            flow = self._flow
+            if flow is None:
+                return {"active": False}
+            return {
+                "active": True,
+                "mode": flow.mode,
+                "authorize_url": flow.authorize_url,
+                # A code is already in flight: the client must resume POLLING, not re-offer
+                # the paste box. Read from the recorded submit rather than `proc.poll()` so
+                # this stays a pure attribute read that cannot touch the subprocess at all.
+                "pending": flow.code_submitted,
+                "idle_seconds": max(0.0, time.monotonic() - flow.last_active_at),
+                "idle_ttl_seconds": IDLE_FLOW_TTL_SECONDS,
+            }
+
+    def _reclaim_if_idle(self) -> None:
+        """Tear down an active flow that has sat past `IDLE_FLOW_TTL_SECONDS` (#1078).
+
+        The lazy half of the un-wedging: called only from `start()`, so an abandoned flow is
+        reclaimed by the operator's next sign-in attempt rather than by a background timer.
+        The stale flow is detached under `_flow_lock` and torn down OUTSIDE it — `_teardown`
+        blocks (terminate + reader join, up to ~10s) and re-acquires the lock itself, so
+        holding it across the call would both stall every other caller and deadlock.
+
+        Concurrency: whichever caller wins the lock detaches the flow and owns its teardown; a
+        racing caller then sees `None` and proceeds to spawn. Only one can spawn (the spawn
+        block re-checks under the same lock), so this never yields two live flows.
+        """
+        with self._flow_lock:
+            flow = self._flow
+            if flow is None or (time.monotonic() - flow.last_active_at) < IDLE_FLOW_TTL_SECONDS:
+                return
+            self._flow = None
+        _log.info(
+            "login_shepherd: reclaiming a %s flow idle for over %.0fs so a new sign-in can start",
+            flow.mode,
+            IDLE_FLOW_TTL_SECONDS,
+        )
+        self._teardown(flow, already_cleared=True)
 
     def _spawn(self, mode: Mode, resolved_binary: str) -> _Flow:
         """Spawn `mode`'s subprocess and return its `_Flow`. Called under `_flow_lock`.
@@ -520,8 +608,11 @@ class LoginShepherd:
         when the optional `pyte` dependency is unavailable, BEFORE any subprocess is
         spawned, so a `PyteUnavailableError` never leaves a phantom flow behind either.
 
-        Raises `AlreadyActiveError` if a flow is already in progress.
+        Raises `AlreadyActiveError` if a flow is already in progress — unless that flow has
+        been parked, untouched, past `IDLE_FLOW_TTL_SECONDS`, in which case it is reclaimed
+        first (#1078) so an abandoned sign-in cannot wedge every later attempt.
         """
+        self._reclaim_if_idle()
         with self._flow_lock:
             if self._flow is not None:
                 raise AlreadyActiveError("a login flow is already in progress; cancel it first")
@@ -583,6 +674,10 @@ class LoginShepherd:
                 f"claude {mode} did not produce a usable login: {reason}. "
                 f"Captured output:\n{_redact(output, flow.pasted_secrets)}"
             )
+        # Retain the URL on the flow so `state()` can hand it back to a client that lost its
+        # local copy to a page reload (#1078). Set only on the success path — the fail-closed
+        # branches above have already torn the flow down.
+        flow.authorize_url = url
         return {"authorize_url": url, "output": _redact(output, flow.pasted_secrets)}
 
     def submit_code(self, code: str) -> dict:
@@ -621,6 +716,12 @@ class LoginShepherd:
                 if self._flow is not flow:
                     raise NotActiveError("no login flow is in progress")
 
+            # Operator interaction: reset the idle clock and record that a code is in
+            # flight, so (a) the TTL reclaim can't terminate a verification still being
+            # polled — destroying a one-time setup-token mid-flight — and (b) a client
+            # rehydrating after a reload resumes polling instead of re-offering the box.
+            flow.touch()
+            flow.code_submitted = True
             self._write_code(flow, code)
 
             # Wait until the process exits, then read a FRESH poll() — never trust the
@@ -664,6 +765,9 @@ class LoginShepherd:
             with self._flow_lock:
                 if self._flow is not flow:
                     raise NotActiveError("no login flow is in progress")
+            # A poll IS the operator waiting on this flow — reset the idle clock so the
+            # TTL reclaim can never tear down a verification still being actively polled.
+            flow.touch()
             exit_code = flow.proc.poll()
             if exit_code is None:
                 return self._pending_result(flow)

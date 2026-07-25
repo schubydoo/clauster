@@ -1881,6 +1881,22 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         except login_shepherd.NotActiveError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    @app.get("/api/login-shepherd/state")
+    async def api_login_shepherd_state() -> dict:
+        # Rehydration read (#1078): the dashboard's login state is per-page-load, so after a
+        # reload the client no longer knows a flow is open and never renders Cancel — while
+        # the server still refuses /start with 409. This lets the component recover that view
+        # on init. Unlike /status it is a GET and never reaps: it cannot race the polling
+        # client for a one-time setup-token result. `{"active": false}` when idle — a 200,
+        # not a 409, because "no flow" is the expected answer here rather than an error.
+        # Behind the same fail-closed gate as every other route in this group.
+        #
+        # Off-loaded like its siblings even though it only reads a dict: `state()` takes
+        # `_flow_lock`, which `start()` holds across a subprocess spawn, so an inline call
+        # could park the event loop behind that spawn.
+        _require_login_shepherd()
+        return await asyncio.to_thread(app.state.login_shepherd.state)
+
     @app.post("/api/login-shepherd/cancel")
     async def api_login_shepherd_cancel() -> dict:
         _require_login_shepherd()
