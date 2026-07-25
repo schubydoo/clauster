@@ -7,6 +7,15 @@ repo_url: https://github.com/schubydoo/clauster
 repo_name: schubydoo/clauster
 copyright: Copyright &copy; schubydoo — Apache-2.0
 
+# `docs/README.md` is a GitHub-only notice (#995): GitHub renders a directory's
+# README above its file listing, so it warns repo browsers that these pages track
+# `main` rather than the latest release. MkDocs uses `index.md` as the home page and
+# would otherwise emit "Excluding 'README.md' ... conflicts with 'index.md'" — which
+# `--strict` turns into a build failure. Excluding it explicitly is what makes the
+# file GitHub-only rather than a broken second index. Requires MkDocs >= 1.5.
+exclude_docs: |
+  README.md
+
 theme:
   name: material
   icon:
