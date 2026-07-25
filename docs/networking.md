@@ -327,3 +327,9 @@ The container binds `0.0.0.0` internally, so it **requires enforced auth to
 start** — the bundled `compose.yaml` sets `CLAUSTER_AUTH_ENABLED=true` and
 `CLAUSTER_AUTH_PASSWORD_REQUIRED=true` and expects a
 `CLAUSTER_AUTH_PASSWORD_HASH`. See [Installation](installation.md#docker).
+
+Because that bind is non-loopback, it also needs `auth.allowed_origins` (see the
+callout above) — otherwise the login POST is refused with `403 origin check
+failed`. Completing the first-run setup wizard records the origin you reached it
+at automatically; a Compose deployment configured purely by environment sets
+`CLAUSTER_AUTH_ALLOWED_ORIGINS` instead (comma-separated for more than one).

@@ -9,9 +9,12 @@
 #        export CLAUSTER_AUTH_PASSWORD_HASH='$argon2id$v=19$...'
 #      (Or put it in a .env file beside this one — but then double every `$` to `$$`
 #       so Compose doesn't try to interpolate it.)
-#   3. Point the `projects` volume at your projects_root, and mount the `claude` CLI +
+#   3. If you will open the dashboard at anything other than http://localhost:7621 —
+#      a LAN address, a hostname, a reverse proxy — set that origin too:
+#        export CLAUSTER_AUTH_ALLOWED_ORIGINS='http://nas.local:7621'
+#   4. Point the `projects` volume at your projects_root, and mount the `claude` CLI +
 #      credentials (Clauster spawns `claude remote-control`; the CLI is NOT in the image).
-#   4. docker compose up -d
+#   5. docker compose up -d
 
 services:
   clauster:
@@ -25,6 +28,10 @@ services:
       CLAUSTER_AUTH_ENABLED: "true"
       CLAUSTER_AUTH_PASSWORD_REQUIRED: "true"
       CLAUSTER_AUTH_PASSWORD_HASH: ${CLAUSTER_AUTH_PASSWORD_HASH:?run clauster hash-password and export it (see header)}
+      # The browser origin you open the dashboard at. A 0.0.0.0 bind auto-allows NOTHING,
+      # so without this the login POST is refused with "origin check failed" (#1071).
+      # Comma-separate to list more than one (e.g. a LAN address as well as localhost).
+      CLAUSTER_AUTH_ALLOWED_ORIGINS: ${CLAUSTER_AUTH_ALLOWED_ORIGINS:-http://localhost:7621}
       # Remap the runtime user to own the bind-mounts (match your host UID/GID).
       PUID: "1000"
       PGID: "1000"
