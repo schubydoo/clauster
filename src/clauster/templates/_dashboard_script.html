@@ -158,8 +158,8 @@
       _byId: {},              // rk -> row, across both collections (key-aware lookups)
       ptyPending: {},         // project -> true while a pty launch awaits its first row (#779)
       externalSessions: {},
-      trackedSessions: {},  // instance id (project) -> live working sessions under its bridge (#570)
-      bridgeSessOpen: {},   // instance id -> true while its multi-session list is expanded (#570)
+      trackedSessions: {},  // instance_id -> live working sessions under THAT bridge (#570, #1020)
+      bridgeSessOpen: {},   // row key (rk) -> true while its multi-session list is expanded (#570)
       externalOpen: {},   // project name -> true while its external-session detail is expanded
       adoptableProjects: [],  // names whose external session is a standard bridge we can adopt (#330)
       // --- in-app config editor (FE-3, Tier-A allowlist) ---
@@ -3594,14 +3594,18 @@
       // A standard `claude remote-control` bridge is multi-session; surface every live
       // session under it (not just the starter). pty bridges are single-session, so this
       // expander is gated to standard mode at the row — they keep showing only their one.
-      bridgeSessions(name) {
-        const s = this.trackedSessions[name];
+      // Takes a ROW KEY (`i.rk`, the instance_id), never a project name: /api/sessions/tracked
+      // is keyed per bridge instance (#1020 A3), so a project-keyed lookup would hand every
+      // bridge on a project the same list. start()'s optimistic placeholder has no
+      // instance_id, so its rk is the project name and it correctly finds nothing yet.
+      bridgeSessions(rk) {
+        const s = this.trackedSessions[rk];
         return Array.isArray(s) ? s : [];
       },
-      bridgeSessionCount(name) { return this.bridgeSessions(name).length; },
+      bridgeSessionCount(rk) { return this.bridgeSessions(rk).length; },
       // Singular/plural label for the expander ("1 live session" vs "N live sessions").
-      bridgeSessionLabel(name) {
-        const n = this.bridgeSessionCount(name);
+      bridgeSessionLabel(rk) {
+        const n = this.bridgeSessionCount(rk);
         return n + (n === 1 ? " live session" : " live sessions");
       },
       // Show the expander for any STANDARD bridge with at least one live session. The row's
@@ -3609,10 +3613,10 @@
       // or start a session) — distinct from these per-session claude.ai/code deep links, which
       // jump straight into a specific working session, so even a single session is worth a
       // direct link. pty bridges are single-session by construction (issue #570).
-      hasBridgeSessions(name) {
-        return this.resumeModeOf(name) !== "pty" && this.bridgeSessionCount(name) > 0;
+      hasBridgeSessions(rk) {
+        return this.resumeModeOf(rk) !== "pty" && this.bridgeSessionCount(rk) > 0;
       },
-      toggleBridgeSessions(name) { this.bridgeSessOpen[name] = !this.bridgeSessOpen[name]; },
+      toggleBridgeSessions(rk) { this.bridgeSessOpen[rk] = !this.bridgeSessOpen[rk]; },
       // Stable x-for key + short label: the local RFC-4122 UUID is unique per session;
       // fall back to project:pid for a pre-2.1.139 CLI that might omit it.
       bridgeSessionKey(s) { return s.local_uuid || (s.parent_instance + ":" + s.pid); },
@@ -4434,7 +4438,11 @@
             this.errors[name] = body.detail || "failed to adopt";
             this.toast(name + ": adopt failed", "error");
           } else {
-            this.instances[name] = body;
+            // Via _absorbRow, not a bare assign: every other insert path stamps the row's
+            // `rk` and indexes it in _byId, and an unstamped row has `rk === undefined` —
+            // which now silently breaks every key-aware lookup on it (status, Stop, QR,
+            // and this PR's live-session expander) until the next poll overwrites it.
+            this._absorbRow(body);
             // Optimistically drop the now-managed session from the external lists so the
             // "external session active" note + Manage button disappear at once (the server
             // reclassifies it TRACKED on its next poll; the refresh() below confirms).

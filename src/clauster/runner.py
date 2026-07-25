@@ -616,6 +616,28 @@ class SessionRunner:
         inst = self.get_instance_for_project(identity)
         return inst.instance_id if inst is not None else None
 
+    @staticmethod
+    def _can_own_sessions(inst: RemoteControlInstance) -> bool:
+        """Whether this instance could plausibly own a live working session (#1020, #820).
+
+        A row with no resolvable pid that is NOT still starting — an ERROR row whose spawn
+        failed, or a ``_stopped_from_persisted`` phantom — owns no process and so can own no
+        session. It must be excluded from the reconcile candidate lists: absent from the
+        ownership map, it would otherwise be the ungated candidate that
+        :func:`inspector._select_owner` falls back to, silently absorbing an external
+        hand-run ``claude`` at that cwd (the #820 case) and re-labelling it as a dead
+        bridge's session. Its project can be `live` because a *sibling* bridge is alive
+        (#778), so the project-level liveness test above does not filter it out.
+
+        A STARTING row is kept even with no pid — that is the #713 window, where the bridge
+        genuinely exists and its auto-created session must still attribute.
+        """
+        return (
+            inst.bridge_pid is not None
+            or inst.keeper_pid is not None
+            or inst.status is InstanceStatus.STARTING
+        )
+
     def _live_standard_for_project(self, project_name: str) -> RemoteControlInstance | None:
         """Return the first STARTING/RUNNING *standard* bridge for a project, or ``None``.
 
@@ -666,7 +688,10 @@ class SessionRunner:
         that list so the dashboard can enumerate every live session under a bridge,
         not just its starter session.
 
-        Keyed by ``parent_instance`` (the project/instance id stamped at reconcile).
+        Keyed by ``instance_id`` — the ``parent_instance`` stamped at reconcile. A project
+        may run several bridges (#778), so a project key would fold them into one bucket
+        and a standard bridge's row would list the independent interactive sessions as if
+        it owned them (#1020 A3). Callers must look up by ``instance_id``, not project.
         Sessions are ordered by ``started_at`` then ``local_uuid`` for a stable
         render order across polls. HOSTED/EXTERNAL/UNTRACKED sessions are excluded.
         """
@@ -3320,25 +3345,40 @@ class SessionRunner:
         # reconciled to CRASHED/STOPPED in the loop above, so it can't shadow an external
         # bridge; it only covers a just-spawned bridge whose pid isn't live yet but whose
         # auto-created session `agents --json` already reports.
-        managed = {
-            Path(discovered[i.project].path): i.project
-            for i in self._instances.values()
-            if i.project in discovered
-            and (i.project in live_projects or i.status is InstanceStatus.STARTING)
-        }
+        #
+        # Values are LISTS of instance_id, never a project name (#1020 symptom A3): a
+        # project may run a standard bridge AND N interactive bridges at once (#778), so
+        # a project-keyed value folds them into one bucket and the standard bridge's row
+        # then lists the independent interactive sessions as if it owned them. Reconcile
+        # picks the one owner out of the candidates by pid ownership.
+        managed: dict[Path, list[str]] = {}
+        for i in self._instances.values():
+            if (
+                i.project in discovered
+                and (i.project in live_projects or i.status is InstanceStatus.STARTING)
+                and self._can_own_sessions(i)
+            ):
+                managed.setdefault(Path(discovered[i.project].path), []).append(i.instance_id)
         # A worktree-spawn bridge runs each session in a per-session worktree under
         # `<root>/.claude/worktrees/` (`claude remote-control --spawn worktree`), so the
         # session cwd never exactly matches the project-root key above — without this the
         # session reads EXTERNAL and the dashboard shows no live-session count for the
         # bridge. Reconcile attributes such a session to its bridge by containment in
         # that worktree subtree.
-        worktree_roots = {
-            Path(discovered[i.project].path): i.project
-            for i in self._instances.values()
-            if i.project in discovered
-            and (i.project in live_projects or i.status is InstanceStatus.STARTING)
-            and i.spawn_mode == "worktree"
-        }
+        # Same per-instance shape as `managed` above, and load-bearing here: N interactive
+        # bridges share ONE project root, so a project-keyed value cannot say which of them
+        # a given worktree session belongs to (#1020 A3).
+        worktree_roots: dict[Path, list[str]] = {}
+        for i in self._instances.values():
+            if (
+                i.project in discovered
+                and (i.project in live_projects or i.status is InstanceStatus.STARTING)
+                and i.spawn_mode == "worktree"
+                and self._can_own_sessions(i)
+            ):
+                worktree_roots.setdefault(Path(discovered[i.project].path), []).append(
+                    i.instance_id
+                )
         # Clauster's own hosted (claustrum) sessions run no bridge process, so the
         # cross-check would otherwise see their live `claude` pid and label it
         # EXTERNAL/unmanaged (#592). Claim them by the CT-1 agent_pid (authoritative)
@@ -3381,35 +3421,40 @@ class SessionRunner:
         # with at least one resolvable pid: a bridge with no known pid yet (STARTING pty,
         # pre-sidecar) is left unkeyed → cwd-only, preserving the #713 startup-window
         # attribution. Never root ownership at a dead instance's stale pid (it could be
-        # reused). Roots are UNIONED per cwd, not last-wins: a standard and a pty bridge
-        # (or N pty) can be co-located at one project root (mode-independence note above),
-        # each owning distinct worker pids — last-wins would flip the other's genuine
-        # children to EXTERNAL.
-        roots_by_cwd: dict[Path, tuple[int, ...]] = {}
+        # reused).
+        #
+        # Keyed per INSTANCE, not per cwd (#1020 A3). Co-located bridges — a standard plus
+        # N pty at one project root — each own distinct worker pids, and it is exactly that
+        # distinction that says which bridge a session belongs to. The old per-cwd union
+        # deliberately merged them (so neither flipped the other's children to EXTERNAL),
+        # but merging is also what made every session on a project attribute to one bucket.
+        # Reconcile now unions across candidates itself when it has to, and separates them
+        # when it can.
+        roots_by_instance: dict[str, tuple[int, ...]] = {}
         for i in self._instances.values():
             if i.project in discovered and (
                 i.project in live_projects or i.status is InstanceStatus.STARTING
             ):
                 roots = tuple(p for p in (i.bridge_pid, i.keeper_pid) if p is not None)
                 if roots:
-                    cwd = Path(discovered[i.project].path)
-                    roots_by_cwd[cwd] = roots_by_cwd.get(cwd, ()) + roots
+                    roots_by_instance[i.instance_id] = roots
         # `owned_pids` returns the roots plus their readable descendants — the roots
         # themselves are owned because a single-session flag-form pty
         # (`claude --remote-control`) can report its `agents --json` pid as the bridge
         # process itself (in-process), and a reattached pty with a rotated/missing keeper
         # contributes only bridge_pid. A root whose tree can't be READ (AccessDenied:
-        # hardened /proc, hidepid, restricted container) contributes only its own pid, so
-        # a keyed cwd always gates: a session that isn't provably owned reads EXTERNAL,
-        # never silently re-enabling the cwd-only join #820 removed. The gate stays on
-        # for a cwd with any known pid; only a bridge with no resolvable pid yet (STARTING
-        # pty pre-sidecar) is absent from roots_by_cwd → cwd-only (#713 window). psutil
-        # walk → to_thread.
-        owned_pids_by_cwd = await asyncio.to_thread(
-            lambda: {cwd: procutil.owned_pids(roots) for cwd, roots in roots_by_cwd.items()}
+        # hardened /proc, hidepid, restricted container) contributes only its own pid, so a
+        # keyed INSTANCE always gates: a session that isn't provably owned reads EXTERNAL,
+        # never silently re-enabling the cwd-only join #820 removed. Only a bridge with no
+        # resolvable pid yet (STARTING pty pre-sidecar) is absent from `roots_by_instance`
+        # → cwd-only (#713 window); a pid-less row that ISN'T starting was already dropped
+        # from the candidate lists above (`_can_own_sessions`), so it can never become the
+        # ungated candidate that would swallow an unowned pid. psutil walk → to_thread.
+        owned_pids_by_instance = await asyncio.to_thread(
+            lambda: {iid: procutil.owned_pids(roots) for iid, roots in roots_by_instance.items()}
         )
         self._sessions = inspector.reconcile(
-            sessions, managed, hosted_pids, hosted_cwds, worktree_roots, owned_pids_by_cwd
+            sessions, managed, hosted_pids, hosted_cwds, worktree_roots, owned_pids_by_instance
         )
         # Drop a non-live managed instance whose project has a live EXTERNAL session:
         # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record

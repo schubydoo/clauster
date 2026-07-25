@@ -759,21 +759,26 @@
                  live session (hasBridgeSessions); pty bridges are single-session and keep their
                  own link. Short-UUID labels only — friendly names deferred. x-text everywhere
                  (NEVER x-html): the sessionId is untrusted CLI output. #}
-              <div class="mt-1" x-show="i.resume_mode !== 'pty' && hasBridgeSessions(i.project)" x-cloak>
+              {# Keyed by the row key `rk` (the instance_id), NOT the project (#1020 A3): a
+                 project can run a standard bridge and N interactive ones, so a project key
+                 gave every one of those rows the SAME session list — the standard bridge
+                 appeared to own the independent interactive sessions — and minted duplicate
+                 `bridge-sess-<project>` DOM ids while it was at it. #}
+              <div class="mt-1" x-show="i.resume_mode !== 'pty' && hasBridgeSessions(i.rk)" x-cloak>
                 <button type="button" data-test="bridge-sessions-toggle"
                         class="btn btn-link btn-sm p-0 text-secondary text-decoration-none d-inline-flex align-items-center"
-                        @click="toggleBridgeSessions(i.project)"
-                        :aria-expanded="!!bridgeSessOpen[i.project]"
-                        :aria-controls="'bridge-sess-' + i.project"
+                        @click="toggleBridgeSessions(i.rk)"
+                        :aria-expanded="!!bridgeSessOpen[i.rk]"
+                        :aria-controls="'bridge-sess-' + i.rk"
                         title="Live sessions running under this bridge — expand to open any of them directly.">
                   <span class="status-dot status-dot-animated bg-green me-2" aria-hidden="true"></span>
-                  <span x-text="bridgeSessionLabel(i.project)"></span>
-                  <svg class="ico ms-1 text-muted" aria-hidden="true" x-show="bridgeSessOpen[i.project]"><use href="#ic-caret-down"/></svg><svg class="ico ms-1 text-muted" aria-hidden="true" x-show="!bridgeSessOpen[i.project]"><use href="#ic-caret-right"/></svg>
+                  <span x-text="bridgeSessionLabel(i.rk)"></span>
+                  <svg class="ico ms-1 text-muted" aria-hidden="true" x-show="bridgeSessOpen[i.rk]"><use href="#ic-caret-down"/></svg><svg class="ico ms-1 text-muted" aria-hidden="true" x-show="!bridgeSessOpen[i.rk]"><use href="#ic-caret-right"/></svg>
                 </button>
-                <div class="mt-1" :id="'bridge-sess-' + i.project" data-test="bridge-sessions-detail"
-                     x-show="bridgeSessOpen[i.project]" x-cloak>
+                <div class="mt-1" :id="'bridge-sess-' + i.rk" data-test="bridge-sessions-detail"
+                     x-show="bridgeSessOpen[i.rk]" x-cloak>
                   <div class="list-group list-group-flush border rounded overflow-hidden">
-                    <template x-for="s in bridgeSessions(i.project)" :key="bridgeSessionKey(s)">
+                    <template x-for="s in bridgeSessions(i.rk)" :key="bridgeSessionKey(s)">
                       <div class="list-group-item d-flex align-items-center gap-2 py-2 px-2" data-test="bridge-session-row">
                         <span class="status-dot status-dot-animated bg-green flex-shrink-0" aria-hidden="true"
                               title="Live session"></span>

@@ -162,7 +162,11 @@ async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
     tracked = runner.tracked_sessions_by_instance()
     for inst in runner.list_instances():
         sessions.append(_summarize_instance(inst, kind="bridge"))
-        for ws in tracked.get(inst.project, []):
+        # Keyed by instance_id, not project (#1020 A3): a project-keyed lookup inside this
+        # per-instance loop emitted every session once per bridge on that project, so a
+        # project running a standard bridge plus two interactive ones reported each session
+        # three times.
+        for ws in tracked.get(inst.instance_id, []):
             summary = _summarize_working(ws, kind="bridge-session")
             summary["project"] = (
                 inst.project
@@ -199,12 +203,19 @@ def _summarize_instance(inst: RemoteControlInstance, *, kind: str) -> dict[str, 
     """Summarize a :class:`RemoteControlInstance` (bridge or hosted) read-only.
 
     Only structural/lifecycle fields are surfaced — never log or transcript
-    content. The id is the bridge's project for a bridge (stable and
-    human-meaningful; the runner registry itself is keyed by instance_id since
-    issue 777), or the ``claustrum_process_id`` for a hosted session.
+    content. The id is the bridge's ``instance_id`` for a bridge, or the
+    ``claustrum_process_id`` for a hosted session.
+
+    The bridge id was the project name until #1020. A project may run several bridges
+    (#778), so that id was not unique: every bridge on a project serialized the SAME id,
+    `session_status` could only ever return whichever was registered first, and — once
+    a working session's ``parent_instance`` became an instance_id — nothing a client
+    could see joined a child session back to its owning bridge. ``project`` is still
+    reported as its own field, so the human-meaningful name is not lost, and
+    `session_status` still accepts a project name when it names exactly one bridge.
     """
     is_hosted = kind == "hosted"
-    session_id = inst.claustrum_process_id if is_hosted else inst.project
+    session_id = inst.claustrum_process_id if is_hosted else inst.instance_id
     summary: dict[str, Any] = {
         "id": session_id,
         "kind": kind,
@@ -409,9 +420,20 @@ async def _tool_session_status(config: ClausterConfig, args: dict[str, Any]) -> 
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError("session_status requires a non-empty string 'id'")
     wanted = raw.strip()
-    for session in await gather_sessions(config):
+    sessions = await gather_sessions(config)
+    for session in sessions:
         if session.get("id") == wanted:
             return {"found": True, "session": session}
+    # A bridge's id is its instance_id since #1020, but a project name was the documented
+    # way to name a bridge before that, so keep accepting one — while a project running
+    # SEVERAL bridges (#778) genuinely doesn't name a single session. Report that instead
+    # of returning whichever happened to be registered first, and hand back the ids the
+    # caller can retry with.
+    bridges = [s for s in sessions if s.get("kind") == "bridge" and s.get("project") == wanted]
+    if len(bridges) == 1:
+        return {"found": True, "session": bridges[0]}
+    if bridges:
+        return {"found": False, "id": wanted, "ambiguous": [s["id"] for s in bridges]}
     return {"found": False, "id": wanted}
 
 

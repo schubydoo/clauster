@@ -68,7 +68,7 @@ def test_reconcile_attributes_by_resolved_cwd(tmp_path: Path):
     sessions = inspector.parse_agents_json(
         json.dumps([_agent(10, str(proj), "u-tracked"), _agent(11, "/somewhere/else", "u-ext")])
     )
-    result = inspector.reconcile(sessions, {proj: "alpha"})
+    result = inspector.reconcile(sessions, {proj: ["alpha"]})
     by_uuid = {s.local_uuid: s for s in result}
     assert by_uuid["u-tracked"].attribution is Attribution.TRACKED
     assert by_uuid["u-tracked"].parent_instance == "alpha"
@@ -79,7 +79,7 @@ def test_reconcile_normalizes_trailing_slash(tmp_path: Path):
     proj = tmp_path / "beta"
     proj.mkdir()
     sessions = inspector.parse_agents_json(json.dumps([_agent(12, str(proj) + "/", "u")]))
-    result = inspector.reconcile(sessions, {proj: "beta"})
+    result = inspector.reconcile(sessions, {proj: ["beta"]})
     assert result[0].attribution is Attribution.TRACKED
 
 
@@ -92,7 +92,7 @@ def test_reconcile_worktree_session_attributed_by_containment(tmp_path: Path):
     wt = proj / ".claude" / "worktrees" / "bridge-cse_x"
     wt.mkdir(parents=True)
     sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(wt), "u-wt")]))
-    result = inspector.reconcile(sessions, {proj: "alpha"}, worktree_roots={proj: "alpha"})
+    result = inspector.reconcile(sessions, {proj: ["alpha"]}, worktree_roots={proj: ["alpha"]})
     assert result[0].attribution is Attribution.TRACKED
     assert result[0].parent_instance == "alpha"
 
@@ -105,7 +105,7 @@ def test_reconcile_worktree_containment_is_opt_in(tmp_path: Path):
     sub = proj / "src"
     sub.mkdir(parents=True)
     sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(sub), "u-sub")]))
-    result = inspector.reconcile(sessions, {proj: "alpha"})  # no worktree_roots
+    result = inspector.reconcile(sessions, {proj: ["alpha"]})  # no worktree_roots
     assert result[0].attribution is Attribution.EXTERNAL
     assert result[0].parent_instance is None
 
@@ -119,7 +119,7 @@ def test_reconcile_worktree_containment_scoped_to_worktrees_dir(tmp_path: Path):
     sub = proj / "src"
     sub.mkdir(parents=True)
     sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(sub), "u-stray")]))
-    result = inspector.reconcile(sessions, {proj: "alpha"}, worktree_roots={proj: "alpha"})
+    result = inspector.reconcile(sessions, {proj: ["alpha"]}, worktree_roots={proj: ["alpha"]})
     assert result[0].attribution is Attribution.EXTERNAL
     assert result[0].parent_instance is None
 
@@ -134,8 +134,8 @@ def test_reconcile_worktree_nested_root_most_specific_wins(tmp_path: Path):
     sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(wt), "u-nested")]))
     result = inspector.reconcile(
         sessions,
-        {outer: "outer", inner: "inner"},
-        worktree_roots={outer: "outer", inner: "inner"},
+        {outer: ["outer"], inner: ["inner"]},
+        worktree_roots={outer: ["outer"], inner: ["inner"]},
     )
     assert result[0].attribution is Attribution.TRACKED
     assert result[0].parent_instance == "inner"
@@ -150,7 +150,7 @@ def test_reconcile_worktree_containment_respects_kind_gate(tmp_path: Path):
     sessions = inspector.parse_agents_json(
         json.dumps([_agent(10, str(wt), "u-bg", kind="background", state="working")])
     )
-    result = inspector.reconcile(sessions, {proj: "alpha"}, worktree_roots={proj: "alpha"})
+    result = inspector.reconcile(sessions, {proj: ["alpha"]}, worktree_roots={proj: ["alpha"]})
     assert result[0].attribution is Attribution.UNTRACKED
 
 
@@ -162,7 +162,7 @@ def test_reconcile_hosted_at_worktree_root_stays_hosted(tmp_path: Path):
     proj.mkdir()
     sessions = inspector.parse_agents_json(json.dumps([_agent(10, str(proj), "u-hosted")]))
     result = inspector.reconcile(
-        sessions, {}, hosted_cwds={proj: "host-9"}, worktree_roots={proj: "alpha"}
+        sessions, {}, hosted_cwds={proj: "host-9"}, worktree_roots={proj: ["alpha"]}
     )
     assert result[0].attribution is Attribution.HOSTED
     assert result[0].parent_instance == "host-9"
@@ -195,7 +195,7 @@ def test_reconcile_background_kind_never_tracked(tmp_path: Path):
     sessions = inspector.parse_agents_json(
         json.dumps([_agent(10, str(proj), "u-bg", kind="background", state="working")])
     )
-    result = inspector.reconcile(sessions, {proj: "alpha"})
+    result = inspector.reconcile(sessions, {proj: ["alpha"]})
     assert result[0].attribution is Attribution.UNTRACKED
     assert result[0].parent_instance is None
 
@@ -217,7 +217,7 @@ def test_reconcile_unknown_kind_stays_untracked(tmp_path: Path):
     sessions = inspector.parse_agents_json(
         json.dumps([_agent(12, str(proj), "u-new", kind="subagent")])
     )
-    result = inspector.reconcile(sessions, {proj: "alpha"})
+    result = inspector.reconcile(sessions, {proj: ["alpha"]})
     assert result[0].attribution is Attribution.UNTRACKED
 
 
@@ -227,7 +227,9 @@ def test_reconcile_missing_kind_still_joins(tmp_path: Path):
     proj.mkdir()
     item = _agent(13, str(proj), "u-old")
     del item["kind"]
-    result = inspector.reconcile(inspector.parse_agents_json(json.dumps([item])), {proj: "alpha"})
+    result = inspector.reconcile(
+        inspector.parse_agents_json(json.dumps([item])), {proj: ["alpha"]}
+    )
     assert result[0].attribution is Attribution.TRACKED
 
 
@@ -269,7 +271,7 @@ def test_reconcile_managed_bridge_wins_over_hosted_cwd(tmp_path: Path):
     proj = tmp_path / "ws"
     proj.mkdir()
     sessions = inspector.parse_agents_json(json.dumps([_agent(60, str(proj), "u-b")]))
-    result = inspector.reconcile(sessions, {proj: "bridge-1"}, hosted_cwds={proj: "host-4"})
+    result = inspector.reconcile(sessions, {proj: ["bridge-1"]}, hosted_cwds={proj: "host-4"})
     assert result[0].attribution is Attribution.TRACKED
     assert result[0].parent_instance == "bridge-1"
 
@@ -292,7 +294,9 @@ def test_reconcile_external_session_at_bridge_cwd_stays_external(tmp_path: Path)
     sessions = inspector.parse_agents_json(
         json.dumps([_agent(100, str(proj), "u-owned"), _agent(200, str(proj), "u-ext")])
     )
-    result = inspector.reconcile(sessions, {proj: "alpha"}, owned_pids_by_cwd={proj: {100}})
+    result = inspector.reconcile(
+        sessions, {proj: ["alpha"]}, owned_pids_by_instance={"alpha": {100}}
+    )
     by_uuid = {s.local_uuid: s for s in result}
     assert by_uuid["u-owned"].attribution is Attribution.TRACKED
     assert by_uuid["u-owned"].parent_instance == "alpha"
@@ -306,48 +310,193 @@ def test_reconcile_ownership_gate_none_is_cwd_only(tmp_path: Path):
     proj = tmp_path / "alpha"
     proj.mkdir()
     sessions = inspector.parse_agents_json(json.dumps([_agent(300, str(proj), "u-x")]))
-    result = inspector.reconcile(sessions, {proj: "alpha"})  # no owned_pids_by_cwd
+    result = inspector.reconcile(sessions, {proj: ["alpha"]})  # no owned_pids_by_instance
     assert result[0].attribution is Attribution.TRACKED
 
 
-def test_reconcile_ownership_gate_absent_cwd_is_cwd_only(tmp_path: Path):
-    # A managed cwd ABSENT from owned_pids_by_cwd is not gated — cwd-only. This is the
+def test_reconcile_ownership_gate_absent_instance_is_cwd_only(tmp_path: Path):
+    # An instance ABSENT from owned_pids_by_instance is not gated — cwd-only. This is the
     # STARTING-bridge window (#713): the bridge's pid isn't known yet, so its
     # auto-created initial session must still attribute rather than flicker EXTERNAL.
     proj = tmp_path / "alpha"
     proj.mkdir()
     sessions = inspector.parse_agents_json(json.dumps([_agent(350, str(proj), "u-s")]))
-    # gate enabled (non-None), but keyed for a DIFFERENT cwd → alpha is ungated.
+    # gate enabled (non-None), but keyed for a DIFFERENT instance → alpha is ungated.
     result = inspector.reconcile(
-        sessions, {proj: "alpha"}, owned_pids_by_cwd={tmp_path / "other": {1}}
+        sessions, {proj: ["alpha"]}, owned_pids_by_instance={"other": {1}}
     )
     assert result[0].attribution is Attribution.TRACKED
 
 
 def test_reconcile_ownership_gate_empty_set_marks_external(tmp_path: Path):
-    # A cwd present with an EMPTY owned set (bridge pid known, but it owns none of the
-    # observed pids) actively marks a session at that cwd EXTERNAL — distinct from an
-    # absent cwd (cwd-only). Guards against collapsing "known-but-owns-nothing" into
+    # An instance present with an EMPTY owned set (bridge pid known, but it owns none of
+    # the observed pids) actively marks a session at that cwd EXTERNAL — distinct from an
+    # absent instance (cwd-only). Guards against collapsing "known-but-owns-nothing" into
     # "unknown → attribute anyway."
     proj = tmp_path / "alpha"
     proj.mkdir()
     sessions = inspector.parse_agents_json(json.dumps([_agent(400, str(proj), "u-y")]))
-    result = inspector.reconcile(sessions, {proj: "alpha"}, owned_pids_by_cwd={proj: set()})
+    result = inspector.reconcile(
+        sessions, {proj: ["alpha"]}, owned_pids_by_instance={"alpha": set()}
+    )
     assert result[0].attribution is Attribution.EXTERNAL
 
 
-def test_reconcile_worktree_join_not_gated_by_ownership(tmp_path: Path):
-    # The ownership gate is scoped to the exact-cwd join (#820's precise case: an
-    # external session at the bridge's ROOT cwd). The worktree-containment join is
-    # deliberately left ungated — a session inside `<root>/.claude/worktrees/` is in
-    # bridge-owned territory, and worktree-worker ancestry isn't observed here — so a
-    # worktree session is TRACKED even when its pid isn't in owned_pids.
+def test_reconcile_worktree_join_ungated_when_only_one_bridge_could_own_it(tmp_path: Path):
+    # The worktree join is gated ONLY when there is something to disambiguate. With one
+    # worktree bridge at this root, containment already names the owner, so an unowned pid
+    # still attributes. That is deliberate coverage insurance: where the process tree can't
+    # be walked (AccessDenied under hidepid / a hardened container) `owned_pids` returns
+    # just the bridge pid, and gating here would flip every worktree session to EXTERNAL —
+    # where they'd show up NOWHERE, since the external grouping joins on the exact project
+    # path and a worktree cwd never matches it. That would undo #1076.
     proj = tmp_path / "alpha"
     wt = proj / ".claude" / "worktrees" / "bridge-cse_x"
     wt.mkdir(parents=True)
     sessions = inspector.parse_agents_json(json.dumps([_agent(500, str(wt), "u-wt")]))
     result = inspector.reconcile(
-        sessions, {proj: "alpha"}, worktree_roots={proj: "alpha"}, owned_pids_by_cwd={proj: set()}
+        sessions,
+        {proj: ["alpha"]},
+        worktree_roots={proj: ["alpha"]},
+        owned_pids_by_instance={"alpha": set()},
     )
     assert result[0].attribution is Attribution.TRACKED
     assert result[0].parent_instance == "alpha"
+
+
+def test_reconcile_worktree_join_gated_once_several_bridges_share_the_subtree(tmp_path: Path):
+    # With N worktree bridges under one root, containment says only "some bridge here" —
+    # ownership is the only thing that can name which, so it becomes load-bearing (#1020
+    # A3). Two RUNNING bridges that both know their pids and neither owns this one must
+    # not have it handed to whichever was registered first.
+    proj = tmp_path / "alpha"
+    wt = proj / ".claude" / "worktrees" / "bridge-cse_x"
+    wt.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(json.dumps([_agent(500, str(wt), "u-wt")]))
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["pty-1", "pty-2"]},
+        worktree_roots={proj: ["pty-1", "pty-2"]},
+        owned_pids_by_instance={"pty-1": {1}, "pty-2": {2}},
+    )
+    assert result[0].attribution is Attribution.EXTERNAL
+
+
+def test_reconcile_worktree_starting_bridge_claims_beside_a_keyed_sibling(tmp_path: Path):
+    # A worktree root with a RUNNING bridge and a still-pid-less STARTING one. The
+    # STARTING bridge's own first worker is owned by nobody yet, and on this arm refusing
+    # to attribute is NOT the safe answer: the external grouping joins on the exact
+    # project path, which a worktree cwd never matches, so EXTERNAL here renders the
+    # session NOWHERE — not under a bridge, not in the external list. The pid-less
+    # candidate (the bridge that just spawned) therefore claims it.
+    #
+    # Contrast `test_reconcile_starting_bridge_cannot_absorb_an_external_when_a_sibling_
+    # is_gated`: at an exact cwd the same shape stays EXTERNAL, because there EXTERNAL is
+    # visible and #820's hand-run `claude` lives at exactly that path.
+    proj = tmp_path / "alpha"
+    wt = proj / ".claude" / "worktrees" / "bridge-new"
+    wt.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(json.dumps([_agent(777, str(wt), "u-fresh")]))
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["running-1", "starting-2"]},
+        worktree_roots={proj: ["running-1", "starting-2"]},
+        owned_pids_by_instance={"running-1": {200}},  # starting-2 has no pid yet
+    )
+    assert result[0].attribution is Attribution.TRACKED
+    assert result[0].parent_instance == "starting-2"
+
+
+def test_reconcile_starting_bridge_cannot_absorb_an_external_when_a_sibling_is_gated(
+    tmp_path: Path,
+):
+    # #820 vs #713, the mixed case. A RUNNING bridge (pid known) shares a cwd with a
+    # STARTING one that has no pid yet. An operator's hand-run `claude` is owned by
+    # neither — and must NOT be handed to the STARTING bridge just because that bridge
+    # can't prove anything yet, which would hide a genuinely external session from the
+    # external list and the Adopt affordance.
+    #
+    # The gate is decided for the CWD, not per candidate: any candidate here with a known
+    # pid set means this location can prove ownership. That is what the pre-#1020 code did
+    # by unioning co-located roots per cwd, so this preserves its strictness.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(999, str(proj), "u-handrun")]))
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["running-1", "starting-2"]},
+        owned_pids_by_instance={"running-1": {200}},  # starting-2 has no pid yet
+    )
+    assert result[0].attribution is Attribution.EXTERNAL
+    assert result[0].parent_instance is None
+
+
+def test_reconcile_starting_bridge_still_claims_its_session_when_nothing_is_gated(
+    tmp_path: Path,
+):
+    # The other half of the same rule — #713 must survive it. When NO candidate at this
+    # cwd can prove ownership yet (every bridge here is still starting, pre-sidecar), the
+    # startup window applies and the auto-created session attributes rather than
+    # flickering EXTERNAL.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(500, str(proj), "u-initial")]))
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["starting-1"]},
+        owned_pids_by_instance={"unrelated": {1}},  # keyed, but not for this cwd
+    )
+    assert result[0].attribution is Attribution.TRACKED
+    assert result[0].parent_instance == "starting-1"
+
+
+def test_reconcile_pidless_colocated_row_cannot_absorb_an_external(tmp_path: Path):
+    # #820 regression guard for the per-instance rewrite. `_select_owner` falls back to a
+    # candidate that is ABSENT from the ownership map (the #713 startup window). A row with
+    # no pid that isn't starting — a crashed/ERROR spawn, or a `_stopped_from_persisted`
+    # phantom — is exactly such a candidate, and would otherwise become a permanent sink
+    # that re-labels an operator's hand-run `claude` as a dead bridge's session. The runner
+    # keeps those rows out of the candidate lists (`_can_own_sessions`); this pins the
+    # consequence at the reconcile layer so the two can't drift apart silently.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(999, str(proj), "u-handrun")]))
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["pty-live"]},  # the phantom is NOT a candidate
+        owned_pids_by_instance={"pty-live": {200}},
+    )
+    assert result[0].attribution is Attribution.EXTERNAL
+    assert result[0].parent_instance is None
+
+
+def test_reconcile_separates_colocated_bridges_by_ownership(tmp_path: Path):
+    # The #1020 A3 regression. A project runs a standard bridge plus two interactive
+    # (worktree) bridges. Every session must land under the bridge that actually owns
+    # it — before this, all three shared one project-keyed bucket, so the standard
+    # bridge's row listed the independent interactive sessions as if it owned them.
+    proj = tmp_path / "alpha"
+    wt1 = proj / ".claude" / "worktrees" / "bridge-one"
+    wt2 = proj / ".claude" / "worktrees" / "bridge-two"
+    wt1.mkdir(parents=True)
+    wt2.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(
+        json.dumps(
+            [
+                _agent(10, str(proj), "u-standard"),
+                _agent(20, str(wt1), "u-pty-one"),
+                _agent(30, str(wt2), "u-pty-two"),
+            ]
+        )
+    )
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["std-1", "pty-1", "pty-2"]},
+        worktree_roots={proj: ["pty-1", "pty-2"]},
+        owned_pids_by_instance={"std-1": {10}, "pty-1": {20}, "pty-2": {30}},
+    )
+    by_uuid = {s.local_uuid: s for s in result}
+    assert by_uuid["u-standard"].parent_instance == "std-1"
+    assert by_uuid["u-pty-one"].parent_instance == "pty-1"
+    assert by_uuid["u-pty-two"].parent_instance == "pty-2"
+    assert all(s.attribution is Attribution.TRACKED for s in result)

@@ -88,13 +88,18 @@ the service uses.
 Lists every session Clauster can observe, as one flat array. It unions the four
 session sources the dashboard already surfaces:
 
-- **bridges** — managed `claude remote-control` bridges (one per project);
+- **bridges** — managed `claude remote-control` bridges. A project may run
+  several at once: at most one standard (Server Mode) bridge plus any number of
+  Interactive Sessions, so `project` is not unique — key on `id`, which is the
+  bridge's stable instance id (**changed in 1.0**: it was the project name, which
+  collided across a project's bridges);
 - **hosted** — Direct Session (claustrum stream-json) sessions, from their
   persisted records;
 - **background-agents** — agent-view background jobs (`claude --bg`);
 - **external-session** / **bridge-session** — live working sessions seen via the
   `claude agents --json` cross-check (unmanaged externals and the sessions under
-  a managed bridge).
+  a managed bridge). A `bridge-session` is listed **once**, under the bridge that
+  owns it; its `parent_instance` is that bridge's `id`.
 
 Takes no arguments. Returns `{"count": <n>, "sessions": [...]}`. Each session
 carries an `id`, a `kind`, a `status`/`state`, the owning `project` where known,
@@ -110,7 +115,7 @@ Reports one session by id.
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `id` | string (required) | A session id as returned by `list_sessions` — a bridge project name, a hosted `claustrum_process_id`, a background-agent id, or a working-session uuid. |
+| `id` | string (required) | A session id as returned by `list_sessions` — a bridge instance id, a hosted `claustrum_process_id`, a background-agent id, or a working-session uuid. A **project name** is also accepted for a bridge, as long as that project runs exactly one; when it runs several the reply is `{"found": false, "id": ..., "ambiguous": [<bridge ids>]}` rather than an arbitrary pick. |
 
 Returns `{"found": true, "session": {...}}` for a match, or
 `{"found": false, "id": "<id>"}` for an unknown id. A blank/missing `id` comes
@@ -142,9 +147,11 @@ permission mode, or an untrusted directory come back as an `isError` result.
 
 ### `stop_session` / `resume_session`
 
-Stop, or resume into its prior conversation, the bridge named by an `id` (a
-project name / id / prefix as returned by `list_sessions`) — resolved exactly
-like the dashboard's DELETE / resume routes.
+Stop, or resume into its prior conversation, the bridge named by an `id` (an
+instance id or a project name as returned by `list_sessions`, matched in full —
+there is no prefix matching) — resolved exactly like the dashboard's DELETE /
+resume routes. A project name that matches **several** bridges resolves to the
+one the dashboard displays, so pass an instance id to target a specific bridge.
 
 | Argument | Type | Description |
 | --- | --- | --- |
