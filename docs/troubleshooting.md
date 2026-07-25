@@ -361,11 +361,6 @@ load, so it re-opens on the in-progress flow with its authorize link and a
 **Cancel** button — cancel, then start again. A flow untouched for more than 15
 minutes is also reclaimed automatically by the next sign-in attempt.
 
-> **New in 1.0:** the panel rehydrates an in-progress flow after a reload. On
-> 0.12.x and earlier it tracked the flow only per page load, so a reload left no
-> way to reach Cancel — restart Clauster to clear a wedged flow (nothing persists
-> it, so a restart always clears it).
-
 ### The claude version is too old (min_version)
 
 **What you see:** `doctor` fails the `claude` row with

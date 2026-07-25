@@ -715,13 +715,20 @@ class LoginShepherd:
             with self._flow_lock:
                 if self._flow is not flow:
                     raise NotActiveError("no login flow is in progress")
-
-            # Operator interaction: reset the idle clock and record that a code is in
-            # flight, so (a) the TTL reclaim can't terminate a verification still being
-            # polled — destroying a one-time setup-token mid-flight — and (b) a client
-            # rehydrating after a reload resumes polling instead of re-offering the box.
-            flow.touch()
-            flow.code_submitted = True
+                # Operator interaction: reset the idle clock and record that a code is in
+                # flight, so (a) the TTL reclaim can't terminate a verification still being
+                # polled — destroying a one-time setup-token mid-flight — and (b) a client
+                # rehydrating after a reload resumes polling instead of re-offering the box.
+                #
+                # ATOMIC with the ownership check above, under the SAME lock. Refreshing
+                # after releasing it leaves a window where `_reclaim_if_idle` (which takes
+                # this lock) reads the STALE timestamp and tears the flow down anyway — the
+                # exact teardown-of-live-work this touch exists to prevent. Holding it
+                # across both makes the two orderings the only ones possible: reclaim runs
+                # first and the check below raises NotActiveError, or this runs first and
+                # reclaim sees a fresh clock and declines.
+                flow.touch()
+                flow.code_submitted = True
             self._write_code(flow, code)
 
             # Wait until the process exits, then read a FRESH poll() — never trust the
@@ -765,9 +772,12 @@ class LoginShepherd:
             with self._flow_lock:
                 if self._flow is not flow:
                     raise NotActiveError("no login flow is in progress")
-            # A poll IS the operator waiting on this flow — reset the idle clock so the
-            # TTL reclaim can never tear down a verification still being actively polled.
-            flow.touch()
+                # A poll IS the operator waiting on this flow — reset the idle clock so the
+                # TTL reclaim can never tear down a verification still being actively
+                # polled. Refreshed under the SAME lock as the ownership check for the
+                # reason spelled out in `submit_code`: releasing between the two leaves a
+                # window where a concurrent reclaim reads the stale timestamp.
+                flow.touch()
             exit_code = flow.proc.poll()
             if exit_code is None:
                 return self._pending_result(flow)

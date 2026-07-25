@@ -865,6 +865,72 @@ def test_state_reports_pending_once_a_code_is_submitted(shepherd, monkeypatch) -
         shepherd.cancel()
 
 
+def _touch_under_lock(shepherd, flow) -> list[bool]:
+    """Record whether `_flow_lock` was held each time this flow's idle clock is refreshed."""
+    held: list[bool] = []
+    original = type(flow).touch
+
+    def _spy(self) -> None:
+        held.append(shepherd._flow_lock.locked())  # noqa: SLF001 - the lock IS the assertion
+        original(self)
+
+    flow.touch = _spy.__get__(flow, type(flow))
+    return held
+
+
+def test_poll_refreshes_the_idle_clock_under_the_flow_lock(shepherd, monkeypatch) -> None:
+    # The refresh must be ATOMIC with the ownership check, not merely ordered after it.
+    # Releasing `_flow_lock` in between leaves a window where a concurrent start() ->
+    # `_reclaim_if_idle` (which takes the same lock) reads the STALE timestamp, detaches
+    # the flow and terminates it — killing a verification the operator is actively polling
+    # and destroying its one-time setup-token. Asserting on the lock is what makes this a
+    # test of the invariant rather than of a lucky interleaving.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("login")
+        flow = shepherd._flow  # noqa: SLF001 - internals: instrument this flow's touch()
+        held = _touch_under_lock(shepherd, flow)
+        shepherd.poll()
+        assert held == [True]
+    finally:
+        shepherd.cancel()
+
+
+def test_submit_code_refreshes_the_idle_clock_under_the_flow_lock(shepherd, monkeypatch) -> None:
+    # Same invariant on the submit path, which additionally sets `code_submitted` —
+    # `state()` reads that under the same lock, so it must not be written outside it.
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("login")
+        flow = shepherd._flow  # noqa: SLF001 - internals: instrument this flow's touch()
+        held = _touch_under_lock(shepherd, flow)
+        shepherd.submit_code("code-123")
+        assert held == [True]
+    finally:
+        shepherd.cancel()
+
+
+def test_reclaim_loses_to_a_concurrent_poll_rather_than_killing_it(shepherd, monkeypatch) -> None:
+    # The behaviour the locking protects: with the flow already aged past the TTL, a poll
+    # refreshes the clock, so a following start() is REFUSED (single-flight intact) rather
+    # than reclaiming the flow out from under the operator — and the subprocess is still
+    # alive afterwards. This is a sequential assertion, so it does NOT by itself catch the
+    # lock-ordering bug; the atomicity guard above is what does that (verified: it fails
+    # when the refresh moves back outside `_flow_lock`, this one still passes).
+    monkeypatch.setenv("FAKE_CLAUDE_LOGIN_MODE", "ready")
+    try:
+        shepherd.start("login")
+        flow = shepherd._flow  # noqa: SLF001 - age the flow to make it reclaim-eligible
+        flow.last_active_at = time.monotonic() - ls.IDLE_FLOW_TTL_SECONDS - 1.0
+        shepherd.poll()
+        with pytest.raises(ls.AlreadyActiveError):
+            shepherd.start("login")
+        assert shepherd._flow is flow  # noqa: SLF001 - the live flow survived
+        assert flow.proc.poll() is None  # …and was never terminated
+    finally:
+        shepherd.cancel()
+
+
 def test_reclaim_is_a_noop_with_no_flow(shepherd) -> None:
     shepherd._reclaim_if_idle()  # noqa: SLF001 - must be safe with nothing active
     assert not shepherd.is_active()
