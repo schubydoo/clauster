@@ -1710,7 +1710,9 @@ async def test_poll_attributes_starting_bridge_session_not_external(runner_confi
     await runner.poll_once()
     assert runner.external_sessions_by_project() == {}  # NOT a phantom external row
     tracked = runner.tracked_sessions_by_instance()
-    assert tracked.get("alpha") and [s.local_uuid for s in tracked["alpha"]] == ["u-starting"]
+    # Keyed by instance_id, not project (#1020 A3).
+    key = fake.instance_id
+    assert tracked.get(key) and [s.local_uuid for s in tracked[key]] == ["u-starting"]
     inst = runner.get_instance_for_project("alpha")
     assert inst is not None and inst.status is InstanceStatus.STARTING  # still starting, kept
 
@@ -1743,7 +1745,8 @@ async def test_poll_attributes_starting_worktree_bridge_session_not_external(
     await runner.poll_once()
     assert runner.external_sessions_by_project() == {}  # attributed by worktree containment
     tracked = runner.tracked_sessions_by_instance()
-    assert tracked.get("alpha") and [s.local_uuid for s in tracked["alpha"]] == ["u-wt"]
+    key = fake.instance_id  # keyed by instance_id, not project (#1020 A3)
+    assert tracked.get(key) and [s.local_uuid for s in tracked[key]] == ["u-wt"]
 
 
 async def test_poll_ignores_background_session_at_stopped_cwd(runner_config, monkeypatch):
@@ -2092,7 +2095,8 @@ async def test_poll_external_session_at_live_bridge_cwd_stays_external(runner_co
         )
         await runner.poll_once()
         tracked = runner.tracked_sessions_by_instance()
-        assert [s.local_uuid for s in tracked.get("alpha", [])] == ["u-owned"]
+        # Keyed by instance_id, not project (#1020 A3).
+        assert [s.local_uuid for s in tracked.get(fake.instance_id, [])] == ["u-owned"]
         assert "alpha" in runner.external_sessions_by_project()
     finally:
         proc.terminate()
@@ -2134,19 +2138,73 @@ async def test_poll_inprocess_pty_session_owned_via_bridge_pid(runner_config, mo
         monkeypatch.setattr(procutil, "owned_pids", lambda roots: set(roots))
         await runner.poll_once()
         tracked = runner.tracked_sessions_by_instance()
-        assert [s.local_uuid for s in tracked.get("alpha", [])] == ["u-inproc"]
+        # Keyed by instance_id, not project (#1020 A3).
+        assert [s.local_uuid for s in tracked.get(fake.instance_id, [])] == ["u-inproc"]
         assert "alpha" not in runner.external_sessions_by_project()
     finally:
         proc.terminate()
         proc.wait(timeout=5)
 
 
-async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config, monkeypatch):
-    # #820 review: a standard and a pty bridge (or N pty) may be co-located at one
-    # project root — each owns distinct worker pids. The per-cwd ownership set must
-    # UNION every co-located bridge's roots, or last-wins would flip one bridge's
-    # genuine children to EXTERNAL. Both children stay TRACKED; a session owned by
-    # neither is EXTERNAL.
+async def test_poll_pidless_stopped_row_never_absorbs_an_external_session(
+    runner_config, monkeypatch
+):
+    # #820 guard for the per-instance rewrite (#1020 A3). A project can hold a pid-less
+    # STOPPED/ERROR row alongside a LIVE bridge (#778 multi-bridge), and the liveness test
+    # that builds the candidate list is project-level, so that dead row would otherwise be
+    # a candidate. Being absent from the ownership map, it is the one `_select_owner` falls
+    # back to — so an operator's hand-run `claude` in the project dir would be re-labelled
+    # TRACKED under a bridge that isn't even running, and would vanish from the external
+    # list (and with it the Adopt affordance) instead of surfacing.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "claude", "remote-control"]
+    )
+    try:
+        live = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.RUNNING,
+            resume_mode="pty",
+            bridge_pid=proc.pid,
+            bridge_proc_start=procutil.proc_create_time(proc.pid),
+        )
+        dead = RemoteControlInstance(
+            project="alpha",
+            label="alpha",
+            status=InstanceStatus.STOPPED,
+        )  # no bridge_pid / keeper_pid — owns nothing
+        runner._instances[live.instance_id] = live
+        runner._instances[dead.instance_id] = dead
+        cwd = config.projects_root / "alpha"
+        hand_run = WorkingSession(
+            pid=999, cwd=cwd, kind="interactive", started_at=1, local_uuid="u-handrun"
+        )
+        monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [hand_run])
+        # The live bridge owns its own child only; 999 descends from sshd/a shell.
+        monkeypatch.setattr(procutil, "owned_pids", lambda roots: {200})
+        await runner.poll_once()
+        tracked = runner.tracked_sessions_by_instance()
+        assert tracked.get(dead.instance_id, []) == []
+        assert tracked.get(live.instance_id, []) == []
+        ext = runner.external_sessions_by_project().get("alpha", [])
+        assert [s.local_uuid for s in ext] == ["u-handrun"]
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+async def test_poll_ownership_separates_colocated_bridges_at_one_cwd(runner_config, monkeypatch):
+    # #820 + #1020 A3: a standard and a pty bridge (or N pty) may be co-located at one
+    # project root — each owns distinct worker pids. Both children stay TRACKED (neither
+    # bridge flips the other's genuine children to EXTERNAL) and a session owned by
+    # neither is EXTERNAL — that is the #820 half, unchanged.
+    #
+    # What CHANGED for #1020 A3: each child now attributes to the bridge that actually
+    # owns it, instead of both landing in one project-keyed bucket. That bucket is what
+    # made the dashboard's standard-bridge row list independent interactive sessions as
+    # if it owned them.
     config = runner_config[0]
     runner = _make_runner(runner_config)
     procs = [
@@ -2156,6 +2214,7 @@ async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config,
         for _ in range(2)
     ]
     try:
+        ids = []
         for mode, p in zip(("pty", "pty"), procs, strict=True):
             inst = RemoteControlInstance(
                 project="alpha",
@@ -2166,6 +2225,7 @@ async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config,
                 bridge_proc_start=procutil.proc_create_time(p.pid),
             )
             runner._instances[inst.instance_id] = inst
+            ids.append(inst.instance_id)
         cwd = config.projects_root / "alpha"
         sessions = [
             WorkingSession(pid=1001, cwd=cwd, kind="interactive", started_at=1, local_uuid="a"),
@@ -2183,7 +2243,10 @@ async def test_poll_ownership_unions_colocated_bridges_at_one_cwd(runner_config,
         )
         await runner.poll_once()
         tracked = runner.tracked_sessions_by_instance()
-        assert sorted(s.local_uuid for s in tracked.get("alpha", [])) == ["a", "b"]
+        # Separated, one session per owning bridge — NOT one shared bucket keyed "alpha".
+        assert [s.local_uuid for s in tracked.get(ids[0], [])] == ["a"]
+        assert [s.local_uuid for s in tracked.get(ids[1], [])] == ["b"]
+        assert "alpha" not in tracked
         ext = runner.external_sessions_by_project().get("alpha", [])
         assert [s.local_uuid for s in ext] == ["ext"]
     finally:

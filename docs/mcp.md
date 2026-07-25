@@ -88,13 +88,16 @@ the service uses.
 Lists every session Clauster can observe, as one flat array. It unions the four
 session sources the dashboard already surfaces:
 
-- **bridges** — managed `claude remote-control` bridges (one per project);
+- **bridges** — managed `claude remote-control` bridges. A project may run
+  several at once: at most one standard (Server Mode) bridge plus any number of
+  Interactive Sessions, so `project` is not unique — key on `id`;
 - **hosted** — Direct Session (claustrum stream-json) sessions, from their
   persisted records;
 - **background-agents** — agent-view background jobs (`claude --bg`);
 - **external-session** / **bridge-session** — live working sessions seen via the
   `claude agents --json` cross-check (unmanaged externals and the sessions under
-  a managed bridge).
+  a managed bridge). A `bridge-session` is listed **once**, under the bridge that
+  owns it; its `parent_instance` is that bridge's `id`.
 
 Takes no arguments. Returns `{"count": <n>, "sessions": [...]}`. Each session
 carries an `id`, a `kind`, a `status`/`state`, the owning `project` where known,

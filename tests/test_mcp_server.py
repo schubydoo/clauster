@@ -847,6 +847,57 @@ def test_gather_sessions_includes_background_job_without_freetext(cfg, monkeypat
     assert "name" not in bg[0]
 
 
+def test_gather_sessions_does_not_duplicate_a_session_per_bridge(cfg, monkeypatch):
+    """A session is reported once, under its owning bridge — not once per bridge (#1020 A3).
+
+    ``gather_sessions`` loops over every instance and pulls that instance's tracked
+    sessions. While the tracked map was keyed by PROJECT, every bridge on a project got
+    the same list, so a project running a standard bridge plus two interactive ones
+    reported each of its sessions three times.
+    """
+    from clauster.models import Attribution, InstanceStatus, RemoteControlInstance, WorkingSession
+    from clauster.runner import SessionRunner
+
+    std = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.RUNNING)
+    pty_a = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, resume_mode="pty"
+    )
+    pty_b = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, resume_mode="pty"
+    )
+
+    def _ws(uuid: str, parent: str) -> WorkingSession:
+        return WorkingSession(
+            pid=1,
+            cwd=cfg.projects_root / "alpha",
+            kind="interactive",
+            state="working",
+            started_at=1700000000000,
+            local_uuid=uuid,
+            parent_instance=parent,
+            attribution=Attribution.TRACKED,
+        )
+
+    tracked = {
+        std.instance_id: [_ws("u-std", std.instance_id)],
+        pty_a.instance_id: [_ws("u-pty-a", pty_a.instance_id)],
+        pty_b.instance_id: [_ws("u-pty-b", pty_b.instance_id)],
+    }
+    monkeypatch.setattr(SessionRunner, "rediscover", _anoop)
+    monkeypatch.setattr(SessionRunner, "poll_once", _anoop)
+    monkeypatch.setattr(SessionRunner, "list_instances", lambda self: [std, pty_a, pty_b])
+    monkeypatch.setattr(SessionRunner, "tracked_sessions_by_instance", lambda self: tracked)
+    monkeypatch.setattr(SessionRunner, "external_sessions_by_project", lambda self: {})
+
+    sessions = asyncio.run(mcp_server.gather_sessions(cfg))
+    ids = [s["id"] for s in sessions if s["kind"] == "bridge-session"]
+    assert sorted(ids) == ["u-pty-a", "u-pty-b", "u-std"]  # three sessions, not nine
+    # …and each is filed under the bridge that owns it.
+    by_id = {s["id"]: s for s in sessions if s["kind"] == "bridge-session"}
+    assert by_id["u-std"]["parent_instance"] == std.instance_id
+    assert by_id["u-pty-a"]["parent_instance"] == pty_a.instance_id
+
+
 def test_gather_sessions_summarizes_tracked_and_external_working_sessions(cfg, monkeypatch):
     """Tracked (under a bridge) and external working sessions are each summarized.
 
@@ -865,7 +916,7 @@ def test_gather_sessions_summarizes_tracked_and_external_working_sessions(cfg, m
         state="working",
         started_at=1700000000000,
         local_uuid="aaaaaaaa-1111-2222-3333-444444444444",
-        parent_instance="alpha",
+        parent_instance=inst.instance_id,
         attribution=Attribution.TRACKED,
     )
     external_ws = WorkingSession(
@@ -880,7 +931,9 @@ def test_gather_sessions_summarizes_tracked_and_external_working_sessions(cfg, m
     monkeypatch.setattr(SessionRunner, "poll_once", _anoop)
     monkeypatch.setattr(SessionRunner, "list_instances", lambda self: [inst])
     monkeypatch.setattr(
-        SessionRunner, "tracked_sessions_by_instance", lambda self: {"alpha": [tracked_ws]}
+        SessionRunner,
+        "tracked_sessions_by_instance",
+        lambda self: {inst.instance_id: [tracked_ws]},  # keyed by instance_id (#1020 A3)
     )
     monkeypatch.setattr(
         SessionRunner, "external_sessions_by_project", lambda self: {"beta": [external_ws]}
@@ -892,7 +945,7 @@ def test_gather_sessions_summarizes_tracked_and_external_working_sessions(cfg, m
     tracked = by_kind["bridge-session"]
     assert tracked["id"] == "aaaaaaaa-1111-2222-3333-444444444444"
     assert tracked["attribution"] == "tracked"
-    assert tracked["parent_instance"] == "alpha"
+    assert tracked["parent_instance"] == inst.instance_id
     assert tracked["project"] == "alpha"  # bridge-session carries its bridge's project (not null)
     # started_at normalized to an ISO-8601 string for every kind (epoch-ms in -> ISO out)
     assert tracked["started_at"] == "2023-11-14T22:13:20+00:00"

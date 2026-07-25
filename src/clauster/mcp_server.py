@@ -162,7 +162,11 @@ async def gather_sessions(config: ClausterConfig) -> list[dict[str, Any]]:
     tracked = runner.tracked_sessions_by_instance()
     for inst in runner.list_instances():
         sessions.append(_summarize_instance(inst, kind="bridge"))
-        for ws in tracked.get(inst.project, []):
+        # Keyed by instance_id, not project (#1020 A3): a project-keyed lookup inside this
+        # per-instance loop emitted every session once per bridge on that project, so a
+        # project running a standard bridge plus two interactive ones reported each session
+        # three times.
+        for ws in tracked.get(inst.instance_id, []):
             summary = _summarize_working(ws, kind="bridge-session")
             summary["project"] = (
                 inst.project
