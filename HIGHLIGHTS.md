@@ -22,10 +22,12 @@ managing Claude Code remote-control bridges on your own host. Highlights since 0
 - **Windows & cross-OS parity.** Interactive (true-resume PTY) sessions now run on Windows
   over ConPTY, the hosted channel speaks Windows named pipes, and state writes are hardened
   — bringing Windows to parity with POSIX across the 3-OS test matrix.
-- **Drive it headless: CLI, MCP write tools, and a versioned API.** Operate Clauster
-  entirely from the terminal with no server running (`clauster projects/status/sessions/
-  logs/open`, `start`/`stop`), spawn/stop/resume sessions from an MCP client, and integrate
-  against a versioned `/api/v1` with named, revocable bearer tokens.
+- **Drive it headless: CLI, MCP, and a versioned API.** Operate Clauster entirely from the
+  terminal with no server running (`clauster projects/status/sessions/logs/open`,
+  `start`/`stop`), inspect sessions from any MCP client, and integrate against a versioned
+  `/api/v1` with named, revocable bearer tokens. The stdio MCP surface is **read-only by
+  default** — it is local-privileged and unauthenticated, so the tools that spawn, stop and
+  resume sessions are opt-in behind `mcp.allow_writes`.
 - **Re-authenticate from the dashboard.** A browser login flow (`claude auth login` /
   `setup-token`) plus a header pill that surfaces a logged-out runtime account before a
   bridge silently hangs — no more SSHing in to fix auth.
@@ -38,5 +40,18 @@ managing Claude Code remote-control bridges on your own host. Highlights since 0
 - **Committed to SQLite.** Storage is now SQLite-only (the unsupported Postgres `database_url`
   is gone), with an automatic `clauster.db` snapshot before every migration.
 
-See **Breaking Changes** below before upgrading — most notably the Docker base moved to
-Alpine (derived images must use `apk`, and `su-exec` replaces `gosu`).
+**Read Breaking Changes below before upgrading**, and [UPGRADING.md][upgrading] for the
+step-by-step. The three most likely to need action from you:
+
+- **Cross-site requests are now blocked even with no password set.** If you reach the
+  dashboard at anything other than a loopback address at its configured port — a LAN bind,
+  a tunnel or reverse proxy, an SSH forward onto a different port — that address must be in
+  `auth.allowed_origins` or your buttons and live views stop working. It fails visibly, not
+  silently. A default loopback deployment needs no change.
+- **The Docker base moved to Alpine.** Derived images must use `apk` rather than `apt`, and
+  `su-exec` replaces `gosu`.
+- **`clauster mcp` changed twice.** Its write tools now default off (above), and a bridge's
+  `id` is its unique instance id rather than the project name — if you consume
+  `list_sessions`, read `project` for the name.
+
+[upgrading]: https://github.com/schubydoo/clauster/blob/main/UPGRADING.md
