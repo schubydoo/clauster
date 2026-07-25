@@ -98,6 +98,8 @@ def _select_owner(
     candidates: list[str],
     pid: int,
     owned_by_instance: dict[str, set[int]] | None,
+    *,
+    unproven_may_claim: bool = False,
 ) -> str | None:
     """Pick which of several co-located bridges owns ``pid``, or ``None`` (#820, #1020).
 
@@ -115,11 +117,7 @@ def _select_owner(
     hand in a managed bridge's directory stays EXTERNAL (#820). Only when NO candidate
     can prove anything yet (every bridge here is still starting, pre-sidecar) does the
     #713 window apply and a pid-less candidate claim the session, so a just-spawned
-    bridge's auto-created session doesn't flicker EXTERNAL — *unless* a keyed bridge
-    shares the cwd, in which case it does flicker, exactly as the pre-#1020 per-cwd
-    union did. That window is only the few milliseconds between registering the
-    STARTING row and its ``Popen`` returning, since both ``bridge_pid`` and
-    ``keeper_pid`` are set immediately after spawn.
+    bridge's auto-created session doesn't flicker EXTERNAL.
 
     Deciding this per candidate instead would reopen #820 (the pre-#1020 code gated per
     cwd, unioning every co-located bridge's roots): a RUNNING bridge sharing a cwd with a
@@ -127,6 +125,24 @@ def _select_owner(
     absorbs any unowned pid — hiding a genuinely external session from the external list
     and the Adopt affordance. Per-cwd gating with per-instance attribution keeps #820's
     strictness and still names the right owner.
+
+    ``unproven_may_claim`` relaxes exactly that last step, and ONLY the worktree caller
+    passes it. The two arms differ in what "no match" costs. At an exact cwd, EXTERNAL is
+    a *visible* answer — the session shows up in the external-session list with its Adopt
+    affordance — so refusing to guess is genuinely conservative, and #820's hand-run
+    ``claude`` lives at exactly that path. Inside ``.claude/worktrees/…`` it is not:
+    the external grouping joins on the exact project path, which a worktree cwd never
+    matches, so EXTERNAL there means the session renders NOWHERE. Fail-closed stops being
+    conservative and becomes a disappearing act.
+
+    With the flag, a candidate that cannot yet prove anything may claim the session even
+    beside a keyed sibling. That is well-motivated rather than a coin flip: the pid-less
+    candidate is a bridge that *just* spawned, which is precisely who a brand-new worker
+    in this subtree is likely to belong to. It does not weaken #820 — that subtree is
+    created and owned by the bridge, not somewhere an operator runs ``claude`` by hand,
+    which is why the pre-#1020 code left the worktree arm ungated altogether. A candidate
+    that IS keyed and simply doesn't own the pid still never claims it, so two running
+    worktree bridges can't absorb each other's sessions (the #1020 A3 lie in miniature).
     """
     if not candidates:
         return None
@@ -136,11 +152,14 @@ def _select_owner(
         owned = owned_by_instance.get(inst_id)
         if owned is not None and pid in owned:
             return inst_id
-    if any(inst_id in owned_by_instance for inst_id in candidates):
+    unproven = [inst_id for inst_id in candidates if inst_id not in owned_by_instance]
+    if not unproven:
+        # Every candidate here can prove ownership and none owns this pid: it isn't ours.
         return None
-    # Nothing here can prove ownership yet (#713). Registration order, so a tie between
-    # two still-starting bridges is at least stable.
-    return candidates[0]
+    if unproven_may_claim or len(unproven) == len(candidates):
+        # #713. Registration order, so a tie between two still-starting bridges is stable.
+        return unproven[0]
+    return None
 
 
 def reconcile(
@@ -247,14 +266,16 @@ def reconcile(
         # With N bridges sharing the subtree, ownership is the only thing that can name the
         # owner, so there the gate is what makes the attribution honest (#1020 A3).
         #
-        # Consequence of the per-cwd gate, deliberate: with a MIXED candidate set (one
-        # keyed bridge, one still pid-less) an unowned worktree session now resolves to
-        # None → EXTERNAL, where it previously fell back to the pid-less candidate. That
-        # fallback was the #1020 A3 lie in miniature — attributing one bridge's sessions
-        # to another — so refusing is the honest answer even though, per the note above,
-        # an EXTERNAL worktree session is visible nowhere.
+        # `unproven_may_claim` because EXTERNAL is not a visible answer here: the external
+        # grouping joins on the exact project path, which a worktree cwd never matches, so
+        # refusing to attribute makes the session render NOWHERE rather than surfacing it
+        # as unmanaged. A pid-less candidate — a bridge that just spawned — may therefore
+        # claim a worker even beside a keyed sibling, which is who a brand-new worker in
+        # this subtree most likely belongs to. A keyed candidate that doesn't own the pid
+        # still never claims it, so two running worktree bridges can't absorb each other's
+        # sessions.
         wt_id = (
-            _select_owner(wt_candidates, s.pid, owned_pids_by_instance)
+            _select_owner(wt_candidates, s.pid, owned_pids_by_instance, unproven_may_claim=True)
             if len(wt_candidates) > 1
             else (wt_candidates[0] if wt_candidates else None)
         )

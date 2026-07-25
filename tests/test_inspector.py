@@ -367,7 +367,8 @@ def test_reconcile_worktree_join_ungated_when_only_one_bridge_could_own_it(tmp_p
 def test_reconcile_worktree_join_gated_once_several_bridges_share_the_subtree(tmp_path: Path):
     # With N worktree bridges under one root, containment says only "some bridge here" —
     # ownership is the only thing that can name which, so it becomes load-bearing (#1020
-    # A3). An unowned pid must not be handed to an arbitrary co-located bridge.
+    # A3). Two RUNNING bridges that both know their pids and neither owns this one must
+    # not have it handed to whichever was registered first.
     proj = tmp_path / "alpha"
     wt = proj / ".claude" / "worktrees" / "bridge-cse_x"
     wt.mkdir(parents=True)
@@ -379,6 +380,31 @@ def test_reconcile_worktree_join_gated_once_several_bridges_share_the_subtree(tm
         owned_pids_by_instance={"pty-1": {1}, "pty-2": {2}},
     )
     assert result[0].attribution is Attribution.EXTERNAL
+
+
+def test_reconcile_worktree_starting_bridge_claims_beside_a_keyed_sibling(tmp_path: Path):
+    # A worktree root with a RUNNING bridge and a still-pid-less STARTING one. The
+    # STARTING bridge's own first worker is owned by nobody yet, and on this arm refusing
+    # to attribute is NOT the safe answer: the external grouping joins on the exact
+    # project path, which a worktree cwd never matches, so EXTERNAL here renders the
+    # session NOWHERE — not under a bridge, not in the external list. The pid-less
+    # candidate (the bridge that just spawned) therefore claims it.
+    #
+    # Contrast `test_reconcile_starting_bridge_cannot_absorb_an_external_when_a_sibling_
+    # is_gated`: at an exact cwd the same shape stays EXTERNAL, because there EXTERNAL is
+    # visible and #820's hand-run `claude` lives at exactly that path.
+    proj = tmp_path / "alpha"
+    wt = proj / ".claude" / "worktrees" / "bridge-new"
+    wt.mkdir(parents=True)
+    sessions = inspector.parse_agents_json(json.dumps([_agent(777, str(wt), "u-fresh")]))
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["running-1", "starting-2"]},
+        worktree_roots={proj: ["running-1", "starting-2"]},
+        owned_pids_by_instance={"running-1": {200}},  # starting-2 has no pid yet
+    )
+    assert result[0].attribution is Attribution.TRACKED
+    assert result[0].parent_instance == "starting-2"
 
 
 def test_reconcile_starting_bridge_cannot_absorb_an_external_when_a_sibling_is_gated(
