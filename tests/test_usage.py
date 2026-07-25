@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -247,6 +249,29 @@ def test_token_totals_merge():
 # ----- per-project discovery + aggregation -----------------------------
 
 
+@pytest.fixture
+def short_tmp_root():
+    """A SHORT root for tests that need REAL project directories on disk.
+
+    ``sanitize_cwd`` collapses an absolute path into a single directory NAME, so a
+    transcript directory is about as long as the project path itself — the full path is
+    effectively doubled. pytest's ``tmp_path`` already carries a
+    ``popen-gwN/<test-name>`` segment under xdist (the default here), and the doubled
+    length then exceeds Windows' 260-char MAX_PATH: ``mkdir`` fails with
+    ``FileNotFoundError: [WinError 206] The filename or extension is too long``. It
+    reproduces ONLY under xdist, so a serial run of the same test passes — caught by the
+    3-OS matrix, not locally.
+
+    Most tests here pass a fake path (``/srv/projects/...``) that is never created and are
+    unaffected; this is for the ones that must enumerate real sibling directories.
+    """
+    root = Path(tempfile.mkdtemp())
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _project_transcript_dir(claude_projects_dir: Path, project_path: Path) -> Path:
     """Build the dir Claude would use for a project's transcripts, and create it."""
     d = claude_projects_dir / sanitize_cwd(project_path)
@@ -270,6 +295,228 @@ def test_transcript_paths_for_missing_dir_is_empty(tmp_path):
     assert (
         transcript_paths_for(Path("/srv/projects/never_run"), tmp_path / "claude_projects") == []
     )
+
+
+def _write_transcript(directory: Path, name: str, cwd: Path | str | None, **extra) -> Path:
+    """Write a transcript that records ``cwd``, the way Claude does.
+
+    Ownership of a worktree transcript is proven from this recorded cwd, not from the
+    containing directory name (which is a lossy one-way hash of it), so a fixture that
+    omits it is correctly refused as unproven — pass ``cwd=None`` to exercise that.
+    """
+    record: dict = {"type": "user", "message": {"role": "user"}, **extra}
+    if cwd is not None:
+        record["cwd"] = str(cwd)
+    path = directory / name
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return path
+
+
+def test_recorded_cwd_skips_records_without_one(short_tmp_root):
+    # Leading records are often queue-operation/attachment entries carrying no cwd, and a
+    # corrupt line can appear anywhere, so the scan must step over both rather than give up
+    # at the first record. An explicitly EMPTY cwd is not a cwd either.
+    from clauster.usage import _recorded_cwd
+
+    path = short_tmp_root / "t.jsonl"
+    path.write_text(
+        json.dumps({"type": "queue-operation"}) + "\n"
+        "{not json\n"
+        + json.dumps({"type": "user", "cwd": ""})
+        + "\n"
+        + json.dumps({"type": "user", "cwd": "/srv/projects/found"})
+        + "\n",
+        encoding="utf-8",
+    )
+    assert _recorded_cwd(path) == "/srv/projects/found"
+
+
+def test_recorded_cwd_gives_up_past_the_line_bound(short_tmp_root):
+    # Bounded scan: a transcript whose cwd only appears beyond the cap reads as unproven
+    # rather than making the walk read an arbitrarily large file.
+    from clauster.usage import _recorded_cwd
+
+    path = short_tmp_root / "late.jsonl"
+    filler = json.dumps({"type": "attachment"}) + "\n"
+    path.write_text(
+        filler * 20 + json.dumps({"type": "user", "cwd": "/srv/projects/late"}) + "\n",
+        encoding="utf-8",
+    )
+    assert _recorded_cwd(path, max_lines=5) is None
+    assert _recorded_cwd(path, max_lines=50) == "/srv/projects/late"
+
+
+def test_recorded_cwd_unreadable_transcript_is_unproven(short_tmp_root):
+    # stat/open failures must read as "unproven" (-> refused downstream), never raise into
+    # a listing. A directory stands in for the unreadable file: opening one raises OSError
+    # on every platform (IsADirectoryError on POSIX, PermissionError on Windows).
+    from clauster.usage import _recorded_cwd
+
+    assert _recorded_cwd(short_tmp_root / "does-not-exist.jsonl") is None
+    directory = short_tmp_root / "not-a-file.jsonl"
+    directory.mkdir()
+    assert _recorded_cwd(directory) is None
+
+
+def test_recorded_cwd_cache_clears_at_the_cap(short_tmp_root, monkeypatch):
+    # The cache is cleared wholesale at the cap rather than evicted per-entry; pin that it
+    # actually bounds, so a long-lived process can't grow it without limit.
+    from clauster import usage as usage_mod
+
+    monkeypatch.setattr(usage_mod, "_CWD_CACHE_MAX", 1)
+    usage_mod._CWD_CACHE.clear()
+    for i in range(3):
+        p = short_tmp_root / f"c{i}.jsonl"
+        p.write_text(json.dumps({"type": "user", "cwd": f"/srv/p{i}"}) + "\n", encoding="utf-8")
+        assert usage_mod._recorded_cwd(p) == f"/srv/p{i}"
+    assert len(usage_mod._CWD_CACHE) <= 1
+    usage_mod._CWD_CACHE.clear()
+
+
+def test_transcript_is_owned_rejects_an_unresolvable_cwd(short_tmp_root):
+    # A recorded cwd is untrusted input from a file on disk. One that cannot even be
+    # resolved (a NUL byte makes Path.resolve raise ValueError) must fail closed, not
+    # propagate out of a listing.
+    from clauster.usage import _transcript_is_owned
+
+    project = short_tmp_root / "projects" / "my_proj"
+    project.mkdir(parents=True)
+    path = short_tmp_root / "bad.jsonl"
+    path.write_text(json.dumps({"type": "user", "cwd": "/srv/\x00/x"}) + "\n", encoding="utf-8")
+    assert _transcript_is_owned(project, path) is False
+
+
+def test_transcript_paths_for_tolerates_an_unreadable_candidate_dir(short_tmp_root, monkeypatch):
+    # An unreadable worktree candidate dir contributes nothing rather than failing the whole
+    # walk — the project's own conversations must still list.
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    worktree = project / ".claude" / "worktrees" / "sess-1"
+    project.mkdir(parents=True)
+    _write_transcript(_project_transcript_dir(claude_dir, project), "main.jsonl", project)
+    candidate = _project_transcript_dir(claude_dir, worktree)
+    _write_transcript(candidate, "wt.jsonl", worktree)
+
+    real_glob = Path.glob
+
+    def boom(self, pattern):
+        if self == candidate:
+            raise OSError("permission denied")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", boom)
+    assert [p.name for p in transcript_paths_for(project, claude_dir)] == ["main.jsonl"]
+
+
+def test_transcript_paths_for_includes_worktree_sessions(short_tmp_root):
+    # #1020: a worktree-spawn session runs with the worktree as its cwd, so Claude files its
+    # transcript in a SIBLING directory. Keying only on the project root hid those
+    # conversations from the Conversation picker and dropped their tokens from the rollup.
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    worktree = project / ".claude" / "worktrees" / "sess-abc123"
+    project.mkdir(parents=True)
+    _write_transcript(_project_transcript_dir(claude_dir, project), "main.jsonl", project)
+    _write_transcript(_project_transcript_dir(claude_dir, worktree), "worktree.jsonl", worktree)
+
+    names = [p.name for p in transcript_paths_for(project, claude_dir)]
+    assert sorted(names) == ["main.jsonl", "worktree.jsonl"]
+
+
+def test_worktree_transcript_without_a_recorded_cwd_is_refused(short_tmp_root):
+    # Fail closed on UNPROVEN. A candidate dir is only a lossy name match, so a transcript
+    # that never states its cwd cannot be shown to belong here — and this feeds the pty
+    # resume ownership gate, so "can't tell" must mean "no".
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    worktree = project / ".claude" / "worktrees" / "sess-1"
+    project.mkdir(parents=True)
+    _write_transcript(_project_transcript_dir(claude_dir, project), "main.jsonl", project)
+    _write_transcript(_project_transcript_dir(claude_dir, worktree), "mystery.jsonl", None)
+
+    assert [p.name for p in transcript_paths_for(project, claude_dir)] == ["main.jsonl"]
+    assert resolve_session_transcript(project, "mystery", claude_dir) is None
+
+
+@pytest.mark.parametrize(
+    "foreign",
+    [
+        # A sibling PROJECT whose name sanitizes into this project's worktree prefix:
+        # sanitize_cwd maps `/`, `.`, `-` and `_` all to `-`, and is_valid_project_name
+        # admits both spellings.
+        "projects/my_proj--claude-worktrees-x",
+        "projects/my_proj__claude_worktrees_y",
+        # Greptile P1 (security): the colliding family is NOT limited to the projects root.
+        # `<root>/projects-my_proj--claude-worktrees-z` sanitizes IDENTICALLY to
+        # `<root>/projects/my_proj/.claude/worktrees/z`, yet is not a sibling of the project
+        # at all — so no enumeration of neighbours can exclude it. Ownership has to be proven
+        # from the transcript's own recorded cwd instead.
+        "projects-my_proj--claude-worktrees-z",
+    ],
+)
+def test_transcript_paths_for_excludes_foreign_collisions(short_tmp_root, foreign):
+    project = short_tmp_root / "projects" / "my_proj"
+    project.mkdir(parents=True)
+    foreign_path = short_tmp_root / foreign
+    foreign_path.mkdir(parents=True, exist_ok=True)
+
+    claude_dir = short_tmp_root / "claude_projects"
+    _write_transcript(_project_transcript_dir(claude_dir, project), "mine.jsonl", project)
+    # The foreign transcript honestly records ITS OWN cwd — which is exactly what proves it
+    # is not ours, even though its directory name is indistinguishable from one of ours.
+    _write_transcript(
+        _project_transcript_dir(claude_dir, foreign_path), "theirs.jsonl", foreign_path
+    )
+
+    assert [p.name for p in transcript_paths_for(project, claude_dir)] == ["mine.jsonl"]
+    # The ownership proof behind pty resume must refuse it too, not just the listing.
+    assert resolve_session_transcript(project, "theirs", claude_dir) is None
+
+
+def test_resolve_session_transcript_finds_worktree_session(short_tmp_root):
+    # Cross-layer: the picker lists worktree conversations, so the resolver behind
+    # selecting one must find them too. Listing without resolving would 404 every worktree
+    # session the moment it was clicked — the two sides must stay in lockstep.
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    worktree = project / ".claude" / "worktrees" / "sess-1"
+    project.mkdir(parents=True)
+    _project_transcript_dir(claude_dir, project)
+    _write_transcript(_project_transcript_dir(claude_dir, worktree), "abc-123.jsonl", worktree)
+    resolved = resolve_session_transcript(project, "abc-123", claude_dir)
+    assert resolved is not None and resolved.name == "abc-123.jsonl"
+
+
+def test_resolve_session_transcript_still_rejects_traversal(tmp_path):
+    # Widening the candidate DIRECTORIES must not widen what a crafted `session` can reach:
+    # the stem checks and the per-directory parent-identity check both still apply.
+    claude_dir = tmp_path / "claude_projects"
+    project = Path("/srv/projects/my_proj")
+    _project_transcript_dir(claude_dir, project)
+    outsider = _project_transcript_dir(claude_dir, Path("/srv/projects/other"))
+    (outsider / "secret.jsonl").write_text("")
+    for evil in ("../" + sanitize_cwd(Path("/srv/projects/other")) + "/secret", "..", "", "a/b"):
+        assert resolve_session_transcript(project, evil, claude_dir) is None
+
+
+def test_project_usage_counts_worktree_transcripts(short_tmp_root):
+    # The rollup shares transcript_paths_for, so worktree sessions must now be counted —
+    # their tokens were previously invisible in the project's usage totals.
+    claude_dir = short_tmp_root / "claude_projects"
+    project = short_tmp_root / "projects" / "my_proj"
+    project.mkdir(parents=True)
+    _project_transcript_dir(claude_dir, project)
+    worktree = project / ".claude" / "worktrees" / "sess-1"
+    _write_transcript(
+        _project_transcript_dir(claude_dir, worktree),
+        "s.jsonl",
+        worktree,
+        type="assistant",
+        message={"model": "claude-opus-4", "usage": {"input_tokens": 10, "output_tokens": 5}},
+    )
+    result = aggregate_project_usage(project, claude_projects_dir=claude_dir)
+    assert result.transcript_count == 1
+    assert result.by_model["claude-opus-4"].input == 10
 
 
 def test_aggregate_project_usage_sums_across_transcripts(tmp_path):
