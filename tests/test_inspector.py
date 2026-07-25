@@ -381,6 +381,49 @@ def test_reconcile_worktree_join_gated_once_several_bridges_share_the_subtree(tm
     assert result[0].attribution is Attribution.EXTERNAL
 
 
+def test_reconcile_starting_bridge_cannot_absorb_an_external_when_a_sibling_is_gated(
+    tmp_path: Path,
+):
+    # #820 vs #713, the mixed case. A RUNNING bridge (pid known) shares a cwd with a
+    # STARTING one that has no pid yet. An operator's hand-run `claude` is owned by
+    # neither — and must NOT be handed to the STARTING bridge just because that bridge
+    # can't prove anything yet, which would hide a genuinely external session from the
+    # external list and the Adopt affordance.
+    #
+    # The gate is decided for the CWD, not per candidate: any candidate here with a known
+    # pid set means this location can prove ownership. That is what the pre-#1020 code did
+    # by unioning co-located roots per cwd, so this preserves its strictness.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(999, str(proj), "u-handrun")]))
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["running-1", "starting-2"]},
+        owned_pids_by_instance={"running-1": {200}},  # starting-2 has no pid yet
+    )
+    assert result[0].attribution is Attribution.EXTERNAL
+    assert result[0].parent_instance is None
+
+
+def test_reconcile_starting_bridge_still_claims_its_session_when_nothing_is_gated(
+    tmp_path: Path,
+):
+    # The other half of the same rule — #713 must survive it. When NO candidate at this
+    # cwd can prove ownership yet (every bridge here is still starting, pre-sidecar), the
+    # startup window applies and the auto-created session attributes rather than
+    # flickering EXTERNAL.
+    proj = tmp_path / "alpha"
+    proj.mkdir()
+    sessions = inspector.parse_agents_json(json.dumps([_agent(500, str(proj), "u-initial")]))
+    result = inspector.reconcile(
+        sessions,
+        {proj: ["starting-1"]},
+        owned_pids_by_instance={"unrelated": {1}},  # keyed, but not for this cwd
+    )
+    assert result[0].attribution is Attribution.TRACKED
+    assert result[0].parent_instance == "starting-1"
+
+
 def test_reconcile_pidless_colocated_row_cannot_absorb_an_external(tmp_path: Path):
     # #820 regression guard for the per-instance rewrite. `_select_owner` falls back to a
     # candidate that is ABSENT from the ownership map (the #713 startup window). A row with

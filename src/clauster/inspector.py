@@ -107,12 +107,26 @@ def _select_owner(
     own live pid(s) plus their descendants.
 
     ``None`` for ``owned_by_instance`` disables the gate (legacy callers) and the first
-    candidate wins. Otherwise a candidate that provably owns the pid wins. Failing that,
-    a candidate with *no known pid yet* (absent from the map — a STARTING pty
-    pre-sidecar) may still claim it: that is the #713 startup window, where the bridge
-    genuinely exists but has nothing to prove ownership with. A pid that is gated and
-    unowned matches nothing, so an external ``claude`` run by hand in a managed bridge's
-    directory stays EXTERNAL (#820) instead of being folded into the bridge's sessions.
+    candidate wins. Otherwise a candidate that provably owns the pid wins.
+
+    Failing that, the gate is decided **for the cwd as a whole, not per candidate**: if
+    ANY candidate here has a known pid set, this location can prove ownership, so a pid
+    none of them owns is not ours and matches nothing — an external ``claude`` run by
+    hand in a managed bridge's directory stays EXTERNAL (#820). Only when NO candidate
+    can prove anything yet (every bridge here is still starting, pre-sidecar) does the
+    #713 window apply and a pid-less candidate claim the session, so a just-spawned
+    bridge's auto-created session doesn't flicker EXTERNAL — *unless* a keyed bridge
+    shares the cwd, in which case it does flicker, exactly as the pre-#1020 per-cwd
+    union did. That window is only the few milliseconds between registering the
+    STARTING row and its ``Popen`` returning, since both ``bridge_pid`` and
+    ``keeper_pid`` are set immediately after spawn.
+
+    Deciding this per candidate instead would reopen #820 (the pre-#1020 code gated per
+    cwd, unioning every co-located bridge's roots): a RUNNING bridge sharing a cwd with a
+    pid-less STARTING one would leave the STARTING bridge as an ungated candidate that
+    absorbs any unowned pid — hiding a genuinely external session from the external list
+    and the Adopt affordance. Per-cwd gating with per-instance attribution keeps #820's
+    strictness and still names the right owner.
     """
     if not candidates:
         return None
@@ -122,8 +136,11 @@ def _select_owner(
         owned = owned_by_instance.get(inst_id)
         if owned is not None and pid in owned:
             return inst_id
-    # Registration order, so a tie between two still-starting bridges is at least stable.
-    return next((i for i in candidates if i not in owned_by_instance), None)
+    if any(inst_id in owned_by_instance for inst_id in candidates):
+        return None
+    # Nothing here can prove ownership yet (#713). Registration order, so a tie between
+    # two still-starting bridges is at least stable.
+    return candidates[0]
 
 
 def reconcile(
@@ -229,6 +246,13 @@ def reconcile(
         # the exact project path and a worktree cwd never matches it (#1076 regression).
         # With N bridges sharing the subtree, ownership is the only thing that can name the
         # owner, so there the gate is what makes the attribution honest (#1020 A3).
+        #
+        # Consequence of the per-cwd gate, deliberate: with a MIXED candidate set (one
+        # keyed bridge, one still pid-less) an unowned worktree session now resolves to
+        # None → EXTERNAL, where it previously fell back to the pid-less candidate. That
+        # fallback was the #1020 A3 lie in miniature — attributing one bridge's sessions
+        # to another — so refusing is the honest answer even though, per the note above,
+        # an EXTERNAL worktree session is visible nowhere.
         wt_id = (
             _select_owner(wt_candidates, s.pid, owned_pids_by_instance)
             if len(wt_candidates) > 1

@@ -29,6 +29,32 @@ run a database migration by hand. (The separate `clauster migrate` command is a
 *legacy* helper that only upgrades an older flat-file `state.json`; on a 0.12+
 deployment it has nothing to do.)
 
+## 0.12 → 1.0: a bridge's `id` in `clauster mcp` is now its instance id
+
+`list_sessions` reported each bridge's **project name** as its `id`. A project can
+run several bridges at once — one standard (Server Mode) bridge plus any number of
+Interactive Sessions — so that id was not unique: every bridge on a project came
+back with the same one. As of 1.0 a bridge's `id` is its stable **instance id**, and
+the project name stays available as the separate `project` field.
+
+This matters if you consume `list_sessions` output. A working session's
+`parent_instance` now joins to exactly one bridge `id`, which it could not do
+before. If you keyed bridges by `id` and assumed it was the project name, read
+`project` instead.
+
+`session_status` still accepts a **project name** for a bridge when that project
+runs exactly one. When it runs several, the name no longer identifies a single
+session, so instead of returning whichever bridge was registered first you get:
+
+```json
+{"found": false, "id": "myproject", "ambiguous": ["<bridge id>", "<bridge id>"]}
+```
+
+Retry with one of the returned ids. `stop_session` / `resume_session` accept either
+form, so they keep working — but note a project name that matches several bridges
+still resolves to the one the dashboard displays rather than reporting the
+ambiguity, so pass an **instance id** when you mean a specific bridge.
+
 ## 0.12 → 1.0: `clauster mcp` write tools default off
 
 The [`clauster mcp`](docs/mcp.md) stdio server's **write** tools —

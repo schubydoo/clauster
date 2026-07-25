@@ -775,7 +775,8 @@ def test_gather_sessions_includes_persisted_bridge(cfg):
     )
     sessions = asyncio.run(mcp_server.gather_sessions(cfg))
     bridges = [s for s in sessions if s["kind"] == "bridge"]
-    bridge = next(s for s in bridges if s["id"] == "alpha")
+    # `id` is the instance_id since #1020; `project` carries the human-meaningful name.
+    bridge = next(s for s in bridges if s["project"] == "alpha")
     assert bridge["channel"] == "remote-control"
     assert bridge["status"] in {"stopped", "starting", "running", "crashed", "error"}
     # Only structural fields — never raw log / transcript content.
@@ -845,6 +846,81 @@ def test_gather_sessions_includes_background_job_without_freetext(cfg, monkeypat
     assert "detail" not in bg[0]
     assert "intent" not in bg[0]
     assert "name" not in bg[0]
+
+
+def test_bridge_ids_are_unique_and_children_join_to_them(cfg, monkeypatch):
+    """Each bridge gets a unique `id`, and a child session's `parent_instance` matches it.
+
+    Before #1020 every bridge on a project serialized the SAME `id` (the project name).
+    Once a working session's `parent_instance` became an instance_id, nothing a client
+    could see joined a child back to its owning bridge, and `session_status(project)`
+    could only ever return whichever bridge was registered first.
+    """
+    from clauster.models import Attribution, InstanceStatus, RemoteControlInstance, WorkingSession
+    from clauster.runner import SessionRunner
+
+    std = RemoteControlInstance(project="alpha", label="alpha", status=InstanceStatus.RUNNING)
+    pty = RemoteControlInstance(
+        project="alpha", label="alpha", status=InstanceStatus.RUNNING, resume_mode="pty"
+    )
+    child = WorkingSession(
+        pid=1,
+        cwd=cfg.projects_root / "alpha",
+        kind="interactive",
+        state="working",
+        started_at=1700000000000,
+        local_uuid="u-child",
+        parent_instance=pty.instance_id,
+        attribution=Attribution.TRACKED,
+    )
+    monkeypatch.setattr(SessionRunner, "rediscover", _anoop)
+    monkeypatch.setattr(SessionRunner, "poll_once", _anoop)
+    monkeypatch.setattr(SessionRunner, "list_instances", lambda self: [std, pty])
+    monkeypatch.setattr(
+        SessionRunner, "tracked_sessions_by_instance", lambda self: {pty.instance_id: [child]}
+    )
+    monkeypatch.setattr(SessionRunner, "external_sessions_by_project", lambda self: {})
+
+    sessions = asyncio.run(mcp_server.gather_sessions(cfg))
+    bridge_ids = [s["id"] for s in sessions if s["kind"] == "bridge"]
+    assert len(set(bridge_ids)) == 2  # NOT two rows both called "alpha"
+    assert all(s["project"] == "alpha" for s in sessions if s["kind"] == "bridge")
+    # The join a client needs: the child names exactly one of the bridge ids.
+    tracked = next(s for s in sessions if s["kind"] == "bridge-session")
+    assert tracked["parent_instance"] in bridge_ids
+    assert tracked["parent_instance"] == pty.instance_id
+
+
+def test_session_status_accepts_a_project_name_and_reports_ambiguity(cfg, monkeypatch):
+    """A project name still names a bridge when it names exactly ONE; otherwise say so."""
+    from clauster.models import InstanceStatus, RemoteControlInstance
+    from clauster.runner import SessionRunner
+
+    solo = RemoteControlInstance(project="solo", label="solo", status=InstanceStatus.RUNNING)
+    monkeypatch.setattr(SessionRunner, "rediscover", _anoop)
+    monkeypatch.setattr(SessionRunner, "poll_once", _anoop)
+    monkeypatch.setattr(SessionRunner, "tracked_sessions_by_instance", lambda self: {})
+    monkeypatch.setattr(SessionRunner, "external_sessions_by_project", lambda self: {})
+    monkeypatch.setattr(SessionRunner, "list_instances", lambda self: [solo])
+
+    # Back-compat: the pre-#1020 way of naming a bridge still resolves.
+    out = asyncio.run(mcp_server._tool_session_status(cfg, {"id": "solo"}))
+    assert out["found"] is True
+    assert out["session"]["id"] == solo.instance_id
+    # …and the precise id resolves too.
+    out = asyncio.run(mcp_server._tool_session_status(cfg, {"id": solo.instance_id}))
+    assert out["found"] is True
+
+    # Two bridges on one project: a project name no longer names a single session, so
+    # report that and hand back the ids to retry with, rather than silently picking one.
+    a = RemoteControlInstance(project="dup", label="dup", status=InstanceStatus.RUNNING)
+    b = RemoteControlInstance(
+        project="dup", label="dup", status=InstanceStatus.RUNNING, resume_mode="pty"
+    )
+    monkeypatch.setattr(SessionRunner, "list_instances", lambda self: [a, b])
+    out = asyncio.run(mcp_server._tool_session_status(cfg, {"id": "dup"}))
+    assert out["found"] is False
+    assert sorted(out["ambiguous"]) == sorted([a.instance_id, b.instance_id])
 
 
 def test_gather_sessions_does_not_duplicate_a_session_per_bridge(cfg, monkeypatch):
@@ -941,7 +1017,8 @@ def test_gather_sessions_summarizes_tracked_and_external_working_sessions(cfg, m
 
     sessions = asyncio.run(mcp_server.gather_sessions(cfg))
     by_kind = {s["kind"]: s for s in sessions}
-    assert by_kind["bridge"]["id"] == "alpha"
+    assert by_kind["bridge"]["id"] == inst.instance_id  # unique per bridge (#1020)
+    assert by_kind["bridge"]["project"] == "alpha"
     tracked = by_kind["bridge-session"]
     assert tracked["id"] == "aaaaaaaa-1111-2222-3333-444444444444"
     assert tracked["attribution"] == "tracked"
