@@ -430,6 +430,12 @@ def test_recorded_origin_keeps_ipv6_literal_bracketed(tmp_path):
         "javascript:x",
         "http://:80",  # hostless
         "http://a.com,http",  # comma-mangled host
+        # Unterminated / empty IPv6 brackets. normalize_origin cannot parse these either,
+        # and hands the string back unchanged — so they reach the second urlsplit, which
+        # raises ValueError("Invalid IPv6 URL"). Unguarded that 500s the submit BEFORE the
+        # config is written, i.e. a junk header could abort setup entirely.
+        "http://[::1",
+        "http://[]",
     ],
 )
 def test_wildcard_bind_rejects_malformed_origin(tmp_path, bad):

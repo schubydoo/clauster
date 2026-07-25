@@ -216,8 +216,15 @@ def _origins_to_persist(host: str, port: int, origin: str | None) -> list[str]:
         return []
     # normalize_origin returns the cleaned input unchanged when it can't parse a
     # scheme+host, so re-derive the parts rather than trusting it round-tripped.
-    parts = urlsplit(auth.normalize_origin(origin))
-    hostname = (parts.hostname or "").lower()
+    try:
+        parts = urlsplit(auth.normalize_origin(origin))
+        hostname = (parts.hostname or "").lower()
+    except ValueError:
+        # ...and because it hands back that unparseable string, a malformed bracketed
+        # Origin (`http://[::1`, `http://[]`) reaches urlsplit HERE, which raises
+        # "Invalid IPv6 URL". Unguarded that 500s the submit before any config is written:
+        # a header we have already decided not to trust must not be able to abort setup.
+        return []
     if parts.scheme not in ("http", "https") or not _ORIGIN_HOST_RE.match(hostname):
         return []
     if ":" in hostname:  # IPv6 literal — urlsplit drops the brackets a real Origin carries
