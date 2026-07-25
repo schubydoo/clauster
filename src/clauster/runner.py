@@ -698,9 +698,15 @@ class SessionRunner:
 
         Those worktrees MUST stay in lockstep with :func:`usage.transcript_paths_for`,
         which lists the same set (#1020). If a worktree session were listed but not
-        counted live here, it would render as a dormant conversation — and the fork
-        picker's ``!live && turn_count > 0`` filter would then offer a *running* session
-        as forkable, which is exactly what that filter exists to prevent. Hosted
+        counted live here, it would render as a dormant conversation and the launch
+        popover's Conversation picker (``!live && turn_count > 0``) would surface it.
+        That picker always sends ``--fork-session`` alongside ``--resume <uuid>``, so it
+        only ever BRANCHES: a fresh session id, picked conversation never clobbered.
+        (The two flags are independent — ``hosted``/``supervisor`` send ``--resume``
+        bare to continue a conversation in place — the picker simply never offers that.)
+        So surfacing a live session is not destructive; it is the wrong control, since a
+        live session is resumed from its own row, and branching from a conversation still
+        being written yields a mid-flight snapshot. Hosted
         (claustrum) sessions are folded in separately by the route, since they run no
         ``agents --json`` session.
         """
@@ -709,8 +715,8 @@ class SessionRunner:
         # live set cannot disagree. Matching on a different rule (containment in
         # `.claude/worktrees`) left a gap: a cwd like `<project>/.claude/worktrees-foo/x`
         # sanitizes into this prefix and IS listed, but failed the containment test, so a
-        # RUNNING session there read as dormant and the picker's `!live && turn_count > 0`
-        # filter offered it as forkable.
+        # RUNNING session there read as dormant and the Conversation (fork) picker's
+        # `!live && turn_count > 0` filter surfaced it.
         worktree_prefix = pointers.sanitize_cwd(Path(project_path) / pointers.WORKTREE_SUBDIR)
         try:
             project_root = Path(project_path).resolve()

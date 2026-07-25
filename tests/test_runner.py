@@ -1384,7 +1384,7 @@ def test_live_session_uuids_includes_worktree_sessions(runner_config):
 
     usage.transcript_paths_for now lists worktree transcripts, so this must count them live.
     If it did not, a RUNNING worktree session would render as a dormant conversation and the
-    fork picker's `!live && turn_count > 0` filter would offer it as forkable — the precise
+    Conversation (fork) picker's `!live && turn_count > 0` filter would surface it — the precise
     situation that filter exists to prevent.
     """
     config, _ = runner_config

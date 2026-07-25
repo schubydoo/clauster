@@ -238,10 +238,13 @@ def transcript_paths_for(
 
     A **worktree-spawn** session runs with the worktree as its cwd, so Claude files it under
     a different sanitized directory — a sibling of the project's own. Those sessions belong
-    to the project, so the project directory AND every worktree sibling are searched; keying
-    only on the project root hid worktree conversations from the fork/resume picker and left
-    their tokens out of the usage rollup (#1020). A directory that is absent or unreadable
-    contributes nothing rather than failing the walk.
+    to the project — Claude Code scopes its own session-id lookup to "the current project
+    directory and its git worktrees" (code.claude.com/docs/en/sessions.md), so this widening
+    matches the CLI rather than outrunning it. The project directory AND every worktree
+    sibling are therefore searched; keying
+    only on the project root hid worktree conversations from the launch popover's Conversation
+    picker and left their tokens out of the usage rollup (#1020). A directory that is absent
+    or unreadable contributes nothing rather than failing the walk.
     """
     out: list[Path] = []
     for directory in _transcript_dirs_for(project_path, claude_projects_dir):
