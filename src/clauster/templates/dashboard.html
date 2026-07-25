@@ -97,15 +97,35 @@
     .launch-anchor { position: relative; display: inline-block; }
     .launch-pop { position: absolute; z-index: 40; right: 0; left: auto; margin-top: .35rem;
                   width: min(360px, 92vw); box-shadow: 0 .5rem 1.25rem rgba(0,0,0,.3); }
-    /* In-popover trust-on-start gate (#747): the nested .alert sat inside the card's
-       p-2, doubling padding and squeezing body text to 1–2 words per line on a security-
-       critical surface. Give it comfortable, single-source padding + readable leading, and
-       let the explanation breathe before the action row. Scoped to the .trust-gate
-       semantic class (a durable style hook, not the data-test attribute) so it never
-       reshapes the sibling bypass gate. */
-    .launch-pop .trust-gate { padding: .75rem .85rem; }
-    .launch-pop .trust-gate p { line-height: 1.5; }
-    .launch-pop .trust-gate .btn-list { margin-top: .25rem; }
+    /* In-popover consent gates (#747, widened in #1097). Each gate is a Tabler .alert
+       nested inside the popover card's p-2, which doubled padding and squeezed body text
+       to 1-2 words per line on a security-consent surface.
+
+       Tabler also ships `.alert { display: flex; flex-direction: row }`, so a gate's
+       children -- explanation, checkbox/input, action row -- lay out SIDE BY SIDE and each
+       collapses to a fraction of the 360px popover (measured: the MCP gate's explanation
+       at 74px, the trust gate's at ~110px). `display: block` is what makes them stack;
+       padding and leading cannot rescue a 74px-wide paragraph.
+
+       `block` rather than `flex-direction: column` on purpose: `column` would keep Tabler's
+       `gap: 1rem`, which stacks on top of the `mb-2` these children already carry and pads
+       the gate out (measured 189px tall vs 153px) for no reason. Note the consequence --
+       under `block` the `.btn-list` margin below COLLAPSES with the preceding sibling's
+       `mb-2` and contributes nothing; it is kept only for gates whose last element before
+       the actions carries no bottom margin.
+
+       Scoped to `.launch-pop .alert` -- (0,2,0), so it beats Tabler's `.alert` (0,1,0) --
+       which covers all THREE consent gates (trust, bypass-permissions, MCP-approval)
+       rather than only the one that prompted the issue. The popover runs from
+       `class="card launch-pop"` to the `data-test="launch-pop-end"` sentinel in
+       `_project_row.html`; the row's other alerts sit outside it and are untouched.
+
+       The `.trust-gate` class on the first gate is deliberately left in place as a
+       semantic hook even though nothing selects it now -- it is how a future rule would
+       target that one gate without disturbing its siblings. */
+    .launch-pop .alert { display: block; padding: .75rem .85rem; }
+    .launch-pop .alert p { line-height: 1.5; }
+    .launch-pop .alert .btn-list { margin-top: .25rem; }
     /* The project list is a card; let the popover overflow its bounds instead of clipping. */
     #project-grid { overflow: visible; }
     .launch-opt { display: flex; align-items: flex-start; gap: .15rem; width: 100%; margin: 0;

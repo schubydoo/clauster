@@ -120,6 +120,130 @@ def test_optout_inputs_declare_an_explicit_type(write_config):
     assert not p.bad, f"autofill-opt-out inputs missing an explicit type: {p.bad}"
 
 
+def _inline_style_blocks(html: str) -> list[str]:
+    """Return the page's inline ``<style>`` element bodies.
+
+    Parsed rather than regexed: the template mentions a literal ``<style>`` inside a **JS
+    comment** in the head script, which any ``<style[^>]*>`` pattern happily matches — so a
+    regex hands back a slab of JavaScript as though it were CSS. ``HTMLParser`` puts
+    ``<script>`` content in CDATA mode, so it yields only the true style elements.
+    """
+    from html.parser import HTMLParser
+
+    class _Styles(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocks: list[str] = []
+            self._in_style = False
+
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            self._in_style = tag == "style"
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "style":
+                self._in_style = False
+
+        def handle_data(self, data: str) -> None:
+            if self._in_style:
+                self.blocks.append(data)
+
+    parser = _Styles()
+    parser.feed(html)
+    return parser.blocks
+
+
+def _inline_css(html: str) -> str:
+    """Return the page's inline CSS with paired comments stripped.
+
+    Stripping comments is what makes a caller's assertion mean "the browser will apply
+    this", not merely "these characters appear somewhere in the response" — a rule that
+    is commented out, or one stranded after an unbalanced ``*/``, must not satisfy a
+    style guard (#1097).
+    """
+    return re.sub(r"/\*.*?\*/", "", "\n".join(_inline_style_blocks(html)), flags=re.S)
+
+
+def test_popover_consent_gates_stack_their_children(write_config):
+    # #1097 (regression of #747): every consent gate in the launch popover is a Tabler
+    # `.alert`, and Tabler ships `.alert { display: flex; flex-direction: row }`. Without an
+    # explicit override each gate's children — explanation, checkbox/input, action row — lay
+    # out SIDE BY SIDE and collapse to a fraction of the 360px popover (measured live: the
+    # MCP gate's explanation at 74px, the trust gate's at ~110px, ~2.4 words per line).
+    #
+    # That text is what tells the operator that trusting a directory lets Claude execute code
+    # in it, so these are security-consent surfaces, not decoration.
+    #
+    # This guard exists because the FIRST attempt at the fix shipped a stray `*/` above the
+    # rule, which made the CSS parser discard the whole thing — and a substring-matching
+    # version of this test passed anyway. So: strip comments first, then require the rule to
+    # survive with a CLEAN prelude. Both checks fail on that broken tree.
+    css = _inline_css(_client(write_config).get("/").text)
+
+    marker = ".launch-pop .alert {"
+    start = css.find(marker)
+    assert start != -1, (
+        "the `.launch-pop .alert` rule is gone from the surviving CSS — renamed, or "
+        "swallowed by an unbalanced comment?"
+    )
+
+    # Everything between the previous rule's `}` and this selector must be whitespace. Prose
+    # stranded there (the #1097 defect) becomes part of this rule's selector list, and an
+    # invalid selector list makes the browser drop the entire rule.
+    prelude = css[css.rfind("}", 0, start) + 1 : start]
+    assert not prelude.strip(), (
+        "text stranded before `.launch-pop .alert` becomes part of its selector list, so "
+        f"the browser discards the rule (#1097). Found: {prelude.strip()[:120]!r}"
+    )
+
+    body = css[start + len(marker) : css.index("}", start)]
+    assert "display: block" in body, (
+        "the popover's consent gates must stack their children; otherwise Tabler's flex-row "
+        f"`.alert` squeezes the explanation to ~2 words/line (#1097). Body: {body.strip()!r}"
+    )
+    # The #747 half of the fix lives in the same rule: without it these gates fall back to
+    # Tabler's padding nested inside the popover card's own p-2. The stray-`*/` defect took
+    # BOTH declarations down together, so guard both or the regression is only half-caught.
+    assert "padding:" in body, (
+        f"the consent gates lost their single-source padding (#747). Body: {body.strip()!r}"
+    )
+
+
+def test_dashboard_inline_css_comments_are_balanced(write_config):
+    # The #1097 defect was a stray `*/` that terminated a comment early, turning the prose
+    # after it into CSS token soup and silently killing the next rule. Nothing else catches
+    # that: the page still renders, most rules still apply, and a substring-matching guard
+    # stays green. Assert the delimiters pair up across the whole inline stylesheet so this
+    # class of bug fails loudly wherever it recurs, not just at the one rule we fixed.
+    # Scanned the way CSS actually tokenises, NOT with a nesting depth counter: CSS comments
+    # do not nest, so `/* mind the /* token */` is one valid comment that a counter would
+    # report as unterminated. Getting that wrong would break the build for the next person who
+    # documents this very bug class inside a comment.
+    #
+    # Caveat, deliberate: without a real tokeniser a `*/` inside a string or url() would read
+    # as stray. None exists today, and the alternative is vendoring a CSS parser for one guard.
+    for i, block in enumerate(_inline_style_blocks(_client(write_config).get("/").text)):
+        pos = 0
+        while True:
+            opened = block.find("/*", pos)
+            stray = block.find("*/", pos)
+            # Check the GAP before the next comment, not just the tail. A stray `*/` that
+            # happens to sit before a later, well-formed comment is exactly the #1097 shape,
+            # and scanning comment-to-comment would step straight over it.
+            assert stray == -1 or (opened != -1 and opened < stray), (
+                f"<style> block {i}: `*/` at offset {stray} closes a comment that was never "
+                "opened, so the text before it is parsed as CSS and the following rule is "
+                "discarded (#1097)"
+            )
+            if opened == -1:
+                break
+            closed = block.find("*/", opened + 2)
+            assert closed != -1, (
+                f"<style> block {i}: unterminated `/*` at offset {opened} — the rest of the "
+                "stylesheet is swallowed as comment text"
+            )
+            pos = closed + 2
+
+
 def test_live_terminal_button_and_xterm_gated_on_pty_screen_flag(write_config, monkeypatch):
     # #534 S5 / #904: the per-bridge "Live terminal" control + the xterm.js assets render ONLY
     # when the (default-off) claude.pty_screen_enabled tap is on AND the optional `pty` extra
