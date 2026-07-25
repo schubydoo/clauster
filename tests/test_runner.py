@@ -1379,6 +1379,47 @@ def test_live_session_uuids_matches_by_sanitized_cwd(runner_config):
     assert runner.live_session_uuids(root / "gamma") == set()
 
 
+def test_live_session_uuids_includes_worktree_sessions(runner_config):
+    """A worktree session counts live for its project, in lockstep with the listing (#1020).
+
+    usage.transcript_paths_for now lists worktree transcripts, so this must count them live.
+    If it did not, a RUNNING worktree session would render as a dormant conversation and the
+    Conversation (fork) picker's `!live && turn_count > 0` filter would surface it — the precise
+    situation that filter exists to prevent.
+    """
+    config, _ = runner_config
+    runner = _make_runner(runner_config)
+    root = config.projects_root
+
+    def session(uuid, cwd):
+        return WorkingSession(
+            pid=hash(uuid) & 0xFFFF,
+            cwd=cwd,
+            kind="interactive",
+            started_at=1,
+            local_uuid=uuid,
+            attribution=Attribution.TRACKED,
+        )
+
+    (root / "alpha" / ".claude" / "worktrees" / "sess-1").mkdir(parents=True, exist_ok=True)
+    (root / "alpha" / ".claude" / "worktrees-foo" / "sess-2").mkdir(parents=True, exist_ok=True)
+    (root / "alpha" / "subdir").mkdir(parents=True, exist_ok=True)
+
+    runner._sessions = [
+        session("u-root", root / "alpha"),
+        session("u-wt", root / "alpha" / ".claude" / "worktrees" / "sess-1"),
+        # Greptile P1: this cwd sanitizes into the project's worktree prefix, so the
+        # transcript scan LISTS it — matching liveness on `.claude/worktrees` containment
+        # instead left it dormant, and the picker's `!live && turn_count > 0` filter would
+        # then offer a RUNNING session as forkable. The two sides must use one rule.
+        session("u-wt-lookalike", root / "alpha" / ".claude" / "worktrees-foo" / "sess-2"),
+        # Under the project but NOT in the worktree-prefix family: a stray hand-run
+        # `claude` must still not be claimed.
+        session("u-stray", root / "alpha" / "subdir"),
+    ]
+    assert runner.live_session_uuids(root / "alpha") == {"u-root", "u-wt", "u-wt-lookalike"}
+
+
 def test_live_session_uuids_empty_when_no_sessions(runner_config):
     config, _ = runner_config
     runner = _make_runner(runner_config)

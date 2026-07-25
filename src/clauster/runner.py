@@ -693,14 +693,57 @@ class SessionRunner:
 
         The result lets the read-only transcript viewer badge a transcript as "live"
         when its session id maps to a running bridge/agent. It covers any kind of live
-        session landing in that dir (a bridge child, an external terminal session); a
-        worktree-spawn session lives under a *different* sanitized cwd, so it is neither
-        listed here nor by :func:`usage.transcript_paths_for` for the project root —
-        the two stay consistent. Hosted (claustrum) sessions are folded in separately
-        by the route, since they run no ``agents --json`` session.
+        session landing in that dir (a bridge child, an external terminal session), plus
+        sessions running in the project's git worktrees.
+
+        Those worktrees MUST stay in lockstep with :func:`usage.transcript_paths_for`,
+        which lists the same set (#1020). If a worktree session were listed but not
+        counted live here, it would render as a dormant conversation and the launch
+        popover's Conversation picker (``!live && turn_count > 0``) would surface it.
+        That picker always sends ``--fork-session`` alongside ``--resume <uuid>``, so it
+        only ever BRANCHES: a fresh session id, picked conversation never clobbered.
+        (The two flags are independent — ``hosted``/``supervisor`` send ``--resume``
+        bare to continue a conversation in place — the picker simply never offers that.)
+        Surfacing a live session there is not destructive. Whether it SHOULD be offered is
+        an open product question (``scratch`` FE-5): Claude Code's own ``/branch`` branches
+        a live conversation by design, but it does so from the writing process itself,
+        whereas this picker would spawn a SECOND process against a transcript the first is
+        still appending to. Either way, what this function owes the picker is an ACCURATE
+        flag — the filter can then be whatever we decide. Hosted
+        (claustrum) sessions are folded in separately by the route, since they run no
+        ``agents --json`` session.
         """
         target = pointers.sanitize_cwd(project_path)
-        return {s.local_uuid for s in self._sessions if pointers.sanitize_cwd(s.cwd) == target}
+        # The SAME string rule usage._transcript_dirs_for scans with, so the listing and the
+        # live set cannot disagree. Matching on a different rule (containment in
+        # `.claude/worktrees`) left a gap: a cwd like `<project>/.claude/worktrees-foo/x`
+        # sanitizes into this prefix and IS listed, but failed the containment test, so a
+        # RUNNING session there read as dormant and the Conversation (fork) picker's
+        # `!live && turn_count > 0` filter surfaced it.
+        worktree_prefix = pointers.sanitize_cwd(Path(project_path) / pointers.WORKTREE_SUBDIR)
+        try:
+            project_root = Path(project_path).resolve()
+        except OSError:  # pragma: no cover - resolve() on a pathological path
+            project_root = Path(project_path)
+
+        def _belongs(cwd: Path) -> bool:
+            sanitized = pointers.sanitize_cwd(cwd)
+            if sanitized == target:
+                return True
+            # The name rule alone is ambiguous (sanitizing is lossy), so pair it with real
+            # containment under the project — the liveness equivalent of the scan's
+            # sibling-project exclusion, which is what keeps a neighbouring project out.
+            # A stray `claude` run elsewhere under the project fails the prefix test, so it
+            # is still not claimed. Resolved because is_relative_to is purely lexical:
+            # unresolved, `…/worktrees/../../etc` would match and a symlinked cwd would not.
+            if not sanitized.startswith(f"{worktree_prefix}-"):
+                return False
+            try:
+                return cwd.resolve().is_relative_to(project_root)
+            except OSError:  # pragma: no cover - unreadable/looping symlink
+                return False
+
+        return {s.local_uuid for s in self._sessions if _belongs(Path(s.cwd))}
 
     # ----- persistence (state.json, D14) ----------------------------------
 
@@ -1206,9 +1249,15 @@ class SessionRunner:
             # Scope the pick to THIS project's own conversations (fail closed): a
             # well-formed uuid belonging to another project's transcript must never
             # fork foreign context into this session. resolve_session_transcript
-            # walks only the project's sanitized-cwd transcript dir — the same
-            # source the picker lists from — so anything it can't resolve is
-            # rejected before any spawn side effect.
+            # walks the project's own sanitized-cwd transcript dir PLUS its worktree
+            # dirs (#1020) — the same source the picker lists from — so anything it
+            # can't resolve is rejected before any spawn side effect.
+            #
+            # The worktree dirs are found by name prefix, and the same punctuation
+            # ambiguity described below applies to them: a sibling project named
+            # "<project>--claude-worktrees-x" sanitizes into this project's worktree
+            # prefix. _transcript_dirs_for therefore excludes every real sibling
+            # project's directory, so the set stays this project's own.
             #
             # Ownership requires that dir to be UNAMBIGUOUS. Claude keys transcripts
             # by sanitize_cwd (non-alphanumerics → "-"), so two configured project
