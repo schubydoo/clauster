@@ -705,22 +705,32 @@ class SessionRunner:
         ``agents --json`` session.
         """
         target = pointers.sanitize_cwd(project_path)
-        # Resolved, mirroring inspector's containment check on the same constant:
-        # is_relative_to is purely lexical, so an unresolved `…/worktrees/../../etc` would
-        # match and a symlinked worktree cwd would not. Sharing the constant only makes the
-        # two agree on the VALUE; they have to agree on the policy too.
+        # The SAME string rule usage._transcript_dirs_for scans with, so the listing and the
+        # live set cannot disagree. Matching on a different rule (containment in
+        # `.claude/worktrees`) left a gap: a cwd like `<project>/.claude/worktrees-foo/x`
+        # sanitizes into this prefix and IS listed, but failed the containment test, so a
+        # RUNNING session there read as dormant and the picker's `!live && turn_count > 0`
+        # filter offered it as forkable.
+        worktree_prefix = pointers.sanitize_cwd(Path(project_path) / pointers.WORKTREE_SUBDIR)
         try:
-            worktrees = (Path(project_path) / pointers.WORKTREE_SUBDIR).resolve()
+            project_root = Path(project_path).resolve()
         except OSError:  # pragma: no cover - resolve() on a pathological path
-            worktrees = Path(project_path) / pointers.WORKTREE_SUBDIR
+            project_root = Path(project_path)
 
         def _belongs(cwd: Path) -> bool:
-            if pointers.sanitize_cwd(cwd) == target:
+            sanitized = pointers.sanitize_cwd(cwd)
+            if sanitized == target:
                 return True
-            # Containment on the worktrees subtree only — not the whole project — so a
-            # stray `claude` run by hand elsewhere under the project is not claimed.
+            # The name rule alone is ambiguous (sanitizing is lossy), so pair it with real
+            # containment under the project — the liveness equivalent of the scan's
+            # sibling-project exclusion, which is what keeps a neighbouring project out.
+            # A stray `claude` run elsewhere under the project fails the prefix test, so it
+            # is still not claimed. Resolved because is_relative_to is purely lexical:
+            # unresolved, `…/worktrees/../../etc` would match and a symlinked cwd would not.
+            if not sanitized.startswith(f"{worktree_prefix}-"):
+                return False
             try:
-                return cwd.resolve().is_relative_to(worktrees)
+                return cwd.resolve().is_relative_to(project_root)
             except OSError:  # pragma: no cover - unreadable/looping symlink
                 return False
 

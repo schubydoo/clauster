@@ -1401,14 +1401,23 @@ def test_live_session_uuids_includes_worktree_sessions(runner_config):
             attribution=Attribution.TRACKED,
         )
 
+    (root / "alpha" / ".claude" / "worktrees" / "sess-1").mkdir(parents=True, exist_ok=True)
+    (root / "alpha" / ".claude" / "worktrees-foo" / "sess-2").mkdir(parents=True, exist_ok=True)
+    (root / "alpha" / "subdir").mkdir(parents=True, exist_ok=True)
+
     runner._sessions = [
         session("u-root", root / "alpha"),
         session("u-wt", root / "alpha" / ".claude" / "worktrees" / "sess-1"),
-        # Under the project but NOT in the worktrees subtree: a stray hand-run `claude`
-        # must still not be claimed, so containment stays scoped to .claude/worktrees.
+        # Greptile P1: this cwd sanitizes into the project's worktree prefix, so the
+        # transcript scan LISTS it — matching liveness on `.claude/worktrees` containment
+        # instead left it dormant, and the picker's `!live && turn_count > 0` filter would
+        # then offer a RUNNING session as forkable. The two sides must use one rule.
+        session("u-wt-lookalike", root / "alpha" / ".claude" / "worktrees-foo" / "sess-2"),
+        # Under the project but NOT in the worktree-prefix family: a stray hand-run
+        # `claude` must still not be claimed.
         session("u-stray", root / "alpha" / "subdir"),
     ]
-    assert runner.live_session_uuids(root / "alpha") == {"u-root", "u-wt"}
+    assert runner.live_session_uuids(root / "alpha") == {"u-root", "u-wt", "u-wt-lookalike"}
 
 
 def test_live_session_uuids_empty_when_no_sessions(runner_config):
