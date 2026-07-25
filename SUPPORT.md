@@ -21,6 +21,28 @@ often turns up an answer or an existing thread to add to.
 - **An idea or enhancement?** Open an issue describing the use case — feature
   requests live in the same tracker.
 
+## When fixes ship
+
+Clauster releases are **event-driven — there is no calendar**. A release is cut
+when there is meaningful user-visible work to ship, not on a schedule, so quiet
+months simply have no release rather than a ceremonial one.
+
+Two things are not left to wait for that:
+
+- **Security fixes ship immediately** and are never batched behind other work.
+  See [`SECURITY.md`](https://github.com/schubydoo/clauster/blob/main/SECURITY.md).
+- **Regressions and data-loss bugs** get a patch release within days.
+
+Everything else rides the next ordinary release. If a merged fix matters to you
+and hasn't shipped, say so on the issue — that is a perfectly good reason to cut
+one.
+
+Because there is no fixed cadence, `main` can sit ahead of the newest release for a
+while — and the [documentation site](https://schubydoo.github.io/clauster/) is built
+from `main`, so it can describe behaviour you don't have yet. For what is in the
+version you installed, check the
+[release notes](https://github.com/schubydoo/clauster/releases) for that tag.
+
 ## Other channels
 
 - **Found a security vulnerability?** Please **don't** open a public issue —
