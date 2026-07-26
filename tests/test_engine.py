@@ -14,6 +14,7 @@ from pathlib import Path
 from clauster.config import ClausterConfig
 from clauster.engine import ClausterEngine
 from clauster.models import RemoteControlInstance
+from clauster.redact import sanitize_line
 
 
 class _FakePersistence:
@@ -275,6 +276,79 @@ def test_read_log_lines_advances_offset_and_sanitizes(tmp_path):
     offset2, lines2 = ClausterEngine.read_log_lines(log, offset)
     assert lines2 == []
     assert offset2 == offset
+
+
+def test_read_log_lines_never_prints_a_secret_split_across_two_reads(tmp_path):
+    # #1105, the security case. `sanitize_line` matches whole tokens, so a mid-line flush
+    # landing INSIDE a secret used to print the fragment verbatim (it matches no pattern)
+    # and the remainder on the next poll — reassembling the secret on the operator's
+    # terminal from a stream `--help`, the docs and this method all document as redacted.
+    log = tmp_path / "bridge.log"
+    # Deliberately LOW-ENTROPY, and it must stay that way. `redact.py` matches token SHAPE
+    # (`gh[pousr]_[A-Za-z0-9]{16,}` — no entropy gate), so a repetitive fixture exercises the
+    # matcher exactly like a random one. gitleaks' `github-pat` rule additionally requires
+    # entropy >= 3, so a realistic-looking fixture here fails the `secret scan` CI job. Do not
+    # "improve" this into something that looks like a real token.
+    secret = "ghp_" + "FAKE" * 9
+    assert sanitize_line(f"token={secret}") == "token=<redacted>"  # whole token: caught
+    assert sanitize_line(f"token={secret[:8]}") == f"token={secret[:8]}"  # fragment: not
+
+    log.write_text(f"token={secret[:8]}", encoding="utf-8")  # bridge flushed half a line
+    offset, lines = ClausterEngine.read_log_lines(log, 0)
+    assert lines == [], "an unterminated line must be withheld, not printed as a fragment"
+    assert offset == 0, "withheld bytes must not be consumed, or the tail is lost"
+
+    with log.open("a", encoding="utf-8") as fh:  # the bridge completes the line
+        fh.write(f"{secret[8:]}\n")
+    offset, lines = ClausterEngine.read_log_lines(log, offset)
+
+    assert lines == ["token=<redacted>"]
+    assert offset == log.stat().st_size
+    # The whole point: neither read put any part of the secret on stdout.
+    assert secret[8:] not in "".join(lines)
+
+
+def test_read_log_lines_emits_complete_lines_and_holds_only_the_partial(tmp_path):
+    # The withholding must not cost the lines that ARE complete in the same read, and the
+    # rewound offset must resume exactly at the partial rather than re-emitting a line.
+    log = tmp_path / "bridge.log"
+    log.write_text("first\nsecond\npart", encoding="utf-8")
+
+    offset, lines = ClausterEngine.read_log_lines(log, 0)
+    assert lines == ["first", "second"]
+    assert offset == len(b"first\nsecond\n")
+
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write("ial\n")
+    offset, lines = ClausterEngine.read_log_lines(log, offset)
+    assert lines == ["partial"], "the held fragment must rejoin its remainder, not duplicate"
+    assert offset == log.stat().st_size
+
+
+def test_read_log_lines_holds_a_multibyte_partial_by_bytes_not_characters(tmp_path):
+    # The offset is a BYTE offset; rewinding by len(str) would desync on any non-ASCII
+    # log line and corrupt every subsequent read.
+    log = tmp_path / "bridge.log"
+    log.write_text("done\nté", encoding="utf-8")  # 'é' is 2 bytes, 1 character
+
+    offset, lines = ClausterEngine.read_log_lines(log, 0)
+    assert lines == ["done"]
+    assert offset == len(b"done\n")
+
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write("st\n")
+    offset, lines = ClausterEngine.read_log_lines(log, offset)
+    assert lines == ["tést"]
+    assert offset == log.stat().st_size
+
+
+def test_read_log_lines_strips_the_cr_of_a_crlf_log(tmp_path):
+    # Line completeness can only be judged on "\n", so this path splits on "\n" rather
+    # than str.splitlines(). Strip the lone \r so a CRLF-written log reads unchanged.
+    log = tmp_path / "bridge.log"
+    log.write_bytes(b"alpha\r\nbeta\r\n")
+    _, lines = ClausterEngine.read_log_lines(log, 0)
+    assert lines == ["alpha", "beta"]
 
 
 def test_initial_log_offset_delegates(tmp_path):

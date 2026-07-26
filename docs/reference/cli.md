@@ -213,6 +213,13 @@ clauster logs <instance> [-f]      # tail a bridge's redacted log (--follow to s
 clauster open <instance>           # print a bridge's connect URL (--launch opens a browser)
 ```
 
+`logs` emits only **complete** lines. A line the bridge has half-flushed is held until
+its newline arrives, so redaction always sees the whole line — a secret split across two
+reads used to match no pattern in either half and print verbatim
+([#1105](https://github.com/schubydoo/clauster/issues/1105)). The practical effect is that
+a partially-written final line appears on the next poll under `--follow`, rather than
+appearing twice in pieces.
+
 ## Headless write commands
 
 Headless **write** commands spawn and stop bridges through that same engine —
