@@ -1228,11 +1228,34 @@ def test_cleanup_keeper_forces_a_lingering_keeper(runner_config, monkeypatch) ->
     monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
     monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
     monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0)  # always "alive"
+    # ...and is still genuinely a keeper. Since #1088 a keeper pid can come from a row
+    # another process wrote, so the force-kill re-verifies by cmdline first.
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)
     forced: list[int] = []
     monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
 
     runner._cleanup_keeper(777)
     assert forced == [777]
+
+
+def test_cleanup_keeper_refuses_to_force_kill_a_recycled_pid(runner_config, monkeypatch) -> None:
+    """A pid that is no longer a keeper is never force-killed (#1088).
+
+    `_cleanup_keeper` force-kills a whole process TREE. The pid used to be reachable only as
+    this process's own child; since #1088 it can arrive from a persisted row another process
+    wrote, and by the time the grace expires the original keeper may be gone and its pid
+    recycled onto something unrelated. Killing that tree would take out a stranger.
+    """
+    runner, _ = _pty_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.time.sleep", lambda _s: None)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: 1.0)  # still "alive"
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: False)  # ...but not ours
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [], "a recycled pid's process tree must never be force-killed"
 
 
 def test_backfill_starter_session_from_debug_file_on_resume(runner_config, tmp_path) -> None:

@@ -10,6 +10,8 @@ showed a single, often stale, row to ``clauster status`` / ``clauster mcp`` — 
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from clauster.models import InstanceStatus, RemoteControlInstance
@@ -21,6 +23,22 @@ pytestmark = pytest.mark.anyio
 def _make_runner(runner_config) -> SessionRunner:
     config, claude_json = runner_config
     return SessionRunner(config, claude_json=claude_json)
+
+
+def _stub_connect(monkeypatch, facts=None):
+    """Stub connect-fact recovery for tests about identity rather than readiness.
+
+    Adoption promotes to RUNNING only with readiness evidence (a live pointer / ready
+    sidecar) — liveness is not usability. Tests that care about WHICH rows materialize
+    supply that evidence here; the recovery itself is covered by its own tests below.
+    """
+    monkeypatch.setattr(
+        SessionRunner,
+        "_connect_facts_for",
+        lambda self, proj, mode, pid, start: dict(
+            facts or {"url": "https://claude.ai/code?environment=env_STUB"}
+        ),
+    )
 
 
 def _row(project: str, *, pid: int | None, proc_start: float | None = 111.0, **extra) -> dict:
@@ -36,6 +54,7 @@ async def test_rediscover_materializes_every_row_for_one_project(runner_config, 
     # standard bridge plus five interactive sessions. Before the fix rediscover returned
     # exactly ONE instance per project, so five of these vanished from every fresh process.
     runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
     rows = {
         "iid-standard": _row("alpha", pid=4001, resume_mode="standard"),
         "iid-pty-1": _row("alpha", pid=4002),
@@ -63,6 +82,7 @@ async def test_rediscover_judges_each_row_on_its_own_liveness(runner_config, mon
     # STOPPED-but-resumable. The old project-keyed walk collapsed these into a single
     # verdict, which is how live sessions ended up attributed to an already-stopped bridge.
     runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
     runner.persistence.state_store().save(
         {
             "iid-live": _row("alpha", pid=5001),
@@ -152,6 +172,7 @@ async def test_rediscover_survives_a_pid_with_no_proc_start(runner_config, monke
     # procStart was unparseable). That must degrade to cmdline-only liveness — the same
     # fallback the pointer walk uses — not raise out of startup.
     runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
     runner.persistence.state_store().save(
         {"iid-a": {"project_name": "alpha", "label": "alpha", "bridge_pid": 9001}}
     )
@@ -199,14 +220,17 @@ async def test_rediscover_drops_a_keeper_pid_that_is_no_longer_a_keeper(
     # stranger's process. Verified by cmdline, matching the sidecar reattach.
     runner = _make_runner(runner_config)
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=2001, keeper_pid=2002)})
+    _stub_connect(monkeypatch)
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
-    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: False)
+    # No sidecar correlates a keeper to THIS bridge, so none may be adopted: the row's
+    # keeper pid is not trusted on its own, because `stop()` force-kills that pid's tree.
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
     await runner.rediscover(persist=False)
 
     inst = runner.get_instance("iid-a")
     assert inst is not None
     assert inst.status is InstanceStatus.RUNNING, "the bridge itself is still alive"
-    assert inst.keeper_pid is None, "a pid that is no longer a keeper must be dropped"
+    assert inst.keeper_pid is None, "an uncorrelated keeper pid must not be adopted"
 
 
 async def test_persist_round_trips_the_liveness_triple(runner_config, monkeypatch):
@@ -245,6 +269,7 @@ async def test_poll_adopts_a_bridge_another_process_started(runner_config, monke
     # `clauster start` or the MCP server was never adopted, and the agents --json cross-check
     # labelled its live process EXTERNAL/unmanaged with no controls in the dashboard.
     runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
@@ -311,6 +336,7 @@ async def test_prune_does_not_wipe_unrelated_stopped_siblings(runner_config, mon
         runner._instances[iid] = runner._stopped_from_row(
             iid, {"project_name": "alpha", "label": label, "resume_mode": "pty"}
         )
+    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha")],
@@ -332,6 +358,7 @@ async def test_prune_still_removes_a_lone_phantom(runner_config, monkeypatch):
     runner._instances["iid-a"] = runner._stopped_from_row(
         "iid-a", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
     )
+    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha")],
@@ -365,6 +392,7 @@ async def test_prune_removes_a_phantom_even_when_a_sibling_is_live(runner_config
     # The external session's pid is NOT a descendant of the live bridge, so reconcile
     # correctly classes it EXTERNAL rather than folding it into the live instance.
     monkeypatch.setattr("clauster.runner.procutil.owned_pids", lambda roots: set(roots))
+    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
     monkeypatch.setattr(
         "clauster.inspector.list_working_sessions",
         lambda *a, **k: [_external_session(config.projects_root / "alpha", pid=999)],
@@ -462,6 +490,7 @@ async def test_a_stop_by_another_process_is_not_reported_as_a_crash(runner_confi
     # process exited `_reconcile_status` had no intent to go on. Exactly the cross-process
     # divergence this change exists to remove.
     runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
     store = runner.persistence.state_store()
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
 
@@ -494,12 +523,15 @@ async def test_reattached_pty_bridge_keeps_its_connect_link(runner_config, monke
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8801)})
     runner._log_dir.mkdir(parents=True, exist_ok=True)
     (runner._log_dir / "alpha-333.keeper.json").write_text(
-        json.dumps({"bridge_pid": 9999, "connect_url": "https://claude.ai/code/OTHER"})
+        json.dumps(
+            {"bridge_pid": 9999, "state": "ready", "connect_url": "https://claude.ai/code/OTHER"}
+        )
     )
     (runner._log_dir / "alpha-222.keeper.json").write_text(
         json.dumps(
             {
                 "bridge_pid": 8801,
+                "state": "ready",
                 "connect_url": "https://claude.ai/code/MINE",
                 "session_id": "session_MINE",
             }
@@ -564,7 +596,13 @@ async def test_pty_sidecar_without_a_session_id_still_yields_the_url(runner_conf
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8601)})
     runner._log_dir.mkdir(parents=True, exist_ok=True)
     (runner._log_dir / "alpha-444.keeper.json").write_text(
-        json.dumps({"bridge_pid": 8601, "connect_url": "https://claude.ai/code/NOSESSION"})
+        json.dumps(
+            {
+                "bridge_pid": 8601,
+                "state": "ready",
+                "connect_url": "https://claude.ai/code/NOSESSION",
+            }
+        )
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
@@ -584,7 +622,7 @@ async def test_pty_sidecar_without_a_url_still_yields_the_session(runner_config,
     runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8501)})
     runner._log_dir.mkdir(parents=True, exist_ok=True)
     (runner._log_dir / "alpha-555.keeper.json").write_text(
-        json.dumps({"bridge_pid": 8501, "session_id": "session_ONLY"})
+        json.dumps({"bridge_pid": 8501, "state": "ready", "session_id": "session_ONLY"})
     )
     monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
     monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
@@ -594,3 +632,204 @@ async def test_pty_sidecar_without_a_url_still_yields_the_session(runner_config,
     assert inst is not None
     assert inst.url is None
     assert inst.starter_session_id == "session_ONLY"
+
+
+async def test_prune_ignores_a_hand_run_claude_that_is_not_a_bridge(runner_config, monkeypatch):
+    # #1096 / #820. An operator running `claude` in a terminal at the project root is
+    # EXTERNAL by design, but it is NOT an unmanaged bridge — so it is no evidence that a
+    # stopped card is a phantom. Deleting a resumable session because someone opened a
+    # terminal there would be a silent data-visibility loss.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    runner._instances["iid-a"] = runner._stopped_from_row(
+        "iid-a", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: False)
+    monkeypatch.setattr(
+        "clauster.inspector.list_working_sessions",
+        lambda *a, **k: [_external_session(config.projects_root / "alpha")],
+    )
+    await runner.poll_once()
+
+    assert runner.get_instance("iid-a") is not None, (
+        "a non-bridge external session must not trigger the phantom prune"
+    )
+
+
+async def test_adoption_does_not_promote_an_unready_bridge_to_running(runner_config, monkeypatch):
+    # Liveness is not usability. A bridge whose process is up but which has not registered
+    # an environment (no live pointer / no ready sidecar) is STARTING — promoting on a bare
+    # pid would report uncontrollable bridges as RUNNING, which the reconcile invariant
+    # explicitly forbids.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=6601)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    await runner.poll_once()  # no pointer, no sidecar -> no readiness evidence
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.status is InstanceStatus.STARTING, "a live-but-unready bridge is STARTING"
+
+
+async def test_intent_sync_ignores_a_row_from_a_different_process_generation(
+    runner_config, monkeypatch
+):
+    # The `intentional_stop` sync must only trust a row describing the SAME incarnation.
+    # A resume reuses the instance id with a FRESH pid while the store still holds the
+    # previous stop's intent; syncing that would mark the new bridge stopped-on-purpose and
+    # silently suppress crash reporting for it.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+
+    store.save({"iid-a": _row("alpha", pid=5501, intentional_stop=True)})  # the OLD pid
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STARTING,
+        intentional_stop=False,
+        bridge_pid=5502,  # resumed: a different process generation
+        bridge_proc_start=222.0,
+    )
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.intentional_stop is False, (
+        "a row describing the previous incarnation must not mark the resumed bridge stopped"
+    )
+
+
+async def test_pids_resync_when_another_process_resumed_the_bridge(runner_config, monkeypatch):
+    # Cross-process pid clobber. If another process resumes an instance we track, our copy
+    # holds the OLD pid — and our next `_persist` would overlay it back over the row, making
+    # the live bridge read dead to every reader. That is the #1088 symptom re-introduced
+    # through the very columns added to fix it.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,  # ours: dead
+        bridge_proc_start=100.0,
+    )
+    store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})  # theirs: live
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+    )
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.bridge_pid == 4402, "must take the live pids another process recorded"
+    assert inst.bridge_proc_start == 200.0
+    assert inst.status is InstanceStatus.RUNNING
+
+
+async def test_adoption_failure_does_not_abort_the_poll(runner_config, monkeypatch):
+    # Adoption runs first in the tick, so an exception there would take crash detection,
+    # the cross-check and the prune down with it — a permanently degraded poll loop for as
+    # long as the offending row exists. Best-effort, like the `agents --json` probe.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+
+    async def _boom() -> None:
+        raise RuntimeError("malformed row")
+
+    monkeypatch.setattr(runner, "_adopt_rows_from_store", _boom)
+    await runner.poll_once()  # must not raise
+
+
+async def test_pty_sidecar_must_be_ready_and_pid_correlated(runner_config, monkeypatch):
+    # A sidecar that is mid-startup, or whose proc-start says it belongs to a recycled pid,
+    # must not lend its connect URL — several interactive sessions share one log directory.
+    import json
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8401, proc_start=500.0)})
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-900.keeper.json").write_text(
+        json.dumps({"bridge_pid": 8401, "state": "starting", "connect_url": "u-notready"})
+    )
+    (runner._log_dir / "alpha-800.keeper.json").write_text(
+        json.dumps(
+            {
+                "bridge_pid": 8401,
+                "state": "ready",
+                "bridge_proc_start": 9999.0,  # a different incarnation of this pid
+                "connect_url": "u-stale",
+            }
+        )
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.url is None, "neither an unready nor a mismatched sidecar may be used"
+
+
+def test_is_bridge_process_fails_closed(monkeypatch):
+    # Any psutil error means "not a bridge": the prune deletes cards on the strength of
+    # this answer, so an unreadable process must never read as one.
+    import psutil
+
+    from clauster import procutil as pu
+
+    def _raise(_pid):
+        raise psutil.AccessDenied(_pid)
+
+    monkeypatch.setattr(psutil, "Process", _raise)
+    assert pu.is_bridge_process(4242) is False
+
+
+async def test_adoption_does_not_overwrite_an_instance_a_lock_holder_created(
+    runner_config, monkeypatch
+):
+    # TOCTOU. The poll is lock-free and its "already tracked?" check is separated from the
+    # insert by several awaits. A lock-holding adopt()/spawn() landing in that window has
+    # already handed its object to an HTTP caller — overwriting it would leave the response
+    # describing an object the registry no longer holds.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=3401)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr(SessionRunner, "_recover_keeper_pid", lambda self, n, p, s: None)
+
+    winner = RemoteControlInstance(
+        instance_id="iid-a", project="alpha", label="from-adopt", status=InstanceStatus.RUNNING
+    )
+
+    def _land_concurrently(self, proj, mode, pid, start):
+        # Simulates the lock-holder committing during one of the awaits above the insert.
+        self._instances["iid-a"] = winner
+        return {"url": "https://claude.ai/code?environment=env_STUB"}
+
+    monkeypatch.setattr(SessionRunner, "_connect_facts_for", _land_concurrently)
+    await runner.poll_once()
+
+    assert runner.get_instance("iid-a") is winner, (
+        "the lock-holder's instance must survive the lock-free poll's insert"
+    )
+
+
+async def test_adoption_cancellation_propagates(runner_config, monkeypatch):
+    # The best-effort guard must not swallow CancelledError, or shutdown would hang while
+    # the poll loop kept going.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+
+    async def _cancelled() -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(runner, "_adopt_rows_from_store", _cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await runner.poll_once()

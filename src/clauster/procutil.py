@@ -296,6 +296,24 @@ def is_keeper_process(pid: int) -> bool:
         return False
 
 
+def is_bridge_process(pid: int) -> bool:
+    """Whether ``pid`` is a live, non-zombie ``claude`` **bridge** process (#1096).
+
+    The cmdline counterpart to :func:`is_keeper_process`, for deciding whether an EXTERNAL
+    working session is an unmanaged *bridge* or merely a hand-run ``claude`` sharing a
+    project directory. The phantom-prune needs that distinction: its premise is "the bridge
+    IS alive, just unmanaged", and deleting a resumable card because an operator opened a
+    terminal in the project would be wrong. Fails closed on any psutil error.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return is_bridge_cmdline(proc.cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+
+
 def _expected_epoch(proc_start: str | float | None) -> float | None:
     """Normalize a stored proc_start to an epoch, or None to skip the check."""
     if proc_start is None:
