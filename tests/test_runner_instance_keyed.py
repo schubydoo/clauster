@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from clauster.models import InstanceStatus
+from clauster.models import InstanceStatus, RemoteControlInstance
 from clauster.runner import SessionRunner, _row_float, _row_int
 
 pytestmark = pytest.mark.anyio
@@ -234,3 +234,162 @@ async def test_stopped_rows_do_not_leak_pids_into_the_store(runner_config, monke
     saved = runner.persistence.state_store().load()["iid-a"]
     assert saved.get("bridge_pid") is None
     assert saved.get("bridge_proc_start") is None
+
+
+# ----- part 3: cross-process adoption (#1091) --------------------------------
+
+
+async def test_poll_adopts_a_bridge_another_process_started(runner_config, monkeypatch):
+    # THE #1091 regression test. `start_poll_loop` called rediscover ONCE and poll_once then
+    # iterated only `self._instances`, never re-reading the shared store — so a bridge from
+    # `clauster start` or the MCP server was never adopted, and the agents --json cross-check
+    # labelled its live process EXTERNAL/unmanaged with no controls in the dashboard.
+    runner = _make_runner(runner_config)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    assert runner.list_instances() == []
+
+    # Another process writes a row to the shared store while we are already running.
+    runner.persistence.state_store().save({"iid-cli": _row("alpha", pid=3001)})
+    await runner.poll_once()
+
+    adopted = runner.get_instance("iid-cli")
+    assert adopted is not None, "a row created by another process must be adopted"
+    assert adopted.status is InstanceStatus.RUNNING
+    assert adopted.bridge_pid == 3001
+
+
+async def test_poll_adoption_cannot_undo_a_forget(runner_config, monkeypatch):
+    # The hazard of refreshing the merge base every tick: adoption must never resurrect a
+    # row another process deliberately removed. `_refresh_persisted` replaces the base with
+    # the CURRENT store, so a forgotten row is simply absent and cannot come back.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+
+    store.save({"iid-a": _row("alpha", pid=3101)})
+    await runner.poll_once()
+    assert runner.get_instance("iid-a") is not None
+
+    store.save({})  # another process forgets it
+    del runner._instances["iid-a"]  # ...and it leaves our registry too
+    await runner.poll_once()
+
+    assert runner.get_instance("iid-a") is None, "a forgotten row must not be re-adopted"
+
+
+async def test_poll_does_not_resurrect_dead_rows_as_stopped_cards(runner_config, monkeypatch):
+    # Poll-time adoption is LIVE-only. Resurrecting dead rows every tick would fight the
+    # phantom-prune below, which deletes exactly such cards.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-dead": _row("alpha", pid=3201)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    await runner.poll_once()
+    assert runner.get_instance("iid-dead") is None
+
+
+# ----- part 4: the phantom-prune (#1096) -------------------------------------
+
+
+def _external_session(cwd, pid=999):
+    from clauster.models import WorkingSession
+
+    return WorkingSession(pid=pid, cwd=cwd, kind="interactive", started_at=999, local_uuid="u")
+
+
+async def test_prune_does_not_wipe_unrelated_stopped_siblings(runner_config, monkeypatch):
+    # #1096 over-prune. Two DISTINCT resumable interactive sessions plus one unmanaged
+    # bridge at the project root previously deleted BOTH cards — one external process
+    # cannot be two bridges, and the operator lost the Resume affordance for both.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    for iid, label in (("iid-a", "session-A"), ("iid-b", "session-B")):
+        runner._instances[iid] = runner._stopped_from_row(
+            iid, {"project_name": "alpha", "label": label, "resume_mode": "pty"}
+        )
+    monkeypatch.setattr(
+        "clauster.inspector.list_working_sessions",
+        lambda *a, **k: [_external_session(config.projects_root / "alpha")],
+    )
+    await runner.poll_once()
+
+    survivors = sorted(i.label for i in runner.list_instances() if i.project == "alpha")
+    assert survivors == ["session-A", "session-B"], (
+        "one external bridge cannot identify which stopped card is the phantom, so neither "
+        "may be deleted"
+    )
+
+
+async def test_prune_still_removes_a_lone_phantom(runner_config, monkeypatch):
+    # The behaviour the prune exists for must survive the fix: a single stopped card
+    # shadowing a live unmanaged bridge at the same cwd is a phantom and still goes.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    runner._instances["iid-a"] = runner._stopped_from_row(
+        "iid-a", {"project_name": "alpha", "label": "alpha", "resume_mode": "pty"}
+    )
+    monkeypatch.setattr(
+        "clauster.inspector.list_working_sessions",
+        lambda *a, **k: [_external_session(config.projects_root / "alpha")],
+    )
+    await runner.poll_once()
+
+    assert runner.get_instance("iid-a") is None, "a lone phantom must still be pruned"
+    assert "alpha" in runner.external_sessions_by_project()
+
+
+async def test_prune_removes_a_phantom_even_when_a_sibling_is_live(runner_config, monkeypatch):
+    # #1096 UNDER-prune — the direction the old code got wrong in the opposite way. A live
+    # sibling put the whole project into `live_projects`, so a genuine phantom was never
+    # pruned and kept offering a misleading Stopped/Resume card right next to a live
+    # unmanaged bridge. The prune must decide per INSTANCE, not per project.
+    config = runner_config[0]
+    runner = _make_runner(runner_config)
+    live = RemoteControlInstance(
+        instance_id="iid-live",
+        project="alpha",
+        label="live-pty",
+        resume_mode="pty",
+        status=InstanceStatus.RUNNING,
+        bridge_pid=4242,
+    )
+    runner._instances["iid-live"] = live
+    runner._instances["iid-phantom"] = runner._stopped_from_row(
+        "iid-phantom", {"project_name": "alpha", "label": "phantom", "resume_mode": "pty"}
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    # The external session's pid is NOT a descendant of the live bridge, so reconcile
+    # correctly classes it EXTERNAL rather than folding it into the live instance.
+    monkeypatch.setattr("clauster.runner.procutil.owned_pids", lambda roots: set(roots))
+    monkeypatch.setattr(
+        "clauster.inspector.list_working_sessions",
+        lambda *a, **k: [_external_session(config.projects_root / "alpha", pid=999)],
+    )
+    await runner.poll_once()
+
+    assert runner.get_instance("iid-live") is not None, "the live sibling must survive"
+    assert runner.get_instance("iid-phantom") is None, (
+        "a live sibling must not shield a phantom from the prune"
+    )
+
+
+async def test_poll_adoption_skips_when_the_store_read_fails(runner_config, monkeypatch):
+    # Fail-closed. `_refresh_persisted` keeps the OLD base on a read error rather than
+    # replacing it with nothing, so adopting off that stale base could take over rows the
+    # store no longer has. On a failed refresh, adopt nothing this tick and try again next.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=3301)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+
+    async def _failed_refresh() -> bool:
+        return False
+
+    monkeypatch.setattr(runner, "_refresh_persisted", _failed_refresh)
+    await runner.poll_once()
+
+    assert runner.get_instance("iid-a") is None, "a failed store read must not adopt anything"

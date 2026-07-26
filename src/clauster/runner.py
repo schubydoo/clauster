@@ -3043,7 +3043,31 @@ class SessionRunner:
             return RemoteControlInstance(**kwargs)
         return None
 
-    async def _reattach_rows_with_pids(self, discovered: dict[str, Project]) -> set[str]:
+    async def _adopt_rows_from_store(self) -> None:
+        """Adopt live instances another process created, so they stop reading EXTERNAL (#1091).
+
+        The server's registry was fixed at startup: ``start_poll_loop`` called
+        :meth:`rediscover` once and ``poll_once`` then iterated only ``self._instances``,
+        never re-reading the shared store. A bridge started by ``clauster start`` or the MCP
+        server was therefore never adopted — the ``agents --json`` cross-check saw its live
+        process, found no managed instance owning it, and correctly-by-its-own-logic labelled
+        it EXTERNAL/unmanaged, with no controls in the dashboard.
+
+        Refresh the merge base, then take over any persisted row we don't already track whose
+        pids are live. **Live rows only**: a dead row is left to :meth:`rediscover` at startup
+        rather than resurrected as a STOPPED card on every tick.
+
+        Because :meth:`_refresh_persisted` replaces the base with the CURRENT store contents,
+        a row another process *forgot* is simply absent and cannot be re-adopted here — the
+        adoption can't undo a ``clauster forget``.
+        """
+        if not await self._refresh_persisted():
+            return  # store read failed; keep the old base rather than acting on nothing
+        await self._reattach_rows_with_pids(self._discovered(), live_only=True)
+
+    async def _reattach_rows_with_pids(
+        self, discovered: dict[str, Project], *, live_only: bool = False
+    ) -> set[str]:
         """Reattach every persisted row that carries its own pids; return their projects.
 
         This is the instance-keyed half of :meth:`rediscover` (#1088). Each row is judged on
@@ -3078,6 +3102,8 @@ class SessionRunner:
             keeper_pid = _row_int(saved.get("keeper_pid"))
             alive = await asyncio.to_thread(procutil.is_live_bridge, pid, proc_start)
             if not alive:
+                if live_only:
+                    continue  # poll-time adoption never resurrects dead cards
                 stopped = self._stopped_from_row(iid, saved)
                 self._instances[stopped.instance_id] = stopped
                 continue
@@ -3420,6 +3446,11 @@ class SessionRunner:
 
         Off-loop work, applied on-loop.
         """
+        # Take over anything another process started before reconciling (#1091). Without
+        # this the registry stays frozen at whatever `rediscover` found at startup, so a
+        # `clauster start` / MCP-spawned bridge is never adopted and the cross-check below
+        # labels its live process EXTERNAL/unmanaged.
+        await self._adopt_rows_from_store()
         # Projects whose bridge PROCESS is actually alive (PID + proc-start match).
         # This is the source of truth for "do we own the sessions at this cwd" below —
         # NOT the instance's status field, which can lag or be wrong (a fresh pty bridge
@@ -3602,22 +3633,53 @@ class SessionRunner:
         # _persist_subset overlays `live` onto the retained `_persisted` map, which keeps
         # the record (intentionally — it preserves the project's modes for a later managed
         # spawn). Re-materialization by `_stopped_from_persisted` is cleaned by the next poll.
+        # Gathered per PROJECT first, then decided per INSTANCE (#1096). The old form asked
+        # `inst.project not in live_projects` — a project-level question standing in for an
+        # instance-level one, which since #778 (N instances per project) is wrong in BOTH
+        # directions:
+        #
+        #   over-prune  — with no live sibling, ONE unmanaged bridge at the project root
+        #                 deleted EVERY stopped row for that project, including unrelated
+        #                 resumable interactive sessions;
+        #   under-prune — with a live sibling, the project is in `live_projects`, so a
+        #                 genuine phantom was never pruned at all — exactly the misleading
+        #                 Stopped/Resume card this prune exists to remove.
+        #
+        # `live_projects` is gone from the test: reconcile only marks a session EXTERNAL
+        # once it has decided no live managed instance owns it, so a live sibling already
+        # cannot produce an EXTERNAL session here. The guard was redundant for correctness
+        # and load-bearing only for the bug.
+        candidates: dict[str, list[str]] = {}
         for n, inst in list(self._instances.items()):
             # Only prune non-live (STOPPED/CRASHED) phantoms. A RUNNING/STARTING instance
-            # here that isn't in live_projects was inserted AFTER this poll snapshotted
-            # live_projects (the lock-free poll races a lock-held adopt()/spawn() that lands
-            # during the list_working_sessions suspension) — pruning it would silently undo
-            # a just-adopted/spawned bridge. The first loop already reconciled every instance
-            # it saw, so a genuinely-dead record is no longer RUNNING by the time we get here.
+            # here was inserted AFTER this poll snapshotted its state (the lock-free poll
+            # races a lock-held adopt()/spawn() that lands during the list_working_sessions
+            # suspension) — pruning it would silently undo a just-adopted/spawned bridge.
+            # The first loop already reconciled every instance it saw, so a genuinely-dead
+            # record is no longer RUNNING by the time we get here.
             if inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
                 continue
             if (
-                inst.project not in live_projects
-                and inst.project in discovered
+                inst.project in discovered
                 and Path(discovered[inst.project].path).resolve() in external_cwds
             ):
-                del self._instances[n]
-                self._procs.pop(n, None)  # don't leak the phantom's dead Popen handle
+                candidates.setdefault(inst.project, []).append(n)
+        for project, ids in candidates.items():
+            # One external bridge can only be ONE of these rows. With several candidates
+            # nothing here says which, so prune none rather than delete N-1 resumable cards
+            # to explain a single unmanaged process. Left visible and logged: a stale card
+            # the operator can Forget is recoverable; a silently deleted one is not.
+            if len(ids) > 1:
+                _log.debug(
+                    "not pruning %d stopped cards for %r: one external session can't "
+                    "identify which is the phantom",
+                    len(ids),
+                    project,
+                )
+                continue
+            n = ids[0]
+            del self._instances[n]
+            self._procs.pop(n, None)  # don't leak the phantom's dead Popen handle
 
     @staticmethod
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:
