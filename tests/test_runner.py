@@ -3346,8 +3346,40 @@ def test_resolve_bridge_id_treats_the_empty_string_as_unknown_not_ambiguous(runn
 
 
 def test_resolve_bridge_id_still_falls_back_to_the_project_name(runner_config):
-    # The #777/#778 compatibility path the dashboard still uses must be untouched: it
-    # runs only when no id prefix matched at all.
+    # The #777/#778 compatibility path the dashboard still uses must be untouched. It is
+    # tried BEFORE prefix matching (see the exact-name-beats-prefix test below), so an
+    # exact project name resolves whether or not some id also starts with it.
     runner = _runner_with_ids(runner_config, "f2c456fd-1111-2222-3333-444444444444")
     assert runner.resolve_bridge_id("alpha") == "f2c456fd-1111-2222-3333-444444444444"
     assert runner.bridge_id_candidates("alpha") == []
+
+
+def test_resolve_bridge_id_prefers_an_exact_project_name_over_a_colliding_id_prefix(
+    runner_config,
+):
+    # Instance ids are UUIDs, so a project name collides with one only if it is itself
+    # hex-ish -- "cafe", "face", "deadbeef" are all plausible directory names. Ranking the
+    # prefix first made the project reading UNREACHABLE: a project name is a fixed string
+    # the operator cannot lengthen, so there was no way left to name that project, and
+    # stop/forget would silently act on an unrelated live bridge. Both readings stay
+    # reachable this way -- one more character means the id.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    named = "11111111-1111-1111-1111-111111111111"  # the bridge OF project "cafe"
+    collides = "cafe0000-2222-2222-2222-222222222222"  # an unrelated bridge, id starts "cafe"
+    for iid, project in ((named, "cafe"), (collides, "beta")):
+        runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project=project, label=project, status=InstanceStatus.RUNNING
+        )
+
+    assert runner.resolve_bridge_id("cafe") == named, "the exact project name must win"
+    assert runner.bridge_id_candidates("cafe") == [], "an exact match is never ambiguous"
+    assert runner.resolve_bridge_id("cafe0") == collides, "the id stays reachable"
+
+
+def test_resolve_bridge_id_falls_through_to_a_prefix_when_no_project_matches(runner_config):
+    # Exact-name-first must not short-circuit to "not found" when the name resolves to no
+    # instance, or an idle same-named project would shadow an unambiguous id prefix.
+    runner = _runner_with_ids(runner_config, "cafe0000-1111-2222-3333-444444444444")
+    assert runner.get_instance_for_project("cafe") is None  # no bridge under that name
+    assert runner.resolve_bridge_id("cafe") == "cafe0000-1111-2222-3333-444444444444"

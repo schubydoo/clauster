@@ -625,11 +625,12 @@ class SessionRunner:
         keeps that client working: a known ``instance_id`` returns itself; otherwise
         the identity is treated as a project name and mapped to its instance's id.
 
-        A unique **prefix** of a known ``instance_id`` also resolves (#1099). Three
-        surfaces already advertised prefixes — ``clauster stop/logs/open --help``, both
-        MCP tool descriptions, and the CLI reference — while the CLI prints only the
-        first 8 characters of an id, so the tool handed you an identifier and then
-        rejected it. Now it accepts what it prints.
+        A unique **prefix** of a known ``instance_id`` also resolves (#1099), but only
+        after both exact forms have been tried — see :meth:`_resolve_bridge_ref` for why
+        an exact project name has to outrank a prefix. Three surfaces already advertised
+        prefixes — ``clauster stop/logs/open --help``, both MCP tool descriptions, and the
+        CLI reference — while the CLI prints only the first 8 characters of an id, so the
+        tool handed you an identifier and then rejected it. Now it accepts what it prints.
 
         Returns ``None`` when the identity matches neither a known instance_id nor a
         managed project — the caller raises the same 404 it would have raised before —
@@ -664,15 +665,31 @@ class SessionRunner:
         :meth:`bridge_id_candidates`, so the two can never disagree about whether a
         given identity was ambiguous.
 
-        Order is exact id, then unique prefix, then project name. An exact id wins
-        outright: a full id is never treated as a prefix of some longer one, so adding a
-        bridge can't make an id the operator already had stop working. The project
-        fallback runs last and only when no id prefix matched at all — instance ids are
-        UUIDs, so a project name can only collide with one if it is itself hex-ish, and
-        in that case the more specific match (an actual id) is the safer reading.
+        Order is exact id, then exact project name, then unique id prefix. **Both exact
+        forms beat a prefix**, because a prefix is an abbreviation and an exact match is
+        not. An exact id wins outright: a full id is never treated as a prefix of some
+        longer one, so adding a bridge can't make an id the operator already had stop
+        working.
+
+        The project name must also outrank a prefix, and the reason is reachability, not
+        taste. Instance ids are UUIDs, so a project name collides only if it is itself
+        hex-ish (``cafe``, ``deadbeef``, ``face``) and happens to prefix a live id — rare,
+        but the loser of that race is unrecoverable. Ranking the prefix first would make
+        the project reading **unreachable**: a project name is a fixed string the operator
+        cannot lengthen, so there would be no way left to name that project, and
+        ``stop``/``forget`` would silently act on an unrelated bridge. Ranking the exact
+        name first costs the prefix reading nothing — the operator just types one more
+        character to mean the id.
+
+        A project that resolves to no live instance falls through to prefix matching
+        rather than short-circuiting to "not found", so naming a bridge by a prefix still
+        works even when a same-named project happens to be idle.
         """
         if identity in self._instances:
             return identity, []
+        inst = self.get_instance_for_project(identity)
+        if inst is not None:
+            return inst.instance_id, []
         if identity:
             # `if identity` guards the empty string, which prefixes EVERYTHING: without
             # it, "" would read as ambiguous-across-all rather than simply unknown.
@@ -681,8 +698,7 @@ class SessionRunner:
                 return matches[0], []
             if matches:
                 return None, matches
-        inst = self.get_instance_for_project(identity)
-        return (inst.instance_id if inst is not None else None), []
+        return None, []
 
     @staticmethod
     def _can_own_sessions(inst: RemoteControlInstance) -> bool:

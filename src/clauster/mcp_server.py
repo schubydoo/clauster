@@ -322,15 +322,21 @@ _READ_TOOLS: list[dict[str, Any]] = [
         "title": "Clauster session status",
         "description": (
             "Report the status of one Clauster session by its id (a bridge "
-            "project name, a hosted claustrum_process_id, a background-agent id, "
-            "or a working-session uuid). Read-only."
+            "instance id or project name, a hosted claustrum_process_id, a "
+            "background-agent id, or a working-session uuid). A UNIQUE prefix of a "
+            "bridge instance id also resolves; a prefix matching several bridges is "
+            "reported as found: false with an 'ambiguous' list rather than guessing. "
+            "Read-only."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "The session id to look up (as returned by list_sessions).",
+                    "description": (
+                        "The session id to look up (as returned by list_sessions), a "
+                        "bridge's project name, or a unique prefix of a bridge id."
+                    ),
                 }
             },
             "required": ["id"],
@@ -459,6 +465,30 @@ async def _tool_session_status(config: ClausterConfig, args: dict[str, Any]) -> 
         return {"found": True, "session": bridges[0]}
     if bridges:
         return {"found": False, "id": wanted, "ambiguous": [s["id"] for s in bridges]}
+    # A unique id PREFIX resolves too (#1099), in the same order the engine resolver uses:
+    # exact id, then exact project name, then prefix — an abbreviation must never outrank
+    # either exact form. Restricted to bridges because a bridge id is the only one the
+    # tooling abbreviates (`clauster status` prints 8 characters); hosted / background /
+    # working ids are echoed verbatim by `list_sessions`, so a partial one is a typo.
+    # `wanted` is non-empty (validated above), so there is no prefixes-everything case.
+    prefixed = sorted(
+        (
+            s
+            for s in sessions
+            if s.get("kind") == "bridge" and str(s.get("id", "")).startswith(wanted)
+        ),
+        key=lambda s: str(s.get("id", "")),
+    )
+    if len(prefixed) == 1:
+        return {"found": True, "session": prefixed[0]}
+    if prefixed:
+        # Refused, not guessed — reporting the candidates so the caller can retry with a
+        # longer prefix, exactly as `stop_session` / `resume_session` do.
+        return {
+            "found": False,
+            "id": wanted,
+            "ambiguous": [str(s.get("id", "")) for s in prefixed],
+        }
     return {"found": False, "id": wanted}
 
 

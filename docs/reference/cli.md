@@ -224,6 +224,11 @@ $ clauster logs f2c456fd
 clauster: ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters
 ```
 
+Both **exact** forms outrank a prefix — a full instance id first, then an exact project
+name. That only shows up for a hex-ish project name (`cafe`, `deadbeef`) that happens to
+prefix an unrelated bridge's id: the project keeps its name, and the id is still reachable
+with one more character.
+
 `logs` emits only **complete** lines. A line the bridge has half-flushed is held until
 its newline arrives, so redaction always sees the whole line — a secret split across two
 reads used to match no pattern in either half and print verbatim
