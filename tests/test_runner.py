@@ -1681,6 +1681,10 @@ async def test_poll_drops_phantom_stopped_shadowing_external(runner_config, monk
         local_uuid="u",
     )
     monkeypatch.setattr(inspector, "list_working_sessions", lambda *a, **k: [sess])
+    # The prune's premise is "the bridge IS alive, just unmanaged", so since #1096 the
+    # external session must actually BE a bridge — a hand-run `claude` sharing the cwd is
+    # EXTERNAL by design (#820) but is not evidence that this card is a phantom.
+    monkeypatch.setattr("clauster.runner.procutil.is_bridge_process", lambda pid: True)
     await runner.poll_once()
     assert runner.get_instance_for_project("alpha") is None  # phantom dropped
     assert "alpha" in runner.external_sessions_by_project()  # now surfaced as external

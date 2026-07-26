@@ -283,6 +283,28 @@ def _release_flock_if_acquired(cm) -> Callable[[asyncio.Task], None]:
     return _release
 
 
+def _row_int(value: object) -> int | None:
+    """Coerce a persisted-row field to ``int``, or ``None`` if it isn't one (#1088).
+
+    ``bool`` is a subclass of ``int``, so a hand-edited row carrying ``"bridge_pid": true``
+    would otherwise resolve to PID 1 and have its liveness checked against init. Excluded,
+    matching the convention in ``procutil`` and ``pty_keeper``.
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _row_float(value: object) -> float | None:
+    """Coerce a persisted-row field to ``float``, or ``None`` if it isn't one (#1088).
+
+    A missing or junk ``bridge_proc_start`` degrades to ``None`` — cmdline-only liveness,
+    exactly as an unparseable pointer ``procStart`` does — rather than raising out of the
+    startup reattach.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 class SessionRunner:
     """Owns the lifecycle of managed bridges: spawn, resume, stop, and status polling."""
 
@@ -782,6 +804,15 @@ class SessionRunner:
                 "permission_mode": inst.permission_mode,
                 "resume_mode": inst.resume_mode,
                 "sandbox_mode": inst.sandbox_mode,
+                # Liveness identity (#1088/#1091): without these persisted, a fresh process
+                # cannot tell which rows are live, and `rediscover` could only ever resolve
+                # one instance per project via the (project-keyed) pointer walk. Written for
+                # dead rows too — as None — so a STOPPED row's stale pid can't later be
+                # mistaken for a live one. Always paired with proc_start: a bare pid is
+                # reusable, so liveness is only ever judged as the pair.
+                "bridge_pid": inst.bridge_pid,
+                "bridge_proc_start": inst.bridge_proc_start,
+                "keeper_pid": inst.keeper_pid,
             }
             for inst in self._instances.values()
             # #951 rounds 2+3: a dead card (STOPPED/CRASHED/ERROR) whose row this
@@ -2345,11 +2376,45 @@ class SessionRunner:
         The keeper self-exits once its bridge is gone, so this is usually just a
         reap; the force path covers a keeper that somehow outlives its bridge.
         """
+        # Identity, snapshotted BEFORE the grace: `is_keeper_process` alone answers "is this
+        # pid *a* keeper", never "is it *THIS* keeper", and on a host that spawns keepers
+        # continuously those differ.
+        expected_start = procutil.proc_create_time(pid)
         for _ in range(8):  # ~2s grace for the keeper to follow its bridge out
             procutil.reap_if_exited(pid)
             if procutil.proc_create_time(pid) is None:
                 return  # pragma: skip-on-win
             time.sleep(0.25)
+        # Re-verify before force-killing a TREE. This pid used to be reachable only as this
+        # process's own child, so the check was redundant; since #1088 a keeper pid can
+        # arrive from a row ANOTHER process wrote at an unknown time, and by the time the
+        # grace expires the original keeper may be gone and its pid recycled. Killing the
+        # tree of whatever now holds it would take down an unrelated process — including,
+        # if the recycled holder is itself a keeper, that keeper's live bridge.
+        #
+        # The create-time pair is what makes this "the same discipline as
+        # `procutil.kill_if_match`" true rather than merely claimed: that helper gates on
+        # live + cmdline + a create-time match, and a cmdline check alone passes for any
+        # keeper at all.
+        #
+        # Exact `!=`, and deliberately NOT the tolerance its siblings use. Both values come
+        # from `proc_create_time`, but that is psutil's `starttime/CLK_TCK + boot_time()`,
+        # and `boot_time()` re-reads `/proc/stat` btime on every call (verified uncached in
+        # psutil 7.2.2). btime tracks the live realtime-vs-uptime offset, so an NTP step
+        # between the two samples — ~2s apart, across the grace loop — shifts it by about a
+        # second and this reads as a mismatch. That is the direction we want: the outcome
+        # is a keeper that is spared and leaks (the orphan-keeper sweep still reaps it),
+        # not a `force_kill_tree` aimed at an unrelated process. Widening to absorb the
+        # step is what would be unsafe here — `_EXACT_PROC_START_TOLERANCE` (0.05s) is far
+        # too tight to absorb it anyway, and `_KEEPER_START_TOLERANCE` (2.0s) is wide
+        # enough to admit a pid recycled during this very grace loop.
+        #
+        # psutil exposes a clock-step-immune `create_time(monotonic=True)` only on the
+        # private Linux implementation, not on `psutil.Process`, so there is no supported
+        # way to compare boot-relative values here today.
+        if not procutil.is_keeper_process(pid) or procutil.proc_create_time(pid) != expected_start:
+            _log.warning("keeper pid %s is no longer that keeper — not force-killing", pid)
+            return
         procutil.force_kill_tree(pid)
         procutil.reap_if_exited(pid)
 
@@ -2836,17 +2901,44 @@ class SessionRunner:
 
     # ----- background poll (source #2 + liveness reconcile) ---------------
 
-    def _persisted_for_project(self, project_name: str) -> tuple[str, dict] | None:
+    def _persisted_for_project(
+        self,
+        project_name: str,
+        *,
+        unclaimed_only: bool = False,
+        resume_mode: ResumeMode | None = None,
+    ) -> tuple[str, dict] | None:
         """Return ``(instance_id, fields)`` for the first persisted record for ``project_name``.
 
         Since issue 777 ``_persisted`` is keyed by ``instance_id``; the project name lives
         in the ``"project_name"`` field of each value dict.  Returns ``None`` when no match.
         Used by :meth:`_stopped_from_persisted` and :meth:`_reattach_pty_from_sidecar` to
         look up a persisted record by project without assuming a project-keyed dict.
+
+        ``unclaimed_only`` skips records already materialized in ``self._instances``. The
+        pointer walk needs that: it resolves by PROJECT and adopts the id it finds, but
+        since #1088 the row pass may already have inserted cards for several of that
+        project's rows. First-match would then hand the walk an id that is somebody else's
+        card, and the live bridge's fields would be written over a different session's
+        record — losing it, because the next ``_persist`` rewrites that row too.
+
+        ``resume_mode`` narrows to rows of that mode. Both walk legs need it, because
+        first-match over a project's rows is arbitrary in MODE as well as identity: a
+        project holding a standard row and a pty row would hand the keeper-sidecar leg
+        the standard row, whose ``resume_mode`` makes ``_reattach_pty_from_sidecar``
+        return before it ever globs a sidecar — leaving a live detached keeper unmanaged
+        behind STOPPED cards, which is the leak the leg exists to prevent. Compared
+        through :meth:`_saved_modes`, not the raw field, so a pre-#1088 row with no
+        recorded mode is judged by the same coercion the caller will apply.
         """
         for iid, fields in self._persisted.items():
-            if fields.get("project_name") == project_name:
-                return iid, fields
+            if fields.get("project_name") != project_name:
+                continue
+            if unclaimed_only and iid in self._instances:
+                continue
+            if resume_mode is not None and self._saved_modes(fields)[2] != resume_mode:
+                continue
+            return iid, fields
         return None
 
     def _saved_modes(self, saved: dict) -> tuple[SpawnMode, PermissionMode, ResumeMode]:
@@ -3012,6 +3104,381 @@ class SessionRunner:
             return RemoteControlInstance(**kwargs)
         return None
 
+    async def _adopt_rows_from_store(self) -> None:
+        """Adopt live instances another process created, so they stop reading EXTERNAL (#1091).
+
+        The server's registry was fixed at startup: ``start_poll_loop`` called
+        :meth:`rediscover` once and ``poll_once`` then iterated only ``self._instances``,
+        never re-reading the shared store. A bridge started by ``clauster start`` or the MCP
+        server was therefore never adopted — the ``agents --json`` cross-check saw its live
+        process, found no managed instance owning it, and correctly-by-its-own-logic labelled
+        it EXTERNAL/unmanaged, with no controls in the dashboard.
+
+        Refresh the merge base, then take over any persisted row we don't already track whose
+        pids are live. **Live rows only**: a dead row is left to :meth:`rediscover` at startup
+        rather than resurrected as a STOPPED card on every tick.
+
+        Because :meth:`_refresh_persisted` replaces the base with the CURRENT store contents,
+        a row another process *forgot* is simply absent and cannot be re-adopted here — the
+        adoption can't undo a ``clauster forget``.
+        """
+        if not await self._refresh_persisted():
+            return  # store read failed; keep the old base rather than acting on nothing
+        rows = dict(self._persisted)
+        row_pairs = {
+            iid: (pid, _row_float(saved.get("bridge_proc_start")))
+            for iid, saved in rows.items()
+            if (pid := _row_int(saved.get("bridge_pid"))) is not None
+        }
+        # Every liveness question this tick needs, answered in ONE thread hop rather than a
+        # sequential hop per row: this runs on the poll loop, and rows are never GC'd.
+        # The GENERATION we would be overwriting, not just its pids. A `stop()` that lands
+        # on the near side of the liveness probe mutates `status` and `intentional_stop`
+        # while deliberately leaving `bridge_pid` in place, so a pid-only compare passes
+        # and silently reverts the operator's Stop to RUNNING. Keyed only on instances that
+        # HAVE a pid, so one whose pid was unknown at snapshot (the mid-`_popen` window)
+        # yields None below and is skipped rather than clobbered.
+        gen = {
+            iid: (i.bridge_pid, i.bridge_proc_start, i.status, i.intentional_stop)
+            for iid, i in self._instances.items()
+            if i.bridge_pid is not None
+        }
+        ours = {iid: (g[0], g[1]) for iid, g in gen.items()}
+        live = await asyncio.to_thread(
+            lambda: {
+                key: {
+                    iid: procutil.is_live_bridge(pid, start) for iid, (pid, start) in pairs.items()
+                }
+                for key, pairs in (("row", row_pairs), ("ours", ours))
+            }
+        )
+        discovered = self._discovered()
+        for iid, saved in rows.items():
+            inst = self._instances.get(iid)
+            if inst is None:
+                continue
+            pair = row_pairs.get(iid)
+            if pair == (inst.bridge_pid, inst.bridge_proc_start):
+                # Same process generation: the row is describing the bridge we hold, so its
+                # recorded intent is ours too. `stop()` writes the intent BEFORE the process
+                # exits, so without this an adopted bridge stopped from the CLI reconciles to
+                # CRASHED ("exited unexpectedly") for a stop the operator asked for.
+                if saved.get("intentional_stop") and not inst.intentional_stop:
+                    inst.intentional_stop = True
+            elif pair is not None and live["row"].get(iid) and not live["ours"].get(iid):
+                await self._resync_pids_from_row(iid, inst, saved, pair, gen.get(iid), discovered)
+        await self._reattach_rows_with_pids(discovered, live_only=True, liveness=live["row"])
+
+    async def _resync_pids_from_row(
+        self,
+        iid: str,
+        inst: RemoteControlInstance,
+        saved: dict,
+        pair: tuple[int, float | None],
+        ours_generation: tuple[int | None, float | None, InstanceStatus, bool] | None,
+        discovered: dict[str, Project],
+    ) -> None:
+        """Take over the pids another process resumed this instance with (#1088).
+
+        The row's process is live while the one we recorded is dead, so another process
+        resumed this instance. Adopt its pids, or our next ``_persist`` overlays the stale
+        ones back over the row and the bridge reads dead to every reader — the #1088
+        symptom, via the very columns added to fix it.
+
+        **Under the project's spawn lock**, because this is the only ``bridge_pid`` mutator
+        on the lock-free poll path and it races the two operations that own that field:
+
+        * ``resume()``/``_spawn_locked`` registers a new instance under the same id and
+          publishes its pid *after* a ``to_thread(self._popen)``. Landing inside that window
+          overwrites a live, freshly-spawned pid with the row's — orphaning a bridge nothing
+          can stop, which runs until reboot.
+        * ``stop()`` reads the pid, signals in a thread, then sets STOPPED without clearing
+          ``bridge_pid``. Interleaving leaves another process's LIVE bridge persisted as
+          ``bridge_pid=<live>`` + ``intentional_stop=True``, and ``_reconcile_status`` only
+          ever demotes — so it reads STOPPED to every reader, permanently.
+
+        A held lock means one of those is in flight: skip the row and retry next tick, which
+        is always safe (the row is not going anywhere). But the lock only covers a
+        *concurrent* mutation — one that COMPLETED while we were in the liveness probe holds
+        no lock by the time we look. That is what ``ours_generation`` is for: pid,
+        proc-start, status AND intent are compared against the live object, so a finished
+        ``stop()`` (which changes the latter two and deliberately leaves ``bridge_pid``
+        alone) is detected and left alone. An instance whose pid was unknown at snapshot
+        time (``ours_generation is None`` — precisely the mid-``_popen`` window) is skipped
+        rather than overwritten.
+
+        Connect facts are recomputed rather than carried over: the previous generation's
+        ``url``/``environment_id`` point at a dead environment, and publishing them as
+        RUNNING offers the operator a link that can never work. Same readiness rule as
+        :meth:`_reattach_rows_with_pids` — no connect evidence means STARTING, not RUNNING.
+        """
+        proj = discovered.get(inst.project)
+        if proj is None:
+            return  # project vanished from discovery; nothing to attribute it to
+        pid, proc_start = pair
+        # Resolved BEFORE the lock. All three are pure filesystem reads keyed entirely on
+        # snapshot values (project, pid, proc_start) — none reads live mutable state — so
+        # holding the project's spawn lock across them would stall every spawn/resume/stop
+        # for that project behind up to three globs of the bridge-log dir, per resynced
+        # row, per tick, for no correctness gain. What must be inside the lock is the
+        # re-check plus the mutation, and that block contains no ``await`` at all.
+        keeper_pid = (
+            await asyncio.to_thread(self._recover_keeper_pid, inst.project, pid, proc_start)
+            if inst.resume_mode == "pty"
+            else None
+        )
+        connect = await asyncio.to_thread(
+            self._connect_facts_for, proj, inst.resume_mode, pid, proc_start
+        )
+        log_path = await asyncio.to_thread(self._latest_debug_log_for, inst.project)
+
+        lock = self._spawn_lock_for(inst.project)
+        if lock.locked():
+            return  # a spawn/resume/stop owns this project right now; next tick is fine
+        async with lock:
+            # `locked()` is a cheap HINT, not a try-acquire: `release()` clears the flag
+            # before the first waiter resumes, so this can read False with a queue behind
+            # it and the acquire below then blocks. Correctness rests entirely on the
+            # generation re-check that follows, never on the hint.
+            current = self._instances.get(iid)
+            if current is None or current is not inst or iid not in self._persisted:
+                return  # replaced by a lock holder, or forgotten — don't resurrect either
+            if (
+                current.bridge_pid,
+                current.bridge_proc_start,
+                current.status,
+                current.intentional_stop,
+            ) != ours_generation:
+                # Status and intent are in the tuple deliberately. `stop()` sets STOPPED and
+                # `intentional_stop` but never clears `bridge_pid`, so a pid-only compare
+                # passes for a stop that completed while we were in the liveness probe — and
+                # we would revert the operator's Stop to RUNNING, permanently.
+                return
+            current.bridge_pid, current.bridge_proc_start = pair
+            current.keeper_pid = keeper_pid
+            current.intentional_stop = bool(saved.get("intentional_stop"))
+            current.url = connect.get("url")
+            current.environment_id = connect.get("environment_id")
+            current.starter_session_id = connect.get("starter_session_id")
+            current.bridge_debug_log_path = log_path
+            current.bridge_raw_log_path = (
+                self._raw_log_path_for(log_path) if log_path is not None else None
+            )
+            current.status = InstanceStatus.RUNNING if connect else InstanceStatus.STARTING
+
+    async def _reattach_rows_with_pids(
+        self,
+        discovered: dict[str, Project],
+        *,
+        live_only: bool = False,
+        liveness: dict[str, bool] | None = None,
+    ) -> tuple[set[str], set[str]]:
+        """Reattach every persisted row that carries its own pids; return their projects.
+
+        This is the instance-keyed half of :meth:`rediscover` (#1088). Each row is judged on
+        **its own** ``bridge_pid``/``bridge_proc_start`` — live becomes RUNNING, dead becomes
+        a STOPPED resumable card — so a project running a standard bridge plus N interactive
+        sessions materializes all of them, each under the id it was spawned with.
+
+        The pointer walk this replaces could only ever resolve ONE instance per project, and
+        picked it by first-match rather than by any correlation with the live process, which
+        is what made ``clauster status`` / ``clauster mcp`` show a single stale row and
+        ``clauster stop <id>`` fail for every id but the oldest.
+
+        Liveness is the (pid, proc_start) PAIR — never a bare pid, which is reusable — so a
+        recycled pid cannot resurrect an unrelated process as somebody's bridge. A pty row
+        additionally carries its keeper pid, checked by cmdline (``is_keeper_process``) for
+        the same reason.
+
+        Returns ``(claimed, stopped)``. ``claimed`` is the projects that had at least one
+        LIVE row, so the legacy pointer walk can skip them and the two paths never both
+        claim the same bridge. ``stopped`` is the projects for which this pass inserted a
+        STOPPED card from a dead row — the walk must NOT treat those as "already resolved"
+        (they are exactly the projects whose live externally-started bridge it still has to
+        discover), and must not stack its project-level stopped-card fallback on top of the
+        per-row cards this pass already produced.
+        """
+        claimed: set[str] = set()
+        stopped_projects: set[str] = set()
+        for iid, saved in list(self._persisted.items()):
+            name = saved.get("project_name")
+            proj = discovered.get(name) if isinstance(name, str) else None
+            pid = _row_int(saved.get("bridge_pid"))
+            if proj is None or pid is None:
+                continue  # unknown project, or a pre-#1088 row -> legacy pointer walk
+            if iid in self._instances:
+                continue  # already tracked in this process (a spawn we own)
+            proc_start = _row_float(saved.get("bridge_proc_start"))
+            alive = (
+                liveness[iid]
+                if liveness is not None and iid in liveness
+                else await asyncio.to_thread(procutil.is_live_bridge, pid, proc_start)
+            )
+            if not alive:
+                if live_only:
+                    continue  # poll-time adoption never resurrects dead cards
+                stopped = self._stopped_from_row(iid, saved)
+                self._instances[stopped.instance_id] = stopped
+                # Record it, but do NOT claim the project: a dead row proves nothing about
+                # a live externally-started bridge, which only the pointer walk can find.
+                # The walk's presence guard must therefore ignore this card (#1088 MF-1).
+                stopped_projects.add(proj.name)
+                continue
+            # Claim ONLY once the row proves live. `stop()` leaves `bridge_pid` on the
+            # instance, so every user-stopped row keeps a stale pid — claiming on the pid
+            # alone would mark the project resolved forever and permanently suppress the
+            # pointer walk, which is still the only way a live externally-started bridge is
+            # discovered at startup.
+            claimed.add(proj.name)
+            spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
+            # Resolve the keeper from the SIDECAR, correlated to this bridge's pid +
+            # proc-start, rather than trusting the pid the row carries. `is_keeper_process`
+            # alone only proves "some keeper", not "OUR keeper" — and `stop()` hands
+            # `keeper_pid` to `_cleanup_keeper`, which force-kills the whole tree. A recycled
+            # pid landing on another instance's keeper would reap a stranger's processes.
+            keeper_pid = (
+                await asyncio.to_thread(self._recover_keeper_pid, proj.name, pid, proc_start)
+                if resume_mode == "pty"
+                else None
+            )
+            log_path = await asyncio.to_thread(self._latest_debug_log_for, proj.name)
+            # The row carries identity and liveness but NOT the connect facts — those live in
+            # the Anthropic pointer (standard) or the keeper sidecar (pty). Without this the
+            # dashboard sits on "Preparing connect link…" forever for every reattached or
+            # adopted bridge, which is the whole point of having the bridge.
+            connect = await asyncio.to_thread(
+                self._connect_facts_for, proj, resume_mode, pid, proc_start
+            )
+            # Re-check across the awaits above. This runs lock-free on the poll loop, so a
+            # lock-holding adopt()/spawn() can have registered this id — overwriting it would
+            # discard the object the HTTP caller was handed — and a concurrent forget() can
+            # have dropped the row, which we must not resurrect.
+            if iid in self._instances or iid not in self._persisted:
+                continue
+            # Liveness is not usability (see `_reconcile_status`): a bridge whose process is
+            # up but which has not registered an environment / reached a ready sidecar is
+            # STARTING, not RUNNING. `connect` IS that evidence — it only resolves from a
+            # live pointer or a ready sidecar — so promoting without it would report
+            # uncontrollable bridges as RUNNING, the exact thing that invariant forbids.
+            status = InstanceStatus.RUNNING if connect else InstanceStatus.STARTING
+            self._instances[iid] = RemoteControlInstance(
+                instance_id=iid,
+                project=proj.name,
+                label=saved.get("label") or proj.name,
+                spawn_mode=spawn_mode,
+                permission_mode=permission_mode,
+                resume_mode=resume_mode,
+                sandbox_mode=self._saved_sandbox(saved),
+                # Seeded from the row, not hardcoded False: `stop()` records the intent and
+                # THEN signals, so a poll landing in that grace window adopts a still-live
+                # pid whose stop was already requested. Hardcoding False reports CRASHED.
+                intentional_stop=bool(saved.get("intentional_stop")),
+                status=status,
+                bridge_pid=pid,
+                bridge_proc_start=proc_start,
+                keeper_pid=keeper_pid,
+                bridge_debug_log_path=log_path,
+                bridge_raw_log_path=(
+                    self._raw_log_path_for(log_path) if log_path is not None else None
+                ),
+                **connect,
+            )
+        return claimed, stopped_projects
+
+    def _connect_facts_for(
+        self, proj: Project, resume_mode: ResumeMode, pid: int, proc_start: float | None
+    ) -> dict:
+        """Recover a reattached bridge's connect URL / env id / starter session (#1088).
+
+        The persisted row carries identity and liveness, deliberately — but not the facts a
+        human needs to actually *use* the bridge. Those are written by the bridge itself:
+
+        * **standard** — the Anthropic ``bridge-pointer.json`` (environment id + session id);
+        * **pty** — the keeper sidecar, which records the connect URL directly.
+
+        Both are matched against THIS instance's pid before being believed, so a pointer left
+        by a different bridge at the same project path can't lend its environment to somebody
+        else's row. Returns ``{}`` when nothing matches — the dashboard then shows the
+        "preparing connect link" state, which is honest, rather than a wrong link.
+        """
+        if resume_mode == "pty":
+            for sidecar in sorted(self._log_dir.glob(f"{proj.name}-*.keeper.json"), reverse=True):
+                info = self._read_sidecar(sidecar)
+                if not info or info.get("bridge_pid") != pid:
+                    continue
+                # Correlate on proc-start too, and require a READY state — matching
+                # `_recover_keeper_pid` and `_reattach_pty_from_sidecar`. Several interactive
+                # sessions share one project's log dir, so a stale sidecar left by a recycled
+                # pid would otherwise hand its connect URL to a different session.
+                if info.get("state") != "ready":
+                    continue
+                sidecar_start = info.get("bridge_proc_start")
+                if (
+                    proc_start is not None
+                    and isinstance(sidecar_start, (int, float))
+                    and not isinstance(sidecar_start, bool)
+                    and abs(float(sidecar_start) - proc_start) > _PROC_START_TOLERANCE
+                ):
+                    continue
+                facts = {}
+                if info.get("connect_url"):
+                    facts["url"] = info["connect_url"]
+                if info.get("session_id"):
+                    facts["starter_session_id"] = info["session_id"]
+                return facts
+            return {}
+        ptr = pointers.pointer_for_project(proj.path)
+        if ptr is None or ptr.pid != pid:
+            return {}
+        # Same pid AND same start time, or a recycled pid could hand over its environment.
+        #
+        # Compared with a tolerance, not `!=`: our `proc_start` is psutil's `create_time()`
+        # while the pointer's is `boot_time + jiffies/CLK_TCK` — two independent derivations
+        # that agree on Linux today only because the rounding happens to coincide. Every
+        # other proc-start comparison in the codebase uses a tolerance for exactly this
+        # reason. An UNKNOWN expected value (unparseable / non-Linux `procStart`) skips the
+        # check rather than failing it, matching `is_live_process` and `_recover_keeper_pid`
+        # — treating unknown as mismatch would strip the connect link on any platform where
+        # the jiffies form isn't comparable, reintroducing the bug this recovers from.
+        expected = procutil._expected_epoch(ptr.proc_start)
+        if (
+            proc_start is not None
+            and expected is not None
+            and abs(expected - proc_start) > procutil._EXACT_PROC_START_TOLERANCE
+        ):
+            return {}
+        # No presence guards: `BridgePointer` declares both as required `str`, so a parsed
+        # pointer always carries them — a guard here would be unreachable, not defensive.
+        return {
+            "environment_id": ptr.environment_id,
+            "url": f"https://claude.ai/code?environment={ptr.environment_id}",
+            "starter_session_id": ptr.session_id,
+        }
+
+    def _stopped_from_row(self, instance_id: str, saved: dict) -> RemoteControlInstance:
+        """Rebuild ONE persisted row as a STOPPED, resumable card (#1088).
+
+        The per-row counterpart of :meth:`_stopped_from_persisted`, which resolves by project
+        and so can only ever rebuild one row of the several a project may hold (#778).
+        """
+        spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
+        return RemoteControlInstance(
+            instance_id=instance_id,
+            project=str(saved.get("project_name")),
+            label=saved.get("label") or str(saved.get("project_name")),
+            spawn_mode=spawn_mode,
+            permission_mode=permission_mode,
+            resume_mode=resume_mode,
+            sandbox_mode=self._saved_sandbox(saved),
+            intentional_stop=bool(saved.get("intentional_stop", False)),
+            status=InstanceStatus.STOPPED,
+            # The process is gone: drop the stale pids rather than carry them onto a dead
+            # card, where a later reuse of that pid could read as this bridge coming back.
+            bridge_pid=None,
+            bridge_proc_start=None,
+            keeper_pid=None,
+        )
+
     async def rediscover(self, *, persist: bool = True) -> None:
         """Re-detect bridges after a restart: reattach live ones, resurrect dead ones.
 
@@ -3021,6 +3488,14 @@ class SessionRunner:
         resumable card instead of being dropped; one with no persisted record is
         left absent (nothing to resume).
 
+        Two passes since #1088. First :meth:`_reattach_rows_with_pids` walks the persisted
+        rows **by instance**, judging each on its own pids — that is what lets a project
+        surface its standard bridge AND its N interactive sessions instead of a single
+        first-match row. Then the original **project-keyed** pointer walk runs for whatever
+        it did not claim: rows written before the pids existed (so an upgrade never declares
+        a surviving bridge dead) and live bridges with no persisted row at all, which is
+        still the only way to discover an externally-started one at startup.
+
         ``persist=False`` reattaches into the in-memory registry only and skips the
         trailing state write — the read-only mode the headless CLI (#775) uses so a
         ``clauster status`` never clobbers the running service's shared ``state.json``.
@@ -3029,8 +3504,22 @@ class SessionRunner:
         # ``_persisted``, and a headless runner calls this as its hydrate step — its
         # construction-time snapshot may already lag the live service's store.
         await self._refresh_persisted()
-        for proj in self._discovered().values():
-            if self.get_instance_for_project(proj.name) is not None:
+        discovered = self._discovered()
+        row_claimed, row_stopped = await self._reattach_rows_with_pids(discovered)
+        for proj in discovered.values():
+            if proj.name in row_claimed:
+                continue  # resolved per-instance above; don't let the walk re-claim it
+            # Liveness-exact on purpose. `get_instance_for_project` matches in ANY status
+            # (by design — #778, see its docstring), so the STOPPED cards the row pass just
+            # inserted would suppress the walk for precisely the projects that still need
+            # it: a dead row plus a live externally-started bridge, which only the pointer
+            # walk (or, for a flag-form pty, the keeper sidecar below) can discover. That
+            # regressed both legs against `main` and leaked live detached keepers (#1088).
+            if any(
+                inst.project == proj.name
+                and inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+                for inst in self._instances.values()
+            ):
                 continue
             ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
             if ptr is None or not await asyncio.to_thread(pointers.is_live, ptr):
@@ -3039,9 +3528,29 @@ class SessionRunner:
                 # sidecar so a live keeper is re-managed (Stop/observe restored)
                 # rather than leaking behind a STOPPED card; fall through to the
                 # STOPPED resurrection when no live keeper remains.
-                persisted_hit = self._persisted_for_project(proj.name)
-                persisted_saved = persisted_hit[1] if persisted_hit is not None else {}
-                persisted_iid = persisted_hit[0] if persisted_hit is not None else None
+                # TWO lookups on purpose, because `saved` and the id answer different
+                # questions: `saved` supplies only the modes and label (this leg is gated
+                # on `resume_mode == "pty"`), while the id is ADOPTED. Resolving both from
+                # one `unclaimed_only=True` call disabled the leg outright — the row pass
+                # has already carded every row of this project, so it returned None,
+                # `saved` was empty, and `_reattach_pty_from_sidecar` bailed on its first
+                # line for precisely the dead-row-plus-live-keeper case MF-1 exists to fix.
+                # So: modes from ANY row of the project, id only from an UNCLAIMED one, so
+                # the live keeper is never written over another session's record (SF-4).
+                # None -> mint a fresh id, one extra card, the same trade the pointer leg
+                # below already makes for an ambiguous project (#1088).
+                # Both lookups are pinned to `resume_mode="pty"`. Only a pty bridge has a
+                # keeper sidecar, so a standard row can supply neither the modes (its
+                # `resume_mode` makes the leg bail before it globs) nor the id (adopting
+                # it would write the keeper's pids over a standard session's record). No
+                # pty row at all means there is no pty session to recover, and the empty
+                # `saved` correctly bails on the leg's first line.
+                modes_hit = self._persisted_for_project(proj.name, resume_mode="pty")
+                persisted_saved = modes_hit[1] if modes_hit is not None else {}
+                unclaimed_hit = self._persisted_for_project(
+                    proj.name, unclaimed_only=True, resume_mode="pty"
+                )
+                persisted_iid = unclaimed_hit[0] if unclaimed_hit is not None else None
                 reattached = await asyncio.to_thread(
                     self._reattach_pty_from_sidecar,
                     proj.name,
@@ -3050,12 +3559,37 @@ class SessionRunner:
                 )
                 if reattached is not None:
                     self._instances[reattached.instance_id] = reattached
-                elif (stopped := self._stopped_from_persisted(proj.name)) is not None:
+                elif proj.name not in row_stopped and (
+                    (stopped := self._stopped_from_persisted(proj.name)) is not None
+                ):
+                    # Only when the row pass didn't already leave one. This fallback is the
+                    # last resort for a project the row pass could NOT cover, not a second
+                    # source of cards for one it did. It resolves by PROJECT — first match
+                    # over `_persisted` — so on a project with several rows it can land on
+                    # a different row than the one already carded and leave two cards up
+                    # where the row pass had deliberately produced one per live-or-dead row.
+                    # (It always takes an id that already keys a row, so it cannot mint an
+                    # id for a session that does not exist; the risk is duplication, not
+                    # invention.) Whether a pre-#1088 pid-less row deserves a card of its
+                    # own is a real question, deliberately left alone here — this guard
+                    # keeps the walk from answering it as a side effect.
                     self._instances[stopped.instance_id] = stopped
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge
             # found alive is by definition NOT intentionally stopped.
-            persisted_hit = self._persisted_for_project(proj.name)
+            # `unclaimed_only` for the same reason as the pty leg above: this attaches the
+            # LIVE bridge under the id it is handed, so a claimed one would overwrite a
+            # different session's record irrecoverably (#1088 SF-4).
+            #
+            # Deliberately NOT also pinned to `resume_mode="standard"`, unlike the pty leg.
+            # A pointer means the live bridge is standard, so the mirror mismatch is real —
+            # but a mode-less pre-#1088 row coerces to the host's CONFIGURED default, so on
+            # a `launch_mode: pty` host that filter would reject a standard bridge's own
+            # legacy row and mint a fresh id, losing the association it was meant to keep.
+            # The pty leg has no such exposure: a keeper sidecar only exists for a bridge
+            # Clauster spawned in pty mode, and those rows always record their mode.
+            # Correlating a row to the process actually found is tracked in #1108.
+            persisted_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
             saved = persisted_hit[1] if persisted_hit is not None else {}
             persisted_iid = persisted_hit[0] if persisted_hit is not None else None
             spawn_mode, permission_mode, resume_mode = self._saved_modes(saved)
@@ -3287,6 +3821,22 @@ class SessionRunner:
 
         Off-loop work, applied on-loop.
         """
+        # Take over anything another process started before reconciling (#1091). Without
+        # this the registry stays frozen at whatever `rediscover` found at startup, so a
+        # `clauster start` / MCP-spawned bridge is never adopted and the cross-check below
+        # labels its live process EXTERNAL/unmanaged.
+        #
+        # Best-effort, like the `agents --json` cross-check below: this reads the store and
+        # builds instances from operator-writable fields, so a malformed row or an unreadable
+        # log dir must not abort the whole tick. `_poll_forever` would swallow and retry, but
+        # everything downstream — crash detection, notifications, the prune — would be dead
+        # for as long as that row existed.
+        try:
+            await self._adopt_rows_from_store()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("cross-process adoption failed (continuing this tick)")
         # Projects whose bridge PROCESS is actually alive (PID + proc-start match).
         # This is the source of truth for "do we own the sessions at this cwd" below —
         # NOT the instance's status field, which can lag or be wrong (a fresh pty bridge
@@ -3460,31 +4010,75 @@ class SessionRunner:
         # the bridge IS alive, just unmanaged (flag-form/tmux), so the persisted record
         # is a phantom. Showing it as a Stopped/Resume card is misleading and invites a
         # double-spawn — let the card fall back to "external session active" instead.
-        external_cwds = {
-            s.cwd.resolve() for s in self._sessions if s.attribution is Attribution.EXTERNAL
-        }
+        # Only sessions that are actually BRIDGES count as evidence. The prune's whole
+        # premise is "the bridge IS alive, just unmanaged, so this Stopped card is a
+        # phantom" — an operator's hand-run `claude` at the project root is EXTERNAL by
+        # design (#820) but is NOT a bridge, and deleting a resumable card because someone
+        # opened a terminal there is wrong. `live_projects` used to mask this by accident;
+        # testing the thing the premise actually claims is the honest replacement.
+        external_cwds = await asyncio.to_thread(
+            lambda: {
+                s.cwd.resolve()
+                for s in self._sessions
+                if s.attribution is Attribution.EXTERNAL and procutil.is_bridge_process(s.pid)
+            }
+        )
         # No _persist() after this delete, by design: this is continuous reconciliation
         # (every poll, and the first poll runs immediately on startup), not a one-time
         # edit — so it self-heals after any restart. Persisting would be a no-op anyway:
         # _persist_subset overlays `live` onto the retained `_persisted` map, which keeps
         # the record (intentionally — it preserves the project's modes for a later managed
         # spawn). Re-materialization by `_stopped_from_persisted` is cleaned by the next poll.
+        # Gathered per PROJECT first, then decided per INSTANCE (#1096). The old form asked
+        # `inst.project not in live_projects` — a project-level question standing in for an
+        # instance-level one, which since #778 (N instances per project) is wrong in BOTH
+        # directions:
+        #
+        #   over-prune  — with no live sibling, ONE unmanaged bridge at the project root
+        #                 deleted EVERY stopped row for that project, including unrelated
+        #                 resumable interactive sessions;
+        #   under-prune — with a live sibling, the project is in `live_projects`, so a
+        #                 genuine phantom was never pruned at all — exactly the misleading
+        #                 Stopped/Resume card this prune exists to remove.
+        #
+        # `live_projects` is gone from the test. NOT because a live sibling can't coexist
+        # with an EXTERNAL session — it demonstrably can: reconcile's ownership gate is pid
+        # DESCENT (#820), so an operator's hand-run `claude` at a managed bridge's cwd is
+        # designed to stay EXTERNAL. The guard is replaced by a stricter one below: the
+        # prune's premise is "the bridge IS alive, just unmanaged", so the external session
+        # must actually BE a bridge. Project liveness never tested that; it only happened to
+        # shield stopped cards as a side effect, while also suppressing genuine phantoms.
+        candidates: dict[str, list[str]] = {}
         for n, inst in list(self._instances.items()):
             # Only prune non-live (STOPPED/CRASHED) phantoms. A RUNNING/STARTING instance
-            # here that isn't in live_projects was inserted AFTER this poll snapshotted
-            # live_projects (the lock-free poll races a lock-held adopt()/spawn() that lands
-            # during the list_working_sessions suspension) — pruning it would silently undo
-            # a just-adopted/spawned bridge. The first loop already reconciled every instance
-            # it saw, so a genuinely-dead record is no longer RUNNING by the time we get here.
+            # here was inserted AFTER this poll snapshotted its state (the lock-free poll
+            # races a lock-held adopt()/spawn() that lands during the list_working_sessions
+            # suspension) — pruning it would silently undo a just-adopted/spawned bridge.
+            # The first loop already reconciled every instance it saw, so a genuinely-dead
+            # record is no longer RUNNING by the time we get here.
             if inst.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
                 continue
             if (
-                inst.project not in live_projects
-                and inst.project in discovered
+                inst.project in discovered
                 and Path(discovered[inst.project].path).resolve() in external_cwds
             ):
-                del self._instances[n]
-                self._procs.pop(n, None)  # don't leak the phantom's dead Popen handle
+                candidates.setdefault(inst.project, []).append(n)
+        for project, ids in candidates.items():
+            # One external bridge can only be ONE of these rows. With several candidates
+            # nothing here says which, so prune none rather than delete N-1 resumable cards
+            # to explain a single unmanaged process. Left visible and logged: a stale card
+            # the operator can Forget is recoverable; a silently deleted one is not.
+            if len(ids) > 1:
+                _log.debug(
+                    "not pruning %d stopped cards for %r: one external session can't "
+                    "identify which is the phantom",
+                    len(ids),
+                    project,
+                )
+                continue
+            n = ids[0]
+            del self._instances[n]
+            self._procs.pop(n, None)  # don't leak the phantom's dead Popen handle
 
     @staticmethod
     def _reconcile_status(instance: RemoteControlInstance, alive: bool) -> None:

@@ -67,6 +67,12 @@ _INSTANCE_FIELDS = (
     "spawn_mode",
     "permission_mode",
     "resume_mode",
+    # Liveness identity (#1088/#1091) — see the Instance model. ``_present`` drops NULLs, so a
+    # row from an older build simply omits these and the reattach path falls back to the
+    # pointer/sidecar lookup, exactly as it behaved before the columns existed.
+    "bridge_pid",
+    "bridge_proc_start",
+    "keeper_pid",
 )
 # The mutable-payload subset: ``project_name`` is the non-null FK, set explicitly in
 # _sync (guarded so a record that omits it can't blank an existing row's parent), so

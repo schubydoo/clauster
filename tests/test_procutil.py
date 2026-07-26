@@ -587,6 +587,54 @@ def test_is_keeper_process_zombie_is_false(monkeypatch):
     assert procutil.is_keeper_process(1234) is True
 
 
+def test_is_bridge_process_zombie_is_false(monkeypatch):
+    # The bridge twin of the check above, and previously pinned by nothing: deleting the
+    # zombie arm left the whole suite green. The phantom-prune asks "is this EXTERNAL
+    # session really a live bridge?" before deleting a resumable card — a zombie answering
+    # yes would keep a card alive against a process that is already gone.
+    bridge_argv = ("claude", "remote-control", "--name", "alpha")
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(status=psutil.STATUS_ZOMBIE, cmdline=bridge_argv),
+    )
+    assert procutil.is_bridge_process(1234) is False
+    # Differential control: same cmdline, RUNNING -> True, so it is the status that decided.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(status=psutil.STATUS_RUNNING, cmdline=bridge_argv),
+    )
+    assert procutil.is_bridge_process(1234) is True
+
+
+def test_is_bridge_cmdline_does_not_match_the_bare_rc_alias():
+    # A deliberate miss, not an oversight (#1107). An earlier revision of this branch matched
+    # `--rc`, on the premise that Clauster's own supervisor spawns bridges with it. It does
+    # not: `supervisor.build_dispatch_argv` builds `claude --bg --rc <name>`, a BACKGROUND
+    # AGENT opening a cloud door. Both bridge spawners emit `remote-control` /
+    # `--remote-control` instead.
+    #
+    # `is_bridge_process` gates the phantom-prune, where True DELETES a resumable card. So
+    # matching the alias would let a background agent stand as proof that "the bridge is
+    # alive, just unmanaged" and prune the card out from under it. A miss only leaves a
+    # phantom card lingering, which is the failure to prefer in a delete path.
+    #
+    # The intermediate fix — anchoring on the executable basename — is also pinned below
+    # by the `somelinter` case: the binary hint matches "claude" anywhere in the joined
+    # argv, and this host's service user IS `claude`, so every path under /home/claude
+    # satisfied it.
+    assert procutil.is_bridge_cmdline(["claude", "--rc", "alpha"]) is False
+    assert procutil.is_bridge_cmdline(["claude", "--rc=alpha"]) is False
+    assert procutil.is_bridge_cmdline(["somelinter", "--rc", "/home/claude/x"]) is False
+    # The two spellings carrying the literal `remote-control` token stay matched...
+    assert procutil.is_bridge_cmdline(["claude", "--remote-control", "alpha"]) is True
+    assert procutil.is_bridge_cmdline(["claude", "remote-control", "--name", "alpha"]) is True
+    # ...and only the subcommand form is adoptable as a standard bridge.
+    assert procutil.is_standard_bridge_cmdline(["claude", "--remote-control", "alpha"]) is False
+    assert procutil.is_standard_bridge_cmdline(["claude", "remote-control", "-n", "a"]) is True
+
+
 def test_reap_if_exited_without_wnohang_is_noop(monkeypatch):
     # procutil.py 323-324: the Windows arm — no os.WNOHANG means no zombies to reap,
     # so the function returns before ever calling waitpid.

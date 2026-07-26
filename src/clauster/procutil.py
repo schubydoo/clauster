@@ -76,7 +76,24 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
 
 
 def is_bridge_cmdline(cmdline: list[str]) -> bool:
-    """Whether a process command line is a ``claude … remote-control`` bridge."""
+    """Whether a process command line is a ``claude … remote-control`` bridge.
+
+    Matches the two spellings that carry the literal ``remote-control`` token: the
+    subcommand (standard) and the ``--remote-control`` flag. The bare ``--rc`` alias is
+    deliberately NOT matched (#1107).
+
+    The reason is the direction this gate fails in. ``is_bridge_process`` feeds the
+    phantom-prune, and a True there DELETES a resumable card — so a false positive costs
+    an operator their session, while a false negative only leaves a phantom card
+    lingering. Clauster's own use of ``--rc`` is
+    :func:`~clauster.supervisor.build_dispatch_argv`'s ``claude --bg --rc <name>``: a
+    BACKGROUND AGENT that opens a cloud door, not a bridge. Matching the alias would let
+    a background agent stand as proof that "the bridge is alive, just unmanaged" and
+    prune the card out from under it. Whether a ``--bg --rc`` job should count as bridge
+    liveness is a real question, but it is one to answer deliberately, not by widening a
+    delete gate.
+    Use :func:`is_standard_bridge_cmdline` when the subcommand form must be told apart.
+    """
     if not cmdline:
         return False
     joined = " ".join(cmdline)
@@ -90,9 +107,10 @@ def is_standard_bridge_cmdline(cmdline: list[str]) -> bool:
 
     The standard (multi-session) form carries ``remote-control`` as a standalone
     argv token (``claude remote-control …``); the pty true-resume form is the
-    ``--remote-control`` / ``--rc`` **flag** instead. :func:`is_bridge_cmdline`
-    matches both (it substring-tests the joined cmdline), so it can't tell them
-    apart — this exact-token check can, and only the subcommand form passes.
+    ``--remote-control`` **flag** instead. :func:`is_bridge_cmdline` matches both
+    of those (it substring-tests the joined cmdline for ``remote-control``), so it
+    can't tell them apart — this exact-token check can, and only the subcommand
+    form passes. Neither matches the bare ``--rc`` alias (#1107).
 
     External-session adoption (#330) is gated on this: a standard external bridge is
     safely adoptable (its pid is its own process group, Stop is a clean single
@@ -292,6 +310,24 @@ def is_keeper_process(pid: int) -> bool:
         if proc.status() == psutil.STATUS_ZOMBIE:
             return False
         return is_keeper_cmdline(proc.cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return False
+
+
+def is_bridge_process(pid: int) -> bool:
+    """Whether ``pid`` is a live, non-zombie ``claude`` **bridge** process (#1096).
+
+    The cmdline counterpart to :func:`is_keeper_process`, for deciding whether an EXTERNAL
+    working session is an unmanaged *bridge* or merely a hand-run ``claude`` sharing a
+    project directory. The phantom-prune needs that distinction: its premise is "the bridge
+    IS alive, just unmanaged", and deleting a resumable card because an operator opened a
+    terminal in the project would be wrong. Fails closed on any psutil error.
+    """
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return is_bridge_cmdline(proc.cmdline())
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return False
 
