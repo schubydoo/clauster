@@ -789,6 +789,9 @@ async def test_pids_resync_when_another_process_resumed_the_bridge(runner_config
     monkeypatch.setattr(
         "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
     )
+    # Readiness evidence for the ADOPTED generation: since MF-3 the re-sync recomputes the
+    # connect facts instead of keeping the dead generation's, and RUNNING requires them.
+    _stub_connect(monkeypatch)
     await runner.poll_once()
 
     inst = runner.get_instance("iid-a")
@@ -796,6 +799,247 @@ async def test_pids_resync_when_another_process_resumed_the_bridge(runner_config
     assert inst.bridge_pid == 4402, "must take the live pids another process recorded"
     assert inst.bridge_proc_start == 200.0
     assert inst.status is InstanceStatus.RUNNING
+
+
+async def test_resync_replaces_the_dead_generations_connect_facts(runner_config, monkeypatch):
+    # MF-3. Taking the live pids while keeping the previous generation's url/environment_id
+    # published a RUNNING bridge whose connect link pointed into an environment that no
+    # longer exists — permanently, since nothing else on the poll path refreshes them.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+        environment_id="env_OLD",
+        url="https://claude.ai/code?environment=env_OLD",
+        starter_session_id="session_OLD",
+    )
+    store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+    )
+    # No pointer and no ready sidecar => no connect evidence for the new generation.
+    monkeypatch.setattr(SessionRunner, "_connect_facts_for", lambda *a, **k: {})
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.bridge_pid == 4402
+    assert inst.environment_id is None, "must not keep the dead generation's environment"
+    assert inst.url is None, "a link into a dead environment is worse than none"
+    assert inst.starter_session_id is None
+    # Liveness is not usability: without connect evidence this is STARTING, not RUNNING.
+    assert inst.status is InstanceStatus.STARTING
+
+
+async def test_resync_keeps_a_pid_published_during_the_liveness_probe(runner_config, monkeypatch):
+    # MF-2, the core case. The `ours` snapshot is taken BEFORE the liveness thread hop. If a
+    # resume() publishes a fresh live pid during that hop, the pre-hop snapshot says "ours is
+    # dead" and the row's pid would overwrite the brand-new one — orphaning a bridge that
+    # nothing can stop, because stop() would then signal the wrong pid.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,  # ours at snapshot: dead
+        bridge_proc_start=100.0,
+    )
+    store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})  # another process's live
+    _stub_connect(monkeypatch)
+
+    def _is_live(pid, _s=None):
+        # Stand in for resume() landing mid-probe and publishing its fresh live pid.
+        inst = runner._instances.get("iid-a")
+        if inst is not None and inst.bridge_pid == 4401:
+            inst.bridge_pid, inst.bridge_proc_start = 7777, 300.0
+        return pid in (4402, 7777)
+
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", _is_live)
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.bridge_pid == 7777, "clobbered a live pid published during the probe"
+    assert inst.bridge_proc_start == 300.0
+
+
+async def test_resync_skips_an_instance_replaced_during_the_probe(runner_config, monkeypatch):
+    # A lock-holding spawn()/adopt() can register a NEW object under the same id while the
+    # probe is in flight. Mutating it would edit an object the HTTP caller was already handed.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+    store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
+    _stub_connect(monkeypatch)
+
+    def _is_live(pid, _s=None):
+        if runner._instances["iid-a"].bridge_pid == 4401:
+            runner._instances["iid-a"] = RemoteControlInstance(
+                instance_id="iid-a",
+                project="alpha",
+                label="alpha",
+                status=InstanceStatus.RUNNING,
+                bridge_pid=5555,
+                bridge_proc_start=400.0,
+            )
+        return pid in (4402, 5555)
+
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", _is_live)
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.bridge_pid == 5555, "overwrote the object a lock holder had just registered"
+
+
+async def test_resync_skips_a_row_whose_project_is_no_longer_discovered(
+    runner_config, monkeypatch
+):
+    # Without a Project there is nothing to attribute the connect facts to, so the row is
+    # left alone rather than adopted half-populated.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-gone"] = RemoteControlInstance(
+        instance_id="iid-gone",
+        project="deleted-project",
+        label="deleted-project",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+    store.save({"iid-gone": _row("deleted-project", pid=4402, proc_start=200.0)})
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+    )
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-gone")
+    assert inst is not None
+    assert inst.bridge_pid == 4401, "adopted pids for a project that no longer exists"
+
+
+async def test_resync_aborts_when_the_row_is_forgotten_while_recovering_facts(
+    runner_config, monkeypatch
+):
+    # Connect-fact recovery is a thread hop, and `forget()` is not gated by the spawn lock.
+    # A row dropped during that window must not be written back onto the instance.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+    store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+    )
+
+    def _forget_mid_flight(self, proj, mode, pid, start):
+        self._persisted.pop("iid-a", None)  # another process's `clauster forget`
+        return {"url": "https://claude.ai/code?environment=env_STUB"}
+
+    monkeypatch.setattr(SessionRunner, "_connect_facts_for", _forget_mid_flight)
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.bridge_pid == 4401, "resurrected pids for a row another process forgot"
+
+
+async def test_resync_refuses_an_instance_that_is_no_longer_the_registered_one(runner_config):
+    # Pins the post-lock identity guard directly. Between the poll loop reading the instance
+    # and this call taking the lock, a lock holder can have swapped the registry entry — and
+    # `forget()` can have dropped the row. Mutating the stale object would edit something no
+    # reader can see; writing it back would resurrect a forgotten row.
+    runner = _make_runner(runner_config)
+    registered = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_pid=5555,
+        bridge_proc_start=400.0,
+    )
+    runner._instances["iid-a"] = registered
+    stale = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+
+    await runner._resync_pids_from_row(
+        "iid-a",
+        stale,
+        {"project_name": "alpha"},
+        (4402, 200.0),
+        (4401, 100.0),
+        runner._discovered(),
+    )
+
+    assert registered.bridge_pid == 5555, "mutated the live registry entry"
+    assert stale.bridge_pid == 4401, "mutated a stale object the registry no longer holds"
+
+
+async def test_resync_skips_a_project_whose_spawn_lock_is_held(runner_config, monkeypatch):
+    # MF-2 / H-2. The re-sync is the only bridge_pid mutator off the spawn lock, so it could
+    # land mid-`resume()` and overwrite a freshly-spawned live pid (orphaning a bridge that
+    # nothing can stop), or interleave with `stop()` and persist another process's LIVE pid
+    # as intentionally stopped. Holding the lock must make it defer to the next tick.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.STOPPED,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+    store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
+    )
+    _stub_connect(monkeypatch)
+
+    async with runner._spawn_lock_for("alpha"):  # stand in for an in-flight resume()/stop()
+        await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.bridge_pid == 4401, "must not mutate pids while the project's lock is held"
+    assert inst.status is InstanceStatus.STOPPED
 
 
 async def test_adoption_failure_does_not_abort_the_poll(runner_config, monkeypatch):

@@ -3093,6 +3093,7 @@ class SessionRunner:
                 for key, pairs in (("row", row_pairs), ("ours", ours))
             }
         )
+        discovered = self._discovered()
         for iid, saved in rows.items():
             inst = self._instances.get(iid)
             if inst is None:
@@ -3106,17 +3107,87 @@ class SessionRunner:
                 if saved.get("intentional_stop") and not inst.intentional_stop:
                     inst.intentional_stop = True
             elif pair is not None and live["row"].get(iid) and not live["ours"].get(iid):
-                # DIFFERENT generation, and the row's process is live while ours is dead:
-                # another process resumed this instance. Take its pids, or our next
-                # `_persist` overlays the stale ones back over the row and the bridge reads
-                # dead to every reader — the #1088 symptom, via the columns added to fix it.
-                inst.bridge_pid, inst.bridge_proc_start = pair
-                inst.keeper_pid = _row_int(saved.get("keeper_pid"))
-                inst.intentional_stop = bool(saved.get("intentional_stop"))
-                inst.status = InstanceStatus.RUNNING
-        await self._reattach_rows_with_pids(
-            self._discovered(), live_only=True, liveness=live["row"]
-        )
+                await self._resync_pids_from_row(iid, inst, saved, pair, ours.get(iid), discovered)
+        await self._reattach_rows_with_pids(discovered, live_only=True, liveness=live["row"])
+
+    async def _resync_pids_from_row(
+        self,
+        iid: str,
+        inst: RemoteControlInstance,
+        saved: dict,
+        pair: tuple[int, float | None],
+        ours_pair: tuple[int | None, float | None] | None,
+        discovered: dict[str, Project],
+    ) -> None:
+        """Take over the pids another process resumed this instance with (#1088).
+
+        The row's process is live while the one we recorded is dead, so another process
+        resumed this instance. Adopt its pids, or our next ``_persist`` overlays the stale
+        ones back over the row and the bridge reads dead to every reader — the #1088
+        symptom, via the very columns added to fix it.
+
+        **Under the project's spawn lock**, because this is the only ``bridge_pid`` mutator
+        on the lock-free poll path and it races the two operations that own that field:
+
+        * ``resume()``/``_spawn_locked`` registers a new instance under the same id and
+          publishes its pid *after* a ``to_thread(self._popen)``. Landing inside that window
+          overwrites a live, freshly-spawned pid with the row's — orphaning a bridge nothing
+          can stop, which runs until reboot.
+        * ``stop()`` reads the pid, signals in a thread, then sets STOPPED without clearing
+          ``bridge_pid``. Interleaving leaves another process's LIVE bridge persisted as
+          ``bridge_pid=<live>`` + ``intentional_stop=True``, and ``_reconcile_status`` only
+          ever demotes — so it reads STOPPED to every reader, permanently.
+
+        A held lock means one of those is in flight: skip the row and retry next tick, which
+        is always safe (the row is not going anywhere). ``ours_pair`` is re-checked against
+        the live object so a generation that changed during the liveness probe is never
+        clobbered — and an instance whose pid was unknown at snapshot time (``ours_pair is
+        None``: precisely the mid-``_popen`` window) is skipped rather than overwritten.
+
+        Connect facts are recomputed rather than carried over: the previous generation's
+        ``url``/``environment_id`` point at a dead environment, and publishing them as
+        RUNNING offers the operator a link that can never work. Same readiness rule as
+        :meth:`_reattach_rows_with_pids` — no connect evidence means STARTING, not RUNNING.
+        """
+        lock = self._spawn_lock_for(inst.project)
+        if lock.locked():
+            return  # a spawn/resume/stop owns this project right now; next tick is fine
+        async with lock:
+            # `locked()` -> `async with` cannot interleave: an uncontended asyncio.Lock
+            # acquires without suspending, so nothing runs between the check and the hold.
+            current = self._instances.get(iid)
+            if current is None or current is not inst or iid not in self._persisted:
+                return  # replaced by a lock holder, or forgotten — don't resurrect either
+            if (current.bridge_pid, current.bridge_proc_start) != ours_pair:
+                return  # its generation moved under us since the liveness probe
+            pid, proc_start = pair
+            proj = discovered.get(current.project)
+            if proj is None:
+                return  # project vanished from discovery; nothing to attribute it to
+            keeper_pid = (
+                await asyncio.to_thread(self._recover_keeper_pid, current.project, pid, proc_start)
+                if current.resume_mode == "pty"
+                else None
+            )
+            connect = await asyncio.to_thread(
+                self._connect_facts_for, proj, current.resume_mode, pid, proc_start
+            )
+            log_path = await asyncio.to_thread(self._latest_debug_log_for, current.project)
+            # Re-check across those thread hops: we hold the spawn lock, but `forget()` and
+            # the registry are not gated by it.
+            if self._instances.get(iid) is not current or iid not in self._persisted:
+                return
+            current.bridge_pid, current.bridge_proc_start = pair
+            current.keeper_pid = keeper_pid
+            current.intentional_stop = bool(saved.get("intentional_stop"))
+            current.url = connect.get("url")
+            current.environment_id = connect.get("environment_id")
+            current.starter_session_id = connect.get("starter_session_id")
+            current.bridge_debug_log_path = log_path
+            current.bridge_raw_log_path = (
+                self._raw_log_path_for(log_path) if log_path is not None else None
+            )
+            current.status = InstanceStatus.RUNNING if connect else InstanceStatus.STARTING
 
     async def _reattach_rows_with_pids(
         self,
