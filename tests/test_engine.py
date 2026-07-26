@@ -26,6 +26,7 @@ class _FakePersistence:
 
 
 class _FakeRunner:
+    candidates: list[str] = []
     """Minimal SessionRunner stand-in — no DB, just the methods the facade calls."""
 
     def __init__(
@@ -48,7 +49,12 @@ class _FakeRunner:
         return list(self._instances.values())
 
     def resolve_bridge_id(self, identity: str) -> str | None:
+        # Exact-match only, on purpose: the engine is a passthrough, and the real
+        # prefix/ambiguity logic is pinned against the real resolver in test_runner.py.
         return identity if identity in self._instances else None
+
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        return list(self.candidates)
 
     def get_instance(self, instance_id: str) -> RemoteControlInstance | None:
         return self._instances.get(instance_id)
@@ -81,6 +87,20 @@ def _engine(tmp_path: Path, projects_root: Path, runner: _FakeRunner) -> Clauste
         {"projects_root": str(projects_root), "state_dir": str(tmp_path / "state")}
     )
     return ClausterEngine(cfg, runner=runner)  # type: ignore[arg-type]
+
+
+def test_bridge_id_candidates_passes_through_to_the_runner(tmp_path, projects_root):
+    # #1099: every engine resolve returns None for an ambiguous prefix exactly as it does
+    # for an unknown one, so this is the only way a CLI/MCP caller can tell the two apart
+    # and name the ids to retry with instead of printing a bare "not found".
+    runner = _FakeRunner(claude_json=tmp_path / "claude.json")
+    engine = _engine(tmp_path, projects_root, runner)
+    assert engine.bridge_id_candidates("nope") == []
+    runner.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    try:
+        assert engine.bridge_id_candidates("f2c456fd") == ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    finally:
+        runner.candidates = []
 
 
 # -- list_projects: discovery + the bypass stamp -------------------------------
