@@ -393,3 +393,204 @@ async def test_poll_adoption_skips_when_the_store_read_fails(runner_config, monk
     await runner.poll_once()
 
     assert runner.get_instance("iid-a") is None, "a failed store read must not adopt anything"
+
+
+# ----- regressions found by dogfooding the fix (not by the tests above) ------
+
+
+async def test_reattached_standard_bridge_keeps_its_connect_link(runner_config, monkeypatch):
+    # Found on a live instance: the dashboard sat on "Preparing connect link…" forever for
+    # every reattached/adopted bridge. The row carries identity and liveness but NOT the
+    # connect facts — those are written by the bridge into the Anthropic pointer — so a
+    # reattach that reads only the row produces a managed bridge nobody can connect to,
+    # which defeats the point of having it.
+    from clauster import pointers
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-a": _row("alpha", pid=7701, proc_start=None, resume_mode="standard")}
+    )
+    ptr = pointers.BridgePointer(
+        pid=7701,
+        proc_start="123",
+        source="test",
+        environment_id="env_ABC",
+        session_id="session_XYZ",
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.environment_id == "env_ABC"
+    assert inst.url == "https://claude.ai/code?environment=env_ABC"
+    assert inst.starter_session_id == "session_XYZ"
+
+
+async def test_connect_facts_are_not_borrowed_from_another_bridge(runner_config, monkeypatch):
+    # The pointer lives at the PROJECT path, so it may have been written by a different
+    # bridge than the row being reattached. Matching on pid stops one instance inheriting
+    # another's environment — which would deep-link the operator into the wrong session.
+    from clauster import pointers
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-a": _row("alpha", pid=7801, proc_start=None, resume_mode="standard")}
+    )
+    other = pointers.BridgePointer(
+        pid=9999,
+        proc_start="123",
+        source="test",
+        environment_id="env_SOMEONE_ELSE",
+        session_id="s",
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: other)
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.environment_id is None, "a pointer for a different pid must not be adopted"
+    assert inst.url is None
+
+
+async def test_a_stop_by_another_process_is_not_reported_as_a_crash(runner_config, monkeypatch):
+    # Found on a live instance: stop a CLI-started bridge from the CLI and the dashboard
+    # showed "Crashed — the bridge exited unexpectedly". `stop()` records the intent in the
+    # ROW, but the server's adopted copy still said intentional_stop=False, so when the
+    # process exited `_reconcile_status` had no intent to go on. Exactly the cross-process
+    # divergence this change exists to remove.
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+
+    store.save({"iid-a": _row("alpha", pid=7901)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    await runner.poll_once()
+    adopted = runner.get_instance("iid-a")
+    assert adopted is not None and adopted.status is InstanceStatus.RUNNING
+
+    # Another process stops it: the row records the intent, then the process exits.
+    store.save({"iid-a": _row("alpha", pid=7901, intentional_stop=True)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.status is InstanceStatus.STOPPED, (
+        "a deliberate stop from another process must not be reported as a crash"
+    )
+
+
+async def test_reattached_pty_bridge_keeps_its_connect_link(runner_config, monkeypatch):
+    # The pty half of the same regression: a flag-form bridge writes no Anthropic pointer,
+    # so its connect URL lives in the keeper sidecar. Matched on bridge pid so one interactive
+    # session cannot inherit another's link — several share one project's log directory.
+    import json
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8801)})
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-333.keeper.json").write_text(
+        json.dumps({"bridge_pid": 9999, "connect_url": "https://claude.ai/code/OTHER"})
+    )
+    (runner._log_dir / "alpha-222.keeper.json").write_text(
+        json.dumps(
+            {
+                "bridge_pid": 8801,
+                "connect_url": "https://claude.ai/code/MINE",
+                "session_id": "session_MINE",
+            }
+        )
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.url == "https://claude.ai/code/MINE", "must match on pid, not just newest"
+    assert inst.starter_session_id == "session_MINE"
+
+
+async def test_reattached_pty_bridge_with_no_sidecar_has_no_link(runner_config, monkeypatch):
+    # No sidecar match -> no facts. Showing the honest "preparing connect link" state beats
+    # inventing a link that deep-links the operator somewhere wrong.
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8901)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None and inst.url is None
+
+
+async def test_connect_facts_reject_a_pointer_whose_start_time_differs(runner_config, monkeypatch):
+    # Same pid, different start time: the pid was recycled, so the pointer belongs to some
+    # other process and its environment must not be handed to this row.
+    from clauster import pointers
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save(
+        {"iid-a": _row("alpha", pid=8701, proc_start=999.0, resume_mode="standard")}
+    )
+    ptr = pointers.BridgePointer(
+        pid=8701,
+        proc_start="123",  # -> a different epoch than 999.0
+        source="test",
+        environment_id="env_STALE",
+        session_id="s",
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda *a, **k: ptr)
+    monkeypatch.setattr("clauster.runner.procutil._expected_epoch", lambda _s: 111.0)
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.environment_id is None, "a recycled pid must not inherit the old environment"
+
+
+async def test_pty_sidecar_without_a_session_id_still_yields_the_url(runner_config, monkeypatch):
+    # The sidecar is raw JSON written by the keeper, so unlike the pointer its fields really
+    # can be absent — a bridge that is up but has not yet minted a session has a connect URL
+    # and no session id. Take what is there rather than discarding both.
+    import json
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8601)})
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-444.keeper.json").write_text(
+        json.dumps({"bridge_pid": 8601, "connect_url": "https://claude.ai/code/NOSESSION"})
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.url == "https://claude.ai/code/NOSESSION"
+    assert inst.starter_session_id is None
+
+
+async def test_pty_sidecar_without_a_url_still_yields_the_session(runner_config, monkeypatch):
+    # The mirror case: a keeper that recorded its session before the connect URL resolved.
+    import json
+
+    runner = _make_runner(runner_config)
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=8501)})
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-555.keeper.json").write_text(
+        json.dumps({"bridge_pid": 8501, "session_id": "session_ONLY"})
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda *a, **k: True)
+    await runner.rediscover(persist=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.url is None
+    assert inst.starter_session_id == "session_ONLY"

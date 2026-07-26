@@ -3063,6 +3063,17 @@ class SessionRunner:
         """
         if not await self._refresh_persisted():
             return  # store read failed; keep the old base rather than acting on nothing
+        # Honour a stop another process performed. `stop()` records the intent in the row,
+        # but our in-memory copy of an ADOPTED instance still says False — so when the
+        # process then exits, `_reconcile_status` sees alive->dead with no intent and reports
+        # CRASHED ("the bridge exited unexpectedly"). The operator stopped it deliberately
+        # from the CLI; calling that a crash is exactly the cross-process divergence this
+        # change exists to remove. One-directional on purpose: a local stop we just performed
+        # must not be un-set by a row that hasn't been written yet.
+        for iid, saved in self._persisted.items():
+            inst = self._instances.get(iid)
+            if inst is not None and saved.get("intentional_stop") and not inst.intentional_stop:
+                inst.intentional_stop = True
         await self._reattach_rows_with_pids(self._discovered(), live_only=True)
 
     async def _reattach_rows_with_pids(
@@ -3115,6 +3126,13 @@ class SessionRunner:
             ):
                 keeper_pid = None
             log_path = await asyncio.to_thread(self._latest_debug_log_for, proj.name)
+            # The row carries identity and liveness but NOT the connect facts — those live in
+            # the Anthropic pointer (standard) or the keeper sidecar (pty). Without this the
+            # dashboard sits on "Preparing connect link…" forever for every reattached or
+            # adopted bridge, which is the whole point of having the bridge.
+            connect = await asyncio.to_thread(
+                self._connect_facts_for, proj, resume_mode, pid, proc_start
+            )
             self._instances[iid] = RemoteControlInstance(
                 instance_id=iid,
                 project=proj.name,
@@ -3132,8 +3150,51 @@ class SessionRunner:
                 bridge_raw_log_path=(
                     self._raw_log_path_for(log_path) if log_path is not None else None
                 ),
+                **connect,
             )
         return claimed
+
+    def _connect_facts_for(
+        self, proj: Project, resume_mode: ResumeMode, pid: int, proc_start: float | None
+    ) -> dict:
+        """Recover a reattached bridge's connect URL / env id / starter session (#1088).
+
+        The persisted row carries identity and liveness, deliberately — but not the facts a
+        human needs to actually *use* the bridge. Those are written by the bridge itself:
+
+        * **standard** — the Anthropic ``bridge-pointer.json`` (environment id + session id);
+        * **pty** — the keeper sidecar, which records the connect URL directly.
+
+        Both are matched against THIS instance's pid before being believed, so a pointer left
+        by a different bridge at the same project path can't lend its environment to somebody
+        else's row. Returns ``{}`` when nothing matches — the dashboard then shows the
+        "preparing connect link" state, which is honest, rather than a wrong link.
+        """
+        if resume_mode == "pty":
+            for sidecar in sorted(self._log_dir.glob(f"{proj.name}-*.keeper.json"), reverse=True):
+                info = self._read_sidecar(sidecar)
+                if not info or info.get("bridge_pid") != pid:
+                    continue
+                facts = {}
+                if info.get("connect_url"):
+                    facts["url"] = info["connect_url"]
+                if info.get("session_id"):
+                    facts["starter_session_id"] = info["session_id"]
+                return facts
+            return {}
+        ptr = pointers.pointer_for_project(proj.path)
+        if ptr is None or ptr.pid != pid:
+            return {}
+        # Same pid AND same start time, or a recycled pid could hand over its environment.
+        if proc_start is not None and procutil._expected_epoch(ptr.proc_start) != proc_start:
+            return {}
+        # No presence guards: `BridgePointer` declares both as required `str`, so a parsed
+        # pointer always carries them — a guard here would be unreachable, not defensive.
+        return {
+            "environment_id": ptr.environment_id,
+            "url": f"https://claude.ai/code?environment={ptr.environment_id}",
+            "starter_session_id": ptr.session_id,
+        }
 
     def _stopped_from_row(self, instance_id: str, saved: dict) -> RemoteControlInstance:
         """Rebuild ONE persisted row as a STOPPED, resumable card (#1088).
