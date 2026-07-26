@@ -2376,19 +2376,29 @@ class SessionRunner:
         The keeper self-exits once its bridge is gone, so this is usually just a
         reap; the force path covers a keeper that somehow outlives its bridge.
         """
+        # Identity, snapshotted BEFORE the grace: `is_keeper_process` alone answers "is this
+        # pid *a* keeper", never "is it *THIS* keeper", and on a host that spawns keepers
+        # continuously those differ.
+        expected_start = procutil.proc_create_time(pid)
         for _ in range(8):  # ~2s grace for the keeper to follow its bridge out
             procutil.reap_if_exited(pid)
             if procutil.proc_create_time(pid) is None:
                 return  # pragma: skip-on-win
             time.sleep(0.25)
-        # Re-verify by cmdline before force-killing a TREE. This pid used to be reachable
-        # only as this process's own child, so the check was redundant; since #1088 a
-        # keeper pid can arrive from a row another process wrote, and by the time the grace
-        # expires the original keeper may be gone and its pid recycled. Killing the tree of
-        # whatever now holds that pid would take down an unrelated process. Same discipline
-        # as `procutil.kill_if_match`.
-        if not procutil.is_keeper_process(pid):
-            _log.warning("keeper pid %s is no longer a keeper — not force-killing", pid)
+        # Re-verify before force-killing a TREE. This pid used to be reachable only as this
+        # process's own child, so the check was redundant; since #1088 a keeper pid can
+        # arrive from a row ANOTHER process wrote at an unknown time, and by the time the
+        # grace expires the original keeper may be gone and its pid recycled. Killing the
+        # tree of whatever now holds it would take down an unrelated process — including,
+        # if the recycled holder is itself a keeper, that keeper's live bridge.
+        #
+        # The create-time pair is what makes this "the same discipline as
+        # `procutil.kill_if_match`" true rather than merely claimed: that helper gates on
+        # live + cmdline + an exact create-time match, and a cmdline check alone passes for
+        # any keeper at all. Both values come from `proc_create_time`, so an exact compare
+        # is right here (no cross-derivation rounding, unlike the pointer's `procStart`).
+        if not procutil.is_keeper_process(pid) or procutil.proc_create_time(pid) != expected_start:
+            _log.warning("keeper pid %s is no longer that keeper — not force-killing", pid)
             return
         procutil.force_kill_tree(pid)
         procutil.reap_if_exited(pid)

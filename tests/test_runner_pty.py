@@ -1258,6 +1258,36 @@ def test_cleanup_keeper_refuses_to_force_kill_a_recycled_pid(runner_config, monk
     assert forced == [], "a recycled pid's process tree must never be force-killed"
 
 
+def test_cleanup_keeper_refuses_a_pid_recycled_onto_a_different_keeper(
+    runner_config, monkeypatch
+) -> None:
+    """The gap a cmdline-only gate leaves open (#1088).
+
+    `is_keeper_process` answers "is this pid *a* keeper", not "is it *THIS* keeper". On a
+    host that spawns keepers continuously the recycled holder can itself be a keeper, so the
+    gate passes and `force_kill_tree` takes down that keeper **and its live bridge**. Only
+    an identity check — the create-time pair, as `procutil.kill_if_match` uses — separates
+    them. The sibling test above covers the easy half (recycled onto a NON-keeper).
+    """
+    runner, _ = _pty_runner(runner_config)
+    state = {"start": 1.0, "sleeps": 0}
+
+    def _sleep(_s) -> None:
+        state["sleeps"] += 1
+        if state["sleeps"] == 8:  # grace expires; the pid now belongs to another keeper
+            state["start"] = 2.0
+
+    monkeypatch.setattr("clauster.runner.time.sleep", _sleep)
+    monkeypatch.setattr(procutil, "reap_if_exited", lambda pid: None)
+    monkeypatch.setattr(procutil, "proc_create_time", lambda pid: state["start"])
+    monkeypatch.setattr(procutil, "is_keeper_process", lambda pid: True)  # a keeper — not ours
+    forced: list[int] = []
+    monkeypatch.setattr(procutil, "force_kill_tree", lambda pid: forced.append(pid))
+
+    runner._cleanup_keeper(777)
+    assert forced == [], "force-killed a DIFFERENT keeper's tree, taking its live bridge down"
+
+
 def test_backfill_starter_session_from_debug_file_on_resume(runner_config, tmp_path) -> None:
     # pty true-resume: no pointer and the keeper captured no connect URL — recover the
     # session the bridge resumed from its --debug-file so the "Open session" deep link
