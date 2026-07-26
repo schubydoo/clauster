@@ -3497,13 +3497,21 @@ class SessionRunner:
                 # sidecar so a live keeper is re-managed (Stop/observe restored)
                 # rather than leaking behind a STOPPED card; fall through to the
                 # STOPPED resurrection when no live keeper remains.
-                # `unclaimed_only`: the row pass may already hold cards for several of this
-                # project's rows, and this leg ADOPTS the id it is handed. Taking a claimed
-                # one would write the live keeper's fields over another session's record
-                # (#1088 SF-4). None here means "all taken" -> mint a fresh id.
-                persisted_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
-                persisted_saved = persisted_hit[1] if persisted_hit is not None else {}
-                persisted_iid = persisted_hit[0] if persisted_hit is not None else None
+                # TWO lookups on purpose, because `saved` and the id answer different
+                # questions: `saved` supplies only the modes and label (this leg is gated
+                # on `resume_mode == "pty"`), while the id is ADOPTED. Resolving both from
+                # one `unclaimed_only=True` call disabled the leg outright — the row pass
+                # has already carded every row of this project, so it returned None,
+                # `saved` was empty, and `_reattach_pty_from_sidecar` bailed on its first
+                # line for precisely the dead-row-plus-live-keeper case MF-1 exists to fix.
+                # So: modes from ANY row of the project, id only from an UNCLAIMED one, so
+                # the live keeper is never written over another session's record (SF-4).
+                # None -> mint a fresh id, one extra card, the same trade the pointer leg
+                # below already makes for an ambiguous project (#1088).
+                modes_hit = self._persisted_for_project(proj.name)
+                persisted_saved = modes_hit[1] if modes_hit is not None else {}
+                unclaimed_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
+                persisted_iid = unclaimed_hit[0] if unclaimed_hit is not None else None
                 reattached = await asyncio.to_thread(
                     self._reattach_pty_from_sidecar,
                     proj.name,

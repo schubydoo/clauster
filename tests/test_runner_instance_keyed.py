@@ -197,24 +197,45 @@ async def test_stopped_row_does_not_hide_a_live_detached_keeper(runner_config, m
     # leg is what re-manages a detached keeper that outlived the restart. Blocked by the same
     # guard, it never ran, so a LIVE keeper leaked behind a STOPPED card — and the new prune
     # then deleted that card, leaving the operator with no handle on a running bridge.
+    #
+    # Drives the REAL `_reattach_pty_from_sidecar`. This test used to stub that method and
+    # assert only that it was CALLED, which is why it stayed green through the regression
+    # it was written to prevent: resolving `saved` with `unclaimed_only=True` handed the
+    # real method an empty dict, and it bailed on its own first line. A stub that ignores
+    # the arguments cannot see a bug that lives in them.
+    import json
+
     runner = _make_runner(runner_config)
     _stub_connect(monkeypatch)
+    # The row's OWN bridge is dead -> the row pass cards it STOPPED and claims that id.
     runner.persistence.state_store().save({"iid-dead-pty": _row("alpha", pid=5003)})
-    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
-    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
-
-    sidecar_calls: list = []
-    monkeypatch.setattr(
-        SessionRunner,
-        "_reattach_pty_from_sidecar",
-        lambda self, name, saved, iid: sidecar_calls.append(name),
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 5555,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 222.0,
+                "state": "ready",
+                "connect_url": "https://claude.ai/code/KEEPER",
+            }
+        )
     )
+    # Live: the keeper and the bridge IT holds. The row's own pid stays dead.
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None: pid == 4242
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 5555)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
 
     await runner.rediscover(persist=False)
 
-    # Other fixture projects are walked too; `alpha` is the one with the STOPPED card, and
-    # pre-fix it was the only one MISSING from this list.
-    assert "alpha" in sidecar_calls, "the keeper-sidecar leg never ran: a live keeper leaks"
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert len(live) == 1, "the live detached keeper leaked: unmanaged, no Stop, no observe"
+    assert (live[0].keeper_pid, live[0].bridge_pid) == (5555, 4242)
+    assert live[0].url == "https://claude.ai/code/KEEPER", "the sidecar's connect link is lost"
+    # SF-4 still holds: the walk adopts a fresh id rather than the one the row pass carded.
+    assert live[0].instance_id != "iid-dead-pty"
 
 
 async def test_rediscover_rejects_a_recycled_pid(runner_config, monkeypatch):
