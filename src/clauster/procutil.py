@@ -76,12 +76,22 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
 
 
 def is_bridge_cmdline(cmdline: list[str]) -> bool:
-    """Whether a process command line is a ``claude … remote-control`` bridge."""
+    """Whether a process command line is a ``claude … remote-control`` bridge.
+
+    Matches all three spellings a bridge can be launched with: the ``remote-control``
+    subcommand (standard), the ``--remote-control`` flag, and its ``--rc`` alias. The
+    alias needs its own arm — the substring test below only sees the literal
+    ``remote-control``, so a ``--rc``-spawned bridge read as "not a bridge" even though
+    Clauster spawns exactly that form itself (``supervisor.py``, ``--rc <name>``).
+    Use :func:`is_standard_bridge_cmdline` when the subcommand form must be told apart.
+    """
     if not cmdline:
         return False
     joined = " ".join(cmdline)
     if _BRIDGE_BINARY_HINT not in joined:
         return False
+    if any(tok == "--rc" or tok.startswith("--rc=") for tok in cmdline):
+        return True
     return all(tok in cmdline or tok in joined for tok in _BRIDGE_CMDLINE)
 
 

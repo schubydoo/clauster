@@ -587,6 +587,49 @@ def test_is_keeper_process_zombie_is_false(monkeypatch):
     assert procutil.is_keeper_process(1234) is True
 
 
+def test_is_bridge_process_zombie_is_false(monkeypatch):
+    # The bridge twin of the check above, and previously pinned by nothing: deleting the
+    # zombie arm left the whole suite green. The phantom-prune asks "is this EXTERNAL
+    # session really a live bridge?" before deleting a resumable card — a zombie answering
+    # yes would keep a card alive against a process that is already gone.
+    bridge_argv = ("claude", "remote-control", "--name", "alpha")
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(status=psutil.STATUS_ZOMBIE, cmdline=bridge_argv),
+    )
+    assert procutil.is_bridge_process(1234) is False
+    # Differential control: same cmdline, RUNNING -> True, so it is the status that decided.
+    monkeypatch.setattr(
+        procutil.psutil,
+        "Process",
+        _fake_proc(status=psutil.STATUS_RUNNING, cmdline=bridge_argv),
+    )
+    assert procutil.is_bridge_process(1234) is True
+
+
+def test_is_bridge_cmdline_matches_the_rc_alias():
+    # `--rc` is a real spelling — Clauster's own supervisor spawns bridges with it — but the
+    # substring test only ever sees the literal "remote-control", so the alias read as "not a
+    # bridge". That made the #1096 phantom-prune's "is it actually a bridge?" gate answer no
+    # for a genuine bridge.
+    assert procutil.is_bridge_cmdline(["claude", "--rc", "alpha"]) is True
+    assert procutil.is_bridge_cmdline(["claude", "--rc=alpha"]) is True
+    # The long flag form and the subcommand form were already matched; keep them pinned.
+    assert procutil.is_bridge_cmdline(["claude", "--remote-control", "alpha"]) is True
+    assert procutil.is_bridge_cmdline(["claude", "remote-control", "--name", "alpha"]) is True
+    # Still requires the binary hint, so an unrelated `--rc` (e.g. an rc-file flag) is not one.
+    assert procutil.is_bridge_cmdline(["someothertool", "--rc", "alpha"]) is False
+
+
+def test_rc_alias_is_not_adoptable_as_a_standard_bridge():
+    # Widening is_bridge_cmdline must NOT widen the adoption gate: the flag form is a pty
+    # bridge (terminal-coupled stop, no recoverable keeper) and stays non-adoptable.
+    for argv in (["claude", "--rc", "alpha"], ["claude", "--rc=alpha"]):
+        assert procutil.is_bridge_cmdline(argv) is True
+        assert procutil.is_standard_bridge_cmdline(argv) is False
+
+
 def test_reap_if_exited_without_wnohang_is_noop(monkeypatch):
     # procutil.py 323-324: the Windows arm — no os.WNOHANG means no zombies to reap,
     # so the function returns before ever calling waitpid.
