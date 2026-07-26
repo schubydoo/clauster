@@ -312,14 +312,16 @@ def test_read_log_lines_emits_complete_lines_and_holds_only_the_partial(tmp_path
     # The withholding must not cost the lines that ARE complete in the same read, and the
     # rewound offset must resume exactly at the partial rather than re-emitting a line.
     log = tmp_path / "bridge.log"
-    log.write_text("first\nsecond\npart", encoding="utf-8")
+    # write_bytes, not write_text: this asserts a BYTE offset, and text mode translates
+    # "\n"->"\r\n" on Windows, which would make the expected offset platform-dependent.
+    log.write_bytes(b"first\nsecond\npart")
 
     offset, lines = ClausterEngine.read_log_lines(log, 0)
     assert lines == ["first", "second"]
     assert offset == len(b"first\nsecond\n")
 
-    with log.open("a", encoding="utf-8") as fh:
-        fh.write("ial\n")
+    with log.open("ab") as fh:
+        fh.write(b"ial\n")
     offset, lines = ClausterEngine.read_log_lines(log, offset)
     assert lines == ["partial"], "the held fragment must rejoin its remainder, not duplicate"
     assert offset == log.stat().st_size
@@ -329,14 +331,16 @@ def test_read_log_lines_holds_a_multibyte_partial_by_bytes_not_characters(tmp_pa
     # The offset is a BYTE offset; rewinding by len(str) would desync on any non-ASCII
     # log line and corrupt every subsequent read.
     log = tmp_path / "bridge.log"
-    log.write_text("done\nté", encoding="utf-8")  # 'é' is 2 bytes, 1 character
+    # write_bytes, not write_text: the assertion below is a BYTE count, and text mode
+    # translates "\n"->"\r\n" on Windows, making it platform-dependent.
+    log.write_bytes("done\nté".encode())  # 'é' is 2 bytes, 1 character
 
     offset, lines = ClausterEngine.read_log_lines(log, 0)
     assert lines == ["done"]
     assert offset == len(b"done\n")
 
-    with log.open("a", encoding="utf-8") as fh:
-        fh.write("st\n")
+    with log.open("ab") as fh:
+        fh.write(b"st\n")
     offset, lines = ClausterEngine.read_log_lines(log, offset)
     assert lines == ["tést"]
     assert offset == log.stat().st_size
