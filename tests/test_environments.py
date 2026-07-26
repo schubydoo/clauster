@@ -149,18 +149,91 @@ def test_find_ghosts_classification():
         _env("env_nodir", "bridge", None),  # unattributable -> skip
         _env("env_other", "other", "/dead"),  # not a bridge -> skip
     ]
-    ghosts = find_ghosts(envs, {"/live"})
+    # Root "/" contains every path here, isolating the type/liveness logic from the
+    # containment gate (which the projects_root tests below cover on its own).
+    ghosts = find_ghosts(envs, {"/live"}, projects_root=Path("/"))
     assert [g.id for g in ghosts] == ["env_dead"]
 
 
 def test_find_ghosts_never_reaps_cloud_even_if_dir_dead():
     envs = [_env("env_default", "cloud", "/gone")]
-    assert find_ghosts(envs, set()) == []
+    assert find_ghosts(envs, set(), projects_root=Path("/")) == []
 
 
 def test_find_ghosts_empty_live_set_reaps_all_bridges():
     envs = [_env("env_a", "bridge", "/a"), _env("env_b", "bridge", "/b")]
-    assert {g.id for g in find_ghosts(envs, set())} == {"env_a", "env_b"}
+    assert {g.id for g in find_ghosts(envs, set(), projects_root=Path("/"))} == {"env_a", "env_b"}
+
+
+# ----- find_ghosts containment gate (#1100) ----------------------------
+
+
+def test_find_ghosts_skips_bridge_outside_projects_root(tmp_path):
+    # THE #1100 REGRESSION. A second instance (its own projects_root) reaping while a
+    # bridge from ANOTHER instance/OS user is live: that bridge is absent from the live
+    # set because `claude agents --json` only sees its own user's sessions, so without
+    # the containment gate it classified as a ghost and got archived out from under a
+    # running session. Only the env inside THIS root may be reaped.
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    (mine / "dead").mkdir(parents=True)
+    (theirs / "live-elsewhere").mkdir(parents=True)
+    envs = [
+        _env("env_mine_dead", "bridge", str(mine / "dead")),
+        _env("env_theirs_live", "bridge", str(theirs / "live-elsewhere")),
+    ]
+    ghosts = find_ghosts(envs, set(), projects_root=mine)
+    assert [g.id for g in ghosts] == ["env_mine_dead"]
+
+
+def test_find_ghosts_sibling_prefix_root_is_not_contained(tmp_path):
+    # Pins the containment line itself. A naive `startswith` refactor passes every other
+    # test in this file but reads `/data/projects-old` as inside `/data/projects` — which
+    # is #1100 again between two instances whose roots merely share a prefix.
+    mine, sibling = tmp_path / "projects", tmp_path / "projects-old"
+    (mine / "a").mkdir(parents=True)
+    (sibling / "b").mkdir(parents=True)
+    envs = [
+        _env("env_mine", "bridge", str(mine / "a")),
+        _env("env_sibling", "bridge", str(sibling / "b")),
+    ]
+    assert [g.id for g in find_ghosts(envs, set(), projects_root=mine)] == ["env_mine"]
+
+
+def test_find_ghosts_treats_projects_root_itself_as_contained(tmp_path):
+    # A bridge whose cwd IS the root (not a child) is still ours to attribute.
+    envs = [_env("env_at_root", "bridge", str(tmp_path))]
+    assert [g.id for g in find_ghosts(envs, set(), projects_root=tmp_path)] == ["env_at_root"]
+
+
+def test_find_ghosts_containment_survives_symlinked_root(tmp_path):
+    # The gate compares RESOLVED paths, so reaching the same tree through a symlink
+    # must not read as "outside my root" and silently disable reaping.
+    real = tmp_path / "real"
+    (real / "proj").mkdir(parents=True)
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged Windows
+        pytest.skip("symlinks unavailable on this platform/account")
+    envs = [_env("env_via_link", "bridge", str(link / "proj"))]
+    assert [g.id for g in find_ghosts(envs, set(), projects_root=real)] == ["env_via_link"]
+
+
+def test_find_ghosts_without_projects_root_reaps_nothing_and_says_so(caplog):
+    # Fail closed when there is no scope to attribute against — and LOG it, because a
+    # silent empty ghost list is indistinguishable from "nothing to clean up".
+    envs = [_env("env_a", "bridge", "/a"), _env("env_cloud", "cloud", "/b")]
+    with caplog.at_level("WARNING", logger="clauster.environments"):
+        assert find_ghosts(envs, set(), projects_root=None) == []
+    assert "projects_root" in caplog.text
+    assert "1 bridge environment(s)" in caplog.text  # the cloud env is not counted
+
+
+def test_find_ghosts_without_projects_root_stays_quiet_when_nothing_was_at_risk(caplog):
+    # No bridge envs => nothing was skipped => no warning worth emitting.
+    with caplog.at_level("WARNING", logger="clauster.environments"):
+        assert find_ghosts([_env("env_cloud", "cloud", "/b")], set(), projects_root=None) == []
+    assert caplog.text == ""
 
 
 # ----- client (mock transport) -----------------------------------------
@@ -337,7 +410,13 @@ def _patch_creds(monkeypatch):
     monkeypatch.setattr(environments, "load_credentials", lambda **k: Credentials("t", "o"))
 
 
-def test_cli_reap_dry_run(write_config, tmp_path, monkeypatch, capsys):
+def _dead_env(projects_root, id_="env_dead"):
+    # Must live INSIDE the config's projects_root: since #1100 the reaper only
+    # attributes environments in its own tree, so a "/dead" outside it is skipped.
+    return _env(id_, "bridge", str(projects_root / "dead"))
+
+
+def test_cli_reap_dry_run(write_config, tmp_path, projects_root, monkeypatch, capsys):
     _patch_creds(monkeypatch)
 
     class FakeClient:
@@ -345,7 +424,7 @@ def test_cli_reap_dry_run(write_config, tmp_path, monkeypatch, capsys):
             pass
 
         def list_environments(self):
-            return [_env("env_dead", "bridge", "/dead")]
+            return [_dead_env(projects_root)]
 
         def archive_environment(self, i):
             raise AssertionError("dry-run must not archive")
@@ -361,7 +440,7 @@ def test_cli_reap_dry_run(write_config, tmp_path, monkeypatch, capsys):
     assert "dry-run" in err and "env_dead" in err
 
 
-def test_cli_reap_archive(write_config, tmp_path, monkeypatch):
+def test_cli_reap_archive(write_config, tmp_path, projects_root, monkeypatch):
     _patch_creds(monkeypatch)
     archived = []
 
@@ -370,7 +449,7 @@ def test_cli_reap_archive(write_config, tmp_path, monkeypatch):
             pass
 
         def list_environments(self):
-            return [_env("env_dead", "bridge", "/dead"), _env("env_default", "cloud")]
+            return [_dead_env(projects_root), _env("env_default", "cloud")]
 
         def archive_environment(self, i):
             archived.append(i)
@@ -382,7 +461,7 @@ def test_cli_reap_archive(write_config, tmp_path, monkeypatch):
     assert archived == ["env_dead"]  # cloud env never touched
 
 
-def test_cli_reap_aborts_when_live_probe_fails(write_config, tmp_path, monkeypatch):
+def test_cli_reap_aborts_when_live_probe_fails(write_config, tmp_path, projects_root, monkeypatch):
     _patch_creds(monkeypatch)
 
     class FakeClient:
@@ -390,7 +469,7 @@ def test_cli_reap_aborts_when_live_probe_fails(write_config, tmp_path, monkeypat
             pass
 
         def list_environments(self):
-            return [_env("env_dead", "bridge", "/dead")]
+            return [_dead_env(projects_root)]
 
         def archive_environment(self, i):
             raise AssertionError("must not reap when live set unknown")
@@ -415,7 +494,7 @@ def test_cli_reap_bad_credentials_exit_2(write_config, tmp_path, monkeypatch):
     assert rc == 2
 
 
-def test_cli_reap_force_delete(write_config, tmp_path, monkeypatch):
+def test_cli_reap_force_delete(write_config, tmp_path, projects_root, monkeypatch):
     _patch_creds(monkeypatch)
     deleted = []
 
@@ -424,7 +503,7 @@ def test_cli_reap_force_delete(write_config, tmp_path, monkeypatch):
             pass
 
         def list_environments(self):
-            return [_env("env_dead", "bridge", "/dead")]
+            return [_dead_env(projects_root)]
 
         def delete_environment(self, i, force=False):
             deleted.append((i, force))
@@ -435,7 +514,11 @@ def test_cli_reap_force_delete(write_config, tmp_path, monkeypatch):
     assert rc == 0 and deleted == [("env_dead", True)]
 
 
-def test_cli_reap_no_ghosts(write_config, tmp_path, monkeypatch, capsys):
+def test_cli_reap_no_ghosts(write_config, tmp_path, projects_root, monkeypatch, capsys):
+    # The live dir must sit INSIDE projects_root, or the containment gate skips this env
+    # before liveness is ever consulted and the test passes without testing anything.
+    live = str(projects_root / "live")
+
     _patch_creds(monkeypatch)
 
     class FakeClient:
@@ -443,15 +526,15 @@ def test_cli_reap_no_ghosts(write_config, tmp_path, monkeypatch, capsys):
             pass
 
         def list_environments(self):
-            return [_env("env_live", "bridge", "/live")]
+            return [_env("env_live", "bridge", live)]
 
     monkeypatch.setattr(environments, "EnvironmentsClient", FakeClient)
-    monkeypatch.setattr(environments, "live_bridge_directories", lambda b, pr: {"/live"})
+    monkeypatch.setattr(environments, "live_bridge_directories", lambda b, pr: {live})
     rc = cli.main(["reap-environments", "-c", _cfg(write_config, tmp_path)])
     assert rc == 0 and "0 ghost" in capsys.readouterr().err
 
 
-def test_cli_reap_archive_failure_exit_1(write_config, tmp_path, monkeypatch):
+def test_cli_reap_archive_failure_exit_1(write_config, tmp_path, projects_root, monkeypatch):
     _patch_creds(monkeypatch)
 
     class FakeClient:
@@ -459,7 +542,7 @@ def test_cli_reap_archive_failure_exit_1(write_config, tmp_path, monkeypatch):
             pass
 
         def list_environments(self):
-            return [_env("env_dead", "bridge", "/dead")]
+            return [_dead_env(projects_root)]
 
         def archive_environment(self, i):
             raise environments.EnvironmentsAPIError(500, "boom")

@@ -1095,7 +1095,9 @@ def _reap_environments(config_path: str | None, archive: bool, force_delete: boo
         )
         return 2
 
-    ghosts = environments.find_ghosts(envs, live)
+    # projects_root scopes the classification: this instance may only reap
+    # environments inside its own tree (#1100).
+    ghosts = environments.find_ghosts(envs, live, projects_root=config.projects_root)
     print(
         f"clauster: {len(envs)} env(s), {len(live)} live dir(s), {len(ghosts)} ghost(s)",
         file=sys.stderr,

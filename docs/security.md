@@ -327,3 +327,12 @@ closed: if it cannot enumerate the live bridge set it aborts rather than risk
 archiving a still-live environment. The destructive **dashboard** surface is off
 by default and gated by `reaper.ui_enabled`; archive is reversible, force-delete
 requires typing `DELETE`.
+
+It is also **scoped to this instance's `projects_root`**. The environment list is
+account-wide while the liveness check is instance-scoped — it sees only this OS
+user's sessions and this instance's projects — so an environment outside
+`projects_root` is unattributable and never reaped. Without that rail, reaping on
+one instance could archive another instance's *live* environment and tear down
+its running session. See
+[`clauster reap-environments`](reference/cli.md#clauster-reap-environments-archive-ghost-environments)
+for the scope rules, including the shared-`projects_root` caveat.
