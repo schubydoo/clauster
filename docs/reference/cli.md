@@ -106,6 +106,23 @@ would touch until you pass `--archive` (reversible) or `--force-delete`
 behind [`reaper.ui_enabled`](config.md#reaper-ghost-environment-reaper-reaperconfig);
 this CLI is always available.
 
+**Scope: only environments inside this instance's `projects_root`.** The
+environment list comes from your Anthropic account and is therefore shared by
+every Clauster instance and OS user on the account, while the "which bridges are
+live" check can only see this instance's own projects and this OS user's
+sessions. An environment outside `projects_root` is treated as unattributable and
+left alone, so running the reaper on one instance (say a dev instance on its own
+`projects_root`) will not archive the live bridge of another instance whose
+`projects_root` is *different*. If you have several instances, run the reaper on
+each to clean up all of them.
+
+!!! warning "Instances that share a `projects_root` are not separated by this"
+    The scope check distinguishes instances by directory, so two instances
+    pointed at the *same* `projects_root` can still see each other's bridges as
+    leftovers — the reaper cannot tell whose they are. Give each instance its own
+    `projects_root` (they also collide on project cards and pointer files
+    otherwise).
+
 ## `clauster keepers` — stop an orphaned pty keeper {#clauster-keepers-stop-an-orphaned-pty-keeper}
 
 A **pty** (true-resume) bridge runs under a detached *keeper* process that
