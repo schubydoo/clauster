@@ -11,6 +11,7 @@ showed a single, often stale, row to ``clauster status`` / ``clauster mcp`` — 
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -980,10 +981,17 @@ async def test_resync_skips_an_instance_replaced_during_the_probe(runner_config,
 
 
 async def test_resync_skips_a_row_whose_project_is_no_longer_discovered(
-    runner_config, monkeypatch
+    runner_config, monkeypatch, caplog
 ):
     # Without a Project there is nothing to attribute the connect facts to, so the row is
     # left alone rather than adopted half-populated.
+    #
+    # The pid assertion ALONE cannot tell "skipped cleanly" from "crashed the whole
+    # adoption pass", which is why this test used to pass with its own guard deleted:
+    # `_connect_facts_for(None, ...)` then raises AttributeError, `poll_once`'s blanket
+    # handler swallows it, and the pid is still an untouched 4401. The caplog assertion is
+    # the half that distinguishes them — and it also covers every OTHER row this tick,
+    # which the crash would have skipped too.
     runner = _make_runner(runner_config)
     store = runner.persistence.state_store()
     monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
@@ -1000,11 +1008,102 @@ async def test_resync_skips_a_row_whose_project_is_no_longer_discovered(
         "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 4402
     )
 
-    await runner.poll_once()
+    with caplog.at_level(logging.ERROR, logger="clauster.runner"):
+        await runner.poll_once()
 
     inst = runner.get_instance("iid-gone")
     assert inst is not None
     assert inst.bridge_pid == 4401, "adopted pids for a project that no longer exists"
+    assert not [r for r in caplog.records if "cross-process adoption failed" in r.getMessage()], (
+        "the guard must SKIP this row, not raise out of the whole adoption pass"
+    )
+
+
+async def test_resync_takes_the_keeper_from_the_sidecar_not_the_row(runner_config, monkeypatch):
+    # H-1, and it was pinned by nothing: swapping `_recover_keeper_pid` back for the row's
+    # own `keeper_pid` left the whole suite green. A row's keeper_pid is written once at
+    # spawn and never refreshed, so after a peer re-spawned the bridge it names a keeper
+    # that is gone — or a pid since recycled onto an unrelated process, which `stop()`
+    # would then kill a tree of. The sidecar is rewritten with the live pair, so it wins.
+    import json
+
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        resume_mode="pty",
+        status=InstanceStatus.STOPPED,
+        # Our own generation, now dead — a row whose pid is unknown is skipped by design.
+        bridge_pid=7009,
+        bridge_proc_start=299.0,
+    )
+    # The row still carries the keeper pid recorded at the ORIGINAL spawn.
+    runner.persistence.state_store().save(
+        {"iid-a": _row("alpha", pid=7010, proc_start=300.0, keeper_pid=9999)}
+    )
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 7011,
+                "bridge_pid": 7010,
+                "bridge_proc_start": 300.0,
+                "state": "ready",
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 7010
+    )
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.keeper_pid == 7011, "trusted the row's stale keeper_pid over the live sidecar"
+
+
+async def test_resync_clears_a_stale_stop_intent_the_peer_already_undid(
+    runner_config, monkeypatch
+):
+    # Also unpinned: deleting `current.intentional_stop = bool(saved.get(...))` left the
+    # suite green. We stopped this instance, then a PEER process resumed it and wrote
+    # intentional_stop=False with live pids. Adopting the pids while keeping our own stale
+    # True leaves a card that reads "stopped on purpose" over a running bridge — so its
+    # eventual death is not reported as a crash, and the operator is never told.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        resume_mode="standard",
+        status=InstanceStatus.STOPPED,
+        intentional_stop=True,
+        bridge_pid=7019,  # our dead generation; the peer's is 7020
+        bridge_proc_start=399.0,
+    )
+    runner.persistence.state_store().save(
+        {
+            "iid-a": _row(
+                "alpha", pid=7020, proc_start=400.0, resume_mode="standard", intentional_stop=False
+            )
+        }
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, _s=None: pid == 7020
+    )
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.bridge_pid == 7020, "the peer's live pids were not adopted at all"
+    assert inst.intentional_stop is False, "kept a stop intent the peer had already undone"
 
 
 async def test_resync_aborts_when_the_row_is_forgotten_while_recovering_facts(

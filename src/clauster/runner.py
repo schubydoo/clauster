@@ -3280,7 +3280,8 @@ class SessionRunner:
         claim the same bridge. ``stopped`` is the projects for which this pass inserted a
         STOPPED card from a dead row — the walk must NOT treat those as "already resolved"
         (they are exactly the projects whose live externally-started bridge it still has to
-        discover), and must not add a second stopped card for them under another id.
+        discover), and must not stack its project-level stopped-card fallback on top of the
+        per-row cards this pass already produced.
         """
         claimed: set[str] = set()
         stopped_projects: set[str] = set()
@@ -3538,9 +3539,17 @@ class SessionRunner:
                 elif proj.name not in row_stopped and (
                     (stopped := self._stopped_from_persisted(proj.name)) is not None
                 ):
-                    # Only when the row pass didn't already leave one: it resolves by
-                    # project, so it would rebuild the same dead session under a SECOND
-                    # instance_id and show the operator two cards for one bridge.
+                    # Only when the row pass didn't already leave one. This fallback is the
+                    # last resort for a project the row pass could NOT cover, not a second
+                    # source of cards for one it did. It resolves by PROJECT — first match
+                    # over `_persisted` — so on a project with several rows it can land on
+                    # a different row than the one already carded and leave two cards up
+                    # where the row pass had deliberately produced one per live-or-dead row.
+                    # (It always takes an id that already keys a row, so it cannot mint an
+                    # id for a session that does not exist; the risk is duplication, not
+                    # invention.) Whether a pre-#1088 pid-less row deserves a card of its
+                    # own is a real question, deliberately left alone here — this guard
+                    # keeps the walk from answering it as a side effect.
                     self._instances[stopped.instance_id] = stopped
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge
