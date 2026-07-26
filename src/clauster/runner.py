@@ -866,6 +866,55 @@ class SessionRunner:
 
     # ----- persistence (state.json, D14) ----------------------------------
 
+    def _persisted_liveness(self, inst: RemoteControlInstance) -> dict:
+        """Return the ``bridge_pid``/``bridge_proc_start`` pair to persist for ``inst``.
+
+        A live instance publishes its own pair, and so does an operator-stopped one:
+        :meth:`stop` records the intent and sets STOPPED **without** clearing ``bridge_pid``
+        (see :meth:`_resync_pids_from_row`, whose generation compare depends on that). The
+        cards that carry no pids are the ones REBUILT from a row — :meth:`_stopped_from_row`
+        and :meth:`_stopped_from_persisted` zero them so a card can never be re-read as
+        alive. This branch therefore engages for exactly those rebuilt cards, which is
+        precisely the ratchet it exists to break: the ROW must keep the pair its bridge
+        last ran under (#1115).
+
+        That pair is the row's liveness *identity*: :meth:`_reattach_rows_with_pids` uses
+        "row has a pid" to tell a post-#1088 instance-keyed row from a legacy pid-less one.
+        Writing the card's ``None`` back made every dead row look legacy on the NEXT cold
+        start, so it fell through to the project-keyed pointer walk — which rebuilds at
+        most ONE card per project. That was a one-way ratchet: each restart hid every
+        stopped session but the earliest of each project, while its row sat in the DB.
+
+        Preserved ONLY as a complete pair, which is what makes it safe: a recycled pid is
+        rejected because :func:`procutil.is_live_bridge` compares the process create-time
+        against the stored one. A pid with NO ``proc_start`` is a different animal — that
+        function has no start-time to compare and falls back to "alive + bridge cmdline",
+        so a reused pid running any bridge WOULD read as this one coming back to life.
+        Such a row is therefore still cleared — correctness beats completeness for the one
+        shape that cannot be made reuse-proof. It no longer *folds* for it: the pid-less
+        pass at the end of :meth:`rediscover` still cards it under its own id.
+
+        ``keeper_pid`` is deliberately NOT carried through this helper: the reattach
+        re-derives it from the sidecar, correlated to the bridge's own pair
+        (:meth:`_recover_keeper_pid`), and :meth:`stop` force-kills that tree — so a stale
+        keeper pid is the one value here that could reap a stranger's processes. It stays
+        on ``_persist_subset``'s own ``inst.keeper_pid`` passthrough, which means a
+        stop()-ed card's row keeps its keeper pid while a REBUILT card's row drops it.
+        """
+        if inst.bridge_pid is not None:
+            return {
+                "bridge_pid": inst.bridge_pid,
+                "bridge_proc_start": inst.bridge_proc_start,
+            }
+        # Normalized through the row coercers, not passed through raw: this value is
+        # round-tripping from the store, where a hand-edited row can hold junk.
+        prior = self._persisted.get(inst.instance_id) or {}
+        pid = _row_int(prior.get("bridge_pid"))
+        proc_start = _row_float(prior.get("bridge_proc_start"))
+        if pid is None or proc_start is None:
+            return {"bridge_pid": None, "bridge_proc_start": None}
+        return {"bridge_pid": pid, "bridge_proc_start": proc_start}
+
     def _persist_subset(self) -> dict[str, dict]:
         live = {
             inst.instance_id: {
@@ -878,12 +927,10 @@ class SessionRunner:
                 "sandbox_mode": inst.sandbox_mode,
                 # Liveness identity (#1088/#1091): without these persisted, a fresh process
                 # cannot tell which rows are live, and `rediscover` could only ever resolve
-                # one instance per project via the (project-keyed) pointer walk. Written for
-                # dead rows too — as None — so a STOPPED row's stale pid can't later be
-                # mistaken for a live one. Always paired with proc_start: a bare pid is
-                # reusable, so liveness is only ever judged as the pair.
-                "bridge_pid": inst.bridge_pid,
-                "bridge_proc_start": inst.bridge_proc_start,
+                # one instance per project via the (project-keyed) pointer walk. A dead
+                # card's pair is carried from its ROW rather than from the card, which
+                # holds None by design — see `_persisted_liveness` (#1115).
+                **self._persisted_liveness(inst),
                 "keeper_pid": inst.keeper_pid,
             }
             for inst in self._instances.values()
@@ -2298,9 +2345,17 @@ class SessionRunner:
 
     @staticmethod
     def _read_sidecar(sidecar: Path) -> dict | None:
-        """Read the keeper's discovery JSON, or None if absent / mid-write / invalid."""
+        """Read the keeper's discovery JSON, or None if absent / mid-write / invalid.
+
+        The ``isinstance`` gate matters: valid JSON that is not an object (``[]``, ``"x"``)
+        would otherwise return a non-dict whose ``.get`` raises ``AttributeError`` in every
+        caller — and one of those callers now runs inside ``rediscover``, where it would
+        take down lifespan startup rather than skipping one unreadable sidecar. Mirrors
+        ``pty_keeper._read_sidecar``, which already guards this.
+        """
         try:
-            return json.loads(sidecar.read_text(encoding="utf-8"))
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
         except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
             # UnicodeDecodeError (a ValueError) for a non-UTF-8 sidecar must still
             # honor the invalid -> None contract, not break readiness polling.
@@ -3031,6 +3086,26 @@ class SessionRunner:
             rm if rm in RESUME_MODES else self._config.claude.launch_mode,
         )
 
+    def _sweep_modes(self, saved: dict) -> set[str]:
+        """Return the resume-modes to sweep for ``saved``; ALL of them when it only guessed.
+
+        :meth:`_saved_modes` coerces a row with no recorded ``resume_mode`` to the host's
+        configured ``claude.launch_mode``. That is a fact about this deployment, not about
+        the row, so routing a *liveness* check on it repeats the mistake the pointer walk
+        already refuses to make (see its ``resume_mode`` note): on a ``launch_mode: pty``
+        host a pre-#1088 row — which necessarily ran a STANDARD bridge, since it predates
+        pty — would coerce to "pty", skip the pointer check, and be carded STOPPED while
+        its bridge is still live.
+
+        So a row that RECORDED its mode is swept by that one mechanism; a row that did not
+        is swept by every mechanism. Costs some over-hiding for legacy rows on a project
+        that genuinely has a live unclaimed bridge, which is the trade this pass already
+        makes everywhere else: a hidden card is recoverable, a duplicate bridge is not.
+        """
+        if saved.get("resume_mode") in RESUME_MODES:
+            return {self._saved_modes(saved)[2]}
+        return set(RESUME_MODES)
+
     @staticmethod
     def _saved_sandbox(saved: dict) -> SandboxMode:
         """Coerce a persisted ``sandbox_mode`` against the allowed set (#780).
@@ -3088,6 +3163,118 @@ class SessionRunner:
             bridge_proc_start=None,
             keeper_pid=None,
         )
+
+    def _modes_with_an_unclaimed_live_bridge(
+        self,
+        pending: dict[str, tuple[frozenset[str], Path]],
+        held_keepers: set[int],
+        held_pids: set[int],
+    ) -> set[tuple[str, str]]:
+        """Return the ``(project, resume_mode)`` pairs that still have an untracked bridge.
+
+        The blocking half of :meth:`rediscover`'s pid-less pass, run in ONE worker thread.
+        ``pending`` maps a project to the resume-modes of its uncarded pid-less rows plus
+        its path; ``held_keepers``/``held_pids`` are snapshots of the pids LIVE tracked
+        instances already own, taken on the event loop so this never iterates
+        ``_instances`` off-thread.
+
+        Resolved per MODE because the two bridge shapes are discovered differently and a
+        project can hold both: a pty row is answered by the keeper sidecars, everything
+        else by the project's Anthropic pointer. A mode with a live-but-untracked bridge is
+        returned so the caller leaves those rows uncarded — it deliberately does NOT say
+        WHICH row owns the process, because nothing here can (#1108).
+        """
+        blocked: set[tuple[str, str]] = set()
+        for name, (modes, path) in pending.items():
+            # Allowlisted per mode, never `modes - {"pty"}`: a denylist would route a future
+            # third ResumeMode to the pointer mechanism, silently sweeping it with the wrong
+            # one. But an allowlist alone is fail-OPEN — an unmatched mode would get NO sweep
+            # and still be carded, because `_sweep_modes` puts it in `pending` (so the
+            # `unswept` guard clears) and nothing puts it in `blocked`. Hence the explicit
+            # raise: a mode with no sweep must land in the handler below and BLOCK.
+            try:
+                if unknown := set(modes) - {"pty", "standard"}:
+                    raise AssertionError(f"no liveness sweep for resume_mode {sorted(unknown)}")
+                if "pty" in modes and self._has_unclaimed_live_keeper(name, held_keepers):
+                    blocked.add((name, "pty"))
+                if "standard" in modes and self._has_unclaimed_live_pointer(path, held_pids):
+                    blocked.add((name, "standard"))
+            except Exception:  # noqa: BLE001 - deliberate catch-all, see below
+                # This runs inside a to_thread on `rediscover`'s path, which the web app
+                # awaits during lifespan STARTUP with no handler of its own — so an escaping
+                # exception takes the service down rather than losing one project's sweep.
+                # Degrading to BLOCKED keeps the fail-closed posture: the rows stay hidden
+                # (recoverable next start) instead of being carded unswept. `exception`, not
+                # `warning`: this silently hides cards, so the cause must reach the log —
+                # matching the other degrade-and-continue sites in this file.
+                _log.exception("rediscover: liveness sweep failed for %s; blocking its rows", name)
+                blocked.update((name, mode) for mode in modes)
+        return blocked
+
+    @staticmethod
+    def _has_unclaimed_live_pointer(path: Path, held_pids: set[int]) -> bool:
+        """Whether ``path``'s Anthropic pointer names a live bridge no instance holds.
+
+        The standard-mode counterpart of :meth:`_has_unclaimed_live_keeper`. A project
+        publishes at most one pointer, so this cannot distinguish several standard rows —
+        it only answers "is the pointer bridge still unaccounted for", which is enough for
+        the caller to decline to card them.
+        """
+        ptr = pointers.pointer_for_project(path)
+        if ptr is None or not pointers.is_live(ptr):
+            return False
+        return ptr.pid not in held_pids
+
+    def _has_unclaimed_live_keeper(self, name: str, held_keepers: set[int]) -> bool:
+        """Whether ``name`` still has a live keeper that no tracked instance holds.
+
+        The pid-less pass in :meth:`rediscover` needs this because the pointer walk does
+        NOT always run: it skips a project that already has a live row (``row_claimed``)
+        or any STARTING/RUNNING instance, both *before* the pointer read and the keeper
+        leg. On such a project a pid-less pty row can still own a live detached keeper,
+        and carding it STOPPED would offer a Resume that spawns a **second** keeper on
+        the same ``--continue`` conversation — the exact leak
+        :meth:`_reattach_pty_from_sidecar` exists to prevent.
+
+        Answers only "is one still unaccounted for", never "which row owns it": nothing
+        here correlates a keeper to a ROW (that is #1108). So the caller does what the
+        phantom-prune does with an ambiguous project — leaves every candidate alone
+        rather than guessing — which keeps a live keeper reachable at the cost of the
+        stopped cards for that one project staying hidden until it exits.
+
+        ``held_keepers`` is passed in rather than read from ``_instances`` because this
+        runs in a worker thread; see :meth:`_modes_with_an_unclaimed_live_bridge`.
+        """
+        for sidecar in self._log_dir.glob(f"{name}-*.keeper.json"):
+            info = self._read_sidecar(sidecar)
+            if not info or info.get("state") != "ready":
+                continue
+            keeper_pid = info.get("keeper_pid")
+            bridge_pid = info.get("bridge_pid")
+            # `> 0` as well as int-not-bool: psutil raises ValueError (NOT the NoSuchProcess
+            # its callers catch) for a negative pid, and a sidecar is an on-disk file that
+            # can hold one.
+            if (
+                not isinstance(keeper_pid, int)
+                or isinstance(keeper_pid, bool)
+                or keeper_pid <= 0
+                or not isinstance(bridge_pid, int)
+                or isinstance(bridge_pid, bool)
+                or bridge_pid <= 0
+                or keeper_pid in held_keepers
+            ):
+                continue
+            ps = info.get("bridge_proc_start")
+            proc_start = (
+                float(ps) if isinstance(ps, (int, float)) and not isinstance(ps, bool) else None
+            )
+            # Same PID-reuse defense as the reattach: keeper by cmdline AND the bridge
+            # matched on its pid + proc-start pair.
+            if procutil.is_keeper_process(keeper_pid) and procutil.is_live_bridge(
+                bridge_pid, proc_start
+            ):
+                return True
+        return False
 
     def _reattach_pty_from_sidecar(
         self, name: str, saved: dict, instance_id: str | None = None
@@ -3560,13 +3747,18 @@ class SessionRunner:
         resumable card instead of being dropped; one with no persisted record is
         left absent (nothing to resume).
 
-        Two passes since #1088. First :meth:`_reattach_rows_with_pids` walks the persisted
-        rows **by instance**, judging each on its own pids — that is what lets a project
+        Three passes. First :meth:`_reattach_rows_with_pids` walks the persisted rows **by
+        instance** (#1088), judging each on its own pids — that is what lets a project
         surface its standard bridge AND its N interactive sessions instead of a single
         first-match row. Then the original **project-keyed** pointer walk runs for whatever
         it did not claim: rows written before the pids existed (so an upgrade never declares
         a surviving bridge dead) and live bridges with no persisted row at all, which is
         still the only way to discover an externally-started one at startup.
+
+        Finally a per-ROW pass cards whatever pid-less rows remain (#1115). Without it the
+        project-keyed walk was the only thing that ever saw them, so a project surfaced ONE
+        of its pid-less rows and the rest stayed invisible with their rows still in the DB.
+        That pass is gated on a live-keeper sweep for pty rows — see the comment there.
 
         ``persist=False`` reattaches into the in-memory registry only and skips the
         trailing state write — the read-only mode the headless CLI (#775) uses so a
@@ -3701,6 +3893,105 @@ class SessionRunner:
                 instance_id=persisted_iid,
             )
             self._instances[instance.instance_id] = instance
+        # Third pass (#1115): rows carrying NO pid at all. The two passes above resolve at
+        # most ONE such row per project between them — the row pass skips them (no pair to
+        # judge) and the pointer walk is project-keyed — so every other pid-less row of a
+        # project stayed invisible while its record sat in the DB. On the dogfood that was
+        # 16 of 17 rows, because the pre-fix ratchet had already erased their pids; no
+        # backfill can restore those (the processes are long gone), so carding them here is
+        # the only way they come back.
+        #
+        # The "resumable card for a bridge that is actually alive" trap is REAL here, and is
+        # NOT ruled out by the walk above: that loop `continue`s for a project in
+        # `row_claimed` or holding any STARTING/RUNNING instance *before* it reads the
+        # pointer or consults the keeper sidecar. So on those projects nothing has looked
+        # for a pid-less row's process at all. NEITHER mode is exempt. `_reattach_rows_with_pids`
+        # claims a project when ANY row of it proves live, before it even reads that row's
+        # mode — so one live pty row makes the walk skip the project, and a pid-less STANDARD
+        # row there can still own the live pointer bridge nobody looked for. Carding either
+        # live shape STOPPED offers a Resume that spawns a duplicate: a second keeper on the
+        # same `--continue` conversation, or a second bridge that overwrites the pointer of
+        # the running one and orphans it.
+        #
+        # So sweep BOTH discovery mechanisms for the projects that still have uncarded
+        # pid-less rows — keeper sidecars for pty rows, the Anthropic pointer for the rest —
+        # and when one names a live process no tracked instance holds, leave that project's
+        # rows of that mode alone rather than guess which row owns it (#1108). Same
+        # discipline as the phantom-prune's ">1 candidate -> prune none": a hidden card is
+        # recoverable, a duplicate bridge is not.
+        #
+        # Snapshotted on the event loop and swept in ONE thread hop, mirroring the poll
+        # loop's `gen`/`ours` discipline: the sweep does blocking IO, so it must not iterate
+        # `_instances` from a worker thread. Held pids are read from LIVE instances only —
+        # `stop()` leaves `keeper_pid`/`bridge_pid` on a dead card, and letting a dead card's
+        # stale pid mark a live process "accounted for" would fail OPEN.
+        held_keepers = {
+            i.keeper_pid
+            for i in self._instances.values()
+            if i.keeper_pid is not None
+            and i.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+        }
+        held_pids = {
+            i.bridge_pid
+            for i in self._instances.values()
+            if i.bridge_pid is not None
+            and i.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+        }
+        pending: dict[str, set[str]] = {}
+        for iid, saved in self._persisted.items():
+            pname = saved.get("project_name")
+            if (
+                iid in self._instances
+                or _row_int(saved.get("bridge_pid")) is not None
+                or not isinstance(pname, str)
+                or pname not in discovered
+            ):
+                continue
+            pending.setdefault(pname, set()).update(self._sweep_modes(saved))
+        blocked: set[tuple[str, str]] = (
+            await asyncio.to_thread(
+                self._modes_with_an_unclaimed_live_bridge,
+                {n: (frozenset(modes), discovered[n].path) for n, modes in pending.items()},
+                held_keepers,
+                held_pids,
+            )
+            if pending
+            else set()
+        )
+        for iid, saved in list(self._persisted.items()):
+            if iid in self._instances:
+                continue  # live-claimed, or already carded by a pass above
+            name = saved.get("project_name")
+            if not isinstance(name, str) or name not in discovered:
+                continue  # unknown/undiscoverable project: nothing to resume into
+            if _row_int(saved.get("bridge_pid")) is not None:
+                continue  # has a pair; the row pass owns its verdict
+            modes = self._sweep_modes(saved)
+            if blocked_modes := {m for m in modes if (name, m) in blocked}:
+                _log.warning(
+                    "rediscover: %s still has an unresolved live %s bridge; leaving its "
+                    "pid-less row %s uncarded rather than offer a duplicate Resume",
+                    name,
+                    "/".join(sorted(blocked_modes)),
+                    iid,
+                )
+                continue
+            # Mode-EXACT, not just `name in pending`: the sweep only reads the mechanism a
+            # project had rows for, so a project swept for "pty" alone never had its pointer
+            # read, and a standard row arriving during the await would pass a project-level
+            # check while its pointer bridge is unexamined. Anything not swept for THIS
+            # row's mode arrived during the await; fail CLOSED, since an uncarded row is
+            # recoverable on the next start and a duplicate spawn is not.
+            if unswept := modes - pending.get(name, set()):
+                _log.warning(
+                    "rediscover: row %s (%s, mode %s) arrived during the liveness sweep and "
+                    "was never swept; deferring it to the next start",
+                    iid,
+                    name,
+                    "/".join(sorted(unswept)),
+                )
+                continue
+            self._instances[iid] = self._stopped_from_row(iid, saved)
         if persist:
             await self._persist()
 
