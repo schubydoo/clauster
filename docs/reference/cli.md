@@ -220,7 +220,7 @@ the candidates are listed, rather than one being picked
 ([#1099](https://github.com/schubydoo/clauster/issues/1099)):
 
 ```console
-$ clauster stop f2c456fd
+$ clauster logs f2c456fd
 clauster: ambiguous instance id 'f2c456fd' — matches f2c456fd-aaaa-…, f2c456fd-bbbb-…; use more characters
 ```
 
