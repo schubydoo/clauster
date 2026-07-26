@@ -3124,7 +3124,7 @@ class SessionRunner:
         *,
         live_only: bool = False,
         liveness: dict[str, bool] | None = None,
-    ) -> set[str]:
+    ) -> tuple[set[str], set[str]]:
         """Reattach every persisted row that carries its own pids; return their projects.
 
         This is the instance-keyed half of :meth:`rediscover` (#1088). Each row is judged on
@@ -3142,10 +3142,15 @@ class SessionRunner:
         additionally carries its keeper pid, checked by cmdline (``is_keeper_process``) for
         the same reason.
 
-        Returns the set of project names that had at least one such row, so the legacy
-        pointer walk can skip them and the two paths never both claim the same bridge.
+        Returns ``(claimed, stopped)``. ``claimed`` is the projects that had at least one
+        LIVE row, so the legacy pointer walk can skip them and the two paths never both
+        claim the same bridge. ``stopped`` is the projects for which this pass inserted a
+        STOPPED card from a dead row — the walk must NOT treat those as "already resolved"
+        (they are exactly the projects whose live externally-started bridge it still has to
+        discover), and must not add a second stopped card for them under another id.
         """
         claimed: set[str] = set()
+        stopped_projects: set[str] = set()
         for iid, saved in list(self._persisted.items()):
             name = saved.get("project_name")
             proj = discovered.get(name) if isinstance(name, str) else None
@@ -3165,6 +3170,10 @@ class SessionRunner:
                     continue  # poll-time adoption never resurrects dead cards
                 stopped = self._stopped_from_row(iid, saved)
                 self._instances[stopped.instance_id] = stopped
+                # Record it, but do NOT claim the project: a dead row proves nothing about
+                # a live externally-started bridge, which only the pointer walk can find.
+                # The walk's presence guard must therefore ignore this card (#1088 MF-1).
+                stopped_projects.add(proj.name)
                 continue
             # Claim ONLY once the row proves live. `stop()` leaves `bridge_pid` on the
             # instance, so every user-stopped row keeps a stale pid — claiming on the pid
@@ -3225,7 +3234,7 @@ class SessionRunner:
                 ),
                 **connect,
             )
-        return claimed
+        return claimed, stopped_projects
 
     def _connect_facts_for(
         self, proj: Project, resume_mode: ResumeMode, pid: int, proc_start: float | None
@@ -3347,11 +3356,21 @@ class SessionRunner:
         # construction-time snapshot may already lag the live service's store.
         await self._refresh_persisted()
         discovered = self._discovered()
-        row_claimed = await self._reattach_rows_with_pids(discovered)
+        row_claimed, row_stopped = await self._reattach_rows_with_pids(discovered)
         for proj in discovered.values():
             if proj.name in row_claimed:
                 continue  # resolved per-instance above; don't let the walk re-claim it
-            if self.get_instance_for_project(proj.name) is not None:
+            # Liveness-exact on purpose. `get_instance_for_project` matches in ANY status
+            # (by design — #778, see its docstring), so the STOPPED cards the row pass just
+            # inserted would suppress the walk for precisely the projects that still need
+            # it: a dead row plus a live externally-started bridge, which only the pointer
+            # walk (or, for a flag-form pty, the keeper sidecar below) can discover. That
+            # regressed both legs against `main` and leaked live detached keepers (#1088).
+            if any(
+                inst.project == proj.name
+                and inst.status in (InstanceStatus.STARTING, InstanceStatus.RUNNING)
+                for inst in self._instances.values()
+            ):
                 continue
             ptr = await asyncio.to_thread(pointers.pointer_for_project, proj.path)
             if ptr is None or not await asyncio.to_thread(pointers.is_live, ptr):
@@ -3371,7 +3390,12 @@ class SessionRunner:
                 )
                 if reattached is not None:
                     self._instances[reattached.instance_id] = reattached
-                elif (stopped := self._stopped_from_persisted(proj.name)) is not None:
+                elif proj.name not in row_stopped and (
+                    (stopped := self._stopped_from_persisted(proj.name)) is not None
+                ):
+                    # Only when the row pass didn't already leave one: it resolves by
+                    # project, so it would rebuild the same dead session under a SECOND
+                    # instance_id and show the operator two cards for one bridge.
                     self._instances[stopped.instance_id] = stopped
                 continue
             # Overlay the few fields the pointer-walk can't recover; a bridge

@@ -106,6 +106,71 @@ async def test_rediscover_judges_each_row_on_its_own_liveness(runner_config, mon
     assert by_id["iid-dead"].bridge_proc_start is None
 
 
+async def test_stopped_row_does_not_hide_a_live_external_bridge(runner_config, monkeypatch):
+    # MF-1 regression. The row pass inserts a STOPPED card for a dead row; that card must NOT
+    # suppress the pointer walk, which is the only way a bridge someone else started is found
+    # at startup. Guarding the walk on `get_instance_for_project` did exactly that, because it
+    # matches in ANY status (#778) — so the projects that most needed the walk were the ones
+    # that skipped it. Differential: on `main` the pointer is consulted once and the instance
+    # comes back RUNNING; unfixed, it is consulted zero times and the card stays STOPPED.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save(
+        {"iid-dead": _row("alpha", pid=5002, resume_mode="standard")}
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+
+    consulted: list = []
+
+    class _ExternalPtr:
+        pid = 9001
+        proc_start = "1000"
+        environment_id = "env_EXTERNAL"
+        session_id = "session_EXTERNAL"
+
+    def _pointer_for_project(path):
+        consulted.append(path)
+        return _ExternalPtr()
+
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", _pointer_for_project)
+    monkeypatch.setattr("clauster.runner.pointers.is_live", lambda ptr: True)
+
+    await runner.rediscover(persist=False)
+
+    assert consulted, "pointer walk skipped: the STOPPED card suppressed external discovery"
+    alpha = [i for i in runner.list_instances() if i.project == "alpha"]
+    assert len(alpha) == 1, f"the walk must reuse the row's id, not add a card: {alpha}"
+    assert alpha[0].instance_id == "iid-dead"
+    assert alpha[0].status is InstanceStatus.RUNNING
+    assert alpha[0].bridge_pid == 9001
+    assert alpha[0].environment_id == "env_EXTERNAL"
+
+
+async def test_stopped_row_does_not_hide_a_live_detached_keeper(runner_config, monkeypatch):
+    # The pty half of the same defect: with no Anthropic pointer, the walk's keeper-sidecar
+    # leg is what re-manages a detached keeper that outlived the restart. Blocked by the same
+    # guard, it never ran, so a LIVE keeper leaked behind a STOPPED card — and the new prune
+    # then deleted that card, leaving the operator with no handle on a running bridge.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    runner.persistence.state_store().save({"iid-dead-pty": _row("alpha", pid=5003)})
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
+
+    sidecar_calls: list = []
+    monkeypatch.setattr(
+        SessionRunner,
+        "_reattach_pty_from_sidecar",
+        lambda self, name, saved, iid: sidecar_calls.append(name),
+    )
+
+    await runner.rediscover(persist=False)
+
+    # Other fixture projects are walked too; `alpha` is the one with the STOPPED card, and
+    # pre-fix it was the only one MISSING from this list.
+    assert "alpha" in sidecar_calls, "the keeper-sidecar leg never ran: a live keeper leaks"
+
+
 async def test_rediscover_rejects_a_recycled_pid(runner_config, monkeypatch):
     # PID-reuse defence. The pid is alive but belongs to something else, which the
     # proc-start half of the pair detects. Persisting a bare pid would have let an unrelated
