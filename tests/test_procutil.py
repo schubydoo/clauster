@@ -620,6 +620,14 @@ def test_is_bridge_cmdline_matches_the_rc_alias():
     assert procutil.is_bridge_cmdline(["claude", "remote-control", "--name", "alpha"]) is True
     # Still requires the binary hint, so an unrelated `--rc` (e.g. an rc-file flag) is not one.
     assert procutil.is_bridge_cmdline(["someothertool", "--rc", "alpha"]) is False
+    # ...and the hint must be the EXECUTABLE, not merely the string "claude" somewhere in
+    # argv. On this host the service user is `claude`, so every path under /home/claude
+    # contains it; a loose check would classify any tool with an --rc flag as a bridge, and
+    # `is_bridge_process` gates the phantom-prune that deletes resumable cards.
+    assert procutil.is_bridge_cmdline(["somelinter", "--rc", "/home/claude/x"]) is False
+    assert procutil.is_bridge_cmdline(["rsync", "--rc=/home/claude/cfg"]) is False
+    # A real bridge invoked by absolute path still matches (basename is the executable).
+    assert procutil.is_bridge_cmdline(["/home/claude/.local/bin/claude", "--rc", "alpha"]) is True
 
 
 def test_rc_alias_is_not_adoptable_as_a_standard_bridge():

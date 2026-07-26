@@ -91,7 +91,14 @@ def is_bridge_cmdline(cmdline: list[str]) -> bool:
     if _BRIDGE_BINARY_HINT not in joined:
         return False
     if any(tok == "--rc" or tok.startswith("--rc=") for tok in cmdline):
-        return True
+        # `--rc` is a generic-looking flag, unlike the distinctive `remote-control`
+        # token, so it must be paired with its launcher the way `is_keeper_cmdline`
+        # pairs its module with `python`/the clauster binary. The loose hint above
+        # matches "claude" ANYWHERE in the joined argv, which on a host whose service
+        # user is `claude` means any path under /home/claude qualifies — enough to make
+        # `<unrelated-tool> --rc /home/claude/x` read as a bridge, and `is_bridge_process`
+        # feeds the phantom-prune, which deletes resumable cards.
+        return _BRIDGE_BINARY_HINT in os.path.basename(cmdline[0]).lower()
     return all(tok in cmdline or tok in joined for tok in _BRIDGE_CMDLINE)
 
 

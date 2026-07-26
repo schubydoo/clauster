@@ -3090,11 +3090,18 @@ class SessionRunner:
         }
         # Every liveness question this tick needs, answered in ONE thread hop rather than a
         # sequential hop per row: this runs on the poll loop, and rows are never GC'd.
-        ours = {
-            iid: (i.bridge_pid, i.bridge_proc_start)
+        # The GENERATION we would be overwriting, not just its pids. A `stop()` that lands
+        # on the near side of the liveness probe mutates `status` and `intentional_stop`
+        # while deliberately leaving `bridge_pid` in place, so a pid-only compare passes
+        # and silently reverts the operator's Stop to RUNNING. Keyed only on instances that
+        # HAVE a pid, so one whose pid was unknown at snapshot (the mid-`_popen` window)
+        # yields None below and is skipped rather than clobbered.
+        gen = {
+            iid: (i.bridge_pid, i.bridge_proc_start, i.status, i.intentional_stop)
             for iid, i in self._instances.items()
             if i.bridge_pid is not None
         }
+        ours = {iid: (g[0], g[1]) for iid, g in gen.items()}
         live = await asyncio.to_thread(
             lambda: {
                 key: {
@@ -3117,7 +3124,7 @@ class SessionRunner:
                 if saved.get("intentional_stop") and not inst.intentional_stop:
                     inst.intentional_stop = True
             elif pair is not None and live["row"].get(iid) and not live["ours"].get(iid):
-                await self._resync_pids_from_row(iid, inst, saved, pair, ours.get(iid), discovered)
+                await self._resync_pids_from_row(iid, inst, saved, pair, gen.get(iid), discovered)
         await self._reattach_rows_with_pids(discovered, live_only=True, liveness=live["row"])
 
     async def _resync_pids_from_row(
@@ -3126,7 +3133,7 @@ class SessionRunner:
         inst: RemoteControlInstance,
         saved: dict,
         pair: tuple[int, float | None],
-        ours_pair: tuple[int | None, float | None] | None,
+        ours_generation: tuple[int | None, float | None, InstanceStatus, bool] | None,
         discovered: dict[str, Project],
     ) -> None:
         """Take over the pids another process resumed this instance with (#1088).
@@ -3149,43 +3156,61 @@ class SessionRunner:
           ever demotes — so it reads STOPPED to every reader, permanently.
 
         A held lock means one of those is in flight: skip the row and retry next tick, which
-        is always safe (the row is not going anywhere). ``ours_pair`` is re-checked against
-        the live object so a generation that changed during the liveness probe is never
-        clobbered — and an instance whose pid was unknown at snapshot time (``ours_pair is
-        None``: precisely the mid-``_popen`` window) is skipped rather than overwritten.
+        is always safe (the row is not going anywhere). But the lock only covers a
+        *concurrent* mutation — one that COMPLETED while we were in the liveness probe holds
+        no lock by the time we look. That is what ``ours_generation`` is for: pid,
+        proc-start, status AND intent are compared against the live object, so a finished
+        ``stop()`` (which changes the latter two and deliberately leaves ``bridge_pid``
+        alone) is detected and left alone. An instance whose pid was unknown at snapshot
+        time (``ours_generation is None`` — precisely the mid-``_popen`` window) is skipped
+        rather than overwritten.
 
         Connect facts are recomputed rather than carried over: the previous generation's
         ``url``/``environment_id`` point at a dead environment, and publishing them as
         RUNNING offers the operator a link that can never work. Same readiness rule as
         :meth:`_reattach_rows_with_pids` — no connect evidence means STARTING, not RUNNING.
         """
+        proj = discovered.get(inst.project)
+        if proj is None:
+            return  # project vanished from discovery; nothing to attribute it to
+        pid, proc_start = pair
+        # Resolved BEFORE the lock. All three are pure filesystem reads keyed entirely on
+        # snapshot values (project, pid, proc_start) — none reads live mutable state — so
+        # holding the project's spawn lock across them would stall every spawn/resume/stop
+        # for that project behind up to three globs of the bridge-log dir, per resynced
+        # row, per tick, for no correctness gain. What must be inside the lock is the
+        # re-check plus the mutation, and that block contains no ``await`` at all.
+        keeper_pid = (
+            await asyncio.to_thread(self._recover_keeper_pid, inst.project, pid, proc_start)
+            if inst.resume_mode == "pty"
+            else None
+        )
+        connect = await asyncio.to_thread(
+            self._connect_facts_for, proj, inst.resume_mode, pid, proc_start
+        )
+        log_path = await asyncio.to_thread(self._latest_debug_log_for, inst.project)
+
         lock = self._spawn_lock_for(inst.project)
         if lock.locked():
             return  # a spawn/resume/stop owns this project right now; next tick is fine
         async with lock:
-            # `locked()` -> `async with` cannot interleave: an uncontended asyncio.Lock
-            # acquires without suspending, so nothing runs between the check and the hold.
+            # `locked()` is a cheap HINT, not a try-acquire: `release()` clears the flag
+            # before the first waiter resumes, so this can read False with a queue behind
+            # it and the acquire below then blocks. Correctness rests entirely on the
+            # generation re-check that follows, never on the hint.
             current = self._instances.get(iid)
             if current is None or current is not inst or iid not in self._persisted:
                 return  # replaced by a lock holder, or forgotten — don't resurrect either
-            if (current.bridge_pid, current.bridge_proc_start) != ours_pair:
-                return  # its generation moved under us since the liveness probe
-            pid, proc_start = pair
-            proj = discovered.get(current.project)
-            if proj is None:
-                return  # project vanished from discovery; nothing to attribute it to
-            keeper_pid = (
-                await asyncio.to_thread(self._recover_keeper_pid, current.project, pid, proc_start)
-                if current.resume_mode == "pty"
-                else None
-            )
-            connect = await asyncio.to_thread(
-                self._connect_facts_for, proj, current.resume_mode, pid, proc_start
-            )
-            log_path = await asyncio.to_thread(self._latest_debug_log_for, current.project)
-            # Re-check across those thread hops: we hold the spawn lock, but `forget()` and
-            # the registry are not gated by it.
-            if self._instances.get(iid) is not current or iid not in self._persisted:
+            if (
+                current.bridge_pid,
+                current.bridge_proc_start,
+                current.status,
+                current.intentional_stop,
+            ) != ours_generation:
+                # Status and intent are in the tuple deliberately. `stop()` sets STOPPED and
+                # `intentional_stop` but never clears `bridge_pid`, so a pid-only compare
+                # passes for a stop that completed while we were in the liveness probe — and
+                # we would revert the operator's Stop to RUNNING, permanently.
                 return
             current.bridge_pid, current.bridge_proc_start = pair
             current.keeper_pid = keeper_pid

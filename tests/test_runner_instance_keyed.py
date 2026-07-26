@@ -974,6 +974,48 @@ async def test_resync_aborts_when_the_row_is_forgotten_while_recovering_facts(
     assert inst.bridge_pid == 4401, "resurrected pids for a row another process forgot"
 
 
+async def test_resync_does_not_revert_a_stop_that_completed_during_the_probe(
+    runner_config, monkeypatch
+):
+    # The lock alone is not enough. It excludes a CONCURRENT stop(), but a stop() that
+    # COMPLETED while the poll was inside the liveness probe holds no lock by the time the
+    # resync looks — and it mutates `status` and `intentional_stop` while deliberately
+    # leaving `bridge_pid` in place, so a pid-only generation check passes and the
+    # operator's Stop silently comes back RUNNING (and does not self-heal: the next
+    # _persist writes intentional_stop=False over the row).
+    runner = _make_runner(runner_config)
+    store = runner.persistence.state_store()
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_pid=4401,
+        bridge_proc_start=100.0,
+    )
+    store.save({"iid-a": _row("alpha", pid=4402, proc_start=200.0)})
+    _stub_connect(monkeypatch)
+
+    def _is_live(pid, _s=None):
+        inst = runner._instances["iid-a"]
+        if inst.status is InstanceStatus.RUNNING:
+            # stop() lands and finishes while we are in the probe.
+            inst.status = InstanceStatus.STOPPED
+            inst.intentional_stop = True
+        return pid == 4402
+
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", _is_live)
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.status is InstanceStatus.STOPPED, "reverted a Stop the operator completed"
+    assert inst.intentional_stop is True, "cleared the recorded stop intent"
+    assert inst.bridge_pid == 4401, "re-pointed a stopped card at the peer's live bridge"
+
+
 async def test_resync_refuses_an_instance_that_is_no_longer_the_registered_one(runner_config):
     # Pins the post-lock identity guard directly. Between the poll loop reading the instance
     # and this call taking the lock, a lock holder can have swapped the registry entry — and
@@ -1003,7 +1045,7 @@ async def test_resync_refuses_an_instance_that_is_no_longer_the_registered_one(r
         stale,
         {"project_name": "alpha"},
         (4402, 200.0),
-        (4401, 100.0),
+        (4401, 100.0, InstanceStatus.STOPPED, False),
         runner._discovered(),
     )
 
