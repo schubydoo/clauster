@@ -26,7 +26,16 @@ or stop bridges until you opt in.
 The write tools mutate bridge state, so they are opt-in. With the default config the
 server is **read-only** — `tools/list` advertises only `list_sessions` and
 `session_status`, and a `spawn_session` / `stop_session` / `resume_session` call is
-rejected as an unknown tool. To expose them, set:
+rejected as an unknown tool.
+
+"Read-only" is enforced on the read path itself, not just at the tool list: since
+[#1104](https://github.com/schubydoo/clauster/issues/1104) `list_sessions` does not write
+the shared `state.json`, and fires no lifecycle event, webhook, or notification. It still
+reconciles instance status in memory, so a bridge that died is *reported* as crashed — but
+announcing that death stays the running service's job, so the two can't double-notify for
+one crash. Before #1104 a session list rewrote the shared state on every call.
+
+To expose the write tools, set:
 
 ```yaml
 mcp:

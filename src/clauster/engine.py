@@ -21,8 +21,9 @@ refinement (or the in-process MCP, #527), not a serverless CLI. Two usage shapes
   :meth:`hydrate`, and :meth:`dispose` is a no-op (the app owns the runner).
 * **Headless CLI** — ``ClausterEngine(config)`` builds its own runner. There is no
   poll loop, so a command that reports instance state calls :meth:`hydrate` once
-  (a **read-only** ``rediscover(persist=False)`` — never ``poll_once``, so a read
-  command can't write shared state or fire lifecycle webhooks) before reading, and
+  (a **read-only** ``rediscover(persist=False)``, with no ``poll_once`` at all — the
+  CLI's reads don't need its ``agents --json`` cross-check, so the cheapest way not to
+  write shared state or fire lifecycle webhooks is not to call it) before reading, and
   :meth:`dispose` at the end. Use it as a context manager so ``dispose`` is guaranteed.
 """
 
@@ -65,9 +66,14 @@ class ClausterEngine(AbstractContextManager["ClausterEngine"]):
         The web app keeps the registry current via its poll loop; a fresh CLI
         runner has an empty one, so a command that reports instance state calls this
         first. It uses ``rediscover(persist=False)`` — a **read-only** reattach that
-        never writes the shared ``state.json`` and never fires the lifecycle
-        webhooks/notifications ``poll_once`` would, so ``clauster status`` on a host
-        running the live service can't clobber its state or emit spurious events.
+        never writes the shared ``state.json`` — and does not call ``poll_once`` at all,
+        so ``clauster status`` on a host running the live service can't clobber its state
+        or emit spurious events.
+
+        The CLI reads don't need ``poll_once``'s ``agents --json`` cross-check, so the
+        cheapest guarantee here is simply not to call it. A caller that DOES need the
+        cross-check (the MCP server) passes ``side_effects=False`` instead — see
+        :meth:`~clauster.runner.SessionRunner.poll_once` and #1104.
         """
         await self._runner.rediscover(persist=False)
 

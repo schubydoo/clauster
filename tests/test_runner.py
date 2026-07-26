@@ -3219,3 +3219,77 @@ async def test_prune_stale_pointers_tolerates_per_project_error(runner_config, m
 
     monkeypatch.setattr(runner, "_prune_one_pointer", _boom)
     await runner._prune_stale_pointers()  # logged per project, never raised
+
+
+# --------------------------------------------------------------------------- #
+# poll_once(side_effects=False): observation without announcement (#1104)
+# --------------------------------------------------------------------------- #
+def _crashing_runner(runner_config, monkeypatch):
+    """A runner holding one RUNNING instance whose process is dead."""
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_pid=4242,
+    )
+    return runner
+
+
+async def test_poll_once_observing_reports_a_crash_without_announcing_it(
+    runner_config, monkeypatch
+):
+    # #1104. The MCP read path needs poll_once's `agents --json` cross-check, but a
+    # one-shot reader has no standing to announce a death: the live service is already
+    # tracking that bridge and would fire its own event, so both firing double-notifies
+    # the operator for one crash — from a tool documented as read-only.
+    runner = _crashing_runner(runner_config, monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    emitted: list[str] = []
+    monkeypatch.setattr(
+        SessionRunner, "_emit_lifecycle", lambda self, event, inst: emitted.append(event)
+    )
+
+    await runner.poll_once(side_effects=False)
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.status is InstanceStatus.CRASHED, "an observing poll must still SEE the crash"
+    assert emitted == [], "an observing poll must not fire a lifecycle event"
+
+
+async def test_poll_once_default_still_announces_a_crash(runner_config, monkeypatch):
+    # Differential control for the test above: same setup, default flag. Without this,
+    # `side_effects=False` could be the only behaviour and nothing would notice.
+    runner = _crashing_runner(runner_config, monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: False)
+    emitted: list[str] = []
+    monkeypatch.setattr(
+        SessionRunner, "_emit_lifecycle", lambda self, event, inst: emitted.append(event)
+    )
+
+    await runner.poll_once()
+
+    assert emitted == ["crash"], "the poll loop must still announce a crash"
+
+
+async def test_poll_once_observing_does_not_write_the_redacted_mirror(runner_config, monkeypatch):
+    # The other write on this path: a live bridge's public log mirror. The live service
+    # flushes it on its own loop; a read must not write into the instance's log set.
+    runner = _crashing_runner(runner_config, monkeypatch)
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    flushed: list[str] = []
+    monkeypatch.setattr(
+        SessionRunner,
+        "_flush_redacted_mirror",
+        lambda self, inst: flushed.append(inst.instance_id),
+    )
+
+    await runner.poll_once(side_effects=False)
+    assert flushed == [], "an observing poll wrote the redacted log mirror"
+
+    await runner.poll_once()
+    assert flushed == ["iid-a"], "the poll loop must still flush the mirror"
