@@ -3293,3 +3293,116 @@ async def test_poll_once_observing_does_not_write_the_redacted_mirror(runner_con
 
     await runner.poll_once()
     assert flushed == ["iid-a"], "the poll loop must still flush the mirror"
+
+
+# --------------------------------------------------------------------------- #
+# resolve_bridge_id: unique-prefix matching, fail-closed on ambiguity (#1099)
+# --------------------------------------------------------------------------- #
+def _runner_with_ids(runner_config, *ids: str) -> SessionRunner:
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    for iid in ids:
+        runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+        )
+    return runner
+
+
+def test_resolve_bridge_id_accepts_a_unique_prefix(runner_config):
+    # The bug: `clauster status` prints instance_id[:8] and every action command then
+    # rejected it, while --help, both MCP tool descriptions and the CLI reference all
+    # advertised prefixes. The tool handed you an identifier it would not accept.
+    runner = _runner_with_ids(runner_config, "f2c456fd-1111-2222-3333-444444444444")
+    assert runner.resolve_bridge_id("f2c456fd") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.resolve_bridge_id("f") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.bridge_id_candidates("f2c456fd") == []
+
+
+def test_resolve_bridge_id_refuses_an_ambiguous_prefix(runner_config):
+    # Fail closed. Stopping a live session the operator did not mean to touch is
+    # unrecoverable, so a prefix naming several bridges must resolve to NOTHING —
+    # never to whichever the dict happened to yield first.
+    a, b = "f2c456fd-aaaa-0000-0000-000000000000", "f2c456fd-bbbb-0000-0000-000000000000"
+    runner = _runner_with_ids(runner_config, a, b)
+    assert runner.resolve_bridge_id("f2c456fd") is None
+    assert runner.bridge_id_candidates("f2c456fd") == sorted([a, b])
+
+
+def test_resolve_bridge_id_prefers_an_exact_id_over_a_longer_one(runner_config):
+    # An exact id must win outright, so adding a bridge whose id extends an existing
+    # one can never make an id the operator already had stop resolving.
+    short, long = "f2c456fd", "f2c456fd-extra-0000-0000-000000000000"
+    runner = _runner_with_ids(runner_config, short, long)
+    assert runner.resolve_bridge_id(short) == short
+    assert runner.bridge_id_candidates(short) == []
+
+
+def test_resolve_bridge_id_treats_the_empty_string_as_unknown_not_ambiguous(runner_config):
+    # "" prefixes every id. Without the guard it would read as ambiguous-across-all and
+    # report every bridge as a candidate, which is noise rather than an answer.
+    runner = _runner_with_ids(runner_config, "aaaa-1", "bbbb-2")
+    assert runner.resolve_bridge_id("") is None
+    assert runner.bridge_id_candidates("") == []
+
+
+def test_resolve_bridge_id_still_falls_back_to_the_project_name(runner_config):
+    # The #777/#778 compatibility path the dashboard still uses must be untouched. It is
+    # tried BEFORE prefix matching (see the exact-name-beats-prefix test below), so an
+    # exact project name resolves whether or not some id also starts with it.
+    runner = _runner_with_ids(runner_config, "f2c456fd-1111-2222-3333-444444444444")
+    assert runner.resolve_bridge_id("alpha") == "f2c456fd-1111-2222-3333-444444444444"
+    assert runner.bridge_id_candidates("alpha") == []
+
+
+def test_resolve_bridge_id_prefers_an_exact_project_name_over_a_colliding_id_prefix(
+    runner_config,
+):
+    # Instance ids are UUIDs, so a project name collides with one only if it is itself
+    # hex-ish -- "cafe", "face", "deadbeef" are all plausible directory names. Ranking the
+    # prefix first made the project reading UNREACHABLE: a project name is a fixed string
+    # the operator cannot lengthen, so there was no way left to name that project, and
+    # stop/forget would silently act on an unrelated live bridge. Both readings stay
+    # reachable this way -- one more character means the id.
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    named = "11111111-1111-1111-1111-111111111111"  # the bridge OF project "cafe"
+    collides = "cafe0000-2222-2222-2222-222222222222"  # an unrelated bridge, id starts "cafe"
+    for iid, project in ((named, "cafe"), (collides, "beta")):
+        runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project=project, label=project, status=InstanceStatus.RUNNING
+        )
+
+    assert runner.resolve_bridge_id("cafe") == named, "the exact project name must win"
+    assert runner.bridge_id_candidates("cafe") == [], "an exact match is never ambiguous"
+    assert runner.resolve_bridge_id("cafe0") == collides, "the id stays reachable"
+
+
+def test_resolve_bridge_id_falls_through_to_a_prefix_when_no_project_matches(runner_config):
+    # An identity naming NO project must still reach prefix matching -- that is the whole
+    # feature. Only a name that IS a managed project short-circuits (see the next test).
+    runner = _runner_with_ids(runner_config, "cafe0000-1111-2222-3333-444444444444")
+    assert "cafe" not in runner._discovered()  # not a project under projects_root
+    assert runner.resolve_bridge_id("cafe") == "cafe0000-1111-2222-3333-444444444444"
+
+
+def test_resolve_bridge_id_does_not_treat_an_idle_project_name_as_a_prefix(
+    runner_config, projects_root
+):
+    # The hole one step further along, if exact-project-first only applied when the project
+    # had a bridge: "cafe" names a REAL project, so an idle cafe must answer "no instance"
+    # rather than resolving onto an unrelated project's cafe0000-… bridge and letting
+    # stop/resume/forget act on it. The prefix reading is still reachable as "cafe0"; the
+    # project name is the one with no alternative spelling.
+    (projects_root / "cafe").mkdir()  # a real, discoverable project with no bridge
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    other = "cafe0000-2222-2222-2222-222222222222"  # belongs to alpha, not to cafe
+    runner._instances[other] = RemoteControlInstance(
+        instance_id=other, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+    )
+
+    assert "cafe" in runner._discovered(), "fixture: cafe must be discoverable"
+    assert runner.get_instance_for_project("cafe") is None, "fixture: cafe must be idle"
+    assert runner.resolve_bridge_id("cafe") is None, "an idle project must not borrow a bridge"
+    assert runner.bridge_id_candidates("cafe") == [], "not ambiguous -- it has no instance"
+    assert runner.resolve_bridge_id("cafe0") == other, "the id stays reachable"

@@ -311,6 +311,7 @@ clauster deps list|install|uninstall          # manage optional extras beside th
 clauster projects | status | sessions         # headless reads (--json), no server needed
 clauster logs <instance> | open <instance>    # tail a bridge's redacted log / print its connect URL
 clauster start <project> | stop <instance>    # headless spawn/stop through the same engine as the UI
+#   <instance> = full id, a unique prefix of one (as printed by `status`), or a project name
 ```
 
 Full per-command reference:

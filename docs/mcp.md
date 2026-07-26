@@ -124,7 +124,7 @@ Reports one session by id.
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `id` | string (required) | A session id as returned by `list_sessions` — a bridge instance id, a hosted `claustrum_process_id`, a background-agent id, or a working-session uuid. A **project name** is also accepted for a bridge, as long as that project runs exactly one; when it runs several the reply is `{"found": false, "id": ..., "ambiguous": [<bridge ids>]}` rather than an arbitrary pick. |
+| `id` | string (required) | A session id as returned by `list_sessions` — a bridge instance id, a hosted `claustrum_process_id`, a background-agent id, or a working-session uuid. A **project name** is also accepted for a bridge, as long as that project runs exactly one; when it runs several the reply is `{"found": false, "id": ..., "ambiguous": [<bridge ids>]}` rather than an arbitrary pick. The same `ambiguous` reply covers an id **prefix** matching several bridges ([#1099](https://github.com/schubydoo/clauster/issues/1099)). |
 
 Returns `{"found": true, "session": {...}}` for a match, or
 `{"found": false, "id": "<id>"}` for an unknown id. A blank/missing `id` comes
@@ -156,19 +156,34 @@ permission mode, or an untrusted directory come back as an `isError` result.
 
 ### `stop_session` / `resume_session`
 
-Stop, or resume into its prior conversation, the bridge named by an `id` (an
-instance id or a project name as returned by `list_sessions`, matched in full —
-there is no prefix matching) — resolved exactly like the dashboard's DELETE /
-resume routes. A project name that matches **several** bridges resolves to the
+Stop, or resume into its prior conversation, the bridge named by an `id` — an
+instance id, a **unique prefix** of one, or a project name as returned by
+`list_sessions` — resolved exactly like the dashboard's DELETE / resume routes.
+A project name that matches **several** bridges resolves to the
 one the dashboard displays, so pass an instance id to target a specific bridge.
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `id` | string (required) | The bridge id to stop / resume. |
+| `id` | string (required) | The bridge to stop / resume: a project name, a full instance id, or a unique prefix of one. A prefix matching **several** bridges is refused, not guessed — see below. |
 
 `stop_session` returns `{"stopped": <bool>, ...}`; `resume_session` returns
 `{"resumed": <bool>, ...}` — the boolean is `false` (with the id echoed back) when
-no managed bridge matches. Both are **bridge channel only**; hosted-session
+no managed bridge matches.
+
+An **ambiguous prefix** is refused rather than resolved to an arbitrary bridge, and
+the reply carries the candidates so a caller can retry with a longer one:
+
+```json
+{"stopped": false, "id": "f2c456fd", "ambiguous": ["f2c456fd-aaaa-…", "f2c456fd-bbbb-…"]}
+```
+
+Check for `ambiguous` before treating a `false` as "the bridge is already stopped" —
+without it the two are indistinguishable, and the bridge is in fact still running.
+(Prefix matching arrived in
+[#1099](https://github.com/schubydoo/clauster/issues/1099); before that these tools
+advertised prefixes but matched only in full.)
+
+Both are **bridge channel only**; hosted-session
 resume stays in the dashboard.
 
 ## Scope and safety

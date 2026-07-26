@@ -25,6 +25,7 @@ import json
 import sys
 from typing import TYPE_CHECKING, Any
 
+from .cli_read import ambiguous_id_message
 from .engine import ClausterEngine
 from .runner import (
     InvalidSpawnOption,
@@ -121,11 +122,17 @@ def cmd_start(
 
 def cmd_stop(config: ClausterConfig, identity: str, *, as_json: bool) -> int:
     """Stop the bridge resolved from ``identity``; print the stopped instance."""
+    # Carries the "several bridges match" diagnostic out of the engine block, since the
+    # registry it is derived from is disposed on exit (#1099).
+    ambiguous: list[str | None] = [None]
 
     async def _go() -> RemoteControlInstance | None:
         with ClausterEngine(config) as engine:
             await engine.hydrate()  # populate the registry so the identity resolves
-            return await engine.stop(identity)
+            stopped = await engine.stop(identity)
+            if stopped is None:
+                ambiguous[0] = ambiguous_id_message(engine, identity)
+            return stopped
 
     try:
         instance = asyncio.run(_go())
@@ -140,7 +147,7 @@ def cmd_stop(config: ClausterConfig, identity: str, *, as_json: bool) -> int:
         print(f"clauster: could not stop {identity!r}: {exc}", file=sys.stderr)
         return 1
     if instance is None:
-        print(f"clauster: no managed instance: {identity!r}", file=sys.stderr)
+        print(ambiguous[0] or f"clauster: no managed instance: {identity!r}", file=sys.stderr)
         return 2
     if as_json:
         _print_json(instance.model_dump(mode="json"))

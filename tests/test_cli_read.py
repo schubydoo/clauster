@@ -27,6 +27,12 @@ from clauster.models import (
 class _FakeEngine:
     """Stand-in for ClausterEngine — canned data set per test via class attributes."""
 
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        """Ambiguous-prefix candidates (#1099); empty unless a test sets ``candidates``."""
+        return list(self.candidates)
+
+    candidates: list[str] = []
+
     projects: list[Project] = []
     instances: list[RemoteControlInstance] = []
     sessions: list[WorkingSession] = []

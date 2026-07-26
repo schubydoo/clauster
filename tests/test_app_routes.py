@@ -2021,6 +2021,64 @@ def test_qr_unknown_instance_404(write_config, tmp_path):
     assert r.json()["detail"] == "no such instance: ghost"
 
 
+def test_route_resolves_a_unique_id_prefix(write_config, tmp_path):
+    # #1099: the dashboard and CLI both show truncated ids; the routes now accept them.
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    iid = "f2c456fd-1111-2222-3333-444444444444"
+    client.app.state.runner._instances[iid] = RemoteControlInstance(
+        instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+    )
+    r = client.get("/api/instances/f2c456fd")
+    assert r.status_code == 200
+    assert r.json()["instance_id"] == iid
+
+
+def test_route_refuses_an_ambiguous_id_prefix_with_409(write_config, tmp_path):
+    # Ambiguity is a DIFFERENT answer from "unknown", and the operator can only act on
+    # it if told the candidates — a bare 404 would read as "that bridge is gone".
+    # 409 regresses nothing: prefixes never resolved before, so this input used to 404.
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    a = "f2c456fd-aaaa-0000-0000-000000000000"
+    b = "f2c456fd-bbbb-0000-0000-000000000000"
+    for iid in (a, b):
+        client.app.state.runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+        )
+    r = client.delete("/api/instances/f2c456fd")
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert a in detail and b in detail, "the candidate ids must be named, not just refused"
+    # And the bridges are untouched — refusing must never stop one of them.
+    assert client.app.state.runner.get_instance(a) is not None
+    assert client.app.state.runner.get_instance(b) is not None
+
+
+def test_forget_refuses_an_ambiguous_id_prefix_with_409(write_config, tmp_path):
+    # forget falls back to the raw identity (`resolve_bridge_id(...) or instance_id`) so a
+    # purely-persisted record still reaches runner.forget's own lookup. Without an explicit
+    # guard the ambiguous prefix rides that fallback through and comes back as a bare 404,
+    # for an id that names several REAL bridges (#1099).
+    from clauster.models import InstanceStatus, RemoteControlInstance
+
+    client = _client(write_config, tmp_path)
+    a = "f2c456fd-aaaa-0000-0000-000000000000"
+    b = "f2c456fd-bbbb-0000-0000-000000000000"
+    for iid in (a, b):
+        client.app.state.runner._instances[iid] = RemoteControlInstance(
+            instance_id=iid, project="alpha", label="alpha", status=InstanceStatus.STOPPED
+        )
+    r = client.post("/api/instances/f2c456fd/forget")
+    assert r.status_code == 409
+    assert a in r.json()["detail"] and b in r.json()["detail"]
+    # Neither record was forgotten by the refusal.
+    assert client.app.state.runner.get_instance(a) is not None
+    assert client.app.state.runner.get_instance(b) is not None
+
+
 def test_qr_no_session_url_409(write_config, tmp_path):
     # A registered instance that has neither a session_url (no starter_session_id)
     # nor a url yet -> nothing to encode -> 409, not a broken/empty QR.

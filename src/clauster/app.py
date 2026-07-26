@@ -525,6 +525,34 @@ def _reap_ws_task(task: asyncio.Task) -> None:
         logger.debug("ws stream helper task ended with %r", task.exception())
 
 
+def _unresolved_bridge(
+    runner: SessionRunner, instance_id: str, not_found_detail: str
+) -> HTTPException:
+    """Build the error for a bridge reference that didn't resolve (#1099).
+
+    ``409`` when an id **prefix** was ambiguous, ``404`` when nothing matched at all.
+    They are genuinely different answers: "no such bridge" versus "several, say which" —
+    and the operator can act on the second only if told the candidates. Mirrors the
+    ``ambiguous`` reply ``session_status`` already returns on the MCP side.
+
+    Introducing a 409 here regresses nothing: prefixes did not resolve before this
+    change, so every request that can reach it used to 404. The caller passes the whole
+    ``not_found_detail`` rather than a fragment so each route keeps its existing 404
+    wording byte-for-byte — the sites were never consistent about quoting the id, and
+    normalizing that here would be an unrelated visible change riding along.
+    """
+    candidates = runner.bridge_id_candidates(instance_id)
+    if candidates:
+        return HTTPException(
+            status_code=409,
+            detail=(
+                f"ambiguous instance id {instance_id!r} — matches "
+                f"{', '.join(candidates)}; use more characters"
+            ),
+        )
+    return HTTPException(status_code=404, detail=not_found_detail)
+
+
 # How often the /ws/pty-screen reader re-reads the keeper's screen sidecar. Matched to the
 # keeper's _SCREEN_FLUSH_INTERVAL (0.25s) so the poll roughly tracks the publish cadence
 # without busy-spinning; frames already seen are skipped by their monotonic ``seq``.
@@ -4539,7 +4567,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             runner.get_instance(resolved) if resolved is not None else None
         ) or app.state.hosted.get_instance(instance_id)
         if instance is None:
-            raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
+            raise _unresolved_bridge(runner, instance_id, f"no such instance: {instance_id}")
         return instance
 
     @app.post("/api/instances/{instance_id}/message", status_code=202)
@@ -4605,7 +4633,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
         resolved = runner.resolve_bridge_id(instance_id)
         if resolved is None:
-            raise HTTPException(status_code=404, detail=f"no managed instance: {instance_id!r}")
+            raise _unresolved_bridge(runner, instance_id, f"no managed instance: {instance_id!r}")
         try:
             return await runner.stop(resolved)
         except UnknownProject as exc:
@@ -4623,8 +4651,8 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
             return await _resume_hosted(instance_id, hosted)
         resolved = runner.resolve_bridge_id(instance_id)
         if resolved is None:
-            raise HTTPException(
-                status_code=404, detail=f"no managed instance to resume: {instance_id!r}"
+            raise _unresolved_bridge(
+                runner, instance_id, f"no managed instance to resume: {instance_id!r}"
             )
         try:
             return await _spawn_or_http(runner.resume(resolved))
@@ -4658,6 +4686,14 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 # hosted ids are None above and fall through to the bridge runner).
                 await app.state.hosted.forget(instance_id)
             else:
+                # Refuse an ambiguous prefix BEFORE the verbatim fallback below: `or
+                # instance_id` would otherwise hand `forget` the raw prefix, and the
+                # operator would get a bare 404 for an id that names several real
+                # bridges rather than being told which (#1099).
+                if runner.bridge_id_candidates(instance_id):
+                    raise _unresolved_bridge(
+                        runner, instance_id, f"no such instance: {instance_id}"
+                    )
                 # Accept the project name the current client sends as well as a raw
                 # instance_id (#777); fall back to the id verbatim so a purely-persisted
                 # (not-yet-materialized) record still reaches runner.forget's own lookup.
@@ -4759,7 +4795,7 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
         resolved = runner.resolve_bridge_id(instance_id)
         instance = runner.get_instance(resolved) if resolved is not None else None
         if instance is None:
-            raise HTTPException(status_code=404, detail=f"no such instance: {instance_id}")
+            raise _unresolved_bridge(runner, instance_id, f"no such instance: {instance_id}")
         target = instance.session_url or instance.url
         if not target:
             raise HTTPException(status_code=409, detail="no session URL available yet")

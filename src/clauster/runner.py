@@ -625,18 +625,90 @@ class SessionRunner:
         keeps that client working: a known ``instance_id`` returns itself; otherwise
         the identity is treated as a project name and mapped to its instance's id.
 
+        A unique **prefix** of a known ``instance_id`` also resolves (#1099), but only
+        after both exact forms have been tried — see :meth:`_resolve_bridge_ref` for why
+        an exact project name has to outrank a prefix. Three surfaces already advertised
+        prefixes — ``clauster stop/logs/open --help``, both MCP tool descriptions, and the
+        CLI reference — while the CLI prints only the first 8 characters of an id, so the
+        tool handed you an identifier and then rejected it. Now it accepts what it prints.
+
         Returns ``None`` when the identity matches neither a known instance_id nor a
-        managed project — the caller raises the same 404 it would have raised before.
+        managed project — the caller raises the same 404 it would have raised before —
+        **and also when a prefix is ambiguous.** Failing closed there is the point:
+        stopping a live session the operator did not mean to touch is unrecoverable, so
+        an ambiguous prefix must never pick one. Callers that want to say *which* ids it
+        could have meant read :meth:`bridge_id_candidates`.
+
         With N instances per project the name fallback resolves via
         :meth:`get_instance_for_project` (#778) to the instance the project-keyed
         client actually DISPLAYS (its map folds last-registered-wins), so a name
         action never targets a bridge the operator cannot see. Per-session
         operations on a multi-session project must send the instance_id.
         """
+        resolved, _ = self._resolve_bridge_ref(identity)
+        return resolved
+
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        """Return the instance_ids an AMBIGUOUS ``identity`` could mean, else empty (#1099).
+
+        Empty for every unambiguous case — resolved, or matching nothing at all — so a
+        non-empty list means exactly "refused because it was ambiguous", and a caller can
+        branch on that alone without re-deriving the resolution.
+        """
+        _, candidates = self._resolve_bridge_ref(identity)
+        return candidates
+
+    def _resolve_bridge_ref(self, identity: str) -> tuple[str | None, list[str]]:
+        """Resolve ``identity`` to ``(instance_id_or_None, ambiguous_candidates)``.
+
+        Single source of truth for :meth:`resolve_bridge_id` and
+        :meth:`bridge_id_candidates`, so the two can never disagree about whether a
+        given identity was ambiguous.
+
+        Order is exact id, then exact project name, then unique id prefix. **Both exact
+        forms beat a prefix**, because a prefix is an abbreviation and an exact match is
+        not. An exact id wins outright: a full id is never treated as a prefix of some
+        longer one, so adding a bridge can't make an id the operator already had stop
+        working.
+
+        The project name must also outrank a prefix, and the reason is reachability, not
+        taste. Instance ids are UUIDs, so a project name collides only if it is itself
+        hex-ish (``cafe``, ``deadbeef``, ``face``) and happens to prefix a live id — rare,
+        but the loser of that race is unrecoverable. Ranking the prefix first would make
+        the project reading **unreachable**: a project name is a fixed string the operator
+        cannot lengthen, so there would be no way left to name that project, and
+        ``stop``/``forget`` would silently act on an unrelated bridge. Ranking the exact
+        name first costs the prefix reading nothing — the operator just types one more
+        character to mean the id.
+
+        The rule that follows from that: **an identity naming a managed project is never
+        reinterpreted as a prefix.** If the project is idle, the answer is "that project has
+        no instance" — not some other project's bridge that happens to start with the same
+        characters. An earlier revision fell through to prefix matching when the project had
+        no instance, which reopened the same wrong-bridge hole one step further along: an
+        idle ``cafe`` would have resolved ``stop cafe`` onto an unrelated ``cafe0000-…``
+        bridge. Only an identity that names no project at all reaches prefix matching, and
+        the prefix reading is still available there by typing one more character.
+        """
         if identity in self._instances:
-            return identity
+            return identity, []
         inst = self.get_instance_for_project(identity)
-        return inst.instance_id if inst is not None else None
+        if inst is not None:
+            return inst.instance_id, []
+        if identity in self._discovered():
+            # Names a real project that simply has no bridge. `_discovered()` is cached
+            # (short TTL + mtime-invalidated) and already runs on every poll_once, so this
+            # costs a dict lookup on the common path.
+            return None, []
+        if identity:
+            # `if identity` guards the empty string, which prefixes EVERYTHING: without
+            # it, "" would read as ambiguous-across-all rather than simply unknown.
+            matches = sorted(iid for iid in self._instances if iid.startswith(identity))
+            if len(matches) == 1:
+                return matches[0], []
+            if matches:
+                return None, matches
+        return None, []
 
     @staticmethod
     def _can_own_sessions(inst: RemoteControlInstance) -> bool:

@@ -246,6 +246,60 @@ def test_tools_call_session_status_unknown_id_reports_not_found(server, monkeypa
     assert resp["result"]["isError"] is False
 
 
+def test_tools_call_session_status_resolves_a_unique_bridge_id_prefix(server, monkeypatch):
+    # #1099. The docs + this tool's description advertise a unique id prefix, and
+    # `clauster status` prints only 8 characters -- so a client that pastes what it was
+    # shown must get the session, not "not found". Restricted to bridges: a hosted or
+    # background id is echoed verbatim by list_sessions, so a partial one is a typo.
+    async def _fake_gather(config):
+        return [
+            {"id": "hosted-1", "kind": "hosted", "status": "running"},
+            {"id": "f2c456fd-1111-2222-3333-444444444444", "kind": "bridge", "status": "running"},
+        ]
+
+    monkeypatch.setattr(mcp_server, "gather_sessions", _fake_gather)
+    resp = _handle(
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {"name": "session_status", "arguments": {"id": "f2c456fd"}},
+        },
+    )
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload["found"] is True
+    assert payload["session"]["id"] == "f2c456fd-1111-2222-3333-444444444444"
+
+
+def test_tools_call_session_status_refuses_an_ambiguous_bridge_id_prefix(server, monkeypatch):
+    # Fail closed and say why, matching stop_session / resume_session: reporting the
+    # candidates lets the caller retry with a longer prefix, where a bare "not found"
+    # would read as "that session is gone" for an id naming two REAL bridges.
+    a = "f2c456fd-aaaa-0000-0000-000000000000"
+    b = "f2c456fd-bbbb-0000-0000-000000000000"
+
+    async def _fake_gather(config):
+        return [
+            {"id": b, "kind": "bridge", "status": "running"},  # unsorted on purpose
+            {"id": a, "kind": "bridge", "status": "running"},
+        ]
+
+    monkeypatch.setattr(mcp_server, "gather_sessions", _fake_gather)
+    resp = _handle(
+        server,
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "session_status", "arguments": {"id": "f2c456fd"}},
+        },
+    )
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload == {"found": False, "id": "f2c456fd", "ambiguous": [a, b]}
+    assert resp["result"]["isError"] is False, "an ambiguous id is a normal reply, not an error"
+
+
 def test_tools_call_session_status_blank_id_is_an_iserror_result(server, monkeypatch):
     async def _fake_gather(config):  # pragma: no cover - must not be reached
         raise AssertionError("gather should not run for a blank id")
@@ -287,6 +341,12 @@ class _FakeEngine:
     Records the call it received (class attrs) so a test can assert the exact
     params the tool threaded through; ``result``/``raise_with`` shape the outcome.
     """
+
+    def bridge_id_candidates(self, identity: str) -> list[str]:
+        """Ambiguous-prefix candidates (#1099); empty unless a test sets ``candidates``."""
+        return list(self.candidates)
+
+    candidates: list[str] = []
 
     calls: dict = {}
     hydrated_before_op = None
@@ -433,6 +493,30 @@ def test_stop_session_unknown_id_reports_not_stopped(server, fake_engine):
     fake_engine.stop_result = None
     body = _payload(_call(server, "stop_session", {"id": "ghost"}))
     assert body == {"stopped": False, "id": "ghost"}
+
+
+def test_stop_session_reports_an_ambiguous_prefix_instead_of_not_stopped(server, fake_engine):
+    # A tool description IS the contract an agent acts on. A bare {"stopped": false} for
+    # an ambiguous prefix reads as "already stopped", so the agent reports the bridge as
+    # down while it is still running and never retries with a longer id (#1099).
+    fake_engine.stop_result = None
+    fake_engine.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    body = _payload(_call(server, "stop_session", {"id": "f2c456fd"}))
+    assert body == {
+        "stopped": False,
+        "id": "f2c456fd",
+        "ambiguous": ["f2c456fd-aaaa", "f2c456fd-bbbb"],
+    }
+    fake_engine.candidates = []
+
+
+def test_resume_session_reports_an_ambiguous_prefix(server, fake_engine):
+    fake_engine.resume_result = None
+    fake_engine.candidates = ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    body = _payload(_call(server, "resume_session", {"id": "f2c456fd"}))
+    assert body["resumed"] is False
+    assert body["ambiguous"] == ["f2c456fd-aaaa", "f2c456fd-bbbb"]
+    fake_engine.candidates = []
 
 
 def test_resume_session_reports_resumed(server, fake_engine):
