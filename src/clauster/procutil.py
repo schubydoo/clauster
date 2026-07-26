@@ -78,11 +78,20 @@ def jiffies_to_epoch(jiffies: int) -> float | None:
 def is_bridge_cmdline(cmdline: list[str]) -> bool:
     """Whether a process command line is a ``claude … remote-control`` bridge.
 
-    Matches all three spellings a bridge can be launched with: the ``remote-control``
-    subcommand (standard), the ``--remote-control`` flag, and its ``--rc`` alias. The
-    alias needs its own arm — the substring test below only sees the literal
-    ``remote-control``, so a ``--rc``-spawned bridge read as "not a bridge" even though
-    Clauster spawns exactly that form itself (``supervisor.py``, ``--rc <name>``).
+    Matches the two spellings that carry the literal ``remote-control`` token: the
+    subcommand (standard) and the ``--remote-control`` flag. The bare ``--rc`` alias is
+    deliberately NOT matched (#1107).
+
+    The reason is the direction this gate fails in. ``is_bridge_process`` feeds the
+    phantom-prune, and a True there DELETES a resumable card — so a false positive costs
+    an operator their session, while a false negative only leaves a phantom card
+    lingering. Clauster's own use of ``--rc`` is
+    :func:`~clauster.supervisor.build_dispatch_argv`'s ``claude --bg --rc <name>``: a
+    BACKGROUND AGENT that opens a cloud door, not a bridge. Matching the alias would let
+    a background agent stand as proof that "the bridge is alive, just unmanaged" and
+    prune the card out from under it. Whether a ``--bg --rc`` job should count as bridge
+    liveness is a real question, but it is one to answer deliberately, not by widening a
+    delete gate.
     Use :func:`is_standard_bridge_cmdline` when the subcommand form must be told apart.
     """
     if not cmdline:
@@ -90,15 +99,6 @@ def is_bridge_cmdline(cmdline: list[str]) -> bool:
     joined = " ".join(cmdline)
     if _BRIDGE_BINARY_HINT not in joined:
         return False
-    if any(tok == "--rc" or tok.startswith("--rc=") for tok in cmdline):
-        # `--rc` is a generic-looking flag, unlike the distinctive `remote-control`
-        # token, so it must be paired with its launcher the way `is_keeper_cmdline`
-        # pairs its module with `python`/the clauster binary. The loose hint above
-        # matches "claude" ANYWHERE in the joined argv, which on a host whose service
-        # user is `claude` means any path under /home/claude qualifies — enough to make
-        # `<unrelated-tool> --rc /home/claude/x` read as a bridge, and `is_bridge_process`
-        # feeds the phantom-prune, which deletes resumable cards.
-        return _BRIDGE_BINARY_HINT in os.path.basename(cmdline[0]).lower()
     return all(tok in cmdline or tok in joined for tok in _BRIDGE_CMDLINE)
 
 
@@ -107,9 +107,10 @@ def is_standard_bridge_cmdline(cmdline: list[str]) -> bool:
 
     The standard (multi-session) form carries ``remote-control`` as a standalone
     argv token (``claude remote-control …``); the pty true-resume form is the
-    ``--remote-control`` / ``--rc`` **flag** instead. :func:`is_bridge_cmdline`
-    matches both (it substring-tests the joined cmdline), so it can't tell them
-    apart — this exact-token check can, and only the subcommand form passes.
+    ``--remote-control`` **flag** instead. :func:`is_bridge_cmdline` matches both
+    of those (it substring-tests the joined cmdline for ``remote-control``), so it
+    can't tell them apart — this exact-token check can, and only the subcommand
+    form passes. Neither matches the bare ``--rc`` alias (#1107).
 
     External-session adoption (#330) is gated on this: a standard external bridge is
     safely adoptable (its pid is its own process group, Stop is a clean single

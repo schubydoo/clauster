@@ -608,34 +608,31 @@ def test_is_bridge_process_zombie_is_false(monkeypatch):
     assert procutil.is_bridge_process(1234) is True
 
 
-def test_is_bridge_cmdline_matches_the_rc_alias():
-    # `--rc` is a real spelling — Clauster's own supervisor spawns bridges with it — but the
-    # substring test only ever sees the literal "remote-control", so the alias read as "not a
-    # bridge". That made the #1096 phantom-prune's "is it actually a bridge?" gate answer no
-    # for a genuine bridge.
-    assert procutil.is_bridge_cmdline(["claude", "--rc", "alpha"]) is True
-    assert procutil.is_bridge_cmdline(["claude", "--rc=alpha"]) is True
-    # The long flag form and the subcommand form were already matched; keep them pinned.
+def test_is_bridge_cmdline_does_not_match_the_bare_rc_alias():
+    # A deliberate miss, not an oversight (#1107). An earlier revision of this branch matched
+    # `--rc`, on the premise that Clauster's own supervisor spawns bridges with it. It does
+    # not: `supervisor.build_dispatch_argv` builds `claude --bg --rc <name>`, a BACKGROUND
+    # AGENT opening a cloud door. Both bridge spawners emit `remote-control` /
+    # `--remote-control` instead.
+    #
+    # `is_bridge_process` gates the phantom-prune, where True DELETES a resumable card. So
+    # matching the alias would let a background agent stand as proof that "the bridge is
+    # alive, just unmanaged" and prune the card out from under it. A miss only leaves a
+    # phantom card lingering, which is the failure to prefer in a delete path.
+    #
+    # The intermediate fix — anchoring on the executable basename — is also pinned below
+    # by the `somelinter` case: the binary hint matches "claude" anywhere in the joined
+    # argv, and this host's service user IS `claude`, so every path under /home/claude
+    # satisfied it.
+    assert procutil.is_bridge_cmdline(["claude", "--rc", "alpha"]) is False
+    assert procutil.is_bridge_cmdline(["claude", "--rc=alpha"]) is False
+    assert procutil.is_bridge_cmdline(["somelinter", "--rc", "/home/claude/x"]) is False
+    # The two spellings carrying the literal `remote-control` token stay matched...
     assert procutil.is_bridge_cmdline(["claude", "--remote-control", "alpha"]) is True
     assert procutil.is_bridge_cmdline(["claude", "remote-control", "--name", "alpha"]) is True
-    # Still requires the binary hint, so an unrelated `--rc` (e.g. an rc-file flag) is not one.
-    assert procutil.is_bridge_cmdline(["someothertool", "--rc", "alpha"]) is False
-    # ...and the hint must be the EXECUTABLE, not merely the string "claude" somewhere in
-    # argv. On this host the service user is `claude`, so every path under /home/claude
-    # contains it; a loose check would classify any tool with an --rc flag as a bridge, and
-    # `is_bridge_process` gates the phantom-prune that deletes resumable cards.
-    assert procutil.is_bridge_cmdline(["somelinter", "--rc", "/home/claude/x"]) is False
-    assert procutil.is_bridge_cmdline(["rsync", "--rc=/home/claude/cfg"]) is False
-    # A real bridge invoked by absolute path still matches (basename is the executable).
-    assert procutil.is_bridge_cmdline(["/home/claude/.local/bin/claude", "--rc", "alpha"]) is True
-
-
-def test_rc_alias_is_not_adoptable_as_a_standard_bridge():
-    # Widening is_bridge_cmdline must NOT widen the adoption gate: the flag form is a pty
-    # bridge (terminal-coupled stop, no recoverable keeper) and stays non-adoptable.
-    for argv in (["claude", "--rc", "alpha"], ["claude", "--rc=alpha"]):
-        assert procutil.is_bridge_cmdline(argv) is True
-        assert procutil.is_standard_bridge_cmdline(argv) is False
+    # ...and only the subcommand form is adoptable as a standard bridge.
+    assert procutil.is_standard_bridge_cmdline(["claude", "--remote-control", "alpha"]) is False
+    assert procutil.is_standard_bridge_cmdline(["claude", "remote-control", "-n", "a"]) is True
 
 
 def test_reap_if_exited_without_wnohang_is_noop(monkeypatch):
