@@ -1756,7 +1756,10 @@ def create_app(config: ClausterConfig, runner: SessionRunner | None = None) -> F
                 status_code=503,
                 detail=f"refusing to reap — could not determine live bridges: {exc}",
             ) from exc
-        return client, envs, live, environments.find_ghosts(envs, live)
+        # projects_root scopes the classification: this instance may only reap
+        # environments inside its own tree (#1100).
+        ghosts = environments.find_ghosts(envs, live, projects_root=config.projects_root)
+        return client, envs, live, ghosts
 
     @app.get("/api/environments/ghosts")
     async def api_environment_ghosts() -> dict:
