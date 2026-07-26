@@ -3378,8 +3378,31 @@ def test_resolve_bridge_id_prefers_an_exact_project_name_over_a_colliding_id_pre
 
 
 def test_resolve_bridge_id_falls_through_to_a_prefix_when_no_project_matches(runner_config):
-    # Exact-name-first must not short-circuit to "not found" when the name resolves to no
-    # instance, or an idle same-named project would shadow an unambiguous id prefix.
+    # An identity naming NO project must still reach prefix matching -- that is the whole
+    # feature. Only a name that IS a managed project short-circuits (see the next test).
     runner = _runner_with_ids(runner_config, "cafe0000-1111-2222-3333-444444444444")
-    assert runner.get_instance_for_project("cafe") is None  # no bridge under that name
+    assert "cafe" not in runner._discovered()  # not a project under projects_root
     assert runner.resolve_bridge_id("cafe") == "cafe0000-1111-2222-3333-444444444444"
+
+
+def test_resolve_bridge_id_does_not_treat_an_idle_project_name_as_a_prefix(
+    runner_config, projects_root
+):
+    # The hole one step further along, if exact-project-first only applied when the project
+    # had a bridge: "cafe" names a REAL project, so an idle cafe must answer "no instance"
+    # rather than resolving onto an unrelated project's cafe0000-… bridge and letting
+    # stop/resume/forget act on it. The prefix reading is still reachable as "cafe0"; the
+    # project name is the one with no alternative spelling.
+    (projects_root / "cafe").mkdir()  # a real, discoverable project with no bridge
+    config, claude_json = runner_config
+    runner = SessionRunner(config, claude_json=claude_json)
+    other = "cafe0000-2222-2222-2222-222222222222"  # belongs to alpha, not to cafe
+    runner._instances[other] = RemoteControlInstance(
+        instance_id=other, project="alpha", label="alpha", status=InstanceStatus.RUNNING
+    )
+
+    assert "cafe" in runner._discovered(), "fixture: cafe must be discoverable"
+    assert runner.get_instance_for_project("cafe") is None, "fixture: cafe must be idle"
+    assert runner.resolve_bridge_id("cafe") is None, "an idle project must not borrow a bridge"
+    assert runner.bridge_id_candidates("cafe") == [], "not ambiguous -- it has no instance"
+    assert runner.resolve_bridge_id("cafe0") == other, "the id stays reachable"

@@ -681,15 +681,25 @@ class SessionRunner:
         name first costs the prefix reading nothing — the operator just types one more
         character to mean the id.
 
-        A project that resolves to no live instance falls through to prefix matching
-        rather than short-circuiting to "not found", so naming a bridge by a prefix still
-        works even when a same-named project happens to be idle.
+        The rule that follows from that: **an identity naming a managed project is never
+        reinterpreted as a prefix.** If the project is idle, the answer is "that project has
+        no instance" — not some other project's bridge that happens to start with the same
+        characters. An earlier revision fell through to prefix matching when the project had
+        no instance, which reopened the same wrong-bridge hole one step further along: an
+        idle ``cafe`` would have resolved ``stop cafe`` onto an unrelated ``cafe0000-…``
+        bridge. Only an identity that names no project at all reaches prefix matching, and
+        the prefix reading is still available there by typing one more character.
         """
         if identity in self._instances:
             return identity, []
         inst = self.get_instance_for_project(identity)
         if inst is not None:
             return inst.instance_id, []
+        if identity in self._discovered():
+            # Names a real project that simply has no bridge. `_discovered()` is cached
+            # (short TTL + mtime-invalidated) and already runs on every poll_once, so this
+            # costs a dict lookup on the common path.
+            return None, []
         if identity:
             # `if identity` guards the empty string, which prefixes EVERYTHING: without
             # it, "" would read as ambiguous-across-all rather than simply unknown.

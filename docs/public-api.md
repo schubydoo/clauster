@@ -46,10 +46,11 @@ internal surface was never aliased, by design.
 Every `{instance_id}` path segment resolves a full instance id, a **unique prefix** of
 one, or a project name ([#1099](https://github.com/schubydoo/clauster/issues/1099)).
 
-Both **exact** forms outrank a prefix: a full instance id first, then an exact project
-name, then a unique prefix. This matters only for a hex-ish project name (`cafe`,
-`deadbeef`) that happens to prefix an unrelated instance's UUID — the project keeps its
-name, and the id stays reachable by typing one more character.
+Both **exact** forms outrank a prefix: a full instance id first, then a project name, then
+a unique prefix. A segment naming one of your projects is **never** reinterpreted as a
+prefix — if that project has no instance the reply is **404**, never another project's
+bridge. This matters only for a hex-ish project name (`cafe`, `deadbeef`) that happens to
+prefix an unrelated instance's UUID; the id stays reachable by typing one more character.
 
 A prefix matching **several** instances is refused with **409** rather than resolved to
 an arbitrary one — acting on the wrong live session is unrecoverable — and the `detail`
