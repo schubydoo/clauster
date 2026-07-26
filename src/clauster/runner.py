@@ -2902,7 +2902,11 @@ class SessionRunner:
     # ----- background poll (source #2 + liveness reconcile) ---------------
 
     def _persisted_for_project(
-        self, project_name: str, *, unclaimed_only: bool = False
+        self,
+        project_name: str,
+        *,
+        unclaimed_only: bool = False,
+        resume_mode: ResumeMode | None = None,
     ) -> tuple[str, dict] | None:
         """Return ``(instance_id, fields)`` for the first persisted record for ``project_name``.
 
@@ -2917,11 +2921,22 @@ class SessionRunner:
         project's rows. First-match would then hand the walk an id that is somebody else's
         card, and the live bridge's fields would be written over a different session's
         record — losing it, because the next ``_persist`` rewrites that row too.
+
+        ``resume_mode`` narrows to rows of that mode. Both walk legs need it, because
+        first-match over a project's rows is arbitrary in MODE as well as identity: a
+        project holding a standard row and a pty row would hand the keeper-sidecar leg
+        the standard row, whose ``resume_mode`` makes ``_reattach_pty_from_sidecar``
+        return before it ever globs a sidecar — leaving a live detached keeper unmanaged
+        behind STOPPED cards, which is the leak the leg exists to prevent. Compared
+        through :meth:`_saved_modes`, not the raw field, so a pre-#1088 row with no
+        recorded mode is judged by the same coercion the caller will apply.
         """
         for iid, fields in self._persisted.items():
             if fields.get("project_name") != project_name:
                 continue
             if unclaimed_only and iid in self._instances:
+                continue
+            if resume_mode is not None and self._saved_modes(fields)[2] != resume_mode:
                 continue
             return iid, fields
         return None
@@ -3524,9 +3539,17 @@ class SessionRunner:
                 # the live keeper is never written over another session's record (SF-4).
                 # None -> mint a fresh id, one extra card, the same trade the pointer leg
                 # below already makes for an ambiguous project (#1088).
-                modes_hit = self._persisted_for_project(proj.name)
+                # Both lookups are pinned to `resume_mode="pty"`. Only a pty bridge has a
+                # keeper sidecar, so a standard row can supply neither the modes (its
+                # `resume_mode` makes the leg bail before it globs) nor the id (adopting
+                # it would write the keeper's pids over a standard session's record). No
+                # pty row at all means there is no pty session to recover, and the empty
+                # `saved` correctly bails on the leg's first line.
+                modes_hit = self._persisted_for_project(proj.name, resume_mode="pty")
                 persisted_saved = modes_hit[1] if modes_hit is not None else {}
-                unclaimed_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
+                unclaimed_hit = self._persisted_for_project(
+                    proj.name, unclaimed_only=True, resume_mode="pty"
+                )
                 persisted_iid = unclaimed_hit[0] if unclaimed_hit is not None else None
                 reattached = await asyncio.to_thread(
                     self._reattach_pty_from_sidecar,
@@ -3557,6 +3580,15 @@ class SessionRunner:
             # `unclaimed_only` for the same reason as the pty leg above: this attaches the
             # LIVE bridge under the id it is handed, so a claimed one would overwrite a
             # different session's record irrecoverably (#1088 SF-4).
+            #
+            # Deliberately NOT also pinned to `resume_mode="standard"`, unlike the pty leg.
+            # A pointer means the live bridge is standard, so the mirror mismatch is real —
+            # but a mode-less pre-#1088 row coerces to the host's CONFIGURED default, so on
+            # a `launch_mode: pty` host that filter would reject a standard bridge's own
+            # legacy row and mint a fresh id, losing the association it was meant to keep.
+            # The pty leg has no such exposure: a keeper sidecar only exists for a bridge
+            # Clauster spawned in pty mode, and those rows always record their mode.
+            # Correlating a row to the process actually found is tracked in #1108.
             persisted_hit = self._persisted_for_project(proj.name, unclaimed_only=True)
             saved = persisted_hit[1] if persisted_hit is not None else {}
             persisted_iid = persisted_hit[0] if persisted_hit is not None else None

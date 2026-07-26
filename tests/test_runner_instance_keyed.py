@@ -239,6 +239,54 @@ async def test_stopped_row_does_not_hide_a_live_detached_keeper(runner_config, m
     assert live[0].instance_id != "iid-dead-pty"
 
 
+async def test_a_standard_row_ordered_first_does_not_hide_the_pty_keeper(
+    runner_config, monkeypatch
+):
+    # Round-5 review (P1). The walk resolved the sidecar leg's modes by first match over
+    # the project's rows, which is arbitrary in MODE as well as identity: a project with a
+    # standard row AND a pty row could hand the leg the standard one, whose `resume_mode`
+    # makes `_reattach_pty_from_sidecar` return before it ever globs a sidecar. Same leak
+    # the leg exists to prevent, reached by a different route — and Resume would then
+    # launch a duplicate pty bridge alongside the live one.
+    import json
+
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    # Order is the whole point: the standard row is first, so first-match finds it.
+    runner.persistence.state_store().save(
+        {
+            "iid-standard": _row("alpha", pid=5001, resume_mode="standard"),
+            "iid-pty": _row("alpha", pid=5002),
+        }
+    )
+    runner._log_dir.mkdir(parents=True, exist_ok=True)
+    (runner._log_dir / "alpha-1700000000000-0.keeper.json").write_text(
+        json.dumps(
+            {
+                "keeper_pid": 5555,
+                "bridge_pid": 4242,
+                "bridge_proc_start": 222.0,
+                "state": "ready",
+                "connect_url": "https://claude.ai/code/KEEPER",
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "clauster.runner.procutil.is_live_bridge", lambda pid, proc_start=None: pid == 4242
+    )
+    monkeypatch.setattr("clauster.runner.procutil.is_keeper_process", lambda pid: pid == 5555)
+    monkeypatch.setattr("clauster.runner.pointers.pointer_for_project", lambda path: None)
+
+    await runner.rediscover(persist=False)
+
+    live = [i for i in runner.list_instances() if i.status is InstanceStatus.RUNNING]
+    assert len(live) == 1, "a standard row ordered first hid the pty row's live keeper"
+    assert (live[0].keeper_pid, live[0].bridge_pid) == (5555, 4242)
+    # The id must not come from the standard row either — that would write the keeper's
+    # pids over a standard session's record.
+    assert live[0].instance_id != "iid-standard"
+
+
 async def test_rediscover_rejects_a_recycled_pid(runner_config, monkeypatch):
     # PID-reuse defence. The pid is alive but belongs to something else, which the
     # proc-start half of the pair detects. Persisting a bare pid would have let an unrelated
@@ -1104,6 +1152,37 @@ async def test_resync_clears_a_stale_stop_intent_the_peer_already_undid(
     assert inst is not None
     assert inst.bridge_pid == 7020, "the peer's live pids were not adopted at all"
     assert inst.intentional_stop is False, "kept a stop intent the peer had already undone"
+
+
+async def test_adoption_leaves_intent_alone_when_the_peer_recorded_no_stop(
+    runner_config, monkeypatch
+):
+    # The other side of the same-generation arm: the row describes the very bridge we
+    # already hold and records NO stop intent, so ours must be left exactly as it is.
+    # Only the peer-stopped direction was covered, leaving the branch half-tested — and
+    # an over-eager adoption here would mark a running bridge "stopped on purpose", which
+    # suppresses crash reporting for it.
+    runner = _make_runner(runner_config)
+    _stub_connect(monkeypatch)
+    monkeypatch.setattr("clauster.inspector.list_working_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("clauster.runner.procutil.is_live_bridge", lambda *a, **k: True)
+    runner._instances["iid-a"] = RemoteControlInstance(
+        instance_id="iid-a",
+        project="alpha",
+        label="alpha",
+        status=InstanceStatus.RUNNING,
+        bridge_pid=7030,
+        bridge_proc_start=500.0,
+    )
+    # Same (pid, proc_start) as the instance -> the same-generation arm, not a re-sync.
+    runner.persistence.state_store().save({"iid-a": _row("alpha", pid=7030, proc_start=500.0)})
+
+    await runner.poll_once()
+
+    inst = runner.get_instance("iid-a")
+    assert inst is not None
+    assert inst.intentional_stop is False, "invented a stop intent the row never recorded"
+    assert inst.status is InstanceStatus.RUNNING
 
 
 async def test_resync_aborts_when_the_row_is_forgotten_while_recovering_facts(
